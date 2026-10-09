@@ -1,0 +1,12 @@
+# C/C++ formatting for runtime/ and tools/ (generated/ and externals/ are not formatted).
+# Google style with the 4-space indentation from .editorconfig.
+BasedOnStyle: Google
+IndentWidth: 4
+# Wrapped lines are indented two levels so they stand apart from the block body.
+ContinuationIndentWidth: 8
+AccessModifierOffset: -4
+ColumnLimit: 120
+AllowShortCaseLabelsOnASingleLine: true
+BreakStringLiterals: false
+SortIncludes: Never
+SortUsingDeclarations: Never
