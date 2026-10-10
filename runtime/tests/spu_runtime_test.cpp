@@ -16,6 +16,7 @@
 #include "core/fatal.h"
 #include "core/log.h"
 #include "core/reservation.h"
+#include "spu/spu_mfc.h"
 #include "spu/spu_thread.h"
 #include "tox2/spu_lower_stackfree.h"
 
@@ -788,7 +789,10 @@ void testHostThread() {
 }
 
 // Child process modes: each one ends in a stop that the parent checks.
+int runMfcChild(std::string_view mode);
+
 int runStopChild(std::string_view mode) {
+    if (mode.starts_with("--mfc-")) return runMfcChild(mode);
     tox2::installProcessSettings();
     registerSynthImages();
     const auto guest = makeGuest();
@@ -894,6 +898,325 @@ void testStopChildren() {
     CHECK(r.output.find("ls 0x05000..0x05100 synth segment 0 delta 8192") != std::string::npos);
 }
 
+// ---------------------------------------------------------------------------------------------
+// MFC: DMA, atomics, tag status. Guest memory is a plain host buffer.
+// ---------------------------------------------------------------------------------------------
+
+constexpr std::uint32_t kMfcSite = 0x3000;
+constexpr std::uint32_t kPatternEa = 0x8000;  // 0x4000 bytes of pattern
+constexpr std::uint32_t kScratchEa = 0xc000;  // 0x4000 bytes, zero
+
+struct MfcFixture {
+    std::vector<std::uint8_t> guest = makeGuest();
+    tox2::SpuThread thread{0x01000200, "mfc", nullptr};
+    tox2::SpuMfc mfc{thread, guest.data()};
+
+    MfcFixture() {
+        registerSynthImages();
+        for (std::uint32_t i = 0; i < 0x4000; i++) {
+            guest[kPatternEa + i] = static_cast<std::uint8_t>(i * 7 + (i >> 8) + 3);
+            guest[kScratchEa + i] = 0;
+        }
+    }
+
+    void run(std::uint32_t cmd, std::uint32_t lsa, std::uint32_t ea, std::uint32_t size, std::uint32_t tag = 0) {
+        mfc.writeLsa(lsa);
+        mfc.writeEal(ea);
+        mfc.writeSize(size);
+        mfc.writeTagId(tag);
+        mfc.command(kMfcSite, cmd);
+    }
+};
+
+bool same(const std::uint8_t* a, const std::uint8_t* b, std::uint32_t n) { return std::memcmp(a, b, n) == 0; }
+
+void testMfcGetPut() {
+    for (const std::uint32_t size : {1u, 2u, 4u, 8u, 16u, 0x4000u}) {
+        MfcFixture f;
+        // Small transfers keep the low four bits of both addresses equal.
+        const std::uint32_t low = size < 16 ? size : 0;
+        const std::uint32_t ea = kPatternEa + low;
+        const std::uint32_t lsa = 0x2000 + low;
+        std::memset(f.thread.ls() + 0x2000, 0x55, 0x4010);
+        f.run(tox2::mfc::kGet, lsa, ea, size);
+        CHECK(same(f.thread.ls() + lsa, f.guest.data() + ea, size));
+        if (size < 16) {
+            CHECK(f.thread.ls()[lsa - 1] == 0x55 && f.thread.ls()[lsa + size] == 0x55);  // neighbours untouched
+        }
+
+        f.run(tox2::mfc::kPut, lsa, kScratchEa + low, size, 3);
+        CHECK(same(f.guest.data() + kScratchEa + low, f.guest.data() + ea, size));
+        if (size < 16) {
+            CHECK(f.guest[kScratchEa + low - 1] == 0 && f.guest[kScratchEa + low + size] == 0);
+        }
+    }
+
+    // GETB behaves as GET, and the fence and barrier forms run in order.
+    MfcFixture f;
+    f.run(tox2::mfc::kGetB, 0x2000, kPatternEa, 0x80);
+    CHECK(same(f.thread.ls() + 0x2000, f.guest.data() + kPatternEa, 0x80));
+    f.run(tox2::mfc::kGetF, 0x2100, kPatternEa + 0x80, 0x10);
+    CHECK(same(f.thread.ls() + 0x2100, f.guest.data() + kPatternEa + 0x80, 0x10));
+    f.run(tox2::mfc::kPutB, 0x2000, kScratchEa, 0x80);
+    f.run(tox2::mfc::kPutF, 0x2100, kScratchEa + 0x80, 0x10);
+    CHECK(same(f.guest.data() + kScratchEa, f.guest.data() + kPatternEa, 0x90));
+    f.mfc.command(kMfcSite, tox2::mfc::kBarrier);
+    f.mfc.command(kMfcSite, tox2::mfc::kMfcSync);
+    f.mfc.command(kMfcSite, tox2::mfc::kMfcEieio);
+    CHECK(f.mfc.counters().fences == 3);
+    CHECK(f.mfc.counters().get == 2 && f.mfc.counters().put == 2);
+    CHECK(f.mfc.commandSlots() == 16);
+}
+
+void testMfcLsWrap() {
+    MfcFixture f;
+    // A GET that runs off the end of the LS continues at LS 0.
+    f.run(tox2::mfc::kGet, kTox2SpuLsSize - 0x20, kPatternEa, 0x50);
+    CHECK(same(f.thread.ls() + kTox2SpuLsSize - 0x20, f.guest.data() + kPatternEa, 0x20));
+    CHECK(same(f.thread.ls(), f.guest.data() + kPatternEa + 0x20, 0x30));
+    // The same for a PUT, which splits into two reservation-table writes.
+    f.run(tox2::mfc::kPut, kTox2SpuLsSize - 0x20, kScratchEa, 0x50);
+    CHECK(same(f.guest.data() + kScratchEa, f.guest.data() + kPatternEa, 0x50));
+    // The LS address of the command itself wraps as well.
+    f.run(tox2::mfc::kGet, kTox2SpuLsSize + 0x40, kPatternEa + 0x100, 0x10);
+    CHECK(same(f.thread.ls() + 0x40, f.guest.data() + kPatternEa + 0x100, 0x10));
+}
+
+void testMfcImageTracking() {
+    MfcFixture f;
+    // Image bytes tag exactly the code segment; the data segment behind it stays untracked.
+    f.run(tox2::mfc::kGet, 0x3000, kEaA, 0x140);
+    CHECK(trackedAs(f.thread, 0x3000, "synth") && trackedAs(f.thread, 0x30f0, "synth"));
+    CHECK(untracked(f.thread, 0x3100) && untracked(f.thread, 0x3130));
+    // Other bytes over part of it untag that part, rounded outward to units.
+    f.run(tox2::mfc::kGet, 0x3020, kPatternEa, 0x20);
+    CHECK(trackedAs(f.thread, 0x3010, "synth") && untracked(f.thread, 0x3020) && untracked(f.thread, 0x3030) &&
+          trackedAs(f.thread, 0x3040, "synth"));
+    // A GET of image bytes at another LS address records the delta, which dispatch would refuse.
+    f.run(tox2::mfc::kGet, 0x5000, kEaA, 0x100);
+    CHECK(trackedAs(f.thread, 0x5000, "synth") && tox2::trackedImageAt(f.thread, 0x5000)->delta == 0x2000);
+    // GETLLAR over tracked bytes untags them; a PUT leaves the tags alone.
+    f.run(tox2::mfc::kGet, 0x3000, kEaA, 0x100);
+    f.run(tox2::mfc::kGetLLAR, 0x3080, kPatternEa, 128);
+    CHECK(trackedAs(f.thread, 0x3070, "synth") && untracked(f.thread, 0x3080) && untracked(f.thread, 0x30f0));
+    f.run(tox2::mfc::kPut, 0x3000, kScratchEa, 0x70);
+    CHECK(trackedAs(f.thread, 0x3000, "synth") && trackedAs(f.thread, 0x3060, "synth"));
+}
+
+void testMfcAtomics() {
+    MfcFixture f;
+    std::uint32_t status = 99;
+    CHECK(!f.mfc.atomicStatusAvailable() && !f.mfc.takeAtomicStatus(&status));
+
+    // The EA and LS address are rounded down to the line.
+    f.run(tox2::mfc::kGetLLAR, 0x1010, kPatternEa + 0x180 + 0x23, 128);
+    CHECK(f.mfc.hasReservation());
+    CHECK(same(f.thread.ls() + 0x1000, f.guest.data() + kPatternEa + 0x180, 128));
+    CHECK(f.mfc.atomicStatusAvailable() && f.mfc.takeAtomicStatus(&status) && status == 4);
+    CHECK(!f.mfc.atomicStatusAvailable() && !f.mfc.takeAtomicStatus(&status));
+    CHECK(f.mfc.reservation().line == kPatternEa + 0x180 && !f.mfc.reservationLost());
+
+    // PUTLLC with an intact reservation succeeds (status 0) and clears it.
+    f.thread.ls()[0x1005] ^= 0xff;
+    f.run(tox2::mfc::kPutLLC, 0x1000, kPatternEa + 0x180, 128);
+    CHECK(f.mfc.takeAtomicStatus(&status) && status == 0);
+    CHECK(f.guest[kPatternEa + 0x185] == f.thread.ls()[0x1005] && !f.mfc.hasReservation());
+
+    // A second PUTLLC has no reservation: status 1, nothing written.
+    const std::uint8_t before = f.guest[kPatternEa + 0x185];
+    f.thread.ls()[0x1005] ^= 0xff;
+    f.run(tox2::mfc::kPutLLC, 0x1000, kPatternEa + 0x180, 128);
+    CHECK(f.mfc.takeAtomicStatus(&status) && status == 1);
+    CHECK(f.guest[kPatternEa + 0x185] == before);
+
+    // Another writer between GETLLAR and PUTLLC: the loss is visible and the PUTLLC fails.
+    f.run(tox2::mfc::kGetLLAR, 0x1000, kPatternEa + 0x180, 128);
+    f.mfc.takeAtomicStatus(&status);
+    const std::uint8_t other[16] = {1, 2, 3};
+    tox2::reservations().put(f.guest.data(), kPatternEa + 0x1c0, other, 16);
+    CHECK(f.mfc.reservationLost());
+    f.run(tox2::mfc::kPutLLC, 0x1000, kPatternEa + 0x180, 128);
+    CHECK(f.mfc.takeAtomicStatus(&status) && status == 1);
+    CHECK(!f.mfc.hasReservation() && !f.mfc.reservationLost());
+    CHECK(f.guest[kPatternEa + 0x1c0] == 1);  // the other writer's bytes survive
+
+    // A plain store (no stripe bump) is seen through the content compare.
+    f.run(tox2::mfc::kGetLLAR, 0x1000, kPatternEa + 0x180, 128);
+    f.mfc.takeAtomicStatus(&status);
+    plainStore8(f.guest.data() + kPatternEa + 0x1a0, 0x77);
+    CHECK(f.mfc.reservationLost());
+    f.run(tox2::mfc::kPutLLC, 0x1000, kPatternEa + 0x180, 128);
+    CHECK(f.mfc.takeAtomicStatus(&status) && status == 1);
+
+    // A PUT from this very SPU to the reserved line also takes the reservation.
+    f.run(tox2::mfc::kGetLLAR, 0x1000, kPatternEa + 0x180, 128);
+    f.mfc.takeAtomicStatus(&status);
+    f.run(tox2::mfc::kPut, 0x1000, kPatternEa + 0x190, 16);
+    CHECK(f.mfc.reservationLost());
+
+    // PUTLLUC writes unconditionally, status 2; the queued form reports no status.
+    std::memset(f.thread.ls() + 0x1000, 0x42, 128);
+    f.run(tox2::mfc::kPutLLUC, 0x1000, kScratchEa + 0x100, 128);
+    CHECK(f.mfc.takeAtomicStatus(&status) && status == 2);
+    CHECK(same(f.thread.ls() + 0x1000, f.guest.data() + kScratchEa + 0x100, 128));
+    std::memset(f.thread.ls() + 0x1000, 0x43, 128);
+    f.run(tox2::mfc::kPutQLLUC, 0x1000, kScratchEa + 0x180, 128);
+    CHECK(!f.mfc.atomicStatusAvailable());
+    CHECK(same(f.thread.ls() + 0x1000, f.guest.data() + kScratchEa + 0x180, 128));
+
+    CHECK(f.mfc.counters().getllar == 4 && f.mfc.counters().putllc_ok == 1 && f.mfc.counters().putllc_failed == 3);
+    CHECK(f.mfc.counters().putlluc == 2);
+}
+
+void testMfcTagStatus() {
+    MfcFixture f;
+    std::uint32_t status = 99;
+    CHECK(!f.mfc.tagStatusAvailable() && !f.mfc.takeTagStatus(&status));
+    CHECK(f.mfc.tagMask() == 0);
+    for (const std::uint32_t mode : {0u, 1u, 2u}) {
+        f.mfc.writeTagMask(0x80000005u);
+        CHECK(f.mfc.tagMask() == 0x80000005u);
+        f.run(tox2::mfc::kGet, 0x2000, kPatternEa, 16, 2);
+        f.mfc.writeTagUpdate(kMfcSite, mode);
+        CHECK(f.mfc.tagStatusAvailable());
+        // The status is the mask at the time of the request.
+        f.mfc.writeTagMask(0);
+        CHECK(f.mfc.takeTagStatus(&status) && status == 0x80000005u);
+        CHECK(!f.mfc.tagStatusAvailable() && !f.mfc.takeTagStatus(&status));
+    }
+    f.mfc.writeTagMask(0);
+    f.mfc.writeTagUpdate(kMfcSite, 2);
+    CHECK(f.mfc.takeTagStatus(&status) && status == 0);
+}
+
+void putBe32Ls(tox2::SpuThread& thread, std::uint32_t addr, std::uint32_t word) { storeBe32(thread.ls() + addr, word); }
+
+void testMfcLists() {
+    MfcFixture f;
+    // Three elements: 0x20 bytes, a 4-byte element whose effective address ends in 4, 0x30 bytes.
+    putBe32Ls(f.thread, 0x100, 0x20);
+    putBe32Ls(f.thread, 0x104, kPatternEa);
+    putBe32Ls(f.thread, 0x108, 4);
+    putBe32Ls(f.thread, 0x10c, kPatternEa + 0x104);
+    putBe32Ls(f.thread, 0x110, 0x30);
+    putBe32Ls(f.thread, 0x114, kPatternEa + 0x200);
+    f.run(tox2::mfc::kGetL, 0x2000, 0x100, 24);
+    CHECK(same(f.thread.ls() + 0x2000, f.guest.data() + kPatternEa, 0x20));
+    CHECK(same(f.thread.ls() + 0x2024, f.guest.data() + kPatternEa + 0x104, 4));
+    CHECK(same(f.thread.ls() + 0x2030, f.guest.data() + kPatternEa + 0x200, 0x30));
+    CHECK(f.mfc.counters().get_list == 1);
+
+    // A list PUT with an empty element in the middle.
+    putBe32Ls(f.thread, 0x120, 0x20);
+    putBe32Ls(f.thread, 0x124, kScratchEa);
+    putBe32Ls(f.thread, 0x128, 0);
+    putBe32Ls(f.thread, 0x12c, kScratchEa + 0x300);
+    putBe32Ls(f.thread, 0x130, 0x30);
+    putBe32Ls(f.thread, 0x134, kScratchEa + 0x200);
+    f.run(tox2::mfc::kPutL, 0x2000, 0x120, 24);
+    CHECK(same(f.guest.data() + kScratchEa, f.thread.ls() + 0x2000, 0x20));
+    CHECK(same(f.guest.data() + kScratchEa + 0x200, f.thread.ls() + 0x2020, 0x30));
+    CHECK(f.guest[kScratchEa + 0x300] == 0);
+    CHECK(f.mfc.counters().put_list == 1);
+
+    // A list whose elements are image bytes tags like a plain GET.
+    putBe32Ls(f.thread, 0x140, 0x100);
+    putBe32Ls(f.thread, 0x144, kEaA);
+    f.run(tox2::mfc::kGetL, 0x3000, 0x140, 8);
+    CHECK(trackedAs(f.thread, 0x3000, "synth") && trackedAs(f.thread, 0x30f0, "synth"));
+}
+
+// Child processes for the fatal conditions.
+constexpr std::uint32_t kTagUpdateMode3 = 0xffffffffu;
+
+struct MfcStopCase {
+    const char* arg;
+    std::uint32_t cmd, lsa, ea, size, tag;
+    void (*setup)(MfcFixture&);
+    const char* line;  // after "tox2: stop: spu: mfc "
+};
+
+void setupEahSet(MfcFixture& f) { f.mfc.writeEah(1); }
+void setupListStall(MfcFixture& f) {
+    putBe32Ls(f.thread, 0x100, 0x80000010u);
+    putBe32Ls(f.thread, 0x104, kPatternEa);
+}
+void setupListBad(MfcFixture& f) {
+    putBe32Ls(f.thread, 0x100, 0x20);
+    putBe32Ls(f.thread, 0x104, kPatternEa + 8);  // 32 bytes need a 16-byte aligned address
+}
+
+#define MFC_AT " at ls 0x03000 on thread 0x01000200"
+const MfcStopCase kMfcStops[] = {
+        {"--mfc-size3", 0x40, 0x2000, kPatternEa, 3, 0, nullptr,
+         "get (command 0x40): size is not 1, 2, 4, 8 or a multiple of 16" MFC_AT},
+        {"--mfc-size20", 0x40, 0x2000, kPatternEa, 20, 0, nullptr,
+         "get (command 0x40): size is not a multiple of 16" MFC_AT},
+        {"--mfc-size0", 0x20, 0x2000, kPatternEa, 0, 0, nullptr,
+         "put (command 0x20): size is 0 or above 0x4000" MFC_AT},
+        {"--mfc-size-big", 0x40, 0x2000, kPatternEa, 0x4010, 0, nullptr,
+         "get (command 0x40): size is 0 or above 0x4000" MFC_AT},
+        {"--mfc-ea16", 0x40, 0x2000, kPatternEa + 8, 16, 0, nullptr,
+         "get (command 0x40): address is not 16-byte aligned" MFC_AT},
+        {"--mfc-ls16", 0x20, 0x2008, kPatternEa, 32, 0, nullptr,
+         "put (command 0x20): address is not 16-byte aligned" MFC_AT},
+        {"--mfc-natural", 0x40, 0x2000, kPatternEa + 2, 4, 0, nullptr,
+         "get (command 0x40): address is not aligned" MFC_AT},
+        {"--mfc-put-natural", 0x20, 0x2004, kPatternEa + 4, 8, 0, nullptr,
+         "put (command 0x20): address is not aligned" MFC_AT},
+        {"--mfc-nibble", 0x40, 0x2004, kPatternEa + 8, 4, 0, nullptr,
+         "get (command 0x40): ls and ea differ in the low 4 bits" MFC_AT},
+        {"--mfc-tag32", 0x40, 0x2000, kPatternEa, 16, 32, nullptr, "get (command 0x40): tag id above 31" MFC_AT},
+        {"--mfc-4gib", 0x40, 0x2000, 0xffffffe0u, 64, 0, nullptr, "get (command 0x40): range passes 4 GiB" MFC_AT},
+        {"--mfc-eah", 0x40, 0x2000, kPatternEa, 16, 0, setupEahSet,
+         "get (command 0x40): effective address above 4 GiB" MFC_AT},
+        {"--mfc-sndsig", 0xa0, 0, 0, 4, 0, nullptr, "sndsig (command 0xa0): command is not implemented" MFC_AT},
+        {"--mfc-unknown", 0x48, 0x2000, kPatternEa, 16, 0, nullptr,
+         "unknown (command 0x48): command is not implemented" MFC_AT},
+        {"--mfc-atomic-size", 0xd0, 0x1000, kPatternEa, 64, 0, nullptr,
+         "getllar (command 0xd0): size is not 128" MFC_AT},
+        {"--mfc-list-stall", 0x44, 0x2000, 0x100, 8, 0, setupListStall,
+         "getl (command 0x44): list element with stall-and-notify is not implemented" MFC_AT},
+        {"--mfc-list-align", 0x44, 0x2000, 0x104, 8, 0, nullptr,
+         "getl (command 0x44): list address is not 8-byte aligned" MFC_AT},
+        {"--mfc-list-size", 0x24, 0x2000, 0x100, 12, 0, nullptr,
+         "putl (command 0x24): list size is not a multiple of 8 up to 0x4000" MFC_AT},
+        {"--mfc-list-element", 0x44, 0x2000, 0x100, 8, 0, setupListBad,
+         "getl (command 0x44): address is not 16-byte aligned" MFC_AT},
+        {"--mfc-tag-update", kTagUpdateMode3, 0, 0, 0, 0, nullptr, "tag update mode 3 is invalid" MFC_AT},
+};
+#undef MFC_AT
+
+int runMfcChild(std::string_view mode) {
+    tox2::installProcessSettings();
+    for (const MfcStopCase& c : kMfcStops) {
+        if (mode != c.arg) continue;
+        MfcFixture f;
+        if (c.setup != nullptr) c.setup(f);
+        if (c.cmd == kTagUpdateMode3) {
+            f.mfc.writeTagUpdate(kMfcSite, 3);
+        } else {
+            f.run(c.cmd, c.lsa, c.ea, c.size, c.tag);
+        }
+        return 0;  // not reached: the stop ends the process
+    }
+    return 99;
+}
+
+void testMfcStopChildren() {
+    for (const MfcStopCase& c : kMfcStops) {
+        const std::string narrow = c.arg;
+        const ChildResult r = runChild(std::wstring(narrow.begin(), narrow.end()).c_str());
+        const std::string expected = std::string("tox2: stop: spu: mfc ") + c.line;
+        const bool found = r.output.find(expected) != std::string::npos;
+        const bool dump = r.output.find("trace (oldest first)") != std::string::npos;
+        CHECK(r.exit_code == static_cast<DWORD>(tox2::ExitCode::Fatal));
+        CHECK(found);
+        CHECK(dump);
+        if (!found || !dump) std::fprintf(stderr, "child %s output:\n%s\n", c.arg, r.output.c_str());
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -920,6 +1243,13 @@ int main(int argc, char** argv) {
     testCheckImages();
     testHostThread();
     testStopChildren();
+    testMfcGetPut();
+    testMfcLsWrap();
+    testMfcImageTracking();
+    testMfcAtomics();
+    testMfcTagStatus();
+    testMfcLists();
+    testMfcStopChildren();
 
     std::printf("spu runtime tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;
