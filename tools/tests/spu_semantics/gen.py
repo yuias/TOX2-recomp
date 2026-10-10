@@ -38,7 +38,7 @@ TERMINATOR_STOP = 0x102
 _NAME_RE = re.compile(r"[a-z0-9_]+")
 _REG_RE = re.compile(r"r([0-9]|[1-9][0-9]|1[01][0-9]|12[0-7])")
 _MASK32 = 0xFFFFFFFF
-_CHANNEL_KEYS = frozenset({"reads", "counts", "writes", "stops", "stop_leave"})
+_CHANNEL_KEYS = frozenset({"reads", "counts", "writes", "stops", "stop_leave", "halts"})
 
 
 class CaseError(Exception):
@@ -153,7 +153,9 @@ def _channels(case: Case) -> dict[str, list]:
     if "stops" in raw:
         out["stops"] = [_int_in(case, "stop code", c, 0, 0x3FFF) for c in raw["stops"]]
     out["stop_leave"] = [_int_in(case, "stop_leave code", c, 0, 0x3FFF) for c in raw.get("stop_leave", ())]
-    for what in ("writes", "stops"):
+    # Every case checks its halts; no key means none were taken.
+    out["halts"] = [_int_in(case, "halt site", s, 0, 0x3FFFC) for s in raw.get("halts", ())]
+    for what in ("writes", "stops", "halts"):
         if out[what] is not None and len(out[what]) > LOG_SIZE:
             raise CaseError("case %s: more than %d expected %s" % (case.name, LOG_SIZE, what))
     return out
@@ -248,6 +250,9 @@ def _render_case(case: Case) -> tuple[list[str], str, dict[str, list], int]:
         values = ", ".join("0x%xull" % c for c in channels["stops"])
         check_lines.append('n += checkSeq(msg, msg_size, n, "stops", log->stops, log->stop_count, '
                            "(const uint64_t[]){%s}, %du);" % (values or "0", len(channels["stops"])))
+    values = ", ".join("0x%xull" % s for s in channels["halts"])
+    check_lines.append('n += checkSeq(msg, msg_size, n, "halts", log->halts, log->halt_count, '
+                       "(const uint64_t[]){%s}, %du);" % (values or "0", len(channels["halts"])))
     check_lines.append("return n;")
 
     def pairs(label: str, items: list[tuple[int, int]]) -> str:
@@ -287,9 +292,7 @@ _HEADER_HEAD = """\
 
 #include "tox2/spu_context.h"
 #include "tox2/spu_lower_stackfree.h"
-#if __has_include("tox2/spu_ops.h")
 #include "tox2/spu_ops.h"
-#endif
 
 enum { kTox2SemanticsLogSize = %(log_size)d };
 // Keep in sync with tools/tests/spu_semantics/__init__.py.
@@ -299,11 +302,13 @@ typedef struct Tox2SemanticsPair {
     uint32_t channel, value;
 } Tox2SemanticsPair;
 
-// What the hooks saw during the case. Writes are (channel << 32 | value); stops are the codes.
+// What the hooks saw during the case. Writes are (channel << 32 | value); stops are the codes; halts
+// are the LS addresses of the taken halt instructions (the first one ends the case).
 typedef struct Tox2SemanticsLog {
-    uint32_t write_count, stop_count;
+    uint32_t write_count, stop_count, halt_count;
     uint64_t writes[kTox2SemanticsLogSize];
     uint64_t stops[kTox2SemanticsLogSize];
+    uint64_t halts[kTox2SemanticsLogSize];
 } Tox2SemanticsLog;
 
 // Runs before the case; sets the registers and local store the case starts from.

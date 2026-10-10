@@ -203,7 +203,8 @@ class StopAndNoCodeTest(unittest.TestCase):
 class HandlerTest(unittest.TestCase):
     def test_unhandled_words_are_counted_and_emitted_as_hooks(self):
         ai = enc("ai", RT=3, RA=3, I10=1)
-        result, text = emit([ai, ai, enc("a", RT=3, RA=3, RB=3), stop(0x102)])
+        # No handlers: the integer group has real ones by default.
+        result, text = emit([ai, ai, enc("a", RT=3, RA=3, RB=3), stop(0x102)], handlers={})
         self.assertEqual(result.stats.unhandled, {"ai": 2, "a": 1})
         self.assertEqual(result.stats.unhandled_sites["ai"], [at(0), at(1)])
         self.assertIn("tox2SpuUnhandled(ctx, ls, 0x01000u, 0x%08xu);" % ai, text)

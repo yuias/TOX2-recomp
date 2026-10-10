@@ -164,9 +164,7 @@ def render_funcs_header(models: Sequence[ImageModel], records: Mapping[str, Sequ
     headers = sorted({get_lowering(name).header for name in _lowering_names(models)})
     lines = [banner().rstrip("\n"), "#pragma once", "", '#include "tox2/spu_context.h"']
     lines += ['#include "%s"' % h for h in headers]
-    # The semantics helpers arrive with the first op group; the generated code does not need them
-    # before then.
-    lines += ['#if __has_include("tox2/spu_ops.h")', '#include "tox2/spu_ops.h"', "#endif", ""]
+    lines += ['#include "tox2/spu_ops.h"', ""]
     for model in models:
         lines += ["TOX2_SPU_FUNC(%s);" % record.name for record in records[model.name]]
     return "\n".join(lines) + "\n"

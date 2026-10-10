@@ -3,6 +3,7 @@
 
 #include "tox2/spu_context.h"
 #include "tox2/spu_lower_stackfree.h"
+#include "tox2/spu_ops.h"
 
 static_assert(sizeof(Tox2SpuContext) % 16 == 0);
 static_assert(kTox2SpuNoExit == 0xffffffffu);

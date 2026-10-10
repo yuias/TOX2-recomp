@@ -2,6 +2,7 @@
 
 #include "tox2/spu_context.h"
 #include "tox2/spu_lower_stackfree.h"
+#include "tox2/spu_ops.h"
 
 TOX2_SPU_FUNC(spuHeaderFreestandingProbe) {
     TOX2_SPU_SF_ENTER(0x100);

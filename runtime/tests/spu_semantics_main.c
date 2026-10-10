@@ -2,11 +2,13 @@
 //
 // The driver is the whole runtime of a case: it provides the dispatcher over the case's entry table,
 // scripted channel reads and event counts, recorded channel writes and stop codes. A case ends when
-// the generated code leaves (stop, halt) or dispatches to the exit address. A case that reaches a
-// fatal hook (unknown target, unhandled word, halt, an unscripted channel read) ends the process with
-// status 3 before the summary line is printed, so CTest fails; the message names the case. Pass case
+// the generated code leaves (stop, halt) or dispatches to the exit address. A taken halt is
+// recorded and ends the case, so a case can expect it; a case that reaches another fatal hook
+// (unknown target, unhandled word, an unscripted channel read) ends the process with status 3
+// before the summary line is printed, so CTest fails; the message names the case. Pass case
 // names as arguments to run only those.
 
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +18,7 @@
 static const Tox2SemanticsCase* g_case;
 static Tox2SemanticsLog g_log;
 static bool g_read_used[1024];
+static jmp_buf g_halt_env;
 
 [[noreturn]] static void fatal(const char* what, uint32_t a, uint32_t b) {
     fprintf(stderr, "spu semantics: case %s: %s (0x%05x, 0x%08x)\n", g_case != nullptr ? g_case->name : "?", what, a,
@@ -85,10 +88,13 @@ bool tox2SpuStop(Tox2SpuContext* ctx, uint8_t* ls, uint32_t site, uint32_t code)
     return true;
 }
 
+// The real runtime stops the thread; here the case ends and the check compares the recorded sites.
 [[noreturn]] void tox2SpuHalt(Tox2SpuContext* ctx, uint8_t* ls, uint32_t site) {
     (void)ctx;
     (void)ls;
-    fatal("halt", site, 0);
+    if (g_log.halt_count >= kTox2SemanticsLogSize) fatal("too many halts", site, 0);
+    g_log.halts[g_log.halt_count++] = site;
+    longjmp(g_halt_env, 1);
 }
 
 [[noreturn]] void tox2SpuUnhandled(Tox2SpuContext* ctx, uint8_t* ls, uint32_t site, uint32_t word) {
@@ -116,7 +122,7 @@ static bool runCase(const Tox2SemanticsCase* c, Tox2SpuContext* ctx, uint8_t* ls
 
     c->init(ctx, ls);
     ctx->jump_target = kTox2SemanticsCodeBase;
-    tox2SpuDispatch(ctx, ls);
+    if (setjmp(g_halt_env) == 0) tox2SpuDispatch(ctx, ls);
 
     char msg[256] = "";
     uint32_t mismatches = c->check(ctx, ls, &g_log, msg, sizeof msg);
