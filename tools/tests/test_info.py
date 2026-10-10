@@ -209,6 +209,9 @@ class PinTest(InfoTestBase):
         self.assertRegex(config["libsre_prx"]["sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(config["libsre_prx"]["size"], 239344)
         self.assertEqual(config["libsre_prx"]["firmware"], "4.93")
+        self.assertEqual(config["libsre_reloc_elf"]["base"], "0x011d0000")
+        self.assertEqual(config["libsre_reloc_elf"]["size"], 239344)
+        self.assertRegex(config["libsre_reloc_elf"]["sha256"], r"^[0-9a-f]{64}$")
         # The config must stay path-free.
         self.assertNotRegex(info.DEFAULT_CONFIG.read_text(encoding="utf-8"), r"[A-Za-z]:[\\/]")
 

@@ -65,6 +65,9 @@ function(tox2_decrypt_add)
   string(JSON libsre_size GET "${target_text}" libsre_prx size)
   string(JSON libsre_sha256 GET "${target_text}" libsre_prx sha256)
   string(JSON libsre_firmware GET "${target_text}" libsre_prx firmware)
+  string(JSON libsre_reloc_base GET "${target_text}" libsre_reloc_elf base)
+  string(JSON libsre_reloc_size GET "${target_text}" libsre_reloc_elf size)
+  string(JSON libsre_reloc_sha256 GET "${target_text}" libsre_reloc_elf sha256)
 
   set(key_files "${TOX2_RPCS3_KEYS_DIR}/key_vault.h" "${TOX2_RPCS3_KEYS_DIR}/key_vault.cpp")
   set(libsre_path "dev_flash/sys/external/libsre.sprx")
@@ -101,6 +104,21 @@ function(tox2_decrypt_add)
     add_test(NAME decrypt_libsre COMMAND tox2_decrypt ${libsre_args} --out "${test_dir}/libsre.prx")
     set_tests_properties(decrypt_libsre PROPERTIES
       PASS_REGULAR_EXPRESSION "sha256 ${libsre_sha256}: matches the pin"
+      TIMEOUT 120)
+
+    set(libsre_reloc_args reloc --in "${TOX2_INPUTS_DIR}/libsre.prx" --base ${libsre_reloc_base}
+      --expect-input-sha256 ${libsre_sha256} --expect-size ${libsre_reloc_size}
+      --expect-sha256 ${libsre_reloc_sha256})
+    add_custom_command(OUTPUT "${TOX2_INPUTS_DIR}/libsre.reloc.elf"
+      COMMAND tox2_decrypt ${libsre_reloc_args} --out "${TOX2_INPUTS_DIR}/libsre.reloc.elf"
+      DEPENDS tox2_decrypt "${TOX2_INPUTS_DIR}/libsre.prx"
+      COMMENT "Relocating libsre.prx to generated/inputs/libsre.reloc.elf"
+      VERBATIM)
+    list(APPEND input_outputs "${TOX2_INPUTS_DIR}/libsre.reloc.elf")
+
+    add_test(NAME decrypt_libsre_reloc COMMAND tox2_decrypt ${libsre_reloc_args} --out "${test_dir}/libsre.reloc.elf")
+    set_tests_properties(decrypt_libsre_reloc PROPERTIES
+      PASS_REGULAR_EXPRESSION "sha256 ${libsre_reloc_sha256}: matches the pin"
       TIMEOUT 120)
   endif()
 
