@@ -258,8 +258,8 @@ void testCompareWindow() {
     table.setCompareHook(nullptr, nullptr);
 }
 
-// Live version of the same guarantee: a writer to chunk 5 racing with PUTLLCs that change chunk 0 never
-// sees its value go backwards, because PUTLLC leaves chunk 5 alone or fails.
+// Live smoke test only: it can catch a PUTLLC that rewrites an unchanged chunk 5 with a stale snapshot, but
+// only when the rollback happens to be visible. The deterministic evidence is testCompareWindow().
 void testUnchangedChunkSurvivesRace() {
     tox2::ReservationTable table;
     TestMemory mem;
@@ -348,26 +348,110 @@ void testWaitForStoreEpoch() {
     CHECK(table.waitStoreEpoch(seen - 1, &halt, milliseconds(3000)) == tox2::StoreWait::Epoch);
 }
 
+// Ping-pong: each round the writer does exactly one put() once the waiter has read its epoch, so a wakeup
+// lost anywhere between that read and the wait shows up as a Timeout.
 void testWaitersAreNotLost() {
-    // Writers racing with a waiter that re-arms at once: no wait may run to its (long) timeout.
+    constexpr int kRounds = 10000;
     tox2::ReservationTable table;
     TestMemory mem;
     std::uint8_t zeros[16] = {};
-    std::atomic<bool> done{false};
+    std::atomic<bool> ready{false};
+    std::atomic<bool> abort{false};
     std::thread writer([&] {
-        while (!done.load()) {
+        for (int i = 0; i < kRounds; i++) {
+            while (!ready.load(std::memory_order_acquire)) {
+                if (abort.load(std::memory_order_relaxed)) return;
+            }
+            ready.store(false, std::memory_order_relaxed);
             table.put(mem.base(), 0, zeros, 16);
-            std::this_thread::sleep_for(std::chrono::microseconds(200));
         }
     });
     bool timed_out = false;
-    for (int i = 0; i < 300 && !timed_out; i++) {
+    for (int i = 0; i < kRounds; i++) {
         const std::uint64_t seen = table.storeEpoch();
-        if (table.waitStoreEpoch(seen, nullptr, milliseconds(1000)) == tox2::StoreWait::Timeout) timed_out = true;
+        ready.store(true, std::memory_order_release);
+        if (table.waitStoreEpoch(seen, nullptr, milliseconds(1000)) == tox2::StoreWait::Timeout) {
+            timed_out = true;
+            break;
+        }
+    }
+    abort = true;
+    writer.join();
+    CHECK(!timed_out);
+}
+
+// A failed store-conditional locks the stripe and restores it unchanged; lost() must not report that as a
+// lost reservation, on the same line or on a line that shares the stripe.
+void testFailedWritersDoNotLoseReservation() {
+    // Line 0 and the line kReservationStripeCount lines further up map to the same stripe.
+    constexpr std::uint32_t kCollidingLine = tox2::kReservationStripeCount * tox2::kReservationLineSize;
+    struct alignas(128) Block {
+        std::uint8_t bytes[kCollidingLine + tox2::kReservationLineSize] = {};
+    };
+    auto block = std::make_unique<Block>();
+    std::uint8_t* base = block->bytes;
+
+    tox2::ReservationTable table;
+    tox2::Reservation res;
+    std::uint8_t ls[128];
+    table.getllar(base, 0, ls, res);
+
+    // Deterministic part: the stripe is back to its old version after each failure.
+    CHECK(!table.storeConditional(base, 4, 4, 1, 2));
+    CHECK(!table.lost(base, res));
+    CHECK(!table.storeConditional(base, kCollidingLine + 4, 4, 1, 2));
+    CHECK(!table.lost(base, res));
+
+    // Concurrent part: lost() may see the stripe while a failing writer holds it.
+    for (const std::uint32_t target : {4u, kCollidingLine + 4}) {
+        std::atomic<bool> done{false};
+        std::thread failer([&] {
+            for (int i = 0; i < 200000; i++) table.storeConditional(base, target, 4, 1, 2);
+            done = true;
+        });
+        bool wrongly_lost = false;
+        while (!done.load()) {
+            if (table.lost(base, res)) wrongly_lost = true;
+        }
+        failer.join();
+        CHECK(!wrongly_lost);
+    }
+}
+
+// GETLLAR must never return a line that is half one PUTLLUC and half another.
+void testGetllarIsNotTorn() {
+    tox2::ReservationTable table;
+    TestMemory mem;
+    std::atomic<bool> done{false};
+    std::thread writer([&] {
+        alignas(16) std::uint8_t src[128];
+        for (std::uint64_t counter = 1; !done.load(std::memory_order_relaxed); counter++) {
+            for (int i = 0; i < 16; i++) std::memcpy(src + 8 * i, &counter, 8);
+            table.putlluc(mem.base(), 128, src);
+        }
+    });
+
+    bool torn = false;
+    std::uint64_t reads = 0;
+    std::uint64_t last_counter = 0;
+    tox2::Reservation res;
+    alignas(16) std::uint8_t ls[128];
+    const auto deadline = Clock::now() + milliseconds(1000);
+    while (Clock::now() < deadline && !torn) {
+        for (int n = 0; n < 1000; n++) {
+            table.getllar(mem.base(), 128, ls, res);
+            const std::uint64_t first = chunkAt(ls);
+            for (int i = 1; i < 16; i++) {
+                if (chunkAt(ls + 8 * i) != first) torn = true;
+            }
+            last_counter = first;
+            reads++;
+        }
     }
     done = true;
     writer.join();
-    CHECK(!timed_out);
+    CHECK(!torn);
+    CHECK(reads > 0 && last_counter > 0);  // the writer really ran during the reads
 }
 
 void testSharedTable() {
@@ -392,6 +476,8 @@ int main() {
     testUnchangedChunkSurvivesRace();
     testWaitForStoreEpoch();
     testWaitersAreNotLost();
+    testFailedWritersDoNotLoseReservation();
+    testGetllarIsNotTorn();
     testSharedTable();
 
     std::printf("spu runtime tests: %d passed, %d failed\n", g_passed, g_failed);

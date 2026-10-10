@@ -42,6 +42,8 @@ bool haltRequested(const std::uint32_t* halt) {
     return halt != nullptr && __atomic_load_n(halt, __ATOMIC_ACQUIRE) != 0;
 }
 
+// PUT and PUTLLUC reach this path too, so they also skip equal-valued pieces. That narrows the window in
+// which they undo a concurrent plain store; the stripe version and the store epoch still bump.
 template <typename T>
 void storeSkipEqual(std::uint8_t* dst, const std::uint8_t* src) {
     T value;
@@ -209,7 +211,10 @@ bool ReservationTable::storeConditional(std::uint8_t* base, std::uint32_t ea, st
 
 bool ReservationTable::lost(const std::uint8_t* base, const Reservation& res) const {
     if (!res.valid) return false;
-    if (stripe(res.line).load(std::memory_order_acquire) != res.version) return true;
+    // Ignore the lock bit: a writer that holds the stripe briefly and restores it (failed store-conditional,
+    // failed PUTLLC compare, stripe collision) leaves the version unchanged. A writer that did write is
+    // caught by the version bump once it unlocks, or by the content compare below while it still holds it.
+    if ((stripe(res.line).load(std::memory_order_acquire) & ~1ull) != res.version) return true;
     const std::uint8_t* host = base + res.line;
     for (std::uint32_t i = 0; i < kChunkCount; i++) {
         if (loadChunk(host + 8 * i) != readBuffer(res.snapshot + 8 * i)) return true;

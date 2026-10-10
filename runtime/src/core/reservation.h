@@ -75,13 +75,20 @@ public:
     // never lost.
     bool lost(const std::uint8_t* base, const Reservation& res) const;
 
-    // Count of version-bumping writes (and wake() calls) so far.
+    // Count of version-bumping writes (and wake() calls) so far. Must stay an acquire load: a writer bumps
+    // the stripe version before the epoch, so a waiter that reads the epoch first and lost() second can
+    // never miss a write that the later waitStoreEpoch() would otherwise have reported.
     std::uint64_t storeEpoch() const { return epoch_.load(std::memory_order_acquire); }
 
     // Blocks until the store epoch differs from `seen`, `timeout` passes, or `*halt` (may be null) is
     // non-zero. Plain stores do not change the epoch, so a caller that waits for a plain store gets
-    // StoreWait::Timeout and must re-check lost() on every return, whatever the reason. A thread that
-    // sets a halt flag must call wake() afterwards, or the waiter notices it only at its timeout.
+    // StoreWait::Timeout and must re-check lost() on every return, whatever the reason.
+    //
+    // Waiter protocol, in this order: `seen = storeEpoch()`, then `lost()`, then `waitStoreEpoch(seen, ...)`.
+    // Reading the epoch after lost() can sleep through a write that landed in between.
+    //
+    // Halt: the setter must store the flag atomically (the waiter reads it with an acquire load) and only
+    // then call wake(), or the waiter notices it only at its timeout.
     StoreWait waitStoreEpoch(std::uint64_t seen, const std::uint32_t* halt,
                              std::chrono::microseconds timeout = std::chrono::milliseconds(1));
 
