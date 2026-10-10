@@ -20,6 +20,7 @@
 
 namespace tox2 {
 
+class SpuChannels;
 class SpuThread;
 
 // Why runSpu() returned.
@@ -75,6 +76,8 @@ public:
     const Tox2SpuContext& context() const { return ctx_; }
     std::uint8_t* ls() { return ls_.get(); }
     const std::uint8_t* ls() const { return ls_.get(); }
+    // Mailboxes, events, decrementer and the MFC (spu_channels.h).
+    SpuChannels& channels() { return *channels_; }
 
     // Starts the host thread at `entry_ls`. False when it was started already.
     bool start(std::uint32_t entry_ls);
@@ -82,8 +85,8 @@ public:
     void join();
 
     // Asks the thread to leave at its next check. Any thread may call it. The flag is stored atomically
-    // and the reservation waiters are woken, so a thread that waits for a reservation event notices at
-    // once. Waits on the thread's own channels are woken by the channel layer.
+    // and both the reservation waiters and the thread's channel waits are woken, so a waiting thread
+    // notices at once.
     void requestHalt();
     bool haltRequested() const { return tox2SpuHaltRequested(&ctx_); }
 
@@ -134,6 +137,7 @@ private:
     SpuOwner* owner_;
     alignas(16) Tox2SpuContext ctx_{};
     std::unique_ptr<std::uint8_t[], LsDeleter> ls_;
+    std::unique_ptr<SpuChannels> channels_;
 
     // Tags may be changed by another thread (write_ls from the PPU) while this one dispatches. Records are
     // only ever appended, so a tag that is visible always names a complete record.

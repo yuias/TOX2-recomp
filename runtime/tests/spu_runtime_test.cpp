@@ -16,6 +16,8 @@
 #include "core/fatal.h"
 #include "core/log.h"
 #include "core/reservation.h"
+#include "core/timer_resolution.h"
+#include "spu/spu_channels.h"
 #include "spu/spu_mfc.h"
 #include "spu/spu_thread.h"
 #include "tox2/spu_lower_stackfree.h"
@@ -790,9 +792,11 @@ void testHostThread() {
 
 // Child process modes: each one ends in a stop that the parent checks.
 int runMfcChild(std::string_view mode);
+int runChanChild(std::string_view mode);
 
 int runStopChild(std::string_view mode) {
     if (mode.starts_with("--mfc-")) return runMfcChild(mode);
+    if (mode.starts_with("--chan-")) return runChanChild(mode);
     tox2::installProcessSettings();
     registerSynthImages();
     const auto guest = makeGuest();
@@ -1217,10 +1221,510 @@ void testMfcStopChildren() {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Channels: mailboxes, events, decrementer, machine status. The hooks are called directly on a thread
+// that has no host thread of its own; blocking calls run on helper threads.
+// ---------------------------------------------------------------------------------------------
+
+constexpr std::uint32_t kChanSite = 0x3000;
+constexpr std::uint32_t kLineEa = 0x2000;  // a reservation line in the fixture's guest memory
+
+struct ChanOwner : tox2::SpuOwner {
+    std::atomic<int> intr_count{0};
+    std::atomic<std::uint32_t> intr_value{0};
+    std::atomic<std::uint32_t> intr_out_value{0};
+    std::atomic<bool> intr_took_out{false};
+    std::atomic<int> stop_count{0};
+    std::atomic<std::uint32_t> stop_site{0};
+    std::atomic<std::uint32_t> stop_code{0};
+    std::atomic<bool> stop_result{true};
+
+    void onInterruptMailbox(tox2::SpuThread& thread, std::uint32_t value) override {
+        // The channel mutex must not be held here: taking the outbound mailbox needs it.
+        std::uint32_t out = 0;
+        intr_took_out = thread.channels().takeOutMbox(&out);
+        intr_out_value = out;
+        intr_value = value;
+        intr_count++;
+    }
+    bool onStop(tox2::SpuThread&, std::uint32_t site, std::uint32_t code) override {
+        stop_site = site;
+        stop_code = code;
+        stop_count++;
+        return stop_result;
+    }
+    void onFinished(tox2::SpuThread&, tox2::SpuLeave) override {}
+};
+
+struct ChanFixture {
+    std::vector<std::uint8_t> guest = std::vector<std::uint8_t>(0x10000, 0);
+    ChanOwner owner;
+    tox2::SpuThread thread;
+    tox2::SpuChannels& ch;
+
+    explicit ChanFixture(bool with_owner = true)
+        : thread(0x01000300, "chan", with_owner ? &owner : nullptr), ch(thread.channels()) {
+        ch.mfc().setGuestBase(guest.data());
+        for (std::uint32_t i = 0; i < 128; i++) guest[kLineEa + i] = static_cast<std::uint8_t>(i + 1);
+    }
+
+    bool rd(std::uint32_t channel, std::uint32_t* value) {
+        return tox2SpuReadChannel(&thread.context(), thread.ls(), kChanSite, channel, value);
+    }
+    bool wr(std::uint32_t channel, std::uint32_t value) {
+        return tox2SpuWriteChannel(&thread.context(), thread.ls(), kChanSite, channel, value);
+    }
+    std::uint32_t count(std::uint32_t channel) { return tox2SpuChannelCount(&thread.context(), thread.ls(), channel); }
+
+    // GETLLAR of the fixture's line through the MFC channels, then reads the atomic status.
+    std::uint32_t getllar() {
+        wr(tox2::chan::kMfcLsa, 0x1000);
+        wr(tox2::chan::kMfcEah, 0);
+        wr(tox2::chan::kMfcEal, kLineEa);
+        wr(tox2::chan::kMfcSize, 128);
+        wr(tox2::chan::kMfcTagId, 0);
+        wr(tox2::chan::kMfcCmd, tox2::mfc::kGetLLAR);
+        std::uint32_t status = 99;
+        rd(tox2::chan::kRdAtomicStat, &status);
+        return status;
+    }
+    std::uint32_t putllc() {
+        wr(tox2::chan::kMfcCmd, tox2::mfc::kPutLLC);
+        std::uint32_t status = 99;
+        rd(tox2::chan::kRdAtomicStat, &status);
+        return status;
+    }
+
+    // Another agent's PUTLLC on the line.
+    void otherPutllc() {
+        tox2::Reservation res;
+        std::uint8_t line[128];
+        tox2::reservations().getllar(guest.data(), kLineEa, line, res);
+        line[0] ^= 0x5a;
+        tox2::reservations().putllc(guest.data(), kLineEa, line, res);
+    }
+    void otherPlainStore() { plainStore8(guest.data() + kLineEa + 0x72, guest[kLineEa + 0x72] ^ 0x5a); }
+
+    bool blockedIn(std::string_view what) const {
+        const char* in = thread.blockedIn();
+        return thread.state() == tox2::SpuState::Blocked && in != nullptr && std::string_view(in).contains(what);
+    }
+};
+
+template <class Pred>
+bool waitUntil(Pred pred, int timeout_ms = 3000) {
+    const auto deadline = Clock::now() + milliseconds(timeout_ms);
+    while (!pred()) {
+        if (Clock::now() > deadline) return false;
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    return true;
+}
+
+// Runs a channel read on a helper thread so the test can watch it block and wake.
+struct AsyncRead {
+    std::atomic<bool> done{false};
+    std::atomic<bool> ok{false};
+    std::atomic<std::uint32_t> value{0};
+    std::atomic<Clock::rep> finished{0};
+    std::thread worker;
+
+    AsyncRead(ChanFixture& f, std::uint32_t channel) {
+        worker = std::thread([this, &f, channel] {
+            std::uint32_t v = 0;
+            ok = f.rd(channel, &v);
+            value = v;
+            finished = Clock::now().time_since_epoch().count();
+            done = true;
+        });
+    }
+    ~AsyncRead() {
+        if (worker.joinable()) worker.join();
+    }
+    double latencyMsSince(Clock::time_point t) const {
+        const auto end = Clock::time_point(Clock::duration(finished.load()));
+        return std::chrono::duration<double, std::milli>(end - t).count();
+    }
+};
+
+void testChanInMbox() {
+    ChanFixture f;
+    std::uint32_t v = 0;
+    CHECK(f.count(tox2::chan::kRdInMbox) == 0);
+    for (std::uint32_t i = 1; i <= 4; i++) CHECK(f.ch.pushInMbox(i * 0x11));
+    CHECK(f.count(tox2::chan::kRdInMbox) == 4);
+    // A fifth value is dropped, or replaces the newest entry on request.
+    CHECK(!f.ch.pushInMbox(0x99));
+    CHECK(f.count(tox2::chan::kRdInMbox) == 4);
+    CHECK(!f.ch.pushInMbox(0x55, true));
+    CHECK(f.count(tox2::chan::kRdInMbox) == 4);
+    for (const std::uint32_t expected : {0x11u, 0x22u, 0x33u, 0x55u}) {
+        CHECK(f.rd(tox2::chan::kRdInMbox, &v) && v == expected);
+    }
+    CHECK(f.count(tox2::chan::kRdInMbox) == 0);
+
+    // A blocking read is woken by a push from another thread and shows as blocked meanwhile.
+    {
+        AsyncRead reader(f, tox2::chan::kRdInMbox);
+        CHECK(waitUntil([&] { return f.blockedIn("RdInMbox") && f.thread.indefiniteWait(); }));
+        CHECK(!reader.done);
+        std::this_thread::sleep_for(milliseconds(10));
+        CHECK(!reader.done);
+        f.ch.pushInMbox(0xabcd);
+        CHECK(waitUntil([&] { return reader.done.load(); }));
+        CHECK(reader.ok && reader.value == 0xabcd);
+        CHECK(f.thread.state() == tox2::SpuState::Running);
+    }
+
+    // A halt ends the wait with false.
+    {
+        AsyncRead reader(f, tox2::chan::kRdInMbox);
+        CHECK(waitUntil([&] { return f.blockedIn("RdInMbox"); }));
+        f.thread.requestHalt();
+        CHECK(waitUntil([&] { return reader.done.load(); }));
+        CHECK(!reader.ok);
+    }
+}
+
+void testChanOutMbox() {
+    ChanFixture f;
+    std::uint32_t v = 0;
+    CHECK(f.count(tox2::chan::kWrOutMbox) == 1 && !f.ch.outMboxFull());
+    CHECK(f.wr(tox2::chan::kWrOutMbox, 0x1234));
+    CHECK(f.count(tox2::chan::kWrOutMbox) == 0 && f.ch.outMboxFull());
+
+    // A second write blocks until the owner takes the first value.
+    {
+        std::atomic<bool> done{false};
+        std::atomic<bool> ok{false};
+        std::thread writer([&] {
+            ok = f.wr(tox2::chan::kWrOutMbox, 0x5678);
+            done = true;
+        });
+        CHECK(waitUntil([&] { return f.blockedIn("WrOutMbox"); }));
+        std::this_thread::sleep_for(milliseconds(10));
+        CHECK(!done);
+        CHECK(f.ch.takeOutMbox(&v) && v == 0x1234);
+        CHECK(waitUntil([&] { return done.load(); }));
+        writer.join();
+        CHECK(ok);
+        CHECK(f.ch.takeOutMbox(&v) && v == 0x5678);
+        CHECK(!f.ch.takeOutMbox(&v));
+    }
+
+    // A halt ends a blocked write with false.
+    f.wr(tox2::chan::kWrOutMbox, 1);
+    {
+        std::atomic<bool> done{false};
+        std::atomic<bool> ok{true};
+        std::thread writer([&] {
+            ok = f.wr(tox2::chan::kWrOutMbox, 2);
+            done = true;
+        });
+        CHECK(waitUntil([&] { return f.blockedIn("WrOutMbox"); }));
+        f.thread.requestHalt();
+        CHECK(waitUntil([&] { return done.load(); }));
+        writer.join();
+        CHECK(!ok);
+        CHECK(f.ch.takeOutMbox(&v) && v == 1);
+    }
+}
+
+void testChanOutIntrMbox() {
+    ChanFixture f;
+    CHECK(f.count(tox2::chan::kWrOutIntrMbox) == 1);
+    f.wr(tox2::chan::kWrOutMbox, 0x77);
+    CHECK(f.wr(tox2::chan::kWrOutIntrMbox, 0x40000000 | (16u << 24) | 5));
+    // The owner ran without the channel lock (it took the outbound mailbox) and saw both values.
+    CHECK(f.owner.intr_count == 1 && f.owner.intr_took_out);
+    CHECK(f.owner.intr_out_value == 0x77 && f.owner.intr_value == (0x40000000u | (16u << 24) | 5));
+    CHECK(f.count(tox2::chan::kWrOutIntrMbox) == 1 && !f.ch.outMboxFull());
+}
+
+void testChanStop() {
+    ChanFixture f;
+    CHECK(tox2SpuStop(&f.thread.context(), f.thread.ls(), 0x3010, 0x102) == true);
+    CHECK(f.owner.stop_count == 1 && f.owner.stop_site == 0x3010 && f.owner.stop_code == 0x102);
+    f.owner.stop_result = false;
+    CHECK(tox2SpuStop(&f.thread.context(), f.thread.ls(), 0x3014, 0x101) == false);
+    CHECK(f.owner.stop_count == 2 && f.owner.stop_code == 0x101);
+}
+
+void testChanMiscChannels() {
+    ChanFixture f;
+    std::uint32_t v = 99;
+    // RdMachStat follows int_enabled; bit 1 stays clear.
+    f.thread.context().int_enabled = 0;
+    CHECK(f.rd(tox2::chan::kRdMachStat, &v) && v == 0);
+    f.thread.context().int_enabled = 1;
+    CHECK(f.rd(tox2::chan::kRdMachStat, &v) && v == 1);
+    f.thread.context().int_enabled = 0;
+    CHECK(f.rd(tox2::chan::kRdMachStat, &v) && v == 0);
+
+    CHECK(f.wr(tox2::chan::kWrSrr0, 0x1234));
+    CHECK(f.rd(tox2::chan::kRdSrr0, &v) && v == 0x1234 && f.thread.context().srr0 == 0x1234);
+
+    // Event mask and tag mask read back what was written.
+    CHECK(f.wr(tox2::chan::kWrEventMask, 0x410));
+    CHECK(f.rd(tox2::chan::kRdEventMask, &v) && v == 0x410 && f.ch.eventMask() == 0x410);
+    CHECK(f.wr(tox2::chan::kWrTagMask, 0x80000001u));
+    CHECK(f.rd(tox2::chan::kRdTagMask, &v) && v == 0x80000001u);
+
+    // Counts: constants, the MFC queue, and the status channels.
+    for (const std::uint32_t c : {1u, 2u, 7u, 8u, 11u, 12u, 13u, 14u, 15u, 16u, 17u, 18u, 19u, 20u, 22u, 23u}) {
+        CHECK(f.count(c) == 1);
+    }
+    CHECK(f.count(tox2::chan::kMfcCmd) == tox2::mfc::kQueueSlots);
+    CHECK(f.count(tox2::chan::kRdTagStat) == 0 && f.count(tox2::chan::kRdAtomicStat) == 0);
+    f.wr(tox2::chan::kWrTagUpdate, 0);
+    CHECK(f.count(tox2::chan::kRdTagStat) == 1);
+    CHECK(f.rd(tox2::chan::kRdTagStat, &v) && v == 0x80000001u);
+    CHECK(f.count(tox2::chan::kRdTagStat) == 0);
+    CHECK(f.getllar() == 4);
+    CHECK(f.count(tox2::chan::kRdAtomicStat) == 0);
+    CHECK(f.ch.readCount(tox2::chan::kRdTagStat) == 1 && f.ch.readCount(tox2::chan::kRdAtomicStat) == 1);
+}
+
+void testChanDecrementer() {
+    ChanFixture f;
+    std::uint32_t v = 99;
+    CHECK(f.rd(tox2::chan::kRdDec, &v) && v == 0);
+    CHECK(f.wr(tox2::chan::kWrDec, 0x7fffffffu));
+    std::uint32_t first = 0, second = 0;
+    CHECK(f.rd(tox2::chan::kRdDec, &first));
+    std::this_thread::sleep_for(milliseconds(20));
+    CHECK(f.rd(tox2::chan::kRdDec, &second));
+    CHECK(first <= 0x7fffffffu && second < first);
+    // 20 ms at 79.8 MHz are about 1.6 million ticks; allow for scheduling in both directions.
+    const std::uint32_t ticks = first - second;
+    CHECK(ticks >= 1000000u && ticks < 80000000u);
+
+    // The decrementer event comes when the count passes zero: 79,800 ticks are 1 ms.
+    CHECK(f.wr(tox2::chan::kWrEventAck, 0xffffffffu));
+    CHECK(f.wr(tox2::chan::kWrDec, 79800 * 5));
+    CHECK(f.wr(tox2::chan::kWrEventMask, tox2::spu_event::kDecrementer));
+    CHECK(f.count(tox2::chan::kRdEventStat) == 0);
+    const auto start = Clock::now();
+    CHECK(f.rd(tox2::chan::kRdEventStat, &v) && v == tox2::spu_event::kDecrementer);
+    CHECK(Clock::now() - start >= milliseconds(4));
+    CHECK(Clock::now() - start < milliseconds(2000));
+    CHECK(f.rd(tox2::chan::kRdDec, &v) && static_cast<std::int32_t>(v) < 0);
+    // Sticky until acknowledged.
+    CHECK(f.count(tox2::chan::kRdEventStat) == 1);
+    CHECK(f.wr(tox2::chan::kWrEventAck, tox2::spu_event::kDecrementer));
+    CHECK(f.count(tox2::chan::kRdEventStat) == 0);
+}
+
+void testChanLevelEvents() {
+    ChanFixture f;
+    std::uint32_t v = 99;
+    // Queue vacancy is always there.
+    f.wr(tox2::chan::kWrEventMask, tox2::spu_event::kQueueVacancy);
+    CHECK(f.count(tox2::chan::kRdEventStat) == 1 && f.rd(tox2::chan::kRdEventStat, &v) && v == 0x8);
+
+    // Inbound mailbox available follows the FIFO.
+    f.wr(tox2::chan::kWrEventMask, tox2::spu_event::kInMboxAvailable);
+    CHECK(f.count(tox2::chan::kRdEventStat) == 0);
+    f.ch.pushInMbox(7);
+    CHECK(f.count(tox2::chan::kRdEventStat) == 1 && f.rd(tox2::chan::kRdEventStat, &v) && v == 0x10);
+    f.rd(tox2::chan::kRdInMbox, &v);
+    CHECK(f.count(tox2::chan::kRdEventStat) == 0);
+
+    // A blocked wait on it is woken by a push from another thread.
+    {
+        AsyncRead reader(f, tox2::chan::kRdEventStat);
+        CHECK(waitUntil([&] { return f.blockedIn("RdEventStat"); }));
+        const auto t0 = Clock::now();
+        f.ch.pushInMbox(8);
+        CHECK(waitUntil([&] { return reader.done.load(); }));
+        CHECK(reader.ok && reader.value == 0x10);
+        CHECK(reader.latencyMsSince(t0) < 100.0);
+    }
+    f.rd(tox2::chan::kRdInMbox, &v);
+
+    // Tag-group status update.
+    f.wr(tox2::chan::kWrEventMask, tox2::spu_event::kTagStatusUpdate);
+    CHECK(f.count(tox2::chan::kRdEventStat) == 0);
+    f.wr(tox2::chan::kWrTagMask, 1);
+    f.wr(tox2::chan::kWrTagUpdate, 2);
+    CHECK(f.count(tox2::chan::kRdEventStat) == 1 && f.rd(tox2::chan::kRdEventStat, &v) && v == 0x1);
+    f.rd(tox2::chan::kRdTagStat, &v);
+    CHECK(f.count(tox2::chan::kRdEventStat) == 0);
+}
+
+void testChanLockLineLost() {
+    ChanFixture f;
+    std::uint32_t v = 99;
+    CHECK(f.getllar() == 4);
+    CHECK(f.wr(tox2::chan::kWrEventMask, tox2::spu_event::kLockLineLost));
+    CHECK(f.wr(tox2::chan::kWrEventAck, tox2::spu_event::kLockLineLost));
+    CHECK(f.count(tox2::chan::kRdEventStat) == 0);
+
+    // Woken at once by a PUTLLC from another agent.
+    {
+        AsyncRead reader(f, tox2::chan::kRdEventStat);
+        CHECK(waitUntil([&] { return f.blockedIn("RdEventStat"); }));
+        std::this_thread::sleep_for(milliseconds(10));
+        CHECK(!reader.done);
+        const auto t0 = Clock::now();
+        f.otherPutllc();
+        CHECK(waitUntil([&] { return reader.done.load(); }));
+        CHECK(reader.ok && reader.value == tox2::spu_event::kLockLineLost);
+        CHECK(reader.latencyMsSince(t0) < 5.0);
+    }
+    // The failing PUTLLC clears the MFC's loss; the event stays until the acknowledgement.
+    CHECK(f.putllc() == 1);
+    CHECK(!f.ch.mfc().hasReservation());
+    CHECK(f.count(tox2::chan::kRdEventStat) == 1);
+    CHECK(f.wr(tox2::chan::kWrEventAck, tox2::spu_event::kLockLineLost));
+    CHECK(f.count(tox2::chan::kRdEventStat) == 0);
+
+    // The idle loop of the system service: acknowledge, then PUTLLC. The acknowledged loss does not come
+    // back when the PUTLLC looks again.
+    CHECK(f.getllar() == 4);
+    f.otherPutllc();
+    CHECK(f.rd(tox2::chan::kRdEventStat, &v) && v == 0x400);
+    CHECK(f.wr(tox2::chan::kWrEventAck, 0x400));
+    CHECK(f.putllc() == 1);
+    CHECK(f.count(tox2::chan::kRdEventStat) == 0);
+    // A loss that nobody polled for before the failing PUTLLC is still recorded.
+    CHECK(f.getllar() == 4);
+    f.otherPutllc();
+    CHECK(f.putllc() == 1);
+    CHECK(f.count(tox2::chan::kRdEventStat) == 1);
+    f.wr(tox2::chan::kWrEventAck, 0x400);
+    // An untouched reservation lets PUTLLC through and raises nothing.
+    CHECK(f.getllar() == 4);
+    CHECK(f.putllc() == 0);
+    CHECK(f.count(tox2::chan::kRdEventStat) == 0);
+
+    // A plain write is noticed within 5 ms (best of a few tries: the wait polls every millisecond).
+    double best = 1e9;
+    for (int attempt = 0; attempt < 8 && best >= 5.0; attempt++) {
+        CHECK(f.getllar() == 4);
+        f.wr(tox2::chan::kWrEventAck, 0x400);
+        AsyncRead reader(f, tox2::chan::kRdEventStat);
+        CHECK(waitUntil([&] { return f.blockedIn("RdEventStat"); }));
+        std::this_thread::sleep_for(milliseconds(3));
+        const auto t0 = Clock::now();
+        f.otherPlainStore();
+        CHECK(waitUntil([&] { return reader.done.load(); }));
+        CHECK(reader.ok && reader.value == 0x400);
+        best = std::min(best, reader.latencyMsSince(t0));
+    }
+    CHECK(best < 5.0);
+    f.wr(tox2::chan::kWrEventAck, 0x400);
+
+    // A mixed mask is also woken by a mailbox push.
+    CHECK(f.getllar() == 4);
+    f.wr(tox2::chan::kWrEventMask, 0x410);
+    {
+        AsyncRead reader(f, tox2::chan::kRdEventStat);
+        CHECK(waitUntil([&] { return f.blockedIn("RdEventStat"); }));
+        std::this_thread::sleep_for(milliseconds(5));
+        const auto t0 = Clock::now();
+        f.ch.pushInMbox(1);
+        CHECK(waitUntil([&] { return reader.done.load(); }));
+        CHECK(reader.ok && reader.value == 0x10);
+        CHECK(reader.latencyMsSince(t0) < 50.0);
+    }
+
+    // A halt ends the wait on the reservation table.
+    f.rd(tox2::chan::kRdInMbox, &v);
+    {
+        AsyncRead reader(f, tox2::chan::kRdEventStat);
+        CHECK(waitUntil([&] { return f.blockedIn("RdEventStat"); }));
+        f.thread.requestHalt();
+        CHECK(waitUntil([&] { return reader.done.load(); }));
+        CHECK(!reader.ok);
+    }
+}
+
+// A halt ends the wait on the thread's own condition variable.
+void testChanHaltOnCondvar() {
+    ChanFixture f;
+    f.wr(tox2::chan::kWrEventMask, tox2::spu_event::kInMboxAvailable);
+    AsyncRead reader(f, tox2::chan::kRdEventStat);
+    CHECK(waitUntil([&] { return f.blockedIn("RdEventStat"); }));
+    f.thread.requestHalt();
+    CHECK(waitUntil([&] { return reader.done.load(); }));
+    CHECK(!reader.ok);
+}
+
+// Children for the fatal conditions.
+struct ChanStopCase {
+    const char* arg;
+    const char* line;  // after "tox2: stop: spu: "
+};
+
+const ChanStopCase kChanStops[] = {
+        {"--chan-mask0",
+         "rdch 0 (SPU_RdEventStat) at ls 0x03000 on thread 0x01000300: event mask 0x0 has no implemented"},
+        {"--chan-mask-unimplemented",
+         "rdch 0 (SPU_RdEventStat) at ls 0x03000 on thread 0x01000300: event mask 0x1000 has no implemented source"},
+        {"--chan-tagstat", "rdch 24 (MFC_RdTagStat) at ls 0x03000 on thread 0x01000300: no tag update was requested"},
+        {"--chan-atomicstat", "rdch 27 (MFC_RdAtomicStat) at ls 0x03000 on thread 0x01000300: no atomic command"},
+        {"--chan-rd-signal", "rdch 3 (SPU_RdSigNotify1) at ls 0x03000 on thread 0x01000300: channel is not readable"},
+        {"--chan-wr-readonly", "wrch 13 (SPU_RdMachStat) at ls 0x03000 on thread 0x01000300: channel is not writable"},
+        {"--chan-wr-liststall",
+         "wrch 26 (MFC_WrListStallAck) at ls 0x03000 on thread 0x01000300: channel is not writable"},
+        {"--chan-count-signal", "rchcnt 4 (SPU_RdSigNotify2) at ls 0x00000 on thread 0x01000300: channel is not impl"},
+        {"--chan-intr-noowner",
+         "wrch 30 (SPU_WrOutIntrMbox) at ls 0x03000 on thread 0x01000300: the thread has no owner"},
+        {"--chan-stop-noowner", "stop 0x120 at ls 0x03000 on thread 0x01000300: not implemented"},
+};
+
+int runChanChild(std::string_view mode) {
+    tox2::installProcessSettings();
+    ChanFixture f(mode != "--chan-intr-noowner" && mode != "--chan-stop-noowner");
+    std::uint32_t v = 0;
+    if (mode == "--chan-mask0") {
+        f.rd(tox2::chan::kRdEventStat, &v);
+    } else if (mode == "--chan-mask-unimplemented") {
+        f.wr(tox2::chan::kWrEventMask, 0x1000);
+        f.rd(tox2::chan::kRdEventStat, &v);
+    } else if (mode == "--chan-tagstat") {
+        f.rd(tox2::chan::kRdTagStat, &v);
+    } else if (mode == "--chan-atomicstat") {
+        f.rd(tox2::chan::kRdAtomicStat, &v);
+    } else if (mode == "--chan-rd-signal") {
+        f.rd(tox2::chan::kRdSigNotify1, &v);
+    } else if (mode == "--chan-wr-readonly") {
+        f.wr(tox2::chan::kRdMachStat, 1);
+    } else if (mode == "--chan-wr-liststall") {
+        f.wr(tox2::chan::kWrListStallAck, 1);
+    } else if (mode == "--chan-count-signal") {
+        f.count(tox2::chan::kRdSigNotify2);
+    } else if (mode == "--chan-intr-noowner") {
+        f.wr(tox2::chan::kWrOutIntrMbox, 1);
+    } else if (mode == "--chan-stop-noowner") {
+        tox2SpuStop(&f.thread.context(), f.thread.ls(), kChanSite, 0x120);
+    } else {
+        return 99;
+    }
+    return 0;  // not reached: the stop ends the process
+}
+
+void testChanStopChildren() {
+    for (const ChanStopCase& c : kChanStops) {
+        const std::string narrow = c.arg;
+        const ChildResult r = runChild(std::wstring(narrow.begin(), narrow.end()).c_str());
+        const std::string expected = std::string("tox2: stop: spu: ") + c.line;
+        const bool found = r.output.find(expected) != std::string::npos;
+        const bool dump = r.output.find("trace (oldest first)") != std::string::npos;
+        CHECK(r.exit_code == static_cast<DWORD>(tox2::ExitCode::Fatal));
+        CHECK(found);
+        CHECK(dump);
+        if (!found || !dump) std::fprintf(stderr, "child %s output:\n%s\n", c.arg, r.output.c_str());
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc > 1) return runStopChild(argv[1]);
+    // Timed waits round up to the system tick otherwise, which the latency checks would measure.
+    const tox2::TimerResolution timer_resolution;
 
     testGetllarPutllc();
     testPlainWriteBeforePutllc();
@@ -1250,6 +1754,16 @@ int main(int argc, char** argv) {
     testMfcTagStatus();
     testMfcLists();
     testMfcStopChildren();
+    testChanInMbox();
+    testChanOutMbox();
+    testChanOutIntrMbox();
+    testChanStop();
+    testChanMiscChannels();
+    testChanDecrementer();
+    testChanLevelEvents();
+    testChanLockLineLost();
+    testChanHaltOnCondvar();
+    testChanStopChildren();
 
     std::printf("spu runtime tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;

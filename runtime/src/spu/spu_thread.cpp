@@ -9,6 +9,7 @@
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/reservation.h"
+#include "spu/spu_channels.h"
 
 namespace tox2 {
 namespace {
@@ -31,6 +32,7 @@ SpuThread::SpuThread(std::uint32_t id, std::string name, SpuOwner* owner)
     auto* ls = static_cast<std::uint8_t*>(::operator new[](kTox2SpuLsSize, std::align_val_t(128)));
     std::memset(ls, 0, kTox2SpuLsSize);
     ls_.reset(ls);
+    channels_ = std::make_unique<SpuChannels>(*this);
     ctx_.exit_ls = kTox2SpuNoExit;
     ctx_.runtime = this;
 }
@@ -62,6 +64,7 @@ void SpuThread::requestHalt() {
     __atomic_store_n(&ctx_.halt, 1u, __ATOMIC_RELEASE);
     // A thread that waits for a reservation event only sees the flag after this wake-up.
     reservations().wake();
+    channels_->wake();
 }
 
 void SpuThread::threadMain(std::uint32_t entry_ls) {
