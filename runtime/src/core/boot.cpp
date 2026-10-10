@@ -139,7 +139,7 @@ std::uint32_t initializeTls(Tox2PpuContext* ctx, std::uint8_t* base, std::uint32
     return r13;
 }
 
-void bootMainThread(const LoadedExecutable& exe, std::string_view argv0) {
+void bootMainThread(const LoadedExecutable& exe, std::string_view argv0, std::uint32_t module_bytes) {
     Process& p = process();
     std::uint8_t* base = p.memory.base();
     // Nothing runs yet, but the allocators and the thread registry expect the guest lock. The new
@@ -159,8 +159,9 @@ void bootMainThread(const LoadedExecutable& exe, std::string_view argv0) {
 
     // RPCS3 charges the primary stack and the loaded segments to the default memory container
     // (`ppu_load_exec`, "take(primary_stacksize + segs_size)"); the image range stands in for the
-    // segments, which are 64 KiB rounded.
-    p.user_memory_used = thread->stackSize() + (exe.image_end - kMainRegion.begin);
+    // segments, which are 64 KiB rounded. Modules loaded next to the executable are charged the same
+    // way; the sum is assigned, so a caller has to pass their bytes here.
+    p.user_memory_used = thread->stackSize() + (exe.image_end - kMainRegion.begin) + module_bytes;
 
     // Argument block at the top of the stack: argv[] (u64 pointers), 0, envp[] (empty), 0, padding
     // to 16 bytes, then the strings. The environment is empty.

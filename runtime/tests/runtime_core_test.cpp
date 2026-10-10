@@ -40,6 +40,7 @@
 #include "tox2/ppu_context.h"
 #include "hle/guest_printf.h"
 #include "hle/hle.h"
+#include "hle/libsre.h"
 #include "input/keyboard_pad.h"
 #include "input/pad_buttons.h"
 #include "input/pad_script.h"
@@ -463,6 +464,318 @@ void testElfLoader() {
     CHECK(tox2Read32(base, 0x30020) == 0 && tox2Read32(base, 0x30ffc) == 0);  // bss
     // The image range is taken, so the first free block starts after it.
     CHECK(p.main.allocate(0x10000, 0x10000) == 0x40000);
+}
+
+void putBigEndian(std::vector<std::uint8_t>& bytes, std::size_t at, std::uint64_t value, int size) {
+    for (int i = 0; i < size; i++) {
+        bytes[at + i] = static_cast<std::uint8_t>(value >> (8 * (size - 1 - i)));
+    }
+}
+
+// A minimal relocated PRX: segment 0 at `base` (memsz trimmed to the distance to segment 1), segment 1
+// directly after it with bss, and a third header that tests turn into PT_SCE_PPURELA. The module info
+// sits at file offset 0x2C0, which is address base + 0xC0.
+std::vector<std::uint8_t> syntheticPrx(std::uint32_t base) {
+    std::vector<std::uint8_t> prx(0x400, 0);
+    std::memcpy(prx.data(),
+                "\x7f"
+                "ELF",
+                4);
+    prx[4] = 2;
+    prx[5] = 2;
+    putBigEndian(prx, 16, 0xFFA4, 2);
+    putBigEndian(prx, 18, 21, 2);
+    putBigEndian(prx, 32, 64, 8);
+    putBigEndian(prx, 54, 56, 2);
+    putBigEndian(prx, 56, 3, 2);
+
+    auto phdr = [&](int index, std::uint32_t type, std::uint32_t flags, std::uint64_t offset, std::uint64_t vaddr,
+                    std::uint64_t paddr, std::uint64_t filesz, std::uint64_t memsz) {
+        const std::size_t at = 64 + 56 * index;
+        putBigEndian(prx, at, type, 4);
+        putBigEndian(prx, at + 4, flags, 4);
+        putBigEndian(prx, at + 8, offset, 8);
+        putBigEndian(prx, at + 16, vaddr, 8);
+        putBigEndian(prx, at + 24, paddr, 8);
+        putBigEndian(prx, at + 32, filesz, 8);
+        putBigEndian(prx, at + 40, memsz, 8);
+    };
+    phdr(0, 1, 0x400005, 0x200, base, 0x2C0, 0x100, 0x10000);
+    phdr(1, 1, 0x600006, 0x300, base + 0x10000, 0x300, 0x20, 0x1000);
+    phdr(2, 0, 0, 0, 0, 0, 0, 0);
+
+    putBigEndian(prx, 0x200, 0xfeedbead, 4);
+    putBigEndian(prx, 0x240, 0x51000, 4);  // a function descriptor: code address, then TOC
+    putBigEndian(prx, 0x244, base + 0x10800, 4);
+    putBigEndian(prx, 0x2C2, 1, 1);  // module info: version 1.1, name, TOC
+    putBigEndian(prx, 0x2C3, 1, 1);
+    std::memcpy(prx.data() + 0x2C4, "testPrx", 8);
+    putBigEndian(prx, 0x2E0, base + 0x10800, 4);
+    putBigEndian(prx, 0x300, 0xcafef00d, 4);
+    return prx;
+}
+
+std::atomic<tox2::GuestThread*> g_boot_thread{nullptr};
+
+TOX2_PPU_FUNC(testBootEntry) {
+    (void)base;
+    g_boot_thread = tox2::currentThread();
+    ctx->gpr[3] = 0;
+}
+
+void waitForBootThread() {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        tox2::GuestThread* thread = g_boot_thread.load();
+        if (thread != nullptr && thread->state() == tox2::ThreadState::Exited) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void testLoadModule() {
+    tox2::setLogSink([](std::string_view) {});
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+
+    // testElfLoader left its image (0x10000..0x40000) and one block above it in the main region.
+    constexpr std::uint32_t kBase = 0x50000;
+    const std::uint32_t used_before = p.user_memory_used;
+
+    // Every refusal names its cause, and none of them touches guest memory.
+    auto refusal = [&](const char* name, std::uint32_t expected_base, std::uint32_t lowest_free,
+                       const std::function<void(std::vector<std::uint8_t>&)>& mutate, std::string_view needle) {
+        std::vector<std::uint8_t> prx = syntheticPrx(kBase);
+        mutate(prx);
+        const auto path = writeTempFile(name, prx);
+        const auto result = tox2::loadModule(path, expected_base, lowest_free);
+        std::filesystem::remove(path);
+        CHECK(!result.has_value());
+        if (result) return;
+        CHECK(result.error().find(needle) != std::string::npos);
+        if (result.error().find(needle) == std::string::npos) {
+            std::fprintf(stderr, "refusal %s: unexpected message: %s\n", name, result.error().c_str());
+        }
+    };
+    const auto none = [](std::vector<std::uint8_t>&) {};
+    CHECK(!tox2::loadModule(std::filesystem::temp_directory_path() / "tox2_no_such_module.elf", kBase, kBase));
+    refusal("_not_elf.prx", kBase, kBase, [](auto& b) { b[0] = 'X'; }, "not an ELF");
+    refusal("_little.prx", kBase, kBase, [](auto& b) { b[5] = 1; }, "big-endian");
+    refusal("_machine.prx", kBase, kBase, [](auto& b) { putBigEndian(b, 18, 62, 2); }, "e_machine");
+    refusal("_etype.prx", kBase, kBase, [](auto& b) { putBigEndian(b, 16, 2, 2); }, "e_type");
+    refusal("_phdrs.prx", kBase, kBase, [](auto& b) { putBigEndian(b, 56, 0x1000, 2); }, "program header table");
+    refusal("_filesz.prx", kBase, kBase, [](auto& b) { putBigEndian(b, 64 + 32, 0x1000, 8); }, "past the end");
+    refusal(
+            "_relocs.prx", kBase, kBase, [](auto& b) { putBigEndian(b, 64 + 112, 0x700000A4, 4); },
+            "relocations not applied");
+    refusal(
+            "_noload.prx", kBase, kBase,
+            [](auto& b) {
+                putBigEndian(b, 64, 0, 4);
+                putBigEndian(b, 64 + 56, 0, 4);
+            },
+            "no PT_LOAD");
+    refusal("_phdr0.prx", kBase, kBase, [](auto& b) { putBigEndian(b, 64, 4, 4); }, "program header 0");
+    refusal("_overlap.prx", kBase, kBase, [](auto& b) { putBigEndian(b, 64 + 56 + 16, kBase + 0x80, 8); }, "overlap");
+    refusal("_below.prx", kBase, kBase, [](auto& b) { putBigEndian(b, 64 + 56 + 16, 0x8000, 8); }, "main region");
+    refusal("_above.prx", kBase, kBase, [](auto& b) { putBigEndian(b, 64 + 56 + 16, 0x0FFFF800, 8); }, "main region");
+    refusal("_filesz_memsz.prx", kBase, kBase, [](auto& b) { putBigEndian(b, 64 + 56 + 40, 0x10, 8); }, "main region");
+    refusal("_base.prx", kBase + 0x10000, kBase, none, "expected 0x00060000");
+    refusal("_free.prx", kBase, kBase + 0x10000, none, "first free address");
+    refusal("_info_high.prx", kBase, kBase, [](auto& b) { putBigEndian(b, 64 + 24, 0x2FC, 8); }, "module info");
+    refusal("_info_low.prx", kBase, kBase, [](auto& b) { putBigEndian(b, 64 + 24, 0x1F0, 8); }, "module info");
+    CHECK(!p.memory.isCommitted(kBase, 4));
+
+    const auto path = writeTempFile("_ok.prx", syntheticPrx(kBase));
+    const auto loaded = tox2::loadModule(path, kBase, kBase);
+    std::filesystem::remove(path);
+    CHECK(loaded.has_value());
+    if (!loaded) {
+        std::fprintf(stderr, "module load error: %s\n", loaded.error().c_str());
+        tox2::setLogSink({});
+        return;
+    }
+    const tox2::LoadedModule& module = *loaded;
+    CHECK(module.name == "testPrx");
+    CHECK(module.version_major == 1 && module.version_minor == 1);
+    CHECK(module.base == kBase);
+    CHECK(module.image_end == kBase + 0x20000);
+    CHECK(module.toc == kBase + 0x10800);
+    CHECK(module.module_info == kBase + 0xC0);
+    CHECK(module.sha256.size() == 64);
+
+    std::uint8_t* base = p.memory.base();
+    CHECK(tox2Read32(base, kBase) == 0xfeedbead);
+    CHECK(tox2Read32(base, kBase + 0x10000) == 0xcafef00d);
+    CHECK(tox2Read32(base, kBase + 0xC0 + 0x20) == module.toc);  // the module info is in guest memory
+    CHECK(tox2Read32(base, kBase + 0x2000) == 0);                // trimmed gap between the segments
+    CHECK(tox2Read32(base, kBase + 0x10024) == 0 && tox2Read32(base, kBase + 0x10ffc) == 0);  // bss
+    // The image range is taken, so the next block starts after it.
+    CHECK(p.main.allocate(0x10000, 0x10000) == kBase + 0x20000);
+
+    // The boot charge adds the module bytes to the stack and the executable image. The thread runs
+    // after bootMainThread returns and leaves at once.
+    tox2::LoadedExecutable exe;
+    exe.entry_opd = kBase + 0x40;
+    exe.entry_func = 0x51000;
+    exe.entry_toc = module.toc;
+    exe.tls_vaddr = kBase + 0x10000;
+    exe.tls_filesz = 4;
+    exe.tls_memsz = 0x10;
+    exe.primary_prio = 1001;
+    exe.primary_stacksize = 0x10000;
+    exe.image_end = kBase;
+    const Tox2FuncMapping mappings[] = {{0x51000, testBootEntry}};
+    tox2RegisterFuncs(mappings, 1);
+    const std::uint32_t exe_bytes = exe.image_end - tox2::kMainRegion.begin;
+
+    g_boot_thread = nullptr;
+    tox2::bootMainThread(exe, "boot_test", 0x20000);
+    CHECK(p.user_memory_used == 0x10000 + exe_bytes + 0x20000);
+    waitForBootThread();
+    CHECK(g_boot_thread.load() != nullptr);
+
+    g_boot_thread = nullptr;
+    tox2::bootMainThread(exe, "boot_test");
+    CHECK(p.user_memory_used == 0x10000 + exe_bytes);
+    waitForBootThread();
+
+    tox2RegisterFuncs(nullptr, 0);
+    p.user_memory_used = used_before;
+    CHECK(p.main.free(kBase + 0x20000) == 0x10000);
+    CHECK(p.main.free(kBase) == 0x20000);
+    CHECK(!p.memory.isCommitted(kBase, 4));
+    tox2::setLogSink({});
+}
+
+void testLibsreLayout() {
+    namespace libsre = tox2::libsre;
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    CHECK(p.memory.commit(libsre::kBase, libsre::kImageEnd - libsre::kBase));
+    std::uint8_t* base = p.memory.base();
+
+    // An image that satisfies every structural check, built from the layout constants only.
+    std::memcpy(base + libsre::kModuleInfo + 4, "cellSre_Library", 16);
+    tox2Write32(base, libsre::kModuleInfo + 0x20, libsre::kToc);
+    tox2Write32(base, libsre::kModuleInfo + 0x24, libsre::kExportsBegin);
+    tox2Write32(base, libsre::kModuleInfo + 0x28, libsre::kExportsEnd);
+    tox2Write32(base, libsre::kModuleInfo + 0x2C, libsre::kImportsBegin);
+    tox2Write32(base, libsre::kModuleInfo + 0x30, libsre::kImportsEnd);
+    for (std::uint32_t i = 0; i < 352; i++) {
+        tox2Write32(base, libsre::kOpdBegin + 8 * i, libsre::kBase + 0x100 + 4 * i);
+        tox2Write32(base, libsre::kOpdBegin + 8 * i + 4, libsre::kToc);
+    }
+    for (std::uint32_t i = 0; i < 32; i++) {
+        tox2Write32(base, libsre::kImportSlots + 4 * i, libsre::kCodeEnd + 32 * i);
+    }
+    for (const auto& [address, entry] :
+         {std::pair{libsre::kSpuKernel1, 0x818u}, std::pair{libsre::kSpuKernel2, 0x848u}}) {
+        std::memcpy(base + address,
+                    "\x7f"
+                    "ELF",
+                    4);
+        base[address + 4] = 1;
+        base[address + 5] = 2;
+        tox2Write16(base, address + 0x12, 23);
+        tox2Write32(base, address + 0x18, entry);
+    }
+    const std::uint32_t blobs[] = {libsre::kSpuSystemService,  libsre::kSpuTasksetPm,   libsre::kSpuTaskset2ExitHandler,
+                                   libsre::kSpuExitCodePlugin, libsre::kSpuJobChainPm1, libsre::kSpuJobChainPm2};
+    for (const std::uint32_t blob : blobs) {
+        tox2Write32(base, blob, (0x21u << 25) | (0x1234u << 7) | 2);
+    }
+
+    std::vector<Tox2ImportInfo> imports;
+    for (std::uint32_t i = 0; i < 32; i++) {
+        imports.push_back({libsre::kCodeEnd + 32 * i, 0x1000 + i, "module", nullptr});
+    }
+    std::vector<Tox2ExportInfo> exports = {{libsre::kOpdBegin, 1, "module"},
+                                           {libsre::kOpdBegin + 8 * 351, 2, "module"},
+                                           {libsre::kOpdBegin + 8 * 3, 3, "other"}};
+
+    CHECK(libsre::checkLibsreLayout(base, imports, exports).empty());
+
+    // Every check, broken on its own, yields exactly one message that names it.
+    auto expectOne = [&](const char* what, const std::vector<std::string>& problems, std::string_view needle) {
+        CHECK(problems.size() == 1);
+        if (problems.size() != 1 || problems[0].find(needle) == std::string::npos) {
+            std::fprintf(stderr, "layout check %s: %zu messages:\n", what, problems.size());
+            for (const std::string& line : problems) std::fprintf(stderr, "  %s\n", line.c_str());
+            g_failed++;
+        }
+    };
+    auto poke32 = [&](const char* what, std::uint32_t at, std::uint32_t value, std::string_view needle) {
+        const std::uint32_t old = tox2Read32(base, at);
+        tox2Write32(base, at, value);
+        expectOne(what, libsre::checkLibsreLayout(base, imports, exports), needle);
+        tox2Write32(base, at, old);
+    };
+    auto poke8 = [&](const char* what, std::uint32_t at, std::uint8_t value, std::string_view needle) {
+        const std::uint8_t old = base[at];
+        base[at] = value;
+        expectOne(what, libsre::checkLibsreLayout(base, imports, exports), needle);
+        base[at] = old;
+    };
+
+    poke8("module name", libsre::kModuleInfo + 4, 'X', "name is not");
+    poke8("module name terminator", libsre::kModuleInfo + 4 + 15, 'x', "name is not");
+    poke32("module toc", libsre::kModuleInfo + 0x20, libsre::kToc + 8, "TOC is");
+    poke32("exports start", libsre::kModuleInfo + 0x24, 0, "exports start");
+    poke32("exports end", libsre::kModuleInfo + 0x28, 0, "exports end");
+    poke32("imports start", libsre::kModuleInfo + 0x2C, 0, "imports start");
+    poke32("imports end", libsre::kModuleInfo + 0x30, 0, "imports end");
+
+    const std::uint32_t opd = libsre::kOpdBegin + 8 * 100;
+    poke32("descriptor toc", opd + 4, libsre::kToc + 8, "TOC word");
+    poke32("descriptor entry misaligned", opd, libsre::kBase + 0x103, "descriptor 0x012012cc: entry");
+    poke32("descriptor entry at code end", opd, libsre::kCodeEnd, "4-aligned address in the code");
+    poke32("descriptor entry below base", opd, libsre::kBase - 4, "4-aligned address in the code");
+    poke32("first descriptor", libsre::kOpdBegin + 4, 0, "TOC word");
+    poke32("last descriptor", libsre::kOpdEnd - 8, 0, "4-aligned address in the code");
+
+    poke32("slot misaligned", libsre::kImportSlots + 4 * 3, libsre::kCodeEnd + 1, "import slot 3");
+    poke32("slot below thunks", libsre::kImportSlots + 4 * 4, libsre::kCodeEnd - 32, "import slot 4");
+    poke32("slot past thunks", libsre::kImportSlots + 4 * 31, libsre::kThunksEnd, "import slot 31");
+
+    imports[5].stub = libsre::kThunksEnd;
+    expectOne("stub past thunks", libsre::checkLibsreLayout(base, imports, exports), "import stub");
+    imports[5].stub = libsre::kCodeEnd + 32 * 5 + 4;
+    expectOne("stub misaligned", libsre::checkLibsreLayout(base, imports, exports), "import stub");
+    imports[5].stub = libsre::kCodeEnd + 32 * 5;
+
+    exports[1].opd = libsre::kOpdEnd;
+    expectOne("export past descriptors", libsre::checkLibsreLayout(base, imports, exports), "export descriptor");
+    exports[1].opd = libsre::kOpdBegin - 8;
+    expectOne("export below descriptors", libsre::checkLibsreLayout(base, imports, exports), "export descriptor");
+    exports[1].opd = libsre::kOpdBegin + 8 * 351;
+
+    struct Kernel {
+        std::uint32_t address;
+        std::string name;
+        std::uint32_t entry;
+    };
+    for (const Kernel& kernel : {Kernel{libsre::kSpuKernel1, "SPU kernel 1 at", 0x818},
+                                 Kernel{libsre::kSpuKernel2, "SPU kernel 2 at", 0x848}}) {
+        poke8("kernel magic", kernel.address + 1, 'X', kernel.name);
+        poke8("kernel class", kernel.address + 4, 2, kernel.name);
+        poke8("kernel data", kernel.address + 5, 1, kernel.name);
+        poke32("kernel machine", kernel.address + 0x10, 0x00020015, kernel.name);
+        poke32("kernel entry", kernel.address + 0x18, kernel.entry + 4, kernel.name);
+    }
+
+    const char* const blob_names[] = {"system service",   "taskset policy module",     "taskset2 exit handler",
+                                      "exit code plugin", "job chain policy module 1", "job chain policy module 2"};
+    for (std::size_t i = 0; i < 6; i++) {
+        poke32("blob zero", blobs[i], 0, blob_names[i]);
+        poke32("blob wrong opcode", blobs[i], (0x20u << 25) | (0x1234u << 7) | 2, blob_names[i]);
+        poke32("blob wrong target", blobs[i], (0x21u << 25) | (0x1234u << 7) | 3, blob_names[i]);
+    }
+
+    // The immediate of the `ila` is not checked.
+    tox2Write32(base, libsre::kSpuJobChainPm2, (0x21u << 25) | (0x3FFFFu << 7) | 2);
+    CHECK(libsre::checkLibsreLayout(base, imports, exports).empty());
+
+    p.memory.decommit(libsre::kBase, libsre::kImageEnd - libsre::kBase);
 }
 
 TOX2_PPU_FUNC(testFuncA) {
@@ -9876,6 +10189,8 @@ int main(int argc, char** argv) {
     testStackGuards();
     testProcessSingleton();
     testElfLoader();
+    testLoadModule();
+    testLibsreLayout();
     testDispatch();
     testDispatchSpans();
     testCensus();

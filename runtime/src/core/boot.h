@@ -25,7 +25,8 @@ void freeTls(std::uint32_t r13);
 
 // Creates the main thread exactly as RPCS3 `ppu_load_exec` does (stack, argument block, TLS,
 // entry registers), logs the resulting registers and starts it. The thread runs under the guest
-// lock, so it begins once this function has returned.
-void bootMainThread(const LoadedExecutable& exe, std::string_view argv0);
+// lock, so it begins once this function has returned. `module_bytes` (the loaded PRX images) is
+// charged to user memory together with the stack and the executable image.
+void bootMainThread(const LoadedExecutable& exe, std::string_view argv0, std::uint32_t module_bytes = 0);
 
 }  // namespace tox2
