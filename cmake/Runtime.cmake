@@ -174,25 +174,4 @@ function(dal_runtime_add_core)
   add_test(NAME media_core COMMAND dal_media_core_tests)
   set_tests_properties(media_core PROPERTIES
     PASS_REGULAR_EXPRESSION "media core tests: [0-9]+ passed, 0 failed")
-
-  dal_sdat_add_tool()
-endfunction()
-
-# SDAT decryption tool and its tests. The AES keys are read from a local RPCS3 checkout when the
-# tool runs, so nothing here (or in any test) contains key material.
-function(dal_sdat_add_tool)
-  add_library(dal_sdat_lib STATIC tools/dal_sdat/sdat.cpp tools/dal_sdat/sdat_lz.cpp)
-  target_compile_options(dal_sdat_lib PRIVATE -march=x86-64-v3 -Wall -Wextra)
-  target_include_directories(dal_sdat_lib PUBLIC ${CMAKE_SOURCE_DIR}/tools/dal_sdat)
-  target_link_libraries(dal_sdat_lib PUBLIC bcrypt)
-
-  add_executable(dal_sdat tools/dal_sdat/main.cpp)
-  target_compile_options(dal_sdat PRIVATE -march=x86-64-v3 -Wall -Wextra)
-  target_link_libraries(dal_sdat PRIVATE dal_sdat_lib)
-
-  add_executable(dal_sdat_tests tools/dal_sdat/sdat_test.cpp)
-  target_compile_options(dal_sdat_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
-  target_link_libraries(dal_sdat_tests PRIVATE dal_sdat_lib)
-  add_test(NAME sdat_tests COMMAND dal_sdat_tests)
-  set_tests_properties(sdat_tests PROPERTIES PASS_REGULAR_EXPRESSION "sdat tests: [0-9]+ passed, 0 failed")
 endfunction()

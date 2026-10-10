@@ -22,9 +22,7 @@ endfunction()
 # dal_ppu_stub is defined. dal_ppu_generated links no hook library; each consumer picks the stub
 # or the real runtime.
 set(DAL_PPU_GENERATED_DIR "" CACHE PATH "Output directory of 'ps3tool emit' (empty: no generated code)")
-set(DAL_GAME_DIR "" CACHE PATH "Game directory whose .sdat files the build decrypts, also used by the game tests (empty: neither)")
-
-include("${CMAKE_SOURCE_DIR}/cmake/sdat_keys.cmake")
+set(DAL_GAME_DIR "" CACHE PATH "Game directory used by the game_boot test (empty: the test is not registered)")
 
 function(dal_ppu_add_generated_tree)
   if(DAL_PPU_GENERATED_DIR STREQUAL "")
@@ -63,69 +61,11 @@ function(dal_ppu_add_generated_tree)
 
   # Pins how far the game gets; updated by whoever moves the milestone.
   include("${CMAKE_SOURCE_DIR}/cmake/game_boot.cmake")
-  include("${CMAKE_SOURCE_DIR}/cmake/game_input.cmake")
-  include("${CMAKE_SOURCE_DIR}/cmake/game_audio.cmake")
-
-  # Decrypt the game's .sdat files during the build into the directory dal_game uses by default.
-  set(sdata_cache "${CMAKE_BINARY_DIR}/sdata_cache")
-  set(DAL_SDAT_KEYS "")
-  if(NOT DAL_GAME_DIR STREQUAL "")
-    dal_resolve_sdat_keys()
-  endif()
-  if(NOT DAL_SDAT_KEYS STREQUAL "")
-    set(sdata_stamp "${sdata_cache}/.stamp")
-    add_custom_command(OUTPUT "${sdata_stamp}"
-      COMMAND dal_sdat --keys "${DAL_SDAT_KEYS}" --game-dir "${DAL_GAME_DIR}" --out "${sdata_cache}"
-      COMMAND ${CMAKE_COMMAND} -E touch "${sdata_stamp}"
-      DEPENDS dal_sdat
-      COMMENT "Decrypting sdat files into ${sdata_cache}"
-      VERBATIM)
-    add_custom_target(sdata_cache ALL DEPENDS "${sdata_stamp}")
-  endif()
 
   if(DAL_EBOOT_ELF STREQUAL "" OR DAL_GAME_DIR STREQUAL "")
     message(STATUS "DAL: game_boot test not registered (DAL_EBOOT_ELF or DAL_GAME_DIR is empty)")
   else()
     separate_arguments(boot_args UNIX_COMMAND "${DAL_GAME_BOOT_ARGS}")
-
-    if(TARGET sdata_cache)
-      list(APPEND boot_args --sdata-cache "${sdata_cache}")
-      set(boot_milestone "${DAL_GAME_BOOT_MILESTONE}")
-
-      # Own hdd directory: pressing buttons can write save data, which must not leak into game_boot's
-      # directory or into the next run. The setup test wipes it before every run.
-      add_test(NAME game_input_hdd_clean
-        COMMAND ${CMAKE_COMMAND} -E rm -rf "${CMAKE_BINARY_DIR}/game_hdd_input")
-      set_tests_properties(game_input_hdd_clean PROPERTIES FIXTURES_SETUP game_input_hdd)
-      add_test(NAME game_input
-        COMMAND dal_game --no-window --game-dir "${DAL_GAME_DIR}" --elf "${DAL_EBOOT_ELF}"
-          --sdata-cache "${sdata_cache}" --hdd-dir "${CMAKE_BINARY_DIR}/game_hdd_input"
-          --pad-script "${CMAKE_SOURCE_DIR}/tools/pad_scripts/leave_title.txt"
-          --seconds ${DAL_GAME_INPUT_SECONDS})
-      math(EXPR game_input_timeout "${DAL_GAME_INPUT_SECONDS} + 60")
-      set_tests_properties(game_input PROPERTIES
-        FIXTURES_REQUIRED game_input_hdd
-        TIMEOUT ${game_input_timeout}
-        PASS_REGULAR_EXPRESSION "${DAL_GAME_INPUT_MILESTONE}")
-
-      # Same reason for the separate hdd directory as above. The dump file is in the build directory,
-      # which exists; the writer does not create parents.
-      add_test(NAME game_audio_hdd_clean
-        COMMAND ${CMAKE_COMMAND} -E rm -rf "${CMAKE_BINARY_DIR}/game_hdd_audio")
-      set_tests_properties(game_audio_hdd_clean PROPERTIES FIXTURES_SETUP game_audio_hdd)
-      add_test(NAME game_audio
-        COMMAND dal_game --no-window --game-dir "${DAL_GAME_DIR}" --elf "${DAL_EBOOT_ELF}"
-          --sdata-cache "${sdata_cache}" --hdd-dir "${CMAKE_BINARY_DIR}/game_hdd_audio"
-          --pad-script "${CMAKE_SOURCE_DIR}/tools/pad_scripts/leave_title.txt"
-          --audio none --audio-dump "${CMAKE_BINARY_DIR}/game_audio.wav"
-          --seconds ${DAL_GAME_AUDIO_SECONDS})
-      set_tests_properties(game_audio PROPERTIES
-        FIXTURES_REQUIRED game_audio_hdd
-        TIMEOUT 100
-        PASS_REGULAR_EXPRESSION "${DAL_GAME_AUDIO_ATRAC_PATTERN}")
-    else()
-      set(boot_milestone "${DAL_GAME_BOOT_MILESTONE_NO_SDATA}")
-    endif()
 
     add_test(NAME game_boot
       COMMAND dal_game --game-dir "${DAL_GAME_DIR}" --elf "${DAL_EBOOT_ELF}" ${boot_args})
@@ -133,7 +73,7 @@ function(dal_ppu_add_generated_tree)
       TIMEOUT 60
       # Only the milestone is asserted: while boot HLE is incomplete the run is expected to stop
       # (often fatally) somewhere after it, and a stop before it leaves the pattern unmatched.
-      PASS_REGULAR_EXPRESSION "${boot_milestone}")
+      PASS_REGULAR_EXPRESSION "${DAL_GAME_BOOT_MILESTONE}")
   endif()
 endfunction()
 

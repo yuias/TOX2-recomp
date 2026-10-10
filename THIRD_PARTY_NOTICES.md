@@ -1,13 +1,5 @@
 # Third-party notices
 
-## RPCS3 `key_vault.h`
-
-To decrypt the game's `.sdat` files, the build downloads `rpcs3/Crypto/key_vault.h` from the RPCS3
-repository (<https://github.com/RPCS3/rpcs3>, GNU General Public License, version 2) at a pinned
-commit into `generated/deps/rpcs3`, and `dal_sdat` reads four key constants from it. The file is
-not part of this repository, is not compiled or linked, and is not copied into the build output.
-The pin and its SHA-256 are in `cmake/sdat_keys.cmake`; see [SDAT files](docs/sdat.md).
-
 ## Microsoft GameInput
 
 Gamepads are read with Microsoft's GameInput API (version 3). The `Microsoft.GameInput` NuGet

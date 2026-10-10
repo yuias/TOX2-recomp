@@ -131,20 +131,4 @@ function(dal_media_add)
     add_test(NAME movie_decode COMMAND dal_moviedump ${movie_args})
     set_tests_properties(movie_decode PROPERTIES PASS_REGULAR_EXPRESSION "moviedump ok")
   endif()
-
-  # dal_audiotool is defined in dal_audio_add(); target names resolve at generate time.
-  include("${CMAKE_SOURCE_DIR}/cmake/atrac_decode.cmake")
-  set(atrac_archive "${CMAKE_BINARY_DIR}/sdata_cache/${DAL_ATRAC_DECODE_ARCHIVE}")
-  # The cache is decrypted at build time (see PpuCodegen.cmake), so it may not exist yet at configure
-  # time: the sdata_cache target that produces it also registers the test. An existing cache from an
-  # earlier build is enough as well.
-  if(NOT EXISTS "${atrac_archive}" AND NOT TARGET sdata_cache)
-    message(STATUS "DAL: atrac_decode test not registered (no sdata cache and nothing to build it)")
-  else()
-    add_test(NAME atrac_decode
-      COMMAND dal_audiotool at3 "${atrac_archive}" --index ${DAL_ATRAC_DECODE_INDEX} --hash
-        --expect-frames ${DAL_ATRAC_DECODE_FRAMES} --expect-samples ${DAL_ATRAC_DECODE_SAMPLES}
-        --expect-pcm "${DAL_ATRAC_DECODE_PCM_SHA256}")
-    set_tests_properties(atrac_decode PROPERTIES PASS_REGULAR_EXPRESSION "at3 ok")
-  endif()
 endfunction()
