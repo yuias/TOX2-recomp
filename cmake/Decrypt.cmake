@@ -8,7 +8,9 @@ function(tox2_decrypt_add)
   add_library(tox2_decrypt_lib STATIC
     tools/tox2_decrypt/crypto.cpp
     tools/tox2_decrypt/keys.cpp
-    tools/tox2_decrypt/sce.cpp)
+    tools/tox2_decrypt/sce.cpp
+    tools/tox2_decrypt/pup.cpp
+    tools/tox2_decrypt/self.cpp)
   target_compile_options(tox2_decrypt_lib PRIVATE ${decrypt_options})
   target_include_directories(tox2_decrypt_lib PUBLIC tools/tox2_decrypt)
   target_link_libraries(tox2_decrypt_lib PUBLIC bcrypt zlibstatic)
@@ -17,7 +19,9 @@ function(tox2_decrypt_add)
     tools/tox2_decrypt/tests/test_main.cpp
     tools/tox2_decrypt/tests/crypto_test.cpp
     tools/tox2_decrypt/tests/keys_test.cpp
-    tools/tox2_decrypt/tests/sce_test.cpp)
+    tools/tox2_decrypt/tests/sce_test.cpp
+    tools/tox2_decrypt/tests/pup_test.cpp
+    tools/tox2_decrypt/tests/self_test.cpp)
   target_compile_options(tox2_decrypt_tests PRIVATE ${decrypt_options})
   target_link_libraries(tox2_decrypt_tests PRIVATE tox2_decrypt_lib)
 

@@ -190,4 +190,120 @@ inline BuiltSce buildScePackage(const KeyVault& keys, const Bytes& info0, const 
     return buildSce(scePackageOptions(keys, info0, info1, payload));
 }
 
+struct SelfBuildProgramHeader {
+    std::uint32_t type = 1;
+    std::uint32_t flags = 5;
+    std::uint64_t offset = 0;
+    std::uint64_t vaddr = 0;
+    std::uint64_t paddr = 0;
+    std::uint64_t filesz = 0;
+    std::uint64_t memsz = 0;
+    std::uint64_t align = 0x10000;
+};
+
+struct SelfBuildOptions {
+    // flags (key revision), erk/riv and the sections; `prefix` and `type` are set by buildSelf.
+    SceBuildOptions sce;
+    std::uint32_t program_type = 4;
+    std::uint64_t program_version = 0x0004009300000000;
+    std::uint8_t elf_class = 2;
+    std::uint64_t e_shoff = 0;
+    Bytes shdrs;  // plain section header table copy; stored as a trailing plain type-1 section
+    std::vector<SelfBuildProgramHeader> phdrs;
+    std::vector<std::uint32_t> supplemental = {1, 2};  // types; sizes 0x30, 0x40 and 0x90 for type 3
+};
+
+// A SELF: SCE header, extended header, app info, ELF header and program header copies, segment extended
+// headers, version header and supplemental headers, then the encrypted metadata and the sections. The
+// section list in `options.sce` is used as given; the section header copy, if any, is appended.
+inline BuiltSce buildSelf(const SelfBuildOptions& options) {
+    const std::uint32_t phnum = static_cast<std::uint32_t>(options.phdrs.size());
+    const std::uint32_t shnum = static_cast<std::uint32_t>(options.shdrs.size() / 0x40);
+
+    Bytes supplemental;
+    for (std::size_t i = 0; i < options.supplemental.size(); i++) {
+        const std::uint32_t type = options.supplemental[i];
+        const std::uint32_t size = type == 1 ? 0x30 : (type == 2 ? 0x40 : 0x90);
+        detail::putBe32(supplemental, type);
+        detail::putBe32(supplemental, size);
+        detail::putBe64(supplemental, i + 1 < options.supplemental.size() ? 1 : 0);
+        supplemental.resize(supplemental.size() + size - 16, static_cast<std::uint8_t>(0xA0 + type));
+    }
+
+    // Offsets are absolute; the extended header starts at 0x20.
+    const std::uint64_t app_info_offset = 0x70;
+    const std::uint64_t elf_header_offset = app_info_offset + 0x20;
+    const std::uint64_t phdr_offset = elf_header_offset + 0x40;
+    const std::uint64_t segment_info_offset = phdr_offset + phnum * 0x38u;
+    const std::uint64_t version_offset = segment_info_offset + phnum * 0x20u;
+    const std::uint64_t supplemental_offset = version_offset + 0x10;
+
+    Bytes prefix;
+    detail::putBe64(prefix, 3);
+    detail::putBe64(prefix, app_info_offset);
+    detail::putBe64(prefix, elf_header_offset);
+    detail::putBe64(prefix, phdr_offset);
+    detail::putBe64(prefix, 0);  // section header copy offset, patched below
+    detail::putBe64(prefix, segment_info_offset);
+    detail::putBe64(prefix, version_offset);
+    detail::putBe64(prefix, supplemental_offset);
+    detail::putBe64(prefix, supplemental.size());
+    detail::putBe64(prefix, 0);
+
+    detail::putBe64(prefix, 0x1010000001000003);  // authority id
+    detail::putBe32(prefix, 0x01000002);          // vendor id
+    detail::putBe32(prefix, options.program_type);
+    detail::putBe64(prefix, options.program_version);
+    detail::putBe64(prefix, 0);
+
+    prefix.insert(prefix.end(), {0x7F, 'E', 'L', 'F', options.elf_class, 2, 1, 0x66});
+    prefix.resize(prefix.size() + 8, 0);
+    detail::putBe16(prefix, 2);     // e_type
+    detail::putBe16(prefix, 0x15);  // e_machine: PowerPC64
+    detail::putBe32(prefix, 1);
+    detail::putBe64(prefix, 0);  // e_entry
+    detail::putBe64(prefix, phnum != 0 ? 0x40 : 0);
+    detail::putBe64(prefix, options.e_shoff);
+    detail::putBe32(prefix, 0);
+    detail::putBe16(prefix, 0x40);
+    detail::putBe16(prefix, 0x38);
+    detail::putBe16(prefix, static_cast<std::uint16_t>(phnum));
+    detail::putBe16(prefix, 0x40);
+    detail::putBe16(prefix, static_cast<std::uint16_t>(shnum));
+    detail::putBe16(prefix, 0);
+
+    for (const SelfBuildProgramHeader& phdr : options.phdrs) {
+        detail::putBe32(prefix, phdr.type);
+        detail::putBe32(prefix, phdr.flags);
+        detail::putBe64(prefix, phdr.offset);
+        detail::putBe64(prefix, phdr.vaddr);
+        detail::putBe64(prefix, phdr.paddr);
+        detail::putBe64(prefix, phdr.filesz);
+        detail::putBe64(prefix, phdr.memsz);
+        detail::putBe64(prefix, phdr.align);
+    }
+    // Segment extended headers and the version header are never read; zeros stand in for them.
+    prefix.resize(prefix.size() + phnum * 0x20u + 0x10, 0);
+    prefix.insert(prefix.end(), supplemental.begin(), supplemental.end());
+
+    SceBuildOptions sce = options.sce;
+    sce.type = 1;
+    sce.prefix = std::move(prefix);
+    if (!options.shdrs.empty()) {
+        SceBuildSection shdr_section;
+        shdr_section.type = 1;
+        shdr_section.plain = options.shdrs;
+        shdr_section.encrypt = false;
+        sce.sections.push_back(shdr_section);
+    }
+    BuiltSce built = buildSce(sce);
+    if (!options.shdrs.empty()) {
+        // The section header copy lives in section data, whose offset is only known after the build.
+        Bytes offset;
+        detail::putBe64(offset, built.data_offsets.back());
+        std::copy(offset.begin(), offset.end(), built.file.begin() + 0x20 + 0x20);
+    }
+    return built;
+}
+
 }  // namespace tox2::decrypt::test
