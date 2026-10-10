@@ -714,7 +714,7 @@ void testSyscalls() {
     tox2::resetLogOnce();
 
     const auto table = tox2::syscallTable();
-    CHECK(table.size() == 91);  // every number the game issues plus the rest of the families that are implemented
+    CHECK(table.size() == 100);  // every number the game issues plus the rest of the families that are implemented
     bool sorted = true;
     for (std::size_t i = 1; i < table.size(); i++) sorted = sorted && table[i - 1].number < table[i].number;
     CHECK(sorted);
@@ -1207,6 +1207,118 @@ void testStartupSyscalls() {
     tox2::resetCensus();
 }
 
+void testProcessAndPageSyscalls() {
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+
+    // sys_process_getpid: the id is a plain value.
+    CHECK(syscall(1) == 1);
+    CHECK(tox2::kProcessId == 1);
+
+    // sys_process_get_sdk_version: the version that was set, written as a big-endian u32.
+    tox2::setProcessSdkVersion(0x00330000);
+    tox2Write32(base, scratch, 0xeeeeeeee);
+    CHECK(syscall(25, 1, scratch) == 0 && tox2Read32(base, scratch) == 0x00330000);
+    CHECK(syscall(25, 0x1234, scratch) == 0);  // the pid is not looked at
+    CHECK(syscall(25, 1, 0) == err(tox2::kCellEfault));
+    CHECK(syscall(25, 1, 0x0f000000) == err(tox2::kCellEfault));  // not committed
+    tox2::setProcessSdkVersion(0x00475001);
+    CHECK(syscall(25, 1, scratch) == 0 && tox2Read32(base, scratch) == 0x00475001);
+
+    // Memory from the three process ranges qualifies for a lock line reservation, nothing else does.
+    CHECK(syscall(348, 0x100000, 0x400, scratch + 0x100) == 0);
+    const std::uint32_t user1m = tox2Read32(base, scratch + 0x100);
+    CHECK(syscall(348, 0x10000, 0x200, scratch + 0x100) == 0);
+    const std::uint32_t user64k = tox2Read32(base, scratch + 0x100);
+    const std::uint32_t stack = p.stack.allocate(0x1000, 0x1000);
+    CHECK(stack != 0);
+    CHECK(syscall(14, scratch, 2) == 0);
+    CHECK(syscall(14, user1m, 0) == 0);
+    CHECK(syscall(14, user64k, 7) == 0);
+    CHECK(syscall(14, stack, 2) == err(tox2::kCellEperm));
+    CHECK(syscall(14, 0, 2) == err(tox2::kCellEperm));
+    CHECK(syscall(14, 0xC0000000, 2) == err(tox2::kCellEperm));  // RSX local memory
+
+    // sys_memory_get_page_attribute: committed memory only, page size by range.
+    const std::uint32_t attr = scratch + 0x200;
+    auto pageAttr = [&](std::uint32_t addr) {
+        for (std::uint32_t i = 0; i < 24; i++) tox2Write8(base, attr + i, 0xee);
+        return syscall(351, addr, attr);
+    };
+    CHECK(pageAttr(user1m + 0x1234) == 0);
+    CHECK(tox2Read64(base, attr) == 0x40000 && tox2Read64(base, attr + 8) == 0xF);
+    CHECK(tox2Read32(base, attr + 16) == 0x100000 && tox2Read32(base, attr + 20) == 0);
+    CHECK(pageAttr(user64k) == 0 && tox2Read32(base, attr + 16) == 0x10000);
+    CHECK(pageAttr(scratch) == 0 && tox2Read32(base, attr + 16) == 0x10000);
+    CHECK(pageAttr(stack + 8) == 0 && tox2Read32(base, attr + 16) == 0x1000);
+    CHECK(pageAttr(0x0f000000) == err(tox2::kCellEinval));  // not committed
+    CHECK(tox2Read8(base, attr) == 0xee);
+    CHECK(syscall(351, scratch, 0) == err(tox2::kCellEfault));
+    CHECK(syscall(351, user1m, 0x0f000000) == err(tox2::kCellEfault));
+
+    // sys_event_queue_tryreceive: oldest first, never waits, only as many as asked for.
+    const std::uint32_t queue_attr = scratch + 0x300, id_out = scratch + 0x320, events = scratch + 0x400,
+                        number = scratch + 0x380;
+    tox2Write32(base, queue_attr, 1);
+    tox2Write32(base, queue_attr + 4, 1);
+    CHECK(syscall(128, id_out, queue_attr, 0, 8) == 0);
+    const std::uint32_t queue = tox2Read32(base, id_out);
+    auto tryReceive = [&](std::uint32_t id, std::uint32_t array, std::int32_t size, std::uint32_t count_out) {
+        tox2Write32(base, number, 0xeeeeeeee);
+        return syscall(131, id, array, static_cast<std::uint32_t>(size), count_out);
+    };
+    CHECK(tryReceive(queue, events, 4, number) == 0 && tox2Read32(base, number) == 0);  // empty queue
+    for (std::uint64_t i = 1; i <= 3; i++) {
+        CHECK(tox2::sendEventToQueue(queue, 0x100 + i, 0x200 + i, 0x300 + i, 0x400 + i) == 0);
+    }
+    for (std::uint32_t i = 0; i < 0x80; i++) tox2Write8(base, events + i, 0xee);
+    CHECK(tryReceive(queue, events, 0, number) == 0 && tox2Read32(base, number) == 0);  // size 0 takes nothing
+    CHECK(tox2Read8(base, events) == 0xee);
+    CHECK(tryReceive(queue, events, 1, number) == 0 && tox2Read32(base, number) == 1);
+    CHECK(tox2Read64(base, events) == 0x101 && tox2Read64(base, events + 8) == 0x201 &&
+          tox2Read64(base, events + 16) == 0x301 && tox2Read64(base, events + 24) == 0x401);
+    CHECK(tox2Read8(base, events + 32) == 0xee);                                        // only one slot was written
+    CHECK(tryReceive(queue, events, 8, number) == 0 && tox2Read32(base, number) == 2);  // fewer stored than asked
+    CHECK(tox2Read64(base, events) == 0x102 && tox2Read64(base, events + 32) == 0x103 &&
+          tox2Read64(base, events + 56) == 0x403);
+    CHECK(tryReceive(queue, events, 8, number) == 0 && tox2Read32(base, number) == 0);
+
+    // More stored events than the caller asks for stay in the queue; the queue holds at most its size.
+    for (std::uint64_t i = 1; i <= 9; i++) {
+        CHECK(tox2::sendEventToQueue(queue, i, 0, 0, 0) == (i <= 8 ? 0u : tox2::kCellEbusy));
+    }
+    CHECK(tryReceive(queue, events, 5, number) == 0 && tox2Read32(base, number) == 5);
+    CHECK(tryReceive(queue, events, -1, number) == 0 && tox2Read32(base, number) == 0);
+    CHECK(tryReceive(queue, events, 5, number) == 0 && tox2Read32(base, number) == 3);
+    CHECK(tox2Read64(base, events) == 6 && tox2Read64(base, events + 64) == 8);
+
+    // Errors: no such queue, no count pointer, no array while events are taken.
+    CHECK(tryReceive(0x8d000fff, events, 1, number) == err(tox2::kCellEsrch));
+    CHECK(tox2::sendEventToQueue(queue, 1, 2, 3, 4) == 0);
+    CHECK(syscall(131, queue, events, 1, 0) == err(tox2::kCellEfault));
+    CHECK(tryReceive(queue, 0, 1, number) == err(tox2::kCellEfault));
+    CHECK(tryReceive(queue, 0, 0, number) == 0);  // nothing to copy, so no array is needed
+    CHECK(tryReceive(queue, events, 1, number) == 0 && tox2Read32(base, number) == 1);
+
+    const std::string census = tox2::formatCensus();
+    CHECK(census.find("sc 1 sys_process_getpid: 1 [impl]") != std::string::npos);
+    CHECK(census.find("sc 131 sys_event_queue_tryreceive: ") != std::string::npos);
+
+    CHECK(syscall(349, user1m) == 0 && syscall(349, user64k) == 0);
+    p.stack.free(stack);
+    p.main.free(scratch);
+    tox2::setProcessSdkVersion(0);
+    tox2::resetSyncObjects();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+}
+
 void testMemoryContainers() {
     tox2::setLogSink([](std::string_view) {});
     tox2::resetCensus();
@@ -1635,7 +1747,7 @@ std::unique_ptr<tox2::GuestThread> makeCaller(std::uint32_t id) {
 }
 
 std::uint64_t syscallAs(tox2::GuestThread& caller, std::uint32_t number, std::uint64_t r3 = 0, std::uint64_t r4 = 0,
-                        std::uint64_t r5 = 0, std::uint64_t r6 = 0, std::uint64_t r7 = 0) {
+                        std::uint64_t r5 = 0, std::uint64_t r6 = 0, std::uint64_t r7 = 0, std::uint64_t r8 = 0) {
     Tox2PpuContext* ctx = &caller.context();
     ctx->gpr[11] = number;
     ctx->gpr[3] = r3;
@@ -1643,6 +1755,7 @@ std::uint64_t syscallAs(tox2::GuestThread& caller, std::uint32_t number, std::ui
     ctx->gpr[5] = r5;
     ctx->gpr[6] = r6;
     ctx->gpr[7] = r7;
+    ctx->gpr[8] = r8;
     tox2Syscall(ctx, tox2::process().memory.base(), 0x10000);
     return ctx->gpr[3];
 }
@@ -2210,6 +2323,297 @@ void testEventQueueIpcKeys() {
     tox2::resetCensus();
 }
 
+// Layout of the scratch block that the SPU thread group tests and children share.
+constexpr std::uint32_t kSpuIdOut = 0x000;
+constexpr std::uint32_t kSpuGroupAttr = 0x010;
+constexpr std::uint32_t kSpuThreadOut = 0x030;
+constexpr std::uint32_t kSpuThreadAttr = 0x050;
+constexpr std::uint32_t kSpuArgs = 0x070;
+constexpr std::uint32_t kSpuImage = 0x0A0;
+constexpr std::uint32_t kSpuSegments = 0x0C0;
+constexpr std::uint32_t kSpuGroupName = 0x200;
+constexpr std::uint32_t kSpuThreadName = 0x280;
+constexpr std::uint32_t kSpuElf = 0x400;
+constexpr std::string_view kSpuGroupNameText = "SpursTLGraphicsCellSpursKernelGroup";  // 35 characters
+constexpr std::string_view kSpuThreadNameText = "SpursTLGraphicsCellSpursKernel0";     // 31 characters
+
+void putText(std::uint8_t* base, std::uint32_t at, std::string_view text) {
+    for (std::size_t i = 0; i < text.size(); i++) tox2Write8(base, at + static_cast<std::uint32_t>(i), text[i]);
+    tox2Write8(base, at + static_cast<std::uint32_t>(text.size()), 0);
+}
+
+// An SPU ELF32 with one PT_LOAD (0x40 bytes in the file, 0x60 in memory, at local store 0x800), entry 0x818.
+void writeSpuElf(std::uint8_t* base, std::uint32_t elf) {
+    for (std::uint32_t i = 0; i < 0x200; i++) tox2Write8(base, elf + i, 0);
+    tox2Write32(base, elf, 0x7F454C46);
+    tox2Write8(base, elf + 4, 1);
+    tox2Write8(base, elf + 5, 2);
+    tox2Write16(base, elf + 0x12, 23);
+    tox2Write32(base, elf + 0x18, 0x818);
+    tox2Write32(base, elf + 0x1C, 0x34);
+    tox2Write16(base, elf + 0x2A, 0x20);
+    tox2Write16(base, elf + 0x2C, 1);
+    tox2Write32(base, elf + 0x34, 1);
+    tox2Write32(base, elf + 0x38, 0x100);
+    tox2Write32(base, elf + 0x3C, 0x800);
+    tox2Write32(base, elf + 0x44, 0x40);
+    tox2Write32(base, elf + 0x48, 0x60);
+}
+
+// Creates a group of `num` threads the way libsre does (type 0x18, priority 250), imports the ELF and
+// initializes every thread from it. Returns the group id.
+std::uint32_t buildSpuGroup(tox2::GuestThread& caller, std::uint8_t* base, std::uint32_t scratch, std::uint32_t num) {
+    putText(base, scratch + kSpuGroupName, kSpuGroupNameText);
+    tox2Write32(base, scratch + kSpuGroupAttr, static_cast<std::uint32_t>(kSpuGroupNameText.size() + 1));
+    tox2Write32(base, scratch + kSpuGroupAttr + 4, scratch + kSpuGroupName);
+    tox2Write32(base, scratch + kSpuGroupAttr + 8, 0x18);
+    tox2Write32(base, scratch + kSpuGroupAttr + 12, 0xdeadbeef);  // the container word is left uninitialised
+    CHECK(syscallAs(caller, 170, scratch + kSpuIdOut, num, 250, scratch + kSpuGroupAttr) == 0);
+    const std::uint32_t group = tox2Read32(base, scratch + kSpuIdOut);
+
+    writeSpuElf(base, scratch + kSpuElf);
+    CHECK(tox2::spuImageImport(base, scratch + kSpuImage, scratch + kSpuElf, 1) == 0);
+    putText(base, scratch + kSpuThreadName, kSpuThreadNameText);
+    tox2Write32(base, scratch + kSpuThreadAttr, scratch + kSpuThreadName);
+    tox2Write32(base, scratch + kSpuThreadAttr + 4, 32);
+    tox2Write32(base, scratch + kSpuThreadAttr + 8, 2);
+    for (std::uint32_t i = 0; i < num; i++) {
+        tox2Write64(base, scratch + kSpuArgs, std::uint64_t{i} << 32);
+        tox2Write64(base, scratch + kSpuArgs + 8, 0x01127c80);
+        tox2Write64(base, scratch + kSpuArgs + 16, 0);
+        tox2Write64(base, scratch + kSpuArgs + 24, 0);
+        CHECK(syscallAs(caller, 172, scratch + kSpuThreadOut + 4 * i, group, i, scratch + kSpuImage,
+                        scratch + kSpuThreadAttr, scratch + kSpuArgs) == 0);
+    }
+    return group;
+}
+
+void testSpuThreadGroups() {
+    std::vector<std::string> lines;
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetSyncObjects();
+    tox2::resetSpuThreadGroups();
+    tox2::resetSpuImages();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t id_out = scratch + kSpuIdOut, attr = scratch + kSpuGroupAttr;
+    const std::uint32_t thread_out = scratch + kSpuThreadOut, thread_attr = scratch + kSpuThreadAttr;
+    const std::uint32_t args = scratch + kSpuArgs, image = scratch + kSpuImage, segs = scratch + kSpuSegments;
+
+    auto a = makeCaller(0x01000000);
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+
+    putText(base, scratch + kSpuGroupName, "group");
+    auto setAttr = [&](std::uint32_t nsize, std::uint32_t type, std::uint32_t container = 0) {
+        tox2Write32(base, attr, nsize);
+        tox2Write32(base, attr + 4, scratch + kSpuGroupName);
+        tox2Write32(base, attr + 8, type);
+        tox2Write32(base, attr + 12, container);
+    };
+    auto create = [&](std::uint64_t num, std::int32_t priority, std::uint32_t type, std::uint32_t container = 0) {
+        setAttr(6, type, container);
+        return syscallAs(*a, 170, id_out, num, static_cast<std::uint32_t>(priority), attr);
+    };
+
+    // Group creation: argument errors leave no group behind.
+    setAttr(6, 0);
+    CHECK(syscallAs(*a, 170, 0, 1, 100, attr) == err(tox2::kCellEfault));
+    CHECK(syscallAs(*a, 170, id_out, 1, 100, 0) == err(tox2::kCellEfault));
+    CHECK(create(0, 100, 0) == err(tox2::kCellEinval));
+    CHECK(create(7, 100, 0) == err(tox2::kCellEinval));
+    CHECK(create(1, 100, 1) == err(tox2::kCellEinval));
+    CHECK(create(1, 15, 0) == err(tox2::kCellEinval));
+    CHECK(create(1, 256, 0) == err(tox2::kCellEinval));
+    CHECK(create(1, 1, 0x18, 0xdeadbeef) == 0);  // type 0x18: any priority, any container word
+    tox2::resetSpuThreadGroups();
+    setAttr(0x81, 0);
+    CHECK(syscallAs(*a, 170, id_out, 1, 100, attr) == err(tox2::kCellEinval));
+    CHECK(create(1, 100, 4, 0x3F000000) == err(tox2::kCellEsrch));  // type 4 needs a memory container
+    std::uint32_t container = 0;
+    CHECK(syscallAs(*a, 324, id_out, 0x100000) == 0);
+    container = tox2Read32(base, id_out);
+    CHECK(create(2, 100, 4, container) == 0);
+    CHECK(syscallAs(*a, 325, container) == 0);
+    tox2::resetSpuThreadGroups();
+
+    // Ids start at 0x04000100 and advance by 0x100; the group name and parameters are logged.
+    lines.clear();
+    CHECK(create(2, 100, 0) == 0 && tox2Read32(base, id_out) == 0x04000100);
+    CHECK(countContaining(lines, "tox2: spu: group 0x04000100 \"group\" created: 2 threads, priority 100, type 0x0") ==
+          1);
+    CHECK(create(1, 250, 0x20) == 0 && tox2Read32(base, id_out) == 0x04000200);
+    CHECK(syscallAs(*a, 171, 0x04000200) == 0);
+    CHECK(syscallAs(*a, 171, 0x04000200) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 171, 0x04000101) == err(tox2::kCellEsrch));
+    CHECK(create(1, 100, 0) == 0 && tox2Read32(base, id_out) == 0x04000300);  // 0x04000200 is not reused at once
+    const std::uint32_t group = 0x04000100;
+
+    // Thread initialization. The image is one that the import call produced.
+    writeSpuElf(base, scratch + kSpuElf);
+    CHECK(tox2::spuImageImport(base, image, scratch + kSpuElf, 1) == 0);
+    const std::uint32_t array = tox2Read32(base, image + 8);
+    putText(base, scratch + kSpuThreadName, "thread");
+    tox2Write32(base, thread_attr, scratch + kSpuThreadName);
+    tox2Write32(base, thread_attr + 4, 6);
+    tox2Write32(base, thread_attr + 8, 2);
+    tox2Write64(base, args, 0x1111);
+    tox2Write64(base, args + 8, 0x2222);
+    tox2Write64(base, args + 16, 0x3333);
+    tox2Write64(base, args + 24, 0x4444);
+    auto init = [&](std::uint32_t group_id, std::uint32_t index) {
+        return syscallAs(*a, 172, thread_out, group_id, index, image, thread_attr, args);
+    };
+    CHECK(syscallAs(*a, 172, 0, group, 0, image, thread_attr, args) == err(tox2::kCellEfault));
+    CHECK(syscallAs(*a, 172, thread_out, group, 0, 0, thread_attr, args) == err(tox2::kCellEfault));
+    CHECK(syscallAs(*a, 172, thread_out, group, 0, image, 0, args) == err(tox2::kCellEfault));
+    CHECK(syscallAs(*a, 172, thread_out, group, 0, image, thread_attr, 0) == err(tox2::kCellEfault));
+    CHECK(init(0x04000900, 0) == err(tox2::kCellEsrch));
+    CHECK(init(group, 2) == err(tox2::kCellEinval));  // the group has two threads
+    tox2Write32(base, thread_attr + 4, 0x81);
+    CHECK(init(group, 0) == err(tox2::kCellEinval));
+    tox2Write32(base, thread_attr + 4, 6);
+    tox2Write32(base, image + 4, 0x40000);
+    CHECK(init(group, 0) == err(tox2::kCellEinval));  // entry point beyond the local store
+    tox2Write32(base, image + 4, 0x818);
+    tox2Write32(base, image + 12, 0);
+    CHECK(init(group, 0) == err(tox2::kCellEinval));
+    tox2Write32(base, image + 12, 0x21);
+    CHECK(init(group, 0) == err(tox2::kCellEinval));
+    tox2Write32(base, image + 12, 2);
+
+    // A copy of the image whose segment list is wrong in one way at a time.
+    tox2Write32(base, image + 8, segs);
+    for (std::uint32_t i = 0; i < 8; i++) tox2Write32(base, segs + 4 * i, tox2Read32(base, array + 4 * i));
+    CHECK(init(group, 0) == 0);  // the unchanged list is fine
+    tox2::resetSpuThreadGroups();
+    CHECK(create(2, 100, 0) == 0);
+    tox2Write32(base, segs, 3);
+    CHECK(init(group, 0) == err(tox2::kCellEinval));  // unknown segment type
+    tox2Write32(base, segs, 1);
+    tox2Write32(base, segs + 4, 0x3FFF0);
+    tox2Write32(base, segs + 8, 0x20);
+    CHECK(init(group, 0) == err(tox2::kCellEinval));  // ends beyond the local store
+    tox2Write32(base, segs + 4, 0x800);
+    tox2Write32(base, segs + 8, 0xFFFFFFF0);
+    CHECK(init(group, 0) == err(tox2::kCellEinval));  // negative size
+    tox2Write32(base, segs + 8, 0x40);
+    tox2Write32(base, image + 8, array);
+    CHECK(create(1, 100, 0) == 0 && tox2Read32(base, id_out) == 0x04000200);  // never initialized
+
+    // Index 1 first: thread ids count in initialization order, not by index.
+    lines.clear();
+    CHECK(init(group, 1) == 0 && tox2Read32(base, thread_out) == 0x01000100);
+    CHECK(countContaining(lines,
+                          std::format("\"thread\" initialized: group 0x04000100 index 1, image {:#010x} entry 0x818, "
+                                      "args 0x1111 0x2222 0x3333 0x4444",
+                                      scratch + kSpuElf)) == 1);
+    CHECK(init(group, 1) == err(tox2::kCellEbusy));
+    CHECK(syscallAs(*a, 173, group) == err(tox2::kCellEstat));  // not every thread exists yet
+    CHECK(syscallAs(*a, 178, group) == err(tox2::kCellEstat));
+    CHECK(syscallAs(*a, 177, group, 0) == err(tox2::kCellEstat));
+    CHECK(syscallAs(*a, 173, 0x04000900) == err(tox2::kCellEsrch));
+    CHECK(init(group, 0) == 0 && tox2Read32(base, thread_out) == 0x02000100);
+    CHECK(init(group, 0) == err(tox2::kCellEbusy));  // the group is initialized now
+    CHECK(syscallAs(*a, 177, group, 0) == err(tox2::kCellEstat));
+    CHECK(syscallAs(*a, 177, 0x04000900, 0) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 178, 0x04000900) == err(tox2::kCellEsrch));
+    const std::uint32_t thread0 = 0x02000100, thread1 = 0x01000100;
+
+    // Event queues for the connections.
+    const std::uint32_t queue_attr = scratch + 0x180;
+    tox2Write32(base, queue_attr, 1);
+    tox2Write32(base, queue_attr + 4, 2);
+    CHECK(syscallAs(*a, 128, id_out, queue_attr, 0, 8) == 0);
+    const std::uint32_t queue = tox2Read32(base, id_out);
+    CHECK(syscallAs(*a, 128, id_out, queue_attr, 0, 8) == 0);
+    const std::uint32_t queue2 = tox2Read32(base, id_out);
+
+    // Group events: types 1, 2 and 4, each connected once.
+    CHECK(syscallAs(*a, 185, group, queue, 3) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 185, 0x04000900, queue, 1) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 185, group, 0x8d000fff, 1) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 185, group, queue, 1) == 0);
+    CHECK(syscallAs(*a, 185, group, queue2, 1) == err(tox2::kCellEbusy));
+    CHECK(syscallAs(*a, 185, group, queue2, 4) == 0);
+    CHECK(syscallAs(*a, 186, group, 3) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 186, 0x04000900, 1) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 186, group, 1) == 0);
+    CHECK(syscallAs(*a, 186, group, 1) == err(tox2::kCellEnotconn));
+    CHECK(syscallAs(*a, 186, group, 2) == err(tox2::kCellEnotconn));
+    CHECK(syscallAs(*a, 185, group, queue, 1) == 0);  // free again
+
+    // Thread events: user type 1, ports 0..63.
+    CHECK(syscallAs(*a, 191, thread0, queue, 2, 3) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 191, thread0, queue, 1, 64) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 191, 0x03000100, queue, 1, 3) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 191, thread0, 0x8d000fff, 1, 3) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 191, thread0, queue, 1, 3) == 0);
+    CHECK(syscallAs(*a, 191, thread0, queue2, 1, 3) == err(tox2::kCellEisconn));
+    CHECK(syscallAs(*a, 192, thread0, 2, 3) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 192, thread0, 1, 64) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 192, 0x03000100, 1, 3) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 192, thread1, 1, 3) == err(tox2::kCellEnotconn));
+    CHECK(syscallAs(*a, 191, thread0, queue, 1, 4) == 0);
+    CHECK(syscallAs(*a, 192, thread0, 1, 4) == 0);
+    CHECK(syscallAs(*a, 192, thread0, 1, 4) == err(tox2::kCellEnotconn));
+
+    // Event connection on all threads. Port 3 is taken on thread 0, so it is skipped for the group.
+    const std::uint32_t spup = scratch + 0x1C0;
+    tox2Write8(base, spup, 0xee);
+    CHECK(syscallAs(*a, 251, group, queue, 0, spup) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 251, 0x04000900, queue, 4, spup) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 251, group, queue, 4, 0) == err(tox2::kCellEfault));
+    CHECK(syscallAs(*a, 251, group, queue, 0x8, spup) == err(tox2::kCellEisconn));
+    CHECK(tox2Read8(base, spup) == 0xee);
+    CHECK(syscallAs(*a, 251, group, queue2, 0x18, spup) == 0 && tox2Read8(base, spup) == 4);
+    CHECK(syscallAs(*a, 191, thread1, queue, 1, 4) == err(tox2::kCellEisconn));  // bound on thread 1 too
+    CHECK(syscallAs(*a, 252, group, 64) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 252, 0x04000900, 4) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 252, group, 5) == err(tox2::kCellEnotconn));
+    CHECK(syscallAs(*a, 252, group, 4) == 0);
+    CHECK(syscallAs(*a, 191, thread1, queue, 1, 4) == 0);
+
+    // A group that is not initialized refuses the all-threads connection.
+    CHECK(syscallAs(*a, 251, 0x04000200, queue, 4, spup) == err(tox2::kCellEstat));
+
+    // Cooperative victims are only recorded.
+    CHECK(syscallAs(*a, 250, group, 0x3) == 0);
+    CHECK(syscallAs(*a, 250, 0x04000900, 0x3) == err(tox2::kCellEsrch));
+
+    // Destroy takes the threads along.
+    CHECK(syscallAs(*a, 171, group) == 0);
+    CHECK(syscallAs(*a, 191, thread0, queue, 1, 9) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 173, group) == err(tox2::kCellEsrch));
+
+    // Every slot can be used once; the 256th group has no slot.
+    tox2::resetSpuThreadGroups();
+    std::uint32_t created = 0;
+    for (; created < 300; created++) {
+        if (create(1, 100, 0) != 0) break;
+    }
+    CHECK(created == 255);
+    CHECK(create(1, 100, 0) == err(tox2::kCellEagain));
+    CHECK(syscallAs(*a, 171, 0x04000100) == 0);
+    CHECK(create(1, 100, 0) == 0 && tox2Read32(base, id_out) == 0x04000100);
+
+    const std::string census = tox2::formatCensus();
+    CHECK(census.find("sc 170 sys_spu_thread_group_create: ") != std::string::npos);
+    CHECK(census.find("sc 173 sys_spu_thread_group_start: 3 [impl]") != std::string::npos);
+
+    tox2::resetSpuThreadGroups();
+    tox2::resetSpuImages();
+    tox2::resetSyncObjects();
+    p.main.free(scratch);
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+}
+
 void testSpuAndSysmodule() {
     std::vector<std::string> lines;
     tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
@@ -2239,9 +2643,11 @@ void testSpuAndSysmodule() {
     // sc 251: req 0 is invalid, an unknown group or queue is ESRCH, the port is the lowest
     // requested bit.
     tox2::resetSpuThreadGroups();
+    tox2::resetSpuImages();
+    const std::uint32_t spu_scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(spu_scratch != 0);
     CHECK(syscallAs(*a, 251, 0x04000100, queue, 4, spup) == err(tox2::kCellEsrch));
-    CHECK(tox2::createSpuThreadGroup() == 0x04000100);
-    CHECK(!tox2::spuThreadGroupExists(0x04000101));
+    CHECK(buildSpuGroup(*a, base, spu_scratch, 1) == 0x04000100);
     tox2Write8(base, spup, 0xee);
     CHECK(syscallAs(*a, 251, 0x04000100, queue, 0, spup) == err(tox2::kCellEinval));
     CHECK(syscallAs(*a, 251, 0x04000100, 0x8d000fff, 4, spup) == err(tox2::kCellEsrch));
@@ -2283,6 +2689,8 @@ void testSpuAndSysmodule() {
     CHECK(tox2::formatCensus().find("cellSysmodule::cellSysmoduleLoadModule: 3 [impl]") != std::string::npos);
 
     tox2::resetSpuThreadGroups();
+    tox2::resetSpuImages();
+    p.main.free(spu_scratch);
     p.main.free(scratch);
     tox2::resetSyncObjects();
     tox2::setLogSink({});
@@ -9227,6 +9635,39 @@ void testAbortChild() {
     CHECK(contains(r, "tox2: stop: abort from 0x011d1234 (sysPrxForUser 0x9fb6228e)"));
 }
 
+void testSpuStartChild() {
+    const ChildResult r = runChild(L"--spu-start-child");
+    echoChild("spu start child", r);
+    CHECK(r.exit_code == 8);
+    // The child names the address it imported the ELF from.
+    const std::string_view marker = "spu child: elf at ";
+    const std::size_t at = r.output.find(marker);
+    CHECK(at != std::string::npos);
+    const std::string elf = at != std::string::npos ? r.output.substr(at + marker.size(), 10) : std::string();
+    const std::string group = "\"SpursTLGraphicsCellSpursKernelGroup\"";
+    CHECK(contains(r, "tox2: spu: start group 0x04000100 " + group + " type 0x18 priority 250: 2 threads"));
+    CHECK(contains(r, "tox2: spu:   thread 0 0x01000100 \"SpursTLGraphicsCellSpursKernel0\" image " + elf +
+                              " entry 0x818 segments 2 args 0x0 0x1127c80 0x0 0x0"));
+    CHECK(contains(r, "tox2: spu:   thread 1 0x02000100 \"SpursTLGraphicsCellSpursKernel0\" image " + elf +
+                              " entry 0x818 segments 2 args 0x100000000 0x1127c80 0x0 0x0"));
+    CHECK(contains(r, "tox2: spu:     segment fill ls 0x840 size 0x20 value 0x0"));
+    CHECK(contains(r, "tox2: spu:     segment copy ls 0x800 size 0x40 ea 0x"));
+    CHECK(contains(r, "tox2: spu:   event queue run 0x8d000000"));
+    CHECK(contains(r, "tox2: spu:   thread 0 port 2 -> queue 0x8d000000"));
+    CHECK(contains(r, "tox2: spu:   thread 1 port 2 -> queue 0x8d000000"));
+    CHECK(contains(r, "tox2: stop: spu: sys_spu_thread_group_start group 0x04000100 " + group + " (2 threads, image " +
+                              elf + " entry 0x818): SPU execution is not implemented"));
+}
+
+void testSpuJoinChild() {
+    const ChildResult r = runChild(L"--spu-join-child");
+    echoChild("spu join child", r);
+    CHECK(r.exit_code == 8);
+    CHECK(contains(r,
+                   "tox2: stop: spu: sys_spu_thread_group_join on group 0x04000100 that never runs: SPU execution "
+                   "is not implemented"));
+}
+
 void testGuestStackWalk() {
     std::unique_ptr<tox2::GuestMemory> memory(newMemory());
     tox2::RegionAllocator stack(*memory, tox2::kStackRegion);
@@ -9327,6 +9768,43 @@ int abortChild() {
     return 99;
 }
 
+// Builds the two-thread group of the SPU children and wires an event queue to it.
+std::uint32_t spuChildGroup(tox2::GuestThread& caller, std::uint8_t* base, std::uint32_t scratch) {
+    const std::uint32_t group = buildSpuGroup(caller, base, scratch, 2);
+    const std::uint32_t queue_attr = scratch + 0x180, queue_out = scratch + 0x190, spup = scratch + 0x1C0;
+    tox2Write32(base, queue_attr, 1);
+    tox2Write32(base, queue_attr + 4, 2);
+    CHECK(syscallAs(caller, 128, queue_out, queue_attr, 0, 8) == 0);
+    const std::uint32_t queue = tox2Read32(base, queue_out);
+    CHECK(syscallAs(caller, 185, group, queue, 1) == 0);
+    CHECK(syscallAs(caller, 251, group, queue, 4, spup) == 0);
+    return group;
+}
+
+int spuStartChild() {
+    tox2::installProcessSettings();
+    tox2::process().memory.reserve();
+    std::uint8_t* base = tox2::process().memory.base();
+    const std::uint32_t scratch = tox2::process().main.allocate(0x10000, 0x10000);
+    auto caller = makeCaller(0x01000000);
+    const std::uint32_t group = spuChildGroup(*caller, base, scratch);
+    std::printf("spu child: elf at %#010x\n", scratch + kSpuElf);
+    std::fflush(stdout);
+    syscallAs(*caller, 173, group);
+    return 99;
+}
+
+int spuJoinChild() {
+    tox2::installProcessSettings();
+    tox2::process().memory.reserve();
+    std::uint8_t* base = tox2::process().memory.base();
+    const std::uint32_t scratch = tox2::process().main.allocate(0x10000, 0x10000);
+    auto caller = makeCaller(0x01000000);
+    const std::uint32_t group = spuChildGroup(*caller, base, scratch);
+    syscallAs(*caller, 178, group, 0, 0);
+    return 99;
+}
+
 void childCensus() { std::fprintf(stderr, "census: test printer ran\n"); }
 
 Tox2PpuContext g_child_ctx;
@@ -9382,6 +9860,8 @@ int main(int argc, char** argv) {
         if (mode == "--unsorted-table-child") return unsortedTableChild();
         if (mode == "--overlapping-span-child") return overlappingSpanChild();
         if (mode == "--abort-child") return abortChild();
+        if (mode == "--spu-start-child") return spuStartChild();
+        if (mode == "--spu-join-child") return spuJoinChild();
     }
 
     tox2::installProcessSettings();
@@ -9409,6 +9889,7 @@ int main(int argc, char** argv) {
     testHleOutPointerHints();
     testHostFunctionsAndCallGuestFunction();
     testStartupSyscalls();
+    testProcessAndPageSyscalls();
     testMemoryContainers();
     testSemaphores();
     testFileSystem();
@@ -9417,6 +9898,7 @@ int main(int argc, char** argv) {
     testEventObjects();
     testEventQueueIpcKeys();
     testSpuAndSysmodule();
+    testSpuThreadGroups();
     testCellGcmSys();
     testParamSfo();
     testCellGame();
@@ -9473,6 +9955,8 @@ int main(int argc, char** argv) {
     testUnsortedTableChild();
     testOverlappingSpanChild();
     testAbortChild();
+    testSpuStartChild();
+    testSpuJoinChild();
     std::printf("runtime core tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }

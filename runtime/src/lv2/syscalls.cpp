@@ -16,6 +16,10 @@
 namespace tox2 {
 
 // Handlers defined in sys_misc.cpp.
+void sysProcessGetPid(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysProcessIsSpuLockLineReservationAddress(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysProcessGetSdkVersion(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysMemoryGetPageAttribute(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysProcessExit(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysTtyRead(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysTtyWrite(Tox2PpuContext* ctx, std::uint8_t* base);
@@ -62,6 +66,7 @@ void sysEventFlagGet(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysEventQueueCreate(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysEventQueueDestroy(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysEventQueueReceive(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventQueueTryReceive(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysEventQueueDrain(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysEventPortCreate(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysEventPortDestroy(Tox2PpuContext* ctx, std::uint8_t* base);
@@ -93,7 +98,19 @@ void sysFsLseek(Tox2PpuContext* ctx, std::uint8_t* base);
 
 // Handlers defined in sys_spu.cpp.
 void sysSpuInitialize(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadGroupCreate(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadGroupDestroy(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadInitialize(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadGroupStart(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadGroupTerminate(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadGroupJoin(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadGroupConnectEvent(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadGroupDisconnectEvent(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadConnectEvent(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadDisconnectEvent(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadGroupSetCooperativeVictims(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysSpuThreadGroupConnectEventAllThreads(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadGroupDisconnectEventAllThreads(Tox2PpuContext* ctx, std::uint8_t* base);
 
 namespace {
 
@@ -101,7 +118,10 @@ namespace {
 // of each syscall site) plus the implemented ones. Names come from config/lv2_syscalls.json, which
 // mirrors RPCS3 `Emu/Cell/lv2/lv2.cpp`; 988 has none. Keep sorted by number.
 constexpr SyscallEntry kSyscalls[] = {
+        {1, "sys_process_getpid", sysProcessGetPid},
+        {14, "sys_process_is_spu_lock_line_reservation_address", sysProcessIsSpuLockLineReservationAddress},
         {22, "_sys_process_exit", sysProcessExit},
+        {25, "sys_process_get_sdk_version", sysProcessGetSdkVersion},
         {41, "_sys_ppu_thread_exit", sysPpuThreadExit},
         {43, "sys_ppu_thread_yield", sysPpuThreadYield},
         {44, "sys_ppu_thread_join", sysPpuThreadJoin},
@@ -132,6 +152,7 @@ constexpr SyscallEntry kSyscalls[] = {
         {128, "sys_event_queue_create", sysEventQueueCreate},
         {129, "sys_event_queue_destroy", sysEventQueueDestroy},
         {130, "sys_event_queue_receive", sysEventQueueReceive},
+        {131, "sys_event_queue_tryreceive", sysEventQueueTryReceive},
         {132, "sys_event_flag_cancel", sysEventFlagCancel},
         {133, "sys_event_queue_drain", sysEventQueueDrain},
         {134, "sys_event_port_create", sysEventPortCreate},
@@ -144,20 +165,24 @@ constexpr SyscallEntry kSyscalls[] = {
         {142, "sys_timer_sleep", sysTimerSleep},
         {147, "sys_time_get_timebase_frequency", sysTimeGetTimebaseFrequency},
         {169, "sys_spu_initialize", sysSpuInitialize},
-        {170, "sys_spu_thread_group_create", nullptr},
-        {171, "sys_spu_thread_group_destroy", nullptr},
-        {172, "sys_spu_thread_initialize", nullptr},
-        {173, "sys_spu_thread_group_start", nullptr},
-        {178, "sys_spu_thread_group_join", nullptr},
+        {170, "sys_spu_thread_group_create", sysSpuThreadGroupCreate},
+        {171, "sys_spu_thread_group_destroy", sysSpuThreadGroupDestroy},
+        {172, "sys_spu_thread_initialize", sysSpuThreadInitialize},
+        {173, "sys_spu_thread_group_start", sysSpuThreadGroupStart},
+        {177, "sys_spu_thread_group_terminate", sysSpuThreadGroupTerminate},
+        {178, "sys_spu_thread_group_join", sysSpuThreadGroupJoin},
         {181, "sys_spu_thread_write_ls", nullptr},
         {182, "sys_spu_thread_read_ls", nullptr},
+        {185, "sys_spu_thread_group_connect_event", sysSpuThreadGroupConnectEvent},
+        {186, "sys_spu_thread_group_disconnect_event", sysSpuThreadGroupDisconnectEvent},
         {190, "sys_spu_thread_write_spu_mb", nullptr},
-        {191, "sys_spu_thread_connect_event", nullptr},
-        {192, "sys_spu_thread_disconnect_event", nullptr},
+        {191, "sys_spu_thread_connect_event", sysSpuThreadConnectEvent},
+        {192, "sys_spu_thread_disconnect_event", sysSpuThreadDisconnectEvent},
         {193, "sys_spu_thread_bind_queue", nullptr},
         {194, "sys_spu_thread_unbind_queue", nullptr},
+        {250, "sys_spu_thread_group_set_cooperative_victims", sysSpuThreadGroupSetCooperativeVictims},
         {251, "sys_spu_thread_group_connect_event_all_threads", sysSpuThreadGroupConnectEventAllThreads},
-        {252, "sys_spu_thread_group_disconnect_event_all_threads", nullptr},
+        {252, "sys_spu_thread_group_disconnect_event_all_threads", sysSpuThreadGroupDisconnectEventAllThreads},
         {300, "sys_vm_memory_map", nullptr},
         {301, "sys_vm_unmap", nullptr},
         {324, "sys_memory_container_create", sysMemoryContainerCreate},
@@ -168,6 +193,7 @@ constexpr SyscallEntry kSyscalls[] = {
         {348, "sys_memory_allocate", sysMemoryAllocate},
         {349, "sys_memory_free", sysMemoryFree},
         {350, "sys_memory_allocate_from_container", sysMemoryAllocateFromContainer},
+        {351, "sys_memory_get_page_attribute", sysMemoryGetPageAttribute},
         {352, "sys_memory_get_user_memory_size", sysMemoryGetUserMemorySize},
         {402, "sys_tty_read", sysTtyRead},
         {403, "sys_tty_write", sysTtyWrite},

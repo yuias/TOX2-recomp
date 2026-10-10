@@ -1,4 +1,5 @@
-// Startup syscalls: process exit, tty, timers, time base, user memory and memory containers.
+// Startup syscalls: process id, SDK version and exit, tty, timers, time base, user memory, memory
+// containers and page attributes.
 // Behaviour follows RPCS3 `Emu/Cell/lv2/sys_process.cpp`, `sys_tty.cpp`, `sys_timer.cpp`,
 // `sys_time.cpp` and `sys_memory.cpp`. Handlers run under the guest lock.
 
@@ -12,6 +13,7 @@
 #include <format>
 #include <map>
 #include <memory>
+#include <string_view>
 
 #include "core/census.h"
 #include "core/fatal.h"
@@ -21,6 +23,7 @@
 #include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
+#include "lv2/syscalls.h"
 
 namespace tox2 {
 namespace {
@@ -35,6 +38,13 @@ constexpr std::uint32_t kPageSize64k = 0x10000;
 constexpr std::uint64_t kPageSizeFlag1m = 0x400;
 constexpr std::uint64_t kPageSizeFlag64k = 0x200;
 constexpr std::int32_t kTtyChannelMax = 15;
+
+// sys_memory_get_page_attribute: the attribute and access-right values, and the page size per range.
+constexpr std::uint64_t kPageAttributeReadWrite = 0x40000;
+constexpr std::uint64_t kPageAccessAny = 0xF;
+constexpr std::uint32_t kPageSizeStack = 0x1000;
+
+std::uint32_t g_sdk_version = 0;
 
 // A memory container is a slice of the default container's "physical memory" (RPCS3
 // `lv2_memory_container`): creating one charges its size to `Process::user_memory_used`, so
@@ -76,6 +86,35 @@ void sleepFor(Tox2PpuContext* ctx, std::uint8_t* base, std::uint64_t microsecond
 }
 
 }  // namespace
+
+void setProcessSdkVersion(std::uint32_t version) { g_sdk_version = version; }
+
+// 1 sys_process_getpid(): the id is the plain return value.
+void sysProcessGetPid(Tox2PpuContext* ctx, std::uint8_t* base) {
+    (void)base;
+    ctx->gpr[3] = kProcessId;
+}
+
+// 14 sys_process_is_spu_lock_line_reservation_address(u32 addr, u64 flags): memory that a process owns
+// qualifies; the flags are not looked at.
+void sysProcessIsSpuLockLineReservationAddress(Tox2PpuContext* ctx, std::uint8_t* base) {
+    (void)base;
+    const char* range = guestRangeName(static_cast<std::uint32_t>(ctx->gpr[3]));
+    const bool owned = range != nullptr && (std::string_view(range) == "main" || std::string_view(range) == "user1m" ||
+                                            std::string_view(range) == "user64k");
+    setResult(ctx, owned ? kCellOk : kCellEperm);
+}
+
+// 25 sys_process_get_sdk_version(u32 pid, u32* version): the pid is not looked at.
+void sysProcessGetSdkVersion(Tox2PpuContext* ctx, std::uint8_t* base) {
+    const auto version = static_cast<std::uint32_t>(ctx->gpr[4]);
+    if (version == 0 || !process().memory.isCommitted(version, 4)) {
+        setResult(ctx, kCellEfault);
+        return;
+    }
+    tox2Write32(base, version, g_sdk_version);
+    setResult(ctx, kCellOk);
+}
 
 // 22 _sys_process_exit(s32 status, ...)
 void sysProcessExit(Tox2PpuContext* ctx, std::uint8_t* base) {
@@ -310,6 +349,30 @@ void sysMemoryAllocateFromContainer(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResult(ctx, kCellOk);
 }
 
+// 351 sys_memory_get_page_attribute(u32 addr, sys_page_attr_t* attr), attr = {u64 attribute,
+// u64 access_right, u32 page_size, u32 pad}: committed memory is read/write for everyone, and the
+// page size depends on the range that holds it.
+void sysMemoryGetPageAttribute(Tox2PpuContext* ctx, std::uint8_t* base) {
+    const auto addr = static_cast<std::uint32_t>(ctx->gpr[3]);
+    const auto attr = static_cast<std::uint32_t>(ctx->gpr[4]);
+    const Process& p = process();
+    if (!p.memory.isCommitted(addr, 1)) {
+        setResult(ctx, kCellEinval);
+        return;
+    }
+    if (attr == 0 || !p.memory.isCommitted(attr, 24)) {
+        setResult(ctx, kCellEfault);
+        return;
+    }
+    const std::string_view range = guestRangeName(addr) != nullptr ? guestRangeName(addr) : "";
+    const std::uint32_t page_size = range == "user1m" ? kPageSize1m : range == "stack" ? kPageSizeStack : kPageSize64k;
+    tox2Write64(base, attr, kPageAttributeReadWrite);
+    tox2Write64(base, attr + 8, kPageAccessAny);
+    tox2Write32(base, attr + 16, page_size);
+    tox2Write32(base, attr + 20, 0);
+    setResult(ctx, kCellOk);
+}
+
 // 988: not in RPCS3's table. The game issues it as `sc 988(kind, 0)` and ignores the result: kind 1
 // at the start of its exit functions, which end with `sys_process_exit`, kind 4 at the start of
 // `abort()`, ahead of the tty text "abort() is called from ...". It looks like a notification to a
@@ -318,6 +381,8 @@ void sysExitNotification(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResult(ctx, kCellOk);
 }
+
+bool memoryContainerExists(std::uint32_t id) { return g_containers.find(id) != nullptr; }
 
 void resetMemoryContainers() {
     g_containers = IdMap<MemoryContainer>(kContainerIdBase, 1);

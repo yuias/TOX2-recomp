@@ -7,6 +7,13 @@
 
 namespace tox2 {
 
+// The process id that sys_process_getpid reports and that unnamed event ports use in their source.
+inline constexpr uint32_t kProcessId = 1;
+
+// The SDK version that sys_process_get_sdk_version reports (taken from the executable's process
+// parameters). Zero until set.
+void setProcessSdkVersion(uint32_t version);
+
 // Arguments arrive in r3..r10 (syscalls) or r3..r8 (HLE calls); the result goes to r3.
 using GuestHandler = void (*)(Tox2PpuContext* ctx, uint8_t* base);
 

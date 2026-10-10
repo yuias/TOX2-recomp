@@ -1,4 +1,4 @@
-// lv2 event flags (syscalls 82, 83, 85, 87, 118, 132, 139), event queues (128-130, 133) and local
+// lv2 event flags (syscalls 82, 83, 85, 87, 118, 132, 139), event queues (128-131, 133) and local
 // event ports (134-138). Behaviour follows RPCS3 `Emu/Cell/lv2/sys_event_flag.cpp` and
 // `sys_event.cpp`. Handlers run under the guest lock; a waiting call parks in blockingWait, which
 // gives the lock up. Event queues support IPC keys (a non-zero key is unique among live queues);
@@ -19,6 +19,7 @@
 #include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
+#include "lv2/syscalls.h"
 
 namespace tox2 {
 namespace {
@@ -37,7 +38,6 @@ constexpr std::uint32_t kSpuQueue = 2;
 constexpr std::uint32_t kQueueDestroyForce = 1;
 constexpr std::uint32_t kPortLocal = 1;
 constexpr std::uint32_t kPortIpc = 3;
-constexpr std::uint32_t kProcessId = 1;  // RPCS3 `process_getpid`
 
 // Event flags -------------------------------------------------------------------------------------
 
@@ -435,6 +435,39 @@ void sysEventQueueReceive(Tox2PpuContext* ctx, std::uint8_t* base) {
     }
     if (waiter.code == kCellOk) deliver(waiter.event);
     setResultCode(ctx, waiter.code);
+}
+
+// 131 sys_event_queue_tryreceive(u32 id, sys_event_t* events, s32 size, u32* number): moves up to
+// `size` stored events, oldest first, into the array as {source, data1, data2, data3} (8 bytes each)
+// and reports how many. Never waits.
+void sysEventQueueTryReceive(Tox2PpuContext* ctx, std::uint8_t* base) {
+    constexpr std::uint32_t kEventSize = 32;
+    const auto queue = g_queues.find(arg32(ctx, 3));
+    const std::uint32_t array = arg32(ctx, 4);
+    const std::int32_t size = static_cast<std::int32_t>(ctx->gpr[5]);
+    const std::uint32_t number = arg32(ctx, 6);
+    if (queue == nullptr) {
+        setResultCode(ctx, kCellEsrch);
+        return;
+    }
+    const auto count = static_cast<std::uint32_t>(std::min<std::size_t>(queue->events.size(), size > 0 ? size : 0));
+    const Process& p = process();
+    if (number == 0 || !p.memory.isCommitted(number, 4) ||
+        (count != 0 && (array == 0 || !p.memory.isCommitted(array, count * kEventSize)))) {
+        setResultCode(ctx, kCellEfault);
+        return;
+    }
+    for (std::uint32_t i = 0; i < count; i++) {
+        const Event& event = queue->events.front();
+        const std::uint32_t at = array + i * kEventSize;
+        tox2Write64(base, at, event.source);
+        tox2Write64(base, at + 8, event.data1);
+        tox2Write64(base, at + 16, event.data2);
+        tox2Write64(base, at + 24, event.data3);
+        queue->events.pop_front();
+    }
+    tox2Write32(base, number, count);
+    setResultCode(ctx, kCellOk);
 }
 
 // 133 sys_event_queue_drain(u32 id)

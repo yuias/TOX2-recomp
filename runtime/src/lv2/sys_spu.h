@@ -4,20 +4,12 @@
 
 namespace tox2 {
 
-// SPU thread groups exist only as ids: the game's SPURS instance asks for one, but no SPU thread
-// is ever created. Ids follow RPCS3 `Emu/Cell/lv2/sys_spu.h` `lv2_spu_group` (base 0x04000100,
-// step 0x100, 255 slots). Call under the guest lock.
+// SPU thread groups are bookkeeping only: groups, threads, their images and event connections are
+// recorded and validated, but no SPU thread ever runs. Starting a group ends the run with
+// ExitCode::Unsupported after logging what would have started. Ids: groups 0x04000100 + slot * 0x100
+// (255 slots), threads (n << 24) | (group id & 0xFFFFFF). Handlers run under the guest lock.
 
-// Allocates a group id, or returns 0 when every slot is taken.
-std::uint32_t createSpuThreadGroup();
-
-// Releases `id`; unknown ids are ignored.
-void destroySpuThreadGroup(std::uint32_t id);
-
-// True while `id` was created and not destroyed.
-bool spuThreadGroupExists(std::uint32_t id);
-
-// Forgets every group. Intended for tests.
+// Forgets every group and thread and restarts the thread counter. Intended for tests.
 void resetSpuThreadGroups();
 
 // An SPU ELF imported with spuImageImport. `segs` is the guest address of the segment array that the
