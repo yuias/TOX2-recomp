@@ -20,6 +20,38 @@ function(tox2_spu_add_header_check)
   set_tests_properties(spu_header_check PROPERTIES PASS_REGULAR_EXPRESSION "spu header ok")
 endfunction()
 
+# Adds the generated SPU tree and its link test when TOX2_PPU_GENERATED_DIR holds spu/spu_sources.cmake
+# (written by 'ps3tool spu-emit --out <dir>/spu'). Call after tox2_spu_stub is defined.
+# tox2_spu_generated links no hook library; each consumer picks the stub or the real runtime.
+function(tox2_spu_add_generated_tree)
+  if(TOX2_PPU_GENERATED_DIR STREQUAL "")
+    return()
+  endif()
+
+  cmake_path(ABSOLUTE_PATH TOX2_PPU_GENERATED_DIR BASE_DIRECTORY "${CMAKE_SOURCE_DIR}"
+             OUTPUT_VARIABLE generated_dir)
+  set(sources_file "${generated_dir}/spu/spu_sources.cmake")
+  if(NOT EXISTS "${sources_file}")
+    message(STATUS "TOX2: generated SPU code not found (${sources_file}); spu_link not registered. "
+      "Generate it with: python tools/ps3tool.py spu-emit --out ${TOX2_PPU_GENERATED_DIR}/spu")
+    return()
+  endif()
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${sources_file}")
+  include("${sources_file}")
+  message(STATUS "TOX2: generated SPU code from ${generated_dir}/spu")
+
+  add_library(tox2_spu_generated STATIC ${TOX2_SPU_GENERATED_SOURCES})
+  tox2_ppu_codegen_options(tox2_spu_generated)
+  target_include_directories(tox2_spu_generated PUBLIC "${generated_dir}/spu")
+
+  add_executable(tox2_spu_link_test runtime/tests/spu_link_test.cpp)
+  target_compile_options(tox2_spu_link_test PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_link_libraries(tox2_spu_link_test PRIVATE tox2_spu_generated tox2_spu_stub)
+
+  add_test(NAME spu_link COMMAND tox2_spu_link_test)
+  set_tests_properties(spu_link PROPERTIES PASS_REGULAR_EXPRESSION "spu link ok")
+endfunction()
+
 # Semantics harness: hand-written cases are generated into C (tools/tests/spu_semantics) through the
 # real emitter, compiled like emitted code and run natively. The driver supplies every runtime hook,
 # so nothing is linked. Needs Python3_EXECUTABLE and tox2_ppu_codegen_options; call it after

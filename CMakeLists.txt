@@ -32,6 +32,10 @@ add_library(tox2_ppu_stub STATIC runtime/src/ppu_stub_runtime.cpp)
 target_compile_options(tox2_ppu_stub PRIVATE -march=x86-64-v3 -Wall -Wextra)
 target_include_directories(tox2_ppu_stub PUBLIC runtime/include)
 
+add_library(tox2_spu_stub STATIC runtime/src/spu_stub_runtime.cpp)
+target_compile_options(tox2_spu_stub PRIVATE -march=x86-64-v3 -Wall -Wextra)
+target_include_directories(tox2_spu_stub PUBLIC runtime/include)
+
 set(TOX2_EBOOT_ELF "" CACHE FILEPATH "Decrypted EBOOT.elf for optional tests")
 # The file tox2_inputs produces; a build step, so it need not exist yet.
 if(TOX2_EBOOT_ELF STREQUAL "" AND NOT TOX2_EBOOT_BIN STREQUAL "")
@@ -39,6 +43,7 @@ if(TOX2_EBOOT_ELF STREQUAL "" AND NOT TOX2_EBOOT_BIN STREQUAL "")
 endif()
 
 tox2_ppu_add_generated_tree()
+tox2_spu_add_generated_tree()
 tox2_runtime_add_core()
 tox2_decrypt_add()
 tox2_media_add()
