@@ -9,8 +9,8 @@ supply your own `EBOOT.elf`, and all tool output is written to ignored directori
 
 Current state: work in progress. The tools and the runtime were taken over from an earlier
 recompilation project of another game and are being pointed at this one. The executable is
-recovered, recompiled to C and linked, and `tox2_game` runs its start-up code for a few seconds
-before it stops at a guest fault; the game cannot be played. The SPU code (8 embedded SPU images,
+recovered, recompiled to C and linked, and `tox2_game` runs its start-up code for a few seconds,
+issues a few flips and ends when the game calls `abort()` itself; the game cannot be played. The SPU code (8 embedded SPU images,
 SPURS and raw SPU thread groups), the `TLFILE.TLDAT` / `FILEHEADER.TOFHDB` data archive and the
 Bink movies are not handled. See [Status](docs/status.md).
 
@@ -90,8 +90,8 @@ Every build parameter, the CMake variables and the test builds are described in
 build/release/bin/tox2_game.exe --game-dir <game-dir>
 ```
 
-In the headless runs so far the game ended within a few seconds at a guest fault in its start-up
-code, and nothing was drawn; [Status](docs/status.md) has the details. Closing the window ends the run. Game data and
+In the headless runs so far the game ended within a few seconds, when it called `abort()` in its
+start-up code, and nothing was drawn; [Status](docs/status.md) has the details. Closing the window ends the run. Game data and
 saves are written to `build/release/hdd`; `tools/build.ps1 -Clean` deletes them together with the
 rest of `build/release`.
 

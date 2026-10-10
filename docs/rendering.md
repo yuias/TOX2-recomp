@@ -2,9 +2,9 @@
 
 Everything on this page is inherited from the project this one was derived from, and it was
 written against that game. For *Tales of Xillia 2* the fake RSX has run only until the game's
-start-up stops at a guest fault (see [Status](status.md)): in the three headless runs the game
-initialised GCM, produced 186 FIFO headers and issued no flip, so no frame was built, drawn or
-displayed. The frame builder, the renderer, the shader translators and the capture and replay
+start-up ends (see [Status](status.md)): in the three headless runs the game initialised GCM,
+produced 939 or 563 FIFO headers and issued 5 or 3 flips, which the fake RSX executed; no renderer
+ran, so no frame was built, drawn or displayed. The frame builder, the renderer, the shader translators and the capture and replay
 tools have not been exercised with this game's commands. The statements below about what the
 game does (frame rate, flips, vblank waits) describe the inherited behaviour and are unverified
 for this game.
@@ -132,8 +132,8 @@ the earlier game's reference image does not apply here, so the test only replays
 passes when the summary line is printed and the validation layer reports no error. With a SHA-256
 set, the reference image must exist and match it, and the thresholds apply. To make a capture, run
 `tox2_game` with `--rsx-capture` on the frame you want and copy the file to
-`generated/rsx/captures/title.tox2cap`. This game has not reached a flip yet, so no capture of it
-exists.
+`generated/rsx/captures/title.tox2cap`. No capture of this game exists yet: its flips have only run
+without a renderer.
 
 Three further renderer tests are registered: `render_core` (renders synthetic command lists, and
 skips itself when there is no Vulkan device), and `vp_translator` and `fp_translator` (need no

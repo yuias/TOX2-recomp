@@ -102,15 +102,16 @@ exits:
 | 7 | All guest threads ended without a process exit | `tox2: stop: no guest threads left` |
 
 A fatal stop also prints the registers and the call trace (the most recent function entries) of
-the faulting guest thread. The current runs of this game end with code 3 and the stop line
-`tox2: stop: fatal guest fault: write to guest address 0x00000000` (see [Status](status.md)). The runtime never calls
+the faulting guest thread. The current runs of this game end with code 0 and the stop line
+`tox2: stop: process exit status 1`, after the game printed its own `abort()` text (see
+[Status](status.md)). The runtime never calls
 `abort`: the CRT and Windows error dialogs are disabled, so a run always ends with an exit code,
 also when it is started from a script.
 
 ## Examples by purpose
 
 A short unattended run that keeps its log and starts from an empty hdd directory, like the
-`game_boot` test (this game stops at a guest fault within the 20 s; see [Status](status.md)):
+`game_boot` test (this game ends itself within the 20 s; see [Status](status.md)):
 
 ```sh
 tox2_game --game-dir <game-dir> --no-window --seconds 20 --hdd-dir <empty-dir> --log run.log
@@ -122,8 +123,8 @@ The same run with an explicit executable, for a game directory that does not hol
 tox2_game --game-dir <game-dir> --elf <elf> --no-window --seconds 20 --hdd-dir <empty-dir>
 ```
 
-Every 30th frame of the first 30 s as PNG files, without a window (the game has not drawn a frame
-yet, so no file appears until a run gets as far as its first flip):
+Every 30th frame of the first 30 s as PNG files, without a window (the game ends after its first
+few flips, so few files appear):
 
 ```sh
 tox2_game --game-dir <game-dir> --no-window --seconds 30 --dump-frames out/frames --dump-frames-every 30

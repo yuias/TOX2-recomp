@@ -15,13 +15,15 @@ The executable imports 10 `cellAudio` functions and 15 `cellAtrac` functions:
 | Module | Imported | Handler in the runtime |
 | --- | --- | --- |
 | `cellAudio` | `cellAudioInit`, `cellAudioQuit`, `cellAudioPortOpen`, `cellAudioPortStart`, `cellAudioPortStop`, `cellAudioPortClose`, `cellAudioGetPortConfig`, `cellAudioSetNotifyEventQueue`, `cellAudioRemoveNotifyEventQueue` | yes |
-| `cellAudio` | `cellAudioSetPortLevel` | no (default handler) |
+| `cellAudio` | `cellAudioSetPortLevel` | yes |
 | `cellAtrac` | `cellAtracSetDataAndGetMemSize`, `cellAtracDeleteDecoder`, `cellAtracDecode`, `cellAtracGetStreamDataInfo`, `cellAtracAddStreamData`, `cellAtracIsSecondBufferNeeded`, `cellAtracGetSecondBufferInfo`, `cellAtracSetSecondBuffer`, `cellAtracGetLoopInfo`, `cellAtracSetLoopNum`, `cellAtracGetChannel`, `cellAtracGetMaxSample` | yes |
 | `cellAtrac` | `cellAtracCreateDecoderExt`, `cellAtracGetInternalErrorInfo`, `cellAtracGetVacantSize` | no (default handler) |
 
-The `cellAudioOut` calls come from `cellSysutil`: only `cellAudioOutGetState` has a handler;
-`cellAudioOutConfigure`, `cellAudioOutGetSoundAvailability` and `cellAudioOutGetConfiguration` are
-default-handled.
+The `cellAudioOut` calls come from `cellSysutil` and all four have handlers
+(`runtime/src/hle/cell_sysutil.cpp`): `cellAudioOutGetState`, `cellAudioOutGetConfiguration`,
+`cellAudioOutGetSoundAvailability` and `cellAudioOutConfigure`. They share one list of sound modes,
+which holds LPCM 2 ch at 48 kHz only, because the mixer outputs stereo, and one stored setting
+(channel count, coding type and downmixer). The game had not called them in the headless runs.
 
 The game does not import `cellAtracCreateDecoder`, `cellAtracGetRemainFrame` or
 `cellAtracGetSoundInfo`, which the runtime implements. It imports `cellAtracCreateDecoderExt`,
@@ -156,13 +158,16 @@ short is valid up to its last full second. `tox2_audiotool wavstat` reads it.
 
 ## cellAudio
 
-All 11 `cellAudio` functions the earlier game imported are implemented (`runtime/src/hle/cell_audio.cpp` for the handlers,
+All 11 `cellAudio` functions the earlier game imported and `cellAudioSetPortLevel` are implemented (`runtime/src/hle/cell_audio.cpp` for the handlers,
 `cell_audio_ports.*` for the state): `cellAudioInit`, `cellAudioQuit`, `cellAudioPortOpen`,
 `cellAudioPortStart`, `cellAudioPortStop`, `cellAudioPortClose`, `cellAudioGetPortConfig`,
 `cellAudioGetPortBlockTag`, `cellAudioGetPortTimestamp`, `cellAudioSetNotifyEventQueue` and
-`cellAudioRemoveNotifyEventQueue`. This game does not import `cellAudioGetPortBlockTag` and `cellAudioGetPortTimestamp`. Other
-functions (for example `cellAudioCreateNotifyEventQueue`, `cellAudioAddData` and the
-`cellAudioSetPortLevel` that this game imports) are not implemented.
+`cellAudioRemoveNotifyEventQueue`. `cellAudioSetPortLevel(port, level)` sets the level of an open
+port (the mixer multiplies the port's samples by it; a negative level or NaN is refused with
+`CELL_AUDIO_ERROR_PARAM`, a closed port is `CELL_AUDIO_ERROR_PORT_NOT_OPEN`), and a reopened port
+starts at 1.0 again. This game does not import `cellAudioGetPortBlockTag` and `cellAudioGetPortTimestamp`. Other
+functions (for example `cellAudioCreateNotifyEventQueue` and `cellAudioAddData`) are not
+implemented.
 
 - **Ports.** There are 8 ports. The earlier game opened port 0 with 8 channels, 8 blocks, no
   attributes and level 1.0 (the logged line is below). Channel counts 0 (mono), 2 and 8 and block counts 2, 4, 8,

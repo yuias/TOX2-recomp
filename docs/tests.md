@@ -45,14 +45,15 @@ The pin file `cmake/game_boot.cmake` holds the arguments and the milestone:
 
 ```cmake
 set(TOX2_GAME_BOOT_ARGS "--no-window --seconds 20 --hdd-dir \"${CMAKE_BINARY_DIR}/game_hdd\"")
-set(TOX2_GAME_BOOT_MILESTONE "\\[t 01000000\\] tox2: first sc 85 sys_event_flag_wait")
+set(TOX2_GAME_BOOT_MILESTONE "\\[t 01000000\\] tox2: first sc 988 ")
 ```
 
 A milestone is a `tox2: first ...` line written by the main thread (thread id `01000000`), because
 a line from another thread can appear or not depending on scheduling. The current one is the
-main thread's first wait on an event flag (`sys_event_flag_wait`, syscall 85). It comes after the
-game-data check and, on a run with an empty hdd directory, after the install of the game data on
-another thread; the run then ends at a guest fault. The first run of the test copies the 3 GB
+main thread's first call of system call 988 (default-handled), the last main-thread first line
+before the game calls `abort()` itself. The lines after it (`sys_tty_write`, `sys_process_exit`)
+belong to the abort path, which an earlier failure would also reach, so they are not used. The
+run ends with `tox2: stop: process exit status 1`. The first run of the test copies the 3 GB
 `TLFILE.TLDAT` into `build/<preset>/game_hdd`, where it stays for the later runs. The milestone guards how far the main thread gets; it does not mean that the game works.
 
 The pin file started with a placeholder milestone (the first `hle` or `sc` line of the main
