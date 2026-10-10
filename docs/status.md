@@ -106,7 +106,7 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   SPU system calls only `sys_spu_initialize` and the event connection of a thread group keep
   bookkeeping; no SPU code runs, and SPURS workloads are not scheduled. Most `cellSpurs` calls the
   game made are default-handled and return success without creating anything. Whether and how to
-  run SPU code is undecided.
+  run SPU code is undecided; [SPU usage](spu.md) describes what the game runs on the SPUs.
 - The game's data archive `TLFILE.TLDAT` (about 3 GB) and its index `FILEHEADER.TOFHDB` are not
   read, and no reader for their format exists. The file system code uses 64-bit offsets (see
   [Virtual file system](virtual-file-system.md#large-files)), but no read of the real archive has
