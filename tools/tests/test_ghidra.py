@@ -440,10 +440,10 @@ class RealEbootSeedsTest(unittest.TestCase):
             self.skipTest("TOX2_EBOOT_ELF does not point to a file")
         elf = ElfFile.from_path(path)
         toc, seeds = ghidra.collect_seeds(elf)
-        self.assertEqual(toc, 0x00109F80)
+        self.assertEqual(toc, 0x010B6330)
         self.assertEqual(seeds, sorted(set(seeds)))
-        self.assertIn(0x0007484C, seeds)
-        self.assertEqual(cell.find_text_range(elf), (0x00010230, 0x000DCF2C))
+        self.assertIn(0x00010240, seeds)
+        self.assertEqual(cell.find_text_range(elf), (0x00010240, 0x00C8F3D4))
 
 
 if __name__ == "__main__":

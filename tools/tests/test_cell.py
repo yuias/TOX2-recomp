@@ -235,41 +235,41 @@ class RealEbootCellTest(unittest.TestCase):
         cls.elf = ElfFile.from_path(path)
 
     def test_text_range(self):
-        self.assertEqual(cell.find_text_range(self.elf), (0x00010230, 0x000DCF2C))
+        self.assertEqual(cell.find_text_range(self.elf), (0x00010240, 0x00C8F3D4))
 
     def test_code_range_adds_init_and_fini_but_not_the_stubs(self):
-        self.assertEqual(cell.find_code_range(self.elf), (0x00010200, 0x000DCF50))
+        self.assertEqual(cell.find_code_range(self.elf), (0x00010200, 0x00C8F408))
 
     def test_entry(self):
         entry = cell.parse_entry(self.elf)
         self.assertEqual(entry.kind, "opd")
-        self.assertEqual(entry.opd_addr, 0x00101638)
-        self.assertEqual(entry.func, 0x0007484C)
-        self.assertEqual(entry.toc, 0x00109F80)
+        self.assertEqual(entry.opd_addr, 0x0105DDB8)
+        self.assertEqual(entry.func, 0x00010240)
+        self.assertEqual(entry.toc, 0x010B6330)
 
     def test_opd_section_absent(self):
         self.assertIsNone(cell.parse_opd_section(self.elf))
 
     def test_params_and_tls(self):
-        self.assertEqual(cell.parse_proc_param(self.elf)["addr"], 0x000F1B60)
+        self.assertEqual(cell.parse_proc_param(self.elf)["addr"], 0x0104A7C0)
         prx = cell.parse_prx_param(self.elf)
-        self.assertEqual(prx["addr"], 0x000F1B88)
+        self.assertEqual(prx["addr"], 0x0104A7E8)
         self.assertEqual((prx["libstub_start"], prx["libstub_end"]),
-                         (0x000DE7A0, 0x000DEA34))
+                         (0x00E53164, 0x00E53450))
         tls = cell.parse_tls(self.elf)
         self.assertEqual((tls["vaddr"], tls["filesz"], tls["memsz"]),
-                         (0x0010245C, 4, 0x110))
+                         (0x010C99A4, 4, 0x1B4))
 
     def test_imports(self):
         prx = cell.parse_prx_param(self.elf)
         mods = cell.parse_imports(self.elf, prx)
         counts = {m.name: len(m.functions) for m in mods}
-        self.assertEqual(len(mods), 15)
-        self.assertEqual(sum(counts.values()), 166)
+        self.assertEqual(len(mods), 17)
+        self.assertEqual(sum(counts.values()), 173)
         self.assertEqual(counts["sys_io"], 6)
-        self.assertEqual(counts["cellSpurs"], 4)
-        self.assertEqual(counts["cellSail"], 27)
-        self.assertEqual(counts["sysPrxForUser"], 23)
+        self.assertEqual(counts["cellSpurs"], 30)
+        self.assertEqual(counts["cellSysutil"], 23)
+        self.assertEqual(counts["sysPrxForUser"], 20)
         self.assertFalse(any(m.unknown_layout for m in mods))
 
     def test_exports_parse(self):

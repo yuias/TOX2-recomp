@@ -475,10 +475,10 @@ class RealGhidraDiffTest(unittest.TestCase):
             report = json.loads(out_path.read_text(encoding="utf-8"))
         self.assertEqual(code, 0)
         self.assertLess(elapsed, 60)
-        self.assertEqual(report["total_words"], 209727)
-        self.assertEqual(report["range"], {"start": "0x00010230", "end": "0x000dcf2c"})
-        self.assertEqual(sum(report["ghidra_kinds"].values()), 209727)
-        self.assertEqual(sum(report["categories"].values()), 209727)
+        self.assertEqual(report["total_words"], 3275877)
+        self.assertEqual(report["range"], {"start": "0x00010240", "end": "0x00c8f3d4"})
+        self.assertEqual(sum(report["ghidra_kinds"].values()), 3275877)
+        self.assertEqual(sum(report["categories"].values()), 3275877)
         self.assertEqual(report["ghidra_kinds"]["code"], sum(
             report["categories"][k] for k in (
                 "match", "known_difference", "ghidra_code_we_unknown", "mnemonic_mismatch",
