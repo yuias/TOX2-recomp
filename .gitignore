@@ -3,6 +3,7 @@ build/
 build-compdb/
 out/
 dist/
+licenses/
 
 CMakeLists.txt.user
 CMakeCache.txt
@@ -30,3 +31,19 @@ CMakeUserPresets.json
 
 # Claude Code
 .claude/
+
+# User-local VFS configurations (real host paths)
+*.local.json
+
+# Generated analysis output and user-supplied game binaries
+/generated/
+/game/
+*.elf
+*.self
+*.sprx
+*.prx
+*.sdat
+*.edat
+EBOOT.BIN
+__pycache__/
+*.pyc

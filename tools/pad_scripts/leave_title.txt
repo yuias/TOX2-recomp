@@ -1,0 +1,8 @@
+# Leaves the title screen of BLJM61048: taps circle (the game's confirm button) to skip the
+# notice screen and the start-up movies and to pick NEW GAME. Used by the game_input test.
+#
+# The first tap is a few seconds in, before any movie plays (movies start about 25-28 s after start
+# when nothing is pressed). The repeated taps are what make the script tolerant of slower or faster
+# start-up: each one skips whichever screen is showing, so no absolute time has to match a screen.
+# The last tap is past the point where NEW GAME has been confirmed in a typical run.
+4 tap circle every 2 until 30

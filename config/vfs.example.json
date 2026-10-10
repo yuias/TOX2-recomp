@@ -1,0 +1,19 @@
+{
+  "version": 1,
+
+  "game_dir": "/path/to/BLJM61048",
+  "hdd_dir": "/path/to/dal_hdd",
+  "sdata_cache": "/path/to/sdata_cache",
+
+  "mounts": {
+    "/dev_usb000": {
+      "host": "usb_stick",
+      "read_only": false,
+      "block_size": 4096
+    }
+  },
+
+  "files": {
+    "/dev_bdvd/PS3_GAME/USRDIR/example.sdat": "/path/to/decrypted/example.sdat"
+  }
+}

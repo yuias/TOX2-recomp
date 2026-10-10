@@ -1,0 +1,495 @@
+// Self-checking tests for the vertex program translator. No Vulkan device is needed: the shaders
+// are compiled to SPIR-V only.
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
+#include <system_error>
+#include <vector>
+
+#include "render/shader_compiler.h"
+#include "render/vp_translator.h"
+
+namespace {
+
+int g_passed;
+int g_failed;
+
+#define CHECK(cond)                                                                \
+    do {                                                                           \
+        if (cond) {                                                                \
+            g_passed++;                                                            \
+        } else {                                                                   \
+            g_failed++;                                                            \
+            std::fprintf(stderr, "check failed (line %d): %s\n", __LINE__, #cond); \
+        }                                                                          \
+    } while (0)
+
+bool contains(const std::string& text, const std::string& part) { return text.find(part) != std::string::npos; }
+
+bool hasReport(const dal::GlslResult& result, const std::string& part) {
+    return std::any_of(result.unimplemented.begin(), result.unimplemented.end(),
+                       [&](const std::string& entry) { return contains(entry, part); });
+}
+
+// ---- Minimal vertex program assembler (one vector and one scalar op per instruction) ----
+
+struct Src {
+    std::uint32_t type = 1;  // 1 temp, 2 input, 3 constant, 0 invalid
+    std::uint32_t temp = 0;
+    const char* swizzle = "xyzw";
+    bool negate = false;
+
+    std::uint32_t encode() const {
+        std::uint32_t lane[4];
+        for (int i = 0; i < 4; i++) {
+            lane[i] = static_cast<std::uint32_t>(std::string("xyzw").find(swizzle[i]));
+        }
+        return type | (temp << 2) | (lane[3] << 8) | (lane[2] << 10) | (lane[1] << 12) | (lane[0] << 14) |
+               (negate ? 1u << 16 : 0u);
+    }
+};
+
+Src temp(std::uint32_t index, const char* swizzle = "xyzw") { return {1, index, swizzle, false}; }
+Src input(const char* swizzle = "xyzw") { return {2, 0, swizzle, false}; }
+Src constant(const char* swizzle = "xyzw") { return {3, 0, swizzle, false}; }
+
+struct Asm {
+    std::uint32_t vec_op = 0, sca_op = 0;
+    std::uint32_t vec_temp = 63, sca_temp = 63;
+    std::uint32_t slot = 31;
+    bool vec_to_output = true;
+    std::uint32_t vec_mask = 0xf, sca_mask = 0;  // bit 0 = x ... bit 3 = w
+    std::uint32_t input_index = 0, constant_index = 0;
+    Src src0 = {2, 0, "xyzw", false}, src1 = {3, 0, "xyzw", false}, src2 = {3, 0, "xyzw", false};
+    std::uint32_t cond = 7;
+    bool cond_enable = false, saturate = false, cc_update = false, relative_const = false, end = false;
+    std::uint32_t abs_bits = 0;
+
+    std::array<std::uint32_t, 4> words() const {
+        const std::uint32_t s0 = src0.encode(), s1 = src1.encode(), s2 = src2.encode();
+        std::uint32_t w0 = (3u << 2) | (2u << 4) | (1u << 6) | (cond << 10) | (vec_temp << 15) | (abs_bits << 21) |
+                           (vec_to_output ? 1u << 30 : 0u);
+        if (cond_enable) w0 |= 1u << 13;
+        if (cc_update) w0 |= 1u << 14;
+        if (saturate) w0 |= 1u << 26;
+        const std::uint32_t w1 =
+                (s0 >> 9) | (input_index << 8) | (constant_index << 12) | (vec_op << 22) | (sca_op << 27);
+        const std::uint32_t w2 = (s2 >> 11) | (s1 << 6) | ((s0 & 0x1ff) << 23);
+        std::uint32_t w3 =
+                (end ? 1u : 0u) | (relative_const ? 2u : 0u) | (slot << 2) | (sca_temp << 7) | ((s2 & 0x7ff) << 21);
+        // The write mask bits run w, z, y, x from low to high.
+        const auto spread = [](std::uint32_t mask, unsigned base) {
+            return (((mask >> 3) & 1u) << base) | (((mask >> 2) & 1u) << (base + 1)) |
+                   (((mask >> 1) & 1u) << (base + 2)) | ((mask & 1u) << (base + 3));
+        };
+        w3 |= spread(vec_mask, 13) | spread(sca_mask, 17);
+        return {w0, w1, w2, w3};
+    }
+};
+
+std::vector<std::uint32_t> program(const std::vector<Asm>& instructions) {
+    std::vector<std::uint32_t> words;
+    for (const Asm& in : instructions) {
+        const auto w = in.words();
+        words.insert(words.end(), w.begin(), w.end());
+    }
+    return words;
+}
+
+dal::GlslResult translate(const std::vector<Asm>& instructions) {
+    const std::vector<std::uint32_t> words = program(instructions);
+    return dal::translateVertexProgram(words, 0);
+}
+
+// ---- Dumps ----
+
+struct Dump {
+    std::string name;
+    std::vector<std::uint32_t> words;
+};
+
+std::vector<Dump> loadDumps() {
+    std::vector<Dump> dumps;
+#ifdef DAL_RSX_DUMP_DIR
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(DAL_RSX_DUMP_DIR, ec)) {
+        const std::string name = entry.path().filename().string();
+        if (!name.starts_with("vp_") || entry.path().extension() != ".bin") continue;
+        std::ifstream file(entry.path(), std::ios::binary);
+        const std::vector<char> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        if (bytes.size() % 16 != 0) continue;
+        Dump dump{name, {}};
+        for (std::size_t i = 0; i < bytes.size(); i += 4) {
+            dump.words.push_back((static_cast<std::uint32_t>(static_cast<std::uint8_t>(bytes[i])) << 24) |
+                                 (static_cast<std::uint32_t>(static_cast<std::uint8_t>(bytes[i + 1])) << 16) |
+                                 (static_cast<std::uint32_t>(static_cast<std::uint8_t>(bytes[i + 2])) << 8) |
+                                 static_cast<std::uint32_t>(static_cast<std::uint8_t>(bytes[i + 3])));
+        }
+        dumps.push_back(std::move(dump));
+    }
+#endif
+    std::sort(dumps.begin(), dumps.end(), [](const Dump& a, const Dump& b) { return a.name < b.name; });
+    return dumps;
+}
+
+void printHistogram(const std::vector<Dump>& dumps) {
+    std::array<unsigned, 32> vec{}, sca{};
+    for (const Dump& dump : dumps) {
+        for (std::size_t i = 0; i + 4 <= dump.words.size(); i += 4) {
+            vec[(dump.words[i + 1] >> 22) & 0x1f]++;
+            sca[(dump.words[i + 1] >> 27) & 0x1f]++;
+        }
+    }
+    std::printf("vp opcode histogram over %zu dumps:\n", dumps.size());
+    for (int op = 0; op < 32; op++) {
+        if (vec[static_cast<std::size_t>(op)] != 0) {
+            std::printf("  vector 0x%02x: %u\n", op, vec[static_cast<std::size_t>(op)]);
+        }
+    }
+    for (int op = 0; op < 32; op++) {
+        if (sca[static_cast<std::size_t>(op)] != 0) {
+            std::printf("  scalar 0x%02x: %u\n", op, sca[static_cast<std::size_t>(op)]);
+        }
+    }
+}
+
+// Decoded body of each dumped program (all scalar ops are NOP).
+const char* const kFrontColor = "  out_1 = attr_3;\n";
+const char* const kRow1 = "  r_0 = attr_0.yyyy * vp_consts.c[1];\n";
+const char* const kTexCoord = "  out_7.xy = attr_8.xyxx.xy;\n";
+const char* const kRows023 =
+        "  r_0 = fma(attr_0.xxxx, vp_consts.c[0], r_0);\n"
+        "  r_0 = fma(attr_0.zzzz, vp_consts.c[2], r_0);\n"
+        "  out_0 = fma(attr_0.wwww, vp_consts.c[3], r_0);\n";
+
+std::string expectedBody(const std::string& name) {
+    if (name.starts_with("vp_30e29a531ca34b4e")) {
+        return std::string(kFrontColor) + kRow1 + kTexCoord + kRows023;
+    }
+    if (name.starts_with("vp_6433cfb568fd74d1")) return std::string(kFrontColor) + kRow1 + kRows023;
+    if (name.starts_with("vp_a00fab88abddf079")) return std::string(kRow1) + kTexCoord + kRows023;
+    return {};
+}
+
+// Attributes read by each dumped program: v[0], v[3] (front colour) and v[8] (TEX0) as applicable.
+std::uint32_t expectedInputs(const std::string& name) {
+    if (name.starts_with("vp_30e29a531ca34b4e")) return 0x109;
+    if (name.starts_with("vp_6433cfb568fd74d1")) return 0x9;  // no texture coordinate
+    if (name.starts_with("vp_a00fab88abddf079")) return 0x101;
+    return 0;
+}
+
+void testDumps() {
+    const std::vector<Dump> dumps = loadDumps();
+    if (dumps.empty()) {
+        std::printf("vp translator: no dumps in generated/rsx, dump tests skipped\n");
+        return;
+    }
+    printHistogram(dumps);
+
+    bool printed = false;
+    int seen = 0;
+    for (const Dump& dump : dumps) {
+        const dal::GlslResult result = dal::translateVertexProgram(dump.words, 0);
+        CHECK(result.ok);
+        CHECK(result.unimplemented.empty());
+        for (const std::string& entry : result.unimplemented) {
+            std::fprintf(stderr, "%s: unimplemented: %s\n", dump.name.c_str(), entry.c_str());
+        }
+        const std::string body = expectedBody(dump.name);
+        CHECK(!body.empty());  // an unknown dump must not skip the comparison silently
+        if (!body.empty()) {
+            CHECK(contains(result.glsl, body));
+            seen++;
+        }
+        CHECK(result.inputs_used == expectedInputs(dump.name));
+
+        auto spirv = dal::compileGlsl(dal::ShaderStage::Vertex, result.glsl, 0xd0d0);
+        CHECK(spirv.has_value());
+        if (!spirv) {
+            std::fprintf(stderr, "%s: %s\n", dump.name.c_str(), spirv.error().c_str());
+            std::fprintf(stderr, "%s\n", result.glsl.c_str());
+        }
+        if (!printed && dump.name.starts_with("vp_30e29a531ca34b4e")) {
+            std::printf("translated %s:\n%s\n", dump.name.c_str(), result.glsl.c_str());
+            printed = true;
+        }
+    }
+#ifdef DAL_RSX_DUMP_DIR
+    CHECK(seen == 3);  // all three known programs must be present once the directory has dumps
+#endif
+}
+
+// ---- Hand-assembled programs ----
+
+void testAssembler() {
+    // The assembler reproduces a decoded instruction word for word: MAD o[0], v[0].wwww, c[3], R0.
+    Asm mad;
+    mad.vec_op = 4;
+    mad.slot = 0;
+    mad.src0 = input("wwww");
+    mad.constant_index = 3;
+    mad.src1 = constant();
+    mad.src2 = temp(0);
+    mad.end = true;
+    const auto w = mad.words();
+    CHECK(w[0] == 0x401f9c6c && w[1] == 0x0100307f && w[2] == 0x8106c0c3 && w[3] == 0x6021ff81);
+}
+
+void testMov() {
+    Asm mov;
+    mov.vec_op = 1;
+    mov.slot = 0;
+    mov.end = true;
+    const dal::GlslResult result = translate({mov});
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "  out_0 = attr_0;\n"));
+    CHECK(result.inputs_used == 1u);
+    auto spirv = dal::compileGlsl(dal::ShaderStage::Vertex, result.glsl, 0xd0d1);
+    CHECK(spirv.has_value());
+    if (!spirv) std::fprintf(stderr, "%s\n", spirv.error().c_str());
+}
+
+void testOperations() {
+    // ADD reads src0 and src2.
+    Asm add;
+    add.vec_op = 3;
+    add.vec_temp = 1;
+    add.src0 = input("xyzw");
+    add.src1 = constant();
+    add.src2 = temp(2, "wzyx");
+    add.src2.negate = true;
+    add.abs_bits = 4;
+    Asm out;
+    out.vec_op = 1;
+    out.slot = 0;
+    out.src0 = temp(1);
+    out.end = true;
+    dal::GlslResult result = translate({add, out});
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "  r_1 = attr_0 + -abs(r_2.wzyx);\n"));
+
+    // Masked scalar write routed to the output slot, saturate, dual destinations.
+    Asm sca;
+    sca.sca_op = 2;  // RCP
+    sca.vec_to_output = false;
+    sca.slot = 3;
+    sca.sca_mask = 0x3;
+    sca.src2 = temp(0, "yyyy");
+    sca.saturate = true;
+    Asm pos;
+    pos.vec_op = 5;  // DP3 into temp and the position
+    pos.vec_temp = 0;
+    pos.slot = 0;
+    pos.src0 = input();
+    pos.src1 = constant("zzzw");
+    pos.end = true;
+    result = translate({sca, pos});
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "  out_3.xy = clamp(vec4(1.0 / r_0.yyyy.x), 0.0, 1.0).xy;\n"));
+    CHECK(contains(result.glsl, "    vec4 res = vec4(dot(attr_0.xyz, vp_consts.c[0].zzzw.xyz));\n"));
+    auto spirv = dal::compileGlsl(dal::ShaderStage::Vertex, result.glsl, 0xd0d2);
+    CHECK(spirv.has_value());
+    if (!spirv) std::fprintf(stderr, "%s\n%s\n", spirv.error().c_str(), result.glsl.c_str());
+}
+
+void testAllOutputsCompile() {
+    // Every vector and scalar op the translator implements, writing every exported slot.
+    std::vector<Asm> instructions;
+    const std::uint32_t slots[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    for (const std::uint32_t slot : slots) {
+        Asm in;
+        in.vec_op = 1;
+        in.slot = slot;
+        instructions.push_back(in);
+    }
+    const std::uint32_t vec_ops[] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22};
+    for (const std::uint32_t op : vec_ops) {
+        Asm in;
+        in.vec_op = op;
+        in.vec_temp = 0;
+        in.src0 = temp(0);
+        in.src2 = temp(1);
+        instructions.push_back(in);
+    }
+    const std::uint32_t sca_ops[] = {1, 2, 3, 4, 5, 6, 7, 13, 14, 15, 16};
+    for (const std::uint32_t op : sca_ops) {
+        Asm in;
+        in.sca_op = op;
+        in.sca_temp = 1;
+        in.sca_mask = 0xf;
+        in.vec_mask = 0;
+        in.src2 = input("xyzw");
+        instructions.push_back(in);
+    }
+    instructions.back().end = true;
+    const dal::GlslResult result = translate(instructions);
+    CHECK(result.ok);
+    if (!result.ok) {
+        for (const std::string& entry : result.unimplemented) std::fprintf(stderr, "%s\n", entry.c_str());
+        return;
+    }
+    CHECK(contains(result.glsl, "(draw.output_mask & 16384u) != 0u ? out_7 : vec4(0.0, 0.0, 0.0, 1.0)"));
+    CHECK(contains(result.glsl, "var_fog = (draw.output_mask & 16u) != 0u ? vec4(out_5.x) :"));
+    // Front and back colours are exported when either of their mask bits is set.
+    CHECK(contains(result.glsl, "var_back_diffuse = (draw.output_mask & 5u) != 0u ? out_3 :"));
+    CHECK(contains(result.glsl, "var_front_specular = (draw.output_mask & 10u) != 0u ? out_2 :"));
+    auto spirv = dal::compileGlsl(dal::ShaderStage::Vertex, result.glsl, 0xd0d3);
+    CHECK(spirv.has_value());
+    if (!spirv) std::fprintf(stderr, "%s\n%s\n", spirv.error().c_str(), result.glsl.c_str());
+}
+
+void testUnwrittenOutputsAreDefault() {
+    Asm pos;
+    pos.vec_op = 1;
+    pos.slot = 0;
+    pos.end = true;
+    const dal::GlslResult result = translate({pos});
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "  var_front_diffuse = vec4(0.0, 0.0, 0.0, 1.0);\n"));
+    CHECK(contains(result.glsl, "  var_tex0 = vec4(0.0, 0.0, 0.0, 1.0);\n"));
+    CHECK(contains(result.glsl, "  gl_PointSize = draw.point_size;\n"));
+
+    // No position write: the body is disabled and the position is (0, 0, 0, 1).
+    Asm color;
+    color.vec_op = 1;
+    color.slot = 1;
+    color.end = true;
+    const dal::GlslResult disabled = translate({color});
+    CHECK(disabled.ok);
+    CHECK(contains(disabled.glsl, "  var_front_diffuse = vec4(0.0, 0.0, 0.0, 1.0);\n"));
+    CHECK(contains(disabled.glsl, "vec4 pos = vec4(0.0, 0.0, 0.0, 1.0);"));
+    CHECK(disabled.inputs_used == 0u);
+}
+
+void testUnimplementedReports() {
+    Asm unknown;
+    unknown.vec_op = 0x1f;
+    unknown.slot = 0;
+    unknown.end = true;
+    dal::GlslResult result = translate({unknown});
+    CHECK(!result.ok && result.glsl.empty());
+    CHECK(hasReport(result, "vp opcode 0x1f"));
+
+    Asm arl;
+    arl.vec_op = 0x0d;
+    arl.end = true;
+    result = translate({arl});
+    CHECK(!result.ok && hasReport(result, "ARL"));
+
+    Asm relative;
+    relative.vec_op = 2;
+    relative.slot = 0;
+    relative.relative_const = true;
+    relative.end = true;
+    result = translate({relative});
+    CHECK(!result.ok && hasReport(result, "relative"));
+
+    Asm conditional;
+    conditional.vec_op = 1;
+    conditional.slot = 0;
+    conditional.cond_enable = true;
+    conditional.cond = 2;
+    conditional.end = true;
+    result = translate({conditional});
+    CHECK(!result.ok && hasReport(result, "condition"));
+
+    Asm branch;
+    branch.sca_op = 0x08;  // BRA
+    branch.vec_op = 1;
+    branch.slot = 0;
+    branch.end = true;
+    result = translate({branch});
+    CHECK(!result.ok && hasReport(result, "BRA"));
+
+    Asm invalid_source;
+    invalid_source.vec_op = 1;
+    invalid_source.slot = 0;
+    invalid_source.src0.type = 0;
+    invalid_source.end = true;
+    result = translate({invalid_source});
+    CHECK(!result.ok && hasReport(result, "source type 0"));
+
+    // An unused source field of type 0 is harmless.
+    Asm unused_invalid;
+    unused_invalid.vec_op = 1;
+    unused_invalid.slot = 0;
+    unused_invalid.src1.type = 0;
+    unused_invalid.src2.type = 0;
+    unused_invalid.end = true;
+    result = translate({unused_invalid});
+    CHECK(result.ok);
+
+    // Writing nothing but a condition code.
+    Asm cc_only;
+    cc_only.vec_op = 1;
+    cc_only.vec_mask = 0xf;
+    cc_only.end = true;
+    result = translate({cc_only});
+    CHECK(!result.ok && hasReport(result, "condition code"));
+
+    // Condition 0 skips the instruction, even with the enable bit clear.
+    Asm never;
+    never.vec_op = 1;
+    never.slot = 0;
+    never.cond = 0;
+    never.end = true;
+    result = translate({never});
+    CHECK(result.ok && !contains(result.glsl, "out_0 = attr_0"));
+
+    result = dal::translateVertexProgram({}, 0);
+    CHECK(!result.ok);
+}
+
+void testScalarDualDestination() {
+    // A scalar op routed to the output slot also writes its own temp, with the same masked value.
+    Asm scalar_both;
+    scalar_both.sca_op = 1;
+    scalar_both.vec_to_output = false;
+    scalar_both.slot = 0;
+    scalar_both.sca_temp = 2;
+    scalar_both.vec_mask = 0;
+    scalar_both.sca_mask = 0x5;  // x and z
+    scalar_both.src2 = input();
+    scalar_both.end = true;
+    const dal::GlslResult result = translate({scalar_both});
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "r_2.xz = res.xz;"));
+    CHECK(contains(result.glsl, "out_0.xz = res.xz;"));
+}
+
+void testLocations() {
+    CHECK(dal::vpOutputSlotLocation(0) == -1);
+    CHECK(dal::vpOutputSlotLocation(1) == 10);
+    CHECK(dal::vpOutputSlotLocation(2) == 12);
+    CHECK(dal::vpOutputSlotLocation(3) == 11);
+    CHECK(dal::vpOutputSlotLocation(4) == 13);
+    CHECK(dal::vpOutputSlotLocation(5) == 14);
+    CHECK(dal::vpOutputSlotLocation(6) == -1);
+    CHECK(dal::vpOutputSlotLocation(7) == 0);
+    CHECK(dal::vpOutputSlotLocation(14) == 7);
+    CHECK(dal::vpOutputSlotLocation(15) == 8);
+    CHECK(dal::vpOutputSlotLocation(16) == -1);
+}
+
+}  // namespace
+
+int main() {
+    testAssembler();
+    testMov();
+    testOperations();
+    testAllOutputsCompile();
+    testUnwrittenOutputsAreDefault();
+    testUnimplementedReports();
+    testScalarDualDestination();
+    testLocations();
+    testDumps();
+    std::printf("vp translator tests: %d passed, %d failed\n", g_passed, g_failed);
+    return g_failed != 0 ? 1 : 0;
+}
