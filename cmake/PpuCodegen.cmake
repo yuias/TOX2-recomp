@@ -40,11 +40,22 @@ function(tox2_ppu_add_generated_tree)
   endif()
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${sources_file}")
   include("${sources_file}")
-  message(STATUS "TOX2: generated PPU code from ${generated_dir}")
 
-  add_library(tox2_ppu_generated STATIC ${TOX2_PPU_GENERATED_SOURCES})
+  # libsre is part of the program: the game's cellSpurs imports are bound to its recompiled exports.
+  set(libsre_sources_file "${generated_dir}/libsre/libsre_sources.cmake")
+  if(NOT EXISTS "${libsre_sources_file}")
+    message(FATAL_ERROR
+      "TOX2: ${libsre_sources_file} not found. libsre.reloc.elf comes from a build with -Pup. Generate it with: "
+      "python tools/ps3tool.py emit generated/inputs/libsre.reloc.elf --db config/libsre_functions.json "
+      "--symbol-prefix libsre --chunks 4 --out ${TOX2_PPU_GENERATED_DIR}/libsre --max-unhandled 0")
+  endif()
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${libsre_sources_file}")
+  include("${libsre_sources_file}")
+  message(STATUS "TOX2: generated PPU code from ${generated_dir} (with libsre)")
+
+  add_library(tox2_ppu_generated STATIC ${TOX2_PPU_GENERATED_SOURCES} ${TOX2_LIBSRE_PPU_GENERATED_SOURCES})
   tox2_ppu_codegen_options(tox2_ppu_generated)
-  target_include_directories(tox2_ppu_generated PUBLIC "${generated_dir}")
+  target_include_directories(tox2_ppu_generated PUBLIC "${generated_dir}" "${generated_dir}/libsre")
 
   add_executable(tox2_ppu_link_test runtime/tests/ppu_link_test.cpp)
   target_compile_options(tox2_ppu_link_test PRIVATE -march=x86-64-v3 -Wall -Wextra)
