@@ -15,6 +15,7 @@ COMMANDS = {
     "emit": "emit",
     "nidgen": "nidgen",
     "spu-extract": "spu_images",
+    "spu-disasm": "spu_disasm",
 }
 
 
