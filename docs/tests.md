@@ -45,16 +45,20 @@ The pin file `cmake/game_boot.cmake` holds the arguments and the milestone:
 
 ```cmake
 set(TOX2_GAME_BOOT_ARGS "--no-window --seconds 20 --hdd-dir \"${CMAKE_BINARY_DIR}/game_hdd\"")
-set(TOX2_GAME_BOOT_MILESTONE "\\[t 01000000\\] tox2: first sc 988 ")
+set(TOX2_GAME_BOOT_MILESTONE "\\[t 01000000\\] tox2: first sc 350 ")
 ```
 
 A milestone is a `tox2: first ...` line written by the main thread (thread id `01000000`), because
 a line from another thread can appear or not depending on scheduling. The current one is the
-main thread's first call of system call 988 (default-handled), the last main-thread first line
-before the game calls `abort()` itself. The lines after it (`sys_tty_write`, `sys_process_exit`)
-belong to the abort path, which an earlier failure would also reach, so they are not used. The
-run ends with `tox2: stop: process exit status 1`. The first run of the test copies the 3 GB
-`TLFILE.TLDAT` into `build/<preset>/game_hdd`, where it stays for the later runs. The milestone guards how far the main thread gets; it does not mean that the game works.
+main thread's first call of system call 350 (`sys_memory_allocate_from_container`), the last
+main-thread first line in a run from an empty HDD directory and in one with existing data. The run
+ends at the watchdog (`tox2: stop: watchdog 20 s`) while a worker loops on a default-handled SPURS
+call. The pin avoids the lines of the abort path that the game took before the memory container
+calls were implemented (`sys_tty_write`, `sys_process_exit` and system call 988 inside the game's
+`abort()`): an earlier failure would also reach them, so they would not show that the run got this
+far. The first run of the test copies the 3 GB `TLFILE.TLDAT` into `build/<preset>/game_hdd`, where
+it stays for the later runs. The milestone guards how far the main thread gets; it does not mean
+that the game works.
 
 The pin file started with a placeholder milestone (the first `hle` or `sc` line of the main
 thread), which was replaced once the game reached a census stop. When a change lets the game get

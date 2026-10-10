@@ -4,62 +4,74 @@ What works on the pinned executable today, and what does not. The [top-level REA
 has the short version.
 
 The game does not run in any useful sense. `tox2_game` loads the executable, runs its start-up code
-on real guest threads for a few seconds, issues a few flips and then ends, because the game calls
-`abort()` itself. This is work in progress.
+on real guest threads, issues a few flips and then loops: a worker thread polls
+`cellSpursEventFlagWait` (default-handled) until the `--seconds` watchdog ends the run. This is work
+in progress.
 The code was taken over from an earlier recompilation project of another game and is being pointed
 at *Tales of Xillia 2* (BLJS10188); the parts that this game has not reached have never run against
 its executable.
 
 ## What has been run
 
-Three headless runs (`--no-window --seconds 20`; the first with an empty `--hdd-dir`, the other two
-reusing it) of the build from the generated code ended the same way:
+Headless runs (`--no-window --seconds 20`) of the build from the generated code, one with an empty
+`--hdd-dir` and one reusing the installed data, ended the same way:
 
 - The runtime loaded the executable and booted the main thread. The stop was
-  `tox2: stop: process exit status 1` (exit code 0) on the main thread, within the 20 s: the game
-  wrote `abort() is called from 0x0099ebbc` and ten more return addresses to the tty (stdout) and
-  called `sys_process_exit(1)`. The census listed no unknown dispatch target: every call and jump that ran
-  reached a recovered function. What makes the game abort is not established. The calls just before
-  it on the main thread are the default-handled system calls 324 and 343 (the memory container calls)
-  and 988, and the default-handled `cellSaveDataListAutoLoad` had run on another thread.
+  `tox2: stop: watchdog 20 s` (exit code 5). The census listed no unknown dispatch target: every
+  call and jump that ran reached a recovered function, and no system call was default-handled.
+  The main thread ends in polling with `sys_timer_usleep`; the last `tox2: first ...` line it wrote
+  is `first sc 350 sys_memory_allocate_from_container`.
+- Before the memory container calls were implemented, the runs ended with the game's own
+  `abort()`: `tox2: stop: process exit status 1`, after the game wrote `abort() is called from
+  0x0099ebbc` and ten more return addresses to the tty. The cause was the default-handled
+  `sys_memory_container_create` (324), which wrote no container id, so that the next call,
+  `sys_memory_container_get_size` (343), got id 0 and the game found no container. With the container
+  calls implemented (the game creates one of 0x5600000 bytes and allocates twice from it) the main
+  thread goes on to open `TLFILE.TLDAT` from the installed copy and to look for
+  `FILEDATABASELOCAL.TLFDBX` (not found) and two save directories (`BLJS10120`, `BLJS10188`; not
+  found). `sys_ppu_thread_detach` (45) and system call 988 were default-handled in those runs and
+  had no part in the abort; 988 is issued inside the abort and exit functions (see
+  [Runtime internals](runtime.md#implemented-system-calls)).
 - Earlier runs stopped at a write to address 0 on the GCM interrupt thread, after the
   default-handled `cellGcmGetLabelAddress`. With that import served (see [Runtime internals](runtime.md#implemented-imports)),
   the thread no longer faults: the game polls `cellGcmGetFlipStatus`, sets the display buffers
   (two of 1280x720, pitch `0x1400`, after `cellVideoOutConfigure` for 720p), queues flip commands
-  and the fake RSX executes them. The RSX census counted 5 flips and 939 FIFO headers in the first
-  run and 3 flips and 563 headers in each of the others; the flip handler ran as often as there were
-  flips and the vblank handler 3, 1 and 1 times. No frame was inspected: the runs were headless.
+  and the fake RSX executes them. The RSX census counted 5 flips and 939 FIFO headers in the run
+  from an empty `--hdd-dir` and 3 flips and 563 headers in the other; the flip handler ran as often
+  as there were flips and the vblank handler about 1,200 times in the 20 s. No frame was inspected:
+  the runs were headless.
 - `cellGameBootCheck` has a handler (a disc boot, see [Runtime internals](runtime.md#implemented-imports)),
   so the game's data paths start with `/dev_bdvd/PS3_GAME`: the stats of `TLFILE.TLDAT`,
   `FILEHEADER.TOFHDB` (both in `USRDIR`) and `ICON0.PNG` succeed.
-- First run: `cellGameDataCheck` for `BLJS10188_INSTALL` finds no directory, so thread
+- From an empty `--hdd-dir`: `cellGameDataCheck` for `BLJS10188_INSTALL` finds no directory, so thread
   `0x01000007` calls `cellGameCreateGameData`, opens a message dialog and copies the three files
   from the disc to the temporary game data directory with `cellFsRead` and `cellFsWrite` (724 of
   each in total; `TLFILE.TLDAT` is 3,017,411,417 bytes, `FILEHEADER.TOFHDB` 10.6 MB). The copy
   is complete within the 20 s. `cellGameContentPermit` then moves it to
   `/dev_hdd0/game/BLJS10188_INSTALL`, the dialog is closed and the main thread waits on an event
-  flag until the install thread sets it. The reads are sequential and cross 2 GiB; `cellFsLseek`
-  was not called.
-- The two later runs find the installed directory: the game reads `FILEHEADER.TOFHDB` from the disc
-  again, opens the installed copy, stats and fstats it, and in all three runs the main thread then
-  calls the memory container calls 324 and 343 and the call 988 (default-handled) before the abort.
-- The last line of the form `tox2: first ...` that the main thread (`[t 01000000]`) wrote in all
-  three runs is `first hle sysPrxForUser::sys_process_exit`, which belongs to the game's abort path;
-  the `game_boot` test pins the line before the abort, `first sc 988` (see
-  [Tests](tests.md#the-game_boot-test)). The test run leaves the 3 GB copy in the build
-  directory's `game_hdd`.
-- `cellSpursEventFlagWait`, `_cellSpursLFQueuePushBody` and `cellSpursQueuePushBody` were not
-  called. `TLFILE.TLDAT` was read only as the sequential copy above; nothing parses it.
+  flag until the install thread sets it. The reads are sequential and cross 2 GiB; the copy does
+  not call `cellFsLseek`.
+- A run that finds the installed directory reads `FILEHEADER.TOFHDB` from the disc again, opens the
+  installed copy, stats and fstats it, and then the main thread calls the memory container calls.
+- The `game_boot` test pins the main thread's `first sc 350` line, the last `tox2: first ...` line
+  it wrote in both kinds of run (see [Tests](tests.md#the-game_boot-test)). The test run leaves the
+  3 GB copy in the build directory's `game_hdd`.
+- Worker `0x01000003` pushes four entries with the default-handled `_cellSpursLFQueuePushBody` and then
+  calls `cellSpursEventFlagWait` (default-handled, returns success without writing anything) in a
+  loop: 154 to 164 million calls in 20 s. `cellSpursQueuePushBody` was not called. `TLFILE.TLDAT` was
+  read only as the sequential copy above, plus one `cellFsLseek` on a worker; nothing parses it.
 
-What the census of the first run showed (the other two runs differ in counts that depend on
-scheduling):
+What the census of the run from an empty `--hdd-dir` showed (the other run differs in counts that
+depend on scheduling):
 
-- System calls: 57,410 calls, 17 distinct, 4 default-handled. The default-handled ones are numbers
-  45 (`sys_ppu_thread_detach`, which the runtime does not name or implement), 324, 343 and 988.
-  `sys_ppu_thread_yield` accounts for 57,173 of the calls.
-- Imports: 129,493 calls, 79 distinct, 22 default-handled. The default-handled ones are 19
-  `cellSpurs` functions (attribute, taskset, task, queue, event flag and lock-free queue setup),
-  `cellRtcGetCurrentTick`, `cellRtcConvertUtcToLocalTime` and `cellSaveDataListAutoLoad`. Each is
+- System calls: 127,415 calls, 16 distinct, none default-handled. `sys_ppu_thread_yield` and
+  `sys_timer_usleep` account for most of the calls. The memory container calls (324, 343 and 350),
+  `sys_ppu_thread_detach` (45) and `sys_memory_free` (349, from the install thread) ran.
+- Imports: 154,627,484 calls, 81 distinct, 24 default-handled. Almost all of the calls are
+  `cellSpursEventFlagWait` (154,356,636). The default-handled ones are 21 `cellSpurs` functions
+  (attribute, taskset, task, queue, event flag and lock-free queue setup, `_cellSpursLFQueuePushBody`
+  and `cellSpursEventFlagWait`), `cellRtcGetCurrentTick`, `cellRtcConvertUtcToLocalTime` and
+  `cellSaveDataListAutoLoad`. Each is
   logged with the argument registers that look like out-pointers; the game's later behaviour may
   depend on the values that were never written. `cellGcmGetLabelAddress` (8 calls),
   `cellGcmGetFlipStatus` (16), `cellVideoOutGetResolution` (1) and `cellVideoOutSetGamma` (5) are
@@ -70,8 +82,8 @@ scheduling):
   `sys_spu_initialize`. No SPU thread group or raw SPU system call was issued.
 - RSX: 939 FIFO headers, 172 distinct methods and 5 flips. `rsx unimplemented` listed one kind, the
   ZPASS report constant.
-- Threads: 8 created, 5 live at the stop (the main thread, two workers blocked in
-  `sys_event_flag_wait`, the GCM interrupt thread waiting for an interrupt, and a running worker; the
+- Threads: 8 created, 5 live at the stop (the main thread and a worker polling with
+  `sys_timer_usleep`, the GCM interrupt thread waiting for an interrupt, and two running workers; the
   install thread and two others had exited). The game's own threads are named `CThread`.
 
 ## Components
@@ -110,9 +122,10 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   `sys_spu_image_import`, 28 of the 30 `cellSpurs` functions and the four `cellRtc` and four
   `cellScreenShotUtility` functions.
 - It embeds 8 SPU images and has 267 system call sites; the probe leaves 4 of them unresolved.
-- The game uses 24 system call numbers that the runtime has no implementation for, among them the
-  semaphore calls 90, 92 and 93, the SPU thread group calls 170 to 178, and the vm and memory
-  container calls. None of them ran before the stop.
+- The game issues 67 system call numbers. The runtime now has a handler for the semaphore, memory
+  container and detach calls among them; it has none for the SPU thread group calls (170 to 173, 178,
+  193, 194), the vm calls (300, 301) and the file system calls 810, 812, 813, 815, 820, 831, 832 and
+  834. None of those ran before the stop.
 
 ## Not implemented
 
@@ -129,8 +142,8 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   implemented.
 - Imports and system calls without a handler (see above), and imports whose handler is minimal.
   The census at the end of a run lists what the game called and what the default handler served.
-  The next step is to find out why the game aborts after the install step: the default-handled
-  system calls 324, 343 and 988 and `cellSaveDataListAutoLoad` come before it.
+  The next step is to find out what the worker loop on `cellSpursEventFlagWait` waits for: SPURS
+  tasks that nothing runs. `cellSaveDataListAutoLoad` is still default-handled.
 - Graphics: only what the inherited fake RSX and renderer implement. Whatever the renderer meets and
   cannot handle is listed in the `rsx unimplemented` census (see
   [Rendering](rendering.md#rendering)). Known gaps are the ZPASS report values (the constant 0 is

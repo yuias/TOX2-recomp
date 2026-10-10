@@ -28,9 +28,9 @@ A run starts with the load log, for example (TOX2 values):
 On every stop the runtime prints what the game did, sorted by count and then by name:
 
 ```
-census: syscalls 57410 calls, 17 distinct, 4 default-handled
-  sc 43 sys_ppu_thread_yield: 57173 [impl]
-  sc 45 ?: 3 [default]
+census: syscalls 120954 calls, 15 distinct, 0 default-handled
+  sc 43 sys_ppu_thread_yield: 99096 [impl]
+  sc 45 sys_ppu_thread_detach: 2 [impl]
   sc 169 sys_spu_initialize: 1 [impl]
 census: hle 129493 calls, 79 distinct, 22 default-handled
   sysPrxForUser::sys_lwmutex_lock: 61939 [impl]
@@ -49,8 +49,8 @@ census: threads 8 created, 5 live
 ```
 
 This is an excerpt of the census of a headless run of this game (see [Status](status.md)); the
-counts differ a little from run to run. Syscall 45 prints `?` because the runtime's table has no
-entry for it (it is `sys_ppu_thread_detach` in `config/lv2_syscalls.json`).
+counts differ a little from run to run. A syscall number prints `?` when the runtime's table has no
+name for it: that is 988, which `config/lv2_syscalls.json` (RPCS3's table) does not name either.
 
 `[impl]` marks a call that an implemented handler served and `[default]` one that the default
 handler took (see below). An unknown target is printed as `0x<target> from 0x<site>: count`. A default-handled import is
@@ -91,8 +91,10 @@ dispatcher resolves the key to the host handler.
 
 The primary stack size from the executable's process parameters is clamped as RPCS3 does, between
 0x10000 and 0x100000 bytes; this game asks for 0x10000, so the stack is `0xd0001000..0xd0011000`. The argument block (`argv`, `envp`, strings) sits at the top of
-the stack. `sys_memory_get_user_memory_size` reports a 0xD500000 container. The timebase runs at
-79.8 MHz, scaled from the host performance counter.
+the stack. `sys_memory_get_user_memory_size` reports a 0xD500000 container, the default one: the
+primary stack and the image are charged to it at boot, `sys_memory_allocate` charges what it hands
+out, and a memory container (below) takes its whole size from it when it is created. The timebase
+runs at 79.8 MHz, scaled from the host performance counter.
 
 ## Dispatch
 
@@ -134,7 +136,7 @@ rescheduling when a priority changes.
 `runtime/src/core/timer_resolution.*`). Timed waits (`sys_timer_usleep`, lock and queue time-outs)
 are host condition variable waits, and Windows rounds them to its timer tick (15.6 ms by default),
 so a 1 ms guest sleep would take 15 ms. The earlier game's decode loops polled with 1 ms sleeps;
-this game's worker threads also sleep with `sys_timer_usleep` (24 calls before the stop). The
+this game's main thread and a worker poll with `sys_timer_usleep` (about 21,000 calls in a 20 s run). The
 request ends with the process; a refusal is logged as a warning and the default tick stays.
 
 The RSX thread and the audio engine are host threads that take the same guest lock. The RSX thread
@@ -161,24 +163,47 @@ stall and the absence of live guest threads.
 
 Everything else goes to the default handler. Behaviour follows the RPCS3 handler of the same
 name; struct layouts and error codes are restated from its headers. The table lists what the
-runtime implements; this game's executable uses 24 system call numbers that are not in it
-(among them the semaphores 90, 92 and 93, the SPU thread group calls 170 to 178 and the vm and
-memory container calls), and only some of those were reached before the stop (the census shows
-number 45, `sys_ppu_thread_detach`, as default-handled, and later also 324 and 343,
-`sys_memory_container_create` and `_get_size`, and 988, which the table does not name).
+runtime implements. The executable of this game issues 67 system call numbers; the ones without a
+handler are the SPU thread group calls (170 to 173, 178, 193 and 194, besides those named under SPU
+below), the vm calls `sys_vm_memory_map` (300) and `sys_vm_unmap` (301) and the file system calls
+810 (link), 812 (rename), 813 (rmdir), 815 (utime), 820 (fsync), 831 (truncate), 832 (ftruncate) and
+834 (chmod). None of those was reached in the runs so far (the census of the latest run lists no
+default-handled system call). The syscall table (`kSyscalls`) holds every number the game issues,
+with its name from `config/lv2_syscalls.json`, so the log and the census name them whether or not
+they have a handler.
+
+Memory containers follow RPCS3's `lv2_memory_container`. `sys_memory_container_create` (324 and the
+older number 341) rounds the size down to 1 MiB, fails with `CELL_ENOMEM` when the default container
+cannot give that much, takes it from the default container (so `sys_memory_get_user_memory_size`
+reports it as used) and writes an id from `0x3F000000` up; at most 16 containers exist at a time
+(`CELL_EAGAIN`). `sys_memory_allocate_from_container` (350) charges the allocation to the container
+only, `sys_memory_free` credits the container that owns the block, `_get_size` (343) reports
+`{size, size - used}`, and `_destroy` (325 and 342) returns the memory to the default container and
+fails with `CELL_EBUSY` while a block is in use. Creation logs `tox2: memory: container <id> created`.
+The game creates a container of 0x5600000 bytes (86 MB), which leaves 0x4740000 in the default
+container, and allocates from it twice. It had called `sys_memory_container_get_size` with id 0 while the container
+create call did not write an id, and aborted; with the container calls implemented the abort is gone.
+
+System call 988 is not in RPCS3's table. The game issues it at three sites, `sc 988(kind, 0)`, and
+ignores the result: kind 1 at the start of its exit functions, which end with `sys_process_exit`,
+and kind 4 at the start of the function that prints `abort() is called from 0x...` to the tty (the
+abort path then continues into the exit function). It is accepted and ignored (`CELL_OK`). A run
+that does not abort or exit does not issue it.
 
 | Group | Calls |
 | --- | --- |
 | Process | `_sys_process_exit` (22) |
 | TTY | `sys_tty_write` (403); `sys_tty_read` (402) returns `CELL_EIO` |
 | Time | `sys_timer_usleep` (141), `sys_timer_sleep` (142), `sys_time_get_timebase_frequency` (147) |
-| Memory | `sys_memory_allocate` (348), `sys_memory_free` (349), `sys_memory_get_user_memory_size` (352) |
+| Memory | `sys_memory_allocate` (348), `sys_memory_free` (349), `sys_memory_get_user_memory_size` (352); containers: `sys_memory_container_create` (324, 341), `_destroy` (325, 342), `_get_size` (343) and `sys_memory_allocate_from_container` (350) |
+| Debug notification | System call 988, which is unnamed (see above) |
 | Mutex and condition variable | `sys_mutex_create`, `_destroy`, `_lock`, `_trylock`, `_unlock` (100-104); `sys_cond_create`, `_destroy`, `_wait`, `_signal`, `_signal_all` (105-109) |
+| Semaphore | `sys_semaphore_create` (90), `_destroy` (91), `_wait` (92), `_trywait` (93), `_post` (94), `_get_value` (114). Process-shared semaphores (an IPC key) are not supported; a waiter that blocks wakes in no particular order |
 | Event flag | `sys_event_flag_create` (82), `_destroy` (83), `_wait` (85), `_set` (87), `_clear` (118), `_cancel` (132), `_get` (139) |
 | Event queue and port | `sys_event_queue_create` (128), `_destroy` (129), `_receive` (130), `_drain` (133); `sys_event_port_create` (134), `_destroy` (135), `_connect_local` (136), `_disconnect` (137), `_send` (138). A queue created with a non-zero IPC key can be found by that key (the host looks it up and sends to it; the `cellAudio` notify uses this); a second live queue with the same key fails with `CELL_EEXIST`, key 0 makes a local queue, and destroying the queue forgets the key. IPC ports (`sys_event_port_connect_ipc`) are not supported. |
 | SPU | `sys_spu_initialize` (169) and `sys_spu_thread_group_connect_event_all_threads` (251) on a thread group id that the runtime handed out. Both only keep bookkeeping; no SPU code runs. The table names `sys_spu_thread_write_ls` (181), `_read_ls` (182), `_write_spu_mb` (190), `_connect_event` (191), `_disconnect_event` (192) and `sys_spu_thread_group_disconnect_event_all_threads` (252) but has no handler for them, so they are default-handled. |
 | File system | `sys_fs_open` (801), `_read` (802), `_write` (803), `_close` (804), `_opendir` (805), `_readdir` (806), `_closedir` (807), `_stat` (808), `_fstat` (809), `_mkdir` (811), `_unlink` (814), `_lseek` (818); see [Virtual file system](virtual-file-system.md#virtual-file-system) |
-| Thread | `_sys_ppu_thread_exit` (41), `sys_ppu_thread_yield` (43), `sys_ppu_thread_join` (44), `sys_ppu_thread_set_priority` (47), `sys_ppu_thread_get_priority` (48); the creation rule of `sys_ppu_thread_create` is under [Threads](#threads) |
+| Thread | `_sys_ppu_thread_exit` (41), `sys_ppu_thread_yield` (43), `sys_ppu_thread_join` (44), `sys_ppu_thread_detach` (45; a thread that already exited without being joined is dropped, as in RPCS3), `sys_ppu_thread_set_priority` (47), `sys_ppu_thread_get_priority` (48); the creation rule of `sys_ppu_thread_create` is under [Threads](#threads) |
 
 ## Implemented imports
 
@@ -416,11 +441,14 @@ outside the code), as `tox2: default hle <module>::<name>: possible out-pointer 
 (<region>)`, and the census repeats the register list as `ptr r<N>,...`. These are hints for writing
 the handler, not facts: a register left over from an earlier call can look like a pointer too.
 
-In this game's runs the default handlers served 22 imports and four system calls. The earlier
+In this game's runs the default handlers served 24 imports and no system call. An earlier
 stop, a write to address 0 in fn `0x008a090c` on the GCM interrupt thread, followed the
 default-handled `cellGcmGetLabelAddress`, which returned 0 instead of a label address; with a
-handler for it the thread no longer faults. The runs now end when the game calls `abort()` itself;
-what leads to that is not known (see [Status](status.md)).
+handler for it the thread no longer faults. A later stop, the game's own `abort()`, followed the
+memory container calls, which did not write a container id (see
+[Implemented system calls](#implemented-system-calls)). The runs now end at the `--seconds`
+watchdog, while one worker thread loops on the default-handled `cellSpursEventFlagWait`, which
+returns success at once (about 160 million calls in 20 s; see [Status](status.md)).
 
 With the default result of `cellGameBootCheck` the game used data file paths without a directory
 prefix; with the handler they start with `/dev_bdvd/PS3_GAME`.

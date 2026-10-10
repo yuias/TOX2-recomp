@@ -102,9 +102,8 @@ exits:
 | 7 | All guest threads ended without a process exit | `tox2: stop: no guest threads left` |
 
 A fatal stop also prints the registers and the call trace (the most recent function entries) of
-the faulting guest thread. The current runs of this game end with code 0 and the stop line
-`tox2: stop: process exit status 1`, after the game printed its own `abort()` text (see
-[Status](status.md)). The runtime never calls
+the faulting guest thread. The current runs of this game end with code 5 and the stop line
+`tox2: stop: watchdog 20 s` (see [Status](status.md)). The runtime never calls
 `abort`: the CRT and Windows error dialogs are disabled, so a run always ends with an exit code,
 also when it is started from a script.
 
