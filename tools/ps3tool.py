@@ -17,6 +17,7 @@ COMMANDS = {
     "spu-extract": "spu_images",
     "spu-disasm": "spu_disasm",
     "spu-recover": "spu_recover",
+    "spu-emit": "spu_emit",
 }
 
 
