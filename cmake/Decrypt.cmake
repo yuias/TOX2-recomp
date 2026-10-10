@@ -21,6 +21,7 @@ function(tox2_decrypt_add)
     tools/tox2_decrypt/crypto.cpp
     tools/tox2_decrypt/keys.cpp
     tools/tox2_decrypt/sce.cpp
+    tools/tox2_decrypt/prx_reloc.cpp
     tools/tox2_decrypt/pup.cpp
     tools/tox2_decrypt/self.cpp)
   target_compile_options(tox2_decrypt_lib PRIVATE ${decrypt_options})
@@ -38,6 +39,7 @@ function(tox2_decrypt_add)
     tools/tox2_decrypt/tests/keys_test.cpp
     tools/tox2_decrypt/tests/sce_test.cpp
     tools/tox2_decrypt/tests/pup_test.cpp
+    tools/tox2_decrypt/tests/reloc_test.cpp
     tools/tox2_decrypt/tests/self_test.cpp)
   target_compile_options(tox2_decrypt_tests PRIVATE ${decrypt_options})
   target_link_libraries(tox2_decrypt_tests PRIVATE tox2_decrypt_lib)

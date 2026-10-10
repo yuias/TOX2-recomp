@@ -2,6 +2,7 @@
 
 #include <charconv>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -13,6 +14,7 @@
 
 #include "crypto.h"
 #include "keys.h"
+#include "prx_reloc.h"
 #include "pup.h"
 #include "self.h"
 
@@ -27,6 +29,8 @@ constexpr std::string_view kUsage =
         "                    [--expect-input-sha256 HEX]\n"
         "  tox2_decrypt pup  --keys DIR --in PS3UPDAT.PUP --path PATH --firmware VERSION --out libsre.prx\n"
         "                    --expect-size N --expect-sha256 HEX\n"
+        "  tox2_decrypt reloc --in libsre.prx --base 0xADDR --out libsre.reloc.elf --expect-size N\n"
+        "                    --expect-sha256 HEX [--expect-input-sha256 HEX]\n"
         "  tox2_decrypt keys --keys DIR\n";
 
 struct OptionSpec {
@@ -198,6 +202,36 @@ bool parsePin(const OptionMap& options, Pin& pin, std::string& err, int& code) {
     return true;
 }
 
+// The optional --expect-input-sha256; returns false after writing a usage error.
+bool parseInputPin(const OptionMap& options, std::optional<std::string>& input_hash, std::string& err, int& code) {
+    if (options.contains("expect-input-sha256")) {
+        input_hash = parseSha256(options.at("expect-input-sha256"));
+        if (!input_hash) {
+            code = usageError(err, "--expect-input-sha256 is not 64 hex digits");
+            return false;
+        }
+    }
+    return true;
+}
+
+// Returns false after writing the error when `file` is not the pinned input.
+bool checkInputPin(const std::string& in_name, const Bytes& file, const std::optional<std::string>& input_hash,
+                   std::string& err) {
+    if (!input_hash) {
+        return true;
+    }
+    Sha256Digest digest;
+    if (!sha256(file, digest)) {
+        fail(err, in_name + ": SHA-256 failed");
+        return false;
+    }
+    if (toHex(digest) != *input_hash) {
+        fail(err, in_name + ": sha256 " + toHex(digest) + " is not the pinned input " + *input_hash);
+        return false;
+    }
+    return true;
+}
+
 bool loadKeys(const OptionMap& options, KeyVault& keys, std::string& err) {
     std::string error;
     if (!loadKeyVault(options.at("keys"), keys, error)) {
@@ -222,11 +256,8 @@ int runSelf(std::span<const std::string_view> args, std::string& out, std::strin
         return code;
     }
     std::optional<std::string> input_hash;
-    if (options.contains("expect-input-sha256")) {
-        input_hash = parseSha256(options.at("expect-input-sha256"));
-        if (!input_hash) {
-            return usageError(err, "--expect-input-sha256 is not 64 hex digits");
-        }
+    if (!parseInputPin(options, input_hash, err, code)) {
+        return code;
     }
 
     const std::string& in_name = options.at("in");
@@ -234,14 +265,8 @@ int runSelf(std::span<const std::string_view> args, std::string& out, std::strin
     if (!readFile(in_name, file, error)) {
         return fail(err, in_name + ": " + error);
     }
-    if (input_hash) {
-        Sha256Digest digest;
-        if (!sha256(file, digest)) {
-            return fail(err, in_name + ": SHA-256 failed");
-        }
-        if (toHex(digest) != *input_hash) {
-            return fail(err, in_name + ": sha256 " + toHex(digest) + " is not the pinned input " + *input_hash);
-        }
+    if (!checkInputPin(in_name, file, input_hash, err)) {
+        return 1;
     }
 
     KeyVault keys;
@@ -303,6 +328,71 @@ int runPup(std::span<const std::string_view> args, std::string& out, std::string
     return finishOutput(options, pin, elf, out, err);
 }
 
+// `0x`-prefixed hexadecimal that fits in 32 bits.
+std::optional<std::uint32_t> parseBase(std::string_view text) {
+    if (text.size() < 3 || text.substr(0, 2) != "0x") {
+        return std::nullopt;
+    }
+    text.remove_prefix(2);
+    std::uint64_t value = 0;
+    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value, 16);
+    if (ec != std::errc{} || end != text.data() + text.size() || value > 0xFFFFFFFFull) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(value);
+}
+
+std::string hex32(std::uint32_t value) {
+    char text[16];
+    std::snprintf(text, sizeof text, "0x%08x", value);
+    return text;
+}
+
+int runReloc(std::span<const std::string_view> args, std::string& out, std::string& err) {
+    static constexpr OptionSpec kSpecs[] = {
+            {"in", true},          {"base", true},          {"out", true},
+            {"expect-size", true}, {"expect-sha256", true}, {"expect-input-sha256", false}};
+    OptionMap options;
+    std::string error;
+    if (!parseOptions(args, kSpecs, options, error)) {
+        return usageError(err, error);
+    }
+    Pin pin;
+    int code = 0;
+    if (!parsePin(options, pin, err, code)) {
+        return code;
+    }
+    std::optional<std::string> input_hash;
+    if (!parseInputPin(options, input_hash, err, code)) {
+        return code;
+    }
+    const std::optional<std::uint32_t> base = parseBase(options.at("base"));
+    if (!base) {
+        return usageError(err, "--base is not 0x-prefixed hexadecimal of at most 32 bits");
+    }
+
+    const std::string& in_name = options.at("in");
+    Bytes file;
+    if (!readFile(in_name, file, error)) {
+        return fail(err, in_name + ": " + error);
+    }
+    if (!checkInputPin(in_name, file, input_hash, err)) {
+        return 1;
+    }
+
+    Bytes relocated;
+    RelocCounts counts;
+    std::uint32_t image_end = 0;
+    if (!relocatePrx(file, *base, relocated, counts, image_end, error)) {
+        return fail(err, in_name + ": " + error);
+    }
+    out += "relocated: " + std::to_string(counts.total()) + " relocations (ADDR32 " + std::to_string(counts.addr32) +
+           ", ADDR16_LO " + std::to_string(counts.addr16_lo) + ", ADDR16_HI " + std::to_string(counts.addr16_hi) +
+           ", ADDR16_HA " + std::to_string(counts.addr16_ha) + "), image " + hex32(*base) + ".." + hex32(image_end) +
+           "\n";
+    return finishOutput(options, pin, relocated, out, err);
+}
+
 int runKeys(std::span<const std::string_view> args, std::string& out, std::string& err) {
     static constexpr OptionSpec kSpecs[] = {{"keys", true}};
     OptionMap options;
@@ -350,6 +440,9 @@ int runCli(std::span<const std::string_view> args, std::string& out, std::string
     }
     if (command == "pup") {
         return runPup(rest, out, err);
+    }
+    if (command == "reloc") {
+        return runReloc(rest, out, err);
     }
     if (command == "keys") {
         return runKeys(rest, out, err);
