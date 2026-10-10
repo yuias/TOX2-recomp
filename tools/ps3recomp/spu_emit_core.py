@@ -320,15 +320,23 @@ class _FunctionEmitter:
         if name == "bi" and insn.field("RA") == 0 and not insn.field("D") and not insn.field("E"):
             self.stats.edges["returns"] += 1
         body = ["uint32_t target = %s;" % target]
+        # bisled sets its link on both paths (ISA: RT receives the next address whether or not the
+        # branch is taken), so the write sits outside the condition, after the target was read.
+        pre_link = link is not None and name == "bisled"
+        if pre_link:
+            body.append(self.lowering.link_stmt(link, site + 4))
+        taken = []
         # The D and E bits change the interrupt state together with the transfer. iret has no extra
         # rule here: no interrupt is ever delivered, so only RdMachStat could tell.
         if insn.field("D"):
-            body.append("ctx->int_enabled = 0;")
+            taken.append("ctx->int_enabled = 0;")
         elif insn.field("E"):
-            body.append("ctx->int_enabled = 1;")
-        body += self.lowering.computed(self.view, site, "target", link)
-        head = "{" if cond is None else "if (%s) {" % cond
-        return [head] + [_INDENT + line for line in body] + ["}"]
+            taken.append("ctx->int_enabled = 1;")
+        taken += self.lowering.computed(self.view, site, "target", None if pre_link else link)
+        if cond is None:
+            return ["{"] + [_INDENT + line for line in body + taken] + ["}"]
+        return (["{"] + [_INDENT + line for line in body] + [_INDENT + "if (%s) {" % cond]
+                + [_INDENT * 2 + line for line in taken] + [_INDENT + "}", "}"])
 
     def stop(self, op: SpuOp) -> list[str]:
         code = op.f("STOP")

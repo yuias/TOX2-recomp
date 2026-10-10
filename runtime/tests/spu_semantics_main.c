@@ -2,11 +2,11 @@
 //
 // The driver is the whole runtime of a case: it provides the dispatcher over the case's entry table,
 // scripted channel reads and event counts, recorded channel writes and stop codes. A case ends when
-// the generated code leaves (stop, halt) or dispatches to the exit address. A taken halt is
-// recorded and ends the case, so a case can expect it; a case that reaches another fatal hook
-// (unknown target, unhandled word, an unscripted channel read) ends the process with status 3
-// before the summary line is printed, so CTest fails; the message names the case. Pass case
-// names as arguments to run only those.
+// the generated code leaves (stop, halt, a channel hook that refuses) or dispatches to the exit
+// address. A taken halt (heq/hgt/hlgt, stopd) is recorded and ends the case, so a case can expect it; a case that
+// reaches another fatal hook (unknown target, unhandled word, an unscripted channel read) ends the process with status
+// 3 before the summary line is printed, so CTest fails; the message names the case. Pass case names as arguments to run
+// only those.
 
 #include <setjmp.h>
 #include <stdio.h>
@@ -46,9 +46,17 @@ void tox2SpuDispatch(Tox2SpuContext* __restrict ctx, uint8_t* __restrict ls) {
     fatal("unknown dispatch target", target, ctx->jump_site);
 }
 
+static bool leavesOnChannel(uint32_t ch) {
+    for (uint32_t i = 0; i < g_case->leave_channel_count; i++) {
+        if (g_case->leave_channels[i] == ch) return true;
+    }
+    return false;
+}
+
 bool tox2SpuReadChannel(Tox2SpuContext* ctx, uint8_t* ls, uint32_t site, uint32_t ch, uint32_t* value) {
     (void)ctx;
     (void)ls;
+    if (leavesOnChannel(ch)) return false;
     for (uint32_t i = 0; i < g_case->read_count && i < sizeof g_read_used / sizeof g_read_used[0]; i++) {
         if (g_read_used[i] || g_case->reads[i].channel != ch) continue;
         g_read_used[i] = true;
@@ -63,7 +71,7 @@ bool tox2SpuWriteChannel(Tox2SpuContext* ctx, uint8_t* ls, uint32_t site, uint32
     (void)ls;
     if (g_log.write_count >= kTox2SemanticsLogSize) fatal("too many channel writes", site, ch);
     g_log.writes[g_log.write_count++] = (uint64_t)ch << 32 | value;
-    return true;
+    return !leavesOnChannel(ch);
 }
 
 uint32_t tox2SpuChannelCount(Tox2SpuContext* ctx, uint8_t* ls, uint32_t ch) {

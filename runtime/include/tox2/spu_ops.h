@@ -545,6 +545,19 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuGb(Tox2Vr a) {
 
 TOX2_FORCEINLINE Tox2Vr tox2SpuOrx(Tox2Vr a) { return tox2SpuGatherResult(a.u32[0] | a.u32[1] | a.u32[2] | a.u32[3]); }
 
+// --- Floating-point status and control register ------------------------------------------------
+//
+// fscrwr stores a register as it is (its unused bits are undefined); fscrrd returns the register with
+// the unused bits forced to zero. The used bits per word are the rounding controls (bits 20:23 of
+// word 0), the IEEE exception flags (50:55 of word 1, 82:87 of word 2), the single-precision flags
+// (29:31, 61:63, 93:95, 125:127) and the divide-by-zero flags (116:119 of word 3).
+TOX2_FORCEINLINE Tox2Vr tox2SpuFscrRead(Tox2Vr fpscr) {
+    // Host lanes run opposite to the big-endian words, so lane 0 holds word 3.
+    const Tox2U32x4 used = {0x00000f07u, 0x00003f07u, 0x00003f07u, 0x00000f07u};
+    fpscr.u32 = fpscr.u32 & used;
+    return fpscr;
+}
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

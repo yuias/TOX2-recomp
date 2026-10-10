@@ -38,7 +38,7 @@ TERMINATOR_STOP = 0x102
 _NAME_RE = re.compile(r"[a-z0-9_]+")
 _REG_RE = re.compile(r"r([0-9]|[1-9][0-9]|1[01][0-9]|12[0-7])")
 _MASK32 = 0xFFFFFFFF
-_CHANNEL_KEYS = frozenset({"reads", "counts", "writes", "stops", "stop_leave", "halts"})
+_CHANNEL_KEYS = frozenset({"reads", "counts", "writes", "stops", "stop_leave", "halts", "leave_channels"})
 
 
 class CaseError(Exception):
@@ -138,7 +138,8 @@ def _channels(case: Case) -> dict[str, list]:
     unknown = sorted(set(raw) - _CHANNEL_KEYS)
     if unknown:
         raise CaseError("case %s: unknown channels key %r" % (case.name, unknown[0]))
-    out: dict[str, list] = {"reads": [], "counts": [], "writes": None, "stops": None, "stop_leave": []}
+    out: dict[str, list] = {"reads": [], "counts": [], "writes": None, "stops": None, "stop_leave": [],
+                            "leave_channels": []}
     for ch, values in sorted(dict(raw.get("reads", {})).items()):
         _channel_number(case, "reads channel", ch)
         if not isinstance(values, (tuple, list)) or not values:
@@ -153,6 +154,8 @@ def _channels(case: Case) -> dict[str, list]:
     if "stops" in raw:
         out["stops"] = [_int_in(case, "stop code", c, 0, 0x3FFF) for c in raw["stops"]]
     out["stop_leave"] = [_int_in(case, "stop_leave code", c, 0, 0x3FFF) for c in raw.get("stop_leave", ())]
+    out["leave_channels"] = [_channel_number(case, "leave_channels channel", ch)
+                             for ch in raw.get("leave_channels", ())]
     # Every case checks its halts; no key means none were taken.
     out["halts"] = [_int_in(case, "halt site", s, 0, 0x3FFFC) for s in raw.get("halts", ())]
     for what in ("writes", "stops", "halts"):
@@ -265,6 +268,9 @@ def _render_case(case: Case) -> tuple[list[str], str, dict[str, list], int]:
     if channels["stop_leave"]:
         tables += "static const uint32_t leave_stops_%s[] = { %s };\n\n" % (
             name, ", ".join("0x%xu" % c for c in channels["stop_leave"]))
+    if channels["leave_channels"]:
+        tables += "static const uint32_t leave_channels_%s[] = { %s };\n\n" % (
+            name, ", ".join("%du" % c for c in channels["leave_channels"]))
 
     entry_rows = []
     for addr in sorted(model.dispatchable):
@@ -330,6 +336,8 @@ typedef struct Tox2SemanticsCase {
     uint32_t count_count;
     const uint32_t* leave_stops;  // stop codes for which the hook asks the thread to leave
     uint32_t leave_stop_count;
+    const uint32_t* leave_channels;  // channels whose rdch/wrch hook asks the thread to leave
+    uint32_t leave_channel_count;
 } Tox2SemanticsCase;
 
 // Case functions are named after the case and the LS address (generated names).
@@ -443,12 +451,14 @@ def render(cases: Sequence[Case]) -> tuple[str, str]:
         reads, read_count = ref("reads", channels["reads"])
         counts, count_count = ref("counts", channels["counts"])
         leaves, leave_count = ref("leave_stops", channels["stop_leave"])
+        leave_chs, leave_ch_count = ref("leave_channels", channels["leave_channels"])
         rows.append('    { .name = "%s", .init = init_%s, .check = check_%s,\n'
                     "      .entries = entries_%s, .entry_count = %d,\n"
                     "      .reads = %s, .read_count = %d, .counts = %s, .count_count = %d,\n"
-                    "      .leave_stops = %s, .leave_stop_count = %d },"
+                    "      .leave_stops = %s, .leave_stop_count = %d,\n"
+                    "      .leave_channels = %s, .leave_channel_count = %d },"
                     % (case.name, case.name, case.name, case.name, entry_count, reads, read_count,
-                       counts, count_count, leaves, leave_count))
+                       counts, count_count, leaves, leave_count, leave_chs, leave_ch_count))
     _check_unique(prototypes)
 
     header = "\n".join([BANNER, _HEADER_HEAD.rstrip("\n"), ""] + prototypes + [

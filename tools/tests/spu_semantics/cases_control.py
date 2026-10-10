@@ -258,6 +258,19 @@ CASES += [
     case("bisled_falls_through_without_event", BISLED_REF,
          [enc("bisled", RT=9, RA=5), mark(1, 10)],
          dict(sentinels(10), r5=exit_reg()), {"r10": ran(1)}, channels={"counts": {0: 0}}),
+    # RT receives the next address on both paths (p.180); only the transfer and the E/D bits are
+    # conditional.
+    case("bisled_not_taken_still_writes_the_link", BISLED_REF,
+         [enc("bisled", RT=9, RA=5), mark(1, 10)],
+         dict(sentinels(9, 10), r5=exit_reg()), {"r9": ran(0), "r10": ran(1)}, channels={"counts": {0: 0}}),
+    case("bisled_not_taken_ignores_the_e_bit", BISLED_REF,
+         [enc("bisled", RT=9, RA=5, E=1), mark(1, 10)],
+         dict(sentinels(9, 10), r5=exit_reg(), int_enabled=0),
+         {"r9": ran(0), "r10": ran(1), "int_enabled": 0}, channels={"counts": {0: 0}}),
+    # The target is read before the link overwrites a shared register.
+    case("bisled_taken_reads_the_target_before_the_link", BISLED_REF,
+         [enc("bisled", RT=5, RA=5), mark(1, 10)],
+         dict(sentinels(10), r5=exit_reg()), {"r5": ran(0), "r10": SENTINEL}, channels={"counts": {0: 1}}),
     case("bisled_taken_with_any_nonzero_count_and_e_bit", BISLED_REF,
          [enc("bisled", RT=9, RA=5, E=1), mark(1, 10)],
          dict(sentinels(9, 10), r5=exit_reg(), int_enabled=0),

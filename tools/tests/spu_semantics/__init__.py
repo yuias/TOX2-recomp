@@ -33,5 +33,8 @@ class Case:
     #   "writes":     [(channel, value), ...]   every wrch, in order, expected exactly
     #   "stops":      [code, ...]               every stop executed (the appended terminator included)
     #   "stop_leave": (code, ...)               stop codes for which the hook asks the thread to leave
-    #   "halts":      [site, ...]               taken heq/hgt/hlgt; the case ends at the first (default: none)
+    #   "halts":      [site, ...]               taken heq/hgt/hlgt and stopd; the case ends at the first
+    #                                           (default: none)
+    #   "leave_channels": (channel, ...)        rdch/wrch of these channels make the hook ask the thread to
+    #                                           leave (a write is still recorded; a read yields no value)
     channels: Mapping[str, object] = field(default_factory=dict)
