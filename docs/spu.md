@@ -145,3 +145,14 @@ without end.
   element format, and LZMA is simple to implement on the host. The engine tasks would each need
   their element format and computation worked out. The sound engine core (85 KB) is not practical
   to replace this way.
+
+## References
+
+The SPU decoder, emitter and semantics cases are written from these public documents. They are copyrighted by
+IBM, Sony and Toshiba and are not included in this repository.
+
+- *Synergistic Processor Unit Instruction Set Architecture*, Version 1.2, January 27, 2007: instruction formats,
+  semantics and the interrupt and channel instructions. A copy is at
+  <https://arcm.csc.ncsu.edu/~mueller/cluster/ps3/SDK3.0/docs/arch/SPU_ISA_v1.2_27Jan2007_pub.pdf>.
+- *SPU Assembly Language Specification*, Version 1.7: assembler mnemonics and operand syntax. A copy is at
+  <https://support.scinet.utoronto.ca/Manuals/Cell/SPU_Assembly_Language_Specification_1.7.pdf>.
