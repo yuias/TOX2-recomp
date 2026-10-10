@@ -287,6 +287,17 @@ void gcmSetFlipMode(Tox2PpuContext* ctx, std::uint8_t*) {
 // cellGcmResetFlipStatus(): void
 void gcmResetFlipStatus(Tox2PpuContext*, std::uint8_t*) { rsxState().flip_status = kRsxFlipStatusWaiting; }
 
+// cellGcmGetFlipStatus(): s32, the status the last flip or reset left (RPCS3 returns the renderer's flip_status).
+void gcmGetFlipStatus(Tox2PpuContext* ctx, std::uint8_t*) { ctx->gpr[3] = rsxState().flip_status; }
+
+// cellGcmGetLabelAddress(u8 index): the 16-byte label slot `index` of the semaphore area. The consumer resolves
+// the semaphore offsets of _cellGcmSetFlipCommandWithWaitLabel and the NV406E/NV4097 releases against the same
+// base (kRsxLabelAddr + offset), so a label the game polls is the one the RSX writes. Before initialisation there is
+// no label area, so the result is 0 (RPCS3 would return the bare offset, which no guest memory backs either).
+void gcmGetLabelAddress(Tox2PpuContext* ctx, std::uint8_t*) {
+    ctx->gpr[3] = rsxState().initialized ? kRsxLabelAddr + kRsxLabelStride * (argU32(ctx, 0) & 0xff) : 0;
+}
+
 // cellGcmGetLastFlipTime(): u64
 void gcmGetLastFlipTime(Tox2PpuContext* ctx, std::uint8_t*) { ctx->gpr[3] = rsxState().last_flip_time; }
 
@@ -320,7 +331,7 @@ void gcmSetFlipCommand(Tox2PpuContext* ctx, std::uint8_t* base) {
 void gcmSetFlipCommandWithWaitLabel(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t context = argU32(ctx, 0);
     requireCommitted(context, kContextSize, "command buffer context");
-    writeCommand(base, context, kMethodNv406eSemaphoreOffset, {argU32(ctx, 2) * 0x10, argU32(ctx, 3)});
+    writeCommand(base, context, kMethodNv406eSemaphoreOffset, {argU32(ctx, 2) * kRsxLabelStride, argU32(ctx, 3)});
     writeFlipCommand(base, context, argU32(ctx, 1), "_cellGcmSetFlipCommandWithWaitLabel");
 }
 
@@ -421,6 +432,7 @@ constexpr HleEntry kHandlers[] = {
         {kModule, 0x5a41c10f, "cellGcmGetTimeStamp", gcmGetTimeStamp},
         {kModule, 0x5e2ee0f0, "cellGcmGetDefaultCommandWordSize", gcmGetDefaultCommandWordSize},
         {kModule, 0x63387071, "cellGcmGetLastFlipTime", gcmGetLastFlipTime},
+        {kModule, 0x72a577ce, "cellGcmGetFlipStatus", gcmGetFlipStatus},
         {kModule, 0x8cdf8c70, "cellGcmGetDefaultSegmentWordSize", gcmGetDefaultSegmentWordSize},
         {kModule, 0x9ba451e4, "cellGcmSetDefaultFifoSize", gcmSetDefaultFifoSize},
         {kModule, 0x9dc04436, "cellGcmBindZcull", gcmBindZcull},
@@ -436,6 +448,7 @@ constexpr HleEntry kHandlers[] = {
         {kModule, 0xd9b7653e, "cellGcmUnbindTile", gcmBindTile<false>},
         {kModule, 0xe315a0b2, "cellGcmGetConfiguration", gcmGetConfiguration},
         {kModule, 0xefd00f54, "cellGcmUnmapEaIoAddress", gcmUnmapEaIoAddress},
+        {kModule, 0xf80196c1, "cellGcmGetLabelAddress", gcmGetLabelAddress},
 };
 
 }  // namespace

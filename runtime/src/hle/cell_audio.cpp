@@ -1,5 +1,5 @@
-// HLE of the 11 cellAudio imports the game uses: Init, Quit, PortOpen, PortStart, PortStop,
-// PortClose, GetPortConfig, GetPortBlockTag, GetPortTimestamp, SetNotifyEventQueue and
+// HLE of the 12 cellAudio imports the game uses: Init, Quit, PortOpen, PortStart, PortStop,
+// PortClose, GetPortConfig, GetPortBlockTag, GetPortTimestamp, SetPortLevel, SetNotifyEventQueue and
 // RemoveNotifyEventQueue. The library state and the period logic are in cell_audio_ports.cpp; this
 // file decodes the arguments and runs the audio engine that ticks the periods.
 //
@@ -7,7 +7,9 @@
 // `AudioSetNotifyEventQueue`, `cell_audio_thread::advance`) and `cellAudio.h` (`CellAudioPortConfig`).
 // Not taken over: RPCS3's key-0 workaround in `AudioSetNotifyEventQueue` (the thread creation rule
 // makes the game's mixer create its queue first), its short sleeps in PortOpen/PortStart/Set, and
-// its period catch-up (the engine skips late periods).
+// its period catch-up (the engine skips late periods). cellAudioSetPortLevel differs too: RPCS3 ramps
+// the level over several periods and accepts a negative level without changing anything, while here the
+// level applies from the next period and a negative or NaN level is CELL_AUDIO_ERROR_PARAM.
 
 #include <cstdint>
 #include <mutex>
@@ -85,6 +87,12 @@ void audioGetPortTimestamp(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, cellAudioPorts().getPortTimestamp(base, argU32(ctx, 0), ctx->gpr[4], argU32(ctx, 2)));
 }
 
+// cellAudioSetPortLevel(u32 port, float level): the level is the first floating-point argument.
+void audioSetPortLevel(Tox2PpuContext* ctx, std::uint8_t* base) {
+    (void)base;
+    setResultCode(ctx, cellAudioPorts().setPortLevel(argU32(ctx, 0), static_cast<float>(ctx->fpr[1].f64)));
+}
+
 // cellAudioSetNotifyEventQueue(u64 key) and cellAudioRemoveNotifyEventQueue(u64 key)
 void audioSetNotifyEventQueue(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
@@ -102,6 +110,7 @@ constexpr HleEntry kHandlers[] = {
         {kModule, 0x377e0cd9, "cellAudioSetNotifyEventQueue", audioSetNotifyEventQueue},
         {kModule, 0x4109d08c, "cellAudioGetPortTimestamp", audioGetPortTimestamp},
         {kModule, 0x4129fe2d, "cellAudioPortClose", audioPortClose},
+        {kModule, 0x56dfe179, "cellAudioSetPortLevel", audioSetPortLevel},
         {kModule, 0x5b1e2c73, "cellAudioPortStop", audioPortStop},
         {kModule, 0x74a66af0, "cellAudioGetPortConfig", audioGetPortConfig},
         {kModule, 0x89be28f2, "cellAudioPortStart", audioPortStart},

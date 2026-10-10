@@ -8,11 +8,12 @@
 //  - CELL_SYSUTIL_REQUEST_EXITGAME does not arm RPCS3's termination watchdog.
 //  - The BGM state is the status struct only; no system BGM is played, so the player state stays
 //    "stop" and the fade ratio 0.
-// Video and audio out (the four imports below the callback pump) are served from here too; see the
-// notes at their handlers.
+// Video and audio out (the imports below the callback pump) and cellVideoOutSetGamma of the
+// cellSysutilAvconfExt module are served from here too; see the notes at their handlers.
 // RPCS3 sends no system events on its own at startup; the first ones come from the HLE modules that
 // emulate the system software (message dialog, save data, trophy installation, ...).
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <deque>
@@ -31,6 +32,7 @@ namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "cellSysutil";
+constexpr char kAvconfExtModule[] = "cellSysutilAvconfExt";
 
 constexpr std::uint32_t kSlotCount = 4;
 
@@ -92,6 +94,12 @@ void checkCallback(Tox2PpuContext* ctx, std::uint8_t* base) {
 // cellSysutilEnableBgmPlayback()
 void enableBgmPlayback(Tox2PpuContext* ctx, std::uint8_t*) {
     g_bgm_enable_state = kBgmEnable;
+    ctx->gpr[3] = kCellOk;
+}
+
+// cellSysutilDisableBgmPlayback()
+void disableBgmPlayback(Tox2PpuContext* ctx, std::uint8_t*) {
+    g_bgm_enable_state = kBgmDisable;
     ctx->gpr[3] = kCellOk;
 }
 
@@ -164,21 +172,32 @@ VideoMode defaultVideoMode() {
     return mode;
 }
 
-// Ids that RPCS3's _IntGetResolutionInfo knows and that need no stereo support.
-bool knownResolution(std::uint8_t id) {
-    switch (id) {
-        case kResolution1080:
-        case kResolution720:
-        case kResolution480:
-        case kResolution576:
-        case 0x0a:
-        case 0x0b:
-        case 0x0c:
-        case 0x0d:
-        case 0x64: return true;
-        default: return false;
+// Ids that RPCS3's _IntGetResolutionInfo knows and that need no stereo support, with their pixel
+// size. cellVideoOutConfigure accepts exactly these and cellVideoOutGetResolution reports them.
+struct ResolutionSize {
+    std::uint8_t id;
+    std::uint16_t width, height;
+};
+constexpr ResolutionSize kResolutionSizes[] = {
+        {kResolution1080, 1920, 1080},
+        {kResolution720, 1280, 720},
+        {kResolution480, 720, 480},
+        {kResolution576, 720, 576},
+        {0x0a, 1600, 1080},
+        {0x0b, 1440, 1080},
+        {0x0c, 1280, 1080},
+        {0x0d, 960, 1080},
+        {0x64, 1280, 768},
+};
+
+const ResolutionSize* findResolution(std::uint32_t id) {
+    for (const ResolutionSize& size : kResolutionSizes) {
+        if (size.id == id) return &size;
     }
+    return nullptr;
 }
+
+bool knownResolution(std::uint8_t id) { return findResolution(id) != nullptr; }
 
 bool sfoAllows(std::uint32_t resolution_id, std::uint32_t aspect) {
     const std::uint32_t flags = sfoFlags("RESOLUTION");
@@ -240,6 +259,36 @@ void videoOutGetResolutionAvailability(Tox2PpuContext* ctx, std::uint8_t*) {
     ctx->gpr[3] = available ? 1 : 0;
 }
 
+// cellVideoOutGetResolution(u32 resolutionId, CellVideoOutResolution* resolution): {u16 width, u16 height}.
+// It describes the id, not the configured mode, and ignores the PARAM.SFO flags.
+void videoOutGetResolution(Tox2PpuContext* ctx, std::uint8_t* base) {
+    const std::uint32_t resolution = argU32(ctx, 1);
+    const ResolutionSize* size = findResolution(argU32(ctx, 0));
+    if (resolution == 0 || size == nullptr) {
+        ctx->gpr[3] = kVideoErrorIllegalParameter;
+        return;
+    }
+    tox2Write16(base, resolution, size->width);
+    tox2Write16(base, resolution + 2, size->height);
+    ctx->gpr[3] = kCellOk;
+}
+
+// cellVideoOutSetGamma(u32 videoOut, float gamma): the SDK range is 0.8 to 1.8. The gamma is not applied,
+// because the renderer presents the frame as it is.
+void videoOutSetGamma(Tox2PpuContext* ctx, std::uint8_t*) {
+    if (argU32(ctx, 0) != kVideoOutPrimary) {
+        ctx->gpr[3] = kVideoErrorUnsupportedVideoOut;
+        return;
+    }
+    const double gamma = ctx->fpr[1].f64;
+    if (!(gamma >= 0.8 && gamma <= 1.8)) {
+        ctx->gpr[3] = kVideoErrorIllegalParameter;
+        return;
+    }
+    logOnce("videoout-gamma", "tox2: videoout: gamma {} ignored", gamma);
+    ctx->gpr[3] = kCellOk;
+}
+
 // cellVideoOutConfigure(u32 videoOut, CellVideoOutConfiguration* config, CellVideoOutOption* option,
 //                       u32 waitForEvent)
 void videoOutConfigure(Tox2PpuContext* ctx, std::uint8_t* base) {
@@ -278,17 +327,46 @@ void videoOutConfigure(Tox2PpuContext* ctx, std::uint8_t* base) {
     ctx->gpr[3] = kCellOk;
 }
 
-// Audio out. Behaviour follows RPCS3 `Emu/Cell/Modules/cellAudioOut.cpp` cellAudioOutGetState;
-// layout CellAudioOutState {u8 state, u8 encoder, u8 reserved[6], u32 downMixer,
-// CellAudioOutSoundMode {u8 type, u8 channel, u8 fs, u8 reserved, u32 layout}}. RPCS3 always
-// selects LPCM 2 ch 48 kHz first unless its own surround setting adds more, so the PARAM.SFO
-// SOUND_FORMAT flags do not change the reported mode.
+// Audio out. Behaviour follows RPCS3 `Emu/Cell/Modules/cellAudioOut.cpp` (function of the same name);
+// layouts are CellAudioOutState {u8 state, u8 encoder, u8 reserved[6], u32 downMixer,
+// CellAudioOutSoundMode {u8 type, u8 channel, u8 fs, u8 reserved, u32 layout}} and
+// CellAudioOutConfiguration {u8 channel, u8 encoder, u8 reserved[10], u32 downMixer}. RPCS3 always
+// offers LPCM 2 ch 48 kHz first and adds more modes only with its own surround setting, so the
+// PARAM.SFO SOUND_FORMAT flags do not change the modes. The runtime mixes to stereo, so that is the
+// only mode; kSoundModes is the one list that the state, the availability and the configuration
+// share. Which values cellAudioOutConfigure refuses is the runtime's own reading of the SDK, not a
+// copy of RPCS3.
 constexpr std::uint32_t kAudioErrorIllegalParameter = 0x8002b242;
 constexpr std::uint32_t kAudioErrorOutOfRange = 0x8002b243;
+constexpr std::uint32_t kAudioErrorUnsupportedAudioOut = 0x8002b245;
+constexpr std::uint32_t kAudioErrorUnsupportedSoundMode = 0x8002b246;
 constexpr std::uint32_t kAudioStateSize = 20;
-constexpr std::uint8_t kAudioChannels2 = 2;
+constexpr std::uint32_t kAudioConfigSize = 16;
+constexpr std::uint8_t kAudioCodingLpcm = 0;
 constexpr std::uint8_t kAudioFs48k = 0x04;
 constexpr std::uint32_t kAudioLayout2ch = 0x00000001;
+constexpr std::uint32_t kAudioDownMixerTypeB = 2;  // NONE = 0, TYPE_A = 1
+
+struct SoundMode {
+    std::uint8_t type, channel, fs;
+    std::uint32_t layout;
+};
+constexpr SoundMode kSoundModes[] = {{kAudioCodingLpcm, 2, kAudioFs48k, kAudioLayout2ch}};
+
+struct AudioOutSetting {
+    std::uint8_t channel = kSoundModes[0].channel;
+    std::uint8_t encoder = kAudioCodingLpcm;
+    std::uint32_t down_mixer = 0;
+};
+
+AudioOutSetting g_audio_out;
+
+const SoundMode* findSoundMode(std::uint8_t channel) {
+    for (const SoundMode& mode : kSoundModes) {
+        if (mode.channel == channel) return &mode;
+    }
+    return nullptr;
+}
 
 // cellAudioOutGetState(u32 audioOut, u32 deviceIndex, CellAudioOutState* state)
 void audioOutGetState(Tox2PpuContext* ctx, std::uint8_t* base) {
@@ -316,13 +394,91 @@ void audioOutGetState(Tox2PpuContext* ctx, std::uint8_t* base) {
         }
         return;
     }
-    tox2Write8(base, state + 0, 0);   // CELL_AUDIO_OUT_OUTPUT_STATE_ENABLED
-    tox2Write8(base, state + 1, 0);   // CELL_AUDIO_OUT_CODING_TYPE_LPCM
-    tox2Write32(base, state + 8, 0);  // CELL_AUDIO_OUT_DOWNMIXER_NONE
-    tox2Write8(base, state + 12, 0);  // sound mode type: LPCM
-    tox2Write8(base, state + 13, kAudioChannels2);
-    tox2Write8(base, state + 14, kAudioFs48k);
-    tox2Write32(base, state + 16, kAudioLayout2ch);
+    const SoundMode& mode = *findSoundMode(g_audio_out.channel);
+    tox2Write8(base, state + 0, 0);  // CELL_AUDIO_OUT_OUTPUT_STATE_ENABLED
+    tox2Write8(base, state + 1, g_audio_out.encoder);
+    tox2Write32(base, state + 8, g_audio_out.down_mixer);
+    tox2Write8(base, state + 12, mode.type);
+    tox2Write8(base, state + 13, mode.channel);
+    tox2Write8(base, state + 14, mode.fs);
+    tox2Write32(base, state + 16, mode.layout);
+    ctx->gpr[3] = kCellOk;
+}
+
+// cellAudioOutGetConfiguration(u32 audioOut, CellAudioOutConfiguration* config, CellAudioOutOption* option)
+void audioOutGetConfiguration(Tox2PpuContext* ctx, std::uint8_t* base) {
+    const std::uint32_t audio_out = argU32(ctx, 0);
+    const std::uint32_t config = argU32(ctx, 1);
+    if (config == 0 || audio_out > 1) {
+        ctx->gpr[3] = kAudioErrorIllegalParameter;
+        return;
+    }
+    for (std::uint32_t i = 0; i < kAudioConfigSize; i++) tox2Write8(base, config + i, 0);
+    // The secondary output has no device, so its configuration stays empty.
+    if (audio_out == 0) {
+        tox2Write8(base, config + 0, g_audio_out.channel);
+        tox2Write8(base, config + 1, g_audio_out.encoder);
+        tox2Write32(base, config + 12, g_audio_out.down_mixer);
+    }
+    ctx->gpr[3] = kCellOk;
+}
+
+// cellAudioOutGetSoundAvailability(u32 audioOut, u32 type, u32 fs, u32 option): the largest channel count
+// among the modes with that coding type and sampling rate, in r3 (0 when none). This is the runtime's
+// reading of the SDK ("number of channels available"), not a copy of RPCS3.
+void audioOutGetSoundAvailability(Tox2PpuContext* ctx, std::uint8_t*) {
+    const std::uint32_t audio_out = argU32(ctx, 0);
+    const std::uint32_t type = argU32(ctx, 1);
+    const std::uint32_t fs = argU32(ctx, 2);
+    if (audio_out > 1) {
+        ctx->gpr[3] = kAudioErrorUnsupportedAudioOut;
+        return;
+    }
+    std::uint32_t available = 0;
+    if (audio_out == 0) {
+        for (const SoundMode& mode : kSoundModes) {
+            if (mode.type == type && mode.fs == fs) available = std::max<std::uint32_t>(available, mode.channel);
+        }
+    }
+    logOnce(std::format("audioout-avail-{}-{}", type, fs), "tox2: audioout: availability of type {} fs {:#x}: {}", type,
+            fs, available);
+    ctx->gpr[3] = available;
+}
+
+// cellAudioOutConfigure(u32 audioOut, CellAudioOutConfiguration* config, CellAudioOutOption* option,
+//                       u32 waitForEvent). A channel count of 0 keeps the current one. Nothing is
+// stored when any field is refused. The mixer does not use the setting; GetState and GetConfiguration
+// report it back.
+void audioOutConfigure(Tox2PpuContext* ctx, std::uint8_t* base) {
+    const std::uint32_t audio_out = argU32(ctx, 0);
+    const std::uint32_t config = argU32(ctx, 1);
+    if (config == 0 || audio_out > 1) {
+        ctx->gpr[3] = kAudioErrorIllegalParameter;
+        return;
+    }
+    if (audio_out == 1) {
+        ctx->gpr[3] = kCellOk;
+        return;
+    }
+    AudioOutSetting setting = g_audio_out;
+    const std::uint8_t channel = tox2Read8(base, config + 0);
+    const std::uint8_t encoder = tox2Read8(base, config + 1);
+    const std::uint32_t down_mixer = tox2Read32(base, config + 12);
+    if (channel != 0) setting.channel = channel;
+    if (findSoundMode(setting.channel) == nullptr || encoder != kAudioCodingLpcm) {
+        logError("tox2: audioout: unsupported sound mode requested: {} ch, coding type {}", channel, encoder);
+        ctx->gpr[3] = kAudioErrorUnsupportedSoundMode;
+        return;
+    }
+    if (down_mixer > kAudioDownMixerTypeB) {
+        ctx->gpr[3] = kAudioErrorIllegalParameter;
+        return;
+    }
+    setting.encoder = encoder;
+    setting.down_mixer = down_mixer;
+    g_audio_out = setting;
+    logInfo("tox2: audioout: configured {} ch, coding type {}, down mixer {}", setting.channel, setting.encoder,
+            setting.down_mixer);
     ctx->gpr[3] = kCellOk;
 }
 
@@ -331,10 +487,16 @@ constexpr HleEntry kHandlers[] = {
         {kModule, 0x0bae8772, "cellVideoOutConfigure", videoOutConfigure},
         {kModule, 0x189a74da, "cellSysutilCheckCallback", checkCallback},
         {kModule, 0x220894e3, "cellSysutilEnableBgmPlayback", enableBgmPlayback},
+        {kModule, 0x4692ab35, "cellAudioOutConfigure", audioOutConfigure},
         {kModule, 0x887572d5, "cellVideoOutGetState", videoOutGetState},
         {kModule, 0x9d98afa0, "cellSysutilRegisterCallback", registerCallback},
         {kModule, 0xa11552f6, "cellSysutilGetBgmPlaybackStatus", getBgmPlaybackStatus},
         {kModule, 0xa322db75, "cellVideoOutGetResolutionAvailability", videoOutGetResolutionAvailability},
+        {kModule, 0xc01b4e7c, "cellAudioOutGetSoundAvailability", audioOutGetSoundAvailability},
+        {kAvconfExtModule, 0xc7020f62, "cellVideoOutSetGamma", videoOutSetGamma},
+        {kModule, 0xcfdd8e87, "cellSysutilDisableBgmPlayback", disableBgmPlayback},
+        {kModule, 0xe558748d, "cellVideoOutGetResolution", videoOutGetResolution},
+        {kModule, 0xed5d96af, "cellAudioOutGetConfiguration", audioOutGetConfiguration},
         {kModule, 0xf4e3caa0, "cellAudioOutGetState", audioOutGetState},
 };
 
@@ -378,6 +540,7 @@ void resetCellSysutil() {
     g_bgm_enable_state = kBgmDisable;
     g_video_mode = {};
     g_video_configured = false;
+    g_audio_out = {};
 }
 
 }  // namespace tox2

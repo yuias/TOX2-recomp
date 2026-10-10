@@ -176,6 +176,18 @@ std::uint32_t CellAudioPorts::portStop(std::uint32_t port_no) {
     return kCellOk;
 }
 
+std::uint32_t CellAudioPorts::setPortLevel(std::uint32_t port_no, float level) {
+    if (!initialised_) return kCellAudioErrorNotInit;
+    if (port_no >= kCellAudioPortCount) return kCellAudioErrorParam;
+    Port& port = ports_[port_no];
+    if (port.state == PortState::Closed) return kCellAudioErrorPortNotOpen;
+    // A negative level and NaN are refused; above 1 amplifies and the mixer clamps the sum.
+    if (!(level >= 0.0f)) return kCellAudioErrorParam;
+
+    port.level = level;
+    return kCellOk;
+}
+
 std::uint32_t CellAudioPorts::portClose(std::uint32_t port_no) {
     if (!initialised_) return kCellAudioErrorNotInit;
     if (port_no >= kCellAudioPortCount) return kCellAudioErrorParam;

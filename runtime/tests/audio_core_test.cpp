@@ -1283,6 +1283,12 @@ public:
         return result;
     }
 
+    // cellAudioSetPortLevel: the level travels in f1, not in a general register.
+    std::uint32_t setPortLevel(std::uint32_t port, double level) {
+        caller_.context().fpr[1].f64 = level;
+        return call("cellAudioSetPortLevel", port);
+    }
+
     std::uint64_t syscall(std::uint32_t number, std::uint64_t r3, std::uint64_t r4 = 0, std::uint64_t r5 = 0,
                           std::uint64_t r6 = 0) {
         Tox2PpuContext* ctx = &caller_.context();
@@ -1322,15 +1328,15 @@ void testCellAudioStateErrors() {
     // Everything but Init needs Init first.
     for (const char* name :
          {"cellAudioQuit", "cellAudioPortOpen", "cellAudioGetPortConfig", "cellAudioPortStart", "cellAudioPortStop",
-          "cellAudioPortClose", "cellAudioGetPortBlockTag", "cellAudioGetPortTimestamp", "cellAudioSetNotifyEventQueue",
-          "cellAudioRemoveNotifyEventQueue"}) {
+          "cellAudioPortClose", "cellAudioGetPortBlockTag", "cellAudioGetPortTimestamp", "cellAudioSetPortLevel",
+          "cellAudioSetNotifyEventQueue", "cellAudioRemoveNotifyEventQueue"}) {
         CHECK(guest.call(name, guest.at(0), guest.at(0x40), guest.at(0x80)) == kAudioNotInit);
     }
     CHECK(guest.initWithoutEngine() == 0);
     CHECK(guest.call("cellAudioInit") == kAudioAlreadyInit);
     CHECK(guest.call("cellAudioQuit") == 0);
     CHECK(guest.call("cellAudioQuit") == kAudioNotInit);
-    CHECK(tox2::cellAudioHandlers().size() == 11);
+    CHECK(tox2::cellAudioHandlers().size() == 12);
 }
 
 void testCellAudioPortOpenAndConfig() {
@@ -1538,6 +1544,41 @@ void testCellAudioMixing() {
     CHECK(mixed[2 * 255] == 1.0f && mixed[2 * 255 + 1] == -1.0f);
     CHECK(tox2Read64(base, tox2Read32(base, guest.at(0x80))) == 1);
     CHECK(tox2Read64(base, tox2Read32(base, guest.at(0xc0))) == 1);
+}
+
+void testCellAudioPortLevel() {
+    AudioGuest guest;
+    std::uint8_t* base = guest.base();
+    CHECK(guest.initWithoutEngine() == 0);
+
+    CHECK(guest.open(0x00, 2, 2, 0, 1.0f, guest.at(0x60)) == 0);
+    CHECK(guest.call("cellAudioGetPortConfig", 0, guest.at(0x80)) == 0);
+    const std::uint32_t memory = tox2Read32(base, guest.at(0x80 + 0x1c));
+    CHECK(guest.call("cellAudioPortStart", 0) == 0);
+
+    // The level applies to the next period, also on a started port.
+    CHECK(guest.setPortLevel(0, 0.5) == 0);
+    writeFloat(base, memory, 0.5f);
+    writeFloat(base, memory + 4, -0.25f);
+    tox2::AudioBlock out = runPeriod(guest, 1000);
+    CHECK(out[0] == 0.25f && out[1] == -0.125f);
+    CHECK(guest.setPortLevel(0, 0.0) == 0);
+    writeFloat(base, memory + 2 * 256 * 4, 0.5f);
+    CHECK(std::ranges::all_of(runPeriod(guest, 2000), [](float s) { return s == 0.0f; }));
+
+    // Errors leave the level alone; a port that was closed and opened again starts at 1.
+    CHECK(guest.setPortLevel(0, -0.5) == kAudioParam);
+    CHECK(guest.setPortLevel(0, std::numeric_limits<double>::quiet_NaN()) == kAudioParam);
+    CHECK(guest.setPortLevel(8, 1.0) == kAudioParam);
+    CHECK(guest.setPortLevel(1, 1.0) == kAudioPortNotOpen);
+    CHECK(guest.call("cellAudioPortClose", 0) == 0);
+    CHECK(guest.setPortLevel(0, 1.0) == kAudioPortNotOpen);
+    CHECK(guest.open(0x00, 2, 2, 0, 1.0f, guest.at(0x60)) == 0);
+    CHECK(guest.call("cellAudioGetPortConfig", 0, guest.at(0x80)) == 0);
+    CHECK(guest.call("cellAudioPortStart", 0) == 0);  // start zeroes the port memory
+    writeFloat(base, tox2Read32(base, guest.at(0x80 + 0x1c)), 0.5f);
+    CHECK(runPeriod(guest, 3000)[0] == 0.5f);
+    CHECK(guest.call("cellAudioQuit") == 0);
 }
 
 void testCellAudioNotify() {
@@ -2777,6 +2818,7 @@ int main(int argc, char** argv) {
     testCellAudioPortOpenAndConfig();
     testCellAudioTagsAndTimestamps();
     testCellAudioMixing();
+    testCellAudioPortLevel();
     testCellAudioNotify();
     testCellAudioEngine();
     testAt3ParseStereoWithLoop();

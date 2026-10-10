@@ -15,6 +15,7 @@
 #include <fstream>
 #include <functional>
 #include <initializer_list>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -3010,12 +3011,34 @@ void testVideoAndAudioOut() {
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
     CHECK(scratch != 0);
 
-    enum Import : std::uint32_t { GetState, Availability, Configure, AudioState, ImportCount };
+    enum Import : std::uint32_t {
+        GetState,
+        Availability,
+        Configure,
+        AudioState,
+        GetResolution,
+        AudioConfiguration,
+        SoundAvailability,
+        AudioConfigure,
+        SetGamma,
+        DisableBgm,
+        EnableBgm,
+        BgmStatus,
+        ImportCount
+    };
     const Tox2ImportInfo imports[] = {
             {0x00800000, 0x887572d5, "cellSysutil", "cellVideoOutGetState"},
             {0x00800010, 0xa322db75, "cellSysutil", "cellVideoOutGetResolutionAvailability"},
             {0x00800020, 0x0bae8772, "cellSysutil", "cellVideoOutConfigure"},
             {0x00800030, 0xf4e3caa0, "cellSysutil", "cellAudioOutGetState"},
+            {0x00800040, 0xe558748d, "cellSysutil", "cellVideoOutGetResolution"},
+            {0x00800050, 0xed5d96af, "cellSysutil", "cellAudioOutGetConfiguration"},
+            {0x00800060, 0xc01b4e7c, "cellSysutil", "cellAudioOutGetSoundAvailability"},
+            {0x00800070, 0x4692ab35, "cellSysutil", "cellAudioOutConfigure"},
+            {0x00800080, 0xc7020f62, "cellSysutilAvconfExt", "cellVideoOutSetGamma"},
+            {0x00800090, 0xcfdd8e87, "cellSysutil", "cellSysutilDisableBgmPlayback"},
+            {0x008000a0, 0x220894e3, "cellSysutil", "cellSysutilEnableBgmPlayback"},
+            {0x008000b0, 0xa11552f6, "cellSysutil", "cellSysutilGetBgmPlaybackStatus"},
     };
     tox2::installImports(imports, ImportCount);
     auto ctx = std::make_unique<Tox2PpuContext>();
@@ -3100,6 +3123,93 @@ void testVideoAndAudioOut() {
     const std::uint8_t expected_audio[20] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 4, 0, 0, 0, 0, 1};
     CHECK(std::memcmp(base + state, expected_audio, 20) == 0 && base[state + 20] == 0xaa);
     CHECK(call(AudioState, 1, 0, state) == 0 && base[state] == 0x10 && tox2Read32(base, state + 16) == 0xd00c1680);
+
+    // cellVideoOutGetResolution describes the id, whatever the configured mode and the SFO flags are.
+    const std::uint32_t resolution = scratch + 0x200;
+    std::uint32_t width = 0, height = 0;
+    const auto sizeOf = [&](std::uint32_t id) {
+        std::memset(base + resolution, 0xaa, 8);
+        const std::uint32_t result = call(GetResolution, id, resolution);
+        width = tox2Read16(base, resolution);
+        height = tox2Read16(base, resolution + 2);
+        return result;
+    };
+    CHECK(sizeOf(1) == 0 && width == 1920 && height == 1080);
+    CHECK(sizeOf(2) == 0 && width == 1280 && height == 720);
+    CHECK(sizeOf(4) == 0 && width == 720 && height == 480);
+    CHECK(sizeOf(5) == 0 && width == 720 && height == 576);
+    CHECK(sizeOf(0x0a) == 0 && width == 1600 && height == 1080);
+    CHECK(sizeOf(0x0d) == 0 && width == 960 && height == 1080);
+    CHECK(sizeOf(0) == kIllegalParameter && width == 0xaaaa && height == 0xaaaa);
+    CHECK(sizeOf(3) == kIllegalParameter && sizeOf(0x81) == kIllegalParameter);
+    CHECK(sizeOf(0x102) == kIllegalParameter);  // the id is not truncated to a byte
+    CHECK(call(GetResolution, 2, 0) == kIllegalParameter);
+    // cellVideoOutConfigure accepts exactly the ids that have a size.
+    for (std::uint32_t id = 0; id < 0x100; id++) {
+        setConfig(static_cast<std::uint8_t>(id), 0, 0, 0x1400);
+        CHECK((call(Configure, 0, config, 0, 0) == 0) == (sizeOf(id) == 0));
+    }
+
+    // Audio out: the configuration, the availability and the state share one setting.
+    const std::uint32_t audio_config = scratch + 0x300;
+    std::memset(base + audio_config, 0xaa, 20);
+    CHECK(call(AudioConfiguration, 0, 0, 0) == kAudioIllegal);
+    CHECK(call(AudioConfiguration, 2, audio_config, 0) == kAudioIllegal);
+    CHECK(call(AudioConfiguration, 0, audio_config, 0) == 0);
+    const std::uint8_t expected_config[16] = {2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    CHECK(std::memcmp(base + audio_config, expected_config, 16) == 0 && base[audio_config + 16] == 0xaa);
+    CHECK(call(AudioConfiguration, 1, audio_config, 0) == 0);  // the secondary output is empty
+    CHECK(std::all_of(base + audio_config, base + audio_config + 16, [](std::uint8_t byte) { return byte == 0; }));
+
+    // LPCM (0) at 48 kHz (4) offers 2 channels; other types and rates offer none.
+    CHECK(call(SoundAvailability, 0, 0, 4, 0) == 2);
+    CHECK(call(SoundAvailability, 0, 1, 4, 0) == 0 && call(SoundAvailability, 0, 0, 1, 0) == 0);
+    CHECK(call(SoundAvailability, 1, 0, 4, 0) == 0);
+    CHECK(call(SoundAvailability, 2, 0, 4, 0) == 0x8002b245);
+
+    const auto setAudioConfig = [&](std::uint8_t channel, std::uint8_t encoder, std::uint32_t down_mixer) {
+        std::memset(base + audio_config, 0, 16);
+        base[audio_config] = channel;
+        base[audio_config + 1] = encoder;
+        tox2Write32(base, audio_config + 12, down_mixer);
+    };
+    constexpr std::uint32_t kAudioUnsupportedMode = 0x8002b246;
+    CHECK(call(AudioConfigure, 0, 0, 0, 0) == kAudioIllegal);
+    CHECK(call(AudioConfigure, 2, audio_config, 0, 0) == kAudioIllegal);
+    setAudioConfig(8, 0, 0);
+    CHECK(call(AudioConfigure, 0, audio_config, 0, 0) == kAudioUnsupportedMode);
+    setAudioConfig(2, 1, 0);
+    CHECK(call(AudioConfigure, 0, audio_config, 0, 0) == kAudioUnsupportedMode);
+    setAudioConfig(2, 0, 3);
+    CHECK(call(AudioConfigure, 0, audio_config, 0, 0) == kAudioIllegal);
+    CHECK(call(AudioState, 0, 0, state) == 0 && tox2Read32(base, state + 8) == 0);  // nothing was stored
+    setAudioConfig(0, 0, 2);                                  // channel 0 keeps the current channel count
+    CHECK(call(AudioConfigure, 1, audio_config, 0, 0) == 0);  // the secondary output ignores it
+    CHECK(call(AudioState, 0, 0, state) == 0 && tox2Read32(base, state + 8) == 0);
+    CHECK(call(AudioConfigure, 0, audio_config, 0, 0) == 0);
+    CHECK(call(AudioState, 0, 0, state) == 0 && tox2Read32(base, state + 8) == 2 && base[state + 13] == 2);
+    CHECK(call(AudioConfiguration, 0, audio_config, 0) == 0 && base[audio_config] == 2 &&
+          tox2Read32(base, audio_config + 12) == 2);
+
+    // cellVideoOutSetGamma accepts the SDK range 0.8 to 1.8; the value is in f1.
+    const auto setGamma = [&](double gamma) {
+        ctx->fpr[1].f64 = gamma;
+        return call(SetGamma, 0);
+    };
+    CHECK(setGamma(1.0) == 0 && setGamma(0.8) == 0 && setGamma(1.8) == 0);
+    CHECK(setGamma(0.5) == kIllegalParameter && setGamma(2.5) == kIllegalParameter);
+    CHECK(setGamma(std::numeric_limits<double>::quiet_NaN()) == kIllegalParameter);
+    ctx->fpr[1].f64 = 1.0;
+    CHECK(call(SetGamma, 1) == 0x8002b225);  // only the primary output has a gamma
+
+    // DisableBgmPlayback undoes EnableBgmPlayback.
+    const std::uint32_t bgm = scratch + 0x400;
+    CHECK(call(EnableBgm) == 0 && call(BgmStatus, bgm) == 0 && base[bgm + 1] == 0);
+    CHECK(call(DisableBgm) == 0 && call(BgmStatus, bgm) == 0 && base[bgm + 1] == 1);
+
+    // A reset forgets the audio setting.
+    tox2::resetCellSysutil();
+    CHECK(call(AudioState, 0, 0, state) == 0 && tox2Read32(base, state + 8) == 0);
 
     tox2::setGameParamSfo({});
     tox2::resetCellSysutil();
@@ -6903,6 +7013,8 @@ void testCellGcmSys() {
         SetTileInfo,
         FlipWithLabel,
         UnbindTile,
+        GetFlipStatus,
+        GetLabelAddress,
         ImportCount
     };
     const Tox2ImportInfo imports[] = {
@@ -6932,6 +7044,8 @@ void testCellGcmSys() {
             {0x00800170, 0xbd100dbc, "cellGcmSys", "cellGcmSetTileInfo"},
             {0x00800180, 0xd8f88e1a, "cellGcmSys", "_cellGcmSetFlipCommandWithWaitLabel"},
             {0x00800190, 0xd9b7653e, "cellGcmSys", "cellGcmUnbindTile"},
+            {0x008001a0, 0x72a577ce, "cellGcmSys", "cellGcmGetFlipStatus"},
+            {0x008001b0, 0xf80196c1, "cellGcmSys", "cellGcmGetLabelAddress"},
     };
     tox2::installImports(imports, ImportCount);
     auto a = makeCaller(0x01000000);
@@ -6958,6 +7072,8 @@ void testCellGcmSys() {
     std::uint32_t offset = 0;
     CHECK(offsetOf(0xc0000000, offset) == kFailure && offset == 0xdeadbeef);
     CHECK(call(TiledPitch, {0x1400}) == 0x1400);
+    CHECK(call(GetLabelAddress, {0xc0}) == 0);  // no label area before initialisation
+    CHECK(call(GetFlipStatus, {}) == tox2::kRsxFlipStatusDone);
 
     // Handlers are ignored and the zcull request is refused before initialisation.
     call(SetFlipHandler, {0x1234});
@@ -7007,6 +7123,13 @@ void testCellGcmSys() {
     CHECK(call(TimeStamp, {0}) == 0xffffffff && ctx->gpr[3] == ~std::uint64_t{0});
     CHECK(call(TimeStamp, {2047}) == 0xffffffff);
     CHECK(call(TimeStamp, {2048}) == 0 && ctx->gpr[3] == 0);
+
+    // Labels are 16 bytes apart in the semaphore area, which is where the consumer's semaphore methods and the
+    // flip-with-label wait offsets (index * 16) point; the index is a u8.
+    CHECK(call(GetLabelAddress, {0}) == 0x10300000 && call(GetLabelAddress, {1}) == 0x10300010);
+    CHECK(call(GetLabelAddress, {0xc0}) == 0x10300c00 && call(GetLabelAddress, {255}) == 0x10300ff0);
+    CHECK(call(GetLabelAddress, {0x1c0}) == 0x10300c00);
+    CHECK(p.memory.isCommitted(call(GetLabelAddress, {255}), 16));
 
     // cellGcmGetTiledPitchSize
     CHECK(call(TiledPitch, {0}) == 0 && call(TiledPitch, {1}) == 0x200);
@@ -7099,8 +7222,10 @@ void testCellGcmSys() {
     call(SetFlipMode, {2});
     CHECK(state.requested_vsync);
     CHECK(state.flip_status == tox2::kRsxFlipStatusDone);
+    CHECK(call(GetFlipStatus, {}) == 0);
     call(ResetFlipStatus, {});
     CHECK(state.flip_status == tox2::kRsxFlipStatusWaiting);
+    CHECK(call(GetFlipStatus, {}) == 1);
     call(GetLastFlipTime, {});
     CHECK(ctx->gpr[3] == state.last_flip_time);
     call(SetFlipHandler, {0x1111});
@@ -7123,6 +7248,7 @@ void testCellGcmSys() {
           tox2Read32(base, cmd + 16) == 0x77);
     CHECK(tox2Read32(base, cmd + 20) == 0x4feac && tox2Read32(base, cmd + 24) == 2);
     CHECK(tox2Read32(base, context + 8) == cmd + 28);
+    CHECK(call(GetLabelAddress, {5}) == tox2::kRsxLabelAddr + tox2Read32(base, cmd + 12));  // the label it waits on
     call(FlipWithLabel, {context, 9, 1, 2});  // the label wait is written, the flip is refused
     CHECK(tox2Read32(base, cmd + 28) == 0x80064 && tox2Read32(base, context + 8) == cmd + 40);
     CHECK(countContaining(lines, "display buffer id 8 is out of range") == 1);

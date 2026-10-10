@@ -5,7 +5,8 @@
 // Behaviour follows RPCS3 `rpcs3/Emu/Cell/Modules/cellAudio.h` (`CellAudioError`, `CellAudioPortParam`,
 // `CellAudioPortConfig`) and `cellAudio.cpp` (`cellAudioInit`, `cellAudioPortOpen`,
 // `cellAudioGetPortConfig`, `cellAudioPortStart`, `cellAudioGetPortBlockTag`,
-// `cellAudioGetPortTimestamp`, `AudioSetNotifyEventQueue`, `cell_audio_thread::mix` and `advance`).
+// `cellAudioGetPortTimestamp`, `cellAudioSetPortLevel`, `AudioSetNotifyEventQueue`, `cell_audio_thread::mix` and
+// `advance`).
 
 #pragma once
 
@@ -61,7 +62,7 @@ struct CellAudioStats {
 
 class CellAudioPorts {
 public:
-    // The logic of the 11 imports, returning the import's result code. `base` is the guest memory base;
+    // The logic of the 12 imports, returning the import's result code. `base` is the guest memory base;
     // guest addresses are validated here, so a bad pointer is an error code, not a fault. All of them
     // run under the guest lock.
     std::uint32_t init();
@@ -71,6 +72,7 @@ public:
     std::uint32_t portStart(std::uint8_t* base, std::uint32_t port);
     std::uint32_t portStop(std::uint32_t port);
     std::uint32_t portClose(std::uint32_t port);
+    std::uint32_t setPortLevel(std::uint32_t port, float level);
     std::uint32_t getPortBlockTag(std::uint8_t* base, std::uint32_t port, std::uint64_t block_no,
                                   std::uint32_t tag_addr) const;
     std::uint32_t getPortTimestamp(std::uint8_t* base, std::uint32_t port, std::uint64_t tag,

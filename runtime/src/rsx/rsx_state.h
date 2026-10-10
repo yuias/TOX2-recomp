@@ -26,6 +26,7 @@ inline constexpr std::uint32_t kRsxIoSpaceSize = 0x10000000;
 // RsxReports: semaphore[1024] (4 B), notify[64] (16 B), report[2048] (16 B).
 inline constexpr std::uint32_t kRsxReportsNotifyOffset = 0x1000;
 inline constexpr std::uint32_t kRsxReportsReportOffset = 0x1400;
+inline constexpr std::uint32_t kRsxLabelStride = 0x10;  // label n is the semaphore at offset 16 * n
 inline constexpr std::uint32_t kRsxReportsSize = 0x1400 + 2048 * 16;
 
 // Pages of 1 MiB: effective addresses below the local memory, and the IO space (up to 512 MiB).
