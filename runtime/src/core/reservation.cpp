@@ -1,0 +1,239 @@
+#include "core/reservation.h"
+
+#include <algorithm>
+#include <bit>
+#include <cstring>
+#include <thread>
+
+#include <immintrin.h>
+
+namespace tox2 {
+
+namespace {
+
+constexpr std::uint32_t kChunkCount = kReservationLineSize / 8;
+
+// Guest bytes may be read by one thread while another stores to them, so every access to shared
+// memory is an atomic access of its natural width. Host pointers into a line are 8-byte aligned.
+std::uint64_t loadChunk(const std::uint8_t* p) {
+    return __atomic_load_n(reinterpret_cast<const std::uint64_t*>(p), __ATOMIC_RELAXED);
+}
+
+void storeChunk(std::uint8_t* p, std::uint64_t value) {
+    __atomic_store_n(reinterpret_cast<std::uint64_t*>(p), value, __ATOMIC_RELEASE);
+}
+
+// Unaligned read of a caller buffer (LS data, snapshot): no atomicity needed, the thread owns it.
+std::uint64_t readBuffer(const std::uint8_t* p) {
+    std::uint64_t value;
+    std::memcpy(&value, p, sizeof(value));
+    return value;
+}
+
+void spinOnce(std::uint32_t& spins) {
+    if (++spins < 64) {
+        _mm_pause();
+    } else {
+        std::this_thread::yield();
+    }
+}
+
+bool haltRequested(const std::uint32_t* halt) {
+    return halt != nullptr && __atomic_load_n(halt, __ATOMIC_ACQUIRE) != 0;
+}
+
+template <typename T>
+void storeSkipEqual(std::uint8_t* dst, const std::uint8_t* src) {
+    T value;
+    std::memcpy(&value, src, sizeof(T));
+    T* target = reinterpret_cast<T*>(dst);
+    if (__atomic_load_n(target, __ATOMIC_RELAXED) != value) __atomic_store_n(target, value, __ATOMIC_RELEASE);
+}
+
+// Writes `size` bytes in the widest naturally aligned atomic pieces. A piece whose bytes already equal
+// the new ones is skipped, so a concurrent plain store to it is not undone by an equal-valued write.
+void storeBytes(std::uint8_t* dst, const std::uint8_t* src, std::uint32_t size) {
+    while (size != 0) {
+        std::uint32_t width = 8;
+        while (width > size || (reinterpret_cast<std::uintptr_t>(dst) & (width - 1)) != 0) width >>= 1;
+        switch (width) {
+            case 8: storeSkipEqual<std::uint64_t>(dst, src); break;
+            case 4: storeSkipEqual<std::uint32_t>(dst, src); break;
+            case 2: storeSkipEqual<std::uint16_t>(dst, src); break;
+            default: storeSkipEqual<std::uint8_t>(dst, src); break;
+        }
+        dst += width;
+        src += width;
+        size -= width;
+    }
+}
+
+}  // namespace
+
+ReservationTable::ReservationTable() : stripes_(new std::atomic<std::uint64_t>[kReservationStripeCount]) {
+    for (std::uint32_t i = 0; i < kReservationStripeCount; i++) stripes_[i].store(0, std::memory_order_relaxed);
+}
+
+std::uint64_t ReservationTable::lock(std::atomic<std::uint64_t>& s) {
+    std::uint32_t spins = 0;
+    for (;;) {
+        std::uint64_t v = s.load(std::memory_order_relaxed);
+        if ((v & 1) == 0 && s.compare_exchange_weak(v, v + 1, std::memory_order_acquire, std::memory_order_relaxed)) {
+            return v;
+        }
+        spinOnce(spins);
+    }
+}
+
+void ReservationTable::unlockWithWrite(std::atomic<std::uint64_t>& s) {
+    s.fetch_add(1, std::memory_order_seq_cst);
+    // The version moves before the epoch, so a waiter that read the old epoch and then found the
+    // reservation intact is still woken by this bump.
+    publish();
+}
+
+void ReservationTable::unlockClean(std::atomic<std::uint64_t>& s) { s.fetch_sub(1, std::memory_order_release); }
+
+void ReservationTable::publish() {
+    epoch_.fetch_add(1, std::memory_order_seq_cst);
+    if (waiters_.load(std::memory_order_seq_cst) != 0) {
+        // Taking the mutex orders this notify after a waiter that has checked the epoch but not yet
+        // started to wait.
+        {
+            std::lock_guard<std::mutex> guard(wait_mutex_);
+        }
+        wait_cv_.notify_all();
+    }
+}
+
+void ReservationTable::getllar(const std::uint8_t* base, std::uint32_t ea, std::uint8_t* dst, Reservation& res) {
+    const std::uint32_t line = ea & ~(kReservationLineSize - 1);
+    const std::uint8_t* host = base + line;
+    const std::atomic<std::uint64_t>& s = stripe(line);
+    std::uint32_t spins = 0;
+    for (;;) {
+        const std::uint64_t v = s.load(std::memory_order_acquire);
+        if (v & 1) {
+            spinOnce(spins);
+            continue;
+        }
+        for (std::uint32_t i = 0; i < kChunkCount; i++) {
+            const std::uint64_t chunk = loadChunk(host + 8 * i);
+            std::memcpy(res.snapshot + 8 * i, &chunk, sizeof(chunk));
+        }
+        // Keeps the chunk loads above the re-read; without it the copy could pass a writer unnoticed.
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (s.load(std::memory_order_relaxed) == v) {
+            res.valid = true;
+            res.line = line;
+            res.version = v;
+            break;
+        }
+    }
+    std::memcpy(dst, res.snapshot, kReservationLineSize);
+}
+
+bool ReservationTable::putllc(std::uint8_t* base, std::uint32_t ea, const std::uint8_t* src, Reservation& res) {
+    const std::uint32_t line = ea & ~(kReservationLineSize - 1);
+    const bool usable = res.valid && res.line == line;
+    res.valid = false;
+    if (!usable) return false;
+
+    // No spinning: a locked or moved stripe means another writer got there first.
+    std::atomic<std::uint64_t>& s = stripe(line);
+    std::uint64_t expected = res.version;
+    if (!s.compare_exchange_strong(expected, expected + 1, std::memory_order_acquire, std::memory_order_relaxed)) {
+        return false;
+    }
+
+    std::uint8_t* host = base + line;
+    for (std::uint32_t i = 0; i < kChunkCount; i++) {
+        if (loadChunk(host + 8 * i) != readBuffer(res.snapshot + 8 * i)) {
+            unlockClean(s);
+            return false;
+        }
+    }
+    if (compare_hook_ != nullptr) compare_hook_(compare_hook_arg_);
+    for (std::uint32_t i = 0; i < kChunkCount; i++) {
+        const std::uint64_t value = readBuffer(src + 8 * i);
+        if (value != readBuffer(res.snapshot + 8 * i)) storeChunk(host + 8 * i, value);
+    }
+    unlockWithWrite(s);
+    return true;
+}
+
+void ReservationTable::putlluc(std::uint8_t* base, std::uint32_t ea, const std::uint8_t* src) {
+    const std::uint32_t line = ea & ~(kReservationLineSize - 1);
+    std::atomic<std::uint64_t>& s = stripe(line);
+    lock(s);
+    storeBytes(base + line, src, kReservationLineSize);
+    unlockWithWrite(s);
+}
+
+void ReservationTable::put(std::uint8_t* base, std::uint32_t ea, const std::uint8_t* src, std::uint32_t size) {
+    while (size != 0) {
+        const std::uint32_t line_end = (ea | (kReservationLineSize - 1)) + 1;  // 0 at the top of the space
+        const std::uint32_t piece = line_end == 0 ? size : std::min(size, line_end - ea);
+        std::atomic<std::uint64_t>& s = stripe(ea);
+        lock(s);
+        storeBytes(base + ea, src, piece);
+        unlockWithWrite(s);
+        ea += piece;
+        src += piece;
+        size -= piece;
+    }
+}
+
+bool ReservationTable::storeConditional(std::uint8_t* base, std::uint32_t ea, std::uint32_t size,
+                                        std::uint64_t expected, std::uint64_t value) {
+    if (size != 4 && size != 8) return false;
+    std::atomic<std::uint64_t>& s = stripe(ea);
+    lock(s);
+    bool ok;
+    if (size == 4) {
+        auto* target = reinterpret_cast<std::uint32_t*>(base + ea);
+        ok = std::byteswap(__atomic_load_n(target, __ATOMIC_RELAXED)) == static_cast<std::uint32_t>(expected);
+        if (ok) __atomic_store_n(target, std::byteswap(static_cast<std::uint32_t>(value)), __ATOMIC_RELEASE);
+    } else {
+        auto* target = reinterpret_cast<std::uint64_t*>(base + ea);
+        ok = std::byteswap(__atomic_load_n(target, __ATOMIC_RELAXED)) == expected;
+        if (ok) __atomic_store_n(target, std::byteswap(value), __ATOMIC_RELEASE);
+    }
+    if (ok) {
+        unlockWithWrite(s);
+    } else {
+        unlockClean(s);
+    }
+    return ok;
+}
+
+bool ReservationTable::lost(const std::uint8_t* base, const Reservation& res) const {
+    if (!res.valid) return false;
+    if (stripe(res.line).load(std::memory_order_acquire) != res.version) return true;
+    const std::uint8_t* host = base + res.line;
+    for (std::uint32_t i = 0; i < kChunkCount; i++) {
+        if (loadChunk(host + 8 * i) != readBuffer(res.snapshot + 8 * i)) return true;
+    }
+    return false;
+}
+
+StoreWait ReservationTable::waitStoreEpoch(std::uint64_t seen, const std::uint32_t* halt,
+                                           std::chrono::microseconds timeout) {
+    if (haltRequested(halt)) return StoreWait::Halt;
+    if (epoch_.load(std::memory_order_seq_cst) != seen) return StoreWait::Epoch;
+
+    std::unique_lock<std::mutex> guard(wait_mutex_);
+    waiters_.fetch_add(1, std::memory_order_seq_cst);
+    const bool woken = wait_cv_.wait_for(
+            guard, timeout, [&] { return epoch_.load(std::memory_order_seq_cst) != seen || haltRequested(halt); });
+    waiters_.fetch_sub(1, std::memory_order_seq_cst);
+    if (!woken) return StoreWait::Timeout;
+    return haltRequested(halt) ? StoreWait::Halt : StoreWait::Epoch;
+}
+
+ReservationTable& reservations() {
+    static ReservationTable table;
+    return table;
+}
+
+}  // namespace tox2

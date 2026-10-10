@@ -90,6 +90,7 @@ function(tox2_runtime_add_core)
     runtime/src/core/guest_memory.cpp
     runtime/src/core/log.cpp
     runtime/src/core/param_sfo.cpp
+    runtime/src/core/reservation.cpp
     runtime/src/core/threads.cpp
     runtime/src/core/timer_resolution.cpp
     runtime/src/hle/cell_atrac.cpp
@@ -177,4 +178,12 @@ function(tox2_runtime_add_core)
   add_test(NAME media_core COMMAND tox2_media_core_tests)
   set_tests_properties(media_core PROPERTIES
     PASS_REGULAR_EXPRESSION "media core tests: [0-9]+ passed, 0 failed")
+
+  add_executable(tox2_spu_runtime_tests runtime/tests/spu_runtime_test.cpp)
+  target_compile_options(tox2_spu_runtime_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_link_libraries(tox2_spu_runtime_tests PRIVATE tox2_runtime_core)
+
+  add_test(NAME spu_runtime COMMAND tox2_spu_runtime_tests)
+  set_tests_properties(spu_runtime PROPERTIES
+    PASS_REGULAR_EXPRESSION "spu runtime tests: [0-9]+ passed, 0 failed")
 endfunction()
