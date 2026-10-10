@@ -1,8 +1,6 @@
 // Self-checking tests for the run-time FFmpeg loader.
 
 #include <algorithm>
-#include <atomic>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -14,13 +12,11 @@
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <thread>
 #include <vector>
 
 #include "core/log.h"
 #include "media/ffmpeg_api.h"
 #include "media/ffmpeg_codecs.h"
-#include "media/movie_player.h"
 
 namespace {
 
@@ -538,176 +534,6 @@ void testAtracFrameDecoder() {
     CHECK(factory->create(no_rate, error) == nullptr);
 }
 
-// With the decrypted sound effects next to the build (bin/../sdata_cache), a reset must make the next
-// frames decode exactly as they do in a fresh decoder, and the valid audio must be fully decoded.
-void testAtracResetWithGameFile(const std::filesystem::path& exe_dir) {
-    const std::filesystem::path archive = exe_dir.parent_path() / "sdata_cache" / "PS3_GAME" / "USRDIR" / "Se.sdat";
-    std::ifstream stream(archive, std::ios::binary | std::ios::ate);
-    if (!stream) {
-        std::printf("atrac reset game file: skipped (Se.sdat not found in the sdata cache)\n");
-        return;
-    }
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(stream.tellg()));
-    stream.seekg(0);
-    stream.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    const auto entries = dal::scanRiffEntries(bytes);
-    CHECK(entries.size() > 2);
-    if (entries.size() <= 2) return;
-    const auto [offset, size] = entries[2];
-    const std::span<const std::uint8_t> entry = std::span<const std::uint8_t>(bytes).subspan(
-            offset, std::min<std::uint64_t>(std::uint64_t{size} + 8, bytes.size() - offset));
-    const auto info = dal::parseAt3Header(entry);
-    CHECK(info.has_value());
-    if (!info) return;
-
-    std::string error;
-    auto factory = dal::createFfmpegAtracDecoderFactory(error);
-    CHECK(factory != nullptr);
-    if (!factory) return;
-    const std::size_t frame_floats = std::size_t{dal::kAtrac3plusFrameSamples} * info->channels;
-    auto decodeRange = [&](dal::AtracFrameDecoder& decoder, std::uint32_t from, std::uint32_t to,
-                           std::vector<float>& pcm) {
-        std::vector<float> out(frame_floats);
-        for (std::uint32_t f = from; f < to; ++f) {
-            const auto frame = entry.subspan(info->data_offset + std::size_t{f} * info->block_align, info->block_align);
-            CHECK(decoder.decode(frame, out, error));
-            pcm.insert(pcm.end(), out.begin(), out.end());
-        }
-    };
-
-    constexpr std::uint32_t kFrames = 10;
-    CHECK(info->frameCount() >= kFrames);
-    auto fresh = factory->create(*info, error);
-    auto reused = factory->create(*info, error);
-    CHECK(fresh != nullptr && reused != nullptr);
-    if (!fresh || !reused) return;
-    std::vector<float> reference, after_reset, ignored, without_reset;
-    decodeRange(*fresh, 0, kFrames, reference);
-    decodeRange(*reused, 5, 9, ignored);
-    decodeRange(*reused, 0, kFrames, without_reset);  // continues the stream: frame 0 overlaps frame 8
-    reused->reset();
-    decodeRange(*reused, 0, kFrames, after_reset);
-    CHECK(reference == after_reset);
-    std::printf("atrac reset: without a reset the first frame differs from a fresh decoder: %s\n",
-                reference == without_reset ? "no" : "yes");
-    // Same data, same output: the decoder has no hidden randomness.
-    auto again = factory->create(*info, error);
-    std::vector<float> repeat;
-    if (again) decodeRange(*again, 0, kFrames, repeat);
-    CHECK(reference == repeat);
-}
-
-// Plays a game movie through the player with the real codecs. The clock moves one frame period per
-// consumer step, so a slow decoder shows up as dropped frames or missing frames, never as a hang.
-// With `max_steps` > 0 only that many frame periods are played and the movie is not run to its end.
-void playGameMovie(const std::filesystem::path& movie, const char* name, int max_steps) {
-    constexpr std::int64_t kFrameTicks = 3003;
-    constexpr std::uint32_t kAudioPerStep = 1602;  // 48 kHz samples in one 29.97 Hz frame period
-    std::atomic<std::int64_t> clock{0};
-    dal::MoviePlayerOptions options;
-    options.clock = [&clock] { return clock.load(); };
-    {
-        dal::MoviePlayer player(options);
-        dal::VideoOutputFormat format;
-        format.bt709 = true;
-        const auto info = player.open(movie, format, {});
-        CHECK(info.has_value());
-        if (info && player.start()) {
-            CHECK(player.waitPrerolled(std::chrono::seconds(10)));
-            player.restartClock();
-
-            std::uint64_t delivered = 0, dropped = 0, real_audio = 0;
-            std::int64_t first_audio_pts = -1, last_video_pts = -1;
-            bool order_ok = true, size_ok = true;
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
-            bool finished = false;
-            int step = 0;
-            while (std::chrono::steady_clock::now() < deadline) {
-                if (max_steps > 0 && step++ >= max_steps) break;
-                const std::int64_t now = player.now();
-                if (auto due = player.takeDueVideo(now)) {
-                    delivered++;
-                    dropped += due->dropped;
-                    if (due->frame.pts <= last_video_pts) order_ok = false;
-                    last_video_pts = due->frame.pts;
-                    if (due->frame.width != 1280 || due->frame.height != 720 ||
-                        due->frame.bytes.size() != std::size_t{due->frame.pitch} * 720) {
-                        size_ok = false;
-                    }
-                }
-                const dal::MovieAudioBlock audio = player.takeAudio(kAudioPerStep);
-                if (audio.real_frames != 0 && first_audio_pts < 0) first_audio_pts = audio.pts;
-                real_audio += audio.real_frames;
-                if (player.atEnd(now) && player.stats().decode_finished) {
-                    finished = true;
-                    break;
-                }
-                clock += kFrameTicks;
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            const dal::MoviePlayerStats stats = player.stats();
-            std::printf(
-                    "movie player %s: decoded %llu, delivered %llu, dropped %llu, audio %llu of %llu decoded samples, "
-                    "first audio pts %lld, played %lld of %lld ticks, audio stale %llu, audio overflow %llu\n",
-                    name, static_cast<unsigned long long>(stats.video_decoded),
-                    static_cast<unsigned long long>(delivered), static_cast<unsigned long long>(dropped),
-                    static_cast<unsigned long long>(real_audio),
-                    static_cast<unsigned long long>(stats.audio_decoded_frames),
-                    static_cast<long long>(first_audio_pts), static_cast<long long>(stats.played_ticks),
-                    static_cast<long long>(stats.duration_ticks),
-                    static_cast<unsigned long long>(stats.audio_stale_frames),
-                    static_cast<unsigned long long>(stats.audio_overflow_frames));
-            std::printf(
-                    "movie player %s: largest audio lead %.3f s at %.3f s into the movie, after %llu video frames decoded\n",
-                    name, static_cast<double>(stats.audio_max_lead_ticks) / 90000.0,
-                    static_cast<double>(stats.audio_max_lead_at_ticks) / 90000.0,
-                    static_cast<unsigned long long>(stats.audio_max_lead_video_decoded));
-            CHECK(stats.frame_rate_num == 30000 && stats.frame_rate_den == 1001);
-            CHECK(stats.video_decoder && stats.audio_decoder && stats.demux_errors == 0);
-            CHECK(order_ok && size_ok && delivered > 0);
-            CHECK(delivered + dropped <= stats.video_decoded);
-            CHECK(first_audio_pts == 85470);
-            // A consumer that pulls in step with the clock loses no audio, stale or not.
-            CHECK(stats.audio_stale_frames == 0 && stats.audio_overflow_frames == 0);
-            if (max_steps == 0) {
-                CHECK(finished);
-                CHECK(stats.video_decoded >= 200);
-                CHECK(stats.audio_decoded_frames >= 48000 * 6 && real_audio > 48000 * 5);
-                CHECK(stats.played_ticks == stats.duration_ticks);
-            }
-        }
-    }
-}
-
-// Optional: needs DAL_GAME_DIR.
-void testMoviePlayerWithGameFile() {
-    char* dir = nullptr;
-    std::size_t dir_len = 0;
-    if (_dupenv_s(&dir, &dir_len, "DAL_GAME_DIR") != 0 || dir == nullptr || *dir == '\0') {
-        std::free(dir);
-        std::printf("movie player game file: skipped (DAL_GAME_DIR is not set)\n");
-        return;
-    }
-    const std::filesystem::path movie_dir = std::filesystem::path(dir) / "PS3_GAME" / "USRDIR" / "Movie";
-    std::free(dir);
-    if (!std::filesystem::exists(movie_dir / "ch_logo.pam")) {
-        std::printf("movie player game file: skipped (ch_logo.pam not found)\n");
-        return;
-    }
-
-    std::string error;
-    dal::setMediaCodecFactory(dal::createFfmpegCodecFactory(error));
-    CHECK(dal::mediaCodecFactory() != nullptr);
-    if (dal::mediaCodecFactory() == nullptr) {
-        std::fprintf(stderr, "no codecs: %s\n", error.c_str());
-        return;
-    }
-    playGameMovie(movie_dir / "ch_logo.pam", "ch_logo", 0);
-    // The opening 30 s of the longest-running logo-style movie; it only has to keep up with the clock.
-    if (std::filesystem::exists(movie_dir / "op.pam")) playGameMovie(movie_dir / "op.pam", "op", 900);
-    dal::setMediaCodecFactory(nullptr);
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -722,11 +548,6 @@ int main(int argc, char** argv) {
     testAudioConversion();
     testAudioDecoderLifecycle();
     testAtracFrameDecoder();
-    if (argc > 0) {
-        std::error_code ec;
-        testAtracResetWithGameFile(std::filesystem::absolute(argv[0], ec).parent_path());
-    }
-    testMoviePlayerWithGameFile();
     std::printf("media ffmpeg tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

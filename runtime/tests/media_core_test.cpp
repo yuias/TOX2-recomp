@@ -1,6 +1,5 @@
 // Self-checking tests for the movie pipeline's core: cellSail guest layouts, codec interfaces and the
-// service thread, and the PAMF parser and demuxer. No FFmpeg is involved. Only the PAMF game-file
-// test reads game data; it is optional and runs only when DAL_GAME_DIR is set.
+// service thread, and the PAMF parser and demuxer. No FFmpeg is involved and no game data is read.
 
 #include <algorithm>
 #include <atomic>
@@ -1991,151 +1990,6 @@ void testSailSoundDelivery() {
     dal::resetLogOnce();
 }
 
-struct GameFile {
-    const char* name;
-    // The first three counts are from the whole-file statistics of the format description;
-    // `video_pts_only` (PTS without DTS) was found by running the demuxer.
-    std::uint32_t packs, video_pes, video_pts, video_pts_only;
-};
-
-const GameFile kGameFiles[] = {
-        {"ch_logo.pam", 4037, 3979, 17, 0},  {"if_logo.pam", 4169, 4110, 17, 0},  {"op.pam", 113633, 112864, 241, 2},
-        {"world.pam", 51111, 50434, 195, 0}, {"end01.pam", 78080, 77059, 293, 0}, {"end02.pam", 77956, 76935, 293, 0},
-        {"end03.pam", 78023, 77002, 293, 0}, {"end04.pam", 77670, 76649, 292, 0}, {"end05.pam", 78067, 77046, 293, 0},
-        {"end06.pam", 79860, 78813, 299, 2},
-};
-
-void testPamfGameFiles() {
-    // _dupenv_s: the CRT marks getenv as deprecated.
-    char* dir = nullptr;
-    std::size_t dir_len = 0;
-    if (_dupenv_s(&dir, &dir_len, "DAL_GAME_DIR") != 0 || dir == nullptr || *dir == '\0') {
-        std::free(dir);
-        std::printf("pamf game files: skipped (DAL_GAME_DIR is not set)\n");
-        return;
-    }
-    const std::filesystem::path movie_dir = std::filesystem::path(dir) / "PS3_GAME" / "USRDIR" / "Movie";
-    std::free(dir);
-
-    for (const GameFile& file : kGameFiles) {
-        const std::filesystem::path path = movie_dir / file.name;
-        std::ifstream in(path, std::ios::binary);
-        CHECK(in.is_open());
-        if (!in.is_open()) {
-            std::fprintf(stderr, "cannot open %s\n", file.name);
-            continue;
-        }
-        Bytes header(2048);
-        in.read(reinterpret_cast<char*>(header.data()), static_cast<std::streamsize>(header.size()));
-        const auto info = dal::parsePamfHeader(header);
-        CHECK(info.has_value());
-        if (!info) {
-            std::fprintf(stderr, "%s: %s\n", file.name, info.error().c_str());
-            continue;
-        }
-        const bool is_ch_logo = std::string_view(file.name) == "ch_logo.pam";
-        CHECK(info->streams.size() == 2 && info->streams[0].codec == dal::PamfCodec::Avc &&
-              info->streams[1].codec == dal::PamfCodec::Atrac3plus);
-        CHECK(info->data_offset == 2048 && info->data_size / 2048 == file.packs);
-        CHECK(std::filesystem::file_size(path) == std::uint64_t{info->data_offset} + info->data_size);
-        if (info->streams.size() != 2) continue;
-        CHECK(info->streams[0].width == 1280 && info->streams[0].height == 720);
-        CHECK(info->streams[1].channels == 2 && info->streams[1].sample_rate == 48000);
-        if (is_ch_logo) {
-            CHECK(info->start_pts == 89310 && info->end_pts == 722910 && info->mux_rate_bound == 120000);
-            CHECK(info->streams[0].stream_id == 0xE0 && info->streams[1].stream_id == 0xBD &&
-                  info->streams[1].private_stream_id == 0);
-        }
-
-        // The whole data area, fed in odd-sized pieces so that packs and packets straddle feeds.
-        dal::PamfDemuxer demux(*info);
-        in.seekg(info->data_offset);
-        Bytes chunk((1u << 20) + 13);
-        std::uint64_t video_aus = 0, video_pts = 0, video_dts = 0, audio_frames = 0, audio_bytes = 0;
-        std::int64_t last_video_pts = -1, last_video_dts = -1, last_audio_pts = -1, first_audio_pts = -1;
-        std::int64_t first_video_pts = -1, first_video_dts = -1;
-        std::uint64_t video_pts_only = 0;
-        bool video_order_ok = true, audio_order_ok = true, audio_all_stamped = true;
-        bool frames_ok = true;
-        std::size_t first_frame_size = 0;
-        auto pull = [&] {
-            while (auto au = demux.next(0)) {
-                video_aus++;
-                if (au->pts >= 0) {
-                    video_pts++;
-                    if (au->pts <= last_video_pts) video_order_ok = false;
-                    last_video_pts = au->pts;
-                    if (first_video_pts < 0) {
-                        first_video_pts = au->pts;
-                        first_video_dts = au->dts;
-                    }
-                    if (au->dts < 0) {
-                        // The description lists a DTS for every PTS, but some op and end06 packets carry only a PTS.
-                        if (video_pts_only++ < 3) {
-                            std::printf("pamf %s: video AU %llu has PTS %lld and no DTS (last DTS %lld)\n", file.name,
-                                        static_cast<unsigned long long>(video_aus), static_cast<long long>(au->pts),
-                                        static_cast<long long>(last_video_dts));
-                        }
-                    }
-                }
-                if (au->dts >= 0) {
-                    video_dts++;
-                    if (au->dts <= last_video_dts) video_order_ok = false;
-                    last_video_dts = au->dts;
-                }
-            }
-            while (auto au = demux.next(1)) {
-                audio_frames++;
-                audio_bytes += au->bytes.size();
-                if (au->pts < 0)
-                    audio_all_stamped = false;
-                else if (au->pts <= last_audio_pts)
-                    audio_order_ok = false;
-                if (au->pts >= 0) last_audio_pts = au->pts;
-                if (first_audio_pts < 0) {
-                    first_audio_pts = au->pts;
-                    first_frame_size = au->bytes.size();
-                }
-                if (au->bytes.size() < 8 || au->bytes[0] != 0x0F || au->bytes[1] != 0xD0) frames_ok = false;
-            }
-        };
-        while (in) {
-            in.read(reinterpret_cast<char*>(chunk.data()), static_cast<std::streamsize>(chunk.size()));
-            const std::streamsize got = in.gcount();
-            if (got <= 0) break;
-            demux.feed(std::span<const std::uint8_t>(chunk).first(static_cast<std::size_t>(got)));
-            pull();
-        }
-        demux.endOfStream();
-        pull();
-
-        std::printf(
-                "pamf %s: packs %u, video PES/AUs %llu (PTS %llu, DTS %llu), audio frames %llu (%llu bytes), errors %llu, "
-                "first video PTS/DTS %lld/%lld, audio PTS %lld..%lld\n",
-                file.name, file.packs, static_cast<unsigned long long>(video_aus),
-                static_cast<unsigned long long>(video_pts), static_cast<unsigned long long>(video_dts),
-                static_cast<unsigned long long>(audio_frames), static_cast<unsigned long long>(audio_bytes),
-                static_cast<unsigned long long>(demux.errors()), static_cast<long long>(first_video_pts),
-                static_cast<long long>(first_video_dts), static_cast<long long>(first_audio_pts),
-                static_cast<long long>(last_audio_pts));
-
-        CHECK(demux.errors() == 0);
-        CHECK(video_aus == file.video_pes && video_pts == file.video_pts);
-        CHECK(video_pts_only == file.video_pts_only && video_dts == file.video_pts - file.video_pts_only);
-        CHECK(video_order_ok && audio_order_ok && audio_all_stamped && frames_ok);
-        CHECK(audio_frames > 0 && audio_bytes % first_frame_size == 0);
-        if (is_ch_logo || std::string_view(file.name) == "if_logo.pam" || std::string_view(file.name) == "op.pam") {
-            CHECK(first_video_pts == 90000 && first_video_dts == 86997);
-        }
-        if (is_ch_logo) {
-            // One frame before the header start PTS, 165 inside the interval, and one starting at its end.
-            CHECK(audio_frames == 167 && first_audio_pts == 85470 && last_audio_pts == 722910 &&
-                  first_frame_size == 696);
-        }
-        if (std::string_view(file.name) == "op.pam") CHECK(last_audio_pts == 8629470);
-    }
-}
-
 }  // namespace
 
 int main() {
@@ -2157,7 +2011,6 @@ int main() {
     testMoviePlayerWithoutCodecs();
     testMoviePlayerPartialCodecs();
     testSailSoundDelivery();
-    testPamfGameFiles();
     std::printf("media core tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }

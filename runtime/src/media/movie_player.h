@@ -25,8 +25,8 @@
 // the caller's. Without a video decoder the decode waits for the consumer instead.
 //
 // Video backpressure. A full video queue also stops file reads, so the audio read ahead of the clock
-// is set by how the file is multiplexed: in ch_logo the audio runs up to 2.2 s ahead of the clock
-// mid-movie, in op 0.65 s at the start (`audio_max_lead_*` in the stats). That is why future audio is
+// is set by how the file is multiplexed: in the PAMF movies this player was written against the audio ran
+// up to 2.2 s ahead of the clock (`audio_max_lead_*` in the stats). That is why future audio is
 // kept up to the hard cap instead of being limited to `audio_queue_frames`.
 //
 // Threading. `open()` must not run concurrently with any other call except `stop()`: the other calls
