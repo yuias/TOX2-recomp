@@ -2,7 +2,7 @@
 
 Everything on this page is inherited from the project this one was derived from, and it was
 written against that game. For *Tales of Xillia 2* the fake RSX has run only until the game's
-start-up stops at a guest trap (see [Status](status.md)): in the three headless runs the game
+start-up stops at a guest fault (see [Status](status.md)): in the three headless runs the game
 initialised GCM, produced 186 FIFO headers and issued no flip, so no frame was built, drawn or
 displayed. The frame builder, the renderer, the shader translators and the capture and replay
 tools have not been exercised with this game's commands. The statements below about what the

@@ -17,7 +17,7 @@ A run starts with the load log, for example (TOX2 values):
 [host] tox2: sfo: TITLE_ID BLJS10188 RESOLUTION 0x15 SOUND_FORMAT 0x107
 [host] tox2: load: phdr 0 type 0x1 flags 0x00400005 vaddr 0x00010000 filesz 0x103a828 memsz 0x103a828 ...
 [host] tox2: dispatch: 29369 entries, span 0x00010200..0x00c9098c
-[host] tox2: hle: 173 imports, 107 with handlers
+[host] tox2: hle: 173 imports, 111 with handlers
 [host] tox2: loaded EBOOT.elf: entry 0x00010240 toc 0x010b6330 opd 0x0105ddb8 ... image end 0x011d0000
 [host] tox2: sha256 a1d8a56ce1d6300bff704a43218f1b8b87c80c1e1342929a266e58af4e5891e9
 [host] tox2: boot: stack 0xd0001000..0xd0011000 entry 0x00010240 toc 0x010b6330 r1 0xd0010f40 ...
@@ -28,23 +28,23 @@ A run starts with the load log, for example (TOX2 values):
 On every stop the runtime prints what the game did, sorted by count and then by name:
 
 ```
-census: syscalls 34225 calls, 11 distinct, 1 default-handled
-  sc 43 sys_ppu_thread_yield: 34066 [impl]
-  sc 45 ?: 2 [default]
+census: syscalls 26422 calls, 13 distinct, 1 default-handled
+  sc 43 sys_ppu_thread_yield: 26255 [impl]
+  sc 45 ?: 3 [default]
   sc 169 sys_spu_initialize: 1 [impl]
-census: hle 81299 calls, 71 distinct, 26 default-handled
-  sysPrxForUser::sys_lwmutex_lock: 38638 [impl]
+census: hle 67507 calls, 78 distinct, 26 default-handled
+  sysPrxForUser::sys_lwmutex_lock: 30958 [impl]
   cellSpurs::cellSpursCreateTask2: 25 [default] ptr r3,r4,r5,r6,r7,r8,r9
-  cellGame::cellGameBootCheck: 1 [default] ptr r3,r4,r5,r6,r8
+  cellGcmSys::cellGcmGetLabelAddress: 1 [default]
 census: unknown targets 0 distinct
 census: rsx 186 headers, 170 distinct methods, 0 flips
   method 0x1efc: 21
 census: rsx unimplemented 1 kinds
   state zpass report constant: 1
-census: threads 8 created, 6 live
-  0x01000000 main_thread: blocked in sys_timer_usleep
-  0x01000002 _gcm_intr_thread: blocked in gcm interrupt wait [service]
-  0x01000007 CThread: running
+census: threads 8 created, 5 live
+  0x01000000 main_thread: blocked in sys_event_flag_wait
+  0x01000002 _gcm_intr_thread: running
+  0x01000004 CThread: running
 ```
 
 This is an excerpt of the census of a headless run of this game (see [Status](status.md)); the
@@ -162,8 +162,9 @@ Everything else goes to the default handler. Behaviour follows the RPCS3 handler
 name; struct layouts and error codes are restated from its headers. The table lists what the
 runtime implements; this game's executable uses 24 system call numbers that are not in it
 (among them the semaphores 90, 92 and 93, the SPU thread group calls 170 to 178 and the vm and
-memory container calls), and only some of those were reached before the stop (number 45,
-`sys_ppu_thread_detach`, is the one that the census shows as default-handled).
+memory container calls), and only some of those were reached before the stop (the census shows
+number 45, `sys_ppu_thread_detach`, as default-handled, and on a run that finds existing game data
+also 324 and 343, `sys_memory_container_create` and `_get_size`).
 
 | Group | Calls |
 | --- | --- |
@@ -181,8 +182,8 @@ memory container calls), and only some of those were reached before the stop (nu
 ## Implemented imports
 
 Imports are matched to handlers by module and FNID. The executable of this game has 173 imports from
-17 modules, and 107 of them have a handler (the load log says `tox2: hle: 173 imports, 107 with
-handlers`). The other 66 are served by the [default handler](#default-handlers). Behaviour follows
+17 modules, and 111 of them have a handler (the load log says `tox2: hle: 173 imports, 111 with
+handlers`). The other 62 are served by the [default handler](#default-handlers). Behaviour follows
 the RPCS3 function of the same name (`Emu/Cell/Modules/`); each handler file lists its deviations in
 its header comment. `cellAudio` and `cellAtrac` were implemented from a written description of
 RPCS3's behaviour, not from its code (see [Audio](audio.md#clean-room)).
@@ -198,8 +199,8 @@ FNID match, not that the behaviour suits this game.
 | `cellSpurs` | 2 / 30 | `_cellSpursAttributeInitialize` (it fills the attribute structure) and `cellSpursFinalize` | the other 28: attribute setters, `cellSpursInitializeWithAttribute`, tasksets and tasks (versions 1 and 2), queues, lock-free queues, event flags, `cellSpursTaskGetContextSaveAreaSize`, join and push calls |
 | `cellGcmSys` | 24 / 26 | initialization (`_cellGcmInitBody`), configuration, IO mapping (`cellGcmMapMainMemory`, `cellGcmAddressToOffset`, `cellGcmUnmapEaIoAddress`), display buffers, flip mode, the vblank and flip handlers, tiles and zcull, the control register, the flip commands and the default command buffer sizes; see [Fake RSX](rendering.md#fake-rsx) | `cellGcmGetFlipStatus`, `cellGcmGetLabelAddress` |
 | `cellSysutil` | 14 / 23 | the callback pump (`cellSysutilRegisterCallback`, `_CheckCallback`), BGM playback status and enabling, `cellVideoOutConfigure`, `_GetState`, `cellAudioOutGetState`, the message dialog (`cellMsgDialogOpen2`, `_Close`, `ProgressBarInc`) and save data (`cellSaveDataListLoad2`, `ListSave2`, `AutoSave2`, `Delete2`) | `cellVideoOutGetResolution`, `cellAudioOutConfigure`, `cellAudioOutGetConfiguration`, `cellAudioOutGetSoundAvailability`, `cellSysutilDisableBgmPlayback`, `cellMsgDialogOpenErrorCode`, `cellSaveDataListAutoLoad`, `cellSaveDataFixedLoad2`, `cellSaveDataFixedSave2` |
-| `cellGame` | 4 / 5 | `cellGameDataCheck`, `cellGameCreateGameData`, `cellGameContentPermit`, `cellGameContentErrorDialog` | `cellGameBootCheck` |
-| `sys_fs` | 4 / 7 | `cellFsOpen`, `cellFsClose`, `cellFsStat`, `cellFsFstat` | `cellFsRead`, `cellFsLseek`, `cellFsWrite` |
+| `cellGame` | 5 / 5 | `cellGameBootCheck` (always a disc boot: type `CELL_GAME_GAMETYPE_DISC`, attributes 0, an empty directory name, and the permit that follows returns `/dev_bdvd/PS3_GAME` and its `USRDIR`), `cellGameDataCheck`, `cellGameCreateGameData`, `cellGameContentPermit`, `cellGameContentErrorDialog` | |
+| `sys_fs` | 7 / 7 | `cellFsOpen`, `cellFsClose`, `cellFsStat`, `cellFsFstat`, `cellFsRead`, `cellFsLseek`, `cellFsWrite` (the last three call the lv2 handlers of `sys_fs_read`, `_lseek` and `_write`, so offsets and counts stay 64-bit) | |
 | `sys_io` | 6 / 6 | `cellPadInit`, `cellPadEnd`, `cellPadSetPortSetting`, `cellPadGetData`, `cellPadGetInfo2`, `cellPadSetActDirect` | |
 | `cellAudio` | 9 / 10 | `Init`, `Quit`, `PortOpen`, `PortStart`, `PortStop`, `PortClose`, `GetPortConfig`, `SetNotifyEventQueue`, `RemoveNotifyEventQueue`; the ports and the 8-block ring live in guest memory and a host clock drives the game's mixer; see [Audio](audio.md) | `cellAudioSetPortLevel` |
 | `cellAtrac` | 12 / 15 | `SetDataAndGetMemSize`, `DeleteDecoder`, `Decode`, the stream calls (`GetStreamDataInfo`, `AddStreamData`), the loop and info calls, `GetMaxSample`, `GetChannel` and the second-buffer calls; ATRAC3plus is decoded through FFmpeg; see [Audio](audio.md#cellatrac) | `cellAtracCreateDecoderExt`, `cellAtracGetInternalErrorInfo`, `cellAtracGetVacantSize` |
@@ -412,8 +413,10 @@ outside the code), as `tox2: default hle <module>::<name>: possible out-pointer 
 (<region>)`, and the census repeats the register list as `ptr r<N>,...`. These are hints for writing
 the handler, not facts: a register left over from an earlier call can look like a pointer too.
 
-In this game's runs the default handlers served 26 imports and one system call before the stop.
-The most likely to matter for the stop is `cellGameBootCheck`: the game passes it five pointers
-(`r3`, `r4`, `r5`, `r6` and `r8`, of which `r3` is on the stack) and then stats files without a
-directory prefix, which is what an empty directory-name out-parameter would produce. That link is a
-hypothesis; it has not been tested by giving the call a handler.
+In this game's runs the default handlers served 26 imports and one to three system calls before the
+stop. The stop itself (a write to address 0 in fn `0x008a090c` on the GCM interrupt thread) follows
+the default-handled `cellGcmGetLabelAddress`, which returns 0 instead of a label address; that link
+is a hypothesis that has not been tested by giving the call a handler.
+
+With the default result of `cellGameBootCheck` the game used data file paths without a directory
+prefix; with the handler they start with `/dev_bdvd/PS3_GAME`.

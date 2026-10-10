@@ -103,14 +103,14 @@ exits:
 
 A fatal stop also prints the registers and the call trace (the most recent function entries) of
 the faulting guest thread. The current runs of this game end with code 3 and the stop line
-`tox2: stop: fatal trap: at 0x007cac98` (see [Status](status.md)). The runtime never calls
+`tox2: stop: fatal guest fault: write to guest address 0x00000000` (see [Status](status.md)). The runtime never calls
 `abort`: the CRT and Windows error dialogs are disabled, so a run always ends with an exit code,
 also when it is started from a script.
 
 ## Examples by purpose
 
 A short unattended run that keeps its log and starts from an empty hdd directory, like the
-`game_boot` test (this game stops at a guest trap within the 20 s; see [Status](status.md)):
+`game_boot` test (this game stops at a guest fault within the 20 s; see [Status](status.md)):
 
 ```sh
 tox2_game --game-dir <game-dir> --no-window --seconds 20 --hdd-dir <empty-dir> --log run.log

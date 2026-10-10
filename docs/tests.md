@@ -45,15 +45,15 @@ The pin file `cmake/game_boot.cmake` holds the arguments and the milestone:
 
 ```cmake
 set(TOX2_GAME_BOOT_ARGS "--no-window --seconds 20 --hdd-dir \"${CMAKE_BINARY_DIR}/game_hdd\"")
-set(TOX2_GAME_BOOT_MILESTONE "\\[t 01000000\\] tox2: first hle sys_fs::cellFsStat")
+set(TOX2_GAME_BOOT_MILESTONE "\\[t 01000000\\] tox2: first sc 85 sys_event_flag_wait")
 ```
 
 A milestone is a `tox2: first ...` line written by the main thread (thread id `01000000`), because
 a line from another thread can appear or not depending on scheduling. The current one is the
-main thread's first call to `cellFsStat`. The game stats `/TLFILE.TLDAT` there and the stat fails,
-possibly because `cellGameBootCheck` has only a default handler and leaves its directory name
-empty. The game then takes its game-data install path on another thread and stops at a guest
-trap. The milestone guards how far the main thread gets; it does not mean that the game works.
+main thread's first wait on an event flag (`sys_event_flag_wait`, syscall 85). It comes after the
+game-data check and, on a run with an empty hdd directory, after the install of the game data on
+another thread; the run then ends at a guest fault. The first run of the test copies the 3 GB
+`TLFILE.TLDAT` into `build/<preset>/game_hdd`, where it stays for the later runs. The milestone guards how far the main thread gets; it does not mean that the game works.
 
 The pin file started with a placeholder milestone (the first `hle` or `sc` line of the main
 thread), which was replaced once the game reached a census stop. When a change lets the game get

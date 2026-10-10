@@ -4,51 +4,54 @@ What works on the pinned executable today, and what does not. The [top-level REA
 has the short version.
 
 The game does not run in any useful sense. `tox2_game` loads the executable, runs its start-up code
-on real guest threads for a few seconds and then stops at a guest trap. This is work in progress.
+on real guest threads for a few seconds and then stops at a guest fault. This is work in progress.
 The code was taken over from an earlier recompilation project of another game and is being pointed
 at *Tales of Xillia 2* (BLJS10188); the parts that this game has not reached have never run against
 its executable.
 
 ## What has been run
 
-Three headless runs (`--no-window --seconds 20`, each with its own empty `--hdd-dir`) of the build
-from the generated code ended the same way:
+Three headless runs (`--no-window --seconds 20`; the first with an empty `--hdd-dir`, the other two
+reusing it) of the build from the generated code ended the same way:
 
 - The runtime loaded the executable and booted the main thread. The stop was
-  `tox2: stop: fatal trap: at 0x007cac98` (exit code 3) on guest thread `0x01000007`, well before
-  the watchdog. The registers, a call trace and the census were printed every time. The census
-  listed no unknown dispatch target: every call and jump that ran before the stop reached a
-  recovered function.
-- Just before the trap the game printed a boost assertion through `sys_tty_write`:
-  `expr:this->is_initialized()` in `boost::optional<T>::get()` with `T = int`
-  (`optional.hpp`, line 578). The trap is the `tw` instruction of that assertion, not a runtime
-  fault.
+  `tox2: stop: fatal guest fault: write to guest address 0x00000000` (exit code 3) on the GCM
+  interrupt thread `0x01000002`, in fn `0x008a090c` (return address `0x008a0940`), well before the
+  watchdog. The registers, a call trace and the census were printed every time. The census listed no
+  unknown dispatch target: every call and jump that ran before the stop reached a recovered
+  function. The call that precedes the fault is the default-handled `cellGcmGetLabelAddress`, which
+  returns 0 where the game expects an address; that link has not been tested.
+- `cellGameBootCheck` has a handler (a disc boot, see [Runtime internals](runtime.md#implemented-imports)),
+  so the game's data paths now start with `/dev_bdvd/PS3_GAME`: the stats of `TLFILE.TLDAT`,
+  `FILEHEADER.TOFHDB` (both in `USRDIR`) and `ICON0.PNG` succeed.
+- First run: `cellGameDataCheck` for `BLJS10188_INSTALL` finds no directory, so thread
+  `0x01000007` calls `cellGameCreateGameData`, opens a message dialog and copies the three files
+  from the disc to the temporary game data directory with `cellFsRead` and `cellFsWrite` (724 of
+  each in total; `TLFILE.TLDAT` is 3,017,411,417 bytes, `FILEHEADER.TOFHDB` 10.6 MB). The copy is
+  complete within the 20 s. `cellGameContentPermit`
+  then moves it to `/dev_hdd0/game/BLJS10188_INSTALL`, the dialog is closed and the main thread waits
+  on an event flag. The reads are sequential and cross 2 GiB; `cellFsLseek` was not called.
+- The two later runs find the installed directory: the game reads `FILEHEADER.TOFHDB` from the disc
+  again, opens the installed copy, stats and fstats it, calls the memory container calls 324 and 343
+  (default-handled) and runs on until the same fault.
 - The last line of the form `tox2: first ...` that the main thread (`[t 01000000]`) wrote in all
-  three runs is `first hle sys_fs::cellFsStat`. This is the milestone that the `game_boot` test
-  pins (see [Tests](tests.md#the-game_boot-test)). At the stop the main thread was blocked in
-  `sys_timer_usleep`.
-- The game stats `/TLFILE.TLDAT`, `/FILEHEADER.TOFHDB` and `/ICON0.PNG`, each without a directory
-  prefix. They resolve to no device, so `cellFsStat` fails with `0x8001003a` (not mounted). A likely
-  cause is that `cellGameBootCheck` has only a default handler: it returns success and leaves the
-  directory name that the game expects as an out-parameter empty. This has not been established.
-  After the failed stat the game takes its game-data install path: thread `0x01000007` calls
-  `cellGameCreateGameData`, opens a message dialog and opens `TLFILE.TLDAT` in the temporary game
-  data directory under `--hdd-dir`, which creates an empty file. The assertion and the trap follow
-  within that thread. Whether the assertion comes from the empty file or from something else has
-  not been checked.
-- `TLFILE.TLDAT` from the game directory was never opened, so nothing has read from it, with an
-  offset above 2 GiB or otherwise.
+  three runs is `first sc 85 sys_event_flag_wait`. This is the milestone that the `game_boot` test
+  pins (see [Tests](tests.md#the-game_boot-test)). The test run leaves the 3 GB copy in the build
+  directory's `game_hdd`.
+- `cellSpursEventFlagWait` and `_cellSpursLFQueuePushBody` (the path that the Edge LZMA taskset
+  would take) were not called. `TLFILE.TLDAT` was read only as the sequential copy above; nothing
+  parses it.
 
-What the census of the first run showed (the other two runs differ only in counts that depend on
-scheduling):
+What the census of the first run showed (the other two runs differ in counts that depend on
+scheduling, and in the system calls 324 and 343):
 
-- System calls: 34,225 calls, 11 distinct, 1 default-handled. The default-handled one is number 45
+- System calls: 26,422 calls, 13 distinct, 1 default-handled. The default-handled one is number 45
   (`sys_ppu_thread_detach`), which the runtime does not name or implement. `sys_ppu_thread_yield`
-  accounts for 34,066 of the calls.
-- Imports: 81,299 calls, 71 distinct, 26 default-handled. The default-handled ones are 19
+  accounts for 26,255 of the calls.
+- Imports: 67,507 calls, 78 distinct, 26 default-handled. The default-handled ones are 19
   `cellSpurs` functions (attribute, taskset, task, queue, event flag and lock-free queue setup),
-  `cellGameBootCheck`, `cellRtcGetCurrentTick`, `cellRtcConvertUtcToLocalTime`,
-  `cellGcmGetFlipStatus`, `cellVideoOutGetResolution`, `cellVideoOutSetGamma` and
+  `cellRtcGetCurrentTick`, `cellRtcConvertUtcToLocalTime`, `cellGcmGetFlipStatus`,
+  `cellGcmGetLabelAddress`, `cellVideoOutGetResolution`, `cellVideoOutSetGamma` and
   `cellSaveDataListAutoLoad`. Each is logged with the argument registers that look like
   out-pointers; the game's later behaviour may depend on the values that were never written.
 - No SPU code ran. The game set up a SPURS instance and six tasksets with 30 tasks through the
@@ -56,9 +59,10 @@ scheduling):
   `sys_spu_initialize`. No SPU thread group or raw SPU system call was issued before the stop.
 - RSX: 186 FIFO headers, no flip, so no frame was drawn or displayed. `rsx unimplemented` listed
   one kind, the ZPASS report constant.
-- Threads: 8 created, 6 live at the stop (the main thread and two worker threads blocked in
-  `sys_timer_usleep`, the GCM interrupt service thread, one worker running and the thread that
-  trapped, which the census lists as running). The game's own threads are named `CThread`.
+- Threads: 8 created, 5 live at the stop (the main thread and a worker blocked in
+  `sys_event_flag_wait`, the GCM interrupt thread that faulted, a worker blocked in
+  `sys_timer_usleep` and one running; the install thread and two others had exited). The game's own
+  threads are named `CThread`.
 
 ## Components
 
@@ -91,10 +95,10 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   committed function database holds 29,196 functions, and the emitter reports no unhandled
   instruction form.
 - The executable imports 173 functions from 17 modules, all with known names. The runtime has a
-  handler for 107 of them (`tox2: hle: 173 imports, 107 with handlers`); the other 66 get the
+  handler for 111 of them (`tox2: hle: 173 imports, 111 with handlers`); the other 62 get the
   default handler (see [Runtime internals](runtime.md#default-handlers)). Among them are
-  `cellFsRead`, `cellFsLseek`, `cellFsWrite`, `cellGameBootCheck`, `cellVideoOutGetResolution`,
-  `cellAudioOutGetConfiguration`, `sys_spu_image_import` and 28 of the 30 `cellSpurs` functions.
+  `cellGcmGetLabelAddress`, `cellVideoOutGetResolution`, `cellAudioOutGetConfiguration`,
+  `sys_spu_image_import` and 28 of the 30 `cellSpurs` functions.
 - It embeds 8 SPU images and has 267 system call sites; the probe leaves 4 of them unresolved.
 - The game uses 24 system call numbers that the runtime has no implementation for, among them the
   semaphore calls 90, 92 and 93, the SPU thread group calls 170 to 178, and the vm and memory
@@ -107,15 +111,15 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   bookkeeping; no SPU code runs, and SPURS workloads are not scheduled. Most `cellSpurs` calls the
   game made are default-handled and return success without creating anything. Whether and how to
   run SPU code is undecided; [SPU usage](spu.md) describes what the game runs on the SPUs.
-- The game's data archive `TLFILE.TLDAT` (about 3 GB) and its index `FILEHEADER.TOFHDB` are not
-  read, and no reader for their format exists. The file system code uses 64-bit offsets (see
-  [Virtual file system](virtual-file-system.md#large-files)), but no read of the real archive has
-  happened.
+- The game's data archive `TLFILE.TLDAT` (about 3 GB) and its index `FILEHEADER.TOFHDB` are only
+  copied by the game's install step, and no reader for their format exists. The file system code
+  uses 64-bit offsets (see [Virtual file system](virtual-file-system.md#large-files)); the copy
+  read the whole archive sequentially, but no read at a chosen offset above 2 GiB has happened.
 - Movies: the game's movies are Bink files (`USRDIR/MOVIE/*.DAT`). Bink decoding is not
   implemented.
 - Imports and system calls without a handler (see above), and imports whose handler is minimal.
   The census at the end of a run lists what the game called and what the default handler served.
-  The next step is to give `cellGameBootCheck` a handler and see how far the main thread then gets.
+  The next step is to give `cellGcmGetLabelAddress` a handler and see how far the game then gets.
 - Graphics: only what the inherited fake RSX and renderer implement. Whatever the renderer meets and
   cannot handle is listed in the `rsx unimplemented` census (see
   [Rendering](rendering.md#rendering)). Known gaps are the ZPASS report values (the constant 0 is

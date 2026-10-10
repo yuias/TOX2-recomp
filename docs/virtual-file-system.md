@@ -31,21 +31,21 @@ A guest path that starts with something other than a mounted device resolves to 
 `sys_fs` and `cellFs` calls fail with `CELL_ENOTMOUNTED` (`0x8001003a`); a missing file on a mounted
 device fails with `CELL_ENOENT`. The first occurrence of each operation, path and result is logged
 as `tox2: fs: <operation> "<path>" ok` or, at warning level, `... failed 0x<code>`. This game's
-first file system calls show it: it stats `/TLFILE.TLDAT`, `/FILEHEADER.TOFHDB` and `/ICON0.PNG`
-without any directory prefix, and each stat fails with `0x8001003a`. These paths are probably built
-from a directory name that `cellGameBootCheck` should have returned (see [Status](status.md)); that
-function has only a default handler. The game then creates game data under
-`/dev_hdd0/game/_GDATA_<number>/USRDIR`, where `cellFsOpen` creates an empty `TLFILE.TLDAT`.
+first file system calls show it: it stats `/dev_bdvd/PS3_GAME/USRDIR/TLFILE.TLDAT`,
+`/dev_bdvd/PS3_GAME/USRDIR/FILEHEADER.TOFHDB` and `/dev_bdvd/PS3_GAME/ICON0.PNG`, built on the
+paths that `cellGameBootCheck` and `cellGameContentPermit` return (see [Status](status.md)). On an
+empty hdd directory the game then creates game data under `/dev_hdd0/game/_GDATA_<number>/USRDIR`
+and copies those files into it.
 
 ## Large files
 
 The file calls use 64-bit offsets: `sys_fs_lseek`, `cellFsReadWithOffset` and
 `cellFsWriteWithOffset` move the host file pointer with `SetFilePointerEx`, and an offset beyond
 the largest signed 64-bit value is treated as past any file. So an offset above 2 GiB is supported
-by the code. It has not been tried: `TLFILE.TLDAT` is about 3 GB, but no run has opened the real
-file (the game's open of `/TLFILE.TLDAT` failed, and its next open was the empty copy described
-above). The plain `cellFsRead`, `cellFsLseek` and `cellFsWrite` imports of this game also have no
-HLE wrapper yet, although the underlying system calls 802, 803 and 818 exist.
+by the code. `TLFILE.TLDAT` is about 3 GB, and the game's install step has read all of it with the
+plain `cellFsRead` import (which calls the handler of system call 802, like `cellFsWrite` and
+`cellFsLseek` with 803 and 818), so sequential positions above 2 GiB have been exercised. No run has
+yet called `cellFsLseek` or `cellFsReadWithOffset` with such an offset on the real file.
 
 ## VFS configuration file
 
