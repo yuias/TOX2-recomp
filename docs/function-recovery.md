@@ -10,7 +10,7 @@ numbers over the recovered control-flow graph and reports coverage.
 ## Commands
 
 ```sh
-python tools/ps3tool.py ghidra-export  <elf>
+python tools/ps3tool.py ghidra-export  <elf> --timeout 43200
 python tools/ps3tool.py ghidra-summary <elf> --ghidra generated/ghidra/eboot_ghidra.json -o config/ghidra_summary.json
 python tools/ps3tool.py recover        <elf> -o config/functions.json
 ```
@@ -53,12 +53,13 @@ function database is not written.
 provides:
 
 ```json
-{"schema": 1, "seeds": [{"addr": "0x000cc194", "reason": "..."}]}
+{"schema": 1, "seeds": [{"addr": "0x00012340", "reason": "..."}]}
 ```
 
 `reason` is a free-text justification. `recover` reads the file by default when it exists
 (`--extra-seeds PATH` selects another one, which must exist). The entries are counted as
-`manual` seeds. Two kinds of reason occur in the committed file:
+`manual` seeds. The committed file has no seeds so far (`"seeds": []`). Two kinds of reason
+are meant for it:
 
 - a hand-written explanation, for a start that Ghidra missed and that would otherwise be
   absorbed into the body of a neighbouring function;
@@ -73,7 +74,7 @@ holds one hex address per line; blank lines and `#` comments are ignored. The se
 needs its own project directory and output file so that the base export is left alone:
 
 ```sh
-python tools/ps3tool.py ghidra-export  <elf> --seeds-file generated/analysis/ghidra_seeds.txt --project-dir generated/ghidra/project_seeded -o generated/ghidra/eboot_ghidra_seeded.json
+python tools/ps3tool.py ghidra-export  <elf> --timeout 43200 --seeds-file generated/analysis/ghidra_seeds.txt --project-dir generated/ghidra/project_seeded -o generated/ghidra/eboot_ghidra_seeded.json
 python tools/ps3tool.py ghidra-summary <elf> --ghidra generated/ghidra/eboot_ghidra_seeded.json -o generated/ghidra/summary_seeded.json
 python tools/ps3tool.py recover        <elf> --ghidra-summary generated/ghidra/summary_seeded.json -o generated/analysis/functions_seeded.json --report generated/analysis/recovery_report_seeded.json
 ```
@@ -82,6 +83,30 @@ Function entries in the seeded summary that are missing from `config/functions.j
 candidates for `config/extra_seeds.json` with the reason `ghidra-feedback`. The committed
 `config/ghidra_summary.json` always comes from the base export (entry point and exports as
 the only seeds), so it does not depend on an earlier recovery run.
+
+## On this executable
+
+`recover` on the pinned *Tales of Xillia 2* executable with the committed summary (re-run with
+the current tools; `config/functions.json` comes out byte-identical, in about 28 s):
+
+- 29,196 functions. The seeds, by source (a function can have several): Ghidra 29,195 in `.text`,
+  function descriptors 26,911, `bl` targets 12,757, data references 12,136, data pointers 36,
+  and the entry point.
+- 173 import thunks, no slot mismatches, none that no `bl` reaches.
+- Two TOCs in the descriptors: `0x010b6330` (the entry TOC) and `0x010c62d0`. `.opd` holds
+  descriptors of both, interleaved. Jump tables: 512 `bctr` sites, 499 resolved (9,919 targets,
+  3,790 distinct), 13 unresolved (7 `no_table_base`, 6 `no_bound`).
+- Code range `0x00010200..0x00c8f408`; 3,012,703 of 3,275,906 `.text` words are owned (92.0%).
+  The 263,203 uncovered words are mostly code that no seed reaches (250,372 words in 4,728
+  runs); 9,259 are jump tables.
+- 267 `sc` sites, 266 with a resolved syscall number, 1 unresolved.
+- `functions.json` is 3.8 MB and `ghidra_summary.json` is 6.7 MB.
+
+With `--no-ghidra` the same executable gives the same 29,196 functions, 499 of 512 jump tables and
+266 of 267 syscall numbers: the descriptors and `bl` targets already find every start. The
+difference is in the classification of uncovered words (1,513 words of data instead of 3,065, and
+251,924 words of code instead of 250,372), because Ghidra's data ranges are missing. The
+function database differs in `input.ghidra_summary_sha256` and in the sources it records.
 
 ## Committed files and regeneration
 
@@ -100,7 +125,7 @@ files, so `git diff config/` shows exactly what the change affected. To rebuild 
 from scratch:
 
 ```sh
-python tools/ps3tool.py ghidra-export  <elf>
+python tools/ps3tool.py ghidra-export  <elf> --timeout 43200
 python tools/ps3tool.py ghidra-summary <elf> --ghidra generated/ghidra/eboot_ghidra.json -o config/ghidra_summary.json
 python tools/ps3tool.py recover        <elf> -o config/functions.json
 ```

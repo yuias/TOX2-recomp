@@ -1,7 +1,8 @@
 # Analysis tools
 
-`tools/ps3tool.py` has nine subcommands. Each takes the path to the decrypted ELF, except
-`nidgen`, which reads an RPCS3 checkout.
+`tools/ps3tool.py` has nine subcommands. Each takes the path to the decrypted ELF (`<elf>`; the
+supported executable is the one pinned in `config/target.json`, see [Target pin](#target-pin)),
+except `nidgen`, which reads an RPCS3 checkout.
 
 ```sh
 python tools/ps3tool.py info   <elf> [-o OUTPUT] [--target-config FILE] [--nids FILE] [--no-verify]
@@ -42,6 +43,21 @@ python tools/ps3tool.py nidgen --rpcs3 DIR [--source-commit COMMIT] [--nids-out 
 
 Run `python tools/ps3tool.py <command> --help` for the full option list.
 
+## On this executable
+
+What the first three commands report for the pinned *Tales of Xillia 2* executable (re-run with the
+current tools; the `disasm --stats` numbers are from the first measurement of the executable):
+
+- `info`: entry function `0x00010240` with TOC `0x010b6330`, 8 segments, 32 sections, 17 import
+  modules with 173 functions, all of them named, no exports.
+- `probe`: 8 embedded SPU images (at `0x00f75400`, `0x00f76700`, `0x00f7b080`, `0x00f90280`,
+  `0x00fb0b80`, `0x00fe1480`, `0x00ff7580` and `0x01027680`), `cellSpurs` as the SPU-related import,
+  and 267 syscall sites with 77 distinct numbers, 4 of them unresolved by the backward scan
+  (`recover` resolves 266 of the 267 over the control-flow graph, see
+  [Function recovery](function-recovery.md#report)).
+- `disasm --stats`: `.text` is `0x00010240..0x00c8f3d4`, 3,275,877 words, of which 9,687 (0.30%) do
+  not decode. Strict decoding rejects 213 more (`fdiv` 127, `frsqrte` 58, `fsqrt` 24, `fsub` 4).
+
 ## Ghidra cross-check
 
 `ghidra-export` runs Ghidra headless on the ELF and writes a JSON file with the function
@@ -55,7 +71,7 @@ tool at the Ghidra install directory with the `GHIDRA_INSTALL_DIR` environment v
 Python environment for Ghidra is needed.
 
 ```sh
-python tools/ps3tool.py ghidra-export <elf>
+python tools/ps3tool.py ghidra-export <elf> --timeout 43200
 python tools/ps3tool.py ghidra-diff   <elf> --ghidra generated/ghidra/eboot_ghidra.json
 python tools/ps3tool.py ghidra-diff   <elf> --ghidra generated/ghidra/eboot_ghidra.json --strict
 ```
@@ -64,8 +80,9 @@ python tools/ps3tool.py ghidra-diff   <elf> --ghidra generated/ghidra/eboot_ghid
   `--language` and `--cspec`), runs auto-analysis, and exports the range given by
   `--start`/`--end` (default: the largest executable section). Ghidra is seeded with the
   entry point and the exported functions; `--seeds-file` adds more starts (see "Feeding
-  recovered starts back to Ghidra"). Analysis of the real
-  executable takes under a minute and is cut off after `--timeout` seconds (default 3600).
+  recovered starts back to Ghidra"). Analysis is cut off after `--timeout` seconds. The default
+  is 3600. An export of this executable with a seeds file took 287 s here, but the time grows
+  with the code size, so the commands in this documentation pass `--timeout 43200` as a margin.
   The tool then checks that Ghidra decodes a few probe instructions (including AltiVec
   ones) as expected, so a wrong language setting is reported. `--check-only` skips Ghidra
   and only validates and language-checks an existing export.
@@ -87,6 +104,11 @@ python tools/ps3tool.py ghidra-diff   <elf> --ghidra generated/ghidra/eboot_ghid
 
   `ghidra_code_we_unknown`, `mnemonic_mismatch` and `operand_mismatch` are the categories
   that point at decoder bugs. The last two are only recorded.
+
+  For this executable, the diff against the export that produced the committed
+  `config/ghidra_summary.json` gave 2,882,572 `match` words, 0 `ghidra_code_we_unknown`, 3
+  `mnemonic_mismatch` (all `tw` traps) and 9 `operand_mismatch` (`tw` and `ldarx`). These counts
+  were recorded when the summary was made.
 - `--strict` makes `ghidra-diff` decode with reserved-bit checking, as `disasm --strict`
   does. Words that have reserved bits set then count as unknown to this decoder, so the
   category counts change accordingly.

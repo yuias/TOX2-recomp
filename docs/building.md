@@ -67,8 +67,7 @@ Unit tests plus the Python tests that read the real executable:
 pwsh -NoProfile -File tools/build.ps1 -Preset release -EbootElf <path-to-EBOOT.elf> -Test
 ```
 
-These tests still expect the values of the executable this project was derived from, so they fail
-on this game's executable until they are updated.
+These tests expect the values of the pinned TOX2 executable (see [Tests](tests.md)).
 
 Generated code and the game run (`game_boot`):
 

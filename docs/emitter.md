@@ -5,17 +5,20 @@
 
 ```sh
 python tools/ps3tool.py recover <elf> -o config/functions.json
-python tools/ps3tool.py emit    <elf> --out generated/ppu --max-unhandled 0
-pwsh -NoProfile -File tools/build.ps1 -GeneratedDir generated/ppu -Test
+python tools/ps3tool.py emit    <elf> --chunks 256 --out generated/ppu --max-unhandled 0
+pwsh -NoProfile -File tools/build.ps1 -Preset release -GeneratedDir generated/ppu -Test
 ```
+
+The `--chunks` default is 16. This executable has about 3 million code words, so it is emitted
+with `--chunks 256`; see [Chunks and build time](#chunks-and-build-time).
 
 `emit` reads the function database (`--db`, default `config/functions.json`), checks that it
 matches the ELF's hash and code range, and emits every function of the database as one C
 function named `fn_<address>`. Branches inside a function become labels `L_<address>` and
 `goto`, and resolved jump tables become `switch`. Direct calls are C calls, tail calls are
-`musttail` returns, and transfers to computed targets go through `dalDispatch`. Backward
-edges carry a hook (`DAL_LOOP`) that counts a preemption budget. Import stubs become
-trampolines `imp_<address>` that call the runtime hook `dalHleCall` with an index into the
+`musttail` returns, and transfers to computed targets go through `tox2Dispatch`. Backward
+edges carry a hook (`TOX2_LOOP`) that counts a preemption budget. Import stubs become
+trampolines `imp_<address>` that call the runtime hook `tox2HleCall` with an index into the
 generated import table. The output is deterministic: two runs on the same inputs write
 byte-identical files, and a file is only rewritten when its content changes.
 
@@ -25,11 +28,11 @@ Everything goes to `--out` (default `generated/ppu`; git-ignored):
 
 | File | Contents |
 | --- | --- |
-| `ppu_chunk_NNN.c` | The function bodies, split into `--chunks` files (default 16) of similar instruction counts, so that they compile in parallel |
+| `ppu_chunk_NNN.c` | The function bodies, split into `--chunks` files (default 16; 256 for this executable) of similar instruction counts, so that they compile in parallel |
 | `ppu_imports.c` | The import trampolines |
-| `ppu_tables.c` | `kDalPpuFuncMappings` (guest address to host function, one row per function and per trampoline), `kDalPpuImports` (stub address, FNID, module, name) and the executable's SHA-256 |
+| `ppu_tables.c` | `kTox2PpuFuncMappings` (guest address to host function, one row per function and per trampoline), `kTox2PpuImports` (stub address, FNID, module, name) and the executable's SHA-256 |
 | `ppu_funcs.h` | Declarations of the functions and trampolines |
-| `sources.cmake` | The list of sources that `DAL_PPU_GENERATED_DIR` includes |
+| `sources.cmake` | The list of sources that `TOX2_PPU_GENERATED_DIR` includes |
 
 Chunk files that a smaller `--chunks` makes unnecessary are removed. `--comments` annotates
 the code with the guest disassembly; it is off by default because it makes the files larger.
@@ -42,7 +45,7 @@ The report (`--report`, default `generated/analysis/emit_report.json`) is JSON, 
 | `functions`, `instructions`, `import_trampolines` | Emitted counts |
 | `thunks_without_toc_save` | Import stubs that do not save the caller's TOC pointer |
 | `chunks`, `largest_functions`, `output_bytes` | Size of the output |
-| `unhandled` | Words emitted as a call to `dalUnhandled`: total, per mnemonic, per group, with example addresses |
+| `unhandled` | Words emitted as a call to `tox2Unhandled`: total, per mnemonic, per group, with example addresses |
 | `edges` | Calls, tail calls, switches, syscalls and traps by kind, for example `calls_direct` and `calls_indirect` |
 | `dynamic_targets` | Transfers whose constant target is not a recovered function or stub, with site and target |
 | `labels`, `loop_hooks`, `elapsed_s` | Emitted labels, loop hooks, run time |
@@ -50,29 +53,53 @@ The report (`--report`, default `generated/analysis/emit_report.json`) is JSON, 
 `--census` only counts the owned instructions by mnemonic and exits, without writing C.
 The census (`--census-out`, default `generated/analysis/emit_census.json`) lists each
 mnemonic with its count and handler group. `--max-unhandled N` makes `emit` exit with 9 if
-more than `N` words are emitted as unhandled. For the committed function database and the
-pinned ELF, the code range holds 206065 words of 168 distinct mnemonics in 2531 functions,
-`emit` writes 16 chunks and 166 import trampolines, and `--max-unhandled 0` exits with 0.
+more than `N` words are emitted as unhandled.
+
+For the committed function database and the pinned ELF, the code range holds 3,012,703 words
+of 188 distinct mnemonics in 29,196 functions. `emit --chunks 256` writes 256 chunks and 173
+import trampolines (467 `switch` statements, 3,741 cases), and `--max-unhandled 0` exits with 0.
+These numbers come from running `emit --census` and `emit --chunks 256` on the committed
+database. The heaviest mnemonics are `addi` (12.1%), `lwz` (11.7%), `rldicl` (8.1%) and `bc` (8.0%).
+
+## Chunks and build time
+
+The size of the C output follows the code size: with `--chunks 256` the 29,196 functions
+become about 197 MB of C in 260 files (256 chunks plus the four other files), and `emit` takes
+about 24 s. The chunks hold between 6,135 and 17,789 instructions (median 11,775). A function is
+never split across chunks, and the largest one in this executable, `fn_003a1b34`, has 15,255
+instructions, so the chunk that holds it is the heaviest to compile.
+
+The first release build of the 256-chunk tree (made from a function database recovered without the
+Ghidra summary) took about 72 s from scratch at about 18 parallel jobs on a 16-CPU machine. The
+heaviest compile, the chunk with `fn_003a1b34` (about 1.6 MB of C), needed about 317 MB and 3 s.
+These are measurements from that run, not limits. If the compiler runs out of memory on a smaller
+machine, lower the parallelism with the `CMAKE_BUILD_PARALLEL_LEVEL` environment variable
+(`cmake --build` inside `tools/build.ps1` honours it) before changing the emitter.
 
 ## Contract header and stub runtime
 
-Generated code depends only on the headers in `runtime/include/dal/` (`dal/ppu.h` includes
+Generated code depends only on the headers in `runtime/include/tox2/` (`tox2/ppu.h` includes
 all of them). `ppu_context.h` is the contract between generated code and a runtime:
 
-- the CPU context `DalPpuContext` (registers, condition register and XER as one byte per bit,
+- the CPU context `Tox2PpuContext` (registers, condition register and XER as one byte per bit,
   FPSCR, VSCR, reservation, call trace) and the vector and FPR types;
 - guest memory accessors for a flat big-endian 32-bit address space, where `base` must point
   at a reservation of 4 GiB plus a guard area;
-- the hooks the runtime implements: `dalDispatch`, `dalHleCall`, `dalSyscall`, `dalYield`,
-  `dalUnhandled`, `dalTrap`, the reservation and cache operations, `dalMftb` and the FPSCR
+- the hooks the runtime implements: `tox2Dispatch`, `tox2HleCall`, `tox2Syscall`, `tox2Yield`,
+  `tox2Unhandled`, `tox2Trap`, the reservation and cache operations, `tox2Mftb` and the FPSCR
   moves.
 
+`TOX2_TAIL` expands to a `do { ... } while (0)` block around the `musttail` return. Without the
+block, a label directly in front of a tail call (the emitter writes `L_<address>:` before the
+statement) makes C23 parse the attribute as a label attribute and reject it. One function of
+this executable has that shape.
+
 `ppu_int.h`, `ppu_fp.h` and `ppu_vmx.h` hold the inline helpers that emitted code calls.
-Vector registers are stored byte-reversed relative to guest memory; the `DAL_VR_*`
+Vector registers are stored byte-reversed relative to guest memory; the `TOX2_VR_*`
 accessors take big-endian element numbers. Most helpers cite the RPCS3 interpreter handler
 they follow.
 
-`runtime/src/ppu_stub_runtime.cpp` (library `dal_ppu_stub`) implements the hooks only far
+`runtime/src/ppu_stub_runtime.cpp` (library `tox2_ppu_stub`) implements the hooks only far
 enough to link and test generated code: dispatch works, and every hook that would need the
 system (HLE calls, unknown targets, unhandled words, traps) prints a message and exits with
 an error status. Syscalls only set `r3` to 0. `ppu_stub.h` holds test-only additions. The stub
@@ -106,7 +133,8 @@ running the emitter.
 ## What is and is not implemented
 
 Every instruction word in the code range of the pinned ELF has an emitter handler, so
-`unhandled` in the report is 0. Known deviations from the architecture or from RPCS3:
+`unhandled` in the report is 0. A word that needs a new handler goes into the module of its
+group (`tools/ps3recomp/emit_ops_<group>.py`) together with semantics cases. Known deviations from the architecture or from RPCS3:
 
 - FPSCR is modelled only as far as RPCS3 models it. `fcmpu` and `fcmpo` write the FPCC
   field; `mffs`, `mtfsf`, `mtfsfi`, `mtfsb0` and `mtfsb1` move the raw image. Exception
@@ -128,5 +156,5 @@ Every instruction word in the code range of the pinned ELF has an emitter handle
 - `fres`, `frsqrte` and the vector estimate instructions return exactly computed results,
   which lie within the architected estimate error, not the hardware estimate values.
 - The stub runtime does not implement import calls, lv2 syscalls, threads or memory
-  allocation: it exits on import calls and returns 0 from syscalls. The runtime in `dal_game`
+  allocation: it exits on import calls and returns 0 from syscalls. The runtime in `tox2_game`
   implements a subset; see [Runtime internals](runtime.md).
