@@ -38,6 +38,7 @@
 #include "core/threads.h"
 #include "core/timer_resolution.h"
 #include "tox2/ppu_context.h"
+#include "hle/guest_printf.h"
 #include "hle/hle.h"
 #include "input/keyboard_pad.h"
 #include "input/pad_buttons.h"
@@ -1621,7 +1622,7 @@ void testSysPrxForUser() {
     CHECK(t0 != 0 && call(6) >= t0);
     CHECK(call(7, 0x55) == 0);
     CHECK(call(8, 0x55) == 0);
-    CHECK(tox2::sysPrxForUserHandlers().size() == 23);
+    CHECK(tox2::sysPrxForUserHandlers().size() == 27);
 
     tox2::setLogSink({});
     tox2::resetCensus();
@@ -7830,6 +7831,240 @@ void testLwmutex() {
     tox2::resetCensus();
 }
 
+void testLwcond() {
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t lw = scratch, lc = scratch + 0x40, lc2 = scratch + 0x50, attr = scratch + 0x80,
+                        cattr = scratch + 0xa0;
+
+    constexpr const char* kModule = "sysPrxForUser";
+    const Tox2ImportInfo imports[] = {
+            {0x00800000, 0x2f85c0ef, kModule, "sys_lwmutex_create"},
+            {0x00800010, 0x1573dc3f, kModule, "sys_lwmutex_lock"},
+            {0x00800020, 0x1bc200f4, kModule, "sys_lwmutex_unlock"},
+            {0x00800030, 0xda0eb71a, kModule, "sys_lwcond_create"},
+            {0x00800040, 0x1c9a942c, kModule, "sys_lwcond_destroy"},
+            {0x00800050, 0x2a6d9d51, kModule, "sys_lwcond_wait"},
+            {0x00800060, 0xef87a695, kModule, "sys_lwcond_signal"},
+    };
+    tox2::installImports(imports, 7);
+    enum { kMutexCreate, kLock, kUnlock, kCondCreate, kCondDestroy, kWait, kSignal };
+    auto call = [&](tox2::GuestThread& caller, std::uint32_t index, std::uint64_t r3, std::uint64_t r4 = 0,
+                    std::uint64_t r5 = 0) {
+        Tox2PpuContext* ctx = &caller.context();
+        ctx->gpr[3] = r3;
+        ctx->gpr[4] = r4;
+        ctx->gpr[5] = r5;
+        tox2HleCall(ctx, base, index);
+        return ctx->gpr[3];
+    };
+    auto a = makeCaller(0x01000000);
+    auto b = makeCaller(0x01000001);
+
+    tox2Write32(base, attr, 2);
+    tox2Write32(base, attr + 4, 0x10);
+    CHECK(call(*a, kMutexCreate, lw, attr) == 0);
+
+    // Create stores the lwmutex address and the object id; ids are never reused.
+    CHECK(call(*a, kCondCreate, 0, lw, cattr) == err(tox2::kCellEfault));
+    CHECK(call(*a, kCondCreate, lc, 0, cattr) == err(tox2::kCellEfault));
+    CHECK(call(*a, kCondCreate, lc, lw, cattr) == 0);
+    CHECK(tox2Read32(base, lc) == lw && tox2Read32(base, lc + 4) == 0x97000000);
+    CHECK(call(*a, kCondCreate, lc2, lw, cattr) == 0);
+    CHECK(tox2Read32(base, lc2 + 4) == 0x97000100);
+
+    // The caller must own the lwmutex; an unknown id is ESRCH.
+    CHECK(call(*a, kWait, lc, 0) == err(tox2::kCellEperm));
+    CHECK(call(*a, kLock, lw, 0) == 0);
+    CHECK(call(*b, kWait, lc, 0) == err(tox2::kCellEperm));
+    CHECK(call(*a, kUnlock, lw) == 0);
+    tox2Write32(base, lc2 + 4, 0x97000fff);
+    CHECK(call(*a, kWait, lc2, 0) == err(tox2::kCellEsrch));
+    CHECK(call(*a, kSignal, lc2) == err(tox2::kCellEsrch));
+    CHECK(call(*a, kCondDestroy, lc2) == err(tox2::kCellEsrch));
+    tox2Write32(base, lc2 + 4, 0x97000100);
+
+    // A signal without a waiter is dropped; a timed wait gives the lwmutex back with its recursion
+    // count restored.
+    CHECK(call(*a, kSignal, lc) == 0);
+    CHECK(call(*a, kLock, lw, 0) == 0);
+    CHECK(call(*a, kLock, lw, 0) == 0);
+    {
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        CHECK(call(*a, kWait, lc, 1000) == err(tox2::kCellEtimedout));
+    }
+    CHECK(tox2Read32(base, lw) == 0x01000000 && tox2Read32(base, lw + 12) == 1);
+    CHECK(call(*a, kUnlock, lw) == 0);
+    CHECK(call(*a, kUnlock, lw) == 0);
+    CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree);
+
+    // Hand-over: the waiter releases the lwmutex completely, a signal sent while another thread owns
+    // the lwmutex wakes it, and it returns only once it owns the lwmutex again.
+    std::atomic<bool> b_ready{false};
+    std::uint64_t b_result = ~0ull;
+    {
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        std::thread worker([&] {
+            std::lock_guard<tox2::GuestLock> worker_guard(tox2::guestLock());
+            call(*b, kLock, lw, 0);
+            call(*b, kLock, lw, 0);
+            b_ready = true;
+            b_result = call(*b, kWait, lc, 0);
+        });
+        tox2::guestLock().unlock();
+        while (!b_ready) std::this_thread::yield();
+        tox2::guestLock().lock();
+        CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree && tox2Read32(base, lw + 12) == 0);
+        CHECK(call(*a, kCondDestroy, lc) == err(tox2::kCellEbusy));
+        CHECK(call(*a, kLock, lw, 0) == 0);
+        CHECK(call(*a, kSignal, lc) == 0);
+        tox2::guestLock().unlock();
+        // The woken waiter blocks on the lwmutex that `a` still owns.
+        for (;;) {
+            tox2::guestLock().lock();
+            if (tox2Read32(base, lw + 4) == 1) break;
+            tox2::guestLock().unlock();
+            std::this_thread::yield();
+        }
+        CHECK(b_result == ~0ull);
+        CHECK(call(*a, kUnlock, lw) == 0);
+        tox2::guestLock().unlock();
+        worker.join();
+        tox2::guestLock().lock();
+    }
+    CHECK(b_result == 0);
+    CHECK(tox2Read32(base, lw) == 0x01000001 && tox2Read32(base, lw + 12) == 1);
+    CHECK(call(*b, kUnlock, lw) == 0);
+    CHECK(call(*b, kUnlock, lw) == 0);
+    CHECK(call(*b, kUnlock, lw) == err(tox2::kCellEperm));
+
+    // Destroy forgets the object.
+    CHECK(call(*a, kCondDestroy, lc) == 0);
+    CHECK(call(*a, kCondDestroy, lc) == err(tox2::kCellEsrch));
+    CHECK(call(*a, kSignal, lc) == err(tox2::kCellEsrch));
+    CHECK(call(*a, kCondDestroy, lc2) == 0);
+
+    p.main.free(scratch);
+    tox2::resetSyncObjects();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+}
+
+void testGuestPrintf() {
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t fmt_addr = scratch, str_a = scratch + 0x400, str_b = scratch + 0x440, va = scratch + 0x800,
+                        stack = scratch + 0x2000;
+    auto put = [&](std::uint32_t address, std::string_view text) {
+        for (std::size_t i = 0; i < text.size(); i++) tox2Write8(base, address + i, static_cast<std::uint8_t>(text[i]));
+        tox2Write8(base, address + text.size(), 0);
+    };
+    put(str_a, "abcdef");
+    put(str_b, "xy");
+
+    auto ctx = std::make_unique<Tox2PpuContext>();
+    ctx->gpr[1] = stack;
+    std::string error;
+    // Slot 0 is the format; `args` fill slots 1.. from registers, then from the parameter save area.
+    auto run = [&](std::string_view format, std::initializer_list<std::uint64_t> args) {
+        put(fmt_addr, format);
+        ctx->gpr[3] = fmt_addr;
+        std::uint32_t slot = 1;
+        for (const std::uint64_t value : args) {
+            if (slot < 8) {
+                ctx->gpr[3 + slot] = value;
+            } else {
+                tox2Write64(base, stack + 0x30 + 8 * slot, value);
+            }
+            slot++;
+        }
+        tox2::GuestVarArgs va_args = tox2::GuestVarArgs::fromRegisters(ctx.get(), 1);
+        return tox2::formatGuestPrintf(base, fmt_addr, va_args, error);
+    };
+    auto bitsOf = [](double value) { return std::bit_cast<std::uint64_t>(value); };
+
+    // Integers and flags.
+    CHECK(run("%d|%5d|%-5d|%05d|%+d|% d", {static_cast<std::uint64_t>(-5), 42, 42, 42, 42, 42}) ==
+          "-5|   42|42   |00042|+42| 42");
+    CHECK(error.empty());
+    CHECK(run("%d %i", {0xfffffffe, 7}) == "-2 7");  // the low 32 bits, sign-extended
+    CHECK(run("%u %lu", {0xffffffffffffffffull, 0xffffffffffffffffull}) == "4294967295 18446744073709551615");
+    CHECK(run("%lld %ld", {0x8000000000000000ull, 0x8000000000000000ull}) ==
+          "-9223372036854775808 -9223372036854775808");
+    CHECK(run("%x %#x %X %o", {0xbeef, 0xbeef, 0xbeef, 8}) == "beef 0xbeef BEEF 10");
+    CHECK(run("%02x|%05x|%08x|%2u|% 2u|%02u", {0xa, 0xab, 0xab, 5, 5, 5}) == "0a|000ab|000000ab| 5| 5|05");
+    CHECK(run("%lx %llx %08llx %016llx", {0x123456789aull, 0x123456789aull, 0xabcdull, 0xabcdull}) ==
+          "123456789a 123456789a 0000abcd 000000000000abcd");
+    CHECK(run("%hhd %hd %hhu %hu", {0x1ff, 0x18000, 0x1ff, 0x12345}) == "-1 -32768 255 9029");
+    CHECK(run("%zd %jd %td %qd", {1, 2, 3, 4}) == "1 2 3 4");
+    CHECK(run("%.3d|%8.3d|%-8.3d|", {5, 5, 5}) == "005|     005|005     |");
+
+    // Characters, strings, pointers.
+    CHECK(run("%c%c", {0x141, 'z'}) == "Az");
+    {
+        const std::string with_nul = run("a%cb", {0});
+        CHECK(with_nul.size() == 3 && with_nul[1] == '\0');
+    }
+    CHECK(run("%s|%.3s|%-6s|%6s|%s", {str_a, str_a, str_b, str_b, 0}) == "abcdef|abc|xy    |    xy|(null)");
+    CHECK(run("%-.15s|%.32s|%.0s|", {str_a, str_a, str_a}) == "abcdef|abcdef||");
+    CHECK(run("%s", {0x100000000ull + str_b}) == "xy");  // only the low 32 bits are an address
+    CHECK(run("%p %p", {0x1234, 0x100000010ull}) == "0x1234 0x10");
+    CHECK(run("%s%s%u", {str_b, str_b, 9}) == "xyxy9");
+
+    // Star width and precision, percent.
+    CHECK(run("%*d|%*d|%.*s|%*.*s|", {6, 42, static_cast<std::uint64_t>(-6), 42, 2, str_a, 5, 1, str_a}) ==
+          "    42|42    |ab|    a|");
+    CHECK(run("%.*s", {static_cast<std::uint64_t>(-1), str_b}) == "xy");  // a negative precision is none
+    CHECK(run("100%% %d%%", {5}) == "100% 5%");
+
+    // Floating point arrives as the double's bits in the slot.
+    CHECK(run("%f|%.2f|%e|%g|%5.1f|%G", {bitsOf(3.5), bitsOf(2.0 / 3.0), bitsOf(1500.0), bitsOf(1e10), bitsOf(2.25),
+                                         bitsOf(1e-10)}) == "3.500000|0.67|1.500000e+03|1e+10|  2.2|1E-10");
+    CHECK(run("%Lf", {bitsOf(0.5)}) == "0.500000");
+
+    // Slots 0-7 come from r3..r10, slot 8 and up from the parameter save area at r1 + 0x30 + 8k.
+    CHECK(run("%d %d %d %d %d %d %d %d %d", {1, 2, 3, 4, 5, 6, 7, 8, 9}) == "1 2 3 4 5 6 7 8 9");
+    CHECK(tox2Read64(base, stack + 0x30 + 8 * 8) == 8 && tox2Read64(base, stack + 0x30 + 8 * 9) == 9);
+    {
+        // snprintf-style: the variable arguments start at slot 3.
+        put(fmt_addr, "%d-%d");
+        ctx->gpr[6] = 11;
+        ctx->gpr[7] = 22;
+        tox2::GuestVarArgs from_third = tox2::GuestVarArgs::fromRegisters(ctx.get(), 3);
+        CHECK(tox2::formatGuestPrintf(base, fmt_addr, from_third, error) == "11-22" && error.empty());
+        CHECK(from_third.slot == 5);
+    }
+
+    // A va list: 8-byte slots at the pointer.
+    {
+        put(fmt_addr, "%s=%d");
+        tox2Write64(base, va, str_a);
+        tox2Write64(base, va + 8, static_cast<std::uint64_t>(-3));
+        tox2::GuestVarArgs list = tox2::GuestVarArgs::fromVaList(va);
+        CHECK(tox2::formatGuestPrintf(base, fmt_addr, list, error) == "abcdef=-3" && error.empty());
+        CHECK(list.address == va + 16);
+    }
+
+    // Unsupported conversions stop the output and name themselves.
+    CHECK(run("abc%n def", {0}) == "abc");
+    CHECK(error.find("%n") != std::string::npos);
+    CHECK(run("x%y", {0}) == "x" && !error.empty());
+    CHECK(run("done%", {}) == "done" && !error.empty());
+    CHECK(run("%99999999d", {1}) == "" && !error.empty());
+    CHECK(run("ok", {}) == "ok" && error.empty());  // the error is cleared by the next call
+
+    p.main.free(scratch);
+}
+
 // What the entry function of the guest threads below saw; written under the guest lock.
 std::uint64_t g_entry_arg, g_entry_r2, g_entry_r4, g_entry_r13;
 std::uint32_t g_entry_runs, g_once_runs;
@@ -8756,6 +8991,8 @@ int main(int argc, char** argv) {
     testRsxSyntheticCaptures();
     testRsxConsumer();
     testLwmutex();
+    testLwcond();
+    testGuestPrintf();
     testPpuThreads();
     testPpuThreadCreatePriority();
     testGcmInterruptThread();
