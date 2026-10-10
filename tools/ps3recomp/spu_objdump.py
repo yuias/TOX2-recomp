@@ -154,7 +154,8 @@ _COMMENT_RE = re.compile(r"\s+#.*\Z")
 _SYMBOL_RE = re.compile(r"\s*<[^<>]*>\Z")
 _REG_RE = re.compile(r"\$(\d+)\Z")
 _CHAN_RE = re.compile(r"\$ch(\d+)\Z")
-_SPR_RE = re.compile(r"\$spr(\d+)\Z")
+# objdump spells the SPR operand `$sp<N>`; `spu_format` prints `$spr<N>`.
+_SPR_RE = re.compile(r"\$spr?(\d+)\Z")
 _MEM_RE = re.compile(r"([+-]?\w+)\(\$(\d+)\)\Z")
 _NUM_RE = re.compile(r"([+-]?)(0[xX][0-9a-fA-F]+|\d+|[0-9a-fA-F]+)\Z")
 

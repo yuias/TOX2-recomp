@@ -200,6 +200,61 @@ class CanonTest(unittest.TestCase):
         for text in (".long 0x90000000", ".word 0x9000", "(bad)", ".long"):
             self.assertEqual(canon_text(text), CanonInsn(".long", frozenset(), ()), text)
 
+    def test_halts_drop_objdumps_false_target(self):
+        # ISA 1.2 p.151: `heqi ra,symbol`; RT is a false target that objdump prints first.
+        for name, ours_text, kw in (("heq", "heq $5,$6", {"RB": 6}), ("heqi", "heqi $5,-2", {"I10": -2}),
+                                    ("hgt", "hgt $5,$6", {"RB": 6}), ("hgti", "hgti $5,7", {"I10": 7}),
+                                    ("hlgt", "hlgt $5,$6", {"RB": 6}), ("hlgti", "hlgti $5,7", {"I10": 7})):
+            word = encode(name, RA=5, **kw) | 9  # RT = 9
+            self.assertEqual(format_insn(decode(word)), ours_text)
+            with self.subTest(name):
+                self.assertEqual(category(word, "%s	$9,%s" % (name, ours_text.split(" ", 1)[1])), "match")
+                self.assertEqual(category(word, ours_text.replace(" ", "	", 1)), "match")
+                # Only a register may be the extra operand, and the real operands still have to agree.
+                self.assertEqual(category(word, "%s	$9,$4,%s" % (name, ours_text.split(",", 1)[1])),
+                                 "operand_mismatch")
+                self.assertEqual(category(word, "%s	7,%s" % (name, ours_text.split(" ", 1)[1])),
+                                 "operand_mismatch")
+        # Not a halt: an extra operand stays a mismatch.
+        self.assertEqual(category(encode("ai", RT=1, RA=1, I10=-32), "ai	$9,$1,$1,-32"), "operand_mismatch")
+
+    def test_zero_displacement_target(self):
+        # ISA 1.2 p.174: target = PC + I16*4, so a zero field is a branch to the instruction itself;
+        # objdump prints it as 0.
+        for name, kw in (("br", {}), ("brz", {"RT": 3}), ("brnz", {"RT": 3}), ("brhz", {"RT": 3}),
+                         ("brhnz", {"RT": 3}), ("hbrr", {"site": 0x3008})):
+            word = encode(name, addr=0x3000, target=0x3000, **kw)
+            ours = format_insn(decode(word, 0x3000))
+            self.assertIn("0x03000", ours)
+            theirs = ours.replace("0x03000", "0").replace(" ", "	", 1)
+            with self.subTest(name):
+                self.assertEqual(category(word, theirs), "match")
+                # A real target that is printed as 0 elsewhere in the field is still a mismatch.
+                self.assertEqual(category(word, ours.replace("0x03000", "0x03004").replace(" ", "	", 1)),
+                                 "operand_mismatch")
+        # A non-zero displacement never matches a printed 0, and brsl is not covered by the rule.
+        word = encode("br", addr=0x3000, target=0x3040)
+        self.assertEqual(category(word, "br	0"), "operand_mismatch")
+        word = encode("brsl", RT=0, addr=0x3000, target=0x3000)
+        self.assertEqual(category(word, "brsl	$0,0"), "operand_mismatch")
+
+    def test_spr_token_accepts_sp_and_spr(self):
+        self.assertEqual(canon_text("mfspr	$50,$sp4").operands, (Operand("reg", 50), Operand("spr", 4)))
+        self.assertEqual(canon_text("mtspr	$spr4,$50"), canon_text("mtspr	$sp4,$50"))
+        word = encode("mfspr", RT=50, SA=4)
+        self.assertEqual(format_insn(decode(word)), "mfspr $50,$spr4")
+        self.assertEqual(category(word, "mfspr	$50,$sp4"), "match")
+        self.assertEqual(category(word, "mfspr	$50,$sp5"), "operand_mismatch")
+        self.assertEqual(category(encode("mtspr", SA=4, RT=50), "mtspr	$sp4,$50"), "match")
+
+    def test_conversion_scale_is_the_isa_operand(self):
+        # ISA 1.2 p.220-223: scale = 173 - I8 (cflts, cfltu) or 155 - I8 (csflt, cuflt).
+        self.assertEqual(category(encode("cflts", RT=78, RA=13, I8=173), "cflts	$78,$13,0"), "match")
+        self.assertEqual(category(encode("cflts", RT=78, RA=13, I8=173), "cflts	$78,$13,173"), "operand_mismatch")
+        self.assertEqual(category(encode("cfltu", RT=30, RA=40, I8=172), "cfltu	$30,$40,1"), "match")
+        self.assertEqual(category(encode("csflt", RT=8, RA=4, I8=155), "csflt	$8,$4,0"), "match")
+        self.assertEqual(category(encode("cuflt", RT=54, RA=61, I8=150), "cuflt	$54,$61,5"), "match")
+
     def test_stop_drops_its_code(self):
         self.assertEqual(canon_text("stop 0x2001"), canon_text("stop"))
         self.assertEqual(category(encode("stop", STOP=0x2001), "stop"), "match")
@@ -247,8 +302,34 @@ class CategoryTest(unittest.TestCase):
         known = (KnownDifference("objdump_code_we_unknown", None, "il", "test"),)
         self.assertEqual(category(0x90000000, "il\t$0,0", known=known), "known_difference")
 
-    def test_known_differences_start_empty(self):
-        self.assertEqual(spu_objdump_diff.KNOWN_DIFFERENCES, ())
+    def test_known_differences_cite_the_isa(self):
+        pairs = {(e.category, e.ours, e.objdump) for e in spu_objdump_diff.KNOWN_DIFFERENCES}
+        self.assertEqual(pairs, {("mnemonic_mismatch", "bihnz", "bihnzp"), ("mnemonic_mismatch", "bihnz", "bihnzpd"),
+                                 *(("mnemonic_mismatch", "sync", "sync" + f)
+                                   for f in ("d", "e", "de", "cd", "ce", "cde"))})
+        for entry in spu_objdump_diff.KNOWN_DIFFERENCES:
+            self.assertIn("ISA 1.2 p.", entry.reason)
+
+    def test_reserved_bit_entries(self):
+        known = spu_objdump_diff.KNOWN_DIFFERENCES
+        # Bit 11 (P in objdump) of bihnz is reserved: ISA 1.2 p.186-189.
+        word = encode("bihnz", RT=37, RA=80) | 1 << 20
+        self.assertEqual(format_insn(decode(word)), "bihnz $37,$80")
+        self.assertEqual(category(word, "bihnzp	$37,$80", known=known), "known_difference")
+        self.assertEqual(category(word, "bihnzp	$37,$81", known=known), "mnemonic_mismatch")
+        self.assertEqual(category(word, "bihnzp	$37,$80", known=()), "mnemonic_mismatch")
+        word = encode("bihnz", RT=32, RA=82, D=1) | 1 << 20
+        self.assertEqual(category(word, "bihnzpd	$32,$82", known=known), "known_difference")
+        # Reserved D/E bits of sync: ISA 1.2 p.242 defines only C.
+        for bits, text in ((1 << 19, "syncd"), (1 << 18, "synce"), (3 << 18, "syncde"),
+                           (1 << 20 | 1 << 19, "synccd"), (1 << 20 | 1 << 18, "syncce"), (7 << 18, "synccde")):
+            with self.subTest(text):
+                word = encode("sync") | bits
+                self.assertEqual(category(word, text, known=known), "known_difference")
+                self.assertEqual(category(word, text, known=()), "mnemonic_mismatch")
+        # Other pairs, and a different mnemonic of the same family, are not covered.
+        self.assertEqual(category(encode("sync"), "syncp", known=known), "mnemonic_mismatch")
+        self.assertEqual(category(encode("bihz", RT=37, RA=80), "bihzp	$37,$80", known=known), "mnemonic_mismatch")
 
 
 class InvocationTest(unittest.TestCase):

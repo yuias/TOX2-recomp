@@ -45,8 +45,24 @@ class KnownDifference:
     reason: str  # names the ISA section that shows our decoding is right (or that both are valid)
 
 
-# An entry is added only after the ISA has been checked.
-KNOWN_DIFFERENCES: tuple[KnownDifference, ...] = ()
+# An entry is added only after the ISA has been checked. For a mnemonic mismatch the operands must agree
+# as well, so an entry never hides a real operand mismatch.
+_BIHNZ_REASON = ("ISA 1.2 p.186-189 (biz, binz, bihz, bihnz): bit 11 is reserved and only D and E are defined; "
+                 "objdump reads the reserved bit as a P flag, we ignore it")
+_SYNC_REASON = ("ISA 1.2 p.242 (sync): only C (bit 11) is defined, bits 12 and 13 are reserved; "
+                "objdump reads them as D and E flags, we ignore them")
+KNOWN_DIFFERENCES: tuple[KnownDifference, ...] = (
+    KnownDifference("mnemonic_mismatch", "bihnz", "bihnzp", _BIHNZ_REASON),
+    KnownDifference("mnemonic_mismatch", "bihnz", "bihnzpd", _BIHNZ_REASON),
+) + tuple(KnownDifference("mnemonic_mismatch", "sync", name, _SYNC_REASON)
+          for name in ("syncd", "synce", "syncde", "synccd", "syncce", "synccde"))
+
+# The conditional halts print only RA and RB/I10 in ISA 1.2 p.151-159 (`heqi ra,symbol`); RT is a
+# false-target field that objdump prints as an extra first operand.
+_HALTS = frozenset({"heq", "heqi", "hgt", "hgti", "hlgt", "hlgti"})
+# Relative branches and hints whose displacement field is 0 (p.174: target = PC + I16*4, a loop on the
+# instruction itself); objdump prints that target as a plain 0.
+_ZERO_DISPLACEMENT = frozenset({"br", "brz", "brnz", "brhz", "brhnz", "hbrr"})
 
 
 # --- Comparison -----------------------------------------------------------------------------
@@ -77,13 +93,21 @@ def operand_equal(name: str, ours: Operand, theirs: Operand) -> bool:
 
 
 def operands_match(ours: SpuInsn, ours_canon: CanonInsn, theirs: CanonInsn) -> bool:
-    if len(ours_canon.operands) != len(theirs.operands):
+    theirs_operands = theirs.operands
+    if (ours_canon.mnemonic in _HALTS and len(theirs_operands) == len(ours_canon.operands) + 1
+            and theirs_operands[0].kind == "reg"):
+        theirs_operands = theirs_operands[1:]
+    if len(ours_canon.operands) != len(theirs_operands):
         return False
     names = ours.spec.operands if ours.spec is not None else ()
-    for index, (a, b) in enumerate(zip(ours_canon.operands, theirs.operands)):
+    for index, (a, b) in enumerate(zip(ours_canon.operands, theirs_operands)):
         name = names[index] if index < len(names) else ""
-        if not operand_equal(name, a, b):
-            return False
+        if operand_equal(name, a, b):
+            continue
+        if (name == "REL16" and ours_canon.mnemonic in _ZERO_DISPLACEMENT and ours.field("REL16") == 0
+                and b.kind == "target" and b.value == 0):
+            continue
+        return False
     return True
 
 
@@ -109,8 +133,11 @@ def compare(ours: SpuInsn, ours_canon: CanonInsn, theirs: CanonInsn,
     else:
         return "match"
     for entry in KNOWN_DIFFERENCES if known is None else known:
-        if (entry.category, entry.ours, entry.objdump) == (category, _base(ours_canon), _base(theirs)):
-            return "known_difference"
+        if (entry.category, entry.ours, entry.objdump) != (category, _base(ours_canon), _base(theirs)):
+            continue
+        if category == "mnemonic_mismatch" and not operands_match(ours, ours_canon, theirs):
+            continue
+        return "known_difference"
     return category
 
 

@@ -10,8 +10,11 @@ from __future__ import annotations
 from .spu import SpuInsn
 
 _REGISTERS = frozenset({"RT", "RT4", "RA", "RB", "RC"})
-_SIGNED = frozenset({"I7", "I8", "I10", "I10x16", "I16"})
+_SIGNED = frozenset({"I7", "I10", "I10x16", "I16"})
 _UNSIGNED_HEX = frozenset({"U7", "U16", "I18", "STOP"})
+# The assembler operand of the float/integer conversions is `scale`, not the I8 field (ISA 1.2, p.220-223):
+# scale = 173 - I8 for cflts/cfltu and 155 - I8 for csflt/cuflt, as an 8-bit unsigned value.
+_SCALE_BASE = {"cflts": 173, "cfltu": 173, "csflt": 155, "cuflt": 155}
 
 
 def _operand(insn: SpuInsn, name: str) -> str:
@@ -21,6 +24,8 @@ def _operand(insn: SpuInsn, name: str) -> str:
         return f"${insn.field(name)}"
     if name in _SIGNED:
         return str(insn.field(name))
+    if name == "I8":
+        return str((_SCALE_BASE[insn.spec.mnemonic] - insn.field(name)) & 0xFF)
     if name in _UNSIGNED_HEX:
         return f"{insn.field(name):#x}"
     if name == "CA":
