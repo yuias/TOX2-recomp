@@ -17,6 +17,8 @@ enum class ExitCode : int {
     Watchdog = 5,
     Stall = 6,
     NoThreads = 7,
+    // The run reached something this runtime deliberately does not do yet.
+    Unsupported = 8,
 };
 
 enum class FatalKind {
@@ -37,10 +39,11 @@ struct GuestFrame {
 
 inline constexpr std::size_t kMaxGuestFrames = 16;
 
-// Entry of the function that owns `addr`: the greatest registered entry <= addr. Functions have no
-// recorded size, so an address in padding or in unregistered code maps to the preceding function.
-// Returns 0 when `addr` is outside the registered span (which ends at the last entry's slot, so
-// addresses inside the last function's body are not found).
+// Entry of the function that owns `addr`: the greatest registered entry <= addr in the span (one per
+// image) that holds `addr`. Functions have no recorded size, so an address in padding or in
+// unregistered code maps to the preceding function of its span. Returns 0 when `addr` is outside
+// every span (a span ends at its last entry's slot, so addresses inside the last function's body are
+// not found).
 std::uint32_t findOwningFunction(std::uint32_t addr);
 
 // Walks the PPC64 ELF back chain starting at ctx.gpr[1] and stores the saved LR of each caller

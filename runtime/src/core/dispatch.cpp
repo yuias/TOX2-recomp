@@ -1,13 +1,15 @@
-// Dynamic transfers: guest address -> generated function through a flat table with one slot per
-// 4-byte instruction address.
+// Dynamic transfers: guest address -> generated function through flat tables with one slot per
+// 4-byte instruction address, one table (span) per image.
 
 #include <array>
 #include <cstdint>
 #include <format>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/census.h"
+#include "core/dispatch.h"
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/host_functions.h"
@@ -16,16 +18,74 @@
 
 namespace {
 
-// Written once by tox2RegisterFuncs before any guest thread starts, then read-only.
-std::vector<Tox2PpuFunc*> g_table;
-std::uint32_t g_span_begin = 0;
-std::uint32_t g_span_end = 0;  // one past the highest function's first instruction
+// One image's functions. A single table over several images would also cover the data between them,
+// so unknown-target reports and owner lookups would attribute data addresses to a function.
+struct Span {
+    std::uint64_t begin = 0;
+    std::uint64_t end = 0;  // one past the highest function's first instruction; may be 2^32
+    std::vector<Tox2PpuFunc*> table;
+};
+
+// Written by tox2RegisterFuncs and appendFuncs before any guest thread starts, then read-only. A
+// handful of entries at most, so lookups scan it.
+std::vector<Span> g_spans;
 
 // A table of more slots than this means a corrupt mapping list, not a real program.
 constexpr std::uint64_t kMaxSlots = 0x4000000;
 
-// Unsigned wrap-around makes this correct even when the span ends at 2^32 (g_span_end == 0).
-bool insideSpan(std::uint32_t addr) { return addr - g_span_begin < g_span_end - g_span_begin; }
+const Span* findSpan(std::uint32_t addr) {
+    for (const Span& span : g_spans) {
+        if (addr >= span.begin && addr < span.end) {
+            return &span;
+        }
+    }
+    return nullptr;
+}
+
+Span buildSpan(const Tox2FuncMapping* mappings, std::uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) {
+        const Tox2FuncMapping& m = mappings[i];
+        if ((m.guest & 3) != 0) {
+            tox2::fatal(tox2::FatalKind::Internal,
+                        std::format("function table: unaligned guest address {:#010x}", m.guest));
+        }
+        if (m.host == nullptr) {
+            tox2::fatal(tox2::FatalKind::Internal,
+                        std::format("function table: no host function for {:#010x}", m.guest));
+        }
+        if (i > 0 && m.guest <= mappings[i - 1].guest) {
+            tox2::fatal(tox2::FatalKind::Internal,
+                        std::format("function table: {:#010x} follows {:#010x} (unsorted or duplicate)", m.guest,
+                                    mappings[i - 1].guest));
+        }
+    }
+
+    Span span;
+    span.begin = mappings[0].guest;
+    span.end = std::uint64_t{mappings[count - 1].guest} + 4;
+    if (span.end > 0x100000000ull || (span.end - span.begin) / 4 > kMaxSlots) {
+        tox2::fatal(tox2::FatalKind::Internal,
+                    std::format("function table: span {:#x}..{:#x} is too large", span.begin, span.end));
+    }
+
+    span.table.assign((span.end - span.begin) / 4, nullptr);
+    for (uint32_t i = 0; i < count; i++) {
+        span.table[(mappings[i].guest - span.begin) / 4] = mappings[i].host;
+    }
+    return span;
+}
+
+void addSpan(Span span, std::uint32_t count) {
+    for (const Span& other : g_spans) {
+        if (span.begin < other.end && other.begin < span.end) {
+            tox2::fatal(tox2::FatalKind::Internal,
+                        std::format("function table: span {:#010x}..{:#010x} overlaps span {:#010x}..{:#010x}",
+                                    span.begin, span.end, other.begin, other.end));
+        }
+    }
+    tox2::logInfo("tox2: dispatch: {} entries, span {:#010x}..{:#010x}", count, span.begin, span.end);
+    g_spans.push_back(std::move(span));
+}
 
 struct HostFunction {
     const char* name = nullptr;
@@ -55,16 +115,26 @@ std::string recentTrace(const Tox2PpuContext* ctx) {
 namespace tox2 {
 
 std::uint32_t findOwningFunction(std::uint32_t addr) {
-    if (!insideSpan(addr)) {
+    const Span* span = findSpan(addr);
+    if (span == nullptr) {
         return 0;
     }
-    // The table is dense (one slot per instruction), so walk back to the nearest populated slot.
-    for (std::uint32_t slot = (addr - g_span_begin) / 4 + 1; slot-- > 0;) {
-        if (g_table[slot] != nullptr) {
-            return g_span_begin + slot * 4;
+    // The table is dense (one slot per instruction), so walk back to the nearest populated slot. The
+    // walk stays inside this span: a function of another image is not the owner.
+    for (std::uint64_t slot = (addr - span->begin) / 4 + 1; slot-- > 0;) {
+        if (span->table[slot] != nullptr) {
+            return static_cast<std::uint32_t>(span->begin + slot * 4);
         }
     }
     return 0;
+}
+
+void appendFuncs(const Tox2FuncMapping* mappings, std::uint32_t count) {
+    if (count == 0) {
+        tox2::logInfo("tox2: dispatch: 0 entries");
+        return;
+    }
+    addSpan(buildSpan(mappings, count), count);
 }
 
 std::uint32_t registerHostFunction(const char* name, GuestHandler handler) {
@@ -107,46 +177,9 @@ void resetHostFunctions() {
 extern "C" {
 
 void tox2RegisterFuncs(const Tox2FuncMapping* mappings, uint32_t count) {
-    // Replaces any previous registration (unit tests register several programs).
-    g_table.clear();
-    g_span_begin = 0;
-    g_span_end = 0;
-    if (count == 0) {
-        tox2::logInfo("tox2: dispatch: 0 entries");
-        return;
-    }
-
-    for (uint32_t i = 0; i < count; i++) {
-        const Tox2FuncMapping& m = mappings[i];
-        if ((m.guest & 3) != 0) {
-            tox2::fatal(tox2::FatalKind::Internal,
-                        std::format("function table: unaligned guest address {:#010x}", m.guest));
-        }
-        if (m.host == nullptr) {
-            tox2::fatal(tox2::FatalKind::Internal,
-                        std::format("function table: no host function for {:#010x}", m.guest));
-        }
-        if (i > 0 && m.guest <= mappings[i - 1].guest) {
-            tox2::fatal(tox2::FatalKind::Internal,
-                        std::format("function table: {:#010x} follows {:#010x} (unsorted or duplicate)", m.guest,
-                                    mappings[i - 1].guest));
-        }
-    }
-
-    const std::uint64_t begin = mappings[0].guest;
-    const std::uint64_t end = std::uint64_t{mappings[count - 1].guest} + 4;
-    if (end > 0x100000000ull || (end - begin) / 4 > kMaxSlots) {
-        tox2::fatal(tox2::FatalKind::Internal,
-                    std::format("function table: span {:#x}..{:#x} is too large", begin, end));
-    }
-
-    g_table.assign((end - begin) / 4, nullptr);
-    for (uint32_t i = 0; i < count; i++) {
-        g_table[(mappings[i].guest - begin) / 4] = mappings[i].host;
-    }
-    g_span_begin = static_cast<std::uint32_t>(begin);
-    g_span_end = static_cast<std::uint32_t>(end);  // end == 2^32 wraps to 0; see insideSpan
-    tox2::logInfo("tox2: dispatch: {} entries, span {:#010x}..{:#010x}", count, begin, end);
+    // Replaces every previous registration (unit tests register several programs).
+    g_spans.clear();
+    tox2::appendFuncs(mappings, count);
 }
 
 Tox2PpuFunc* tox2Lookup(uint32_t addr) {
@@ -156,10 +189,8 @@ Tox2PpuFunc* tox2Lookup(uint32_t addr) {
     if (addr - tox2::kHostFunctionBase < 4 * g_host_function_count) {
         return g_host_functions[(addr - tox2::kHostFunctionBase) / 4].function;
     }
-    if (!insideSpan(addr)) {
-        return nullptr;
-    }
-    return g_table[(addr - g_span_begin) / 4];
+    const Span* span = findSpan(addr);
+    return span != nullptr ? span->table[(addr - span->begin) / 4] : nullptr;
 }
 
 void tox2UnknownTarget(Tox2PpuContext* ctx, uint8_t* base, uint32_t target, uint32_t site) {
@@ -170,8 +201,8 @@ void tox2UnknownTarget(Tox2PpuContext* ctx, uint8_t* base, uint32_t target, uint
     }
     if (first) {
         tox2::logWarn("tox2: unknown target {:#010x} from {:#010x}: {}", target, site,
-                      insideSpan(target) ? "inside the code span (missed function?)"
-                                         : "outside the code span (corrupt pointer?)");
+                      findSpan(target) != nullptr ? "inside a code span (missed function?)"
+                                                  : "outside the code spans (corrupt pointer?)");
         tox2::logWarn("tox2: trace (oldest -> newest):{}", recentTrace(ctx));
     }
     // Returning here acts like a callee that returned at once: the caller continues after the call

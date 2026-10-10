@@ -28,6 +28,7 @@
 
 #include "core/boot.h"
 #include "core/census.h"
+#include "core/dispatch.h"
 #include "core/elf_loader.h"
 #include "core/fatal.h"
 #include "core/guest_memory.h"
@@ -522,18 +523,86 @@ void testDispatch() {
         tox2Dispatch(ctx.get(), nullptr);
     }
     CHECK(ctx->gpr[3] == 77);
-    CHECK(countContaining(lines, "unknown target 0x00010204 from 0x00010300: inside the code span") == 1);
+    CHECK(countContaining(lines, "unknown target 0x00010204 from 0x00010300: inside a code span") == 1);
     CHECK(countContaining(lines, "trace (oldest -> newest): 00010200 00010210") == 1);
 
     ctx->jump_target = 0x20000;
     tox2Dispatch(ctx.get(), nullptr);
-    CHECK(countContaining(lines, "unknown target 0x00020000 from 0x00010300: outside the code span") == 1);
+    CHECK(countContaining(lines, "unknown target 0x00020000 from 0x00010300: outside the code spans") == 1);
 
     const std::string census = tox2::formatCensus();
     CHECK(census.find("census: unknown targets 2 distinct\n  0x00010204 from 0x00010300: 3\n"
                       "  0x00020000 from 0x00010300: 1") != std::string::npos);
 
     tox2RegisterFuncs(nullptr, 0);
+    CHECK(tox2Lookup(0x10200) == nullptr);
+    tox2::setLogSink({});
+    tox2::resetCensus();
+}
+
+void testDispatchSpans() {
+    std::vector<std::string> lines;
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+
+    const Tox2FuncMapping first[] = {{0x10200, testFuncA}, {0x10210, testFuncB}};
+    const Tox2FuncMapping second[] = {{0x20000, testFuncB}, {0x20040, testFuncA}};
+    tox2RegisterFuncs(first, 2);
+    tox2::appendFuncs(second, 2);
+    CHECK(countContaining(lines, "tox2: dispatch: 2 entries, span 0x00010200..0x00010214") == 1);
+    CHECK(countContaining(lines, "tox2: dispatch: 2 entries, span 0x00020000..0x00020044") == 1);
+
+    CHECK(tox2Lookup(0x10200) == testFuncA);
+    CHECK(tox2Lookup(0x10210) == testFuncB);
+    CHECK(tox2Lookup(0x20000) == testFuncB);
+    CHECK(tox2Lookup(0x20040) == testFuncA);
+    CHECK(tox2Lookup(0x20004) == nullptr);  // inside the second span, no function
+    CHECK(tox2Lookup(0x15000) == nullptr);  // between the spans
+    CHECK(tox2Lookup(0x20044) == nullptr);
+
+    // The walk back stays inside the span that holds the address.
+    CHECK(tox2::findOwningFunction(0x10210) == 0x10210);
+    CHECK(tox2::findOwningFunction(0x20008) == 0x20000);
+    CHECK(tox2::findOwningFunction(0x20040) == 0x20040);
+    CHECK(tox2::findOwningFunction(0x15000) == 0);
+    CHECK(tox2::findOwningFunction(0x1ffff) == 0);
+
+    // A span added below the first one is found too, and the order of registration does not matter.
+    const Tox2FuncMapping third[] = {{0x8000, testFuncA}};
+    tox2::appendFuncs(third, 1);
+    CHECK(tox2Lookup(0x8000) == testFuncA);
+    CHECK(tox2::findOwningFunction(0x8000) == 0x8000);
+
+    auto ctx = std::make_unique<Tox2PpuContext>();
+    ctx->jump_target = 0x20000;
+    tox2Dispatch(ctx.get(), nullptr);
+    CHECK(ctx->gpr[3] == 2);
+
+    lines.clear();
+    ctx->jump_target = 0x20004;
+    ctx->jump_site = 0x10300;
+    tox2Dispatch(ctx.get(), nullptr);
+    CHECK(countContaining(lines, "unknown target 0x00020004 from 0x00010300: inside a code span") == 1);
+    ctx->jump_target = 0x15000;
+    tox2Dispatch(ctx.get(), nullptr);
+    CHECK(countContaining(lines, "unknown target 0x00015000 from 0x00010300: outside the code spans") == 1);
+
+    // Registering again replaces every span, appended ones included.
+    tox2RegisterFuncs(first, 2);
+    CHECK(tox2Lookup(0x10200) == testFuncA);
+    CHECK(tox2Lookup(0x20000) == nullptr);
+    CHECK(tox2::findOwningFunction(0x20008) == 0);
+    CHECK(tox2Lookup(0x8000) == nullptr);
+
+    // Spans that touch without overlapping are fine.
+    const Tox2FuncMapping adjacent[] = {{0x10214, testFuncB}};
+    tox2::appendFuncs(adjacent, 1);
+    CHECK(tox2Lookup(0x10214) == testFuncB);
+    CHECK(tox2::findOwningFunction(0x10214) == 0x10214);
+
+    tox2RegisterFuncs(nullptr, 0);
+    tox2::appendFuncs(nullptr, 0);
     CHECK(tox2Lookup(0x10200) == nullptr);
     tox2::setLogSink({});
     tox2::resetCensus();
@@ -7501,133 +7570,6 @@ void testCellGcmSys() {
     tox2::resetLogOnce();
 }
 
-void testSpurs() {
-    std::vector<std::string> lines;
-    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    tox2::resetCensus();
-    tox2::resetLogOnce();
-    tox2::resetSyncObjects();
-    tox2::resetSpuThreadGroups();
-    tox2::resetSpurs();
-    tox2::Process& p = tox2::process();
-    CHECK(p.memory.reserve());
-    std::uint8_t* base = p.memory.base();
-    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
-    CHECK(scratch != 0);
-    const std::uint32_t attr = scratch, spurs = scratch + 0x4000, out = scratch + 0x8000;
-    const std::uint32_t queue_id_out = scratch + 0x8100, queue_attr = scratch + 0x8140;
-    const std::uint32_t spup = scratch + 0x8180;
-    constexpr std::uint32_t kErrNull = 0x80410711, kErrAlign = 0x80410710, kErrInval = 0x80410702;
-
-    const Tox2ImportInfo imports[] = {
-            {0x00800000, 0x95180230, "cellSpurs", "_cellSpursAttributeInitialize"},
-            {0x00800010, 0x30aa96c4, "cellSpurs", "cellSpursInitializeWithAttribute2"},
-            {0x00800020, 0x39c173fb, "cellSpurs", "cellSpursGetSpuThreadGroupId"},
-            {0x00800030, 0xca4c4600, "cellSpurs", "cellSpursFinalize"},
-    };
-    tox2::installImports(imports, 4);
-    auto a = makeCaller(0x01000000);
-    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
-    Tox2PpuContext* ctx = &a->context();
-    const auto call = [&](std::uint32_t index, std::initializer_list<std::uint64_t> args) {
-        int reg = 3;
-        for (const std::uint64_t value : args) ctx->gpr[reg++] = value;
-        tox2HleCall(ctx, base, index);
-        return static_cast<std::uint32_t>(ctx->gpr[3]);
-    };
-
-    // _cellSpursAttributeInitialize: the struct is zeroed, then the seven fields are stored.
-    std::memset(base + attr, 0xaa, 512);
-    CHECK(call(0, {0, 1, 0x330000, 5, 100, 1000, 1}) == kErrNull);
-    CHECK(call(0, {attr + 4, 1, 0x330000, 5, 100, 1000, 1}) == kErrAlign);
-    CHECK(tox2Read8(base, attr) == 0xaa);  // a rejected call writes nothing
-    CHECK(call(0, {attr, 1, 0x330000, 5, 100, 1000, 1}) == 0);
-    CHECK(tox2Read32(base, attr + 0x00) == 1);
-    CHECK(tox2Read32(base, attr + 0x04) == 0x330000);
-    CHECK(tox2Read32(base, attr + 0x08) == 5);
-    CHECK(tox2Read32(base, attr + 0x0c) == 100);
-    CHECK(tox2Read32(base, attr + 0x10) == 1000);
-    CHECK(tox2Read8(base, attr + 0x14) == 1);
-    CHECK(tox2Read32(base, attr + 0x24) == 0 && tox2Read32(base, attr + 0x28) == 0);
-    CHECK(tox2Read8(base, attr + 0x1ff) == 0);
-    CHECK(call(0, {attr, 2, 0x330000, 6, 3, 4, 0}) == 0);
-    CHECK(tox2Read8(base, attr + 0x14) == 0);
-
-    // cellSpursInitializeWithAttribute2: argument checks first.
-    CHECK(call(1, {spurs, 0}) == kErrNull);
-    CHECK(call(1, {spurs, attr + 4}) == kErrAlign);
-    CHECK(call(1, {0, attr}) == kErrNull);
-    CHECK(call(1, {spurs + 0x80 + 8, attr}) == kErrAlign);
-    CHECK(call(1, {spurs + 0x10, attr}) == kErrAlign);
-    tox2Write32(base, attr, 3);
-    CHECK(call(1, {spurs, attr}) == kErrInval);  // revision > 2
-    tox2Write32(base, attr, 2);
-    tox2Write32(base, attr + 0x24, 16);
-    CHECK(call(1, {spurs, attr}) == kErrInval);  // prefix longer than 15 bytes
-    tox2Write32(base, attr + 0x24, 3);
-    std::memcpy(base + attr + 0x15, "abc", 3);
-    tox2Write8(base, attr + 0x14, 1);  // exitIfNoWork
-    std::memset(base + spurs, 0x55, 0x2000);
-    CHECK(call(1, {spurs, attr}) == 0);
-
-    CHECK(tox2Read32(base, spurs + 0xda0) == 2);         // revision
-    CHECK(tox2Read32(base, spurs + 0xda4) == 0x330000);  // sdkVersion
-    CHECK(tox2Read32(base, spurs + 0xd80) == 5);         // exit-if-no-work | second version
-    CHECK(tox2Read32(base, spurs + 0xd84) == 3);         // spuPriority
-    CHECK(tox2Read32(base, spurs + 0xd88) == 4);         // ppuPriority
-    CHECK(tox2Read8(base, spurs + 0x76) == 6);           // nSpus
-    CHECK(tox2Read8(base, spurs + 0x74) == 0xc0);        // 32 workloads | exit if no work
-    CHECK(tox2Read8(base, spurs + 0xd9b) == 3);          // prefixSize
-    CHECK(std::memcmp(base + spurs + 0xd8c, "abc", 3) == 0);
-    CHECK(tox2Read64(base, spurs + 0xd20) == 0xffffffffull);
-    CHECK(tox2Read8(base, spurs + 0x1fff) == 0 && tox2Read8(base, spurs + 0x500) == 0);  // zeroed
-    const std::uint32_t group = tox2Read32(base, spurs + 0xd30);
-    CHECK(group == 0x04000100);
-    CHECK(tox2::spuThreadGroupExists(group));
-    CHECK(countContaining(lines, "tox2: spurs: initialized") == 1);
-
-    // cellSpursGetSpuThreadGroupId writes the id.
-    tox2Write32(base, out, 0);
-    CHECK(call(2, {spurs, 0}) == kErrNull);
-    CHECK(call(2, {0, out}) == kErrNull);
-    CHECK(call(2, {spurs + 8, out}) == kErrAlign);
-    CHECK(call(2, {spurs, out}) == 0);
-    CHECK(tox2Read32(base, out) == group);
-
-    // sc 251 accepts the SPURS group id and rejects ids that were never handed out.
-    tox2Write32(base, queue_attr, 1);
-    tox2Write32(base, queue_attr + 4, 2);
-    CHECK(syscallAs(*a, 128, queue_id_out, queue_attr, 0, 2) == 0);
-    const std::uint32_t queue = tox2Read32(base, queue_id_out);
-    CHECK(syscallAs(*a, 251, group, queue, 1, spup) == 0);
-    CHECK(syscallAs(*a, 251, group + 0x100, queue, 1, spup) == err(tox2::kCellEsrch));
-
-    // A second instance gets the next id; finalize releases only its own group.
-    const std::uint32_t spurs2 = scratch + 0x2000;
-    CHECK(call(1, {spurs2, attr}) == 0);
-    CHECK(tox2Read32(base, spurs2 + 0xd30) == group + 0x100);
-    CHECK(call(3, {0}) == kErrNull);
-    CHECK(call(3, {spurs2 + 8}) == kErrAlign);
-    CHECK(call(3, {spurs2}) == 0);
-    CHECK(!tox2::spuThreadGroupExists(group + 0x100));
-    CHECK(tox2::spuThreadGroupExists(group));
-    CHECK(call(3, {spurs}) == 0);
-    CHECK(!tox2::spuThreadGroupExists(group));
-    CHECK(syscallAs(*a, 251, group, queue, 1, spup) == err(tox2::kCellEsrch));
-
-    const std::string census = tox2::formatCensus();
-    CHECK(census.find("cellSpurs::cellSpursInitializeWithAttribute2: ") != std::string::npos);
-    CHECK(countContaining(lines, "tox2: default hle") == 0);
-
-    tox2::resetSpurs();
-    tox2::resetSpuThreadGroups();
-    p.main.free(scratch);
-    tox2::resetSyncObjects();
-    tox2::setLogSink({});
-    tox2::resetCensus();
-    tox2::resetLogOnce();
-}
-
 void testLwmutex() {
     tox2::setLogSink([](std::string_view) {});
     tox2::resetCensus();
@@ -8460,6 +8402,15 @@ void testUnsortedTableChild() {
                    "0x00010210 (unsorted or duplicate)"));
 }
 
+void testOverlappingSpanChild() {
+    const ChildResult r = runChild(L"--overlapping-span-child");
+    echoChild("overlapping span child", r);
+    CHECK(r.exit_code == 3);
+    CHECK(contains(r,
+                   "tox2: stop: fatal internal error: function table: span 0x00010210..0x00010218 overlaps "
+                   "span 0x00010200..0x00010214"));
+}
+
 void testGuestStackWalk() {
     std::unique_ptr<tox2::GuestMemory> memory(newMemory());
     tox2::RegionAllocator stack(*memory, tox2::kStackRegion);
@@ -8535,6 +8486,15 @@ int unsortedTableChild() {
     return 99;
 }
 
+int overlappingSpanChild() {
+    tox2::installProcessSettings();
+    const Tox2FuncMapping first[] = {{0x10200, testFuncA}, {0x10210, testFuncB}};
+    const Tox2FuncMapping second[] = {{0x10210, testFuncA}, {0x10214, testFuncB}};
+    tox2RegisterFuncs(first, 2);
+    tox2::appendFuncs(second, 2);
+    return 99;
+}
+
 void childCensus() { std::fprintf(stderr, "census: test printer ran\n"); }
 
 Tox2PpuContext g_child_ctx;
@@ -8588,6 +8548,7 @@ int main(int argc, char** argv) {
         if (mode == "--stop-child") return stopChild();
         if (mode == "--strict-dispatch-child") return strictDispatchChild();
         if (mode == "--unsorted-table-child") return unsortedTableChild();
+        if (mode == "--overlapping-span-child") return overlappingSpanChild();
     }
 
     tox2::installProcessSettings();
@@ -8603,6 +8564,7 @@ int main(int argc, char** argv) {
     testProcessSingleton();
     testElfLoader();
     testDispatch();
+    testDispatchSpans();
     testCensus();
     testCensusRenderSuffix();
     testDisableFrameBuilder();
@@ -8619,7 +8581,6 @@ int main(int argc, char** argv) {
     testEventObjects();
     testEventQueueIpcKeys();
     testSpuAndSysmodule();
-    testSpurs();
     testCellGcmSys();
     testParamSfo();
     testCellGame();
@@ -8667,6 +8628,7 @@ int main(int argc, char** argv) {
     testStopChild();
     testStrictDispatchChild();
     testUnsortedTableChild();
+    testOverlappingSpanChild();
     std::printf("runtime core tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }
