@@ -310,7 +310,12 @@ TOX2_FORCEINLINE void tox2Enter(Tox2PpuContext* ctx, uint8_t* base, uint32_t add
         ctx->jump_target = tox2_t_;            \
         tox2Dispatch(ctx, base);               \
     } while (0)
-#define TOX2_TAIL(fn) TOX2_MUSTTAIL return fn(ctx, base)
+// The block keeps a label directly in front of a tail call from taking the attribute (C23 parses
+// "L: __attribute__((musttail)) return" as a label attribute and rejects it).
+#define TOX2_TAIL(fn)                       \
+    do {                                    \
+        TOX2_MUSTTAIL return fn(ctx, base); \
+    } while (0)
 #define TOX2_TAIL_DYN(site, target)                   \
     do {                                              \
         ctx->jump_site = (site);                      \
