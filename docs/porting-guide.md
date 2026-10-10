@@ -8,8 +8,9 @@ each tool in detail.
 
 ## 1. Get and pin the executable
 
-- Decrypt your own copy's `EBOOT.BIN` to `EBOOT.elf` with RPCS3 (Utilities > Decrypt PS3
-  Binaries). Keys and decrypted files stay out of version control.
+- Decrypt your own copy's `EBOOT.BIN` to `EBOOT.elf` with `tox2_decrypt` (see
+  [Decrypting the inputs](building.md#decrypting-the-inputs)); it needs only the keys that the build
+  downloads, not an emulator. Keys and decrypted files stay out of version control.
 - Check the `TITLE` in `PARAM.SFO`; a directory name can belong to a different game.
 - Record the size and SHA-256 of the executable in `config/target.json`, so every tool and the
   generated code refuse a different build (see [Target pin](analysis-tools.md#target-pin)).

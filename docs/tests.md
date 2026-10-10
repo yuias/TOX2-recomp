@@ -7,8 +7,11 @@ files are registered only when those are configured, and configuration prints wh
 
 | Target | What it checks | Needs |
 | --- | --- | --- |
+| `decrypt_core` | `tox2_decrypt` on synthetic data: crypto known answers, key file parsing, SCE packages, SELF reassembly, PUP and TAR reading, and the command line | - |
+| `decrypt_eboot` | `tox2_decrypt self` on the real `EBOOT.BIN`; the output must match the pin of `EBOOT.elf` (the file is written under `build/<preset>/decrypt_test`) | `-EbootBin` |
+| `decrypt_libsre` | `tox2_decrypt pup` on the real `PS3UPDAT.PUP`; the output must match the pin of `libsre.prx` | `-Pup` |
 | `runtime_version`, `runtime_musttail` | The runtime stub starts, and the compiler supports `musttail` | - |
-| `tools_unittest` | The Python unit tests (below). CTest passes `TOX2_EBOOT_ELF` to them, so they include the real-executable tests when `-EbootElf` is given | - |
+| `tools_unittest` | The Python unit tests (below). CTest passes `TOX2_EBOOT_ELF` to them, so they include the real-executable tests when `-EbootElf` or `-EbootBin` is given | - |
 | `ppu_header_check`, `ppu_semantics` | Contract header and the semantics harness (see [Emitting C](emitter.md)) | - |
 | `ppu_link` | The generated code links | `-GeneratedDir` |
 | `runtime_core` | Runtime core unit tests (memory, threads, lv2, HLE, VFS, fake RSX) | - |
@@ -20,7 +23,7 @@ files are registered only when those are configured, and configuration prints wh
 | `audio_wasapi` | The WASAPI output: device loss and reopen, priming, high-water drops and the fill level on fake streams, then (when a render device exists) opening the default device, playing silence and a real device loss and reopen. Exit code 77 (skipped) when the machine has no render device. Runs serially, because it measures timing | a render device for the real-device part |
 | `input_core` | Gamepad code behind the backend interface, with a fake backend and no GameInput: value, reading and device formatting; the `--pad-probe` logic (a line per change, one `no gamepad reading` per device, devices coming and going, the `SteamVirtualGamepadInfo` lines); the button table, dead zone, stick bytes, trigger threshold, merging of pads and motor conversion; Steam virtual path parsing, `SDL_GAMECONTROLLER_IGNORE_DEVICES` parsing and the selection rule (recorded runs, a virtual pad, the ignore list, no Steam); the hub (use of a pad, removal, two pads, a virtual pad and its physical pad, the focus gate, vibration, the provider following plugging) and the gamepad thread with a fake backend (unavailable backend, feeding the pad, start lines, probe alone) | - |
 | `input_gameinput` | The GameInput backend: the Steam context, then (with a GameInput runtime of API version 3) the device list, unique non-zero ids, a stable device generation, and `read`, `readRaw` and `setRumble` on unknown ids. No pad has to be connected. Exit code 77 (skipped) with the reason when no such runtime is installed | a GameInput runtime for all but the Steam context part (see [Input](input.md#the-gameinput-runtime-and-the-gameinput-unavailable-warning)) |
-| `game_boot` | The game reaches a milestone in a 20 s run (below) | `-GeneratedDir`, `-EbootElf`, `-GameDir` |
+| `game_boot` | The game reaches a milestone in a 20 s run (below) | `-GeneratedDir`, `-GameDir` and `-EbootElf` or `-EbootBin` |
 
 `rsx_replay` is registered when the capture named in `cmake/rsx_replay.cmake` exists under
 `generated/rsx/captures/`. While `TOX2_RSX_REPLAY_REFERENCE_SHA256` in that file is empty, as it is
@@ -35,7 +38,8 @@ tests of the inherited media and audio code remain.
 
 CTest registers `game_boot` only when `TOX2_PPU_GENERATED_DIR`, `TOX2_EBOOT_ELF` and
 `TOX2_GAME_DIR` are all set (`-GeneratedDir`, `-EbootElf`, `-GameDir`); otherwise configuration prints
-that it is not registered. It runs `tox2_game --game-dir <dir> --elf <elf>` with the arguments
+that it is not registered. `-EbootBin` also sets `TOX2_EBOOT_ELF`, to the produced
+`generated/inputs/EBOOT.elf`, unless `-EbootElf` is given. It runs `tox2_game --game-dir <dir> --elf <elf>` with the arguments
 from the pin file (the run keeps its game data in `build/<preset>/game_hdd`), with a 60 s time
 limit, and passes when the output matches the milestone regular expression. The exit code is not
 checked: the run ends at the 20 s watchdog or at a stop somewhere after the milestone, and a

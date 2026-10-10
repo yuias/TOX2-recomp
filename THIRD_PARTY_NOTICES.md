@@ -33,6 +33,25 @@ machine (the in-box `GameInput.dll` or the installed `GameInputRedist.dll`). If 
 implements API version 3 is found, `tox2_game` logs one warning that names `GameInputRedist.msi` and
 the gamepads are disabled; the keyboard keeps working.
 
+## RPCS3 key files
+
+`tox2_decrypt` needs the keys that decrypt `EBOOT.BIN` and the firmware's `libsre.prx`. It reads
+them from two source files of RPCS3, <https://github.com/RPCS3/rpcs3>, licensed under the GNU
+General Public License, version 2:
+
+| | |
+| --- | --- |
+| Commit | `f9b8c209a3800c1865bcfeade611f65f5237138c` |
+| `rpcs3/Crypto/key_vault.h` | SHA-256 `d5d0cede74c7900bb23ca8d60066194648ed4b976eaee60315c0bcbed7dc2aaf` |
+| `rpcs3/Crypto/key_vault.cpp` | SHA-256 `a2947ff6b681258c198552ec6344e16685e2df649018206daa3f41a0a1aadbd7` |
+
+The files are downloaded at configuration time into `generated/deps/rpcs3/<commit>/`, only when
+`-EbootBin` or `-Pup` is given, and their SHA-256 is checked (the pins are in
+`cmake/rpcs3_keys.cmake`). Alternatively `TOX2_RPCS3_CRYPTO_DIR` (`-Rpcs3CryptoDir`) names the
+`rpcs3/Crypto` directory of a local RPCS3 checkout. `tox2_decrypt` reads only the key constants from
+the files, as data. They are not compiled, linked, committed or redistributed, and no key appears
+in this repository or in any build output other than the decrypted files themselves.
+
 ## FFmpeg
 
 The runtime decodes the movies (H.264 video and ATRAC3plus audio) and the game's ATRAC3plus sound

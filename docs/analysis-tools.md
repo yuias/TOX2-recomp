@@ -144,4 +144,5 @@ status if the syscall table disagrees with its own comments.
 `EBOOT.bin` and the decrypted `EBOOT.elf` that the tools were written against. It never
 contains paths. `ps3tool.py info` compares the input with the `eboot_elf` entry so analysis
 results are only trusted for the expected build. The file also pins the size, SHA-256 and firmware
-version of `libsre.prx`, which `tox2_decrypt` checks.
+version of `libsre.prx`, which `tox2_decrypt` checks (see
+[Decrypting the inputs](building.md#decrypting-the-inputs)).

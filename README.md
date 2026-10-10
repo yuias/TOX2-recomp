@@ -4,8 +4,10 @@ Static recompilation of the PS3 title *テイルズ オブ エクシリア2* (*T
 BLJS10188) for Windows, built from your own copy of the game.
 
 This repository contains no game data (see [Licence and legal notice](#licence-and-legal-notice)).
-No executables, keys, or decrypted binaries are included or accepted by version control; you
-supply your own `EBOOT.elf`, and all tool output is written to ignored directories.
+No executables, keys, or decrypted binaries are included or accepted by version control. You
+supply your own `EBOOT.BIN` and the firmware's `PS3UPDAT.PUP`; the decrypted files are written to
+the ignored `generated/inputs/`, and the keys they need are downloaded at configure time, not
+stored (see [Decrypting `EBOOT.elf` and `libsre.prx`](#decrypting-ebootelf-and-libsreprx)).
 
 Current state: work in progress. The tools and the runtime were taken over from an earlier
 recompilation project of another game and are being pointed at this one. The executable is
@@ -26,20 +28,38 @@ Bink movies are not handled. See [Status](docs/status.md).
 - The Vulkan SDK, with the `VULKAN_SDK` environment variable set
 - A Vulkan 1.3 device and driver
 - Python 3.10 or newer (the tools use only the standard library)
-- RPCS3, to decrypt the game's executable
+- Internet access for the first configuration with `-EbootBin` or `-Pup`: two RPCS3 source files that
+  contain the keys are downloaded (see Building for an offline alternative)
 
-## Obtaining `EBOOT.elf`
+## Decrypting `EBOOT.elf` and `libsre.prx`
 
-The tools work on the decrypted PPU executable, not on `EBOOT.BIN`.
+The tools work on the decrypted PPU executable, not on `EBOOT.BIN`. The coming recompilation of
+the SPURS module needs the firmware's `libsre.prx` as well. `tox2_decrypt` produces both from files
+you own; RPCS3 is not needed.
 
 1. Dump your own disc or digital copy. The directory that contains `PS3_GAME` is the game
    directory (`<game-dir>` below).
-2. In RPCS3, use Utilities > Decrypt PS3 Binaries and select the game's `EBOOT.BIN`.
-3. Place the resulting `EBOOT.elf` at `<game-dir>/PS3_GAME/USRDIR/EBOOT.elf`, where `tox2_game`
-   looks for it.
+2. Download the PS3 system software update 4.93, `PS3UPDAT.PUP`, from PlayStation's official site.
+   It is not installed anywhere; the tool reads it as a file. The tested file is 206197916 bytes with
+   SHA-256 `158471fd834f8ea8036136b6aab43cd86c7ba73d79ca30e0af3c0fe0001cf365`. Sony publishes only
+   the latest firmware, and a PUP of another version is refused, because `config/target.json` pins `libsre.prx` of
+   version 4.93.
+3. Build once with both files. This configures, downloads the key files, builds `tox2_decrypt` and
+   runs it:
+
+   ```powershell
+   pwsh -NoProfile -File tools/build.ps1 -Preset release -EbootBin <game-dir>/PS3_GAME/USRDIR/EBOOT.BIN -Pup <path>/PS3UPDAT.PUP
+   ```
+
+   The outputs are `generated/inputs/EBOOT.elf` and `generated/inputs/libsre.prx`. Each is checked
+   against the size and SHA-256 in `config/target.json`; a file that does not match is refused and
+   nothing is written. The build log shows `matches the pin` for both.
 
 The supported executable has the SHA-256
 `a1d8a56ce1d6300bff704a43218f1b8b87c80c1e1342929a266e58af4e5891e9`; `tox2_game` refuses any other.
+`libsre.prx` is needed only to build, by the coming SPURS recompilation; nothing uses it yet. Neither
+file may be shared. The key download, the offline alternative and the checks are described in
+[Building](docs/building.md#decrypting-the-inputs).
 
 ## Building
 
@@ -65,13 +85,14 @@ Run these from the repository root:
    output is split into 256 chunks (the tool default is 16):
 
    ```powershell
-   python tools/ps3tool.py emit <game-dir>/PS3_GAME/USRDIR/EBOOT.elf --chunks 256 --out generated/ppu
+   python tools/ps3tool.py emit generated/inputs/EBOOT.elf --chunks 256 --out generated/ppu
    ```
 
    `emit` reads the committed function database `config/functions.json`. `recover` is needed only
    to regenerate that file (see [Function recovery](docs/function-recovery.md)).
 
-4. Build:
+4. Build. The cache of the release build already points at `generated/inputs/EBOOT.elf`, so
+   `-EbootElf` is not needed:
 
    ```powershell
    pwsh -NoProfile -File tools/build.ps1 -Preset release -GeneratedDir generated/ppu -GameDir <game-dir>
@@ -87,8 +108,11 @@ Every build parameter, the CMake variables and the test builds are described in
 ## Running the game
 
 ```powershell
-build/release/bin/tox2_game.exe --game-dir <game-dir>
+build/release/bin/tox2_game.exe --game-dir <game-dir> --elf generated/inputs/EBOOT.elf
 ```
+
+`--elf` names the decrypted executable. Without it `tox2_game` looks for
+`<game-dir>/PS3_GAME/USRDIR/EBOOT.elf`; copying the produced file there works too.
 
 In the headless runs so far the game ran its start-up code and then looped on a SPURS call
 (`cellSpursEventFlagWait`, which the runtime does not implement) until the watchdog, and nothing was drawn; [Status](docs/status.md) has the details. Closing the window ends the run. Game data and
