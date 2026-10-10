@@ -8,6 +8,7 @@
 #include "core/census.h"
 #include "core/fatal.h"
 #include "core/log.h"
+#include "core/reservation.h"
 #include "tox2/ppu_context.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -68,9 +69,10 @@ void tox2Trap(Tox2PpuContext* ctx, uint8_t* base, uint32_t site) {
     tox2::fatal(tox2::FatalKind::Trap, std::format("at {:#010x}", site));
 }
 
-// All guest code runs under the guest lock, so a reservation holds while the address matches and
-// memory still contains the value that lwarx/ldarx observed (an ABA rewrite is accepted). Every
-// store-conditional clears it, successful or not.
+// A reservation holds while the address matches and memory still contains the value that lwarx/ldarx
+// observed (an ABA rewrite is accepted). Every store-conditional clears it, successful or not. The
+// compare and the write happen under the stripe lock of the reservation table, so they are atomic
+// against SPU GETLLAR/PUTLLC and PUT on the same line even though SPU threads run without the guest lock.
 uint32_t tox2Lwarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
     const uint32_t value = tox2Read32(base, ea);
     ctx->reserve_addr = ea;
@@ -88,15 +90,15 @@ uint64_t tox2Ldarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
 }
 
 bool tox2Stwcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint32_t value) {
-    const bool ok = ctx->reserve_valid && ctx->reserve_addr == ea && tox2Read32(base, ea) == ctx->reserve_value;
-    if (ok) tox2Write32(base, ea, value);
+    const bool ok = ctx->reserve_valid && ctx->reserve_addr == ea &&
+                    tox2::reservations().storeConditional(base, ea, 4, ctx->reserve_value, value);
     ctx->reserve_valid = 0;
     return ok;
 }
 
 bool tox2Stdcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint64_t value) {
-    const bool ok = ctx->reserve_valid && ctx->reserve_addr == ea && tox2Read64(base, ea) == ctx->reserve_value;
-    if (ok) tox2Write64(base, ea, value);
+    const bool ok = ctx->reserve_valid && ctx->reserve_addr == ea &&
+                    tox2::reservations().storeConditional(base, ea, 8, ctx->reserve_value, value);
     ctx->reserve_valid = 0;
     return ok;
 }
@@ -104,12 +106,6 @@ bool tox2Stdcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint64_t value) 
 void tox2Dcbz(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
     (void)ctx;
     std::memset(base + (ea & ~static_cast<uint32_t>(kTox2DcbzLine - 1)), 0, kTox2DcbzLine);
-}
-
-// Guest threads never run in parallel, so no instruction needs a host barrier.
-void tox2Sync(Tox2PpuContext* ctx, uint32_t kind) {
-    (void)ctx;
-    (void)kind;
 }
 
 uint64_t tox2Mftb(Tox2PpuContext* ctx) {

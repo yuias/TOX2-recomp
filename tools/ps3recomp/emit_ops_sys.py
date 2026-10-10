@@ -134,18 +134,18 @@ def emit_cr_logical(op: Op) -> list[str] | None:
 def emit_sync(op: Op) -> list[str] | None:
     # RPCS3 SYNC: L = 1 is lwsync; L = 0 and the reserved/ptesync values are full barriers.
     kind = "kTox2SyncLight" if op.f("L_sync") == 1 else "kTox2SyncHeavy"
-    return ["tox2Sync(ctx, %s);" % kind]
+    return ["TOX2_SYNC(%s);" % kind]
 
 
 @handler("eieio")
 def emit_eieio(op: Op) -> list[str] | None:
-    return ["tox2Sync(ctx, kTox2SyncEieio);"]
+    return ["TOX2_SYNC(kTox2SyncEieio);"]
 
 
 @handler("isync")
 def emit_isync(op: Op) -> list[str] | None:
     # RPCS3 ISYNC
-    return ["tox2Sync(ctx, kTox2SyncIsync);"]
+    return ["TOX2_SYNC(kTox2SyncIsync);"]
 
 
 @handler("lwarx", "ldarx")

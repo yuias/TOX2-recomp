@@ -162,11 +162,6 @@ void tox2Dcbz(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
     std::memset(base + (ea & ~(uint32_t)(kTox2DcbzLine - 1)), 0, kTox2DcbzLine);
 }
 
-void tox2Sync(Tox2PpuContext* ctx, uint32_t kind) {
-    (void)ctx;
-    (void)kind;
-}
-
 uint64_t tox2Mftb(Tox2PpuContext* ctx) {
     (void)ctx;
     static std::atomic<uint64_t> counter{0};

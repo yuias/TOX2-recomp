@@ -35,6 +35,7 @@
 #include "core/host_functions.h"
 #include "core/log.h"
 #include "core/param_sfo.h"
+#include "core/reservation.h"
 #include "core/threads.h"
 #include "core/timer_resolution.h"
 #include "tox2/ppu_context.h"
@@ -9791,9 +9792,11 @@ void testReservationAndDcbz() {
 
     tox2Write32(base, 0x20010, 5);
     CHECK(tox2Lwarx(ctx.get(), base, 0x20010) == 5);
+    const std::uint64_t epoch = tox2::reservations().storeEpoch();
     CHECK(tox2Stwcx(ctx.get(), base, 0x20010, 6));
     CHECK(tox2Read32(base, 0x20010) == 6);
-    CHECK(!tox2Stwcx(ctx.get(), base, 0x20010, 7));  // the reservation is gone
+    CHECK(tox2::reservations().storeEpoch() != epoch);  // goes through the table that SPU atomics use
+    CHECK(!tox2Stwcx(ctx.get(), base, 0x20010, 7));     // the reservation is gone
     CHECK(tox2Read32(base, 0x20010) == 6);
 
     tox2Lwarx(ctx.get(), base, 0x20010);
@@ -9819,7 +9822,6 @@ void testReservationAndDcbz() {
     for (int i = 0x80; i < 0x100; i++) line_zero = line_zero && base[0x20000 + i] == 0;
     CHECK(line_zero);
 
-    tox2Sync(ctx.get(), kTox2SyncHeavy);
     ctx->fpscr = 0;
     tox2Mtfsf(ctx.get(), 0x80, 0xF0000000u);
     CHECK(tox2Mffs(ctx.get()) == 0xF0000000u);

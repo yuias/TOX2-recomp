@@ -151,7 +151,6 @@ uint64_t tox2Ldarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea);
 bool tox2Stwcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint32_t value);
 bool tox2Stdcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint64_t value);
 void tox2Dcbz(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea);
-void tox2Sync(Tox2PpuContext* ctx, uint32_t kind);  // Tox2SyncKind
 uint64_t tox2Mftb(Tox2PpuContext* ctx);
 uint64_t tox2Mffs(Tox2PpuContext* ctx);                                    // FPSCR image in the low 32 bits
 void tox2Mtfsf(Tox2PpuContext* ctx, uint32_t field_mask, uint64_t value);  // bit 0x80 >> i = field i
@@ -338,6 +337,14 @@ TOX2_FORCEINLINE void tox2Enter(Tox2PpuContext* ctx, uint8_t* base, uint32_t add
 #define TOX2_HLE(index) tox2HleCall(ctx, base, (index))
 #define TOX2_HLE_IMPORT(table, index) tox2HleCallImport(ctx, base, &(table)[(index)])
 #define TOX2_SYSCALL(site) tox2Syscall(ctx, base, (site))
+// sync, lwsync, eieio and isync. The empty asm takes `base` as an input and clobbers memory: an opaque call
+// without `base` would not order accesses through the `__restrict` guest pointer. Only the heavy sync needs a
+// host fence, since SPU threads run in parallel with PPU threads and observe guest memory.
+#define TOX2_SYNC(kind)                                                        \
+    do {                                                                       \
+        __asm__ __volatile__("" : : "r"(base) : "memory");                     \
+        if ((kind) == kTox2SyncHeavy) __atomic_thread_fence(__ATOMIC_SEQ_CST); \
+    } while (0)
 #define TOX2_TRAP(site) tox2Trap(ctx, base, (site))
 #define TOX2_UNHANDLED(site, word) tox2Unhandled(ctx, base, (site), (word))
 

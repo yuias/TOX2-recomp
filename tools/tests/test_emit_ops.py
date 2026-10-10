@@ -324,10 +324,10 @@ class SysTest(unittest.TestCase):
                          ["tox2Dcbz(ctx, base, (uint32_t)ctx->gpr[5]);"])
 
     def test_barriers_pass_their_kind(self):
-        self.assertEqual(body(asm.encode("sync", L_sync=0))[0], ["tox2Sync(ctx, kTox2SyncHeavy);"])
-        self.assertEqual(body(asm.encode("sync", L_sync=1))[0], ["tox2Sync(ctx, kTox2SyncLight);"])
-        self.assertEqual(body(asm.encode("eieio"))[0], ["tox2Sync(ctx, kTox2SyncEieio);"])
-        self.assertEqual(body(asm.encode("isync"))[0], ["tox2Sync(ctx, kTox2SyncIsync);"])
+        self.assertEqual(body(asm.encode("sync", L_sync=0))[0], ["TOX2_SYNC(kTox2SyncHeavy);"])
+        self.assertEqual(body(asm.encode("sync", L_sync=1))[0], ["TOX2_SYNC(kTox2SyncLight);"])
+        self.assertEqual(body(asm.encode("eieio"))[0], ["TOX2_SYNC(kTox2SyncEieio);"])
+        self.assertEqual(body(asm.encode("isync"))[0], ["TOX2_SYNC(kTox2SyncIsync);"])
 
     def test_reservations_go_through_the_runtime(self):
         self.assertEqual(body(asm.encode("lwarx", rD=5, rA=0, rB=4))[0],
