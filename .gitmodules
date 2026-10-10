@@ -1,0 +1,21 @@
+[submodule "externals/spdlog"]
+	path = externals/spdlog
+	url = https://github.com/gabime/spdlog
+[submodule "externals/libpng"]
+	path = externals/libpng
+	url = https://github.com/pnggroup/libpng
+[submodule "externals/zlib"]
+	path = externals/zlib
+	url = https://github.com/madler/zlib
+[submodule "externals/yyjson"]
+	path = externals/yyjson
+	url = https://github.com/ibireme/yyjson
+[submodule "externals/Vulkan-Headers"]
+	path = externals/Vulkan-Headers
+	url = https://github.com/KhronosGroup/Vulkan-Headers
+[submodule "externals/volk"]
+	path = externals/volk
+	url = https://github.com/zeux/volk
+[submodule "externals/VulkanMemoryAllocator"]
+	path = externals/VulkanMemoryAllocator
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
