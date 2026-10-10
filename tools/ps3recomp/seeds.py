@@ -52,7 +52,7 @@ class SeedCensus:
 
 def find_import_thunks(elf: ElfFile, nid_table: NidTable | None) -> dict[int, ImportThunk]:
     """Map each import's thunk address (its `slot_value`) to the import it stands for."""
-    prx = cell.parse_prx_param(elf)
+    prx = cell.library_tables(elf)
     if prx is None:
         return {}
     thunks: dict[int, ImportThunk] = {}
@@ -105,14 +105,18 @@ def _thunk_loads_slot(image: CodeImage, addr: int, slot_addr: int, toc: int | No
 
 
 def _scan_descriptors(elf: ElfFile, image: CodeImage) -> list[tuple[int, int, int]]:
-    """(location, func in image, toc word) for 8-aligned pairs in non-executable loaded data."""
+    """(location, func in image, toc word) for aligned pairs in non-executable loaded data.
+
+    Executables align descriptors to 8; a PRX's sit at 4 mod 8 (libsre's do), so its scan steps by 4.
+    """
+    step = 4 if cell.is_prx(elf) else 8
     found = []
     for seg in elf.loads():
         if seg.p_flags & PF_X or seg.p_filesz < 8:
             continue
-        first = -seg.p_vaddr % 8
+        first = -seg.p_vaddr % step
         raw = elf.read_va(seg.p_vaddr, seg.p_filesz)
-        for off in range(first, len(raw) - 7, 8):
+        for off in range(first, len(raw) - 7, step):
             func, desc_toc = struct.unpack_from(">II", raw, off)
             if image.contains(func):
                 found.append((seg.p_vaddr + off, func, desc_toc))
@@ -232,9 +236,12 @@ def collect_recovery_seeds(elf: ElfFile, image: CodeImage, summary: GhidraSummar
                            extra: list[int], prologue: bool,
                            tocs: Collection[int] | None = None) -> SeedCensus:
     entry = cell.parse_entry(elf)
-    prx = cell.parse_prx_param(elf)
+    prx = cell.library_tables(elf)
 
-    candidates: set[tuple[int, str]] = {(entry.func, "entry")}
+    # A PRX has no entry function; its exports and descriptors seed it.
+    candidates: set[tuple[int, str]] = set()
+    if entry.func is not None:
+        candidates.add((entry.func, "entry"))
     if prx is not None:
         for module in cell.parse_exports(elf, prx):
             for func in module.functions:

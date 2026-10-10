@@ -3,12 +3,13 @@
 import struct
 import unittest
 
-from ps3recomp import seeds
+from ps3recomp import cell, seeds
 from ps3recomp.elf import ElfFile
 from ps3recomp.ghidra_summary import GhidraFunction, GhidraSummary
 from ps3recomp.ppu_flow import CodeImage
 
 from tests import ppc_asm as asm
+from tests import elf_fixture as fx
 from tests.elf_fixture import PS3_DATA_VA, PS3_TEXT_VA, FixtureSegment, build_elf64_be, \
     build_ps3_fixture
 
@@ -83,6 +84,47 @@ class OpdTest(unittest.TestCase):
         elf = build_elf([TEXT, TOC, asm.blr(), asm.blr()], b"")
         image = CodeImage.from_elf(elf, (TEXT, TEXT + 0x10))
         self.assertEqual(seeds.find_opd_descriptors(elf, image, TOC), [(DATA, TEXT)])
+
+
+class PrxSeedsTest(unittest.TestCase):
+    BASE = 0x20000
+
+    def setUp(self):
+        self.elf = ElfFile.from_bytes(fx.build_prx_fixture(True, self.BASE))
+        self.image = CodeImage.from_elf(self.elf, cell.find_code_range(self.elf))
+        self.toc = self.BASE + fx.PRX_TOC
+        self.funcs = [self.BASE + f for f in fx.PRX_FUNCS]
+
+    def test_descriptors_sit_at_4_mod_8_and_are_found(self):
+        self.assertEqual(seeds.find_opd_descriptors(self.elf, self.image, self.toc),
+                         [(self.BASE + opd, func) for opd, func in zip(fx.PRX_OPDS, self.funcs)])
+
+    def test_toc_is_the_module_toc(self):
+        self.assertEqual(seeds.collect_tocs(self.elf, self.image), (self.toc,))
+
+    def test_executable_scan_stays_8_aligned(self):
+        # The same pair one word off the 8-byte grid is a descriptor only for a PRX.
+        data = struct.pack(">I", 0) + struct.pack(">II", TEXT + 8, TOC)
+        elf = build_elf([asm.blr()] * 4, data)
+        image = CodeImage.from_elf(elf, (TEXT, TEXT + 0x10))
+        self.assertEqual(seeds.find_opd_descriptors(elf, image, TOC), [(DATA, TEXT)])
+
+    def test_no_entry_seed_without_an_entry_function(self):
+        thunks = seeds.find_import_thunks(self.elf, None)
+        census = seeds.collect_recovery_seeds(
+            self.elf, self.image, None, thunks, jump_table_targets=set(), extra=[], prologue=False,
+            tocs=(self.toc,))
+        self.assertFalse([s for s in census.seeds if s.source == "entry"])
+        self.assertEqual([(s.addr, s.source) for s in census.seeds if s.source != "bl"],
+                         [(self.funcs[0], "export")] + [(f, "opd") for f in self.funcs])
+
+    def test_import_thunks_come_from_the_module_info(self):
+        thunks = seeds.find_import_thunks(self.elf, None)
+        self.assertEqual(sorted(thunks), [self.BASE + t for t in fx.PRX_THUNKS])
+        self.assertEqual([(t.module, t.fnid, t.slot_addr) for _, t in sorted(thunks.items())],
+                         [("fixImp", fnid, self.BASE + slot)
+                          for fnid, slot in zip(fx.PRX_FNIDS, fx.PRX_SLOTS)])
+        self.assertEqual(seeds.check_thunk_slots(self.elf, thunks), [])
 
 
 class BlScanTest(unittest.TestCase):

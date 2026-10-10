@@ -292,6 +292,9 @@ def _run(args: argparse.Namespace) -> int:
     sha256 = hashlib.sha256(data).hexdigest()
     reject_encrypted(data, sha256, _load_default_config())
     elf = parse_ppu_elf(data)
+    if cell.has_unapplied_relocations(elf):
+        raise CliError(EXIT_NOT_PPU_ELF, "PRX with unapplied relocations; pass the file written by "
+                       "tox2_decrypt reloc (generated/inputs/libsre.reloc.elf)")
 
     try:
         text_range = cell.find_text_range(elf)
@@ -314,7 +317,8 @@ def _run(args: argparse.Namespace) -> int:
     extra: list[int] = []
     if args.extra_seeds is not None:
         extra = _load_extra_seeds(Path(args.extra_seeds))
-    elif DEFAULT_EXTRA_SEEDS.is_file():
+    elif not cell.is_prx(elf) and DEFAULT_EXTRA_SEEDS.is_file():
+        # The default seeds name EBOOT addresses; a PRX must not pick them up.
         extra = _load_extra_seeds(DEFAULT_EXTRA_SEEDS)
 
     nid_table = resolve_nid_table(args.nids)
@@ -409,7 +413,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="ps3tool.py recover",
         description="Recover functions from a decrypted PPU ELF: seed, partition to a fixpoint, "
                     "resolve jump tables and write the function DB and a recovery report.")
-    parser.add_argument("elf", help="decrypted EBOOT.elf")
+    parser.add_argument("elf", help="decrypted EBOOT.elf, or a PRX relocated by tox2_decrypt reloc")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--ghidra-summary", metavar="PATH",
                        help="Ghidra summary (default: config/ghidra_summary.json)")

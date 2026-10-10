@@ -16,8 +16,9 @@ from ps3recomp.elf import ElfFile
 from ps3recomp.ghidra_summary import write_compact_json
 
 from tests import ppc_asm as asm
-from tests.elf_fixture import (PS3_DATA_VA, PS3_TEXT_VA, FixtureSegment, build_elf64_be,
-                               build_ps3_fixture)
+from tests.elf_fixture import (PRX_CODE_END, PRX_FUNCS, PRX_THUNKS, PRX_THUNKS_END, PRX_TOC,
+                               PS3_DATA_VA, PS3_TEXT_VA, FixtureSegment, build_elf64_be,
+                               build_prx_fixture, build_ps3_fixture)
 
 TEXT = PS3_TEXT_VA
 DATA = PS3_DATA_VA
@@ -287,6 +288,60 @@ class CanonicalFixtureTest(RecoverTestBase):
             {"addr": hexs(at(3)), "reason": "test"}]}), encoding="utf-8")
         self.assertEqual(self.run_recover("--no-ghidra")[0], 0)
         self.assertEqual(self.db()["input"]["extra_seeds"], 1)
+
+
+class PrxRecoverTest(RecoverTestBase):
+    BASE = 0x20000
+
+    def setUp(self):
+        super().setUp()
+        self.write_elf(build_prx_fixture(True, self.BASE))
+
+    def test_every_function_thunk_and_the_module_toc(self):
+        code, out, err = self.run_recover("--no-ghidra")
+        self.assertEqual(code, 0, err)
+        db = self.db()
+        base = self.BASE
+        self.assertEqual(db["toc"], hexs(base + PRX_TOC))
+        self.assertEqual(db["input"]["executable_sha256"], self.elf_sha)
+        self.assertEqual(db["text"], {"start": hexs(base), "end": hexs(base + PRX_THUNKS_END)})
+        self.assertEqual(db["code"], {"start": hexs(base), "end": hexs(base + PRX_CODE_END)})
+        # f2 has a descriptor but no caller, so only the 4-aligned descriptor scan finds it.
+        self.assertEqual([(f["entry"], f["sources"]) for f in db["functions"]], [
+            (hexs(base + PRX_FUNCS[0]), ["export", "opd"]),
+            (hexs(base + PRX_FUNCS[1]), ["bl", "opd"]),
+            (hexs(base + PRX_FUNCS[2]), ["opd"]),
+        ])
+        self.assertEqual([t["addr"] for t in db["import_thunks"]],
+                         [hexs(base + t) for t in PRX_THUNKS])
+        report = self.report()
+        self.assertEqual(report["thunks"]["count"], 2)
+        self.assertEqual(report["thunks"]["slot_mismatches"], [])
+        self.assertIn("thunks: 2, slot mismatches 0,", out)
+        self.assertIn("entry 0,", out)
+
+    def test_unrelocated_file_is_refused(self):
+        self.write_elf(build_prx_fixture(False))
+        code, out, err = self.run_recover("--no-ghidra")
+        self.assertEqual(code, 3)
+        self.assertEqual(err, "error: PRX with unapplied relocations; pass the file written by "
+                         "tox2_decrypt reloc (generated/inputs/libsre.reloc.elf)\n")
+        self.assertFalse(self.out_path.exists())
+
+    def test_default_extra_seeds_are_not_read(self):
+        recover.DEFAULT_EXTRA_SEEDS.write_text(json.dumps({"schema": 1, "seeds": [
+            {"addr": hexs(self.BASE + 0x50), "reason": "test"}]}), encoding="utf-8")
+        self.assertEqual(self.run_recover("--no-ghidra")[0], 0)
+        self.assertEqual(self.db()["input"]["extra_seeds"], 0)
+        self.assertNotIn(hexs(self.BASE + 0x50), [f["entry"] for f in self.db()["functions"]])
+
+    def test_explicit_extra_seeds_still_work(self):
+        extra = self.tmp / "extra.json"
+        extra.write_text(json.dumps({"schema": 1, "seeds": [
+            {"addr": hexs(self.BASE + 0x50), "reason": "test"}]}), encoding="utf-8")
+        self.assertEqual(self.run_recover("--no-ghidra", "--extra-seeds", extra)[0], 0)
+        self.assertEqual(self.db()["input"]["extra_seeds"], 1)
+        self.assertIn(hexs(self.BASE + 0x50), [f["entry"] for f in self.db()["functions"]])
 
 
 class ErrorTest(RecoverTestBase):
