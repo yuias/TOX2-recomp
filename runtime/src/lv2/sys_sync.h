@@ -43,6 +43,7 @@ inline constexpr std::uint32_t kMutexIdBase = 0x85000000;
 inline constexpr std::uint32_t kCondIdBase = 0x86000000;
 inline constexpr std::uint32_t kLwmutexIdBase = 0x95000000;
 inline constexpr std::uint32_t kSemaphoreIdBase = 0x96000000;
+inline constexpr std::uint32_t kLwcondIdBase = 0x97000000;
 inline constexpr std::uint32_t kSyncIdStep = 0x100;
 
 // Layout of the guest `sys_lwmutex_t` (RPCS3 `lv2/sys_lwmutex.h`), as byte offsets.
@@ -52,6 +53,11 @@ inline constexpr std::uint32_t kLwmutexAttribute = 8;
 inline constexpr std::uint32_t kLwmutexRecursiveCount = 12;
 inline constexpr std::uint32_t kLwmutexSleepQueue = 16;
 inline constexpr std::uint32_t kLwmutexSize = 24;
+
+// Layout of the guest `sys_lwcond_t`: the guest address of its lwmutex and the id of the host object.
+inline constexpr std::uint32_t kLwcondMutex = 0;
+inline constexpr std::uint32_t kLwcondQueue = 4;
+inline constexpr std::uint32_t kLwcondSize = 8;
 
 // Sync attribute values that the shared constants in cell_error.h do not cover.
 inline constexpr std::uint32_t kSyncPriorityInherit = 3;
@@ -88,6 +94,15 @@ std::uint32_t lwmutexLock(const Tox2PpuContext* ctx, std::uint8_t* base, std::ui
                           std::uint64_t timeout_us);
 std::uint32_t lwmutexTryLock(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex);
 std::uint32_t lwmutexUnlock(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex);
+
+// `lwcond` is the guest address of a `sys_lwcond_t`, `lwmutex` that of the `sys_lwmutex_t` it is bound
+// to, `attr` that of a `sys_lwcond_attribute_t`. A wait needs the caller to own the lwmutex (EPERM),
+// releases it completely, and takes it back with its recursion count before returning, also on a
+// timeout. A signal wakes the longest waiter and does not need the lwmutex.
+std::uint32_t lwcondCreate(std::uint8_t* base, std::uint32_t lwcond, std::uint32_t lwmutex, std::uint32_t attr);
+std::uint32_t lwcondDestroy(std::uint8_t* base, std::uint32_t lwcond);
+std::uint32_t lwcondWait(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwcond, std::uint64_t timeout_us);
+std::uint32_t lwcondSignal(std::uint8_t* base, std::uint32_t lwcond);
 
 // The objects the process creates for itself when the main thread's TLS is set up (RPCS3
 // `Modules/sys_ppu_thread_.cpp` `sys_initialize_tls`): the atexit and `_lv2prx` lwmutexes (guest

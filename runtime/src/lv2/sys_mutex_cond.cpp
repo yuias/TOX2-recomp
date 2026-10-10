@@ -6,6 +6,8 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <iterator>
+#include <list>
 #include <memory>
 
 #include "core/guest_memory.h"
@@ -41,9 +43,20 @@ struct Lwmutex {
     std::condition_variable_any cv;
 };
 
+// Waiters stay queued in arrival order so a signal reaches the longest waiter; the list node address
+// is stable while the waiter blocks.
+struct Lwcond {
+    struct Waiter {
+        bool signaled = false;
+    };
+    std::list<Waiter> waiters;
+    std::condition_variable_any cv;
+};
+
 IdMap<Mutex> g_mutexes(kMutexIdBase, kSyncIdStep);
 IdMap<Cond> g_conds(kCondIdBase, kSyncIdStep);
 IdMap<Lwmutex> g_lwmutexes(kLwmutexIdBase, kSyncIdStep);
+IdMap<Lwcond> g_lwconds(kLwcondIdBase, kSyncIdStep);
 ProcessSyncObjects g_process_objects;
 
 bool validMutexAttr(std::uint32_t protocol, std::uint32_t recursive) {
@@ -228,6 +241,69 @@ std::uint32_t lwmutexUnlock(const Tox2PpuContext* ctx, std::uint8_t* base, std::
     return kCellOk;
 }
 
+std::uint32_t lwcondCreate(std::uint8_t* base, std::uint32_t lwcond, std::uint32_t lwmutex, std::uint32_t attr) {
+    (void)attr;  // only carries a name
+    if (lwcond == 0 || lwmutex == 0) return kCellEfault;
+    tox2Write32(base, lwcond + kLwcondMutex, lwmutex);
+    tox2Write32(base, lwcond + kLwcondQueue, g_lwconds.add(std::make_shared<Lwcond>()));
+    return kCellOk;
+}
+
+std::uint32_t lwcondDestroy(std::uint8_t* base, std::uint32_t lwcond) {
+    if (lwcond == 0) return kCellEfault;
+    const std::uint32_t id = tox2Read32(base, lwcond + kLwcondQueue);
+    const auto object = g_lwconds.find(id);
+    if (object == nullptr) return kCellEsrch;
+    if (!object->waiters.empty()) return kCellEbusy;
+    g_lwconds.erase(id);
+    return kCellOk;
+}
+
+std::uint32_t lwcondWait(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwcond,
+                         std::uint64_t timeout_us) {
+    if (lwcond == 0) return kCellEfault;
+    const auto object = g_lwconds.find(tox2Read32(base, lwcond + kLwcondQueue));
+    if (object == nullptr) return kCellEsrch;
+    const std::uint32_t lwmutex = tox2Read32(base, lwcond + kLwcondMutex);
+    const std::uint32_t tid = callerThreadId(ctx);
+    if (lwmutex == 0 || tox2Read32(base, lwmutex + kLwmutexOwner) != tid) return kCellEperm;
+
+    // Release the lwmutex completely, as an unlock of the last recursion level does, and queue before
+    // anything can run so a signal sent right after cannot be missed.
+    const std::uint32_t saved_count = tox2Read32(base, lwmutex + kLwmutexRecursiveCount);
+    tox2Write32(base, lwmutex + kLwmutexRecursiveCount, 0);
+    tox2Write32(base, lwmutex + kLwmutexOwner, kLwmutexFree);
+    if (const auto mutex_object = g_lwmutexes.find(tox2Read32(base, lwmutex + kLwmutexSleepQueue))) {
+        mutex_object->cv.notify_one();
+    }
+
+    object->waiters.emplace_back();
+    const auto self = std::prev(object->waiters.end());
+    const bool signaled =
+            blockingWait(object->cv, [&self] { return self->signaled; }, "sys_lwcond_wait", waitTimeout(timeout_us));
+    object->waiters.erase(self);
+
+    // Only the lwmutex wait can still block; it has no timeout of its own.
+    const std::uint32_t relocked = lwmutexAcquire(ctx, base, lwmutex, true, 0);
+    if (relocked != kCellOk) return relocked;
+    tox2Write32(base, lwmutex + kLwmutexRecursiveCount, saved_count);
+    return signaled ? kCellOk : kCellEtimedout;
+}
+
+std::uint32_t lwcondSignal(std::uint8_t* base, std::uint32_t lwcond) {
+    if (lwcond == 0) return kCellEfault;
+    const auto object = g_lwconds.find(tox2Read32(base, lwcond + kLwcondQueue));
+    if (object == nullptr) return kCellEsrch;
+    for (Lwcond::Waiter& waiter : object->waiters) {
+        if (!waiter.signaled) {
+            waiter.signaled = true;
+            object->cv.notify_all();
+            break;
+        }
+    }
+    return kCellOk;
+}
+
 const ProcessSyncObjects& processSyncObjects() { return g_process_objects; }
 
 void createProcessSyncObjects(std::uint8_t* base) {
@@ -247,6 +323,7 @@ void resetSyncObjects() {
     g_mutexes = IdMap<Mutex>(kMutexIdBase, kSyncIdStep);
     g_conds = IdMap<Cond>(kCondIdBase, kSyncIdStep);
     g_lwmutexes = IdMap<Lwmutex>(kLwmutexIdBase, kSyncIdStep);
+    g_lwconds = IdMap<Lwcond>(kLwcondIdBase, kSyncIdStep);
     g_process_objects = ProcessSyncObjects{};
     resetSemaphoreObjects();
     resetEventObjects();

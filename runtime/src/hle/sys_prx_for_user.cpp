@@ -108,6 +108,25 @@ void sysLwmutexUnlock(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, lwmutexUnlock(ctx, base, static_cast<std::uint32_t>(ctx->gpr[3])));
 }
 
+// sys_lwcond_create(sys_lwcond_t* lwcond, sys_lwmutex_t* lwmutex, sys_lwcond_attribute_t* attr)
+void sysLwcondCreate(Tox2PpuContext* ctx, std::uint8_t* base) {
+    setResultCode(ctx, lwcondCreate(base, static_cast<std::uint32_t>(ctx->gpr[3]),
+                                    static_cast<std::uint32_t>(ctx->gpr[4]), static_cast<std::uint32_t>(ctx->gpr[5])));
+}
+
+void sysLwcondDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
+    setResultCode(ctx, lwcondDestroy(base, static_cast<std::uint32_t>(ctx->gpr[3])));
+}
+
+// sys_lwcond_wait(sys_lwcond_t* lwcond, u64 timeout)
+void sysLwcondWait(Tox2PpuContext* ctx, std::uint8_t* base) {
+    setResultCode(ctx, lwcondWait(ctx, base, static_cast<std::uint32_t>(ctx->gpr[3]), ctx->gpr[4]));
+}
+
+void sysLwcondSignal(Tox2PpuContext* ctx, std::uint8_t* base) {
+    setResultCode(ctx, lwcondSignal(base, static_cast<std::uint32_t>(ctx->gpr[3])));
+}
+
 // sys_ppu_thread_create(u64* thread_id, u32 entry, u64 arg, s32 prio, u32 stacksize, u64 flags,
 // const char* name)
 void sysPpuThreadCreate(Tox2PpuContext* ctx, std::uint8_t* base) {
@@ -161,7 +180,9 @@ void returnOk(Tox2PpuContext* ctx, std::uint8_t* base) {
 constexpr HleEntry kHandlers[] = {
         {kModule, 0x1573dc3f, "sys_lwmutex_lock", sysLwmutexLock},
         {kModule, 0x1bc200f4, "sys_lwmutex_unlock", sysLwmutexUnlock},
+        {kModule, 0x1c9a942c, "sys_lwcond_destroy", sysLwcondDestroy},
         {kModule, 0x24a1ea07, "sys_ppu_thread_create", sysPpuThreadCreate},
+        {kModule, 0x2a6d9d51, "sys_lwcond_wait", sysLwcondWait},
         {kModule, 0x2c847572, "_sys_process_atexitspawn", returnOk},
         {kModule, 0x2f85c0ef, "sys_lwmutex_create", sysLwmutexCreate},
         {kModule, 0x350d454e, "sys_ppu_thread_get_id", sysPpuThreadGetId},
@@ -180,8 +201,10 @@ constexpr HleEntry kHandlers[] = {
         {kModule, 0xaff080a4, "sys_ppu_thread_exit", sysPpuThreadExit},
         {kModule, 0xb2fcf2c8, "_sys_heap_create_heap", sysHeapCreateHeap},
         {kModule, 0xc3476d0c, "sys_lwmutex_destroy", sysLwmutexDestroy},
+        {kModule, 0xda0eb71a, "sys_lwcond_create", sysLwcondCreate},
         {kModule, 0xdd3b27ac, "_sys_spu_printf_finalize", returnOk},
         {kModule, 0xe6f2c1e7, "sys_process_exit", hleProcessExit},
+        {kModule, 0xef87a695, "sys_lwcond_signal", sysLwcondSignal},
 };
 
 }  // namespace
