@@ -73,5 +73,10 @@ tox2_ppu_add_semantics_harness()
 add_test(NAME tools_unittest
   COMMAND ${Python3_EXECUTABLE} -B -m unittest discover -s tools/tests -t tools
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+# The relocated libsre exists only when the build produces it from a firmware update.
+set(TOX2_LIBSRE_ELF "")
+if(NOT TOX2_PUP STREQUAL "")
+  set(TOX2_LIBSRE_ELF "${TOX2_INPUTS_DIR}/libsre.reloc.elf")
+endif()
 set_tests_properties(tools_unittest PROPERTIES
-  ENVIRONMENT "TOX2_EBOOT_ELF=${TOX2_EBOOT_ELF}")
+  ENVIRONMENT "TOX2_EBOOT_ELF=${TOX2_EBOOT_ELF};TOX2_LIBSRE_ELF=${TOX2_LIBSRE_ELF}")

@@ -108,6 +108,40 @@ difference is in the classification of uncovered words (1,513 words of data inst
 251,924 words of code instead of 250,372), because Ghidra's data ranges are missing. The
 function database differs in `input.ghidra_summary_sha256` and in the sources it records.
 
+## On libsre
+
+`libsre.prx` is the firmware SPURS module. The build with `-Pup` relocates it to `0x011d0000` and
+writes `generated/inputs/libsre.reloc.elf`; `recover` reads only that relocated file and refuses an
+unrelocated PRX. The committed database comes from:
+
+```sh
+python tools/ps3tool.py recover generated/inputs/libsre.reloc.elf --no-ghidra -o config/libsre_functions.json --report generated/analysis/libsre_recovery_report.json --seeds-out generated/analysis/libsre_ghidra_seeds.txt
+```
+
+- `--no-ghidra`: there is no Ghidra summary for libsre, and the module's own seeds are enough.
+  The committed `config/ghidra_summary.json` belongs to the game executable, so passing it would
+  fail the hash check.
+- No extra seeds: the default `config/extra_seeds.json` is the executable's and is not read for a
+  PRX. `--extra-seeds` still selects a file.
+- The descriptor scan steps by 4 bytes for a PRX (8 for an executable), because libsre's
+  function descriptors sit at 4 mod 8.
+
+Result of the run (the output is byte-identical on a second run, in under a second):
+
+- 352 functions. Seeds by source (a function can have several): function descriptors 352,
+  exports 241, `bl` targets 140. There is no Ghidra source and no entry point (a PRX has none).
+  Seven functions are reached by a descriptor only, with no `bl` and no export of their own:
+  `0x011db504`, `0x011dea78`, `0x011deb58`, `0x011e0060`, `0x011e37f8`, `0x011e4df8` and
+  `0x011ed490`.
+- 32 import thunks, no slot mismatches, none that no `bl` reaches. They follow the code and load
+  their slots from `0x011fe000`, 4 bytes apart, in import order.
+- One TOC for every descriptor, `0x01209ab0` (the module TOC).
+- Jump tables: 2 `bctr` sites, both resolved (14 targets), none unresolved.
+- Code range `0x011d0000..0x011ed718`, text range `0x011d0000..0x011edb18` (code plus thunks);
+  30,136 of 30,150 text words are owned. The 14 uncovered words are the two jump tables.
+- 177 `sc` sites, all inside functions and all with a resolved syscall number.
+- `libsre_functions.json` is about 43 KB.
+
 ## Committed files and regeneration
 
 | File | Produced by | Notes |
@@ -115,6 +149,7 @@ function database differs in `input.ghidra_summary_sha256` and in the sources it
 | `config/ghidra_summary.json` | `ghidra-summary` on the base `ghidra-export` | Needs Ghidra and the ELF; regenerate when the Ghidra version, language setting or base seeding changes |
 | `config/extra_seeds.json` | by hand, or from the feedback run | Small and reviewable; edit it directly |
 | `config/functions.json` | `recover -o config/functions.json` | Input for later stages; needs only the ELF and the files above |
+| `config/libsre_functions.json` | `recover` on `generated/inputs/libsre.reloc.elf` with `--no-ghidra` | The firmware module's database; needs only the relocated file (see "On libsre") |
 
 None of them contains instruction words or other code bytes. `generated/` is not committed:
 the exports, the seeded export and the report stay local.
