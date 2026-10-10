@@ -27,6 +27,7 @@ EDGE_KEYS = ("calls_direct", "calls_import", "calls_dynamic_const", "calls_indir
 HEADER_NAME = "ppu_funcs.h"
 IMPORTS_NAME = "ppu_imports.c"
 TABLES_NAME = "ppu_tables.c"
+TABLES_HEADER_NAME = "ppu_tables.h"
 SOURCES_NAME = "sources.cmake"
 
 
@@ -34,16 +35,35 @@ def hexs(value: int) -> str:
     return "0x%08x" % value
 
 
-def func_name(entry: int) -> str:
-    return "fn_%08x" % entry
+def prefixed(name: str, prefix: str = "") -> str:
+    """`name` with the module prefix of a non-main image; the main executable has none."""
+    return "%s_%s" % (prefix, name) if prefix else name
 
 
-def import_name(addr: int) -> str:
-    return "imp_%08x" % addr
+def pascal(prefix: str) -> str:
+    """`libsre` -> `Libsre`: the form that goes into the table names."""
+    return prefix[:1].upper() + prefix[1:]
 
 
-def chunk_name(index: int) -> str:
-    return "ppu_chunk_%03d.c" % index
+def table_name(table: str, prefix: str = "") -> str:
+    """C name of a generated table, e.g. kTox2PpuImports or kTox2LibsrePpuImports."""
+    return "kTox2%sPpu%s" % (pascal(prefix), table)
+
+
+def sources_variable(prefix: str = "") -> str:
+    return "TOX2_%sPPU_GENERATED_SOURCES" % (prefix.upper() + "_" if prefix else "")
+
+
+def func_name(entry: int, prefix: str = "") -> str:
+    return prefixed("fn_%08x" % entry, prefix)
+
+
+def import_name(addr: int, prefix: str = "") -> str:
+    return prefixed("imp_%08x" % addr, prefix)
+
+
+def chunk_name(index: int, prefix: str = "") -> str:
+    return prefixed("ppu_chunk_%03d.c" % index, prefix)
 
 
 def banner(sha256: str, prefix: str = "//") -> str:
@@ -87,18 +107,25 @@ def read_thunk_words(elf: ElfFile, addr: int) -> list[int] | None:
         return None
 
 
-def render_trampoline(thunk: DbThunk, index: int,
-                      words: Sequence[int] | None) -> tuple[str, bool]:
-    """C text of one import trampoline and whether it saves the caller's TOC."""
+def render_trampoline(thunk: DbThunk, index: int, words: Sequence[int] | None,
+                      prefix: str = "") -> tuple[str, bool]:
+    """C text of one import trampoline and whether it saves the caller's TOC.
+
+    The main executable's trampolines pass their index to the runtime. Another image passes a
+    pointer into its own import table, so its indices cannot collide with the executable's.
+    """
     save = toc_save_statement(words, thunk.addr) if words is not None else None
     lines = ["// %s %s %s" % (_comment_text(thunk.module),
                              _comment_text(thunk.name) if thunk.name else "-",
                              hexs(thunk.fnid)),
-             "TOX2_PPU_FUNC(%s) {" % import_name(thunk.addr),
+             "TOX2_PPU_FUNC(%s) {" % import_name(thunk.addr, prefix),
              "    TOX2_ENTER(%s);" % u32(thunk.addr)]
     if save is not None:
         lines.append("    " + save)
-    lines.append("    TOX2_HLE(%d);" % index)
+    if prefix:
+        lines.append("    TOX2_HLE_IMPORT(%s, %d);" % (table_name("Imports", prefix), index))
+    else:
+        lines.append("    TOX2_HLE(%d);" % index)
     lines.append("}")
     return "\n".join(lines) + "\n", save is not None
 
@@ -115,39 +142,82 @@ def c_string(text: str | None) -> str:
     return '"%s"' % "".join(out)
 
 
-def render_funcs_header(sha256: str, entries: Sequence[int], thunks: Sequence[DbThunk]) -> str:
-    lines = [banner(sha256).rstrip("\n"), "#pragma once", "", '#include "tox2/ppu.h"', ""]
-    lines += ["TOX2_PPU_FUNC(%s);" % func_name(entry) for entry in entries]
-    lines += ["TOX2_PPU_FUNC(%s);" % import_name(t.addr) for t in thunks]
+@dataclass(frozen=True)
+class ExportRow:
+    opd: int
+    fnid: int
+    module: str
+
+
+def render_funcs_header(sha256: str, entries: Sequence[int], thunks: Sequence[DbThunk],
+                        prefix: str = "") -> str:
+    lines = [banner(sha256).rstrip("\n"), "#pragma once", "", '#include "tox2/ppu.h"']
+    if prefix:
+        lines.append('#include "%s"' % prefixed(TABLES_HEADER_NAME, prefix))
+    lines.append("")
+    lines += ["TOX2_PPU_FUNC(%s);" % func_name(entry, prefix) for entry in entries]
+    lines += ["TOX2_PPU_FUNC(%s);" % import_name(t.addr, prefix) for t in thunks]
     return "\n".join(lines) + "\n"
 
 
-def render_source(sha256: str, texts: Sequence[str]) -> str:
+def render_tables_header(sha256: str, prefix: str) -> str:
+    """Declarations of a non-main image's tables; the main executable's are in ppu_context.h."""
+    decls = []
+    for table, count, ctype in (("FuncMappings", "FuncMappingCount", "Tox2FuncMapping"),
+                                ("Imports", "ImportCount", "Tox2ImportInfo"),
+                                ("Exports", "ExportCount", "Tox2ExportInfo")):
+        decls.append("extern const %s %s[];" % (ctype, table_name(table, prefix)))
+        decls.append("extern const uint32_t %s;" % table_name(count, prefix))
+    decls.append("extern const char %s[];" % table_name("ExecutableSha256", prefix))
+    lines = [banner(sha256).rstrip("\n"), "#pragma once", "", '#include "tox2/ppu_context.h"', "",
+             "#ifdef __cplusplus", 'extern "C" {', "#endif", ""]
+    lines += decls
+    lines += ["", "#ifdef __cplusplus", '}  // extern "C"', "#endif"]
+    return "\n".join(lines) + "\n"
+
+
+def render_source(sha256: str, texts: Sequence[str], header: str = HEADER_NAME) -> str:
     """A chunk or the import file: banner, include, then the function texts."""
-    head = banner(sha256) + '\n#include "%s"\n\n' % HEADER_NAME
+    head = banner(sha256) + '\n#include "%s"\n\n' % header
     return head + "\n".join(texts)
 
 
-def render_tables(sha256: str, entries: Sequence[int], thunks: Sequence[DbThunk]) -> str:
-    mappings = sorted([(e, func_name(e)) for e in entries]
-                      + [(t.addr, import_name(t.addr)) for t in thunks])
-    lines = [banner(sha256).rstrip("\n"), "", '#include "%s"' % HEADER_NAME, "",
-             "const Tox2FuncMapping kTox2PpuFuncMappings[] = {"]
-    lines += ["    { %s, %s }," % (u32(guest), name) for guest, name in mappings]
+def _table_rows(rows: list[str], empty: str) -> list[str]:
+    # C has no empty array; the count tells the reader that the single entry is not real.
+    return rows if rows else ["    " + empty + ","]
+
+
+def render_tables(sha256: str, entries: Sequence[int], thunks: Sequence[DbThunk],
+                  prefix: str = "", exports: Sequence[ExportRow] = ()) -> str:
+    mappings = sorted([(e, func_name(e, prefix)) for e in entries]
+                      + [(t.addr, import_name(t.addr, prefix)) for t in thunks])
+    lines = [banner(sha256).rstrip("\n"), "", '#include "%s"' % prefixed(HEADER_NAME, prefix), "",
+             "const Tox2FuncMapping %s[] = {" % table_name("FuncMappings", prefix)]
+    lines += _table_rows(["    { %s, %s }," % (u32(guest), name) for guest, name in mappings],
+                         "{ 0u, nullptr }")
     lines += ["};",
-              "const uint32_t kTox2PpuFuncMappingCount = %d;" % len(mappings), "",
-              "const Tox2ImportInfo kTox2PpuImports[] = {"]
-    lines += ["    { %s, %s, %s, %s }," % (u32(t.addr), u32(t.fnid), c_string(t.module),
-                                           c_string(t.name)) for t in thunks]
+              "const uint32_t %s = %d;" % (table_name("FuncMappingCount", prefix), len(mappings)),
+              "",
+              "const Tox2ImportInfo %s[] = {" % table_name("Imports", prefix)]
+    lines += _table_rows(["    { %s, %s, %s, %s }," % (u32(t.addr), u32(t.fnid), c_string(t.module),
+                                                      c_string(t.name)) for t in thunks],
+                         "{ 0u, 0u, nullptr, nullptr }")
     lines += ["};",
-              "const uint32_t kTox2PpuImportCount = %d;" % len(thunks), "",
-              'const char kTox2PpuExecutableSha256[] = "%s";' % sha256]
+              "const uint32_t %s = %d;" % (table_name("ImportCount", prefix), len(thunks)), ""]
+    if prefix:
+        lines.append("const Tox2ExportInfo %s[] = {" % table_name("Exports", prefix))
+        lines += _table_rows(["    { %s, %s, %s }," % (u32(x.opd), u32(x.fnid), c_string(x.module))
+                              for x in exports], "{ 0u, 0u, nullptr }")
+        lines += ["};",
+                  "const uint32_t %s = %d;" % (table_name("ExportCount", prefix), len(exports)),
+                  ""]
+    lines.append('const char %s[] = "%s";' % (table_name("ExecutableSha256", prefix), sha256))
     return "\n".join(lines) + "\n"
 
 
-def render_sources(sha256: str, files: Sequence[str]) -> str:
+def render_sources(sha256: str, files: Sequence[str], prefix: str = "") -> str:
     # CMake comments start with '#', so this file cannot use the C-style banner.
-    lines = [banner(sha256, "#").rstrip("\n"), "set(TOX2_PPU_GENERATED_SOURCES"]
+    lines = [banner(sha256, "#").rstrip("\n"), "set(%s" % sources_variable(prefix)]
     lines += ['    "${CMAKE_CURRENT_LIST_DIR}/%s"' % name for name in files]
     lines.append(")")
     return "\n".join(lines) + "\n"
@@ -166,10 +236,10 @@ def write_if_changed(path: Path, text: str) -> bool:
     return True
 
 
-def remove_stale_chunks(out_dir: Path, wanted: Sequence[str]) -> None:
+def remove_stale_chunks(out_dir: Path, wanted: Sequence[str], prefix: str = "") -> None:
     keep = set(wanted)
     try:
-        for path in sorted(out_dir.glob("ppu_chunk_*.c")):
+        for path in sorted(out_dir.glob(prefixed("ppu_chunk_*.c", prefix))):
             if path.name not in keep:
                 path.unlink()
     except OSError as e:
@@ -191,26 +261,33 @@ class OutputSummary:
 
 def write_output(out_dir: Path, sha256: str, functions: Sequence[FunctionRecord],
                  thunks: Sequence[DbThunk], thunk_texts: Sequence[str],
-                 chunk_count: int) -> OutputSummary:
+                 chunk_count: int, prefix: str = "",
+                 exports: Sequence[ExportRow] = ()) -> OutputSummary:
     """Write the generated tree; returns the per-chunk figures for the report."""
     entries = [fn.entry for fn in functions]
     plan = plan_chunks([fn.instructions for fn in functions], chunk_count)
-    files: dict[str, str] = {HEADER_NAME: render_funcs_header(sha256, entries, thunks)}
+    header = prefixed(HEADER_NAME, prefix)
+    files: dict[str, str] = {header: render_funcs_header(sha256, entries, thunks, prefix)}
+    if prefix:
+        files[prefixed(TABLES_HEADER_NAME, prefix)] = render_tables_header(sha256, prefix)
     chunk_info = []
     chunk_files = []
     for index, (start, end) in enumerate(plan):
-        name = chunk_name(index)
-        text = render_source(sha256, [fn.text for fn in functions[start:end]])
+        name = chunk_name(index, prefix)
+        text = render_source(sha256, [fn.text for fn in functions[start:end]], header)
         files[name] = text
         chunk_files.append(name)
         chunk_info.append({"file": name, "functions": end - start,
                            "instructions": sum(fn.instructions for fn in functions[start:end]),
                            "bytes": len(text.encode("utf-8"))})
-    files[IMPORTS_NAME] = render_source(sha256, thunk_texts)
-    files[TABLES_NAME] = render_tables(sha256, entries, thunks)
-    files[SOURCES_NAME] = render_sources(sha256, chunk_files + [IMPORTS_NAME, TABLES_NAME])
+    imports_name = prefixed(IMPORTS_NAME, prefix)
+    tables_name = prefixed(TABLES_NAME, prefix)
+    files[imports_name] = render_source(sha256, thunk_texts, header)
+    files[tables_name] = render_tables(sha256, entries, thunks, prefix, exports)
+    files[prefixed(SOURCES_NAME, prefix)] = render_sources(
+        sha256, chunk_files + [imports_name, tables_name], prefix)
 
-    remove_stale_chunks(out_dir, chunk_files)
+    remove_stale_chunks(out_dir, chunk_files, prefix)
     total = 0
     for name, text in files.items():
         write_if_changed(out_dir / name, text)

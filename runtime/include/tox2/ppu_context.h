@@ -9,7 +9,8 @@
 // Naming: functions camelCase, types PascalCase, constants kPascalCase (as enumerators), macros
 // TOX2_*. The generated code adds address-derived identifiers that deliberately do not follow the
 // table: fn_%08x (functions), imp_%08x (import trampolines), L_%08x (labels), and the semantics
-// harness uses case_<name>.
+// harness uses case_<name>. A module other than the main executable has its functions and
+// trampolines prefixed with the module's symbol prefix (libsre_fn_%08x).
 //
 // Guest memory: `base` points at a flat, big-endian guest address space. The runtime must reserve
 // 4 GiB + kTox2GuestGuardSize bytes so that an unaligned access at the top of the 32-bit space
@@ -25,7 +26,9 @@
 //
 // HLE boundary: there is no per-import function. Each import is an index into the generated
 // kTox2PpuImports table (stub address, FNID, module, name); emitted code calls TOX2_HLE(index) and
-// the runtime resolves (module, FNID) to an implementation.
+// the runtime resolves (module, FNID) to an implementation. A module's trampolines call
+// TOX2_HLE_IMPORT with a pointer into that module's own import table, so the indices of two images
+// never collide.
 
 #include <stddef.h>
 #include <stdint.h>
@@ -121,6 +124,13 @@ typedef struct Tox2ImportInfo {
     const char* name;
 } Tox2ImportInfo;
 
+// A function export of a module: the guest address of its descriptor {entry, toc}.
+typedef struct Tox2ExportInfo {
+    uint32_t opd;
+    uint32_t fnid;
+    const char* module;
+} Tox2ExportInfo;
+
 #define TOX2_PPU_FUNC(name) TOX2_NOINLINE void name(Tox2PpuContext* __restrict ctx, uint8_t* __restrict base)
 
 // Runtime hooks, implemented by the runtime.
@@ -129,6 +139,9 @@ void tox2UnknownTarget(Tox2PpuContext* ctx, uint8_t* base, uint32_t target, uint
 void tox2RegisterFuncs(const Tox2FuncMapping* mappings, uint32_t count);
 Tox2PpuFunc* tox2Lookup(uint32_t addr);  // nullptr when unknown
 void tox2HleCall(Tox2PpuContext* ctx, uint8_t* base, uint32_t import_index);
+// Import call from the trampoline of a module other than the main executable; `import` points into
+// that module's own import table.
+void tox2HleCallImport(Tox2PpuContext* ctx, uint8_t* base, const Tox2ImportInfo* import);
 void tox2Syscall(Tox2PpuContext* ctx, uint8_t* base, uint32_t site);  // number read from r11
 void tox2Yield(Tox2PpuContext* ctx, uint8_t* base);
 [[noreturn]] void tox2Unhandled(Tox2PpuContext* ctx, uint8_t* base, uint32_t site, uint32_t word);
@@ -323,6 +336,7 @@ TOX2_FORCEINLINE void tox2Enter(Tox2PpuContext* ctx, uint8_t* base, uint32_t add
         TOX2_MUSTTAIL return tox2Dispatch(ctx, base); \
     } while (0)
 #define TOX2_HLE(index) tox2HleCall(ctx, base, (index))
+#define TOX2_HLE_IMPORT(table, index) tox2HleCallImport(ctx, base, &(table)[(index)])
 #define TOX2_SYSCALL(site) tox2Syscall(ctx, base, (site))
 #define TOX2_TRAP(site) tox2Trap(ctx, base, (site))
 #define TOX2_UNHANDLED(site, word) tox2Unhandled(ctx, base, (site), (word))

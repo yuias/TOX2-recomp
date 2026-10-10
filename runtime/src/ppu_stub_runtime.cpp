@@ -90,6 +90,15 @@ void tox2HleCall(Tox2PpuContext* ctx, uint8_t* base, uint32_t import_index) {
     fatalExit();
 }
 
+void tox2HleCallImport(Tox2PpuContext* ctx, uint8_t* base, const Tox2ImportInfo* import) {
+    (void)ctx;
+    (void)base;
+    const char* name = import->name != nullptr ? import->name : "-";
+    std::fprintf(stderr, "tox2: HLE call %s::%s (stub 0x%08x, fnid 0x%08x)\n", import->module, name, import->stub,
+                 import->fnid);
+    fatalExit();
+}
+
 // Reports success so that a harness can observe the call.
 void tox2Syscall(Tox2PpuContext* ctx, uint8_t* base, uint32_t site) {
     (void)base;
