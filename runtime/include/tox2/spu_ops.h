@@ -398,6 +398,153 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuRotmah(Tox2Vr a, Tox2Vr b) {
     return a;
 }
 
+// --- Quadword shifts and rotates -------------------------------------------------------------
+//
+// With the byte-reversed lanes the whole register is one little-endian 128-bit integer whose top bit
+// is bit 0 of the architected register, so an architected left shift is a plain left shift of that
+// integer and a byte shift is a shift by 8 times the count. Every helper takes the count word the
+// instruction names (the preferred word of RB, or the sign-extended I7) and applies its own mask, so
+// the register and immediate forms share the code.
+
+__extension__ typedef unsigned __int128 Tox2SpuU128;
+
+TOX2_FORCEINLINE Tox2SpuU128 tox2SpuToInt(Tox2Vr v) {
+    Tox2SpuU128 x;
+    __builtin_memcpy(&x, &v, sizeof x);
+    return x;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuFromInt(Tox2SpuU128 x) {
+    Tox2Vr v;
+    __builtin_memcpy(&v, &x, sizeof v);
+    return v;
+}
+
+// Rotate by 0 < n < 128 bits, and by 0 without a shift by the width.
+TOX2_FORCEINLINE Tox2SpuU128 tox2SpuRotl128(Tox2SpuU128 x, uint32_t n) { return (x << n) | (x >> ((128u - n) & 127u)); }
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuShlqbi(Tox2Vr a, uint32_t count) {
+    return tox2SpuFromInt(tox2SpuToInt(a) << (count & 7u));
+}
+
+// A byte count above 15 shifts every byte out.
+TOX2_FORCEINLINE Tox2Vr tox2SpuShlqby(Tox2Vr a, uint32_t count) {
+    uint32_t s = count & 0x1fu;
+    return tox2SpuFromInt(s < 16u ? tox2SpuToInt(a) << (8u * s) : (Tox2SpuU128)0);
+}
+
+// The "from bit shift count" forms take the byte count from bits 24 to 28 of the word.
+TOX2_FORCEINLINE Tox2Vr tox2SpuShlqbybi(Tox2Vr a, uint32_t count) { return tox2SpuShlqby(a, count >> 3); }
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuRotqbi(Tox2Vr a, uint32_t count) {
+    return tox2SpuFromInt(tox2SpuRotl128(tox2SpuToInt(a), count & 7u));
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuRotqby(Tox2Vr a, uint32_t count) {
+    return tox2SpuFromInt(tox2SpuRotl128(tox2SpuToInt(a), 8u * (count & 15u)));
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuRotqbybi(Tox2Vr a, uint32_t count) { return tox2SpuRotqby(a, count >> 3); }
+
+// The mask forms shift right by the negated count.
+TOX2_FORCEINLINE Tox2Vr tox2SpuRotqmbi(Tox2Vr a, uint32_t count) {
+    return tox2SpuFromInt(tox2SpuToInt(a) >> ((0u - count) & 7u));
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuRotqmby(Tox2Vr a, uint32_t count) {
+    uint32_t s = (0u - count) & 0x1fu;
+    return tox2SpuFromInt(s < 16u ? tox2SpuToInt(a) >> (8u * s) : (Tox2SpuU128)0);
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuRotqmbybi(Tox2Vr a, uint32_t count) { return tox2SpuRotqmby(a, count >> 3); }
+
+// --- Shuffle and generate controls -----------------------------------------------------------
+
+// Byte k (architected numbering) of RA || RB is selected by the matching byte of RC. The control
+// bytes are read lane by lane because RC and RT share the same lane order.
+TOX2_FORCEINLINE Tox2Vr tox2SpuShufb(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+    uint8_t concat[32];
+    for (uint32_t k = 0; k < 16; k++) {
+        concat[k] = a.u8[15 - k];
+        concat[16 + k] = b.u8[15 - k];
+    }
+    Tox2Vr r;
+    for (uint32_t lane = 0; lane < 16; lane++) {
+        uint8_t sel = c.u8[lane];
+        uint8_t v = concat[sel & 0x1fu];
+        if ((sel & 0xc0u) == 0x80u) {
+            v = 0x00;
+        } else if ((sel & 0xe0u) == 0xc0u) {
+            v = 0xff;
+        } else if ((sel & 0xe0u) == 0xe0u) {
+            v = 0x80;
+        }
+        r.u8[lane] = v;
+    }
+    return r;
+}
+
+// The mask for inserting an element of `size` bytes (1, 2, 4 or 8) at the aligned position of `addr`:
+// bytes 0x10..0x1f select RB-side data (the old quadword), the element's own bytes select the
+// right-aligned bytes of the preferred slot (the leftmost eight for a doubleword).
+TOX2_FORCEINLINE Tox2Vr tox2SpuGenControl(uint32_t addr, uint32_t size) {
+    uint32_t t = addr & (16u - size);
+    uint32_t first = size < 8u ? 4u - size : 0u;
+    Tox2Vr r;
+    for (uint32_t j = 0; j < 16; j++) TOX2_VR_B(r, j) = (uint8_t)(0x10u + j);
+    for (uint32_t i = 0; i < size; i++) TOX2_VR_B(r, t + i) = (uint8_t)(first + i);
+    return r;
+}
+
+// --- Form select mask and gather bits --------------------------------------------------------
+//
+// The leftmost element takes the most significant of the selected bits, which is the highest lane.
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuFsmb(uint32_t s) {
+    Tox2Vr r;
+    for (uint32_t lane = 0; lane < 16; lane++) r.u8[lane] = (uint8_t)(0u - ((s >> lane) & 1u));
+    return r;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuFsmh(uint32_t s) {
+    Tox2Vr r;
+    for (uint32_t lane = 0; lane < 8; lane++) r.u16[lane] = (uint16_t)(0u - ((s >> lane) & 1u));
+    return r;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuFsm(uint32_t s) {
+    Tox2Vr r;
+    for (uint32_t lane = 0; lane < 4; lane++) r.u32[lane] = 0u - ((s >> lane) & 1u);
+    return r;
+}
+
+// The gathered bits go to the preferred word; the other words are zero.
+TOX2_FORCEINLINE Tox2Vr tox2SpuGatherResult(uint32_t bits) {
+    Tox2Vr r = tox2SpuSplatW(0);
+    TOX2_VR_W(r, 0) = bits;
+    return r;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuGbb(Tox2Vr a) {
+    uint32_t bits = 0;
+    for (uint32_t lane = 0; lane < 16; lane++) bits |= (uint32_t)(a.u8[lane] & 1u) << lane;
+    return tox2SpuGatherResult(bits);
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuGbh(Tox2Vr a) {
+    uint32_t bits = 0;
+    for (uint32_t lane = 0; lane < 8; lane++) bits |= (uint32_t)(a.u16[lane] & 1u) << lane;
+    return tox2SpuGatherResult(bits);
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuGb(Tox2Vr a) {
+    uint32_t bits = 0;
+    for (uint32_t lane = 0; lane < 4; lane++) bits |= (a.u32[lane] & 1u) << lane;
+    return tox2SpuGatherResult(bits);
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuOrx(Tox2Vr a) { return tox2SpuGatherResult(a.u32[0] | a.u32[1] | a.u32[2] | a.u32[3]); }
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

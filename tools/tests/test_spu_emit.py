@@ -334,7 +334,10 @@ class CommandTest(SpuFixtureTest):
     def setUp(self):
         super().setUp()
         self.words = table_program()
-        blob = b"".join(w.to_bytes(4, "big") for w in self.words)
+        # The gate tests need a word without a handler; double precision is outside the gate scope and
+        # stays unhandled, unlike the load and rotate words of the jump-table idiom.
+        self.words[12] = enc("dfa", RT=7, RA=3, RB=4)
+        blob =b"".join(w.to_bytes(4, "big") for w in self.words)
         self.libsre = container_elf({RAW_AT: blob})
         self.libsre_path = self.write("libsre.reloc.elf", self.libsre)
         self.config_path = self.write_json("target.json", {"eboot_elf": {"sha256": sha(self.eboot)},
