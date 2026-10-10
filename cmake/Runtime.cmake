@@ -146,7 +146,9 @@ function(tox2_runtime_add_core)
     runtime/src/rsx/rsx_registers.cpp
     runtime/src/rsx/rsx_state.cpp
     runtime/src/rsx/rsx_thread.cpp
-    runtime/src/rsx/rsx_unimplemented.cpp)
+    runtime/src/rsx/rsx_unimplemented.cpp
+    runtime/src/spu/spu_dispatch.cpp
+    runtime/src/spu/spu_thread.cpp)
   target_compile_options(tox2_runtime_core PRIVATE -march=x86-64-v3 -Wall -Wextra)
   target_include_directories(tox2_runtime_core PUBLIC
     ${CMAKE_SOURCE_DIR}/runtime/src
