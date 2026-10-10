@@ -205,6 +205,13 @@ class ElfImageTest(SpuFixtureTest):
         with self.assertRaisesRegex(RegistryError, "extra entry 0x3200 is not in a code"):
             self.resolve(bad)
 
+    def test_data_range_must_be_inside_a_code_segment(self):
+        good = elf_entry(data_ranges=[{"start": "0x3010", "end": "0x3040", "reason": "table"}])
+        self.assertEqual(self.resolve(good).entry.data_ranges[0].end, 0x3040)
+        bad = elf_entry(data_ranges=[{"start": "0x3030", "end": "0x3050", "reason": "table"}])
+        with self.assertRaisesRegex(RegistryError, "data range 0x3030..0x3050 is not inside a code"):
+            self.resolve(bad)
+
 
 class RawImageTest(SpuFixtureTest):
     def test_raw_blob(self):
@@ -308,6 +315,31 @@ class RegistryTest(unittest.TestCase):
             extra_entries=[{"ls": "0x11", "reason": "x"}]))
         self.assertRejected("duplicate extra_entries ls 0x10", elf_entry(
             extra_entries=[{"ls": "0x10", "reason": "x"}, {"ls": "0x10", "reason": "y"}]))
+
+    def test_data_ranges(self):
+        ok = self.parse(elf_entry(data_ranges=[{"start": "0x3010", "end": "0x3020", "reason": "context"}]))
+        self.assertEqual(ok.images[0].data_ranges, (spu_images.DataRange(0x3010, 0x3020, "context"),))
+        self.assertEqual(self.parse(elf_entry()).images[0].data_ranges, ())
+        self.assertRejected("data_ranges must be a list", elf_entry(data_ranges={}))
+        self.assertRejected("non-empty \"reason\"", elf_entry(
+            data_ranges=[{"start": "0x10", "end": "0x20"}]))
+        self.assertRejected("non-empty word aligned LS range", elf_entry(
+            data_ranges=[{"start": "0x20", "end": "0x10", "reason": "x"}]))
+        self.assertRejected("non-empty word aligned LS range", elf_entry(
+            data_ranges=[{"start": "0x10", "end": "0x42", "reason": "x"}]))
+        self.assertRejected("overlap", elf_entry(
+            data_ranges=[{"start": "0x10", "end": "0x30", "reason": "x"},
+                         {"start": "0x20", "end": "0x40", "reason": "y"}]))
+        self.assertRejected("position independent", pic_entry(
+            data_ranges=[{"start": "0x10", "end": "0x20", "reason": "x"}]))
+
+    def test_pic_delta_regs(self):
+        self.assertEqual(self.parse(elf_entry(pic_delta_regs=[126, 3, 126])).images[0].pic_delta_regs,
+                         (3, 126))
+        self.assertEqual(self.parse(elf_entry()).images[0].pic_delta_regs, ())
+        self.assertRejected("pic_delta_regs must be a list", elf_entry(pic_delta_regs=[128]))
+        self.assertRejected("pic_delta_regs must be a list", elf_entry(pic_delta_regs=126))
+        self.assertRejected("position independent", pic_entry(pic_delta_regs=[126]))
 
     def test_lowering_not_implemented(self):
         self.assertRejected("lowering not implemented", elf_entry(lowering="hostcall"))
@@ -514,10 +546,12 @@ class CommittedRegistryTest(unittest.TestCase):
         for e in self.registry.images:
             self.assertEqual(e.container, e.name.split("_")[0])
 
-    def test_only_the_kernel_has_extra_entries(self):
-        extra = {e.name: [(x.ls) for x in e.extra_entries]
+    def test_extra_entries_are_the_gate_images_indirect_targets(self):
+        extra = {e.name: sorted(x.ls for x in e.extra_entries)
                  for e in self.registry.images if e.extra_entries}
-        self.assertEqual(extra, {"libsre_kernel1": [0x808]})
+        self.assertEqual(extra, {"libsre_kernel1": [0x290, 0x808], "libsre_taskset_pm": [0xA70],
+                                 "eboot_edgelzma": [0x4DC0, 0x4DEC, 0x5720, 0x59F8, 0x5BF8]})
+        self.assertTrue(all(e.gate for e in self.registry.images if e.extra_entries))
 
     def test_raw_blobs(self):
         raw = {e.name: (e.size, e.ls_base, e.entry)

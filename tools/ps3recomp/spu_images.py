@@ -46,7 +46,7 @@ _NAME_RE = re.compile(r"[a-z][a-z0-9_]*\Z")
 _HEX_RE = re.compile(r"0x[0-9a-fA-F]+\Z")
 
 _COMMON_KEYS = {"name", "container", "ea", "kind", "role", "lowering", "gate", "extra_entries",
-                "lowering_overrides"}
+                "lowering_overrides", "data_ranges", "pic_delta_regs"}
 _RAW_KEYS = {"size", "ls_base", "entry"}
 
 
@@ -67,6 +67,13 @@ class ExtraEntry:
 
 
 @dataclass(frozen=True)
+class DataRange:
+    start: int      # LS addresses [start, end) of data inside a code segment
+    end: int
+    reason: str
+
+
+@dataclass(frozen=True)
 class RegistryEntry:
     name: str
     container: str
@@ -81,6 +88,10 @@ class RegistryEntry:
     size: int | None = None
     ls_base: int | None = None
     entry: int | None = None
+    # Data inside code segments, and registers that hold 0 at the link address (the delta that
+    # position-independent code adds to its addresses).
+    data_ranges: tuple[DataRange, ...] = ()
+    pic_delta_regs: tuple[int, ...] = ()
     raw: dict = field(default_factory=dict, compare=False, repr=False)
 
 
@@ -187,6 +198,36 @@ def _parse_extra_entries(raw, name: str) -> tuple[ExtraEntry, ...]:
     return tuple(out)
 
 
+def _parse_data_ranges(raw, name: str) -> tuple[DataRange, ...]:
+    if not isinstance(raw, list):
+        raise RegistryError("%s: data_ranges must be a list" % name)
+    out = []
+    for item in raw:
+        if (not isinstance(item, dict) or set(item) != {"start", "end", "reason"}
+                or not isinstance(item["reason"], str) or not item["reason"].strip()):
+            raise RegistryError("%s: data_ranges items need exactly \"start\", \"end\" and a "
+                                "non-empty \"reason\"" % name)
+        start = _ls_value(item["start"], "%s: data_ranges start" % name)
+        end = _hex_value(item["end"], "%s: data_ranges end" % name)
+        if end % 4 or end > LS_SIZE or end <= start:
+            raise RegistryError("%s: data_ranges 0x%x..0x%x is not a non-empty word aligned LS range"
+                                % (name, start, end))
+        out.append(DataRange(start, end, item["reason"]))
+    out.sort(key=lambda r: (r.start, r.end))
+    for a, b in zip(out, out[1:]):
+        if a.end > b.start:
+            raise RegistryError("%s: data_ranges 0x%x..0x%x and 0x%x..0x%x overlap"
+                                % (name, a.start, a.end, b.start, b.end))
+    return tuple(out)
+
+
+def _parse_pic_regs(raw, name: str) -> tuple[int, ...]:
+    if (not isinstance(raw, list)
+            or not all(isinstance(r, int) and not isinstance(r, bool) and 0 <= r < 128 for r in raw)):
+        raise RegistryError("%s: pic_delta_regs must be a list of register numbers 0..127" % name)
+    return tuple(sorted(set(raw)))
+
+
 def _parse_overrides(raw, name: str) -> tuple[tuple[int, str], ...]:
     if not isinstance(raw, dict):
         raise RegistryError("%s: lowering_overrides must be an object" % name)
@@ -232,6 +273,8 @@ def _parse_entry(raw, index: int) -> RegistryEntry:
     lowering = _check_lowering(raw["lowering"], name)
     extra = _parse_extra_entries(raw["extra_entries"], name)
     overrides = _parse_overrides(raw.get("lowering_overrides", {}), name)
+    data_ranges = _parse_data_ranges(raw.get("data_ranges", []), name)
+    pic_regs = _parse_pic_regs(raw.get("pic_delta_regs", []), name)
 
     size = ls_base = entry = None
     if kind == "raw":
@@ -245,11 +288,12 @@ def _parse_entry(raw, index: int) -> RegistryEntry:
             entry = _ls_value(raw.get("entry", raw["ls_base"]), "%s: entry" % name)
             if not ls_base <= entry < ls_base + size:
                 raise RegistryError("%s: entry 0x%x is outside the blob" % (name, entry))
-        elif "entry" in raw or extra or overrides:
+        elif "entry" in raw or extra or overrides or data_ranges or pic_regs:
             raise RegistryError("%s: a position independent blob (ls_base null) has no entry, "
-                                "extra_entries or lowering_overrides" % name)
+                                "extra_entries, lowering_overrides, data_ranges or pic_delta_regs"
+                                % name)
     return RegistryEntry(name, container, ea, kind, raw["role"], lowering, raw["gate"], extra,
-                         overrides, size, ls_base, entry, raw)
+                         overrides, size, ls_base, entry, data_ranges, pic_regs, raw)
 
 
 def parse_registry(doc) -> Registry:
@@ -381,6 +425,10 @@ def resolve_image(entry: RegistryEntry, containers: dict[str, Container]) -> Spu
         if not any(s.ls <= extra.ls < s.ls + s.filesz for s in ordered if s.code):
             raise RegistryError("%s: extra entry 0x%x is not in a code segment"
                                 % (entry.name, extra.ls))
+    for rng in entry.data_ranges:
+        if not any(s.ls <= rng.start and rng.end <= s.ls + s.filesz for s in ordered if s.code):
+            raise RegistryError("%s: data range 0x%x..0x%x is not inside a code segment"
+                                % (entry.name, rng.start, rng.end))
     return SpuImage(entry, data, hashlib.sha256(data).hexdigest(), tuple(segments),
                     ordered[0].ls, max(s.ls + s.memsz for s in ordered), entry_ls)
 
@@ -476,11 +524,13 @@ def describe(image: SpuImage) -> str:
         image.name, image.entry.kind, image.ea, ls, entry, len(image.code_segments))
 
 
-def _write_if_changed(path: Path, content: bytes) -> None:
+def write_if_changed(path: Path, content: bytes) -> bool:
+    """Write `content` unless the file already holds it; True when the file was written."""
     try:
         if path.is_file() and path.read_bytes() == content:
-            return
+            return False
         path.write_bytes(content)
+        return True
     except OSError as e:
         raise CliError(EXIT_IO, "cannot write %s: %s" % (path, e.strerror))
 
@@ -491,10 +541,10 @@ def extract_images(images: list[SpuImage], out_dir: Path) -> dict:
     except OSError as e:
         raise CliError(EXIT_IO, "cannot create %s: %s" % (out_dir, e.strerror))
     for image in images:
-        _write_if_changed(out_dir / image_filename(image), image.data)
+        write_if_changed(out_dir / image_filename(image), image.data)
     manifest = {"schema": SCHEMA, "images": [manifest_entry(i) for i in images]}
     text = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
-    _write_if_changed(out_dir / "manifest.json", text.encode("utf-8"))
+    write_if_changed(out_dir / "manifest.json", text.encode("utf-8"))
     return manifest
 
 

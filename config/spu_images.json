@@ -4,7 +4,15 @@
     {"name": "eboot_spline", "container": "eboot", "ea": "0x00f75400", "kind": "elf",
      "role": "spurs_task", "lowering": "stackfree", "gate": false, "extra_entries": []},
     {"name": "eboot_edgelzma", "container": "eboot", "ea": "0x00f76700", "kind": "elf",
-     "role": "spurs_task", "lowering": "stackfree", "gate": true, "extra_entries": []},
+     "role": "spurs_task", "lowering": "stackfree", "gate": true,
+     "pic_delta_regs": [126],
+     "extra_entries": [
+       {"ls": "0x4dc0", "reason": "interrupt disable returns here through bid on a PC-relative address"},
+       {"ls": "0x4dec", "reason": "interrupt enable returns here through binze on a PC-relative address"},
+       {"ls": "0x5720", "reason": "called through bisl on a position-independent address (ila plus the delta in $126)"},
+       {"ls": "0x59f8", "reason": "called through bisl on a position-independent address (ila plus the delta in $126)"},
+       {"ls": "0x5bf8", "reason": "called through bisl on a position-independent address (ila plus the delta in $126)"}
+     ]},
     {"name": "eboot_bnuscore", "container": "eboot", "ea": "0x00f7b080", "kind": "elf",
      "role": "raw_thread", "lowering": "stackfree", "gate": false, "extra_entries": []},
     {"name": "eboot_animation", "container": "eboot", "ea": "0x00f90280", "kind": "elf",
@@ -19,7 +27,11 @@
      "role": "spurs_task", "lowering": "stackfree", "gate": false, "extra_entries": []},
     {"name": "libsre_kernel1", "container": "libsre", "ea": "0x011f0380", "kind": "elf",
      "role": "spurs_kernel", "lowering": "stackfree", "gate": true,
+     "data_ranges": [
+       {"start": "0x100", "end": "0x290", "reason": "kernel context, not code"}
+     ],
      "extra_entries": [
+       {"ls": "0x290", "reason": "select-workload address stored at LS 0x1e4; the system service calls it through bisl"},
        {"ls": "0x808", "reason": "exit-to-kernel address stored at LS 0x1e0; policy modules branch to it"}
      ]},
     {"name": "libsre_kernel2", "container": "libsre", "ea": "0x011f0c00", "kind": "elf",
@@ -29,7 +41,10 @@
      "lowering": "stackfree", "gate": true, "extra_entries": []},
     {"name": "libsre_taskset_pm", "container": "libsre", "ea": "0x011f3680", "kind": "raw",
      "size": "0x1e40", "ls_base": "0xa00", "entry": "0xa00", "role": "spurs_policy_module",
-     "lowering": "stackfree", "gate": true, "extra_entries": []},
+     "lowering": "stackfree", "gate": true,
+     "extra_entries": [
+       {"ls": "0xa70", "reason": "syscall entry stored at LS 0x27c4; tasks call it through bisl"}
+     ]},
     {"name": "libsre_taskset2_exit", "container": "libsre", "ea": "0x011f5500", "kind": "raw",
      "size": "0x670", "ls_base": null, "role": "exit_handler",
      "lowering": "stackfree", "gate": false, "extra_entries": []},

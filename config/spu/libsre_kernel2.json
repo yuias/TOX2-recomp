@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "image": "libsre_kernel2",
+  "input": {
+    "container_sha256": "4fc712e6967da90a4657cb8893dbaa3b58c27c3fc3a834e3edea07c5ffc2d7ca",
+    "image_sha256": "055d662ecafc95ebdcf34c886d98878fd2ab32d7e12447c590596f14423d6985",
+    "registry_entry_sha256": "cfadd526d469a948347c04733d4bdfcef3b898b30a99d79ee00952488e0212a1"
+  },
+  "segments": [{"ls": "0x100", "size": "0x790", "code": true}],
+  "entry": "0x848",
+  "functions": [
+    {
+      "entry": "0x290",
+      "sources": ["brsl"],
+      "ranges": [["0x290", "0x6e4"]],
+      "call_sites": [],
+      "returns": ["0x6e0"],
+      "indirect": []
+    },
+    {
+      "entry": "0x6e8",
+      "sources": ["brsl"],
+      "ranges": [["0x6e8", "0x848"]],
+      "call_sites": [
+        {"site": "0x840", "kind": "brsl", "target": "0x290", "link": 0},
+        {"site": "0x844", "kind": "brsl", "target": "0x6e8", "link": 0}
+      ],
+      "returns": [],
+      "indirect": [{"site": "0x834", "kind": "bisl", "resolution": "constant", "targets": ["0xa00"], "link": 0}]
+    },
+    {
+      "entry": "0x848",
+      "sources": ["entry"],
+      "ranges": [["0x848", "0x878"]],
+      "call_sites": [{"site": "0x870", "kind": "brsl", "target": "0x6e8", "link": 0}],
+      "returns": [],
+      "indirect": []
+    }
+  ],
+  "dispatch_seeds": [
+    {"ls": "0x290", "sources": ["brsl"]},
+    {"ls": "0x6e8", "sources": ["brsl"]},
+    {"ls": "0x838", "sources": ["return"]},
+    {"ls": "0x844", "sources": ["return"]},
+    {"ls": "0x848", "sources": ["entry", "return"]},
+    {"ls": "0x874", "sources": ["return"]}
+  ],
+  "jump_tables": [],
+  "constant_targets": [{"site": "0x834", "target": "0xa00", "image": "external", "use": "branch"}],
+  "unresolved_indirect": []
+}

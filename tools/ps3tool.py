@@ -16,6 +16,7 @@ COMMANDS = {
     "nidgen": "nidgen",
     "spu-extract": "spu_images",
     "spu-disasm": "spu_disasm",
+    "spu-recover": "spu_recover",
 }
 
 

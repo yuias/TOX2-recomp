@@ -187,20 +187,16 @@ def written_reg(insn: SpuInsn) -> int | None:
     return None
 
 
-def eval_const(code: SpuCode, addr: int, reg: int, *, labels: frozenset[int] | None = None,
-               memory: bool = False, limit: int = 64, depth: int = 8) -> int | None:
-    """Preferred-slot word of `reg` just before `addr`, or None when it is not a recoverable constant.
-
-    The walk goes backward through straight-line code. It ends at `labels` (addresses other paths
-    can enter; default: the direct branch targets of the image), at unconditional transfers and
-    at calls. `memory` also follows `lqr`/`lqa`/`lqd` into the image bytes; those hold initial
-    values that a running program may overwrite, so only code-pointer detection uses them.
-    """
+def find_def(code: SpuCode, addr: int, reg: int, *, labels: frozenset[int] | None = None,
+             limit: int = 64) -> SpuInsn | None:
+    """The instruction that last wrote `reg` before `addr`, found by walking backward through
+    straight-line code. The walk ends at `labels` (addresses other paths can enter; default: the
+    direct branch targets of the image), at unconditional transfers and at calls."""
     if labels is None:
         labels = code.direct_targets
     pos = addr
     for _ in range(limit):
-        if depth <= 0 or pos in labels:
+        if pos in labels:
             return None
         cur = pos - 4
         if not code.contains(cur):
@@ -209,15 +205,38 @@ def eval_const(code: SpuCode, addr: int, reg: int, *, labels: frozenset[int] | N
         if flow_of(insn).kind in _WALK_BARRIERS:
             return None
         if written_reg(insn) == reg:
-            return _eval_def(code, insn, labels, memory, limit, depth)
+            return insn
         pos = cur
     return None
 
 
+def eval_const(code: SpuCode, addr: int, reg: int, *, labels: frozenset[int] | None = None,
+               memory: bool = False, limit: int = 64, depth: int = 8,
+               zero_regs: frozenset[int] = frozenset()) -> int | None:
+    """Preferred-slot word of `reg` just before `addr`, or None when it is not a recoverable constant.
+
+    The walk goes backward through straight-line code (see `find_def`). `memory` also follows
+    `lqr`/`lqa`/`lqd` into the image bytes; those hold initial values that a running program may
+    overwrite, so only code-pointer detection uses them. `zero_regs` are registers that hold 0 at
+    the image's link address (the position-independent-code delta), so addresses computed through
+    them are link-time constants.
+    """
+    if reg in zero_regs:
+        return 0
+    if depth <= 0:
+        return None
+    insn = find_def(code, addr, reg, labels=labels, limit=limit)
+    if insn is None:
+        return None
+    return _eval_def(code, insn, labels if labels is not None else code.direct_targets, memory, limit,
+                     depth, zero_regs)
+
+
 def _eval_def(code: SpuCode, d: SpuInsn, labels: frozenset[int], memory: bool, limit: int,
-              depth: int) -> int | None:
+              depth: int, zero_regs: frozenset[int]) -> int | None:
     def src(r: int) -> int | None:
-        return eval_const(code, d.addr, r, labels=labels, memory=memory, limit=limit, depth=depth - 1)
+        return eval_const(code, d.addr, r, labels=labels, memory=memory, limit=limit, depth=depth - 1,
+                          zero_regs=zero_regs)
 
     name = d.spec.mnemonic
     if name == "il":
@@ -273,7 +292,7 @@ def _eval_def(code: SpuCode, d: SpuInsn, labels: frozenset[int], memory: bool, l
 
 
 def const_target(code: SpuCode, insn: SpuInsn, flow: Flow, *, labels: frozenset[int] | None = None,
-                 memory: bool = True) -> int | None:
+                 memory: bool = True, zero_regs: frozenset[int] = frozenset()) -> int | None:
     """LS address that the register of an indirect branch holds, when it is a constant.
 
     A value that comes out of the image bytes (`memory`) counts only when it is an address in the
@@ -281,9 +300,9 @@ def const_target(code: SpuCode, insn: SpuInsn, flow: Flow, *, labels: frozenset[
     """
     if flow.reg is None:
         return None
-    value = eval_const(code, insn.addr, flow.reg, labels=labels)
+    value = eval_const(code, insn.addr, flow.reg, labels=labels, zero_regs=zero_regs)
     if value is None and memory:
-        value = eval_const(code, insn.addr, flow.reg, labels=labels, memory=True)
+        value = eval_const(code, insn.addr, flow.reg, labels=labels, memory=True, zero_regs=zero_regs)
         if value is not None and not code.contains(value & LS_TARGET_MASK):
             return None
     return None if value is None else value & LS_TARGET_MASK
