@@ -32,6 +32,10 @@ target_compile_options(tox2_ppu_stub PRIVATE -march=x86-64-v3 -Wall -Wextra)
 target_include_directories(tox2_ppu_stub PUBLIC runtime/include)
 
 set(TOX2_EBOOT_ELF "" CACHE FILEPATH "Decrypted EBOOT.elf for optional tests")
+# The file tox2_inputs produces; a build step, so it need not exist yet.
+if(TOX2_EBOOT_ELF STREQUAL "" AND NOT TOX2_EBOOT_BIN STREQUAL "")
+  set_property(CACHE TOX2_EBOOT_ELF PROPERTY VALUE "${TOX2_INPUTS_DIR}/EBOOT.elf")
+endif()
 
 tox2_ppu_add_generated_tree()
 tox2_runtime_add_core()

@@ -8,6 +8,9 @@ param(
     [string]$EbootElf,
     [string]$GeneratedDir,
     [string]$GameDir,
+    [string]$EbootBin,
+    [string]$Pup,
+    [string]$Rpcs3CryptoDir,
     [string]$LlvmBin = $env:TOX2_LLVM_BIN
 )
 
@@ -46,6 +49,17 @@ if ($GameDir) {
     $GameDir = [System.IO.Path]::GetFullPath($GameDir, $PWD.ProviderPath)
 }
 
+# These must exist; the paths are fixed here because Resolve-Path would otherwise run after Push-Location.
+if ($EbootBin) {
+    $EbootBin = (Resolve-Path -LiteralPath $EbootBin).ProviderPath
+}
+if ($Pup) {
+    $Pup = (Resolve-Path -LiteralPath $Pup).ProviderPath
+}
+if ($Rpcs3CryptoDir) {
+    $Rpcs3CryptoDir = (Resolve-Path -LiteralPath $Rpcs3CryptoDir).ProviderPath
+}
+
 Push-Location (Join-Path $PSScriptRoot '..')
 try {
     if ($Clean) {
@@ -62,6 +76,15 @@ try {
     }
     if ($GameDir) {
         $configureArgs += "-DTOX2_GAME_DIR=$GameDir"
+    }
+    if ($EbootBin) {
+        $configureArgs += "-DTOX2_EBOOT_BIN=$EbootBin"
+    }
+    if ($Pup) {
+        $configureArgs += "-DTOX2_PUP=$Pup"
+    }
+    if ($Rpcs3CryptoDir) {
+        $configureArgs += "-DTOX2_RPCS3_CRYPTO_DIR=$Rpcs3CryptoDir"
     }
     & cmake @configureArgs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
