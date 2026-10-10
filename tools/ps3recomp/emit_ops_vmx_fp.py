@@ -1,6 +1,6 @@
 """Group `vmx_fp`: single-precision vector arithmetic, rounding, conversions and compares.
 
-Every operation is a helper in `runtime/include/dal/ppu_vmx.h`; the helpers that flush denormals
+Every operation is a helper in `runtime/include/tox2/ppu_vmx.h`; the helpers that flush denormals
 read VSCR[NJ] from the context and the saturating conversions set VSCR[SAT]. Only the compares are
 expressed inline, on the `f32` view, like the integer compares.
 """
@@ -40,10 +40,10 @@ def emit_vmx_fp(op: Op) -> list[str] | None:
     else:
         a, b = op.vr(op.f("vA")), op.vr(op.f("vB"))
         if name == "vcmpbfp":
-            lines = ["%s = dalVcmpbfp(%s, %s);" % (d, a, b)]
+            lines = ["%s = tox2Vcmpbfp(%s, %s);" % (d, a, b)]
         else:
-            lines = ["%s.u32 = (DalU32x4)(%s.f32 %s %s.f32);" % (d, a, _COMPARE[name], b)]
+            lines = ["%s.u32 = (Tox2U32x4)(%s.f32 %s %s.f32);" % (d, a, _COMPARE[name], b)]
         if op.rc:
-            lines.append("dalSetCr6(ctx, %s);" % d)
+            lines.append("tox2SetCr6(ctx, %s);" % d)
         return lines
-    return ["%s = dal%s(%s);" % (d, name.capitalize(), ", ".join(args))]
+    return ["%s = tox2%s(%s);" % (d, name.capitalize(), ", ".join(args))]

@@ -13,7 +13,7 @@
 #include "hle/cell_sail_types.h"
 #include "media/pamf.h"
 
-namespace dal::sail_hle {
+namespace tox2::sail_hle {
 
 inline bool guestMapped(std::uint32_t addr, std::uint32_t size) {
     return addr != 0 && process().memory.isCommitted(addr, size);
@@ -79,4 +79,4 @@ struct SoundFrameResult {
 std::optional<VideoFrameResult> takeVideoFrame(std::uint8_t* base, std::uint32_t player);
 std::uint32_t takeSoundFrame(std::uint8_t* base, std::uint32_t player, std::uint32_t frames, SoundFrameResult& out);
 
-}  // namespace dal::sail_hle
+}  // namespace tox2::sail_hle

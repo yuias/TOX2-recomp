@@ -26,7 +26,7 @@ def _binary(op: Op, dest: int, a: str, b: str, call: str, overflow: str | None =
     lines = ["uint64_t t0 = %s;" % a, "uint64_t t1 = %s;" % b,
              "uint64_t t2 = %s;" % call.format(a="t0", b="t1"),
              "%s = t2;" % op.gpr(dest),
-             "dalSetOv(ctx, %s);" % overflow.format(a="t0", b="t1", r="t2")]
+             "tox2SetOv(ctx, %s);" % overflow.format(a="t0", b="t1", r="t2")]
     if rc:
         lines.append(op.record("t2"))
     return lines
@@ -53,8 +53,8 @@ def emit_carrying(op: Op) -> list[str] | None:
     a = ("~%s" if invert else "%s") % op.gpr(op.f("rA"))
     b = op.gpr(op.f("rB")) if b_kind == "rB" else u64(int(b_kind))
     # Signed overflow of a + b + CA is that of a + b for any carry-in (0 or 1).
-    return _binary(op, op.f("rD"), a, b, "dalAddCarry(ctx, {a}, {b}, %s)" % carry_in,
-                   "dalAddOverflows({a}, {b}, {r})")
+    return _binary(op, op.f("rD"), a, b, "tox2AddCarry(ctx, {a}, {b}, %s)" % carry_in,
+                   "tox2AddOverflows({a}, {b}, {r})")
 
 
 @handler("addic", "addic.", "subfic")
@@ -63,8 +63,8 @@ def emit_carrying_immediate(op: Op) -> list[str] | None:
     imm = u64(op.f("SIMM"))
     ra = op.gpr(op.f("rA"))
     if op.name == "subfic":
-        return _binary(op, op.f("rD"), "~" + ra, imm, "dalAddCarry(ctx, {a}, {b}, 1)")
-    return _binary(op, op.f("rD"), ra, imm, "dalAddCarry(ctx, {a}, {b}, 0)",
+        return _binary(op, op.f("rD"), "~" + ra, imm, "tox2AddCarry(ctx, {a}, {b}, 1)")
+    return _binary(op, op.f("rD"), ra, imm, "tox2AddCarry(ctx, {a}, {b}, 0)",
                    record=op.name == "addic." or op.rc)
 
 
@@ -77,19 +77,19 @@ def emit_mulli(op: Op) -> list[str] | None:
 @handler("mullw")
 def emit_mullw(op: Op) -> list[str] | None:
     # RPCS3 MULLW
-    return _binary(op, op.f("rD"), op.gpr(op.f("rA")), op.gpr(op.f("rB")), "dalMullw({a}, {b})",
-                   "dalMullwOverflows({r})")
+    return _binary(op, op.f("rD"), op.gpr(op.f("rA")), op.gpr(op.f("rB")), "tox2Mullw({a}, {b})",
+                   "tox2MullwOverflows({r})")
 
 
 @handler("mulld")
 def emit_mulld(op: Op) -> list[str] | None:
     # RPCS3 MULLD
     return _binary(op, op.f("rD"), op.gpr(op.f("rA")), op.gpr(op.f("rB")), "{a} * {b}",
-                   "dalMulldOverflows({a}, {b}, {r})")
+                   "tox2MulldOverflows({a}, {b}, {r})")
 
 
-_HIGH_MULTIPLY = {"mulhw": "dalMulhw", "mulhwu": "dalMulhwu", "mulhd": "dalMulhd",
-                  "mulhdu": "dalMulhdu"}
+_HIGH_MULTIPLY = {"mulhw": "tox2Mulhw", "mulhwu": "tox2Mulhwu", "mulhd": "tox2Mulhd",
+                  "mulhdu": "tox2Mulhdu"}
 
 
 @handler(*_HIGH_MULTIPLY)
@@ -101,10 +101,10 @@ def emit_high_multiply(op: Op) -> list[str] | None:
 
 # name -> (helper, overflow template). RPCS3 DIVW DIVWU DIVD DIVDU
 _DIVIDE = {
-    "divw": ("dalDivw", "dalDivwOverflows({a}, {b})"),
-    "divwu": ("dalDivwu", "dalDivwuOverflows({b})"),
-    "divd": ("dalDivd", "dalDivdOverflows({a}, {b})"),
-    "divdu": ("dalDivdu", "{b} == 0"),
+    "divw": ("tox2Divw", "tox2DivwOverflows({a}, {b})"),
+    "divwu": ("tox2Divwu", "tox2DivwuOverflows({b})"),
+    "divd": ("tox2Divd", "tox2DivdOverflows({a}, {b})"),
+    "divdu": ("tox2Divdu", "{b} == 0"),
 }
 
 

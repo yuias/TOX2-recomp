@@ -7,7 +7,7 @@
 #include <string_view>
 #include <vector>
 
-namespace dal {
+namespace tox2 {
 
 enum class ShaderStage { Vertex, Fragment };
 
@@ -33,4 +33,4 @@ ShaderCompilerStats shaderCompilerStats();
 std::expected<std::vector<std::uint32_t>, std::string> compileGlsl(ShaderStage stage, std::string_view glsl,
                                                                    std::uint64_t cache_key);
 
-}  // namespace dal
+}  // namespace tox2

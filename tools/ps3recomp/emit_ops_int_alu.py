@@ -42,7 +42,7 @@ def _overflow_form(op: Op, result: str, overflow: str, *, unary: bool = False) -
         lines.append("uint64_t t1 = %s;" % rb)
     lines.append("uint64_t t2 = %s;" % result.format(a="t0", b="t1"))
     lines.append("%s = t2;" % op.gpr(op.f("rD")))
-    lines.append("dalSetOv(ctx, %s);" % overflow)
+    lines.append("tox2SetOv(ctx, %s);" % overflow)
     if op.rc:
         lines.append(op.record("t2"))
     return lines
@@ -51,13 +51,13 @@ def _overflow_form(op: Op, result: str, overflow: str, *, unary: bool = False) -
 @handler("add")
 def emit_add(op: Op) -> list[str] | None:
     # RPCS3 ADD
-    return _overflow_form(op, "{a} + {b}", "dalAddOverflows(t0, t1, t2)")
+    return _overflow_form(op, "{a} + {b}", "tox2AddOverflows(t0, t1, t2)")
 
 
 @handler("subf")
 def emit_subf(op: Op) -> list[str] | None:
     # RPCS3 SUBF: rB - rA, which overflows like ~rA + rB.
-    return _overflow_form(op, "{b} - {a}", "dalAddOverflows(~t0, t1, t2)")
+    return _overflow_form(op, "{b} - {a}", "tox2AddOverflows(~t0, t1, t2)")
 
 
 @handler("neg")
@@ -119,7 +119,7 @@ def emit_extend(op: Op) -> list[str] | None:
 @handler("cntlzw", "cntlzd")
 def emit_cntlz(op: Op) -> list[str] | None:
     # RPCS3 CNTLZW, CNTLZD
-    helper = "dalCntlzw" if op.name == "cntlzw" else "dalCntlzd"
+    helper = "tox2Cntlzw" if op.name == "cntlzw" else "tox2Cntlzd"
     return _store(op, op.f("rA"), "%s(%s)" % (helper, op.gpr(op.f("rS"))))
 
 
@@ -136,4 +136,4 @@ def emit_compare(op: Op) -> list[str] | None:
         rhs = str(op.f("SIMM"))
     else:
         rhs = u64(op.f("UIMM")) if wide else u32(op.f("UIMM"))
-    return ["%s(ctx, %d, %s, %s);" % ("dalCmpS" if signed else "dalCmpU", op.f("crfD"), lhs, rhs)]
+    return ["%s(ctx, %d, %s, %s);" % ("tox2CmpS" if signed else "tox2CmpU", op.f("crfD"), lhs, rhs)]

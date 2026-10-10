@@ -11,7 +11,7 @@
 #endif
 #include <windows.h>
 
-namespace dal {
+namespace tox2 {
 
 // A high-resolution timer sleeps in about a millisecond steps; Sleep() would round to the 15.6 ms
 // system tick and make periodic host clocks (VBlank, audio blocks) irregular. One instance per
@@ -43,4 +43,4 @@ private:
     HANDLE timer_ = nullptr;
 };
 
-}  // namespace dal
+}  // namespace tox2

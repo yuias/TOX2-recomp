@@ -10,11 +10,11 @@
 #include <cstdint>
 
 #include "core/guest_memory.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::uint32_t kGroupIdBase = 0x04000100;
@@ -56,7 +56,7 @@ void resetSpuThreadGroups() {
 
 // 169 sys_spu_initialize(u32 max_usable_spu, u32 max_raw_spu): RPCS3 pins the usable count to 6 and
 // only rejects more than 5 raw SPUs (the busy check cannot fail without SPU threads).
-void sysSpuInitialize(DalPpuContext* ctx, std::uint8_t* base) {
+void sysSpuInitialize(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResultCode(ctx, static_cast<std::uint32_t>(ctx->gpr[4]) > 5 ? kCellEinval : kCellOk);
 }
@@ -64,7 +64,7 @@ void sysSpuInitialize(DalPpuContext* ctx, std::uint8_t* base) {
 // 251 sys_spu_thread_group_connect_event_all_threads(u32 id, u32 eq, u64 req, u8* spup): the group
 // must be one created by createSpuThreadGroup (always in the initialized state). The port is the
 // lowest bit set in `req`.
-void sysSpuThreadGroupConnectEventAllThreads(DalPpuContext* ctx, std::uint8_t* base) {
+void sysSpuThreadGroupConnectEventAllThreads(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto id = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto eq = static_cast<std::uint32_t>(ctx->gpr[4]);
     const std::uint64_t req = ctx->gpr[5];
@@ -81,8 +81,8 @@ void sysSpuThreadGroupConnectEventAllThreads(DalPpuContext* ctx, std::uint8_t* b
         setResultCode(ctx, kCellEfault);
         return;
     }
-    dalWrite8(base, spup, static_cast<std::uint8_t>(std::countr_zero(req)));
+    tox2Write8(base, spup, static_cast<std::uint8_t>(std::countr_zero(req)));
     setResultCode(ctx, kCellOk);
 }
 
-}  // namespace dal
+}  // namespace tox2

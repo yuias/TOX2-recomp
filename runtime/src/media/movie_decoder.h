@@ -1,7 +1,7 @@
 #pragma once
 
 // Codec interfaces of the movie pipeline. They carry no FFmpeg types, so the player and its tests
-// build without FFmpeg; the FFmpeg implementation lives in dal_media and is installed at start-up.
+// build without FFmpeg; the FFmpeg implementation lives in tox2_media and is installed at start-up.
 
 #include <cstdint>
 #include <memory>
@@ -11,7 +11,7 @@
 
 #include "media/pamf.h"
 
-namespace dal {
+namespace tox2 {
 
 enum class VideoCoding : std::uint8_t { Argb, Rgba, Yuv420Planar };
 
@@ -84,4 +84,4 @@ public:
 void setMediaCodecFactory(std::unique_ptr<MediaCodecFactory> factory);
 MediaCodecFactory* mediaCodecFactory();
 
-}  // namespace dal
+}  // namespace tox2

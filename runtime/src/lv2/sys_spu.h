@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace dal {
+namespace tox2 {
 
 // SPU thread groups exist only as ids: the game's SPURS instance asks for one, but no SPU thread
 // is ever created. Ids follow RPCS3 `Emu/Cell/lv2/sys_spu.h` `lv2_spu_group` (base 0x04000100,
@@ -20,4 +20,4 @@ bool spuThreadGroupExists(std::uint32_t id);
 // Forgets every group. Intended for tests.
 void resetSpuThreadGroups();
 
-}  // namespace dal
+}  // namespace tox2

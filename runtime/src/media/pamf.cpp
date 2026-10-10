@@ -7,7 +7,7 @@
 #include <deque>
 #include <utility>
 
-namespace dal {
+namespace tox2 {
 
 namespace {
 
@@ -456,4 +456,4 @@ std::optional<PamfAccessUnit> PamfDemuxer::next(std::uint32_t stream_index) {
 
 std::uint64_t PamfDemuxer::errors() const { return impl_->errors; }
 
-}  // namespace dal
+}  // namespace tox2

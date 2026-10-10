@@ -12,7 +12,7 @@
 #include "core/fatal.h"
 #include "core/log.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 struct CallStat {
@@ -93,7 +93,7 @@ void censusSyscall(std::uint32_t number, const char* name, bool implemented) {
         stat.count++;
     }
     if (first) {
-        logInfo("dal: first sc {} {}", number, shown);
+        logInfo("tox2: first sc {} {}", number, shown);
     }
 }
 
@@ -112,7 +112,7 @@ void censusHle(const char* module, const char* name, bool implemented) {
         stat.count++;
     }
     if (first) {
-        logInfo("dal: first hle {}", key);
+        logInfo("tox2: first hle {}", key);
     }
 }
 
@@ -340,4 +340,4 @@ void resetCensus() {
     if (unimplemented_reset != nullptr) unimplemented_reset();
 }
 
-}  // namespace dal
+}  // namespace tox2

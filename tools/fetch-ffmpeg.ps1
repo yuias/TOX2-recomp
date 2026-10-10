@@ -84,9 +84,9 @@ try {
     $pinFile = Join-Path $repoRoot 'cmake/ffmpeg.cmake'
     if (-not (Test-Path -LiteralPath $pinFile)) { throw "pin file not found: cmake/ffmpeg.cmake" }
     $pinText = Get-Content -LiteralPath $pinFile -Raw
-    $tag = Read-Pin $pinText 'DAL_FFMPEG_RELEASE_TAG' 'autobuild-[0-9-]+'
-    $asset = Read-Pin $pinText 'DAL_FFMPEG_ASSET' '[A-Za-z0-9._-]+\.zip'
-    $expectedHash = (Read-Pin $pinText 'DAL_FFMPEG_SHA256' '[0-9A-Fa-f]{64}').ToLowerInvariant()
+    $tag = Read-Pin $pinText 'TOX2_FFMPEG_RELEASE_TAG' 'autobuild-[0-9-]+'
+    $asset = Read-Pin $pinText 'TOX2_FFMPEG_ASSET' '[A-Za-z0-9._-]+\.zip'
+    $expectedHash = (Read-Pin $pinText 'TOX2_FFMPEG_SHA256' '[0-9A-Fa-f]{64}').ToLowerInvariant()
     $stem = $asset.Substring(0, $asset.Length - '.zip'.Length)
 
     $depsDir = Join-Path $repoRoot 'generated/deps/ffmpeg'

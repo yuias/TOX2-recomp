@@ -8,7 +8,7 @@
 #include <string>
 #include <string_view>
 
-namespace dal {
+namespace tox2 {
 
 // Header word layout. Methods are byte offsets of the register (RPCS3 stores them >> 2).
 inline constexpr std::uint32_t kFifoOldJumpMask = 0xE0000003;
@@ -203,4 +203,4 @@ private:
     bool faulted_ = false;
 };
 
-}  // namespace dal
+}  // namespace tox2

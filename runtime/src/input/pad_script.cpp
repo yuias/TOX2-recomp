@@ -10,7 +10,7 @@
 
 #include "core/log.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 // Bounds keep a typo such as `every 0.2 until 99999999` from allocating without limit.
@@ -168,7 +168,7 @@ void playPadScript(std::span<const PadScriptEvent> events, KeyboardPadState& sta
         wait_until(event.at);
         state.setButtons(InputSource::Script, event.buttons, event.down, KeyboardPadState::Clock::now());
         const std::int64_t ms = event.at.count();
-        logInfo("dal: pad: script {}.{:03} s: {} {}", ms / 1000, ms % 1000, event.down ? "press" : "release",
+        logInfo("tox2: pad: script {}.{:03} s: {} {}", ms / 1000, ms % 1000, event.down ? "press" : "release",
                 joinButtonNames(event.buttons));
     }
 }
@@ -182,4 +182,4 @@ void startPadScript(std::vector<PadScriptEvent> events, std::shared_ptr<Keyboard
     }).detach();
 }
 
-}  // namespace dal
+}  // namespace tox2

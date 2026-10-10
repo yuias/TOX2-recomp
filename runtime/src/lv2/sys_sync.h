@@ -10,9 +10,9 @@
 #include <memory>
 #include <optional>
 
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 
-namespace dal {
+namespace tox2 {
 
 // Maps guest ids to objects. Ids are `base + n * step` for a counter n that only grows, so a
 // destroyed id is never handed out again and a stale id cannot alias a new object.
@@ -65,28 +65,28 @@ inline std::optional<std::chrono::microseconds> waitTimeout(std::uint64_t micros
 }
 
 // lv2 errors reach the guest as sign-extended s32 values.
-inline void setResultCode(DalPpuContext* ctx, std::uint32_t code) {
+inline void setResultCode(Tox2PpuContext* ctx, std::uint32_t code) {
     ctx->gpr[3] = static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(code)));
 }
 
 // Id of the guest thread that owns `ctx` (the owner value of mutexes and lwmutexes).
-std::uint32_t callerThreadId(const DalPpuContext* ctx);
+std::uint32_t callerThreadId(const Tox2PpuContext* ctx);
 
 // Native entry points. They return a cell error code (kCellOk on success); a timeout is
 // kCellEtimedout and a failed try-lock is kCellEbusy.
 std::uint32_t mutexCreate(std::uint32_t protocol, std::uint32_t recursive, std::uint32_t* id_out);
 std::uint32_t mutexDestroy(std::uint32_t id);
-std::uint32_t mutexLock(const DalPpuContext* ctx, std::uint32_t id, std::uint64_t timeout_us);
-std::uint32_t mutexTryLock(const DalPpuContext* ctx, std::uint32_t id);
-std::uint32_t mutexUnlock(const DalPpuContext* ctx, std::uint32_t id);
+std::uint32_t mutexLock(const Tox2PpuContext* ctx, std::uint32_t id, std::uint64_t timeout_us);
+std::uint32_t mutexTryLock(const Tox2PpuContext* ctx, std::uint32_t id);
+std::uint32_t mutexUnlock(const Tox2PpuContext* ctx, std::uint32_t id);
 
 // `lwmutex` is the guest address of a `sys_lwmutex_t`, `attr` that of a `sys_lwmutex_attribute_t`.
 std::uint32_t lwmutexCreate(std::uint8_t* base, std::uint32_t lwmutex, std::uint32_t attr);
-std::uint32_t lwmutexDestroy(const DalPpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex);
-std::uint32_t lwmutexLock(const DalPpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex,
+std::uint32_t lwmutexDestroy(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex);
+std::uint32_t lwmutexLock(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex,
                           std::uint64_t timeout_us);
-std::uint32_t lwmutexTryLock(const DalPpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex);
-std::uint32_t lwmutexUnlock(const DalPpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex);
+std::uint32_t lwmutexTryLock(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex);
+std::uint32_t lwmutexUnlock(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex);
 
 // The objects the process creates for itself when the main thread's TLS is set up (RPCS3
 // `Modules/sys_ppu_thread_.cpp` `sys_initialize_tls`): the atexit and `_lv2prx` lwmutexes (guest
@@ -120,4 +120,4 @@ void resetEventObjects();
 // Forgets every mutex, condition variable, lwmutex and event object. Intended for tests.
 void resetSyncObjects();
 
-}  // namespace dal
+}  // namespace tox2

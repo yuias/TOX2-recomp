@@ -3,7 +3,7 @@
 #include <format>
 #include <utility>
 
-namespace dal {
+namespace tox2 {
 
 void FifoParser::reset() { *this = FifoParser{}; }
 
@@ -81,4 +81,4 @@ FifoStatus FifoParser::run(std::uint32_t& get, std::uint32_t put, std::uint32_t 
     }
 }
 
-}  // namespace dal
+}  // namespace tox2

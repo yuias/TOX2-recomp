@@ -7,13 +7,13 @@
 
 #include "core/fatal.h"
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::uint64_t kGuestSpace = 1ull << 32;
@@ -62,7 +62,7 @@ bool GuestMemory::reserve() {
     if (base_ != nullptr) {
         return true;
     }
-    const std::size_t total = static_cast<std::size_t>(kGuestSpace) + kDalGuestGuardSize;
+    const std::size_t total = static_cast<std::size_t>(kGuestSpace) + kTox2GuestGuardSize;
     void* p = VirtualAlloc(nullptr, total, MEM_RESERVE, PAGE_NOACCESS);
     if (p == nullptr) {
         logError("cannot reserve {:#x} bytes of guest address space (error {})", total, GetLastError());
@@ -147,7 +147,7 @@ bool GuestMemory::containsHost(const void* host) const {
     }
     const auto p = reinterpret_cast<std::uintptr_t>(host);
     const auto b = reinterpret_cast<std::uintptr_t>(base_);
-    return p >= b && p < b + kGuestSpace + kDalGuestGuardSize;
+    return p >= b && p < b + kGuestSpace + kTox2GuestGuardSize;
 }
 
 const char* guestRangeName(std::uint32_t addr) {
@@ -261,4 +261,4 @@ void reserveFaultStack() {
     SetThreadStackGuarantee(&bytes);
 }
 
-}  // namespace dal
+}  // namespace tox2

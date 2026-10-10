@@ -17,7 +17,7 @@
 #include "media/at3_file.h"
 #include "media/atrac_decoder.h"
 
-namespace dal {
+namespace tox2 {
 
 // RPCS3 `rpcs3/Emu/Cell/Modules/cellAtrac.h` `CellAtracError`: the values this module returns.
 inline constexpr std::uint32_t kAtracErrorReadsizeOverBuffer = 0x80610311;
@@ -148,4 +148,4 @@ private:
     bool error_seen_ = false;
 };
 
-}  // namespace dal
+}  // namespace tox2

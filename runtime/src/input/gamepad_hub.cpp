@@ -9,7 +9,7 @@
 #include "core/log.h"
 #include "input/gamepad_map.h"
 
-namespace dal {
+namespace tox2 {
 
 GamepadHub::GamepadHub(std::shared_ptr<GamepadBackend> backend, std::shared_ptr<KeyboardPadState> state,
                        GamepadHubOptions options)
@@ -45,10 +45,10 @@ void GamepadHub::refreshDevices() {
         const auto before = uses_.find(info.id);
         if (before == uses_.end() || before->second != chosen.use) {
             if (chosen.steam) {
-                logInfo("dal: pad: gamepad {} {} (steam slot {})", formatGamepadVidPid(info),
+                logInfo("tox2: pad: gamepad {} {} (steam slot {})", formatGamepadVidPid(info),
                         gamepadUseName(chosen.use), chosen.steam->slot);
             } else {
-                logInfo("dal: pad: gamepad {} {}", formatGamepadVidPid(info), gamepadUseName(chosen.use));
+                logInfo("tox2: pad: gamepad {} {}", formatGamepadVidPid(info), gamepadUseName(chosen.use));
             }
         }
         if (chosen.use != GamepadUse::Used) continue;
@@ -82,7 +82,7 @@ void GamepadHub::updateFocus(bool foreground) {
     if (!changed) return;
 
     if (foreground) {
-        logDebug("dal: pad: gamepad input resumed");
+        logDebug("tox2: pad: gamepad input resumed");
         return;
     }
     // Released at once, without the minimum visible time: the game must not see a button that the
@@ -92,7 +92,7 @@ void GamepadHub::updateFocus(bool foreground) {
     published_buttons_ = 0;
     published_analog_ = PadAnalog{};
     forwardRumble(true);
-    logDebug("dal: pad: gamepad input paused (background)");
+    logDebug("tox2: pad: gamepad input paused (background)");
 }
 
 void GamepadHub::publishReadings(KeyboardPadState::Clock::time_point now) {
@@ -139,14 +139,14 @@ void startGamepadHub(GamepadBackendFactory make_backend, std::shared_ptr<Keyboar
     std::thread([make_backend = std::move(make_backend), state = std::move(state), options = std::move(options)] {
         auto backend = make_backend();
         if (!backend || !*backend) {
-            logWarn("dal: pad: gameinput unavailable: {}; gamepads disabled",
+            logWarn("tox2: pad: gameinput unavailable: {}; gamepads disabled",
                     backend ? std::string("no backend") : backend.error());
             return;
         }
         SteamContext steam;
         if (options.detect_steam) steam = options.detect_steam();
-        logInfo("dal: pad: gameinput {}", (*backend)->description());
-        logInfo("dal: pad: steam {}", formatSteamContext(steam));
+        logInfo("tox2: pad: gameinput {}", (*backend)->description());
+        logInfo("tox2: pad: steam {}", formatSteamContext(steam));
         if (options.probe) logSteamVirtualGamepadInfo(steam);
 
         std::optional<GamepadHub> hub;
@@ -169,4 +169,4 @@ void startGamepadHub(GamepadBackendFactory make_backend, std::shared_ptr<Keyboar
     }).detach();
 }
 
-}  // namespace dal
+}  // namespace tox2

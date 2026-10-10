@@ -8,7 +8,7 @@
 #include <array>
 #include <cstdint>
 
-namespace dal {
+namespace tox2 {
 
 inline constexpr std::uint32_t kRsxVpInstructionCount = 544;  // RPCS3 max_vertex_program_instructions
 inline constexpr std::uint32_t kRsxVpConstantCount = 468;     // vec4 slots, RPCS3 `set_transform_constant::impl`
@@ -41,4 +41,4 @@ struct RsxRegisters {
     void contextReset();
 };
 
-}  // namespace dal
+}  // namespace tox2

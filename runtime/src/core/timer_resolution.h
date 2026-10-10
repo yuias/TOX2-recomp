@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <optional>
 
-namespace dal {
+namespace tox2 {
 
 // Windows rounds timed waits up to the system timer tick (~15.6 ms by default), so a guest
 // sys_timer_usleep(1000) would take 15 ms. Holding a 1 ms request for the object's lifetime keeps
@@ -31,4 +31,4 @@ private:
 // report it. It is the finest request of any process, so it can be below what this process asked for.
 std::optional<std::uint32_t> currentTimerPeriodUs();
 
-}  // namespace dal
+}  // namespace tox2

@@ -13,7 +13,7 @@
 
 #include "hle/hle.h"
 
-namespace dal {
+namespace tox2 {
 
 // The order is the bit order: bit i of a PadButtons mask is bit i of button[2] for i < 8 and bit
 // (i - 8) of button[3] for i >= 8, so a mask converts with two shifts.
@@ -70,4 +70,4 @@ PadPortState padStateFromInput(PadButtons buttons, const PadAnalog& analog, PadB
 std::string_view padButtonName(PadButton b);
 std::optional<PadButton> padButtonFromName(std::string_view name);
 
-}  // namespace dal
+}  // namespace tox2

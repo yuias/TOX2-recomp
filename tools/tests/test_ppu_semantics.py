@@ -85,9 +85,9 @@ class GeneratorTest(TempDirTestCase):
         header = (self.tmp / gen.HEADER_NAME).read_text(encoding="utf-8")
         source = (self.tmp / gen.SOURCE_NAME).read_text(encoding="utf-8")
         self.assertEqual(source.count('    { .name = "'), len(cases))
-        self.assertIn("const uint32_t kDalSemanticsCaseCount = %d;" % len(cases), source)
+        self.assertIn("const uint32_t kTox2SemanticsCaseCount = %d;" % len(cases), source)
         for case in cases:
-            self.assertIn("DAL_PPU_FUNC(case_%s);" % case.name, header)
+            self.assertIn("TOX2_PPU_FUNC(case_%s);" % case.name, header)
             self.assertIn("init_%s(" % case.name, source)
             self.assertIn("check_%s(" % case.name, source)
         self.assertNotIn("\r", header + source)
@@ -169,16 +169,16 @@ class GeneratorTest(TempDirTestCase):
                 "ctx->gpr[3] = 0xffffffffffffffffull;",
                 "ctx->fpr[1].u64 = 0x3ff0000000000000ull;",
                 "ctx->fpr[2].u64 = 0x4000000000000000ull;",
-                "ctx->vr[4] = dalVrFromBeWords(0x00000001u, 0x00000002u, 0x00000003u, 0x00000004u);",
-                "dalMtcrf(ctx, 0xffu, 0x20000000u);",
-                "dalSetCrField(ctx, 7, 2u);",
+                "ctx->vr[4] = tox2VrFromBeWords(0x00000001u, 0x00000002u, 0x00000003u, 0x00000004u);",
+                "tox2Mtcrf(ctx, 0xffu, 0x20000000u);",
+                "tox2SetCrField(ctx, 7, 2u);",
                 "ctx->lr = 0x0000000000000100ull;",
                 "ctx->vscr_sat = 1;",
                 "ctx->vrsave = 0x00000005u;",
                 "ctx->fpscr = 0x00000006u;",
                 '"r4", 16, ctx->gpr[4], 0x0000000000000007ull',
                 '"v5", ctx->vr[5], 0x00000000u, 0x00000000u, 0x00000000u, 0x80000000u',
-                '"cr3", 1, dalGetCrField(ctx, 3), 0x8u',
+                '"cr3", 1, tox2GetCrField(ctx, 3), 0x8u',
                 '"xer_ca", 1, ctx->xer_ca, 0x1u',
                 '"ctr", 16, ctx->ctr, 0x0000000000000003ull',
                 "__builtin_memcpy(base + 0x00020000u, (const uint8_t[]){0x01, 0x02}, 2u);",
@@ -187,12 +187,12 @@ class GeneratorTest(TempDirTestCase):
 
     def test_cr_is_applied_before_its_fields(self):
         text = run_case(simple(init={"cr7": 1, "cr": 0}))
-        self.assertLess(text.index("dalMtcrf"), text.index("dalSetCrField(ctx, 7"))
+        self.assertLess(text.index("tox2Mtcrf"), text.index("tox2SetCrField(ctx, 7"))
 
     def test_return_is_appended_after_fall_through(self):
         # `sc` falls through, so a `blr` follows it; `b` does not.
         sc_text = run_case(simple(words=(asm.sc(),)))
-        self.assertIn("DAL_SYSCALL(0x00010000u);\n    return;\n}", sc_text)
+        self.assertIn("TOX2_SYSCALL(0x00010000u);\n    return;\n}", sc_text)
         b_text = run_case(simple(words=(asm.b(CODE_BASE, CODE_BASE + 8), asm.blr(), asm.blr())))
         self.assertIn("goto L_00010008;", b_text)
 
@@ -200,8 +200,8 @@ class GeneratorTest(TempDirTestCase):
         words = (asm.bctr(), asm.bl(CODE_BASE + 4, 0x18000), asm.blr())
         text = run_case(simple(words=words, callees={0x18000: (asm.blr(),)},
                                switch_targets={CODE_BASE: (CODE_BASE + 4,)}))
-        self.assertIn("DAL_PPU_FUNC(case_x_00018000)", text)
-        self.assertIn("DAL_CALL(case_x_00018000, 0x00010008u);", text)
+        self.assertIn("TOX2_PPU_FUNC(case_x_00018000)", text)
+        self.assertIn("TOX2_CALL(case_x_00018000, 0x00010008u);", text)
         self.assertIn("case 0x00010004u: goto L_00010004;", text)
         self.assertIn("{ 0x00018000u, case_x_00018000 },", text)
 

@@ -86,8 +86,8 @@ try {
     $pinFile = Join-Path $repoRoot 'cmake/gameinput.cmake'
     if (-not (Test-Path -LiteralPath $pinFile)) { throw "pin file not found: cmake/gameinput.cmake" }
     $pinText = Get-Content -LiteralPath $pinFile -Raw
-    $version = Read-Pin $pinText 'DAL_GAMEINPUT_VERSION' '[0-9]+\.[0-9]+\.[0-9]+'
-    $expectedHash = (Read-Pin $pinText 'DAL_GAMEINPUT_SHA256' '[0-9A-Fa-f]{64}').ToLowerInvariant()
+    $version = Read-Pin $pinText 'TOX2_GAMEINPUT_VERSION' '[0-9]+\.[0-9]+\.[0-9]+'
+    $expectedHash = (Read-Pin $pinText 'TOX2_GAMEINPUT_SHA256' '[0-9A-Fa-f]{64}').ToLowerInvariant()
     $packageFile = "microsoft.gameinput.$version.nupkg"
 
     $depsDir = Join-Path $repoRoot 'generated/deps/gameinput'

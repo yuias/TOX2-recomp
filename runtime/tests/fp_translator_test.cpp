@@ -35,7 +35,7 @@ int g_failed;
 
 bool contains(const std::string& text, const std::string& part) { return text.find(part) != std::string::npos; }
 
-bool hasReport(const dal::GlslResult& result, const std::string& part) {
+bool hasReport(const tox2::GlslResult& result, const std::string& part) {
     return std::any_of(result.unimplemented.begin(), result.unimplemented.end(),
                        [&](const std::string& entry) { return contains(entry, part); });
 }
@@ -109,20 +109,20 @@ struct Asm {
 std::vector<std::uint32_t> program(const std::vector<Asm>& instructions) {
     std::vector<std::uint32_t> words;
     for (const Asm& in : instructions) {
-        for (const std::uint32_t w : in.words()) words.push_back(dal::fpFixupWord(w));
+        for (const std::uint32_t w : in.words()) words.push_back(tox2::fpFixupWord(w));
         if (in.hasConstant()) words.insert(words.end(), 4, 0);  // the constants live elsewhere
     }
     return words;
 }
 
-dal::GlslResult translate(const std::vector<Asm>& instructions, std::uint32_t control = 0x40,
-                          std::uint32_t texcoord_control = 0) {
+tox2::GlslResult translate(const std::vector<Asm>& instructions, std::uint32_t control = 0x40,
+                           std::uint32_t texcoord_control = 0) {
     const std::vector<std::uint32_t> words = program(instructions);
-    return dal::translateFragmentProgram(words, control, texcoord_control);
+    return tox2::translateFragmentProgram(words, control, texcoord_control);
 }
 
-bool compiles(const dal::GlslResult& result, std::uint64_t key) {
-    auto spirv = dal::compileGlsl(dal::ShaderStage::Fragment, result.glsl, key);
+bool compiles(const tox2::GlslResult& result, std::uint64_t key) {
+    auto spirv = tox2::compileGlsl(tox2::ShaderStage::Fragment, result.glsl, key);
     if (!spirv) std::fprintf(stderr, "%s\n%s\n", spirv.error().c_str(), result.glsl.c_str());
     return spirv.has_value();
 }
@@ -136,9 +136,9 @@ struct Dump {
 
 std::vector<Dump> loadDumps() {
     std::vector<Dump> dumps;
-#ifdef DAL_RSX_DUMP_DIR
+#ifdef TOX2_RSX_DUMP_DIR
     std::error_code ec;
-    for (const auto& entry : std::filesystem::directory_iterator(DAL_RSX_DUMP_DIR, ec)) {
+    for (const auto& entry : std::filesystem::directory_iterator(TOX2_RSX_DUMP_DIR, ec)) {
         const std::string name = entry.path().filename().string();
         if (!name.starts_with("fp_") || entry.path().extension() != ".bin") continue;
         std::ifstream file(entry.path(), std::ios::binary);
@@ -162,7 +162,7 @@ void printHistogram(const std::vector<Dump>& dumps) {
     std::map<std::uint32_t, unsigned> histogram;
     for (const Dump& dump : dumps) {
         for (std::size_t i = 0; i + 4 <= dump.words.size(); i += 4) {
-            const std::uint32_t w0 = dal::fpFixupWord(dump.words[i]), w2 = dal::fpFixupWord(dump.words[i + 2]);
+            const std::uint32_t w0 = tox2::fpFixupWord(dump.words[i]), w2 = tox2::fpFixupWord(dump.words[i + 2]);
             histogram[((w0 >> 24) & 0x3f) | ((w2 >> 31) << 6)]++;
         }
     }
@@ -209,7 +209,7 @@ void testTextProgram() {
     }
     CHECK(found->words.size() == 1424);
 
-    const dal::GlslResult result = dal::translateFragmentProgram(found->words, 0x40, 1);
+    const tox2::GlslResult result = tox2::translateFragmentProgram(found->words, 0x40, 1);
     for (const std::string& entry : result.unimplemented) {
         std::fprintf(stderr, "text program: unimplemented: %s\n", entry.c_str());
     }
@@ -243,8 +243,8 @@ void testDumps() {
     int seen = 0;
     for (const Dump& dump : dumps) {
         if (dump.name.starts_with("fp_c5a1c19123aa52bb")) continue;  // covered by testTextProgram
-        const dal::GlslResult result =
-                dal::translateFragmentProgram(dump.words, controlFor(dump.name), texcoordControlFor(dump.name));
+        const tox2::GlslResult result =
+                tox2::translateFragmentProgram(dump.words, controlFor(dump.name), texcoordControlFor(dump.name));
         CHECK(result.ok);
         CHECK(result.unimplemented.empty());
         for (const std::string& entry : result.unimplemented) {
@@ -264,7 +264,7 @@ void testDumps() {
             printed = true;
         }
     }
-#ifdef DAL_RSX_DUMP_DIR
+#ifdef TOX2_RSX_DUMP_DIR
     CHECK(seen == 3);  // all three known programs must be present once the directory has dumps
 #endif
 }
@@ -297,7 +297,7 @@ void testTextureOnly() {
     tex.dest_half = true;
     tex.input = 4;  // TEX0
     tex.end = true;
-    const dal::GlslResult result = translate({tex}, 0);
+    const tox2::GlslResult result = translate({tex}, 0);
     CHECK(result.ok);
     CHECK(contains(result.glsl, "  h_0 = texture(tex0, var_tex0.xy * draw.texture_scale[0].xy);\n"));
     CHECK(contains(result.glsl, "layout(location = 0) in vec4 var_tex0;"));
@@ -313,7 +313,7 @@ void testTextureOnly() {
     txp.input = 7;
     txp.src0 = inputSrc("xyzw");
     txp.end = true;
-    const dal::GlslResult projective = translate({txp});
+    const tox2::GlslResult projective = translate({txp});
     CHECK(projective.ok);
     CHECK(contains(projective.glsl, "texture(tex5, (var_tex3.xy / var_tex3.w) * draw.texture_scale[5].xy)"));
     CHECK(projective.texture_units == 1u << 5);
@@ -321,7 +321,7 @@ void testTextureOnly() {
 
     // The texture expand bit is not implemented.
     txp.bx2 = true;
-    const dal::GlslResult expand = translate({txp});
+    const tox2::GlslResult expand = translate({txp});
     CHECK(!expand.ok && hasReport(expand, "texture expand"));
 }
 
@@ -340,7 +340,7 @@ void testConstants() {
     out.op = 1;
     out.src0 = temp(1);
     out.end = true;
-    const dal::GlslResult result = translate({first, second, out});
+    const tox2::GlslResult result = translate({first, second, out});
     CHECK(result.ok);
     CHECK(contains(result.glsl, "vec4 fc[2];"));
     CHECK(contains(result.glsl, "  r_0 = fc[0].wzyx * fc[0];\n"));
@@ -366,7 +366,7 @@ void testOperations() {
     tex.input = 4;
     instructions.push_back(tex);
     instructions.back().end = true;
-    const dal::GlslResult result = translate(instructions);
+    const tox2::GlslResult result = translate(instructions);
     CHECK(result.ok);
     CHECK(contains(result.glsl, "  r_2 = in_col0 + h_1;\n"));
     CHECK(contains(result.glsl, "  r_2 = fma(in_col0, h_1, r_2);\n"));
@@ -399,7 +399,7 @@ void testCompareAndRounding() {
         in.src0 = inputSrc();
         in.src1 = temp(1, true);
         in.end = true;
-        const dal::GlslResult result = translate({in});
+        const tox2::GlslResult result = translate({in});
         CHECK(result.ok);
         CHECK(contains(result.glsl, test.expected));
         CHECK(compiles(result, key++));
@@ -413,7 +413,7 @@ void testCompareAndRounding() {
     masked.src0 = inputSrc("yyyy");
     masked.src1 = temp(1);
     masked.end = true;
-    const dal::GlslResult result = translate({masked});
+    const tox2::GlslResult result = translate({masked});
     CHECK(result.ok);
     CHECK(contains(result.glsl, "  r_0.y = (vec4(greaterThanEqual(in_col0.yyyy, r_1)) * 2.0).y;\n"));
 }
@@ -435,7 +435,7 @@ void testConditionalExecution() {
         mov.cond_swizzle = "yyyy";
         mov.cc_read = 1;
         mov.end = true;
-        const dal::GlslResult result = translate({mov});
+        const tox2::GlslResult result = translate({mov});
         CHECK(result.ok);
         CHECK(contains(result.glsl,
                        std::string("  r_0 = mix(r_0, in_col0, ") + entry.compare + "(cc1.yyyy, vec4(0.0)));\n"));
@@ -451,7 +451,7 @@ void testConditionalExecution() {
     lanes.cond = 1;
     lanes.cond_swizzle = "wzyx";
     lanes.end = true;
-    dal::GlslResult result = translate({lanes});
+    tox2::GlslResult result = translate({lanes});
     CHECK(result.ok);
     CHECK(contains(result.glsl, "  r_0.xz = mix(r_0.xz, (in_col0 * r_0).xz, lessThan(cc0.wzyx, vec4(0.0)).xz);\n"));
     CHECK(contains(result.glsl, "  vec4 cc0 = vec4(0.0);\n") && !contains(result.glsl, "cc1"));
@@ -493,7 +493,7 @@ void testSetCondition() {
     use.cc_read = 1;
     use.cond_swizzle = "xxxx";
     use.end = true;
-    dal::GlslResult result = translate({no_dest, use});
+    tox2::GlslResult result = translate({no_dest, use});
     CHECK(result.ok);
     CHECK(contains(result.glsl, "  cc1.xy = (fp_clamp(in_col0 * r_0, -2.0, 2.0)).xy;\n"));
     CHECK(contains(result.glsl, "  r_0 = mix(r_0, in_col0, lessThan(cc1.xxxx, vec4(0.0)));\n"));
@@ -557,7 +557,7 @@ void testModifiers() {
     mul.src1 = temp(1, false, "yyyy");
     mul.src1.precision = 2;
     mul.end = true;
-    const dal::GlslResult result = translate({mul});
+    const tox2::GlslResult result = translate({mul});
     CHECK(result.ok);
     CHECK(contains(result.glsl,
                    "  r_0.xyz = (fp_clamp(fp_clamp((-abs(fp_clamp(in_col0, 0.0, 1.0)) * "
@@ -572,7 +572,7 @@ void testModifiers() {
     half.src0 = inputSrc();
     half.src0.precision = 1;
     half.end = true;
-    const dal::GlslResult half_result = translate({half});
+    const tox2::GlslResult half_result = translate({half});
     CHECK(half_result.ok);
     CHECK(contains(half_result.glsl, "  r_0 = fp_half(fp_half(in_col0) * 0.5);\n"));
     CHECK(compiles(half_result, 0xf0f6));
@@ -591,7 +591,7 @@ void testInputsAndEpilogue() {
     tex_coord.input = 5;  // TEX1
     tex_coord.src0 = inputSrc();
     tex_coord.end = true;
-    const dal::GlslResult result = translate({add, tex_coord}, 0, 1u << 1);
+    const tox2::GlslResult result = translate({add, tex_coord}, 0, 1u << 1);
     CHECK(result.ok);
     CHECK(contains(result.glsl,
                    "vec4 in_col1 = clamp((draw.flags & 1u) != 0u && !gl_FrontFacing ? "
@@ -610,14 +610,14 @@ void testInputsAndEpilogue() {
     Asm nop;
     nop.op = 0;
     nop.end = true;
-    const dal::GlslResult full = translate({nop}, 0x40);
+    const tox2::GlslResult full = translate({nop}, 0x40);
     CHECK(full.ok && contains(full.glsl, "vec4 r_0 = vec4(0.0);") && contains(full.glsl, "out_color0 = r_0;"));
     CHECK(compiles(full, 0xf0f8));
-    const dal::GlslResult halves = translate({nop}, 0);
+    const tox2::GlslResult halves = translate({nop}, 0);
     CHECK(halves.ok && contains(halves.glsl, "vec4 h_0 = vec4(0.0);") && contains(halves.glsl, "out_color0 = h_0;"));
 
     // Depth export reads R1.z.
-    const dal::GlslResult depth = translate({nop}, 0x40 | 0x2);
+    const tox2::GlslResult depth = translate({nop}, 0x40 | 0x2);
     CHECK(depth.ok && contains(depth.glsl, "gl_FragDepth = fp_clamp(r_1, 0.0, 1.0).z;"));
     CHECK(compiles(depth, 0xf0f9));
 }
@@ -626,7 +626,7 @@ void testUnimplementedReports() {
     Asm unknown;
     unknown.op = 0x3f;
     unknown.end = true;
-    dal::GlslResult result = translate({unknown});
+    tox2::GlslResult result = translate({unknown});
     CHECK(!result.ok && result.glsl.empty());
     CHECK(hasReport(result, "fp opcode 0x3f"));
 
@@ -696,20 +696,20 @@ void testUnimplementedReports() {
     result = translate({never, nop});
     CHECK(result.ok && !contains(result.glsl, "fc["));
 
-    result = dal::translateFragmentProgram({}, 0x40, 0);
+    result = tox2::translateFragmentProgram({}, 0x40, 0);
     CHECK(!result.ok);
 }
 
 void testLayout() {
-    CHECK(dal::kFpDrawBlockOffset == 64);
-    CHECK(dal::fpFixupWord(0x9e811700u) == 0x17009e81u);
-    const dal::GlslResult result = translate({});
+    CHECK(tox2::kFpDrawBlockOffset == 64);
+    CHECK(tox2::fpFixupWord(0x9e811700u) == 0x17009e81u);
+    const tox2::GlslResult result = translate({});
     CHECK(!result.ok);
 
     Asm nop;
     nop.op = 0;
     nop.end = true;
-    const dal::GlslResult ok = translate({nop});
+    const tox2::GlslResult ok = translate({nop});
     CHECK(contains(ok.glsl, "layout(std140, set = 0, binding = 2) uniform FpDraw {\n  vec4 vertex_part[4];\n"));
 }
 

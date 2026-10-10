@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-namespace dal {
+namespace tox2 {
 
 // The values equal the cellPamf stream-type numbers of the codec-specific selectors.
 enum class PamfCodec : std::uint8_t { Avc = 0, M2v = 1, Atrac3plus = 2, Lpcm = 3, Ac3 = 4, UserData = 5 };
@@ -69,4 +69,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace dal
+}  // namespace tox2

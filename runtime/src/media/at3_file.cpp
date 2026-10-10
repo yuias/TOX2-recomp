@@ -10,7 +10,7 @@
 
 #include "media/atrac_decoder.h"
 
-namespace dal {
+namespace tox2 {
 
 namespace {
 
@@ -140,4 +140,4 @@ void setAtracDecoderFactory(std::unique_ptr<AtracDecoderFactory> factory) { g_fa
 
 AtracDecoderFactory* atracDecoderFactory() { return g_factory.get(); }
 
-}  // namespace dal
+}  // namespace tox2

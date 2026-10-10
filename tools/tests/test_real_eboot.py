@@ -13,8 +13,8 @@ from ps3recomp.elf import ElfFile
 from ps3recomp.ppu import decode_range
 from ps3recomp.ppu_flow import CodeImage
 
-_ELF_PATH = os.environ.get("DAL_EBOOT_ELF")
-_GHIDRA_JSON = os.environ.get("DAL_GHIDRA_JSON")
+_ELF_PATH = os.environ.get("TOX2_EBOOT_ELF")
+_GHIDRA_JSON = os.environ.get("TOX2_GHIDRA_JSON")
 _COMMITTED_SUMMARY = ghidra_summary.REPO_ROOT / "config" / "ghidra_summary.json"
 
 _IMPORT_COUNTS = [
@@ -35,7 +35,7 @@ _VERIFIED_NAMES = [
 
 
 @unittest.skipUnless(_ELF_PATH and Path(_ELF_PATH).is_file(),
-                     "DAL_EBOOT_ELF is not set or does not name an existing file")
+                     "TOX2_EBOOT_ELF is not set or does not name an existing file")
 class RealEbootInfoTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -109,7 +109,7 @@ class RealEbootInfoTest(unittest.TestCase):
 
 
 @unittest.skipUnless(_ELF_PATH and Path(_ELF_PATH).is_file(),
-                     "DAL_EBOOT_ELF is not set or does not name an existing file")
+                     "TOX2_EBOOT_ELF is not set or does not name an existing file")
 class RealEbootProbeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -143,7 +143,7 @@ class RealEbootProbeTest(unittest.TestCase):
 
 
 @unittest.skipUnless(_ELF_PATH and Path(_ELF_PATH).is_file(),
-                     "DAL_EBOOT_ELF is not set or does not name an existing file")
+                     "TOX2_EBOOT_ELF is not set or does not name an existing file")
 class RealEbootDisasmTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -214,7 +214,7 @@ class RealEbootDisasmTest(unittest.TestCase):
 
 @unittest.skipUnless(_ELF_PATH and Path(_ELF_PATH).is_file()
                      and _GHIDRA_JSON and Path(_GHIDRA_JSON).is_file(),
-                     "DAL_EBOOT_ELF and DAL_GHIDRA_JSON must name existing files")
+                     "TOX2_EBOOT_ELF and TOX2_GHIDRA_JSON must name existing files")
 class RealGhidraDiffTest(unittest.TestCase):
     def test_no_decoder_bug_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -253,7 +253,7 @@ class RealGhidraDiffTest(unittest.TestCase):
 
 @unittest.skipUnless(_ELF_PATH and Path(_ELF_PATH).is_file()
                      and _GHIDRA_JSON and Path(_GHIDRA_JSON).is_file(),
-                     "DAL_EBOOT_ELF and DAL_GHIDRA_JSON must name existing files")
+                     "TOX2_EBOOT_ELF and TOX2_GHIDRA_JSON must name existing files")
 class RealGhidraSummaryTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -289,7 +289,7 @@ class RealGhidraSummaryTest(unittest.TestCase):
 
 
 @unittest.skipUnless(_ELF_PATH and Path(_ELF_PATH).is_file() and _COMMITTED_SUMMARY.is_file(),
-                     "DAL_EBOOT_ELF and config/ghidra_summary.json are required")
+                     "TOX2_EBOOT_ELF and config/ghidra_summary.json are required")
 class RealSeedsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -327,7 +327,7 @@ class RealSeedsTest(unittest.TestCase):
 
 
 @unittest.skipUnless(_ELF_PATH and Path(_ELF_PATH).is_file(),
-                     "DAL_EBOOT_ELF is not set or does not name an existing file")
+                     "TOX2_EBOOT_ELF is not set or does not name an existing file")
 class RealJumpTableTest(unittest.TestCase):
     # bctr site -> entry count (all rel32 tables placed right after the branch).
     EXPECTED_COUNTS = {
@@ -394,7 +394,7 @@ def _recover_result():
 
 
 @unittest.skipUnless(_ELF_PATH and Path(_ELF_PATH).is_file() and _COMMITTED_SUMMARY.is_file(),
-                     "DAL_EBOOT_ELF and config/ghidra_summary.json are required")
+                     "TOX2_EBOOT_ELF and config/ghidra_summary.json are required")
 class RealRecoverTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -451,7 +451,7 @@ class RealRecoverTest(unittest.TestCase):
 
 
 @unittest.skipUnless(_ELF_PATH and Path(_ELF_PATH).is_file() and _COMMITTED_SUMMARY.is_file(),
-                     "DAL_EBOOT_ELF and config/ghidra_summary.json are required")
+                     "TOX2_EBOOT_ELF and config/ghidra_summary.json are required")
 class RealCoverageTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -489,7 +489,7 @@ class RealCoverageTest(unittest.TestCase):
 
 
 @unittest.skipUnless(_ELF_PATH and Path(_ELF_PATH).is_file() and _COMMITTED_SUMMARY.is_file(),
-                     "DAL_EBOOT_ELF and config/ghidra_summary.json are required")
+                     "TOX2_EBOOT_ELF and config/ghidra_summary.json are required")
 class RealSyscallCfgTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -527,7 +527,7 @@ def _emit_census_result():
 
 
 @unittest.skipUnless(_ELF_PATH and Path(_ELF_PATH).is_file(),
-                     "DAL_EBOOT_ELF is not set or does not name an existing file")
+                     "TOX2_EBOOT_ELF is not set or does not name an existing file")
 class RealEmitCensusTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -572,7 +572,7 @@ def _emit_result():
 
 
 @unittest.skipUnless(_ELF_PATH and Path(_ELF_PATH).is_file(),
-                     "DAL_EBOOT_ELF is not set or does not name an existing file")
+                     "TOX2_EBOOT_ELF is not set or does not name an existing file")
 class RealEmitTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -612,7 +612,7 @@ class RealEmitTest(unittest.TestCase):
 
 
 @unittest.skipUnless(_ELF_PATH and Path(_ELF_PATH).is_file(),
-                     "DAL_EBOOT_ELF is not set or does not name an existing file")
+                     "TOX2_EBOOT_ELF is not set or does not name an existing file")
 class RealEbootNidTest(unittest.TestCase):
     _VERIFIED = _VERIFIED_NAMES
 

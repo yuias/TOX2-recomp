@@ -1,4 +1,4 @@
-// dal_game: loads the decrypted EBOOT.elf and runs it through the generated PPU code.
+// tox2_game: loads the decrypted EBOOT.elf and runs it through the generated PPU code.
 
 #include <atomic>
 #include <charconv>
@@ -30,7 +30,7 @@
 #include "core/param_sfo.h"
 #include "core/threads.h"
 #include "core/timer_resolution.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/cell_audio_ports.h"
 #include "hle/hle.h"
 #include "input/gameinput_backend.h"
@@ -63,10 +63,10 @@ struct Options {
     std::string pad_script;
     std::string audio;  // --audio as given; empty until the defaults are settled after all arguments
     std::string audio_dump;
-    std::vector<dal::PadScriptEvent> pad_script_events;
+    std::vector<tox2::PadScriptEvent> pad_script_events;
     // The host pad state, set for every --pad that reads host input (keyboard, gamepad, both). The
     // window thread, the script thread and the gamepad thread each write their own source of it.
-    std::shared_ptr<dal::KeyboardPadState> keyboard;
+    std::shared_ptr<tox2::KeyboardPadState> keyboard;
     unsigned seconds = 0;
     bool strict = false;
     bool quiet_hle = false;
@@ -89,14 +89,14 @@ bool padUsesGamepad(std::string_view pad) { return pad == "gamepad" || pad == "k
 
 // The Vulkan device and the renderer for the RSX thread. Built and destroyed on that thread; the
 // counters are published for the census, which reads them from another one.
-class VulkanExecutor final : public dal::RsxExecutor {
+class VulkanExecutor final : public tox2::RsxExecutor {
 public:
     // `presenter` may be null (no window).
-    VulkanExecutor(std::unique_ptr<dal::VkContext> context, std::unique_ptr<dal::Presenter> presenter,
-                   const dal::RenderOptions& options)
+    VulkanExecutor(std::unique_ptr<tox2::VkContext> context, std::unique_ptr<tox2::Presenter> presenter,
+                   const tox2::RenderOptions& options)
         : context_(std::move(context)),
           presenter_(std::move(presenter)),
-          renderer_(std::make_unique<dal::RsxRenderer>(*context_, options)) {
+          renderer_(std::make_unique<tox2::RsxRenderer>(*context_, options)) {
         renderer_->setPresenter(presenter_.get());
     }
 
@@ -109,30 +109,30 @@ public:
 
     bool valid() const { return renderer_->valid(); }
     const std::string& error() const { return renderer_->error(); }
-    const dal::VkContext& context() const { return *context_; }
+    const tox2::VkContext& context() const { return *context_; }
 
-    void execute(std::span<dal::RsxCommand> commands) override {
+    void execute(std::span<tox2::RsxCommand> commands) override {
         if (!renderer_->valid()) return;
         renderer_->execute(commands);
-        const dal::RendererStats& stats = renderer_->stats();
+        const tox2::RendererStats& stats = renderer_->stats();
         draws_.store(stats.draws, std::memory_order_relaxed);
         skipped_.store(stats.draws_skipped, std::memory_order_relaxed);
         clears_.store(stats.clears, std::memory_order_relaxed);
         flips_.store(stats.flips, std::memory_order_relaxed);
         if (!renderer_->valid()) {
             failed_.store(true, std::memory_order_relaxed);
-            dal::logError("dal: render: renderer stopped: {}", renderer_->error());
+            tox2::logError("tox2: render: renderer stopped: {}", renderer_->error());
         }
     }
 
-    dal::RsxRenderCounts counts() const override {
-        dal::RsxRenderCounts counts;
+    tox2::RsxRenderCounts counts() const override {
+        tox2::RsxRenderCounts counts;
         counts.draws = draws_.load(std::memory_order_relaxed);
         counts.draws_skipped = skipped_.load(std::memory_order_relaxed);
         counts.clears = clears_.load(std::memory_order_relaxed);
         counts.flips = flips_.load(std::memory_order_relaxed);
         // The dump worker keeps its own atomic counters, so these are current without the RSX thread's help.
-        const dal::DumpCounts dumps = renderer_->dumpCounts();
+        const tox2::DumpCounts dumps = renderer_->dumpCounts();
         counts.frames_dumped = dumps.written;
         counts.dumps_skipped = dumps.skipped;
         counts.dumps_failed = dumps.failed;
@@ -145,55 +145,57 @@ public:
     std::uint64_t flushOutput(std::chrono::milliseconds timeout) override { return renderer_->flushDumps(timeout); }
 
 private:
-    std::unique_ptr<dal::VkContext> context_;
-    std::unique_ptr<dal::Presenter> presenter_;
-    std::unique_ptr<dal::RsxRenderer> renderer_;
+    std::unique_ptr<tox2::VkContext> context_;
+    std::unique_ptr<tox2::Presenter> presenter_;
+    std::unique_ptr<tox2::RsxRenderer> renderer_;
     std::atomic<std::uint64_t> draws_{0}, skipped_{0}, clears_{0}, flips_{0};
     std::atomic<bool> failed_{false};
 };
 
 // Runs on the RSX thread; a null result makes the consumer continue without rendering.
-std::unique_ptr<dal::RsxExecutor> createVulkanExecutor(const Options& opt, std::string& error) {
+std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const Options& opt, std::string& error) {
     const auto start = std::chrono::steady_clock::now();
-    dal::VkContextOptions context_options;
+    tox2::VkContextOptions context_options;
     context_options.validation = opt.vk_validation;
     context_options.window = opt.window;
-    std::unique_ptr<dal::VkContext> context = dal::createVkContext(context_options, error);
+    std::unique_ptr<tox2::VkContext> context = tox2::createVkContext(context_options, error);
     if (!context) return nullptr;
     const std::uint32_t api = context->deviceProperties().apiVersion;
-    dal::logInfo("dal: render: vulkan device {} (api {}.{}.{}, d24s8 {})", context->deviceName(),
-                 VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api), VK_API_VERSION_PATCH(api),
-                 context->hasD24S8() ? "yes" : "no");
+    tox2::logInfo("tox2: render: vulkan device {} (api {}.{}.{}, d24s8 {})", context->deviceName(),
+                  VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api), VK_API_VERSION_PATCH(api),
+                  context->hasD24S8() ? "yes" : "no");
     if (opt.vk_validation && !context->validationEnabled()) {
-        dal::logWarn("dal: render: validation layer requested but not installed");
+        tox2::logWarn("tox2: render: validation layer requested but not installed");
     }
 
-    dal::RenderOptions render_options;
+    tox2::RenderOptions render_options;
     render_options.dump_dir = opt.dump_frames;
     render_options.dump_every = opt.dump_frames_every;
     render_options.shader_cache = opt.shader_cache.empty() ? std::filesystem::path("generated") / "shader_cache"
                                                            : std::filesystem::path(opt.shader_cache);
-    std::unique_ptr<dal::Presenter> presenter;
+    std::unique_ptr<tox2::Presenter> presenter;
     if (opt.window) {
-        dal::PresenterOptions presenter_options;
-        presenter_options.frame_slots = dal::RsxRenderer::kFramesInFlight;
-        presenter_options.on_close = [] { dal::stopProcess(dal::ExitCode::ProcessExit, "dal: stop: window closed"); };
+        tox2::PresenterOptions presenter_options;
+        presenter_options.frame_slots = tox2::RsxRenderer::kFramesInFlight;
+        presenter_options.on_close = [] {
+            tox2::stopProcess(tox2::ExitCode::ProcessExit, "tox2: stop: window closed");
+        };
         if (opt.keyboard && padUsesKeyboard(opt.pad)) {
             // These run on the window thread; the state is lock-free, so the guest never waits on it.
             // Focus loss releases the keyboard source only: the gamepad thread is the sole writer of its own.
-            presenter_options.on_key = [keyboard = opt.keyboard](const dal::KeyMessage& key) {
-                keyboard->keyEvent(key.scan_code, key.down, key.repeat, dal::KeyboardPadState::Clock::now());
+            presenter_options.on_key = [keyboard = opt.keyboard](const tox2::KeyMessage& key) {
+                keyboard->keyEvent(key.scan_code, key.down, key.repeat, tox2::KeyboardPadState::Clock::now());
                 if (key.repeat) return;
-                if (const std::optional<dal::PadButton> button = dal::padButtonForScanCode(key.scan_code)) {
-                    dal::logDebug("dal: pad: key {:#x} {} -> {}", key.scan_code, key.down ? "down" : "up",
-                                  dal::padButtonName(*button));
+                if (const std::optional<tox2::PadButton> button = tox2::padButtonForScanCode(key.scan_code)) {
+                    tox2::logDebug("tox2: pad: key {:#x} {} -> {}", key.scan_code, key.down ? "down" : "up",
+                                   tox2::padButtonName(*button));
                 }
             };
             presenter_options.on_focus_lost = [keyboard = opt.keyboard] {
-                keyboard->releaseAll(dal::InputSource::Keyboard);
+                keyboard->releaseAll(tox2::InputSource::Keyboard);
             };
         }
-        presenter = dal::Presenter::create(*context, std::move(presenter_options), error);
+        presenter = tox2::Presenter::create(*context, std::move(presenter_options), error);
         if (!presenter) {
             error = "window: " + error;
             return nullptr;
@@ -206,10 +208,10 @@ std::unique_ptr<dal::RsxExecutor> createVulkanExecutor(const Options& opt, std::
     }
     const auto init_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-    dal::logInfo("dal: render: device and renderer ready in {} ms", init_ms);
+    tox2::logInfo("tox2: render: device and renderer ready in {} ms", init_ms);
     if (!render_options.dump_dir.empty()) {
-        dal::logInfo("dal: render: dumping every {} flip(s) to {}", render_options.dump_every,
-                     render_options.dump_dir.generic_string());
+        tox2::logInfo("tox2: render: dumping every {} flip(s) to {}", render_options.dump_every,
+                      render_options.dump_dir.generic_string());
     }
     return executor;
 }
@@ -231,7 +233,7 @@ bool parseFrameList(std::string_view list, std::vector<std::uint32_t>& frames) {
 
 void printUsage() {
     std::fputs(
-            "usage: dal_game [--game-dir DIR] [--vfs-config FILE] (at least one) [--elf PATH]\n"
+            "usage: tox2_game [--game-dir DIR] [--vfs-config FILE] (at least one) [--elf PATH]\n"
             "                [--seconds N] [--strict] [--log FILE] [--hdd-dir DIR] [--sdata-cache DIR]\n"
             "                [--log-level trace|debug|info|warn|error]\n"
             "                [--quiet-hle] [--load-only] [--png-dump DIR]\n"
@@ -243,12 +245,12 @@ void printUsage() {
             stderr);
 }
 
-std::optional<dal::LogLevel> parseLogLevel(std::string_view name) {
-    if (name == "trace") return dal::LogLevel::Trace;
-    if (name == "debug") return dal::LogLevel::Debug;
-    if (name == "info") return dal::LogLevel::Info;
-    if (name == "warn") return dal::LogLevel::Warn;
-    if (name == "error") return dal::LogLevel::Error;
+std::optional<tox2::LogLevel> parseLogLevel(std::string_view name) {
+    if (name == "trace") return tox2::LogLevel::Trace;
+    if (name == "debug") return tox2::LogLevel::Debug;
+    if (name == "info") return tox2::LogLevel::Info;
+    if (name == "warn") return tox2::LogLevel::Warn;
+    if (name == "error") return tox2::LogLevel::Error;
     return std::nullopt;
 }
 
@@ -288,16 +290,16 @@ bool parseArgs(int argc, char** argv, Options& opt) {
         } else if (arg == "--log-level") {
             std::string name;
             if (!value(name)) return false;
-            const std::optional<dal::LogLevel> level = parseLogLevel(name);
+            const std::optional<tox2::LogLevel> level = parseLogLevel(name);
             if (!level) {
                 std::fprintf(stderr, "error: --log-level needs trace, debug, info, warn or error\n");
                 return false;
             }
             // Applied here so that nothing later in startup logs at the wrong level.
-            dal::setLogLevel(*level);
+            tox2::setLogLevel(*level);
         } else if (arg == "--dialog-answer") {
             if (!value(opt.dialog_answer)) return false;
-            if (!dal::setDialogAnswer(opt.dialog_answer)) {
+            if (!tox2::setDialogAnswer(opt.dialog_answer)) {
                 std::fprintf(stderr, "error: --dialog-answer needs yes, no or ok\n");
                 return false;
             }
@@ -312,7 +314,7 @@ bool parseArgs(int argc, char** argv, Options& opt) {
             opt.pad = name;
         } else if (arg == "--pad-script") {
             if (!value(opt.pad_script)) return false;
-            auto events = dal::loadPadScript(std::filesystem::path(opt.pad_script));
+            auto events = tox2::loadPadScript(std::filesystem::path(opt.pad_script));
             if (!events) {
                 std::fprintf(stderr, "error: --pad-script %s: %s\n", opt.pad_script.c_str(), events.error().c_str());
                 return false;
@@ -418,7 +420,7 @@ bool parseArgs(int argc, char** argv, Options& opt) {
     if (!opt.audio_dump.empty()) {
         // The engine creates the file again on its own thread; creating it here makes a bad path a
         // usage error instead of a warning in the middle of a run.
-        const auto probe = dal::WavWriter::create(opt.audio_dump, dal::kAudioSampleRate, dal::kAudioOutputChannels);
+        const auto probe = tox2::WavWriter::create(opt.audio_dump, tox2::kAudioSampleRate, tox2::kAudioOutputChannels);
         if (!probe) {
             std::fprintf(stderr, "error: --audio-dump %s: %s\n", opt.audio_dump.c_str(), probe.error().c_str());
             return false;
@@ -431,59 +433,59 @@ bool parseArgs(int argc, char** argv, Options& opt) {
 // and every movie plays as black frames and silence for its duration.
 void installMovieCodecs() {
     std::string error;
-    std::unique_ptr<dal::MediaCodecFactory> factory = dal::createFfmpegCodecFactory(error);
+    std::unique_ptr<tox2::MediaCodecFactory> factory = tox2::createFfmpegCodecFactory(error);
     if (!factory) {
-        dal::logWarn("dal: sail: codecs unavailable: {}", error);
+        tox2::logWarn("tox2: sail: codecs unavailable: {}", error);
         return;
     }
-    dal::setMediaCodecFactory(std::move(factory));
+    tox2::setMediaCodecFactory(std::move(factory));
 }
 
 // cellAtrac sounds decode through the same DLLs. Without them every sound plays as silence of its
 // own length and the stream protocol is unchanged.
 void installAtracDecoder() {
     std::string error;
-    std::unique_ptr<dal::AtracDecoderFactory> factory = dal::createFfmpegAtracDecoderFactory(error);
+    std::unique_ptr<tox2::AtracDecoderFactory> factory = tox2::createFfmpegAtracDecoderFactory(error);
     if (!factory) {
-        dal::logWarn("dal: atrac: no decoder: {}", error);
+        tox2::logWarn("tox2: atrac: no decoder: {}", error);
         return;
     }
-    dal::setAtracDecoderFactory(std::move(factory));
+    tox2::setAtracDecoderFactory(std::move(factory));
 }
 
 // Video and audio out report what the game's PARAM.SFO allows. A missing or broken file keeps the
 // defaults of gameParamSfo().
 void loadGameParamSfo() {
     bool read_only = false;
-    const auto sfo_path = dal::resolveGuestPath("/dev_bdvd/PS3_GAME/PARAM.SFO", read_only);
+    const auto sfo_path = tox2::resolveGuestPath("/dev_bdvd/PS3_GAME/PARAM.SFO", read_only);
     if (!sfo_path) {
-        dal::logWarn("dal: sfo: /dev_bdvd is not mounted; using the defaults");
+        tox2::logWarn("tox2: sfo: /dev_bdvd is not mounted; using the defaults");
         return;
     }
-    auto sfo = dal::readParamSfoFile(*sfo_path);
+    auto sfo = tox2::readParamSfoFile(*sfo_path);
     if (!sfo) {
-        dal::logWarn("dal: sfo: {}; using the defaults", sfo.error());
+        tox2::logWarn("tox2: sfo: {}; using the defaults", sfo.error());
         return;
     }
     const auto title_id = sfo->strings.find("TITLE_ID");
     const auto resolution = sfo->ints.find("RESOLUTION");
     const auto sound_format = sfo->ints.find("SOUND_FORMAT");
-    dal::logInfo("dal: sfo: TITLE_ID {} RESOLUTION {:#x} SOUND_FORMAT {:#x}",
-                 title_id == sfo->strings.end() ? "?" : title_id->second,
-                 resolution == sfo->ints.end() ? 0x1u : resolution->second,
-                 sound_format == sfo->ints.end() ? 0x1u : sound_format->second);
-    dal::setGameParamSfo(std::move(*sfo));
+    tox2::logInfo("tox2: sfo: TITLE_ID {} RESOLUTION {:#x} SOUND_FORMAT {:#x}",
+                  title_id == sfo->strings.end() ? "?" : title_id->second,
+                  resolution == sfo->ints.end() ? 0x1u : resolution->second,
+                  sound_format == sfo->ints.end() ? 0x1u : sound_format->second);
+    tox2::setGameParamSfo(std::move(*sfo));
 }
 
 // The census is printed on every stop path and the process then ends without running destructors,
 // so this is also where an --audio-dump file gets its final header.
 std::vector<std::string> audioCensusLines() {
-    const dal::AudioEngineStats engine = dal::audioEngineStats();
-    dal::finishAudioDump();
+    const tox2::AudioEngineStats engine = tox2::audioEngineStats();
+    tox2::finishAudioDump();
 
     std::vector<std::string> lines;
     if (!engine.output.empty()) {  // otherwise cellAudioInit never ran
-        const dal::CellAudioStats ports = dal::cellAudioPorts().stats();
+        const tox2::CellAudioStats ports = tox2::cellAudioPorts().stats();
         lines.push_back(std::format(
                 "audio {}: {} blocks ({} non-silent), skipped {}, dropped {}, underrun {} frames, notify {} sent {} failed, "
                 "max producer {:.2f} ms, clock {:+.0f} ppm",
@@ -499,7 +501,7 @@ std::vector<std::string> audioCensusLines() {
                 std::format("audio input: {} periods, non-zero samples per channel {}", ports.periods, channels));
     }
 
-    const dal::CellAtracStats atrac = dal::cellAtracStats();
+    const tox2::CellAtracStats atrac = tox2::cellAtracStats();
     if (atrac.decoders != 0) {
         lines.push_back(
                 std::format("atrac {} decoders, {} frames decoded ({} non-silent), {} errors, {} without decoder",
@@ -509,35 +511,35 @@ std::vector<std::string> audioCensusLines() {
 }
 
 void configureAudio(const Options& opt) {
-    dal::AudioEngineConfig config;
+    tox2::AudioEngineConfig config;
     // Only the wasapi choice builds a device output, so a run without it never touches COM.
-    if (opt.audio == "wasapi") config.make_output = [] { return dal::makeWasapiOutput(); };
+    if (opt.audio == "wasapi") config.make_output = [] { return tox2::makeWasapiOutput(); };
     config.dump = opt.audio_dump;
-    dal::configureAudioEngine(std::move(config));
-    dal::setAudioCensusProvider(&audioCensusLines);
+    tox2::configureAudioEngine(std::move(config));
+    tox2::setAudioCensusProvider(&audioCensusLines);
 }
 
-// dal_game lives in build/<preset>/bin, and the build writes the .sdat cache next to that
-// directory, so a plain run finds it without --sdata-cache. The hdd directory defaults to the same
-// place so that game data and saves persist between runs without --hdd-dir. Both apply only when
-// neither the command line nor the VFS configuration chose one.
-void applyBuildDirDefaults(dal::VfsLayout& layout) {
-    const std::filesystem::path exe_dir = dal::executableDirectory();
+// tox2_game lives in build/<preset>/bin; a decrypted sdata cache placed next to that directory is
+// found without --sdata-cache. The hdd directory defaults to the same place so that game data and
+// saves persist between runs without --hdd-dir. Both apply only when neither the command line nor
+// the VFS configuration chose one.
+void applyBuildDirDefaults(tox2::VfsLayout& layout) {
+    const std::filesystem::path exe_dir = tox2::executableDirectory();
     if (exe_dir.empty()) return;
     const std::filesystem::path build_dir = exe_dir.parent_path();
     std::error_code ec;
     if (!layout.sdata_cache) {
         const std::filesystem::path cache = build_dir / "sdata_cache";
         if (std::filesystem::is_directory(cache, ec)) {
-            dal::logInfo("dal: vfs: sdata cache {} (default)", cache.generic_string());
+            tox2::logInfo("tox2: vfs: sdata cache {} (default)", cache.generic_string());
             layout.sdata_cache = cache;
         }
     }
-    if (std::ranges::find(layout.mounts, "dev_hdd0", &dal::VfsMount::name) == layout.mounts.end()) {
+    if (std::ranges::find(layout.mounts, "dev_hdd0", &tox2::VfsMount::name) == layout.mounts.end()) {
         const std::filesystem::path hdd = build_dir / "hdd";
-        dal::logInfo("dal: vfs: hdd directory {} (default)", hdd.generic_string());
-        for (dal::VfsMount& mount : dal::hddDirMounts(hdd)) {
-            std::erase_if(layout.mounts, [&](const dal::VfsMount& m) { return m.name == mount.name; });
+        tox2::logInfo("tox2: vfs: hdd directory {} (default)", hdd.generic_string());
+        for (tox2::VfsMount& mount : tox2::hddDirMounts(hdd)) {
+            std::erase_if(layout.mounts, [&](const tox2::VfsMount& m) { return m.name == mount.name; });
             layout.mounts.push_back(std::move(mount));
         }
     }
@@ -546,22 +548,22 @@ void applyBuildDirDefaults(dal::VfsLayout& layout) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    dal::installProcessSettings();
-    dal::installCensus();
+    tox2::installProcessSettings();
+    tox2::installCensus();
 
     Options opt;
     if (!parseArgs(argc, argv, opt)) {
         printUsage();
-        return static_cast<int>(dal::ExitCode::Usage);
+        return static_cast<int>(tox2::ExitCode::Usage);
     }
 
     std::error_code ec;
-    dal::VfsCliOptions cli;
+    tox2::VfsCliOptions cli;
     if (!opt.game_dir.empty()) {
         const std::filesystem::path game_dir(opt.game_dir);
         if (!std::filesystem::is_directory(game_dir, ec)) {
             std::fprintf(stderr, "error: game directory %s does not exist\n", opt.game_dir.c_str());
-            return static_cast<int>(dal::ExitCode::Usage);
+            return static_cast<int>(tox2::ExitCode::Usage);
         }
         cli.game_dir = game_dir;
     }
@@ -572,89 +574,89 @@ int main(int argc, char** argv) {
         cli.sdata_cache = std::filesystem::path(opt.sdata_cache);
     }
 
-    if (!opt.log_file.empty() && !dal::setLogFile(opt.log_file)) {
+    if (!opt.log_file.empty() && !tox2::setLogFile(opt.log_file)) {
         std::fprintf(stderr, "error: cannot open log file %s\n", opt.log_file.c_str());
-        return static_cast<int>(dal::ExitCode::Usage);
+        return static_cast<int>(tox2::ExitCode::Usage);
     }
 
     // Precedence: command-line options, then the configuration file, then the defaults.
-    std::optional<dal::VfsConfigFile> vfs_file;
+    std::optional<tox2::VfsConfigFile> vfs_file;
     if (!opt.vfs_config.empty()) {
-        auto loaded = dal::loadVfsConfig(std::filesystem::path(opt.vfs_config));
+        auto loaded = tox2::loadVfsConfig(std::filesystem::path(opt.vfs_config));
         if (!loaded) {
-            dal::logError("vfs config: {}", loaded.error());
-            return static_cast<int>(dal::ExitCode::LoadError);
+            tox2::logError("vfs config: {}", loaded.error());
+            return static_cast<int>(tox2::ExitCode::LoadError);
         }
         for (const std::string& warning : loaded->warnings) {
-            dal::logWarn("vfs config: {}", warning);
+            tox2::logWarn("vfs config: {}", warning);
         }
         vfs_file = std::move(*loaded);
     }
-    auto layout = dal::composeVfsLayout(vfs_file ? &*vfs_file : nullptr, cli);
+    auto layout = tox2::composeVfsLayout(vfs_file ? &*vfs_file : nullptr, cli);
     if (!layout) {
-        dal::logError("vfs: {}", layout.error());
-        return static_cast<int>(dal::ExitCode::LoadError);
+        tox2::logError("vfs: {}", layout.error());
+        return static_cast<int>(tox2::ExitCode::LoadError);
     }
     applyBuildDirDefaults(*layout);
-    dal::configureVfs(std::move(*layout));
+    tox2::configureVfs(std::move(*layout));
 
     std::filesystem::path elf_path(opt.elf);
     if (opt.elf.empty()) {
         bool read_only = false;
-        const auto default_elf = dal::resolveGuestPath("/dev_bdvd/PS3_GAME/USRDIR/EBOOT.elf", read_only);
+        const auto default_elf = tox2::resolveGuestPath("/dev_bdvd/PS3_GAME/USRDIR/EBOOT.elf", read_only);
         if (!default_elf) {
-            dal::logError("no executable: pass --elf or --game-dir, or mount /dev_bdvd in the VFS config");
-            return static_cast<int>(dal::ExitCode::LoadError);
+            tox2::logError("no executable: pass --elf or --game-dir, or mount /dev_bdvd in the VFS config");
+            return static_cast<int>(tox2::ExitCode::LoadError);
         }
         elf_path = *default_elf;
     }
 
     if (!opt.png_dump.empty()) {
         std::filesystem::create_directories(opt.png_dump, ec);
-        dal::setPngDumpDirectory(std::filesystem::path(opt.png_dump));
+        tox2::setPngDumpDirectory(std::filesystem::path(opt.png_dump));
     }
 
     loadGameParamSfo();
-    if (!opt.rsx_census.empty()) dal::setRsxArgCensusFile(opt.rsx_census);
+    if (!opt.rsx_census.empty()) tox2::setRsxArgCensusFile(opt.rsx_census);
     if (!opt.rsx_capture_frames.empty()) {
-        dal::setRsxCaptureFrames(opt.rsx_capture_frames, std::filesystem::path("generated") / "rsx" / "captures");
+        tox2::setRsxCaptureFrames(opt.rsx_capture_frames, std::filesystem::path("generated") / "rsx" / "captures");
     }
 
-    dal::installFaultHandler();
-    dal::Process& process = dal::process();
+    tox2::installFaultHandler();
+    tox2::Process& process = tox2::process();
     process.strict = opt.strict;
     if (!process.memory.reserve()) {
-        dal::logError("cannot reserve the guest address space");
-        return static_cast<int>(dal::ExitCode::Fatal);
+        tox2::logError("cannot reserve the guest address space");
+        return static_cast<int>(tox2::ExitCode::Fatal);
     }
 
-    const auto loaded = dal::loadExecutable(elf_path);
+    const auto loaded = tox2::loadExecutable(elf_path);
     if (!loaded) {
-        dal::logError("load failed: {}", loaded.error());
-        return static_cast<int>(dal::ExitCode::LoadError);
+        tox2::logError("load failed: {}", loaded.error());
+        return static_cast<int>(tox2::ExitCode::LoadError);
     }
-    const dal::LoadedExecutable& exe = *loaded;
+    const tox2::LoadedExecutable& exe = *loaded;
 
-    const std::string_view expected_sha256 = kDalPpuExecutableSha256;
+    const std::string_view expected_sha256 = kTox2PpuExecutableSha256;
     if (exe.sha256 != expected_sha256) {
-        dal::logError("executable hash {} does not match the generated code ({})", exe.sha256, expected_sha256);
-        return static_cast<int>(dal::ExitCode::LoadError);
+        tox2::logError("executable hash {} does not match the generated code ({})", exe.sha256, expected_sha256);
+        return static_cast<int>(tox2::ExitCode::LoadError);
     }
 
-    dalRegisterFuncs(kDalPpuFuncMappings, kDalPpuFuncMappingCount);
-    dal::setQuietHle(opt.quiet_hle);
-    dal::installImports(kDalPpuImports, kDalPpuImportCount);
+    tox2RegisterFuncs(kTox2PpuFuncMappings, kTox2PpuFuncMappingCount);
+    tox2::setQuietHle(opt.quiet_hle);
+    tox2::installImports(kTox2PpuImports, kTox2PpuImportCount);
 
-    dal::logInfo(
-            "dal: loaded {}: entry {:#010x} toc {:#010x} opd {:#010x} tls {:#010x}/{}/{:#x} sdk {:#010x} "
+    tox2::logInfo(
+            "tox2: loaded {}: entry {:#010x} toc {:#010x} opd {:#010x} tls {:#010x}/{}/{:#x} sdk {:#010x} "
             "prio {} stacksize {:#x} malloc {:#x} ppc_seg {:#x} image end {:#010x}",
             elf_path.filename().string(), exe.entry_func, exe.entry_toc, exe.entry_opd, exe.tls_vaddr, exe.tls_filesz,
             exe.tls_memsz, exe.sdk_version, exe.primary_prio, exe.primary_stacksize, exe.malloc_pagesize, exe.ppc_seg,
             exe.image_end);
-    dal::logInfo("dal: sha256 {}", exe.sha256);
+    tox2::logInfo("tox2: sha256 {}", exe.sha256);
 
     if (opt.load_only) {
-        return static_cast<int>(dal::ExitCode::ProcessExit);
+        return static_cast<int>(tox2::ExitCode::ProcessExit);
     }
 
     installMovieCodecs();
@@ -662,54 +664,55 @@ int main(int argc, char** argv) {
 
     // Held until the process ends (runSupervisor does not return); the decode loops of the game poll
     // with 1 ms sleeps, which the default tick would stretch to 15 ms.
-    const dal::TimerResolution timer_resolution;
+    const tox2::TimerResolution timer_resolution;
     if (timer_resolution.active()) {
-        const auto period_us = dal::currentTimerPeriodUs();
-        dal::logDebug("dal: timer: requested {} ms, system period {}", timer_resolution.periodMs(),
-                      period_us ? std::format("{:.3f} ms", *period_us / 1000.0) : std::string("unknown"));
+        const auto period_us = tox2::currentTimerPeriodUs();
+        tox2::logDebug("tox2: timer: requested {} ms, system period {}", timer_resolution.periodMs(),
+                       period_us ? std::format("{:.3f} ms", *period_us / 1000.0) : std::string("unknown"));
     } else {
-        dal::logWarn("dal: timer: the 1 ms resolution request was refused; timed waits use the default tick");
+        tox2::logWarn("tox2: timer: the 1 ms resolution request was refused; timed waits use the default tick");
     }
 
     // The window, script and gamepad threads share `opt.keyboard`; the executor factory below copies
     // the options, so it is created first.
     if (padUsesKeyboard(opt.pad) || padUsesGamepad(opt.pad)) {
-        opt.keyboard = std::make_shared<dal::KeyboardPadState>();
+        opt.keyboard = std::make_shared<tox2::KeyboardPadState>();
         // With the keyboard in the pad, port 0 is always there; a gamepad-only pad follows the hardware.
-        dal::setPadProvider(dal::makeKeyboardPadProvider(opt.keyboard, {}, {.always_connected = opt.pad != "gamepad"}));
+        tox2::setPadProvider(
+                tox2::makeKeyboardPadProvider(opt.keyboard, {}, {.always_connected = opt.pad != "gamepad"}));
         std::string where;
         if (opt.window) where += " (window)";
         if (!opt.pad_script.empty()) {
             where += std::format(" (script {}, {} events)", std::filesystem::path(opt.pad_script).filename().string(),
                                  opt.pad_script_events.size());
         }
-        dal::logInfo("dal: pad: {}{}", opt.pad, where);
+        tox2::logInfo("tox2: pad: {}{}", opt.pad, where);
     } else {
-        dal::setPadBackend(opt.pad);
+        tox2::setPadBackend(opt.pad);
     }
 
     configureAudio(opt);
 
     // The device is created on the RSX thread when it starts, so it belongs to that thread.
     if (opt.render_vulkan) {
-        dal::setRsxExecutorFactory([opt](std::string& error) { return createVulkanExecutor(opt, error); });
+        tox2::setRsxExecutorFactory([opt](std::string& error) { return createVulkanExecutor(opt, error); });
     }
 
     // RPCS3 passes this VFS path as argv[0] (`Emu/System.cpp` `Emulator::Load`, "Fake arg").
     // The script clock starts here so that it matches --seconds within a few milliseconds.
-    if (opt.keyboard && !opt.pad_script.empty()) dal::startPadScript(opt.pad_script_events, opt.keyboard);
+    if (opt.keyboard && !opt.pad_script.empty()) tox2::startPadScript(opt.pad_script_events, opt.keyboard);
     // GameInput takes about a second to initialise, so the gamepad thread creates the backend itself.
     // The probe alone (no gamepad in the pad) runs the thread without a state to write.
     if (padUsesGamepad(opt.pad) || opt.pad_probe) {
-        dal::startGamepadHub(
-                []() -> std::expected<std::shared_ptr<dal::GamepadBackend>, std::string> {
-                    return dal::makeGameInputBackend({});
+        tox2::startGamepadHub(
+                []() -> std::expected<std::shared_ptr<tox2::GamepadBackend>, std::string> {
+                    return tox2::makeGameInputBackend({});
                 },
                 padUsesGamepad(opt.pad) ? opt.keyboard : nullptr,
-                {.is_foreground = dal::processOwnsForegroundWindow,
-                 .detect_steam = dal::detectSteamContext,
+                {.is_foreground = tox2::processOwnsForegroundWindow,
+                 .detect_steam = tox2::detectSteamContext,
                  .probe = opt.pad_probe});
     }
-    dal::bootMainThread(exe, "/dev_bdvd/PS3_GAME/USRDIR/EBOOT.BIN");
-    dal::runSupervisor(opt.seconds);
+    tox2::bootMainThread(exe, "/dev_bdvd/PS3_GAME/USRDIR/EBOOT.BIN");
+    tox2::runSupervisor(opt.seconds);
 }

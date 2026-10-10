@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <format>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 // Execute mask bits (src0 bits 18-20): the instruction runs in lanes whose condition register
@@ -508,4 +508,4 @@ GlslResult translateFragmentProgram(std::span<const std::uint32_t> ucode, std::u
     return Translator().run(ucode, control, texcoord_control);
 }
 
-}  // namespace dal
+}  // namespace tox2

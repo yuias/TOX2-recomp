@@ -9,13 +9,13 @@
 #include <utility>
 
 #include "core/guest_memory.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "rsx/fifo_parser.h"
 #include "rsx/rsx_census.h"
 #include "rsx/rsx_decode.h"
 #include "rsx/rsx_unimplemented.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::uint32_t kIoPageSize = 0x100000;
@@ -480,4 +480,4 @@ void RsxFrameBuilder::buildDraw(const RsxRegisters& regs) {
     commands_.emplace_back(std::move(draw));
 }
 
-}  // namespace dal
+}  // namespace tox2

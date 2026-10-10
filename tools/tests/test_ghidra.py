@@ -432,12 +432,12 @@ class RunTest(GhidraTestBase):
         self.assertEqual(len(err.strip().splitlines()), 1)
 
 
-@unittest.skipUnless(os.environ.get("DAL_EBOOT_ELF"), "DAL_EBOOT_ELF is not set")
+@unittest.skipUnless(os.environ.get("TOX2_EBOOT_ELF"), "TOX2_EBOOT_ELF is not set")
 class RealEbootSeedsTest(unittest.TestCase):
     def test_seeds(self):
-        path = os.environ["DAL_EBOOT_ELF"]
+        path = os.environ["TOX2_EBOOT_ELF"]
         if not os.path.isfile(path):
-            self.skipTest("DAL_EBOOT_ELF does not point to a file")
+            self.skipTest("TOX2_EBOOT_ELF does not point to a file")
         elf = ElfFile.from_path(path)
         toc, seeds = ghidra.collect_seeds(elf)
         self.assertEqual(toc, 0x00109F80)

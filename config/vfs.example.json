@@ -1,8 +1,8 @@
 {
   "version": 1,
 
-  "game_dir": "/path/to/BLJM61048",
-  "hdd_dir": "/path/to/dal_hdd",
+  "game_dir": "/path/to/BLJS10188",
+  "hdd_dir": "/path/to/tox2_hdd",
   "sdata_cache": "/path/to/sdata_cache",
 
   "mounts": {

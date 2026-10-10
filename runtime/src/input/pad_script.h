@@ -28,7 +28,7 @@
 
 #include "input/keyboard_pad.h"
 
-namespace dal {
+namespace tox2 {
 
 // Longer than KeyboardPadState::kMinPressVisible, so a tap is held for real rather than only
 // kept visible by the minimum press time.
@@ -54,4 +54,4 @@ void playPadScript(std::span<const PadScriptEvent> events, KeyboardPadState& sta
 // joins the thread: the process ends with std::_Exit, and the thread owns what it uses.
 void startPadScript(std::vector<PadScriptEvent> events, std::shared_ptr<KeyboardPadState> state);
 
-}  // namespace dal
+}  // namespace tox2

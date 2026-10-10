@@ -1,6 +1,6 @@
 // The seam between gamepad sources and the rest of the runtime. It holds no Windows or GameInput
-// types, so the mapping, selection and hub code stays in dal_runtime_core and is tested with a fake
-// backend; the GameInput implementation lives in dal_input_gameinput.
+// types, so the mapping, selection and hub code stays in tox2_runtime_core and is tested with a fake
+// backend; the GameInput implementation lives in tox2_input_gameinput.
 
 #pragma once
 
@@ -12,7 +12,7 @@
 #include <string_view>
 #include <vector>
 
-namespace dal {
+namespace tox2 {
 
 // GameInput's gamepad buttons in our own enum, so core code needs no Windows headers.
 enum class GamepadButton : std::uint8_t {
@@ -94,4 +94,4 @@ public:
     virtual void setRumble(std::uint64_t id, const GamepadRumble& rumble) = 0;
 };
 
-}  // namespace dal
+}  // namespace tox2

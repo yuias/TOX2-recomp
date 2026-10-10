@@ -4,7 +4,7 @@
 #include <limits>
 #include <utility>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 // A time of zero is a valid steady-clock reading in tests, so "no press" needs its own value.
@@ -231,4 +231,4 @@ std::unique_ptr<PadProvider> makeKeyboardPadProvider(std::shared_ptr<KeyboardPad
     return std::make_unique<KeyboardPadProvider>(std::move(state), std::move(clock), options);
 }
 
-}  // namespace dal
+}  // namespace tox2

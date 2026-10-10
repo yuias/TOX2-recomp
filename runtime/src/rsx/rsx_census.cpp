@@ -16,7 +16,7 @@
 #include "rsx/fifo_parser.h"
 #include "rsx/rsx_decode.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::size_t kValueCap = 256;      // distinct values kept per register
@@ -1101,7 +1101,7 @@ bool RsxArgCensus::writeFiles() {
         if (!locked) std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     if (!locked) {
-        logError("dal: rsx census: the RSX thread holds the census, nothing written");
+        logError("tox2: rsx census: the RSX thread holds the census, nothing written");
         return false;
     }
     const std::string json = formatJsonLocked();
@@ -1123,12 +1123,12 @@ bool RsxArgCensus::writeFiles() {
         ok = ok && out.good();
     }
     if (ok) {
-        logInfo("dal: rsx census: wrote {} ({} fragment and {} vertex programs in {})", json_path_.string(),
+        logInfo("tox2: rsx census: wrote {} ({} fragment and {} vertex programs in {})", json_path_.string(),
                 fragment_programs_.size(), vertex_programs_.size(), dump_dir_.string());
     } else {
-        logError("dal: rsx census: could not write {}", json_path_.string());
+        logError("tox2: rsx census: could not write {}", json_path_.string());
     }
     return ok;
 }
 
-}  // namespace dal
+}  // namespace tox2

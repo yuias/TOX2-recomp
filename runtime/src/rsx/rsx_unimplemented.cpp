@@ -6,7 +6,7 @@
 #include <mutex>
 #include <tuple>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::size_t kMaxKinds = 1024;  // bounds memory when a key embeds a varying value
@@ -69,4 +69,4 @@ void rsxUnimplementedReset() {
     s.dropped = 0;
 }
 
-}  // namespace dal
+}  // namespace tox2

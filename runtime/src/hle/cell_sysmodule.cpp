@@ -6,30 +6,30 @@
 #include <format>
 
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "cellSysmodule";
 
 // The id argument is a u16 in the SDK.
-void logModule(const char* verb, const DalPpuContext* ctx) {
+void logModule(const char* verb, const Tox2PpuContext* ctx) {
     const auto id = static_cast<std::uint16_t>(argU32(ctx, 0));
-    logOnce(std::format("sysmodule-{}-{}", verb, id), "dal: sysmodule: {} {:#06x}", verb, id);
+    logOnce(std::format("sysmodule-{}-{}", verb, id), "tox2: sysmodule: {} {:#06x}", verb, id);
 }
 
 // cellSysmoduleLoadModule(u16 id)
-void sysmoduleLoadModule(DalPpuContext* ctx, std::uint8_t* base) {
+void sysmoduleLoadModule(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     logModule("load", ctx);
     ctx->gpr[3] = kCellOk;
 }
 
 // cellSysmoduleUnloadModule(u16 id)
-void sysmoduleUnloadModule(DalPpuContext* ctx, std::uint8_t* base) {
+void sysmoduleUnloadModule(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     logModule("unload", ctx);
     ctx->gpr[3] = kCellOk;
@@ -44,4 +44,4 @@ constexpr HleEntry kHandlers[] = {
 
 std::span<const HleEntry> cellSysmoduleHandlers() { return kHandlers; }
 
-}  // namespace dal
+}  // namespace tox2

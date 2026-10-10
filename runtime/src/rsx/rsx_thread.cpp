@@ -17,13 +17,13 @@
 #include "core/log.h"
 #include "core/sleeper.h"
 #include "core/threads.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "rsx/gcm_interrupts.h"
 #include "rsx/rsx_decode.h"
 #include "rsx/rsx_state.h"
 #include "rsx/rsx_unimplemented.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 // CellGcmControl field offsets.
@@ -117,7 +117,7 @@ void RsxConsumer::resetDmaRegisters() {
 bool RsxConsumer::readIo(std::uint32_t io, std::uint32_t& word) {
     std::uint32_t ea = 0;
     if (!rsxIoToEa(io, ea)) return false;
-    word = dalRead32(base_, ea);
+    word = tox2Read32(base_, ea);
     return true;
 }
 
@@ -245,13 +245,13 @@ bool RsxConsumer::readCensusWord(std::uint32_t location, std::uint32_t offset, s
         return false;
     }
     if (!process().memory.isCommitted(ea, 4)) return false;
-    word = dalRead32(base_, ea);
+    word = tox2Read32(base_, ea);
     return true;
 }
 
 bool RsxConsumer::execute(std::uint32_t method, std::uint32_t value) {
     switch (method) {
-        case kMethodNv406eSetReference: dalWrite32(base_, kRsxControlAddr + kControlRef, value); return true;
+        case kMethodNv406eSetReference: tox2Write32(base_, kRsxControlAddr + kControlRef, value); return true;
         case kMethodNv406eSetContextDmaSemaphore: dma_406e_ = value; return true;
         case kMethodNv406eSemaphoreOffset: offset_406e_ = value; return true;
         case kMethodNv406eSemaphoreAcquire: return acquire(value);
@@ -307,11 +307,11 @@ void RsxConsumer::inlineBlitWord(std::uint32_t method, std::uint32_t value) {
     }
     if (!ok) {
         rsxNoteUnimplemented("method", "NV308A_COLOR destination out of range");
-        logOnce("rsx-blit-bad-address", "dal: rsx: NV308A inline blit to offset {:#x} in DMA {:#010x} ignored", offset,
+        logOnce("rsx-blit-bad-address", "tox2: rsx: NV308A inline blit to offset {:#x} in DMA {:#010x} ignored", offset,
                 blit_dma_);
         return;
     }
-    dalWrite32(base_, ea, value);
+    tox2Write32(base_, ea, value);
 }
 
 bool RsxConsumer::resolve(std::uint32_t offset, std::uint32_t location, std::uint32_t size, std::uint32_t& ea) const {
@@ -346,52 +346,52 @@ bool RsxConsumer::acquire(std::uint32_t value) {
     if (!resolve(offset_406e_, dma_406e_, 4, ea)) {
         // RPCS3 throws here; waiting forever on an address that cannot hold a label helps nobody.
         logOnce("rsx-acquire-bad-address",
-                "dal: rsx: semaphore acquire at offset {:#x} in DMA {:#010x} is not addressable, ignored", offset_406e_,
-                dma_406e_);
+                "tox2: rsx: semaphore acquire at offset {:#x} in DMA {:#010x} is not addressable, ignored",
+                offset_406e_, dma_406e_);
         return true;
     }
-    return dalRead32(base_, ea) == value;
+    return tox2Read32(base_, ea) == value;
 }
 
 void RsxConsumer::releaseNv406e(std::uint32_t value) {
     if (offset_406e_ % 4 != 0) {
-        logOnce("rsx-release-unaligned", "dal: rsx: NV406E semaphore release at unaligned offset {:#x} ignored",
+        logOnce("rsx-release-unaligned", "tox2: rsx: NV406E semaphore release at unaligned offset {:#x} ignored",
                 offset_406e_);
         return;
     }
     std::uint32_t ea = 0;
     if (!resolve(offset_406e_, dma_406e_, 4, ea) || (ea >> 28) != (kRsxLabelAddr >> 28)) {
-        logOnce("rsx-release-bad-address", "dal: rsx: NV406E semaphore release at offset {:#x} in DMA {:#010x} ignored",
-                offset_406e_, dma_406e_);
+        logOnce("rsx-release-bad-address",
+                "tox2: rsx: NV406E semaphore release at offset {:#x} in DMA {:#010x} ignored", offset_406e_, dma_406e_);
         return;
     }
     // The flip handshake word reads back 1 even though no display queue command set it.
     if (ea == kRsxDeviceAddr + kDeviceReadyOffset && value == 0) value = 1;
-    dalWrite32(base_, ea, value);
+    tox2Write32(base_, ea, value);
 }
 
 void RsxConsumer::releaseNv4097(std::uint32_t value, bool swizzle) {
     if (offset_4097_ % 16 != 0) {
-        logOnce("rsx-label-unaligned", "dal: rsx: NV4097 semaphore release at unaligned offset {:#x} ignored",
+        logOnce("rsx-label-unaligned", "tox2: rsx: NV4097 semaphore release at unaligned offset {:#x} ignored",
                 offset_4097_);
         return;
     }
     std::uint32_t ea = 0;
     if (!resolve(offset_4097_, dma_semaphore_, 4, ea) || (ea >> 28) != (kRsxLabelAddr >> 28)) {
-        logOnce("rsx-label-bad-address", "dal: rsx: NV4097 semaphore release at offset {:#x} in DMA {:#010x} ignored",
+        logOnce("rsx-label-bad-address", "tox2: rsx: NV4097 semaphore release at offset {:#x} in DMA {:#010x} ignored",
                 offset_4097_, dma_semaphore_);
         return;
     }
     // The back-end release swaps the red and blue bytes of the value.
     if (swizzle) value = (value & 0xFF00FF00) | ((value & 0xFF) << 16) | ((value >> 16) & 0xFF);
-    dalWrite32(base_, ea, value);
+    tox2Write32(base_, ea, value);
 }
 
 void RsxConsumer::getReport(std::uint32_t value) {
     const std::uint32_t offset = value & 0xFFFFFF;
     std::uint32_t ea = 0;
     if (!resolve(offset, dma_report_, kReportSize, ea)) {
-        logOnce("rsx-report-bad-address", "dal: rsx: NV4097_GET_REPORT {:#010x} in DMA {:#010x} ignored", value,
+        logOnce("rsx-report-bad-address", "tox2: rsx: NV4097_GET_REPORT {:#010x} in DMA {:#010x} ignored", value,
                 dma_report_);
         return;
     }
@@ -401,9 +401,9 @@ void RsxConsumer::getReport(std::uint32_t value) {
     rsxNoteUnimplemented("state", "zpass report constant");
     const std::uint64_t now_ns = systemTimeUs() * 1000;
     last_timestamp_ns_ = std::max(now_ns, last_timestamp_ns_ + 1);
-    dalWrite64(base_, ea, last_timestamp_ns_);
-    dalWrite32(base_, ea + 8, 0);
-    dalWrite32(base_, ea + 12, 0);
+    tox2Write64(base_, ea, last_timestamp_ns_);
+    tox2Write32(base_, ea + 8, 0);
+    tox2Write32(base_, ea + 12, 0);
 }
 
 void RsxConsumer::flip(std::uint32_t buffer) {
@@ -421,8 +421,9 @@ void RsxConsumer::flip(std::uint32_t buffer) {
     }
 
     if (flips_.fetch_add(1, std::memory_order_relaxed) == 0) {
-        logInfo("dal: rsx: first flip of buffer {}: put={:#x} get={:#x} parser={:#x}", buffer,
-                dalRead32(base_, kRsxControlAddr + kControlPut), dalRead32(base_, kRsxControlAddr + kControlGet), get_);
+        logInfo("tox2: rsx: first flip of buffer {}: put={:#x} get={:#x} parser={:#x}", buffer,
+                tox2Read32(base_, kRsxControlAddr + kControlPut), tox2Read32(base_, kRsxControlAddr + kControlGet),
+                get_);
     }
     state.flip_status = kRsxFlipStatusDone;
     const std::uint64_t now = systemTimeUs();
@@ -437,7 +438,7 @@ void RsxConsumer::flip(std::uint32_t buffer) {
 void RsxConsumer::userCommand(std::uint32_t cause) {
     user_commands_.fetch_add(1, std::memory_order_relaxed);
     if (g_hook.load() == nullptr) {
-        logOnce(std::format("rsx-user-command-{}", cause), "dal: rsx: pending user command cause {}", cause);
+        logOnce(std::format("rsx-user-command-{}", cause), "tox2: rsx: pending user command cause {}", cause);
         return;
     }
     signalInterrupt(RsxInterrupt::User, cause);
@@ -453,7 +454,7 @@ void RsxConsumer::publishGet(std::uint32_t get) {
     if (get_known_ && get == published_get_) return;
     published_get_ = get;
     get_known_ = true;
-    dalWrite32(base_, kRsxControlAddr + kControlGet, get);
+    tox2Write32(base_, kRsxControlAddr + kControlGet, get);
     rsxGetAdvanced().notify_all();
 }
 
@@ -465,11 +466,11 @@ FifoStatus RsxConsumer::pump(std::uint32_t max_words) {
     finishPendingDraw();
     if (faulted_) return FifoStatus::Fault;
     if (!get_known_) {
-        get_ = dalRead32(base_, kRsxControlAddr + kControlGet);
+        get_ = tox2Read32(base_, kRsxControlAddr + kControlGet);
         published_get_ = get_;
         get_known_ = true;
     }
-    const std::uint32_t put = dalRead32(base_, kRsxControlAddr + kControlPut);
+    const std::uint32_t put = tox2Read32(base_, kRsxControlAddr + kControlPut);
     const FifoStatus status = parser_.run(get_, put, max_words, *this);
     // The guest sees `get` at the start of an unfinished command (a semaphore wait, a flip waiting
     // for VBlank), so "get == put" means the work is really done. The wrap callback only needs get
@@ -480,13 +481,13 @@ FifoStatus RsxConsumer::pump(std::uint32_t max_words) {
     if (status == FifoStatus::Idle) {
         idle_put_ = put & ~3u;
         if (flips_.load(std::memory_order_relaxed) != 0) {
-            logOnce("rsx-idle-after-flip", "dal: rsx: command buffer drained after the first flip: put={:#x} get={:#x}",
-                    put, published_get_);
+            logOnce("rsx-idle-after-flip",
+                    "tox2: rsx: command buffer drained after the first flip: put={:#x} get={:#x}", put, published_get_);
         }
     }
     if (status == FifoStatus::Fault) {
         faulted_ = true;
-        logError("dal: rsx: command fifo fault, no more commands are consumed: {} (get {:#x}, put {:#x})",
+        logError("tox2: rsx: command fifo fault, no more commands are consumed: {} (get {:#x}, put {:#x})",
                  parser_.lastFault(), get_, put);
     }
     return status;
@@ -544,7 +545,7 @@ void onStop() {
     if (g_consumer == nullptr) return;
     if (g_consumer->frameBuilderEnabled()) {
         const RsxConsumer::CommandCounts counts = g_consumer->commandCounts();
-        logInfo("dal: rsx: frame builder: {} clears, {} draws, {} flips", counts.clears, counts.draws, counts.flips);
+        logInfo("tox2: rsx: frame builder: {} clears, {} draws, {} flips", counts.clears, counts.draws, counts.flips);
     }
     if (RsxExecutor* executor = g_executor.load(std::memory_order_acquire)) {
         // The process ends without destructors, so the dump worker's queue is written here. The bound keeps a
@@ -552,18 +553,18 @@ void onStop() {
         constexpr auto kFlushTimeout = std::chrono::milliseconds(2000);
         const std::uint64_t unflushed = executor->flushOutput(kFlushTimeout);
         const RsxRenderCounts r = executor->counts();
-        logInfo("dal: render: {} clears, {} draws rendered, {} skipped, {} flips, {} frames dumped, "
+        logInfo("tox2: render: {} clears, {} draws rendered, {} skipped, {} flips, {} frames dumped, "
                 "{} dumps skipped (queue full), {} dumps failed, validation {}{}",
                 r.clears, r.draws, r.draws_skipped, r.flips, r.frames_dumped, r.dumps_skipped, r.dumps_failed,
                 r.validation ? std::format("{} errors", r.validation_errors) : std::string("off"),
                 r.failed ? ", renderer stopped after an error" : "");
         if (unflushed != 0) {
-            logWarn("dal: render: frame dump flush timed out, {} queued frame(s) were not written", unflushed);
+            logWarn("tox2: render: frame dump flush timed out, {} queued frame(s) were not written", unflushed);
         }
     }
     const std::uint32_t written = g_captures_written.load();
     if (written < g_capture_frames.size()) {
-        logWarn("dal: rsx: {} of {} requested captures written", written, g_capture_frames.size());
+        logWarn("tox2: rsx: {} of {} requested captures written", written, g_capture_frames.size());
     }
     if (g_consumer->argCensus() != nullptr) g_consumer->argCensus()->writeFiles();
 }
@@ -580,14 +581,14 @@ void dispatchCommands(RsxConsumer* consumer, RsxExecutor* executor, std::vector<
 // File I/O stays out of the guest lock; a failed write is reported and the run goes on.
 void writeCaptures(const std::vector<RsxConsumer::FinishedCapture>& captures) {
     for (const RsxConsumer::FinishedCapture& capture : captures) {
-        const std::filesystem::path path = g_capture_dir / std::format("frame_{}.dalcap", capture.frame);
+        const std::filesystem::path path = g_capture_dir / std::format("frame_{}.tox2cap", capture.frame);
         std::string error;
         if (!writeCaptureFile(path, capture.file, error)) {
-            logWarn("dal: rsx: capture of frame {} failed: {}", capture.frame, error);
+            logWarn("tox2: rsx: capture of frame {} failed: {}", capture.frame, error);
             continue;
         }
         g_captures_written.fetch_add(1);
-        logInfo("dal: rsx: captured frame {} -> {} ({} bytes, {} writes, {} ranges)", capture.frame,
+        logInfo("tox2: rsx: captured frame {} -> {} ({} bytes, {} writes, {} ranges)", capture.frame,
                 path.generic_string(), capture.file.size(), capture.writes, capture.ranges);
     }
 }
@@ -607,7 +608,7 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
         if (executor) {
             g_executor.store(executor.get(), std::memory_order_release);
         } else {
-            logWarn("dal: render: {}; continuing without rendering", error.empty() ? "initialisation failed" : error);
+            logWarn("tox2: render: {}; continuing without rendering", error.empty() ? "initialisation failed" : error);
             consumer->disableFrameBuilder();
         }
     }
@@ -696,4 +697,4 @@ void startRsxThread(std::uint8_t* base) {
     std::thread(consumerLoop, g_consumer, base).detach();
 }
 
-}  // namespace dal
+}  // namespace tox2

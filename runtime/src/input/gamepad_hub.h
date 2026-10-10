@@ -26,7 +26,7 @@
 #include "input/keyboard_pad.h"
 #include "input/pad_buttons.h"
 
-namespace dal {
+namespace tox2 {
 
 inline constexpr std::chrono::milliseconds kGamepadPollInterval{4};
 
@@ -95,4 +95,4 @@ struct GamepadThreadOptions {
 void startGamepadHub(GamepadBackendFactory make_backend, std::shared_ptr<KeyboardPadState> state,
                      GamepadThreadOptions options);
 
-}  // namespace dal
+}  // namespace tox2

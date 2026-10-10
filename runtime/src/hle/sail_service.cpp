@@ -13,7 +13,7 @@
 #include "core/threads.h"
 #include "media/movie_decoder.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 // Priorities are only stored (see GuestLock). The stack is larger than the GCM interrupt thread's
@@ -43,7 +43,7 @@ ServiceState& serviceState() {
 
 // Entry function of the thread; r3 holds the generation it serves. Returning ends the thread (only
 // stopSailService asks for it, by bumping the generation).
-void serviceThreadBody(DalPpuContext* ctx, std::uint8_t* base) {
+void serviceThreadBody(Tox2PpuContext* ctx, std::uint8_t* base) {
     ServiceState& s = serviceState();
     const std::uint64_t generation = ctx->gpr[3];
     for (;;) {
@@ -105,7 +105,7 @@ bool queueSailCall(SailCall call) {
     if (s.start_failed) {
         // The game would wait for events that never come; say so instead of failing silently.
         logOnce(LogLevel::Error, "sail-service-thread",
-                "dal: sail: cannot create the {} thread; a queued call is dropped", kThreadName);
+                "tox2: sail: cannot create the {} thread; a queued call is dropped", kThreadName);
         return false;
     }
     s.queue.push_back(std::move(call));
@@ -125,7 +125,7 @@ void stopSailService() {
                     std::chrono::seconds(5));
             // The thread still exits on its own once it wakes; its generation is no longer current, so
             // a thread started afterwards is the only consumer.
-            if (!exited) logWarn("dal: sail: the {} thread did not stop within 5 s", kThreadName);
+            if (!exited) logWarn("tox2: sail: the {} thread did not stop within 5 s", kThreadName);
         }
     }
     s.queue.clear();
@@ -141,4 +141,4 @@ void setMediaCodecFactory(std::unique_ptr<MediaCodecFactory> factory) {
 
 MediaCodecFactory* mediaCodecFactory() { return factoryHolder().current.load(std::memory_order_acquire); }
 
-}  // namespace dal
+}  // namespace tox2

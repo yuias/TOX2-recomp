@@ -62,7 +62,7 @@
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/threads.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/cell_sail_internal.h"
 #include "hle/cell_sail_types.h"
 #include "hle/hle.h"
@@ -74,7 +74,7 @@
 #include "media/movie_player.h"
 #include "media/pamf.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "cellSail";
@@ -224,7 +224,7 @@ Notifier notifierOf(std::uint32_t address, const Player& player) {
 // Calls the notify callback for each event, in order. Events for a player that was finalized
 // meanwhile (also during an earlier callback) are dropped, so nothing reaches the game's callback
 // argument after Finalize.
-void deliverEvents(DalPpuContext* ctx, std::uint8_t* base, const Notifier& to, const std::vector<Event>& events) {
+void deliverEvents(Tox2PpuContext* ctx, std::uint8_t* base, const Notifier& to, const std::vector<Event>& events) {
     for (const Event& event : events) {
         if (!isCurrent(to.address, to.serial)) return;
         callGuestFunction(ctx, base, to.opd,
@@ -235,7 +235,7 @@ void deliverEvents(DalPpuContext* ctx, std::uint8_t* base, const Notifier& to, c
 // Delivers `events` on the service thread.
 void queueEvents(std::uint32_t address, const Player& player, std::vector<Event> events) {
     queueSailCall([to = notifierOf(address, player), events = std::move(events)](
-                          DalPpuContext* ctx, std::uint8_t* base) { deliverEvents(ctx, base, to, events); });
+                          Tox2PpuContext* ctx, std::uint8_t* base) { deliverEvents(ctx, base, to, events); });
 }
 
 constexpr Event stateChanged(sail::PlayerState state) {
@@ -254,7 +254,7 @@ bool drainServiceQueue() {
         bool done = false;
     };
     auto marker = std::make_shared<Marker>();
-    const bool queued = queueSailCall([marker](DalPpuContext*, std::uint8_t*) {
+    const bool queued = queueSailCall([marker](Tox2PpuContext*, std::uint8_t*) {
         marker->done = true;
         marker->done_cv.notify_all();
     });
@@ -276,22 +276,22 @@ Descriptor* findDescriptor(std::uint32_t address) {
 //                                void* arg)
 // The third argument is not in RPCS3's two-argument signature; the game passes one and the player
 // passes it back to every allocator callback.
-void sailMemAllocatorInitialize(DalPpuContext* ctx, std::uint8_t* base) {
+void sailMemAllocatorInitialize(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t self = argU32(ctx, 0);
     const std::uint32_t callbacks = argU32(ctx, 1);
     if (!guestMapped(self, sail::kAllocatorSize) || callbacks == 0) {
         setResultCode(ctx, sail::kErrorInvalidArg);
         return;
     }
-    dalWrite32(base, self + sail::kAllocatorCallbacks, callbacks);
-    dalWrite32(base, self + sail::kAllocatorArg, argU32(ctx, 2));
+    tox2Write32(base, self + sail::kAllocatorCallbacks, callbacks);
+    tox2Write32(base, self + sail::kAllocatorArg, argU32(ctx, 2));
     setResultCode(ctx, kCellOk);
 }
 
 // cellSailPlayerInitialize2(CellSailPlayer* self, CellSailMemAllocator* allocator,
 //                           CellSailPlayerFuncNotified callback, void* callback_arg,
 //                           CellSailPlayerAttribute* attribute, CellSailPlayerResource* resource)
-void playerInitialize2(DalPpuContext* ctx, std::uint8_t* base) {
+void playerInitialize2(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t self = argU32(ctx, 0);
     const std::uint32_t allocator = argU32(ctx, 1);
     const std::uint32_t callback = argU32(ctx, 2);
@@ -301,7 +301,7 @@ void playerInitialize2(DalPpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, sail::kErrorInvalidArg);
         return;
     }
-    const std::uint32_t funcs = dalRead32(base, allocator + sail::kAllocatorCallbacks);
+    const std::uint32_t funcs = tox2Read32(base, allocator + sail::kAllocatorCallbacks);
     if (!guestMapped(funcs, sail::kAllocatorFuncsSize)) {
         setResultCode(ctx, sail::kErrorInvalidArg);
         return;
@@ -313,28 +313,28 @@ void playerInitialize2(DalPpuContext* ctx, std::uint8_t* base) {
 
     Player player;
     player.serial = g_next_serial++;
-    player.alloc_opd = dalRead32(base, funcs + sail::kAllocatorFuncsAlloc);
-    player.free_opd = dalRead32(base, funcs + sail::kAllocatorFuncsFree);
-    player.alloc_arg = dalRead32(base, allocator + sail::kAllocatorArg);
+    player.alloc_opd = tox2Read32(base, funcs + sail::kAllocatorFuncsAlloc);
+    player.free_opd = tox2Read32(base, funcs + sail::kAllocatorFuncsFree);
+    player.alloc_arg = tox2Read32(base, allocator + sail::kAllocatorArg);
     player.notify_opd = callback;
     player.notify_arg = argU32(ctx, 3);
-    player.max_audio_streams = dalRead32(base, attribute + sail::kPlayerAttributeMaxAudioStreams);
-    player.max_video_streams = dalRead32(base, attribute + sail::kPlayerAttributeMaxVideoStreams);
+    player.max_audio_streams = tox2Read32(base, attribute + sail::kPlayerAttributeMaxAudioStreams);
+    player.max_video_streams = tox2Read32(base, attribute + sail::kPlayerAttributeMaxVideoStreams);
     const auto it = g_players.emplace(self, player).first;
-    logDebug("dal: sail: player {:#010x} initialised (notify {:#010x}, arg {:#010x})", self, callback,
+    logDebug("tox2: sail: player {:#010x} initialised (notify {:#010x}, arg {:#010x})", self, callback,
              player.notify_arg);
 
     queueEvents(self, it->second, {stateChanged(sail::PlayerState::Initialized)});
     setResultCode(ctx, kCellOk);
 }
 
-void retireStream(DalPpuContext* ctx, std::uint8_t* base, std::uint32_t self, Player& player);
+void retireStream(Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t self, Player& player);
 
 // cellSailPlayerFinalize(CellSailPlayer* self)
 // The game calls it from whatever state the movie ended in and frees its callback argument right
 // after, so queued events are delivered first and none follows. The decode thread stops and the
 // frame buffers are handed back before the adapters are released.
-void playerFinalize(DalPpuContext* ctx, std::uint8_t* base) {
+void playerFinalize(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t self = argU32(ctx, 0);
     Player* player = findPlayer(self);
     if (player == nullptr) {
@@ -344,7 +344,7 @@ void playerFinalize(DalPpuContext* ctx, std::uint8_t* base) {
     const std::uint64_t serial = player->serial;
     retireStream(ctx, base, self, *player);
     if (!drainServiceQueue()) {
-        logWarn("dal: sail: the service thread did not drain within {} s while finalizing player {:#010x}",
+        logWarn("tox2: sail: the service thread did not drain within {} s while finalizing player {:#010x}",
                 kFinalizeTimeout.count(), self);
     }
     // The drain releases the guest lock; another thread may have finalized this player and reused the
@@ -361,12 +361,12 @@ void playerFinalize(DalPpuContext* ctx, std::uint8_t* base) {
         }
     }
     g_players.erase(self);
-    logDebug("dal: sail: player {:#010x} finalized", self);
+    logDebug("tox2: sail: player {:#010x} finalized", self);
     setResultCode(ctx, kCellOk);
 }
 
 // cellSailPlayerSetSoundAdapter(CellSailPlayer* self, u32 index, CellSailSoundAdapter* adapter)
-void playerSetSoundAdapter(DalPpuContext* ctx, std::uint8_t*) {
+void playerSetSoundAdapter(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t self = argU32(ctx, 0);
     const Player* player = findPlayer(self);
     if (player == nullptr) {
@@ -382,7 +382,7 @@ void playerSetSoundAdapter(DalPpuContext* ctx, std::uint8_t*) {
 }
 
 // cellSailPlayerSetGraphicsAdapter(CellSailPlayer* self, u32 index, CellSailGraphicsAdapter* adapter)
-void playerSetGraphicsAdapter(DalPpuContext* ctx, std::uint8_t*) {
+void playerSetGraphicsAdapter(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t self = argU32(ctx, 0);
     const Player* player = findPlayer(self);
     if (player == nullptr) {
@@ -397,7 +397,7 @@ void playerSetGraphicsAdapter(DalPpuContext* ctx, std::uint8_t*) {
 }
 
 // cellSailPlayerSetRepeatMode(CellSailPlayer* self, s32 repeat_mode, CellSailStartCommand* command)
-void playerSetRepeatMode(DalPpuContext* ctx, std::uint8_t* base) {
+void playerSetRepeatMode(Tox2PpuContext* ctx, std::uint8_t* base) {
     Player* player = findPlayer(argU32(ctx, 0));
     if (player == nullptr) {
         setResultCode(ctx, sail::kErrorInvalidState);
@@ -412,7 +412,7 @@ void playerSetRepeatMode(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellSailPlayerBoot(CellSailPlayer* self, u64 user_param)
-void playerBoot(DalPpuContext* ctx, std::uint8_t*) {
+void playerBoot(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t self = argU32(ctx, 0);
     Player* player = findPlayer(self);
     if (player == nullptr || player->state != sail::PlayerState::Initialized) {
@@ -472,7 +472,7 @@ HeaderRead readPamfHeader(const std::string& guest_path) {
 
 // cellSailPlayerCreateDescriptor(CellSailPlayer* self, s32 stream_type, void* media_info,
 //                                const char* uri, CellSailDescriptor** desc)
-void playerCreateDescriptor(DalPpuContext* ctx, std::uint8_t* base) {
+void playerCreateDescriptor(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t self = argU32(ctx, 0);
     const std::uint32_t uri_addr = argU32(ctx, 3);
     const std::uint32_t out = argU32(ctx, 4);
@@ -485,15 +485,15 @@ void playerCreateDescriptor(DalPpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, sail::kErrorInvalidArg);
         return;
     }
-    dalWrite32(base, out, 0);
+    tox2Write32(base, out, 0);
     if (static_cast<std::int32_t>(argU32(ctx, 1)) != sail::kStreamPamf) {
-        logWarn("dal: sail: descriptor stream type {} is not supported", static_cast<std::int32_t>(argU32(ctx, 1)));
+        logWarn("tox2: sail: descriptor stream type {} is not supported", static_cast<std::int32_t>(argU32(ctx, 1)));
         setResultCode(ctx, sail::kErrorUnsupportedStream);
         return;
     }
     const std::string uri = readGuestString(base, uri_addr, kUriMaxLength);
     if (!uri.starts_with(kUriScheme)) {
-        logWarn("dal: sail: descriptor URI {} is not an {} URI", uri, kUriScheme);
+        logWarn("tox2: sail: descriptor URI {} is not an {} URI", uri, kUriScheme);
         setResultCode(ctx, sail::kErrorUnsupportedStream);
         return;
     }
@@ -509,7 +509,7 @@ void playerCreateDescriptor(DalPpuContext* ctx, std::uint8_t* base) {
     const auto block = static_cast<std::uint32_t>(callGuestFunction(
             ctx, base, player->alloc_opd, {alloc_arg, kDescriptorBoundary, sail::kDescriptorMaxSize}));
     if (!guestMapped(block, sail::kDescriptorMaxSize)) {
-        logError("dal: sail: the allocator callback returned {:#010x} for a descriptor", block);
+        logError("tox2: sail: the allocator callback returned {:#010x} for a descriptor", block);
         setResultCode(ctx, sail::kErrorMemory);
         return;
     }
@@ -529,26 +529,26 @@ void playerCreateDescriptor(DalPpuContext* ctx, std::uint8_t* base) {
     descriptor.error_code = header.error_code;
     if (descriptor.info) {
         const PamfInfo& info = *descriptor.info;
-        logInfo("dal: sail: descriptor {:#010x} for {}: {} streams, {} .. {} (90 kHz)", block, descriptor.guest_path,
+        logInfo("tox2: sail: descriptor {:#010x} for {}: {} streams, {} .. {} (90 kHz)", block, descriptor.guest_path,
                 info.streams.size(), info.start_pts, info.end_pts);
     } else {
-        logError("dal: sail: descriptor {:#010x} for {}: {}", block, descriptor.guest_path, header.error);
+        logError("tox2: sail: descriptor {:#010x} for {}: {}", block, descriptor.guest_path, header.error);
     }
     if (descriptor.player == 0) {
-        logWarn("dal: sail: player {:#010x} was finalized while its descriptor was allocated", self);
+        logWarn("tox2: sail: player {:#010x} was finalized while its descriptor was allocated", self);
     }
     // A block that is already tracked means the game freed it without DestroyDescriptor and got the
     // address back; the new descriptor replaces the stale one.
     if (g_descriptors.contains(block)) {
-        logWarn("dal: sail: descriptor block {:#010x} was still tracked and is replaced", block);
+        logWarn("tox2: sail: descriptor block {:#010x} was still tracked and is replaced", block);
     }
     g_descriptors.insert_or_assign(block, std::move(descriptor));
-    dalWrite32(base, out, block);
+    tox2Write32(base, out, block);
     setResultCode(ctx, kCellOk);
 }
 
 // cellSailPlayerAddDescriptor(CellSailPlayer* self, CellSailDescriptor* desc)
-void playerAddDescriptor(DalPpuContext* ctx, std::uint8_t*) {
+void playerAddDescriptor(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t self = argU32(ctx, 0);
     if (findPlayer(self) == nullptr) {
         setResultCode(ctx, sail::kErrorInvalidState);
@@ -570,7 +570,7 @@ void playerAddDescriptor(DalPpuContext* ctx, std::uint8_t*) {
 // cellSailPlayerDestroyDescriptor(CellSailPlayer* self, CellSailDescriptor* desc)
 // The game calls it after PlayerFinalize, which releases the descriptor; a descriptor still added to
 // a live player is refused (INVALID_STATE, as in RPCS3).
-void playerDestroyDescriptor(DalPpuContext* ctx, std::uint8_t* base) {
+void playerDestroyDescriptor(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t self = argU32(ctx, 0);
     const std::uint32_t address = argU32(ctx, 1);
     const Descriptor* descriptor = findDescriptor(address);
@@ -593,7 +593,7 @@ void playerDestroyDescriptor(DalPpuContext* ctx, std::uint8_t* base) {
 
 // cellSailDescriptorCreateDatabase(CellSailDescriptor* self, void* database, u32 size, u64 arg)
 // The block is a CellPamfReader-sized object only cellPamfReaderGetNumberOfSpecificStreams reads.
-void descriptorCreateDatabase(DalPpuContext* ctx, std::uint8_t* base) {
+void descriptorCreateDatabase(Tox2PpuContext* ctx, std::uint8_t* base) {
     const Descriptor* descriptor = findDescriptor(argU32(ctx, 0));
     const std::uint32_t database = argU32(ctx, 1);
     if (descriptor == nullptr || argU32(ctx, 2) < sail::kPamfReaderSize ||
@@ -610,7 +610,7 @@ void descriptorCreateDatabase(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellSailDescriptorDestroyDatabase(CellSailDescriptor* self, void* database)
-void descriptorDestroyDatabase(DalPpuContext* ctx, std::uint8_t* base) {
+void descriptorDestroyDatabase(Tox2PpuContext* ctx, std::uint8_t* base) {
     if (findDescriptor(argU32(ctx, 0)) == nullptr || !sail_hle::clearPamfDatabase(base, argU32(ctx, 1))) {
         setResultCode(ctx, sail::kErrorInvalidArg);
         return;
@@ -622,14 +622,14 @@ void descriptorDestroyDatabase(DalPpuContext* ctx, std::uint8_t* base) {
 //                                   u32* out3)
 // RPCS3 has no signature for this call. The game passes four word pointers and keeps bit 1 of the
 // last one without ever reading it, so the capabilities are all reported as clear.
-void descriptorGetCapabilities(DalPpuContext* ctx, std::uint8_t* base) {
+void descriptorGetCapabilities(Tox2PpuContext* ctx, std::uint8_t* base) {
     if (findDescriptor(argU32(ctx, 0)) == nullptr) {
         setResultCode(ctx, sail::kErrorInvalidArg);
         return;
     }
     for (int i = 1; i <= 4; i++) {
         const std::uint32_t out = argU32(ctx, i);
-        if (guestMapped(out, 4)) dalWrite32(base, out, 0);
+        if (guestMapped(out, 4)) tox2Write32(base, out, 0);
     }
     setResultCode(ctx, kCellOk);
 }
@@ -751,7 +751,7 @@ void chooseFormats(Stream& stream, const PamfInfo* info, const std::optional<sai
     if (audio_stream != nullptr && snd &&
         ((audio_stream->sample_rate != 0 && audio_stream->sample_rate != stream.audio_format.sample_rate) ||
          (audio_stream->channels != 0 && audio_stream->channels != channels))) {
-        logWarn("dal: sail: the audio stream ({} Hz, {} ch) differs from the sound adapter's format ({} Hz, {} ch)",
+        logWarn("tox2: sail: the audio stream ({} Hz, {} ch) differs from the sound adapter's format ({} Hz, {} ch)",
                 audio_stream->sample_rate, audio_stream->channels, stream.audio_format.sample_rate, channels);
     }
     stream.pcm_frames = snd ? kMaxSoundFrames : 0;
@@ -837,7 +837,7 @@ void recordSummary(Stream& stream) {
                 static_cast<double>(stats.played_ticks) / kTicksPerSecond,
                 static_cast<double>(stats.duration_ticks) / kTicksPerSecond);
         logDebug(
-                "dal: sail: movie {} details: video {} rejected {}, audio decoded {} delivered {} silence {} stale {} "
+                "tox2: sail: movie {} details: video {} rejected {}, audio decoded {} delivered {} silence {} stale {} "
                 "overflow {} rejected {} bad {}, demux errors {}, read errors {}, GetFrame frames refused {}, codecs: {}, "
                 "decode {:.2f} ms/frame (longest call {:.2f} ms), frame copy {:.2f} ms/frame (longest {:.2f} ms)",
                 stream.guest_path, stats.video_decoder ? "decoded" : "black", stats.video_rejected,
@@ -851,11 +851,11 @@ void recordSummary(Stream& stream) {
                                            : 0.0,
                 static_cast<double>(stream.frame_copy_max_ns) / 1e6);
     }
-    logInfo("dal: sail: {}", line);
+    logInfo("tox2: sail: {}", line);
     if (stream.start_us != 0 && stream.ended && stream.end_us > stream.start_us) {
         const double seconds = static_cast<double>(stream.end_us - stream.start_us) / 1e6;
         const std::uint64_t flips = stream.end_flips - stream.start_flips;
-        logInfo("dal: sail: movie window {}: {:.3f} .. {:.3f} s ({:.2f} s), {} flips ({:.1f}/s), {} skipped draws, {} "
+        logInfo("tox2: sail: movie window {}: {:.3f} .. {:.3f} s ({:.2f} s), {} flips ({:.1f}/s), {} skipped draws, {} "
                 "GetFrame calls ({:.1f}/s)",
                 stream.guest_path, static_cast<double>(stream.start_us) / 1e6, static_cast<double>(stream.end_us) / 1e6,
                 seconds, flips, static_cast<double>(flips) / seconds, stream.end_skipped - stream.start_skipped,
@@ -872,13 +872,13 @@ void recordSummary(Stream& stream) {
 // Hands the frame buffers back through the graphics adapter's pFree and the scratch block through
 // the allocator, in that order (the pointer array lives in the scratch block). Runs on the service
 // thread, after every call that used them.
-void releaseStreamMemory(DalPpuContext* ctx, std::uint8_t* base, Stream& stream,
+void releaseStreamMemory(Tox2PpuContext* ctx, std::uint8_t* base, Stream& stream,
                          const std::optional<sail_hle::GraphicsBinding>& gfx, std::uint32_t free_opd,
                          std::uint32_t alloc_arg) {
     if (stream.frames_usable && gfx && gfx->free != 0 && stream.scratch != 0) {
         const std::uint32_t pointers = stream.scratch + kScratchFramePointers;
         for (std::size_t i = 0; i < stream.frames.size(); i++) {
-            dalWrite32(base, pointers + 4 * static_cast<std::uint32_t>(i), stream.frames[i]);
+            tox2Write32(base, pointers + 4 * static_cast<std::uint32_t>(i), stream.frames[i]);
         }
         callGuestFunction(ctx, base, gfx->free, {gfx->arg, static_cast<std::uint32_t>(stream.frames.size()), pointers});
     }
@@ -893,7 +893,7 @@ void releaseStreamMemory(DalPpuContext* ctx, std::uint8_t* base, Stream& stream,
 // Stops the host decode, reports the movie and queues the release of its guest memory. The game
 // may free its callback argument once Finalize returns, so the release is part of what Finalize
 // waits for.
-void retireStream(DalPpuContext* ctx, std::uint8_t* base, std::uint32_t self, Player& player) {
+void retireStream(Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t self, Player& player) {
     const std::shared_ptr<Stream> stream = std::move(player.stream);
     player.stream.reset();
     if (!stream) return;
@@ -906,7 +906,7 @@ void retireStream(DalPpuContext* ctx, std::uint8_t* base, std::uint32_t self, Pl
     const auto gfx = sail_hle::graphicsBoundTo(self);
     const std::uint32_t free_opd = player.free_opd, alloc_arg = player.alloc_arg;
     const bool queued =
-            queueSailCall([stream, gfx, free_opd, alloc_arg](DalPpuContext* service_ctx, std::uint8_t* service_base) {
+            queueSailCall([stream, gfx, free_opd, alloc_arg](Tox2PpuContext* service_ctx, std::uint8_t* service_base) {
                 releaseStreamMemory(service_ctx, service_base, *stream, gfx, free_opd, alloc_arg);
             });
     if (!queued) releaseStreamMemory(ctx, base, *stream, gfx, free_opd, alloc_arg);
@@ -915,7 +915,7 @@ void retireStream(DalPpuContext* ctx, std::uint8_t* base, std::uint32_t self, Pl
 // The service-thread half of OpenStream: the graphics adapter's format and allocation callbacks,
 // then the events. Both callbacks finish before CALL_COMPLETED so the game finds the format and the
 // buffers when it resumes.
-void completeOpenStream(DalPpuContext* ctx, std::uint8_t* base, const std::shared_ptr<Stream>& stream,
+void completeOpenStream(Tox2PpuContext* ctx, std::uint8_t* base, const std::shared_ptr<Stream>& stream,
                         const Notifier& to, const std::optional<sail_hle::GraphicsBinding>& gfx,
                         const std::optional<sail_hle::SoundBinding>& snd) {
     if (stream->summarized || !isCurrent(to.address, to.serial)) return;
@@ -935,13 +935,13 @@ void completeOpenStream(DalPpuContext* ctx, std::uint8_t* base, const std::share
             stream->frames.assign(kFrameBuffers, 0);
             bool usable = result == kCellOk;
             for (std::uint32_t i = 0; i < kFrameBuffers; i++) {
-                stream->frames[i] = dalRead32(base, pointers + 4 * i);
+                stream->frames[i] = tox2Read32(base, pointers + 4 * i);
                 usable = usable && guestMapped(stream->frames[i], stream->frame_bytes);
             }
             stream->frames_usable = usable;
             if (!usable) {
                 logError(
-                        "dal: sail: the frame allocation for {} returned {:#x} and unusable buffers; the movie plays "
+                        "tox2: sail: the frame allocation for {} returned {:#x} and unusable buffers; the movie plays "
                         "without video",
                         stream->guest_path, result);
             }
@@ -957,7 +957,7 @@ void completeOpenStream(DalPpuContext* ctx, std::uint8_t* base, const std::share
 // game allocate the frame buffers. A descriptor whose file could not be read still completes: the
 // game then fails at CreateDatabase and tears down, and it would wait for the completion forever
 // otherwise.
-void playerOpenStream(DalPpuContext* ctx, std::uint8_t* base) {
+void playerOpenStream(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t self = argU32(ctx, 0);
     const Player* player = findPlayer(self);
     if (player == nullptr || player->state != sail::PlayerState::Closed) {
@@ -997,7 +997,7 @@ void playerOpenStream(DalPpuContext* ctx, std::uint8_t* base) {
         stream->open_error = opened.error();
     }
     if (!stream->open_ok) {
-        logError("dal: sail: {} cannot be played: {}", stream->guest_path, stream->open_error);
+        logError("tox2: sail: {} cannot be played: {}", stream->guest_path, stream->open_error);
     }
     descriptor = nullptr;
     info = nullptr;
@@ -1016,7 +1016,7 @@ void playerOpenStream(DalPpuContext* ctx, std::uint8_t* base) {
             stream->scratch = block;
             std::memset(base + block, 0, size);
         } else {
-            logError("dal: sail: the allocator callback returned {:#010x} for the stream's scratch block", block);
+            logError("tox2: sail: the allocator callback returned {:#010x} for the stream's scratch block", block);
         }
     }
     player = findPlayer(self);
@@ -1044,9 +1044,9 @@ void playerOpenStream(DalPpuContext* ctx, std::uint8_t* base) {
     Player& live = g_players.at(self);
     live.stream = stream;
     live.state = sail::PlayerState::Opened;
-    logDebug("dal: sail: stream {} opened: {}x{} pitch {} frame {} bytes, session {}", stream->guest_path,
+    logDebug("tox2: sail: stream {} opened: {}x{} pitch {} frame {} bytes, session {}", stream->guest_path,
              stream->width, stream->height, stream->video_format.pitch, stream->frame_bytes, stream->session_id);
-    queueSailCall([stream, to, gfx, snd](DalPpuContext* service_ctx, std::uint8_t* service_base) {
+    queueSailCall([stream, to, gfx, snd](Tox2PpuContext* service_ctx, std::uint8_t* service_base) {
         completeOpenStream(service_ctx, service_base, stream, to, gfx, snd);
     });
     setResultCode(ctx, kCellOk);
@@ -1060,7 +1060,7 @@ void waitForPreroll(Stream& stream) {
     while (!stream.movie.waitPrerolled(std::chrono::milliseconds(0))) {
         if (stream.summarized) return;
         if (std::chrono::steady_clock::now() >= deadline) {
-            logWarn("dal: sail: {} produced no first frame within {} s; its clock starts anyway", stream.guest_path,
+            logWarn("tox2: sail: {} produced no first frame within {} s; its clock starts anyway", stream.guest_path,
                     std::chrono::duration_cast<std::chrono::seconds>(kPrerollTimeout).count());
             return;
         }
@@ -1070,7 +1070,7 @@ void waitForPreroll(Stream& stream) {
 
 // The service-thread half of Start: the clock starts only after the decoders have output, so their
 // start-up does not make the first frames late, and RUNNING is reported at that moment.
-void completeStart(DalPpuContext* ctx, std::uint8_t* base, const std::shared_ptr<Stream>& stream, const Notifier& to) {
+void completeStart(Tox2PpuContext* ctx, std::uint8_t* base, const std::shared_ptr<Stream>& stream, const Notifier& to) {
     if (!isCurrent(to.address, to.serial)) return;
     deliverEvents(ctx, base, to,
                   {stateChanged(sail::PlayerState::StartTransition), plainEvent(sail::kEventSessionStarted)});
@@ -1082,14 +1082,14 @@ void completeStart(DalPpuContext* ctx, std::uint8_t* base, const std::shared_ptr
     stream->start_flips = flips.flips;
     stream->start_skipped = flips.skipped;
     stream->running = true;
-    logInfo("dal: sail: movie start {} at {:.3f} s, flip {}", stream->guest_path,
+    logInfo("tox2: sail: movie start {} at {:.3f} s, flip {}", stream->guest_path,
             static_cast<double>(stream->start_us) / 1e6, flips.flips);
     deliverEvents(ctx, base, to, {stateChanged(sail::PlayerState::Running), callCompleted(sail::kCallStart)});
 }
 
 // cellSailPlayerStart(CellSailPlayer* self, CellSailStartCommand* command, u64 user_param)
 // The game passes a zeroed command (play from the start to the end), which is the only one played.
-void playerStart(DalPpuContext* ctx, std::uint8_t*) {
+void playerStart(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t self = argU32(ctx, 0);
     Player* player = findPlayer(self);
     if (player == nullptr || player->state != sail::PlayerState::Opened || !player->stream ||
@@ -1099,13 +1099,13 @@ void playerStart(DalPpuContext* ctx, std::uint8_t*) {
     }
     const std::shared_ptr<Stream> stream = player->stream;
     if (!stream->movie.start()) {
-        logError("dal: sail: the decode thread for {} could not be started", stream->guest_path);
+        logError("tox2: sail: the decode thread for {} could not be started", stream->guest_path);
         setResultCode(ctx, sail::kErrorFatal);
         return;
     }
     stream->started = true;
     player->state = sail::PlayerState::Running;
-    queueSailCall([stream, to = notifierOf(self, *player)](DalPpuContext* service_ctx, std::uint8_t* service_base) {
+    queueSailCall([stream, to = notifierOf(self, *player)](Tox2PpuContext* service_ctx, std::uint8_t* service_base) {
         completeStart(service_ctx, service_base, stream, to);
     });
     setResultCode(ctx, kCellOk);
@@ -1122,7 +1122,7 @@ void checkStreamEnd(std::uint32_t self, Player& player, Stream& stream) {
     player.state = sail::PlayerState::Opened;
     if (player.repeat_mode != 0) {
         logOnce(LogLevel::Info, "sail-repeat",
-                "dal: sail: repeat mode {} is set; the stream ends instead of looping (the game restarts a looping "
+                "tox2: sail: repeat mode {} is set; the stream ends instead of looping (the game restarts a looping "
                 "movie itself)",
                 player.repeat_mode);
     }
@@ -1230,4 +1230,4 @@ std::uint32_t takeSoundFrame(std::uint8_t* base, std::uint32_t player_address, s
 
 }  // namespace sail_hle
 
-}  // namespace dal
+}  // namespace tox2

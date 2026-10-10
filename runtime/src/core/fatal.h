@@ -5,9 +5,9 @@
 #include <filesystem>
 #include <string_view>
 
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 
-namespace dal {
+namespace tox2 {
 
 enum class ExitCode : int {
     ProcessExit = 0,
@@ -47,7 +47,8 @@ std::uint32_t findOwningFunction(std::uint32_t addr);
 // frame (`*(back_chain + 16)`). Stops on a null, misaligned, non-ascending or non-committed link, or
 // after `max_frames`. Guest memory is only read after checking that it is committed stack, so a
 // corrupt chain cannot fault. Returns the number of frames written.
-std::size_t walkGuestStack(const DalPpuContext& ctx, const std::uint8_t* base, GuestFrame* out, std::size_t max_frames);
+std::size_t walkGuestStack(const Tox2PpuContext& ctx, const std::uint8_t* base, GuestFrame* out,
+                           std::size_t max_frames);
 
 // Registered by the census code so this file does not depend on it. Called exactly once, on the
 // way out of every stop path. Without a printer nothing is printed.
@@ -56,14 +57,14 @@ void setCensusPrinter(CensusPrinterFn fn);
 
 // Context of the guest thread running on the calling host thread (nullptr on other threads);
 // fatal() dumps its registers and trace ring. The thread layer sets it when a guest thread starts.
-void setFatalContext(const DalPpuContext* ctx);
+void setFatalContext(const Tox2PpuContext* ctx);
 
 // Logs the stop line, the registers and trace ring of the current guest thread, and the census,
 // then ends the process with ExitCode::Fatal. Only the first caller proceeds; others block forever.
 [[noreturn]] void fatal(FatalKind kind, std::string_view message);
 
 // Like fatal() without the register dump. `line` is the complete stop line, e.g.
-// "dal: stop: watchdog 20 s".
+// "tox2: stop: watchdog 20 s".
 [[noreturn]] void stopProcess(ExitCode code, std::string_view line);
 
 // Keeps failures from raising modal dialogs (CRT abort/assert/report boxes, critical-error and
@@ -73,4 +74,4 @@ void installProcessSettings();
 // Directory of the running executable; empty if Windows cannot report it.
 std::filesystem::path executableDirectory();
 
-}  // namespace dal
+}  // namespace tox2

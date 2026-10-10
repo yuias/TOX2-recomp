@@ -12,11 +12,11 @@
 #include "core/host_functions.h"
 #include "core/log.h"
 #include "core/threads.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "rsx/rsx_state.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 // RPCS3 creates the thread with priority 1 and a 16 KiB stack.
@@ -58,7 +58,7 @@ const char* kindName(RsxInterrupt kind) {
 void interruptHook(RsxInterrupt kind, std::uint32_t arg) { postGcmInterrupt(kind, arg); }
 
 // Entry function of the thread. Returning ends the thread (only stopGcmInterruptThread asks for it).
-void interruptThreadBody(DalPpuContext* ctx, std::uint8_t* base) {
+void interruptThreadBody(Tox2PpuContext* ctx, std::uint8_t* base) {
     InterruptState& s = interruptState();
     for (;;) {
         blockingWait(s.wake, [&] { return s.stop || !s.queue.empty(); }, "gcm interrupt wait", std::nullopt);
@@ -72,7 +72,7 @@ void interruptThreadBody(DalPpuContext* ctx, std::uint8_t* base) {
 
         const auto index = static_cast<std::size_t>(item.kind);
         if (s.calls[index].fetch_add(1, std::memory_order_relaxed) == 0) {
-            logInfo("dal: gcm: first {} handler call: opd {:#010x} arg {}", kindName(item.kind), item.opd, item.arg);
+            logInfo("tox2: gcm: first {} handler call: opd {:#010x} arg {}", kindName(item.kind), item.opd, item.arg);
         }
         callGuestFunction(ctx, base, item.opd, {item.arg});
         // Give the guest threads that queued meanwhile a turn before the next handler.
@@ -117,13 +117,13 @@ void postGcmInterrupt(RsxInterrupt kind, std::uint32_t arg) {
     if (opd == 0) {
         if (kind == RsxInterrupt::User) {
             logOnce(std::format("gcm-user-command-no-handler-{}", arg),
-                    "dal: gcm: user command cause {} dropped: no user handler registered", arg);
+                    "tox2: gcm: user command cause {} dropped: no user handler registered", arg);
         }
         return;
     }
     if (kind == RsxInterrupt::VBlank) {
         if (s.vblank_queued) {
-            logOnce("gcm-vblank-coalesced", "dal: gcm: the vblank handler is behind, ticks are being coalesced");
+            logOnce("gcm-vblank-coalesced", "tox2: gcm: the vblank handler is behind, ticks are being coalesced");
             return;
         }
         s.vblank_queued = true;
@@ -160,4 +160,4 @@ void stopGcmInterruptThread() {
     for (auto& count : s.calls) count.store(0, std::memory_order_relaxed);
 }
 
-}  // namespace dal
+}  // namespace tox2

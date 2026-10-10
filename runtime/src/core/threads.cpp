@@ -16,7 +16,7 @@
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -24,7 +24,7 @@
 
 #include <process.h>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 // Guest call depth maps to host frames, so guest threads need far more than the default stack.
@@ -109,7 +109,7 @@ void fillStackPages(std::uint8_t* base, std::uint32_t addr, std::uint32_t size) 
 unsigned __stdcall guestThreadMain(void* arg) {
     auto* thread = static_cast<GuestThread*>(arg);
     reserveFaultStack();
-    DalPpuContext& ctx = thread->context();
+    Tox2PpuContext& ctx = thread->context();
     setFatalContext(&ctx);
     t_current = thread;
 
@@ -118,8 +118,8 @@ unsigned __stdcall guestThreadMain(void* arg) {
     thread->setState(ThreadState::Running);
 
     std::uint8_t* base = process().memory.base();
-    const std::uint32_t entry = dalRead32(base, thread->entryOpd());
-    DalPpuFunc* function = dalLookup(entry);
+    const std::uint32_t entry = tox2Read32(base, thread->entryOpd());
+    Tox2PpuFunc* function = tox2Lookup(entry);
     if (function == nullptr) {
         fatal(FatalKind::UnknownTarget,
               std::format("thread {:#010x} entry {:#010x} (opd {:#010x}) has no generated function", thread->id(),
@@ -129,7 +129,7 @@ unsigned __stdcall guestThreadMain(void* arg) {
 
     // lr is 0 at entry, so a C return from the entry function ends the thread, like a call to
     // sys_ppu_thread_exit (which also gives the TLS block back).
-    logInfo("dal: thread {:#010x} {} returned from its entry function with {:#x}", thread->id(), thread->name(),
+    logInfo("tox2: thread {:#010x} {} returned from its entry function with {:#x}", thread->id(), thread->name(),
             ctx.gpr[3]);
     freeTls(static_cast<std::uint32_t>(ctx.gpr[13]));
     exitCurrentThread(ctx.gpr[3]);
@@ -172,7 +172,7 @@ GuestThread::GuestThread(std::uint32_t id, const GuestThreadParams& params, std:
       joinable_(params.joinable),
       service_(params.service) {
     context_.vscr_nj = 1;
-    context_.preempt_budget = kDalPreemptBudget;
+    context_.preempt_budget = kTox2PreemptBudget;
     context_.runtime = this;
 }
 
@@ -203,12 +203,12 @@ GuestThread* prepareGuestThread(const GuestThreadParams& params) {
 
     // Read before taking the registry mutex: a bad descriptor faults, and the fatal path's census
     // needs that mutex.
-    const std::uint32_t toc = dalRead32(base, params.entry_opd + 4);
+    const std::uint32_t toc = tox2Read32(base, params.entry_opd + 4);
 
     std::lock_guard lock(g_registry_mutex);
     const auto id = static_cast<std::uint32_t>(kFirstThreadId + g_threads.size());
     auto thread = std::make_unique<GuestThread>(id, params, addr, size);
-    DalPpuContext& ctx = thread->context();
+    Tox2PpuContext& ctx = thread->context();
     ctx.gpr[1] = std::uint64_t{addr} + size - kStackStartOffset;
     ctx.gpr[2] = toc;
     ctx.gpr[3] = params.arg0;
@@ -292,7 +292,7 @@ void runSupervisor(std::uint32_t seconds) {
         std::this_thread::sleep_for(kSupervisorPeriod);
 
         if (seconds != 0 && std::chrono::steady_clock::now() - start >= std::chrono::seconds(seconds)) {
-            stopProcess(ExitCode::Watchdog, std::format("dal: stop: watchdog {} s", seconds));
+            stopProcess(ExitCode::Watchdog, std::format("tox2: stop: watchdog {} s", seconds));
         }
 
         std::vector<ThreadHealth> health;
@@ -301,9 +301,9 @@ void runSupervisor(std::uint32_t seconds) {
         }
         std::size_t stalled = 0;
         switch (judgeThreads(health, steadyMs(), &stalled)) {
-            case ThreadVerdict::NoThreads: stopProcess(ExitCode::NoThreads, "dal: stop: no guest threads left"); break;
+            case ThreadVerdict::NoThreads: stopProcess(ExitCode::NoThreads, "tox2: stop: no guest threads left"); break;
             case ThreadVerdict::Stall:
-                stopProcess(ExitCode::Stall, std::format("dal: stop: stall ({} threads blocked)", stalled));
+                stopProcess(ExitCode::Stall, std::format("tox2: stop: stall ({} threads blocked)", stalled));
                 break;
             case ThreadVerdict::Ok: break;
         }
@@ -324,14 +324,14 @@ ThreadVerdict judgeThreads(const std::vector<ThreadHealth>& threads, std::int64_
     return stalled == live ? ThreadVerdict::Stall : ThreadVerdict::Ok;
 }
 
-}  // namespace dal
+}  // namespace tox2
 
 extern "C" {
 
-void dalYield(DalPpuContext* ctx, uint8_t* base) {
+void tox2Yield(Tox2PpuContext* ctx, uint8_t* base) {
     (void)base;
-    ctx->preempt_budget = kDalPreemptBudget;
-    dal::yieldGuestLock();
+    ctx->preempt_budget = kTox2PreemptBudget;
+    tox2::yieldGuestLock();
 }
 
 }  // extern "C"

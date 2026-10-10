@@ -10,76 +10,76 @@
 
 #include "core/census.h"
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 
-namespace dal {
+namespace tox2 {
 
 // Handlers defined in sys_misc.cpp.
-void sysProcessExit(DalPpuContext* ctx, std::uint8_t* base);
-void sysTtyRead(DalPpuContext* ctx, std::uint8_t* base);
-void sysTtyWrite(DalPpuContext* ctx, std::uint8_t* base);
-void sysTimerUsleep(DalPpuContext* ctx, std::uint8_t* base);
-void sysTimerSleep(DalPpuContext* ctx, std::uint8_t* base);
-void sysTimeGetTimebaseFrequency(DalPpuContext* ctx, std::uint8_t* base);
-void sysMemoryAllocate(DalPpuContext* ctx, std::uint8_t* base);
-void sysMemoryFree(DalPpuContext* ctx, std::uint8_t* base);
-void sysMemoryGetUserMemorySize(DalPpuContext* ctx, std::uint8_t* base);
+void sysProcessExit(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysTtyRead(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysTtyWrite(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysTimerUsleep(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysTimerSleep(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysTimeGetTimebaseFrequency(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysMemoryAllocate(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysMemoryFree(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysMemoryGetUserMemorySize(Tox2PpuContext* ctx, std::uint8_t* base);
 
 // Handlers defined in sys_mutex_cond.cpp.
-void sysMutexCreate(DalPpuContext* ctx, std::uint8_t* base);
-void sysMutexDestroy(DalPpuContext* ctx, std::uint8_t* base);
-void sysMutexLock(DalPpuContext* ctx, std::uint8_t* base);
-void sysMutexTryLock(DalPpuContext* ctx, std::uint8_t* base);
-void sysMutexUnlock(DalPpuContext* ctx, std::uint8_t* base);
-void sysCondCreate(DalPpuContext* ctx, std::uint8_t* base);
-void sysCondDestroy(DalPpuContext* ctx, std::uint8_t* base);
-void sysCondWait(DalPpuContext* ctx, std::uint8_t* base);
-void sysCondSignal(DalPpuContext* ctx, std::uint8_t* base);
-void sysCondSignalAll(DalPpuContext* ctx, std::uint8_t* base);
+void sysMutexCreate(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysMutexDestroy(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysMutexLock(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysMutexTryLock(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysMutexUnlock(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysCondCreate(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysCondDestroy(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysCondWait(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysCondSignal(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysCondSignalAll(Tox2PpuContext* ctx, std::uint8_t* base);
 
 // Handlers defined in sys_event.cpp.
-void sysEventFlagCreate(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventFlagDestroy(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventFlagWait(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventFlagSet(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventFlagClear(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventFlagCancel(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventFlagGet(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventQueueCreate(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventQueueDestroy(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventQueueReceive(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventQueueDrain(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventPortCreate(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventPortDestroy(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventPortConnectLocal(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventPortDisconnect(DalPpuContext* ctx, std::uint8_t* base);
-void sysEventPortSend(DalPpuContext* ctx, std::uint8_t* base);
+void sysEventFlagCreate(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventFlagDestroy(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventFlagWait(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventFlagSet(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventFlagClear(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventFlagCancel(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventFlagGet(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventQueueCreate(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventQueueDestroy(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventQueueReceive(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventQueueDrain(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventPortCreate(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventPortDestroy(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventPortConnectLocal(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventPortDisconnect(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysEventPortSend(Tox2PpuContext* ctx, std::uint8_t* base);
 
 // Handlers defined in sys_ppu_thread.cpp.
-void sysPpuThreadExit(DalPpuContext* ctx, std::uint8_t* base);
-void sysPpuThreadYield(DalPpuContext* ctx, std::uint8_t* base);
-void sysPpuThreadJoin(DalPpuContext* ctx, std::uint8_t* base);
-void sysPpuThreadSetPriority(DalPpuContext* ctx, std::uint8_t* base);
-void sysPpuThreadGetPriority(DalPpuContext* ctx, std::uint8_t* base);
+void sysPpuThreadExit(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysPpuThreadYield(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysPpuThreadJoin(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysPpuThreadSetPriority(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysPpuThreadGetPriority(Tox2PpuContext* ctx, std::uint8_t* base);
 
 // Handlers defined in sys_fs.cpp.
-void sysFsOpen(DalPpuContext* ctx, std::uint8_t* base);
-void sysFsRead(DalPpuContext* ctx, std::uint8_t* base);
-void sysFsWrite(DalPpuContext* ctx, std::uint8_t* base);
-void sysFsClose(DalPpuContext* ctx, std::uint8_t* base);
-void sysFsOpendir(DalPpuContext* ctx, std::uint8_t* base);
-void sysFsReaddir(DalPpuContext* ctx, std::uint8_t* base);
-void sysFsClosedir(DalPpuContext* ctx, std::uint8_t* base);
-void sysFsStat(DalPpuContext* ctx, std::uint8_t* base);
-void sysFsFstat(DalPpuContext* ctx, std::uint8_t* base);
-void sysFsMkdir(DalPpuContext* ctx, std::uint8_t* base);
-void sysFsUnlink(DalPpuContext* ctx, std::uint8_t* base);
-void sysFsLseek(DalPpuContext* ctx, std::uint8_t* base);
+void sysFsOpen(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysFsRead(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysFsWrite(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysFsClose(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysFsOpendir(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysFsReaddir(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysFsClosedir(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysFsStat(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysFsFstat(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysFsMkdir(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysFsUnlink(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysFsLseek(Tox2PpuContext* ctx, std::uint8_t* base);
 
 // Handlers defined in sys_spu.cpp.
-void sysSpuInitialize(DalPpuContext* ctx, std::uint8_t* base);
-void sysSpuThreadGroupConnectEventAllThreads(DalPpuContext* ctx, std::uint8_t* base);
+void sysSpuInitialize(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadGroupConnectEventAllThreads(Tox2PpuContext* ctx, std::uint8_t* base);
 
 namespace {
 
@@ -161,17 +161,17 @@ const SyscallEntry* findSyscall(uint32_t number) {
     return it != std::end(kSyscalls) && it->number == number ? &*it : nullptr;
 }
 
-}  // namespace dal
+}  // namespace tox2
 
 extern "C" {
 
-void dalSyscall(DalPpuContext* ctx, uint8_t* base, uint32_t site) {
+void tox2Syscall(Tox2PpuContext* ctx, uint8_t* base, uint32_t site) {
     (void)site;
     const uint32_t number = static_cast<uint32_t>(ctx->gpr[11]);
-    const dal::SyscallEntry* entry = dal::findSyscall(number);
+    const tox2::SyscallEntry* entry = tox2::findSyscall(number);
     const char* name = entry != nullptr ? entry->name : nullptr;
     const bool implemented = entry != nullptr && entry->handler != nullptr;
-    dal::censusSyscall(number, name, implemented);
+    tox2::censusSyscall(number, name, implemented);
 
     if (implemented) {
         entry->handler(ctx, base);
@@ -181,10 +181,10 @@ void dalSyscall(DalPpuContext* ctx, uint8_t* base, uint32_t site) {
     // The key is built on the stack: unimplemented syscalls can be hot.
     std::array<char, 24> key;
     const auto end = std::format_to_n(key.data(), key.size(), "default-sc-{}", number);
-    dal::logOnce(std::string_view(key.data(), static_cast<size_t>(end.out - key.data())),
-                 "dal: default sc {} {}({:#x}, {:#x}, {:#x}, {:#x})", number, name != nullptr ? name : "?", ctx->gpr[3],
-                 ctx->gpr[4], ctx->gpr[5], ctx->gpr[6]);
-    ctx->gpr[3] = dal::kCellOk;
+    tox2::logOnce(std::string_view(key.data(), static_cast<size_t>(end.out - key.data())),
+                  "tox2: default sc {} {}({:#x}, {:#x}, {:#x}, {:#x})", number, name != nullptr ? name : "?",
+                  ctx->gpr[3], ctx->gpr[4], ctx->gpr[5], ctx->gpr[6]);
+    ctx->gpr[3] = tox2::kCellOk;
 }
 
 }  // extern "C"

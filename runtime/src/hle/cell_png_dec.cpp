@@ -48,14 +48,14 @@
 
 #include "core/guest_memory.h"
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
 #include "lv2/vfs.h"
 #include "png.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "cellPngDec";
@@ -254,11 +254,11 @@ ChunkScan scanChunks(const std::vector<std::uint8_t>& png, bool until_idat) {
 }
 
 // Calls a guest allocation callback; returns the callback's result.
-std::uint32_t callMalloc(DalPpuContext* ctx, std::uint8_t* base, const Handle& handle, std::uint32_t size) {
+std::uint32_t callMalloc(Tox2PpuContext* ctx, std::uint8_t* base, const Handle& handle, std::uint32_t size) {
     return static_cast<std::uint32_t>(callGuestFunction(ctx, base, handle.malloc_func, {size, handle.malloc_arg}));
 }
 
-bool callFree(DalPpuContext* ctx, std::uint8_t* base, const Handle& handle, std::uint32_t addr) {
+bool callFree(Tox2PpuContext* ctx, std::uint8_t* base, const Handle& handle, std::uint32_t addr) {
     return callGuestFunction(ctx, base, handle.free_func, {addr, handle.free_arg}) == 0;
 }
 
@@ -275,7 +275,7 @@ Stream* findStream(std::uint32_t handle, std::uint32_t addr) {
 // Pulls data through cbCtrlStrm until `done` holds or the stream ends. Returns kCellOk or an
 // error code.
 template <typename Done>
-std::uint32_t pullStream(DalPpuContext* ctx, std::uint8_t* base, const Handle& handle, Stream& stream, Done done) {
+std::uint32_t pullStream(Tox2PpuContext* ctx, std::uint8_t* base, const Handle& handle, Stream& stream, Done done) {
     if (done()) return kCellOk;
     if (stream.strm_func == 0) return kErrorStreamFormat;
     const std::uint32_t scratch = callMalloc(ctx, base, handle, kStrmScratchSize);
@@ -285,29 +285,29 @@ std::uint32_t pullStream(DalPpuContext* ctx, std::uint8_t* base, const Handle& h
     std::uint32_t calls = 0;
     for (std::uint32_t call = 0; !done(); call++) {
         if (call >= kMaxStreamCalls) {
-            logWarn("dal: pngdec: stream callback gave no end of image after {} calls", call);
+            logWarn("tox2: pngdec: stream callback gave no end of image after {} calls", call);
             result = kErrorStreamFormat;
             break;
         }
         const std::uint32_t info = scratch, param = scratch + 8;
-        dalWrite32(base, info, static_cast<std::uint32_t>(stream.data.size()));
-        dalWrite32(base, param, 0);
-        dalWrite32(base, param + 4, 0);
+        tox2Write32(base, info, static_cast<std::uint32_t>(stream.data.size()));
+        tox2Write32(base, param, 0);
+        tox2Write32(base, param + 4, 0);
         const auto status = static_cast<std::uint32_t>(
                 callGuestFunction(ctx, base, stream.strm_func, {info, param, stream.strm_arg}));
-        const std::uint32_t ptr = dalRead32(base, param);
-        const std::uint32_t size = dalRead32(base, param + 4);
+        const std::uint32_t ptr = tox2Read32(base, param);
+        const std::uint32_t size = tox2Read32(base, param + 4);
         if (status != 0 || size == 0 || !mapped(ptr, size)) {
-            logWarn("dal: pngdec: stream callback returned {:#x}, {} bytes at {:#010x}", status, size, ptr);
+            logWarn("tox2: pngdec: stream callback returned {:#x}, {} bytes at {:#010x}", status, size, ptr);
             result = kErrorStreamFormat;
             break;
         }
         stream.data.insert(stream.data.end(), base + ptr, base + ptr + size);
         calls++;
     }
-    logInfo("dal: pngdec: stream callback: {} calls, {} -> {} bytes", calls, start_size, stream.data.size());
+    logInfo("tox2: pngdec: stream callback: {} calls, {} -> {} bytes", calls, start_size, stream.data.size());
     if (!callFree(ctx, base, handle, scratch)) {
-        logWarn("dal: pngdec: freeing the stream scratch block failed");
+        logWarn("tox2: pngdec: freeing the stream scratch block failed");
     }
     return result;
 }
@@ -468,12 +468,12 @@ bool pngDecode(PngJob* job, const PngRequest* request) {
 std::uint32_t inspect(Stream& stream) {
     PngJob job;
     if (!openJob(&job, stream.data)) {
-        logError("dal: pngdec: cannot create the libpng reader");
+        logError("tox2: pngdec: cannot create the libpng reader");
         return kErrorFatal;
     }
     PngHeader header;
     const bool ok = pngReadHeader(&job, &header);
-    if (!ok) logWarn("dal: pngdec: bad PNG header: {}", job.error);
+    if (!ok) logWarn("tox2: pngdec: bad PNG header: {}", job.error);
     closeJob(&job);
     if (!ok) return kErrorHeader;
     stream.width = header.width;
@@ -502,7 +502,7 @@ std::optional<std::vector<std::uint8_t>> readFileRange(const std::filesystem::pa
 
 // cellPngDecCreate(CellPngDecMainHandle* mainHandle, const CellPngDecThreadInParam* threadInParam,
 //                  CellPngDecThreadOutParam* threadOutParam)
-void pngCreate(DalPpuContext* ctx, std::uint8_t* base) {
+void pngCreate(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t handle_pp = argU32(ctx, 0);
     const std::uint32_t in_param = argU32(ctx, 1);
     const std::uint32_t out_param = argU32(ctx, 2);
@@ -511,33 +511,33 @@ void pngCreate(DalPpuContext* ctx, std::uint8_t* base) {
         return;
     }
     Handle handle;
-    handle.malloc_func = dalRead32(base, in_param + kThreadInMallocFunc);
-    handle.malloc_arg = dalRead32(base, in_param + kThreadInMallocArg);
-    handle.free_func = dalRead32(base, in_param + kThreadInFreeFunc);
-    handle.free_arg = dalRead32(base, in_param + kThreadInFreeArg);
+    handle.malloc_func = tox2Read32(base, in_param + kThreadInMallocFunc);
+    handle.malloc_arg = tox2Read32(base, in_param + kThreadInMallocArg);
+    handle.free_func = tox2Read32(base, in_param + kThreadInFreeFunc);
+    handle.free_arg = tox2Read32(base, in_param + kThreadInFreeArg);
     if (handle.malloc_func == 0 || handle.free_func == 0) {
         setResultCode(ctx, kErrorArg);
         return;
     }
     const std::uint32_t block = callMalloc(ctx, base, handle, kHandleBlockSize);
     if (!mapped(block, kHandleBlockSize)) {
-        logError("dal: pngdec: the handle allocation callback returned {:#010x}", block);
+        logError("tox2: pngdec: the handle allocation callback returned {:#010x}", block);
         setResultCode(ctx, kErrorFatal);
         return;
     }
-    dalWrite32(base, block, handle.malloc_func);
-    dalWrite32(base, block + 4, handle.malloc_arg);
-    dalWrite32(base, block + 8, handle.free_func);
-    dalWrite32(base, block + 12, handle.free_arg);
+    tox2Write32(base, block, handle.malloc_func);
+    tox2Write32(base, block + 4, handle.malloc_arg);
+    tox2Write32(base, block + 8, handle.free_func);
+    tox2Write32(base, block + 12, handle.free_arg);
     g_handles[block] = handle;
-    dalWrite32(base, handle_pp, block);
-    dalWrite32(base, out_param, kCodecVersion);
-    logInfo("dal: pngdec: create handle {:#010x}", block);
+    tox2Write32(base, handle_pp, block);
+    tox2Write32(base, out_param, kCodecVersion);
+    logInfo("tox2: pngdec: create handle {:#010x}", block);
     setResultCode(ctx, kCellOk);
 }
 
 // cellPngDecDestroy(CellPngDecMainHandle mainHandle)
-void pngDestroy(DalPpuContext* ctx, std::uint8_t* base) {
+void pngDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t addr = argU32(ctx, 0);
     Handle* handle = findHandle(addr);
     if (handle == nullptr) {
@@ -547,7 +547,7 @@ void pngDestroy(DalPpuContext* ctx, std::uint8_t* base) {
     const Handle copy = *handle;
     g_handles.erase(addr);
     if (!callFree(ctx, base, copy, addr)) {
-        logError("dal: pngdec: the handle free callback failed");
+        logError("tox2: pngdec: the handle free callback failed");
         setResultCode(ctx, kErrorFatal);
         return;
     }
@@ -557,7 +557,7 @@ void pngDestroy(DalPpuContext* ctx, std::uint8_t* base) {
 // cellPngDecExtOpen(CellPngDecMainHandle mainHandle, CellPngDecSubHandle* subHandle,
 //                   const CellPngDecSrc* src, CellPngDecOpnInfo* openInfo,
 //                   const CellPngDecCbCtrlStrm* cbCtrlStrm, const CellPngDecOpnParam* opnParam)
-void pngExtOpen(DalPpuContext* ctx, std::uint8_t* base) {
+void pngExtOpen(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t handle_addr = argU32(ctx, 0);
     const std::uint32_t stream_pp = argU32(ctx, 1);
     const std::uint32_t src = argU32(ctx, 2);
@@ -574,42 +574,43 @@ void pngExtOpen(DalPpuContext* ctx, std::uint8_t* base) {
     Stream stream;
     stream.handle = handle_addr;
     if (cb_strm != 0) {
-        stream.strm_func = dalRead32(base, cb_strm);
-        stream.strm_arg = dalRead32(base, cb_strm + 4);
+        stream.strm_func = tox2Read32(base, cb_strm);
+        stream.strm_arg = tox2Read32(base, cb_strm + 4);
     }
-    if (opn_param != 0 && mapped(opn_param, 4) && dalRead32(base, opn_param) != 0) {
-        logOnce("pngdec-selectchunk", "dal: pngdec: opnParam.selectChunk {:#x} is ignored", dalRead32(base, opn_param));
+    if (opn_param != 0 && mapped(opn_param, 4) && tox2Read32(base, opn_param) != 0) {
+        logOnce("pngdec-selectchunk", "tox2: pngdec: opnParam.selectChunk {:#x} is ignored",
+                tox2Read32(base, opn_param));
     }
 
-    const std::uint32_t select = dalRead32(base, src);
+    const std::uint32_t select = tox2Read32(base, src);
     std::string origin;
     if (select == kSrcFile) {
         if (stream.strm_func != 0) {
-            logError("dal: pngdec: partial decoding from a file is not possible");
+            logError("tox2: pngdec: partial decoding from a file is not possible");
             setResultCode(ctx, kErrorStreamFormat);
             return;
         }
-        const std::uint32_t name_addr = dalRead32(base, src + kSrcFileName);
+        const std::uint32_t name_addr = tox2Read32(base, src + kSrcFileName);
         if (!mapped(name_addr, 1)) {
             setResultCode(ctx, kErrorArg);
             return;
         }
         const std::string name = readGuestString(base, name_addr, kMaxFileNameLength);
-        const auto offset = static_cast<std::int64_t>(dalRead64(base, src + kSrcFileOffset));
-        const std::uint32_t size = dalRead32(base, src + kSrcFileSize);
+        const auto offset = static_cast<std::int64_t>(tox2Read64(base, src + kSrcFileOffset));
+        const std::uint32_t size = tox2Read32(base, src + kSrcFileSize);
         bool read_only = false;
         const auto host = resolveGuestPath(name, read_only);
         auto data = host ? readFileRange(*host, offset, size) : std::nullopt;
         if (!data) {
-            logError("dal: pngdec: cannot open {}", name);
+            logError("tox2: pngdec: cannot open {}", name);
             setResultCode(ctx, kErrorOpenFile);
             return;
         }
         stream.data = std::move(*data);
         origin = std::format("file {} offset {} size {}", name, offset, stream.data.size());
     } else if (select == kSrcBuffer) {
-        const std::uint32_t ptr = dalRead32(base, src + kSrcStreamPtr);
-        const std::uint32_t size = dalRead32(base, src + kSrcStreamSize);
+        const std::uint32_t ptr = tox2Read32(base, src + kSrcStreamPtr);
+        const std::uint32_t size = tox2Read32(base, src + kSrcStreamSize);
         if (size == 0 || !mapped(ptr, size)) {
             setResultCode(ctx, kErrorArg);
             return;
@@ -626,26 +627,26 @@ void pngExtOpen(DalPpuContext* ctx, std::uint8_t* base) {
         return;
     }
     if (std::memcmp(stream.data.data(), kPngSignature, kPngSignatureSize) != 0) {
-        logError("dal: pngdec: not a PNG signature ({})", origin);
+        logError("tox2: pngdec: not a PNG signature ({})", origin);
         setResultCode(ctx, kErrorHeader);
         return;
     }
 
     const std::uint32_t block = callMalloc(ctx, base, *handle, kStreamBlockSize);
     if (!mapped(block, kStreamBlockSize)) {
-        logError("dal: pngdec: the stream allocation callback returned {:#010x}", block);
+        logError("tox2: pngdec: the stream allocation callback returned {:#010x}", block);
         setResultCode(ctx, kErrorFatal);
         return;
     }
-    logInfo("dal: pngdec: open stream {:#010x} from {} hash {:08x}", block, origin, fnv1a(stream.data));
+    logInfo("tox2: pngdec: open stream {:#010x} from {} hash {:08x}", block, origin, fnv1a(stream.data));
     g_streams[block] = std::move(stream);
-    dalWrite32(base, stream_pp, block);
-    dalWrite32(base, open_info, kStreamBlockSize);
+    tox2Write32(base, stream_pp, block);
+    tox2Write32(base, open_info, kStreamBlockSize);
     setResultCode(ctx, kCellOk);
 }
 
 // cellPngDecClose(CellPngDecMainHandle mainHandle, CellPngDecSubHandle subHandle)
-void pngClose(DalPpuContext* ctx, std::uint8_t* base) {
+void pngClose(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t handle_addr = argU32(ctx, 0);
     const std::uint32_t stream_addr = argU32(ctx, 1);
     Handle* handle = findHandle(handle_addr);
@@ -655,7 +656,7 @@ void pngClose(DalPpuContext* ctx, std::uint8_t* base) {
     }
     g_streams.erase(stream_addr);
     if (!callFree(ctx, base, *handle, stream_addr)) {
-        logError("dal: pngdec: the stream free callback failed");
+        logError("tox2: pngdec: the stream free callback failed");
         setResultCode(ctx, kErrorFatal);
         return;
     }
@@ -664,7 +665,7 @@ void pngClose(DalPpuContext* ctx, std::uint8_t* base) {
 
 // cellPngDecExtReadHeader(CellPngDecMainHandle mainHandle, CellPngDecSubHandle subHandle,
 //                         CellPngDecInfo* info, CellPngDecExtInfo* extInfo)
-void pngExtReadHeader(DalPpuContext* ctx, std::uint8_t* base) {
+void pngExtReadHeader(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t handle_addr = argU32(ctx, 0);
     const std::uint32_t stream_addr = argU32(ctx, 1);
     const std::uint32_t info = argU32(ctx, 2);
@@ -675,7 +676,7 @@ void pngExtReadHeader(DalPpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, kErrorArg);
         return;
     }
-    if (ext_info != 0) dalWrite64(base, ext_info, 0);
+    if (ext_info != 0) tox2Write64(base, ext_info, 0);
 
     std::uint32_t result = pullStream(ctx, base, *handle, *stream, [&] { return stream->data.size() >= kHeaderSize; });
     if (result == kCellOk) result = inspect(*stream);
@@ -685,15 +686,15 @@ void pngExtReadHeader(DalPpuContext* ctx, std::uint8_t* base) {
     }
     const ChunkScan scan = scanChunks(stream->data, true);
     const std::uint32_t components = componentCount(stream->in_space);
-    dalWrite32(base, info, stream->width);
-    dalWrite32(base, info + 4, stream->height);
-    dalWrite32(base, info + 8, components);
-    dalWrite32(base, info + 12, stream->in_space);
-    dalWrite32(base, info + 16, stream->png_depth);
-    dalWrite32(base, info + 20, stream->interlace);
-    dalWrite32(base, info + 24, scan.info);
+    tox2Write32(base, info, stream->width);
+    tox2Write32(base, info + 4, stream->height);
+    tox2Write32(base, info + 8, components);
+    tox2Write32(base, info + 12, stream->in_space);
+    tox2Write32(base, info + 16, stream->png_depth);
+    tox2Write32(base, info + 20, stream->interlace);
+    tox2Write32(base, info + 24, scan.info);
     if (stream->phase == Phase::Opened) stream->phase = Phase::HeaderRead;
-    logInfo("dal: pngdec: stream {:#010x}: {}x{} colorspace {} depth {} interlace {} chunks {:#06x}", stream_addr,
+    logInfo("tox2: pngdec: stream {:#010x}: {}x{} colorspace {} depth {} interlace {} chunks {:#06x}", stream_addr,
             stream->width, stream->height, stream->in_space, stream->png_depth, stream->interlace, scan.info);
     setResultCode(ctx, kCellOk);
 }
@@ -702,7 +703,7 @@ void pngExtReadHeader(DalPpuContext* ctx, std::uint8_t* base) {
 //                           const CellPngDecInParam* inParam, CellPngDecOutParam* outParam,
 //                           const CellPngDecExtInParam* extInParam,
 //                           CellPngDecExtOutParam* extOutParam)
-void pngExtSetParameter(DalPpuContext* ctx, std::uint8_t* base) {
+void pngExtSetParameter(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t handle_addr = argU32(ctx, 0);
     const std::uint32_t stream_addr = argU32(ctx, 1);
     const std::uint32_t in_param = argU32(ctx, 2);
@@ -720,22 +721,22 @@ void pngExtSetParameter(DalPpuContext* ctx, std::uint8_t* base) {
         return;
     }
 
-    const std::uint32_t command_ptr = dalRead32(base, in_param);
-    const std::uint32_t output_mode = dalRead32(base, in_param + 4);
-    const std::uint32_t out_space = dalRead32(base, in_param + 8);
-    const std::uint32_t out_depth = dalRead32(base, in_param + 12);
-    const std::uint32_t pack = dalRead32(base, in_param + 16);
-    const std::uint32_t alpha_select = dalRead32(base, in_param + 20);
-    const std::uint32_t color_alpha = dalRead32(base, in_param + 24);
-    if (command_ptr != 0) logOnce("pngdec-command", "dal: pngdec: commandPtr is ignored");
+    const std::uint32_t command_ptr = tox2Read32(base, in_param);
+    const std::uint32_t output_mode = tox2Read32(base, in_param + 4);
+    const std::uint32_t out_space = tox2Read32(base, in_param + 8);
+    const std::uint32_t out_depth = tox2Read32(base, in_param + 12);
+    const std::uint32_t pack = tox2Read32(base, in_param + 16);
+    const std::uint32_t alpha_select = tox2Read32(base, in_param + 20);
+    const std::uint32_t color_alpha = tox2Read32(base, in_param + 24);
+    if (command_ptr != 0) logOnce("pngdec-command", "tox2: pngdec: commandPtr is ignored");
     if (pack != kPackOneBytePerPixel) {
-        logOnce("pngdec-pack", "dal: pngdec: outputPackFlag {} is treated as 1 byte per pixel", pack);
+        logOnce("pngdec-pack", "tox2: pngdec: outputPackFlag {} is treated as 1 byte per pixel", pack);
     }
 
     const bool space_ok = out_space == kGrayscale || out_space == kRgb || out_space == kPalette ||
                           out_space == kGrayscaleAlpha || out_space == kRgba || out_space == kArgb;
     if (!space_ok || output_mode > 1 || alpha_select > 1) {
-        logError("dal: pngdec: bad output parameters: colorspace {} mode {} alpha select {}", out_space, output_mode,
+        logError("tox2: pngdec: bad output parameters: colorspace {} mode {} alpha select {}", out_space, output_mode,
                  alpha_select);
         setResultCode(ctx, kErrorArg);
         return;
@@ -747,7 +748,7 @@ void pngExtSetParameter(DalPpuContext* ctx, std::uint8_t* base) {
     update.raw = out_space == update.in_space && out_depth == update.png_depth;
     if (!update.raw) {
         if ((out_depth != 8 && out_depth != 16) || out_space == kPalette) {
-            logError("dal: pngdec: cannot convert colorspace {} depth {} to colorspace {} depth {}", update.in_space,
+            logError("tox2: pngdec: cannot convert colorspace {} depth {} to colorspace {} depth {}", update.in_space,
                      update.png_depth, out_space, out_depth);
             setResultCode(ctx, kErrorArg);
             return;
@@ -756,7 +757,7 @@ void pngExtSetParameter(DalPpuContext* ctx, std::uint8_t* base) {
         // png_set_rgb_to_gray.
         const bool in_color = update.in_space == kRgb || update.in_space == kRgba;
         if ((out_space == kGrayscale || out_space == kGrayscaleAlpha) && in_color) {
-            logError("dal: pngdec: RGB to grayscale conversion is not implemented");
+            logError("tox2: pngdec: RGB to grayscale conversion is not implemented");
             setResultCode(ctx, kErrorArg);
             return;
         }
@@ -771,31 +772,31 @@ void pngExtSetParameter(DalPpuContext* ctx, std::uint8_t* base) {
 
     update.out_counts = 0;
     if (ext_in != 0) {
-        if (dalRead32(base, ext_in) != kLineMode) {
-            logError("dal: pngdec: bufferMode {} is not CELL_PNGDEC_LINE_MODE", dalRead32(base, ext_in));
+        if (tox2Read32(base, ext_in) != kLineMode) {
+            logError("tox2: pngdec: bufferMode {} is not CELL_PNGDEC_LINE_MODE", tox2Read32(base, ext_in));
             setResultCode(ctx, kErrorArg);
             return;
         }
         // Adam7 images come out one scan pass at a time in RPCS3; the count does not apply.
-        update.out_counts = update.interlace != 0 ? 1 : dalRead32(base, ext_in + 4);
+        update.out_counts = update.interlace != 0 ? 1 : tox2Read32(base, ext_in + 4);
     }
     if (ext_out != 0) {
-        dalWrite64(base, ext_out, update.width_byte);
-        dalWrite32(base, ext_out + 8,
-                   update.out_counts == 0 ? update.height : std::min(update.out_counts, update.height));
+        tox2Write64(base, ext_out, update.width_byte);
+        tox2Write32(base, ext_out + 8,
+                    update.out_counts == 0 ? update.height : std::min(update.out_counts, update.height));
     }
 
-    dalWrite64(base, out_param, update.width_byte);
-    dalWrite32(base, out_param + 8, update.width);
-    dalWrite32(base, out_param + 12, update.height);
-    dalWrite32(base, out_param + 16, components);
-    dalWrite32(base, out_param + 20, out_depth);
-    dalWrite32(base, out_param + 24, output_mode);
-    dalWrite32(base, out_param + 28, out_space);
-    dalWrite32(base, out_param + 32, 0);  // useMemorySpace: nothing is taken from the game's heap
+    tox2Write64(base, out_param, update.width_byte);
+    tox2Write32(base, out_param + 8, update.width);
+    tox2Write32(base, out_param + 12, update.height);
+    tox2Write32(base, out_param + 16, components);
+    tox2Write32(base, out_param + 20, out_depth);
+    tox2Write32(base, out_param + 24, output_mode);
+    tox2Write32(base, out_param + 28, out_space);
+    tox2Write32(base, out_param + 32, 0);  // useMemorySpace: nothing is taken from the game's heap
     update.phase = Phase::ParamSet;
     *stream = std::move(update);
-    logInfo("dal: pngdec: stream {:#010x}: output colorspace {} depth {} {} bytes per row{}{}", stream_addr, out_space,
+    logInfo("tox2: pngdec: stream {:#010x}: output colorspace {} depth {} {} bytes per row{}{}", stream_addr, out_space,
             out_depth, stream->width_byte, stream->flip ? ", bottom to top" : "",
             stream->fix_alpha ? ", fixed alpha" : "");
     setResultCode(ctx, kCellOk);
@@ -835,14 +836,14 @@ std::optional<std::vector<std::uint8_t>> decodePixels(const Stream& stream, cons
 
     PngJob job;
     if (!openJob(&job, stream.data)) {
-        logError("dal: pngdec: cannot create the libpng reader");
+        logError("tox2: pngdec: cannot create the libpng reader");
         return std::nullopt;
     }
     const bool ok = pngDecode(&job, &request);
     if (job.warnings != 0) {
-        logInfo("dal: pngdec: libpng: {} warning(s), first: {}", job.warnings, job.warning);
+        logInfo("tox2: pngdec: libpng: {} warning(s), first: {}", job.warnings, job.warning);
     }
-    if (!ok) logError("dal: pngdec: decode failed: {}", job.error);
+    if (!ok) logError("tox2: pngdec: decode failed: {}", job.error);
     closeJob(&job);
     if (!ok) return std::nullopt;
 
@@ -894,9 +895,9 @@ void dumpImage(const Stream& stream) {
     }
     png_image_free(&image);
     if (!ok) {
-        logWarn("dal: pngdec: cannot write {}", path.string());
+        logWarn("tox2: pngdec: cannot write {}", path.string());
     } else {
-        logInfo("dal: pngdec: dumped {}x{} image to {}", stream.width, stream.height, path.string());
+        logInfo("tox2: pngdec: dumped {}x{} image to {}", stream.width, stream.height, path.string());
     }
 }
 
@@ -904,7 +905,7 @@ void dumpImage(const Stream& stream) {
 //                         uint8_t* data, const CellPngDecDataCtrlParam* dataCtrlParam,
 //                         CellPngDecDataOutInfo* dataOutInfo, const CellPngDecCbCtrlDisp* cbCtrlDisp,
 //                         CellPngDecDispParam* dispParam)
-void pngExtDecodeData(DalPpuContext* ctx, std::uint8_t* base) {
+void pngExtDecodeData(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t handle_addr = argU32(ctx, 0);
     const std::uint32_t stream_addr = argU32(ctx, 1);
     const std::uint32_t data = argU32(ctx, 2);
@@ -917,22 +918,22 @@ void pngExtDecodeData(DalPpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, kErrorArg);
         return;
     }
-    dalWrite32(base, out_info + 12, kStatusStop);  // stays STOP if an error ends the call
+    tox2Write32(base, out_info + 12, kStatusStop);  // stays STOP if an error ends the call
     if (stream->phase != Phase::ParamSet) {
         setResultCode(ctx, kErrorSeq);
         return;
     }
     if (cb_disp != 0 && stream->out_counts > 0) {
-        logError("dal: pngdec: partial output through cbCtrlDisp is not implemented");
+        logError("tox2: pngdec: partial output through cbCtrlDisp is not implemented");
         setResultCode(ctx, kErrorArg);
         return;
     }
-    const std::uint64_t bytes_per_line = dalRead64(base, ctrl_param);
+    const std::uint64_t bytes_per_line = tox2Read64(base, ctrl_param);
     const std::uint64_t width_byte = stream->width_byte;
     const std::uint64_t span = width_byte + (stream->height - 1) * bytes_per_line;
     if (bytes_per_line < width_byte || bytes_per_line > 0xffffffffull || span > 0xffffffffull ||
         !mapped(data, static_cast<std::uint32_t>(span))) {
-        logError("dal: pngdec: bad output buffer {:#010x}, {} bytes per line (row needs {})", data, bytes_per_line,
+        logError("tox2: pngdec: bad output buffer {:#010x}, {} bytes per line (row needs {})", data, bytes_per_line,
                  width_byte);
         setResultCode(ctx, kErrorArg);
         return;
@@ -955,11 +956,11 @@ void pngExtDecodeData(DalPpuContext* ctx, std::uint8_t* base) {
     }
 
     const ChunkScan scan = scanChunks(stream->data, false);
-    dalWrite32(base, out_info, scan.info | (1u << 15));  // IDAT
-    dalWrite32(base, out_info + 4, scan.text);
-    dalWrite32(base, out_info + 8, scan.unknown);
-    dalWrite32(base, out_info + 12, kStatusFinish);
-    logInfo("dal: pngdec: stream {:#010x}: decoded {}x{} to {:#010x}, {} bytes per line", stream_addr, stream->width,
+    tox2Write32(base, out_info, scan.info | (1u << 15));  // IDAT
+    tox2Write32(base, out_info + 4, scan.text);
+    tox2Write32(base, out_info + 8, scan.unknown);
+    tox2Write32(base, out_info + 12, kStatusFinish);
+    logInfo("tox2: pngdec: stream {:#010x}: decoded {}x{} to {:#010x}, {} bytes per line", stream_addr, stream->width,
             stream->height, data, bytes_per_line);
     dumpImage(*stream);
     setResultCode(ctx, kCellOk);
@@ -988,4 +989,4 @@ void resetCellPngDec() {
     g_dump_count = 0;
 }
 
-}  // namespace dal
+}  // namespace tox2

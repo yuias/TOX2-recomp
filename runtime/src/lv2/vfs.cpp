@@ -14,7 +14,7 @@
 
 #include "core/log.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 struct MountEntry {
@@ -145,7 +145,7 @@ void configureVfs(VfsLayout layout) {
                 }
             }
             if (ec) {
-                logWarn("dal: fs: cannot create the directories of /{}: {}", entry.name, ec.message());
+                logWarn("tox2: fs: cannot create the directories of /{}: {}", entry.name, ec.message());
                 ec.clear();
             }
         }
@@ -277,7 +277,7 @@ VfsResolution resolveVfs(std::string_view guest) {
     const MountEntry* mount = state->findMount(device_name);
     if (mount == nullptr) {
         if (device_name == "dev_hdd0" || device_name == "dev_hdd1") {
-            logOnce("vfs-no-hdd-dir", "dal: fs: {} used without an hdd mount (--hdd-dir or the VFS config)",
+            logOnce("vfs-no-hdd-dir", "tox2: fs: {} used without an hdd mount (--hdd-dir or the VFS config)",
                     std::string(device_name));
             result.status = VfsStatus::NotFound;
         }
@@ -348,4 +348,4 @@ VfsDeviceInfo vfsDeviceInfo(VfsDevice device) {
     return {512, true};
 }
 
-}  // namespace dal
+}  // namespace tox2

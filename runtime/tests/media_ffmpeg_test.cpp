@@ -37,18 +37,18 @@ int g_failed;
 // answered from the already loaded modules and no longer test the directory.
 void testEmptyDirectory() {
     std::error_code ec;
-    const std::filesystem::path dir = std::filesystem::temp_directory_path(ec) / "dal_ffmpeg_empty_dir_test";
+    const std::filesystem::path dir = std::filesystem::temp_directory_path(ec) / "tox2_ffmpeg_empty_dir_test";
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir, ec);
 
-    const auto result = dal::loadFfmpeg(dir);
+    const auto result = tox2::loadFfmpeg(dir);
     CHECK(!result.has_value());
     if (!result) {
         std::printf("empty directory: unavailable: %s\n", result.error().c_str());
         CHECK(result.error().find("avcodec-") != std::string::npos);
     }
 
-    const auto absent = dal::loadFfmpeg(dir / "does_not_exist");
+    const auto absent = tox2::loadFfmpeg(dir / "does_not_exist");
     CHECK(!absent.has_value());
     std::filesystem::remove_all(dir, ec);
 }
@@ -60,7 +60,7 @@ void testEmptyDirectory() {
 void testPartialLoadIsUnmapped(const std::filesystem::path& real_dir) {
     namespace fs = std::filesystem;
     std::error_code ec;
-    const fs::path dir = fs::temp_directory_path(ec) / "dal_ffmpeg_partial_dir_test";
+    const fs::path dir = fs::temp_directory_path(ec) / "tox2_ffmpeg_partial_dir_test";
     fs::remove_all(dir, ec);
     fs::create_directories(dir, ec);
 
@@ -81,7 +81,7 @@ void testPartialLoadIsUnmapped(const std::filesystem::path& real_dir) {
         bogus << "not a dll";
     }
 
-    const auto result = dal::loadFfmpeg(dir);
+    const auto result = tox2::loadFfmpeg(dir);
     CHECK(!result.has_value());
     if (!result) {
         std::printf("partial directory: unavailable: %s\n", result.error().c_str());
@@ -93,11 +93,11 @@ void testPartialLoadIsUnmapped(const std::filesystem::path& real_dir) {
 }
 
 void testLoad() {
-    const auto& loaded = dal::defaultFfmpeg();
+    const auto& loaded = tox2::defaultFfmpeg();
     if (!loaded) std::fprintf(stderr, "load failed: %s\n", loaded.error().c_str());
     CHECK(loaded.has_value());
     if (!loaded) return;
-    const dal::FfmpegApi& api = *loaded;
+    const tox2::FfmpegApi& api = *loaded;
 
     std::printf("avutil %u.%u.%u, avcodec %u.%u.%u, swscale %u.%u.%u\n", api.avutil_version() >> 16,
                 (api.avutil_version() >> 8) & 0xff, api.avutil_version() & 0xff, api.avcodec_version() >> 16,
@@ -133,16 +133,16 @@ void testLoad() {
     // Opening ATRAC3plus without stream parameters fails and makes FFmpeg log, which must arrive
     // through the project logger.
     std::vector<std::string> lines;
-    dal::setLogLevel(dal::LogLevel::Debug);
-    dal::setLogSink([&lines](std::string_view line) { lines.emplace_back(line); });
+    tox2::setLogLevel(tox2::LogLevel::Debug);
+    tox2::setLogSink([&lines](std::string_view line) { lines.emplace_back(line); });
     AVCodecContext* context = atrac3p ? api.avcodec_alloc_context3(atrac3p) : nullptr;
     CHECK(context != nullptr);
     if (context) {
         CHECK(api.avcodec_open2(context, atrac3p, nullptr) < 0);
         api.avcodec_free_context(&context);
     }
-    dal::setLogSink({});
-    dal::setLogLevel(dal::LogLevel::Info);
+    tox2::setLogSink({});
+    tox2::setLogLevel(tox2::LogLevel::Info);
     bool bridged = false;
     for (const std::string& line : lines) {
         if (line.find("ffmpeg: ") != std::string::npos) bridged = true;
@@ -150,7 +150,7 @@ void testLoad() {
     CHECK(bridged);
 
     // The same result comes back on every call.
-    CHECK(&dal::defaultFfmpeg() == &loaded);
+    CHECK(&tox2::defaultFfmpeg() == &loaded);
 }
 
 int clampByte(double value) { return value < 0 ? 0 : value > 255 ? 255 : static_cast<int>(value + 0.5); }
@@ -173,7 +173,7 @@ void expectedRgb(bool bt709, int y, int u, int v, int rgb[3]) {
 // A 16x16 picture made of four flat 8x8 blocks, so chroma interpolation at the block edges does
 // not enter the comparison: only pixels inside each block are checked.
 void testYuvToRgb() {
-    const auto& loaded = dal::defaultFfmpeg();
+    const auto& loaded = tox2::defaultFfmpeg();
     CHECK(loaded.has_value());
     if (!loaded) return;
 
@@ -206,23 +206,23 @@ void testYuvToRgb() {
     frame->linesize[0] = kSize;
     frame->linesize[1] = frame->linesize[2] = kSize / 2;
 
-    dal::FfmpegVideoConverter converter(*loaded);
+    tox2::FfmpegVideoConverter converter(*loaded);
     for (const bool bt709 : {false, true}) {
-        for (const dal::VideoCoding coding : {dal::VideoCoding::Argb, dal::VideoCoding::Rgba}) {
-            dal::VideoOutputFormat format;
+        for (const tox2::VideoCoding coding : {tox2::VideoCoding::Argb, tox2::VideoCoding::Rgba}) {
+            tox2::VideoOutputFormat format;
             format.coding = coding;
             format.bt709 = bt709;
             format.alpha = 0x80;
             format.pitch = kSize * 4 + 16;  // a padded pitch must be honoured
-            dal::VideoFrame out;
+            tox2::VideoFrame out;
             std::string error;
             CHECK(converter.convert(*frame, format, out, error));
             CHECK(out.width == kSize && out.height == kSize && out.pitch == format.pitch);
             CHECK(out.bytes.size() == std::size_t{format.pitch} * kSize);
             if (out.bytes.size() != std::size_t{format.pitch} * kSize) continue;
 
-            const std::size_t alpha_at = coding == dal::VideoCoding::Argb ? 0 : 3;
-            const std::size_t red_at = coding == dal::VideoCoding::Argb ? 1 : 0;
+            const std::size_t alpha_at = coding == tox2::VideoCoding::Argb ? 0 : 3;
+            const std::size_t red_at = coding == tox2::VideoCoding::Argb ? 1 : 0;
             int worst = 0;
             bool alpha_ok = true;
             for (int by = 0; by < 2; ++by) {
@@ -244,7 +244,7 @@ void testYuvToRgb() {
                     }
                 }
             }
-            std::printf("yuv->%s %s: largest difference %d\n", coding == dal::VideoCoding::Argb ? "argb" : "rgba",
+            std::printf("yuv->%s %s: largest difference %d\n", coding == tox2::VideoCoding::Argb ? "argb" : "rgba",
                         bt709 ? "bt709" : "bt601", worst);
             CHECK(worst <= 2);
             CHECK(alpha_ok);
@@ -258,9 +258,9 @@ void testYuvToRgb() {
     CHECK(std::abs(a[1] - b[1]) > 8);
 
     // Planar output keeps the decoder's planes: Y, then U, then V, without padding at pitch 0.
-    dal::VideoOutputFormat planar;
-    planar.coding = dal::VideoCoding::Yuv420Planar;
-    dal::VideoFrame out;
+    tox2::VideoOutputFormat planar;
+    planar.coding = tox2::VideoCoding::Yuv420Planar;
+    tox2::VideoFrame out;
     std::string error;
     CHECK(converter.convert(*frame, planar, out, error));
     CHECK(out.pitch == kSize && out.bytes.size() == luma.size() + cb.size() + cr.size());
@@ -272,12 +272,12 @@ void testYuvToRgb() {
     }
 
     // A pitch below the row size is refused.
-    dal::VideoOutputFormat narrow;
+    tox2::VideoOutputFormat narrow;
     narrow.pitch = kSize * 4 - 1;
     CHECK(!converter.convert(*frame, narrow, out, error));
 
     // The format comes from guest memory: absurd values are refused before any allocation.
-    dal::VideoOutputFormat huge;
+    tox2::VideoOutputFormat huge;
     huge.width = 100000;
     CHECK(!converter.convert(*frame, huge, out, error));
     huge = {};
@@ -288,10 +288,10 @@ void testYuvToRgb() {
     CHECK(!converter.convert(*frame, huge, out, error));
     huge = {};
     huge.pitch = 0xffffffffu;
-    huge.coding = dal::VideoCoding::Yuv420Planar;
+    huge.coding = tox2::VideoCoding::Yuv420Planar;
     CHECK(!converter.convert(*frame, huge, out, error));
     huge = {};
-    huge.coding = dal::VideoCoding::Yuv420Planar;
+    huge.coding = tox2::VideoCoding::Yuv420Planar;
     huge.width = huge.height = 8192;  // within the limits per axis, but the frame is over the byte cap
     huge.pitch = 4 * 8192;
     CHECK(!converter.convert(*frame, huge, out, error));
@@ -303,21 +303,21 @@ void testYuvToRgb() {
 
 // The decoder must survive end of stream and be reusable, with or without data in it.
 void testVideoDecoderLifecycle() {
-    const auto& loaded = dal::defaultFfmpeg();
+    const auto& loaded = tox2::defaultFfmpeg();
     CHECK(loaded.has_value());
     if (!loaded) return;
 
-    dal::FfmpegCodecFactory factory(*loaded);
-    dal::PamfStream stream;
-    stream.codec = dal::PamfCodec::Avc;
+    tox2::FfmpegCodecFactory factory(*loaded);
+    tox2::PamfStream stream;
+    stream.codec = tox2::PamfCodec::Avc;
     stream.codec_info.assign(32, 0);
     stream.codec_info[2] = 4;  // frame-rate code 3 (30000/1001) plus one
     std::string error;
-    std::unique_ptr<dal::VideoDecoder> decoder = factory.createVideo(stream, {}, error);
+    std::unique_ptr<tox2::VideoDecoder> decoder = factory.createVideo(stream, {}, error);
     CHECK(decoder != nullptr);
     if (!decoder) return;
 
-    dal::VideoFrame frame;
+    tox2::VideoFrame frame;
     CHECK(!decoder->receive(frame));
     decoder->flush();
     const std::uint8_t plain[] = {1, 2, 3, 4};  // no start code: the parser only buffers it
@@ -349,7 +349,7 @@ std::int16_t loadBe16(const std::uint8_t* p) { return static_cast<std::int16_t>(
 
 // Planar float in, interleaved big-endian out: byte order, channel order, rounding and clamping.
 void testAudioConversion() {
-    const auto& loaded = dal::defaultFfmpeg();
+    const auto& loaded = tox2::defaultFfmpeg();
     CHECK(loaded.has_value());
     if (!loaded) return;
 
@@ -366,9 +366,9 @@ void testAudioConversion() {
     frame->data[1] = reinterpret_cast<std::uint8_t*>(right);
     frame->extended_data = frame->data;
 
-    dal::AudioChunk chunk;
+    tox2::AudioChunk chunk;
     std::string error;
-    CHECK(dal::convertAudioFrame(*frame, true, chunk, error));
+    CHECK(tox2::convertAudioFrame(*frame, true, chunk, error));
     CHECK(chunk.frames == kSamples && chunk.bytes.size() == kSamples * 2 * 4);
     if (chunk.bytes.size() == kSamples * 2 * 4) {
         const std::uint8_t* p = chunk.bytes.data();
@@ -379,7 +379,7 @@ void testAudioConversion() {
         CHECK(loadBe32(p + 32) == 0x40000000);  // 2.0f is passed through unclamped
     }
 
-    CHECK(dal::convertAudioFrame(*frame, false, chunk, error));
+    CHECK(tox2::convertAudioFrame(*frame, false, chunk, error));
     CHECK(chunk.frames == kSamples && chunk.bytes.size() == kSamples * 2 * 2);
     if (chunk.bytes.size() == kSamples * 2 * 2) {
         const std::uint8_t* p = chunk.bytes.data();
@@ -394,17 +394,17 @@ void testAudioConversion() {
 
     // Anything the decoder could not legitimately produce is refused.
     frame->format = AV_SAMPLE_FMT_S16P;
-    CHECK(!dal::convertAudioFrame(*frame, true, chunk, error));
+    CHECK(!tox2::convertAudioFrame(*frame, true, chunk, error));
     frame->format = AV_SAMPLE_FMT_FLTP;
     frame->nb_samples = 0;
-    CHECK(!dal::convertAudioFrame(*frame, true, chunk, error));
+    CHECK(!tox2::convertAudioFrame(*frame, true, chunk, error));
     frame->nb_samples = 1 << 20;
-    CHECK(!dal::convertAudioFrame(*frame, true, chunk, error));
+    CHECK(!tox2::convertAudioFrame(*frame, true, chunk, error));
     frame->nb_samples = kSamples;
     loaded->av_channel_layout_default(&frame->ch_layout, 9);
-    CHECK(!dal::convertAudioFrame(*frame, true, chunk, error));
+    CHECK(!tox2::convertAudioFrame(*frame, true, chunk, error));
     loaded->av_channel_layout_default(&frame->ch_layout, 2);
-    CHECK(dal::convertAudioFrame(*frame, true, chunk, error));
+    CHECK(tox2::convertAudioFrame(*frame, true, chunk, error));
     frame->data[0] = frame->data[1] = nullptr;  // not owned by the frame
     loaded->av_frame_free(&frame);
 }
@@ -423,36 +423,36 @@ std::vector<std::uint8_t> atracFrame(unsigned rate_index, unsigned channel_index
 }
 
 void testAudioDecoderLifecycle() {
-    const auto& loaded = dal::defaultFfmpeg();
+    const auto& loaded = tox2::defaultFfmpeg();
     CHECK(loaded.has_value());
     if (!loaded) return;
 
-    dal::FfmpegCodecFactory factory(*loaded);
-    dal::PamfStream stream;
-    stream.codec = dal::PamfCodec::Atrac3plus;
+    tox2::FfmpegCodecFactory factory(*loaded);
+    tox2::PamfStream stream;
+    stream.codec = tox2::PamfCodec::Atrac3plus;
     stream.sample_rate = 48000;
     stream.channels = 2;
     std::string error;
-    dal::AudioOutputFormat format;
+    tox2::AudioOutputFormat format;
 
     // The requested format comes from guest memory.
-    dal::AudioOutputFormat too_many = format;
+    tox2::AudioOutputFormat too_many = format;
     too_many.channels = 1000;
     CHECK(factory.createAudio(stream, too_many, error) == nullptr);
-    dal::PamfStream other = stream;
-    other.codec = dal::PamfCodec::Avc;
+    tox2::PamfStream other = stream;
+    other.codec = tox2::PamfCodec::Avc;
     CHECK(factory.createAudio(other, format, error) == nullptr);
 
-    std::unique_ptr<dal::AudioDecoder> decoder = factory.createAudio(stream, format, error);
+    std::unique_ptr<tox2::AudioDecoder> decoder = factory.createAudio(stream, format, error);
     CHECK(decoder != nullptr);
     if (!decoder) return;
-    const auto* ffmpeg_decoder = dynamic_cast<dal::FfmpegAudioDecoder*>(decoder.get());
+    const auto* ffmpeg_decoder = dynamic_cast<tox2::FfmpegAudioDecoder*>(decoder.get());
     CHECK(ffmpeg_decoder != nullptr);
     if (!ffmpeg_decoder) return;
-    const dal::FfmpegAudioStats& stats = ffmpeg_decoder->stats();
+    const tox2::FfmpegAudioStats& stats = ffmpeg_decoder->stats();
     CHECK(ffmpeg_decoder->sampleRate() == 0);  // not configured before the first frame
 
-    dal::AudioChunk chunk;
+    tox2::AudioChunk chunk;
     CHECK(!decoder->receive(chunk));  // nothing sent yet
     decoder->flush();                 // and nothing to flush
     CHECK(!decoder->receive(chunk));
@@ -493,8 +493,8 @@ void testAudioDecoderLifecycle() {
     CHECK(!decoder->receive(chunk));
 }
 
-dal::At3Info syntheticAt3(std::uint32_t channels, std::uint32_t block_align) {
-    dal::At3Info info;
+tox2::At3Info syntheticAt3(std::uint32_t channels, std::uint32_t block_align) {
+    tox2::At3Info info;
     info.channels = channels;
     info.sample_rate = 48000;
     info.block_align = block_align;
@@ -505,7 +505,7 @@ dal::At3Info syntheticAt3(std::uint32_t channels, std::uint32_t block_align) {
 // and a decoder that survives bad data and a reset.
 void testAtracFrameDecoder() {
     std::string error;
-    auto factory = dal::createFfmpegAtracDecoderFactory(error);
+    auto factory = tox2::createFfmpegAtracDecoderFactory(error);
     CHECK(factory != nullptr);
     if (!factory) return;
 
@@ -514,7 +514,7 @@ void testAtracFrameDecoder() {
         CHECK(decoder != nullptr);
         if (!decoder) continue;
 
-        std::vector<float> out(dal::kAtrac3plusFrameSamples * channels, 1.0f);
+        std::vector<float> out(tox2::kAtrac3plusFrameSamples * channels, 1.0f);
         const std::vector<std::uint8_t> frame(512, 0x55);
         CHECK(!decoder->decode(std::span<const std::uint8_t>(frame).first(511), out, error));  // short frame
         CHECK(!decoder->decode(frame, std::span<float>(out).first(out.size() - 1), error));    // short output
@@ -529,7 +529,7 @@ void testAtracFrameDecoder() {
     CHECK(factory->create(syntheticAt3(2, 0), error) == nullptr);  // block_align is required
     CHECK(factory->create(syntheticAt3(0, 512), error) == nullptr);
     CHECK(factory->create(syntheticAt3(9, 512), error) == nullptr);
-    dal::At3Info no_rate = syntheticAt3(2, 512);
+    tox2::At3Info no_rate = syntheticAt3(2, 512);
     no_rate.sample_rate = 0;
     CHECK(factory->create(no_rate, error) == nullptr);
 }

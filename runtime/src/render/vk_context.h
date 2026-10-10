@@ -11,7 +11,7 @@
 #include <volk.h>
 #include <vk_mem_alloc.h>
 
-namespace dal {
+namespace tox2 {
 
 struct VkContextOptions {
     bool validation = false;  // enable VK_LAYER_KHRONOS_validation when it is installed
@@ -73,4 +73,4 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
 // True when VK_LAYER_KHRONOS_validation is installed. Needs the loader; false without it.
 bool vkValidationLayerAvailable();
 
-}  // namespace dal
+}  // namespace tox2

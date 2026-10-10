@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-namespace dal {
+namespace tox2 {
 
 inline constexpr std::uint32_t kAtrac3plusFrameSamples = 2048;
 
@@ -27,7 +27,7 @@ struct At3Info {
     // Encoder delay: the third `fact` dword, 0 when `fact` is shorter. The valid audio is the decoder
     // output samples [delay, delay + total). FFmpeg's RIFF demuxer reads only the first dword, so this
     // convention comes from the game's files: loop positions lie in this output range and the loop end
-    // is delay + total - 1 (off by one in 2 of 53 Se.sdat loops; see `dal_audiotool at3scan`).
+    // is delay + total - 1 (the reference game has loops that are off by one; see `tox2_audiotool at3scan`).
     std::uint32_t delay_samples = 0;
     std::optional<At3Loop> loop;  // first loop of `smpl`
     std::uint32_t frameCount() const { return block_align != 0 ? data_size / block_align : 0; }
@@ -42,4 +42,4 @@ std::expected<At3Info, std::string> parseAt3Header(std::span<const std::uint8_t>
 // after the magic). An entry whose declared size fits in the archive is skipped as a whole.
 std::vector<std::pair<std::uint64_t, std::uint32_t>> scanRiffEntries(std::span<const std::uint8_t> bytes);
 
-}  // namespace dal
+}  // namespace tox2

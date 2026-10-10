@@ -8,7 +8,7 @@
 
 #include <timeapi.h>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 // ntdll exports it without a header; the values are in 100 ns units.
@@ -38,4 +38,4 @@ std::optional<std::uint32_t> currentTimerPeriodUs() {
     return current / 10;
 }
 
-}  // namespace dal
+}  // namespace tox2

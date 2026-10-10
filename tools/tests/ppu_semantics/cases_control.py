@@ -186,7 +186,7 @@ def switch_case(name: str, ctr: int, lr: int, **kwargs) -> Case:
 CASES += [
     switch_case("switch_first_target", at(1), ret_of(1)),
     switch_case("switch_second_target", at(3), ret_of(3)),
-    # Not in the table: falls to dalDispatch.
+    # Not in the table: falls to tox2Dispatch.
     switch_case("switch_default_dispatches_callee", A, A_RAN),
     # A table entry outside the function is a tail transfer.
     switch_case("switch_callee_target", A, A_RAN, targets={at(0): (at(1), A)}),

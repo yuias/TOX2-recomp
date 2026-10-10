@@ -12,7 +12,7 @@
 
 #include "core/log.h"
 
-namespace dal {
+namespace tox2 {
 
 namespace {
 
@@ -182,7 +182,7 @@ bool MoviePlayer::start() {
     try {
         thread_ = std::thread([this] { run(); });
     } catch (const std::system_error& e) {
-        logWarn("dal: movie: cannot start the decode thread: {}", e.what());
+        logWarn("tox2: movie: cannot start the decode thread: {}", e.what());
         return false;
     }
     started_ = true;
@@ -403,9 +403,9 @@ void MoviePlayer::run() {
     try {
         runGuarded();
     } catch (const std::exception& e) {
-        logWarn("dal: movie: decode thread failed: {}", e.what());
+        logWarn("tox2: movie: decode thread failed: {}", e.what());
     } catch (...) {
-        logWarn("dal: movie: decode thread failed");
+        logWarn("tox2: movie: decode thread failed");
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -457,7 +457,7 @@ void MoviePlayer::runGuarded() {
         decoders_ready_ = true;
     }
     cv_.notify_all();
-    if (!error.empty()) logDebug("dal: movie: {}: {}", path_.filename().string(), error);
+    if (!error.empty()) logDebug("tox2: movie: {}: {}", path_.filename().string(), error);
     if (!video && !audio) return;
 
     std::ifstream in(path_, std::ios::binary);
@@ -615,4 +615,4 @@ void MoviePlayer::runGuarded() {
     counters_.demux_errors = demux.errors();
 }
 
-}  // namespace dal
+}  // namespace tox2

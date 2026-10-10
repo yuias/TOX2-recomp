@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace dal {
+namespace tox2 {
 
 struct ParamSfo {
     std::map<std::string, std::uint32_t> ints;
@@ -39,4 +39,4 @@ std::vector<std::uint8_t> serializeParamSfo(const ParamSfo& sfo);
 const ParamSfo& gameParamSfo();
 void setGameParamSfo(ParamSfo sfo);
 
-}  // namespace dal
+}  // namespace tox2

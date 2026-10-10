@@ -9,7 +9,7 @@
 #include <limits>
 #include <string_view>
 
-namespace dal {
+namespace tox2 {
 
 namespace {
 
@@ -253,4 +253,4 @@ std::vector<WavWindowStats> wavStats(std::span<const float> samples, std::uint32
     return result;
 }
 
-}  // namespace dal
+}  // namespace tox2

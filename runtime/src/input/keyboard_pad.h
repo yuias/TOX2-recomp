@@ -21,7 +21,7 @@
 #include "hle/hle.h"
 #include "input/pad_buttons.h"
 
-namespace dal {
+namespace tox2 {
 
 // Only the dedicated (extended) arrow keys map; the numpad does not.
 std::optional<PadButton> padButtonForScanCode(std::uint32_t scan_code);
@@ -105,4 +105,4 @@ std::unique_ptr<PadProvider> makeKeyboardPadProvider(std::shared_ptr<KeyboardPad
                                                      std::function<KeyboardPadState::Clock::time_point()> clock = {},
                                                      PadProviderOptions options = {});
 
-}  // namespace dal
+}  // namespace tox2

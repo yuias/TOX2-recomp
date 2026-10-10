@@ -11,12 +11,12 @@
 #include <string>
 
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 #include "lv2/vfs.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "sceNp";
@@ -33,7 +33,7 @@ constexpr std::uint32_t kDrmPathMax = 0x100;
 bool g_initialized = false;
 
 // sceNpInit(u32 poolsize, void* poolptr)
-void npInit(DalPpuContext* ctx, std::uint8_t*) {
+void npInit(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t pool_size = argU32(ctx, 0);
     const std::uint32_t pool_ptr = argU32(ctx, 1);
     if (g_initialized) {
@@ -53,7 +53,7 @@ void npInit(DalPpuContext* ctx, std::uint8_t*) {
 }
 
 // sceNpTerm()
-void npTerm(DalPpuContext* ctx, std::uint8_t*) {
+void npTerm(Tox2PpuContext* ctx, std::uint8_t*) {
     if (!g_initialized) {
         ctx->gpr[3] = kErrorNotInitialized;
         return;
@@ -63,7 +63,7 @@ void npTerm(DalPpuContext* ctx, std::uint8_t*) {
 }
 
 // sceNpDrmIsAvailable(const u8* k_licensee, const char* drm_path)
-void npDrmIsAvailable(DalPpuContext* ctx, std::uint8_t* base) {
+void npDrmIsAvailable(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t path_addr = argU32(ctx, 1);
     if (path_addr == 0) {
         ctx->gpr[3] = kDrmErrorInvalidParam;
@@ -72,7 +72,7 @@ void npDrmIsAvailable(DalPpuContext* ctx, std::uint8_t* base) {
     const std::string path = readGuestString(base, path_addr, kDrmPathMax);
     FsStat stat;
     const std::uint32_t error = fsStatPath(path, stat);
-    logInfo("dal: np: sceNpDrmIsAvailable \"{}\" -> {:#x}", path, error);
+    logInfo("tox2: np: sceNpDrmIsAvailable \"{}\" -> {:#x}", path, error);
     ctx->gpr[3] = error;
 }
 
@@ -88,4 +88,4 @@ std::span<const HleEntry> sceNpHandlers() { return kHandlers; }
 
 void resetSceNp() { g_initialized = false; }
 
-}  // namespace dal
+}  // namespace tox2

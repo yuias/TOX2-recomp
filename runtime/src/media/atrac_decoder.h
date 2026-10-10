@@ -1,7 +1,7 @@
 #pragma once
 
 // ATRAC3plus frame decoder interface. No codec types here: the FFmpeg implementation lives in
-// dal_media and registers itself through setAtracDecoderFactory().
+// tox2_media and registers itself through setAtracDecoderFactory().
 
 #include <cstdint>
 #include <memory>
@@ -10,7 +10,7 @@
 
 #include "media/at3_file.h"
 
-namespace dal {
+namespace tox2 {
 
 class AtracFrameDecoder {
 public:
@@ -32,4 +32,4 @@ public:
 void setAtracDecoderFactory(std::unique_ptr<AtracDecoderFactory> factory);
 AtracDecoderFactory* atracDecoderFactory();
 
-}  // namespace dal
+}  // namespace tox2

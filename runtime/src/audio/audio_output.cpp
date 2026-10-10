@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
-namespace dal {
+namespace tox2 {
 
 namespace {
 
@@ -85,4 +85,4 @@ std::size_t AudioBlockRing::queuedFrames() const {
 
 void AudioBlockRing::dropOldestBlock() { pending_drops_.fetch_add(1, std::memory_order_acq_rel); }
 
-}  // namespace dal
+}  // namespace tox2

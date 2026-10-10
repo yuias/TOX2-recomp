@@ -57,7 +57,7 @@
 #include "media/movie_decoder.h"
 #include "media/pamf.h"
 
-namespace dal {
+namespace tox2 {
 
 // Returns monotonic 90 kHz ticks. Tests inject their own.
 using MovieClock = std::function<std::int64_t()>;
@@ -218,4 +218,4 @@ private:
     Counters counters_;
 };
 
-}  // namespace dal
+}  // namespace tox2

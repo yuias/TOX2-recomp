@@ -2,7 +2,7 @@
 // WAV writer, reader and level statistics, and the engine with its block clock. No sound device is
 // involved.
 //
-// With a directory argument the WAV files the tests write are kept there (for dal_audiotool
+// With a directory argument the WAV files the tests write are kept there (for tox2_audiotool
 // wavstat); without one they go to a temporary directory that is removed at the end.
 
 #include <algorithm>
@@ -37,7 +37,7 @@
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/threads.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/cell_atrac_stream.h"
 #include "hle/cell_audio_ports.h"
 #include "hle/hle.h"
@@ -92,24 +92,24 @@ float toneSample(std::uint64_t frame, float amplitude) {
            static_cast<float>(std::sin(2.0 * std::numbers::pi * 1000.0 * static_cast<double>(frame) / 48000.0 + 0.3));
 }
 
-bool pushRamp(dal::AudioBlockRing& ring, std::uint64_t first_frame) {
-    dal::AudioBlock block;
+bool pushRamp(tox2::AudioBlockRing& ring, std::uint64_t first_frame) {
+    tox2::AudioBlock block;
     fillRamp(block, first_frame);
     return ring.push(block);
 }
 
 void testRingPushPop() {
-    dal::AudioBlockRing ring(4);
+    tox2::AudioBlockRing ring(4);
     CHECK(ring.queuedFrames() == 0);
 
     std::vector<float> out(2 * 1024);
     CHECK(ring.pop(out, 100) == 0);
 
-    for (std::uint64_t b = 0; b < 4; ++b) CHECK(pushRamp(ring, b * dal::kAudioBlockFrames));
-    CHECK(ring.queuedFrames() == 4 * dal::kAudioBlockFrames);
+    for (std::uint64_t b = 0; b < 4; ++b) CHECK(pushRamp(ring, b * tox2::kAudioBlockFrames));
+    CHECK(ring.queuedFrames() == 4 * tox2::kAudioBlockFrames);
     // Full: the block is refused and nothing changes.
-    CHECK(!pushRamp(ring, 4 * dal::kAudioBlockFrames));
-    CHECK(ring.queuedFrames() == 4 * dal::kAudioBlockFrames);
+    CHECK(!pushRamp(ring, 4 * tox2::kAudioBlockFrames));
+    CHECK(ring.queuedFrames() == 4 * tox2::kAudioBlockFrames);
 
     // Partial reads cross block boundaries and continue where the last one stopped.
     std::uint64_t next = 0;
@@ -124,24 +124,24 @@ void testRingPushPop() {
     CHECK(ring.pop(out, 10) == 0);
 
     // A wrong-sized block is refused.
-    std::vector<float> small(dal::kAudioBlockSamples - 2);
+    std::vector<float> small(tox2::kAudioBlockSamples - 2);
     CHECK(!ring.push(small));
     CHECK(ring.queuedFrames() == 0);
 
     // The destination bounds the read as well as the frame count.
     CHECK(pushRamp(ring, 1024));
     CHECK(ring.pop(std::span<float>(out).first(20), 256) == 10);
-    CHECK(ring.queuedFrames() == dal::kAudioBlockFrames - 10);
+    CHECK(ring.queuedFrames() == tox2::kAudioBlockFrames - 10);
     CHECK(ring.pop(out, 0) == 0);
 
     // A capacity of zero still holds one block.
-    dal::AudioBlockRing tiny(0);
+    tox2::AudioBlockRing tiny(0);
     CHECK(pushRamp(tiny, 0));
     CHECK(!pushRamp(tiny, 256));
 }
 
 void testRingWrap() {
-    dal::AudioBlockRing ring(3);
+    tox2::AudioBlockRing ring(3);
     std::vector<float> out(2 * 1024);
     std::uint64_t pushed = 0;
     std::uint64_t popped = 0;
@@ -150,7 +150,7 @@ void testRingWrap() {
     // Keep the ring between one and three blocks full while reads and writes drift against each other
     // across many wraps.
     for (int round = 0; round < 200; ++round) {
-        while (pushRamp(ring, pushed)) pushed += dal::kAudioBlockFrames;
+        while (pushRamp(ring, pushed)) pushed += tox2::kAudioBlockFrames;
         const std::size_t want = 37 + static_cast<std::size_t>(round * 11 % 400);
         const std::size_t got = ring.pop(out, want);
         ok = ok && got == std::min<std::size_t>(want, pushed - popped);
@@ -159,11 +159,11 @@ void testRingWrap() {
         ok = ok && ring.queuedFrames() == pushed - popped;
     }
     CHECK(ok);
-    CHECK(pushed > 20 * 3 * dal::kAudioBlockFrames);
+    CHECK(pushed > 20 * 3 * tox2::kAudioBlockFrames);
 }
 
 void testRingDrop() {
-    dal::AudioBlockRing ring(4);
+    tox2::AudioBlockRing ring(4);
     std::vector<float> out(2 * 1024);
 
     // Dropping from an empty ring does nothing.
@@ -171,16 +171,16 @@ void testRingDrop() {
     CHECK(ring.queuedFrames() == 0);
     CHECK(ring.pop(out, 100) == 0);
     CHECK(pushRamp(ring, 0));
-    CHECK(ring.queuedFrames() == dal::kAudioBlockFrames);
+    CHECK(ring.queuedFrames() == tox2::kAudioBlockFrames);
 
     // The drop discards the oldest block; the count reflects it before the consumer runs.
     CHECK(pushRamp(ring, 256));
     CHECK(pushRamp(ring, 512));
     ring.dropOldestBlock();
-    CHECK(ring.queuedFrames() == 2 * dal::kAudioBlockFrames);
+    CHECK(ring.queuedFrames() == 2 * tox2::kAudioBlockFrames);
     CHECK(ring.pop(out, 256) == 256);
     CHECK(isRamp(std::span<const float>(out).first(512), 256));
-    CHECK(ring.queuedFrames() == dal::kAudioBlockFrames);
+    CHECK(ring.queuedFrames() == tox2::kAudioBlockFrames);
 
     // A drop with less than a block queued discards what is there; with a block half read it removes
     // the rest of the data it covers.
@@ -192,26 +192,26 @@ void testRingDrop() {
 
     // A drop requested on a full ring frees space once the consumer has run.
     std::uint64_t next = 768;
-    for (int i = 0; i < 4; ++i, next += dal::kAudioBlockFrames) CHECK(pushRamp(ring, next));
+    for (int i = 0; i < 4; ++i, next += tox2::kAudioBlockFrames) CHECK(pushRamp(ring, next));
     CHECK(!pushRamp(ring, next));
     ring.dropOldestBlock();
     ring.dropOldestBlock();
-    CHECK(ring.queuedFrames() == 2 * dal::kAudioBlockFrames);
+    CHECK(ring.queuedFrames() == 2 * tox2::kAudioBlockFrames);
     CHECK(ring.pop(out, 1) == 1);
     CHECK(isRamp(std::span<const float>(out).first(2), 768 + 512));
     CHECK(pushRamp(ring, next));
-    CHECK(ring.queuedFrames() == 2 * dal::kAudioBlockFrames - 1 + dal::kAudioBlockFrames);
+    CHECK(ring.queuedFrames() == 2 * tox2::kAudioBlockFrames - 1 + tox2::kAudioBlockFrames);
 }
 
 void testRingThreaded() {
     constexpr std::uint64_t kBlocks = 3000;
-    constexpr std::uint64_t kFrames = kBlocks * dal::kAudioBlockFrames;
-    dal::AudioBlockRing ring(8);
+    constexpr std::uint64_t kFrames = kBlocks * tox2::kAudioBlockFrames;
+    tox2::AudioBlockRing ring(8);
 
     std::thread producer([&ring] {
-        dal::AudioBlock block;
+        tox2::AudioBlock block;
         for (std::uint64_t b = 0; b < kBlocks; ++b) {
-            fillRamp(block, b * dal::kAudioBlockFrames);
+            fillRamp(block, b * tox2::kAudioBlockFrames);
             while (!ring.push(block)) std::this_thread::yield();
         }
     });
@@ -234,7 +234,7 @@ void testRingThreaded() {
 }
 
 void testNullOutput() {
-    const auto output = dal::makeNullAudioOutput();
+    const auto output = tox2::makeNullAudioOutput();
     CHECK(output->name() == "none");
     CHECK(!output->description().empty());
 
@@ -242,19 +242,19 @@ void testNullOutput() {
     CHECK(output->open(error));
     CHECK(error.empty());
 
-    dal::AudioOutputStats stats = output->stats();
+    tox2::AudioOutputStats stats = output->stats();
     CHECK(stats.blocks_submitted == 0 && stats.frames_played == 0);
 
-    dal::AudioBlock block{};
+    tox2::AudioBlock block{};
     for (int i = 0; i < 5; ++i) output->submit(block);
     stats = output->stats();
     CHECK(stats.blocks_submitted == 5);
-    CHECK(stats.frames_played == 5 * dal::kAudioBlockFrames);
+    CHECK(stats.frames_played == 5 * tox2::kAudioBlockFrames);
     CHECK(stats.blocks_dropped == 0 && stats.underrun_frames == 0 && stats.device_errors == 0);
 
     // The block period is the block length at the sample rate, to the nanosecond.
-    CHECK(dal::kAudioBlockPeriod.count() == 5'333'333);
-    CHECK(dal::kAudioBlockSamples == 512);
+    CHECK(tox2::kAudioBlockPeriod.count() == 5'333'333);
+    CHECK(tox2::kAudioBlockSamples == 512);
 }
 
 std::vector<std::uint8_t> makePcm16Wav(std::uint16_t channels, std::uint32_t rate,
@@ -303,7 +303,7 @@ std::vector<std::uint8_t> readFile(const fs::path& path) {
 
 void testWavFloatRoundTrip() {
     const fs::path path = g_dir / "roundtrip.wav";
-    auto created = dal::WavWriter::create(path, 48000, 2);
+    auto created = tox2::WavWriter::create(path, 48000, 2);
     CHECK(created.has_value());
     if (!created) return;
     auto& writer = *created;
@@ -324,7 +324,7 @@ void testWavFloatRoundTrip() {
     CHECK(writer->framesWritten() == 30000);
     CHECK(writer->finish());
 
-    const auto wav = dal::readWav(path);
+    const auto wav = tox2::readWav(path);
     CHECK(wav.has_value());
     if (wav) {
         CHECK(wav->sample_rate == 48000 && wav->channels == 2);
@@ -355,13 +355,13 @@ void testWavFloatRoundTrip() {
 
 void testWavHeaderValidWithoutFinish() {
     const fs::path path = g_dir / "unfinished.wav";
-    auto created = dal::WavWriter::create(path, 48000, 2);
+    auto created = tox2::WavWriter::create(path, 48000, 2);
     CHECK(created.has_value());
     if (!created) return;
     auto& writer = *created;
 
     // A file that was never written to is a valid empty WAV.
-    auto empty = dal::readWav(path);
+    auto empty = tox2::readWav(path);
     CHECK(empty.has_value() && empty->frames() == 0 && empty->channels == 2 && empty->sample_rate == 48000);
 
     std::uint64_t frame = 0;
@@ -374,7 +374,7 @@ void testWavHeaderValidWithoutFinish() {
 
     // Before the first patch the header still describes an empty file.
     CHECK(writeFrames(40000));
-    auto early = dal::readWav(path);
+    auto early = tox2::readWav(path);
     CHECK(early.has_value() && early->frames() == 0);
 
     // After the patch at 48000 frames the file holds exactly that many, whatever was written since
@@ -383,7 +383,7 @@ void testWavHeaderValidWithoutFinish() {
     for (int i = 0; i < 100 && ok; ++i) ok = writeFrames(256);
     CHECK(ok);
     CHECK(writer->framesWritten() == 40000 + 100 * 256);
-    auto cut = dal::readWav(path);
+    auto cut = tox2::readWav(path);
     CHECK(cut.has_value());
     if (cut) {
         CHECK(cut->frames() == 48000);
@@ -391,21 +391,21 @@ void testWavHeaderValidWithoutFinish() {
     }
 
     CHECK(writeFrames(48000));
-    cut = dal::readWav(path);
+    cut = tox2::readWav(path);
     CHECK(cut.has_value() && cut->frames() == 96000 && isRamp(cut->samples, 0));
 
     CHECK(writer->finish());
-    const auto done = dal::readWav(path);
+    const auto done = tox2::readWav(path);
     CHECK(done.has_value() && done->frames() == 40000 + 100 * 256 + 48000 && isRamp(done->samples, 0));
 }
 
 void testWavWriterErrors() {
-    CHECK(!dal::WavWriter::create(g_dir / "no_such_dir" / "x.wav", 48000, 2).has_value());
-    CHECK(!dal::WavWriter::create(g_dir / "bad_format.wav", 0, 2).has_value());
-    CHECK(!dal::WavWriter::create(g_dir / "bad_format.wav", 48000, 0).has_value());
+    CHECK(!tox2::WavWriter::create(g_dir / "no_such_dir" / "x.wav", 48000, 2).has_value());
+    CHECK(!tox2::WavWriter::create(g_dir / "bad_format.wav", 0, 2).has_value());
+    CHECK(!tox2::WavWriter::create(g_dir / "bad_format.wav", 48000, 0).has_value());
 
     // Samples that are not whole frames are refused without being written.
-    auto created = dal::WavWriter::create(g_dir / "odd.wav", 48000, 2);
+    auto created = tox2::WavWriter::create(g_dir / "odd.wav", 48000, 2);
     CHECK(created.has_value());
     if (!created) return;
     const float three[3] = {0.1f, 0.2f, 0.3f};
@@ -416,17 +416,17 @@ void testWavWriterErrors() {
 
     // The destructor finishes the file.
     created->reset();
-    const auto wav = dal::readWav(g_dir / "odd.wav");
+    const auto wav = tox2::readWav(g_dir / "odd.wav");
     CHECK(wav.has_value() && wav->frames() == 1 && wav->samples[0] == 0.1f && wav->samples[1] == 0.2f);
 
     // A mono writer counts frames, not samples.
-    auto mono = dal::WavWriter::create(g_dir / "mono.wav", 44100, 1);
+    auto mono = tox2::WavWriter::create(g_dir / "mono.wav", 44100, 1);
     CHECK(mono.has_value());
     if (!mono) return;
     CHECK((*mono)->write(three));
     CHECK((*mono)->framesWritten() == 3);
     CHECK((*mono)->finish());
-    const auto mono_wav = dal::readWav(g_dir / "mono.wav");
+    const auto mono_wav = tox2::readWav(g_dir / "mono.wav");
     CHECK(mono_wav.has_value() && mono_wav->channels == 1 && mono_wav->sample_rate == 44100 && mono_wav->frames() == 3);
 }
 
@@ -436,7 +436,7 @@ void testWavReadPcm16() {
     for (const bool long_fmt : {false, true}) {
         for (const bool extra : {false, true}) {
             const auto bytes = makePcm16Wav(2, 44100, stereo, long_fmt, extra);
-            const auto wav = dal::parseWav(bytes);
+            const auto wav = tox2::parseWav(bytes);
             CHECK(wav.has_value());
             if (!wav) continue;
             CHECK(wav->sample_rate == 44100 && wav->channels == 2 && wav->frames() == 3);
@@ -447,34 +447,34 @@ void testWavReadPcm16() {
         }
     }
 
-    const auto mono = dal::parseWav(makePcm16Wav(1, 22050, stereo, false, false));
+    const auto mono = tox2::parseWav(makePcm16Wav(1, 22050, stereo, false, false));
     CHECK(mono.has_value() && mono->channels == 1 && mono->frames() == 6 && mono->sample_rate == 22050);
 
     // A data size past the end of the buffer (a file cut off mid-write) reads what is present; a
     // trailing partial frame is dropped.
-    const auto cut = dal::parseWav(makePcm16Wav(2, 48000, stereo, false, false, 1000));
+    const auto cut = tox2::parseWav(makePcm16Wav(2, 48000, stereo, false, false, 1000));
     CHECK(cut.has_value() && cut->frames() == 3);
     const std::int16_t odd[] = {1, 2, 3, 4, 5};
-    const auto partial = dal::parseWav(makePcm16Wav(2, 48000, odd, false, false));
+    const auto partial = tox2::parseWav(makePcm16Wav(2, 48000, odd, false, false));
     CHECK(partial.has_value() && partial->frames() == 2);
 }
 
 void testWavReadRejects() {
     const std::int16_t samples[] = {1, 2, 3, 4};
-    CHECK(!dal::parseWav({}).has_value());
-    CHECK(!dal::readWav(g_dir / "does_not_exist.wav").has_value());
+    CHECK(!tox2::parseWav({}).has_value());
+    CHECK(!tox2::readWav(g_dir / "does_not_exist.wav").has_value());
 
     auto bytes = makePcm16Wav(2, 48000, samples, false, false);
     auto damaged = bytes;
     damaged[0] = 'X';
-    CHECK(!dal::parseWav(damaged).has_value());
+    CHECK(!tox2::parseWav(damaged).has_value());
     damaged = bytes;
     damaged[8] = 'X';
-    CHECK(!dal::parseWav(damaged).has_value());
+    CHECK(!tox2::parseWav(damaged).has_value());
 
     // fmt cut off, and no data chunk.
-    CHECK(!dal::parseWav(std::span<const std::uint8_t>(bytes).first(20)).has_value());
-    CHECK(!dal::parseWav(std::span<const std::uint8_t>(bytes).first(36)).has_value());
+    CHECK(!tox2::parseWav(std::span<const std::uint8_t>(bytes).first(20)).has_value());
+    CHECK(!tox2::parseWav(std::span<const std::uint8_t>(bytes).first(36)).has_value());
 
     // Unsupported sample formats and channel counts: 8-bit PCM, 24-bit PCM, float64, 3 channels.
     // The fmt payload starts at offset 20; bits per sample sits 14 bytes into it.
@@ -483,12 +483,12 @@ void testWavReadRejects() {
         std::memcpy(copy.data() + offset, &value, 2);
         return copy;
     };
-    CHECK(!dal::parseWav(with(20 + 14, 8)).has_value());
-    CHECK(!dal::parseWav(with(20 + 14, 24)).has_value());
-    CHECK(!dal::parseWav(with(20, 3)).has_value());  // float tag with 16-bit samples
-    CHECK(!dal::parseWav(with(20, 0xFFFE)).has_value());
-    CHECK(!dal::parseWav(with(20 + 2, 3)).has_value());
-    CHECK(!dal::parseWav(with(20 + 2, 0)).has_value());
+    CHECK(!tox2::parseWav(with(20 + 14, 8)).has_value());
+    CHECK(!tox2::parseWav(with(20 + 14, 24)).has_value());
+    CHECK(!tox2::parseWav(with(20, 3)).has_value());  // float tag with 16-bit samples
+    CHECK(!tox2::parseWav(with(20, 0xFFFE)).has_value());
+    CHECK(!tox2::parseWav(with(20 + 2, 3)).has_value());
+    CHECK(!tox2::parseWav(with(20 + 2, 0)).has_value());
 }
 
 void testWavStatsTone() {
@@ -497,7 +497,7 @@ void testWavStatsTone() {
     for (std::uint64_t i = 0; i < 48000; ++i) {
         tone[2 * i] = tone[2 * i + 1] = toneSample(i, 0.5f);
     }
-    auto stats = dal::wavStats(tone, 48000, 2, 1.0);
+    auto stats = tox2::wavStats(tone, 48000, 2, 1.0);
     CHECK(stats.size() == 1);
     if (stats.size() == 1) {
         CHECK(stats[0].start_frame == 0 && stats[0].end_frame == 48000);
@@ -509,7 +509,7 @@ void testWavStatsTone() {
     // The same signal on the left channel only: RMS is taken over both channels, the peak is unchanged.
     std::vector<float> left_only = tone;
     for (std::size_t i = 1; i < left_only.size(); i += 2) left_only[i] = 0;
-    stats = dal::wavStats(left_only, 48000, 2, 1.0);
+    stats = tox2::wavStats(left_only, 48000, 2, 1.0);
     CHECK(stats.size() == 1);
     if (stats.size() == 1) {
         CHECK(isNear(stats[0].rms_db, 20 * std::log10(0.25), 0.01));
@@ -518,7 +518,7 @@ void testWavStatsTone() {
     }
 
     // Windows of 0.25 s: four equal windows.
-    stats = dal::wavStats(tone, 48000, 2, 0.25);
+    stats = tox2::wavStats(tone, 48000, 2, 0.25);
     CHECK(stats.size() == 4);
     for (std::size_t i = 0; i < stats.size(); ++i) {
         CHECK(stats[i].start_frame == i * 12000 && stats[i].end_frame == (i + 1) * 12000);
@@ -528,14 +528,14 @@ void testWavStatsTone() {
     // A mono signal is one channel per frame.
     std::vector<float> mono(48000);
     for (std::uint64_t i = 0; i < mono.size(); ++i) mono[i] = toneSample(i, 1.0f);
-    stats = dal::wavStats(mono, 48000, 1, 1.0);
+    stats = tox2::wavStats(mono, 48000, 1, 1.0);
     CHECK(stats.size() == 1 && stats[0].non_silent_frames == 48000 &&
           isNear(stats[0].rms_db, 20 * std::log10(1.0 / std::numbers::sqrt2), 0.01));
 }
 
 void testWavStatsSilence() {
     std::vector<float> silence(2 * 48000 + 2 * 1000);
-    auto stats = dal::wavStats(silence, 48000, 2, 1.0);
+    auto stats = tox2::wavStats(silence, 48000, 2, 1.0);
     CHECK(stats.size() == 2);
     if (stats.size() == 2) {
         // The last window covers the remainder.
@@ -550,28 +550,28 @@ void testWavStatsSilence() {
     for (std::size_t i = 0; i < 10; ++i) faint[2 * i] = 1e-4f;       // at the threshold
     for (std::size_t i = 10; i < 30; ++i) faint[2 * i + 1] = 2e-4f;  // right channel only
     for (std::size_t i = 30; i < 35; ++i) faint[2 * i] = -3e-4f;     // negative counts too
-    stats = dal::wavStats(faint, 48000, 2, 1.0);
+    stats = tox2::wavStats(faint, 48000, 2, 1.0);
     CHECK(stats.size() == 1 && stats[0].non_silent_frames == 25);
     CHECK(stats.size() == 1 && isNear(stats[0].peak_db, 20 * std::log10(3e-4), 0.01));
 
     // Degenerate input produces no windows.
-    CHECK(dal::wavStats({}, 48000, 2, 1.0).empty());
-    CHECK(dal::wavStats(silence, 0, 2, 1.0).empty());
-    CHECK(dal::wavStats(silence, 48000, 0, 1.0).empty());
-    CHECK(dal::wavStats(silence, 48000, 2, 0.0).empty());
-    CHECK(dal::wavStats(silence, 48000, 2, -1.0).empty());
-    CHECK(dal::wavStats(silence, 48000, 2, 1e-9).empty());
-    CHECK(dal::wavStats(silence, 48000, 2, 1e30).size() == 1);
+    CHECK(tox2::wavStats({}, 48000, 2, 1.0).empty());
+    CHECK(tox2::wavStats(silence, 0, 2, 1.0).empty());
+    CHECK(tox2::wavStats(silence, 48000, 0, 1.0).empty());
+    CHECK(tox2::wavStats(silence, 48000, 2, 0.0).empty());
+    CHECK(tox2::wavStats(silence, 48000, 2, -1.0).empty());
+    CHECK(tox2::wavStats(silence, 48000, 2, 1e-9).empty());
+    CHECK(tox2::wavStats(silence, 48000, 2, 1e30).size() == 1);
 }
 
-// The file dal_audiotool wavstat is checked against by hand (and by anyone reading the docs):
+// The file tox2_audiotool wavstat is checked against by hand (and by anyone reading the docs):
 //   0-1 s    stereo tone, amplitude 0.5
 //   1-2 s    stereo tone, amplitude 0.05
 //   2-3 s    silence
 //   3-3.5 s  tone, amplitude 0.5, left channel only
 void testWavStatsFile() {
     const fs::path path = g_dir / "wavstat_sample.wav";
-    auto created = dal::WavWriter::create(path, 48000, 2);
+    auto created = tox2::WavWriter::create(path, 48000, 2);
     CHECK(created.has_value());
     if (!created) return;
 
@@ -591,17 +591,17 @@ void testWavStatsFile() {
     }
     // Written in cellAudio-sized blocks, like the engine will.
     bool wrote = true;
-    for (std::size_t frame = 0; frame < 168000; frame += dal::kAudioBlockFrames) {
-        const std::size_t frames = std::min<std::size_t>(dal::kAudioBlockFrames, 168000 - frame);
+    for (std::size_t frame = 0; frame < 168000; frame += tox2::kAudioBlockFrames) {
+        const std::size_t frames = std::min<std::size_t>(tox2::kAudioBlockFrames, 168000 - frame);
         wrote = (*created)->write(std::span<const float>(all).subspan(frame * 2, frames * 2)) && wrote;
     }
     CHECK(wrote);
     CHECK((*created)->finish());
 
-    const auto wav = dal::readWav(path);
+    const auto wav = tox2::readWav(path);
     CHECK(wav.has_value() && wav->frames() == 168000 && wav->samples == all);
     if (!wav) return;
-    const auto stats = dal::wavStats(wav->samples, wav->sample_rate, wav->channels, 1.0);
+    const auto stats = tox2::wavStats(wav->samples, wav->sample_rate, wav->channels, 1.0);
     CHECK(stats.size() == 4);
     if (stats.size() != 4) return;
     CHECK(isNear(stats[0].rms_db, -9.03, 0.01) && isNear(stats[0].peak_db, -6.02, 0.05) &&
@@ -615,13 +615,13 @@ void testWavStatsFile() {
 }
 
 void testBlockClock() {
-    using Clock = dal::BlockClock::Clock;
+    using Clock = tox2::BlockClock::Clock;
     using namespace std::chrono_literals;
     const Clock::time_point start{};
-    const auto period = dal::kAudioBlockPeriod;
-    CHECK(dal::kMaxCatchUpBlocks == 0);
+    const auto period = tox2::kAudioBlockPeriod;
+    CHECK(tox2::kMaxCatchUpBlocks == 0);
 
-    dal::BlockClock clock(start);
+    tox2::BlockClock clock(start);
     CHECK(clock.nextDue() == start + period);
 
     // Before the first period is due nothing happens and the schedule stays.
@@ -653,7 +653,7 @@ void testBlockClock() {
     CHECK(plan.produce == 0 && plan.skipped == 0);
 
     // Exactly on time for a long run: one block per period, nothing skipped.
-    dal::BlockClock steady(start);
+    tox2::BlockClock steady(start);
     std::uint64_t produced = 0;
     std::uint64_t skipped = 0;
     for (int i = 1; i <= 1000; ++i) {
@@ -664,7 +664,7 @@ void testBlockClock() {
     CHECK(produced == 1000 && skipped == 0 && steady.nextDue() == start + 1001 * period);
 
     // A pause of an hour is one block and a large count of skipped periods.
-    dal::BlockClock paused(start);
+    tox2::BlockClock paused(start);
     now = start + 1h;
     plan = paused.due(now);
     const std::uint64_t due = 1 + (now - (start + period)) / period;
@@ -673,12 +673,12 @@ void testBlockClock() {
 }
 
 void testBlockClockCorrection() {
-    using Clock = dal::BlockClock::Clock;
+    using Clock = tox2::BlockClock::Clock;
     using Ns = std::chrono::nanoseconds;
     const Clock::time_point start{};
-    const auto nominal = dal::kAudioBlockPeriod;
+    const auto nominal = tox2::kAudioBlockPeriod;
 
-    dal::BlockClock clock(start);
+    tox2::BlockClock clock(start);
     CHECK(clock.period() == nominal);
     clock.setCorrectionPpm(0.0);
     CHECK(clock.period() == nominal);
@@ -696,12 +696,12 @@ void testBlockClockCorrection() {
     CHECK(clock.period() - nominal > Ns(2600) && clock.period() - nominal <= Ns(2700));
 
     // The schedule is absolute: a change moves only the steps after it.
-    dal::BlockClock stepped(start);
+    tox2::BlockClock stepped(start);
     stepped.due(start + nominal);
     const Clock::time_point due_before = stepped.nextDue();
     stepped.setCorrectionPpm(-500.0);
     CHECK(stepped.nextDue() == due_before);
-    const dal::BlockClockPlan plan = stepped.due(due_before);
+    const tox2::BlockClockPlan plan = stepped.due(due_before);
     CHECK(plan.produce == 1 && plan.skipped == 0 && stepped.nextDue() == due_before + stepped.period());
 }
 
@@ -720,15 +720,15 @@ struct DriftRun {
 };
 
 DriftRun simulateDrift(double device_ppm, std::chrono::seconds length, double initial_error, bool device_steps) {
-    using Clock = dal::BlockClock::Clock;
+    using Clock = tox2::BlockClock::Clock;
     using Ns = std::chrono::nanoseconds;
     constexpr double kDevicePeriodFrames = 480.0;  // the device takes its data in 10 ms steps
     const Clock::time_point start{};
-    const double target = static_cast<double>(dal::kFillTargetFrames);
+    const double target = static_cast<double>(tox2::kFillTargetFrames);
     const double initial_fill = target + initial_error;
 
-    dal::BlockClock clock(start);
-    dal::BlockRateController rate;
+    tox2::BlockClock clock(start);
+    tox2::BlockRateController rate;
     DriftRun run;
     std::uint64_t submitted = 0;
     std::uint64_t wakes = 0;
@@ -739,11 +739,11 @@ DriftRun simulateDrift(double device_ppm, std::chrono::seconds length, double in
         ++wakes;
         Clock::time_point now = clock.nextDue() + Ns((lcg >> 16 & 0x7fff) * 45);  // up to 1.5 ms late
         if (wakes % 997 == 0) now += 2 * clock.period();
-        const dal::BlockClockPlan plan = clock.due(now);
-        submitted += std::uint64_t{plan.produce + plan.skipped} * dal::kAudioBlockFrames;
+        const tox2::BlockClockPlan plan = clock.due(now);
+        submitted += std::uint64_t{plan.produce + plan.skipped} * tox2::kAudioBlockFrames;
 
         const double consumed =
-                std::chrono::duration<double>(now - start).count() * dal::kAudioSampleRate * (1.0 + device_ppm * 1e-6);
+                std::chrono::duration<double>(now - start).count() * tox2::kAudioSampleRate * (1.0 + device_ppm * 1e-6);
         const double fill = initial_fill + static_cast<double>(submitted) - consumed;
         // A real device reports its padding at the top of the step; the output subtracts half a period.
         const double reported = device_steps
@@ -767,15 +767,15 @@ DriftRun simulateDrift(double device_ppm, std::chrono::seconds length, double in
 
 void testRateControllerFollowsDeviceDrift() {
     using namespace std::chrono_literals;
-    using Clock = dal::BlockClock::Clock;
-    constexpr double kBlock = dal::kAudioBlockFrames;
+    using Clock = tox2::BlockClock::Clock;
+    constexpr double kBlock = tox2::kAudioBlockFrames;
     for (const double device_ppm : {300.0, -300.0, 50.0, 0.0}) {
         const DriftRun run = simulateDrift(device_ppm, 30min, 0.0, false);
         // Within one block of the target for the whole 30 minutes, nothing near empty or near the ring's
         // high-water mark, and the correction is the drift (device faster: the engine speeds up).
         CHECK(run.max_error <= kBlock);
         CHECK(run.min_fill > 0.0 && run.max_fill < 12 * kBlock);
-        CHECK(run.max_abs_ppm <= dal::kClockMaxPpm);
+        CHECK(run.max_abs_ppm <= tox2::kClockMaxPpm);
         CHECK(run.updates >= 1700);
         CHECK(std::fabs(run.final_ppm - device_ppm) < 15.0);
         CHECK(std::fabs(run.final_error) <= kBlock);
@@ -788,7 +788,7 @@ void testRateControllerFollowsDeviceDrift() {
         CHECK(run.max_error <= kBlock);
         CHECK(std::fabs(run.final_error) <= kBlock);
         CHECK(run.min_fill > 0.0 && run.max_fill < 12 * kBlock);
-        CHECK(run.max_abs_ppm <= dal::kClockMaxPpm);
+        CHECK(run.max_abs_ppm <= tox2::kClockMaxPpm);
         CHECK(std::fabs(run.final_ppm - device_ppm) < 30.0);
     }
 
@@ -796,24 +796,24 @@ void testRateControllerFollowsDeviceDrift() {
     for (const double initial_error : {-512.0, 512.0}) {
         const DriftRun run = simulateDrift(0.0, 10min, initial_error, false);
         CHECK(run.min_fill > 0.0);
-        CHECK(run.max_abs_ppm <= dal::kClockMaxPpm);
+        CHECK(run.max_abs_ppm <= tox2::kClockMaxPpm);
         CHECK(std::fabs(run.final_error) < 32.0);
         CHECK(std::fabs(run.final_ppm) < 15.0);
     }
 
     // Readings of "no fill" leave the correction alone and restart the interval.
-    dal::BlockRateController rate;
+    tox2::BlockRateController rate;
     const Clock::time_point t0{};
-    CHECK(!rate.observe(t0, dal::kFillTargetFrames + 1000));
-    CHECK(rate.observe(t0 + 1s, dal::kFillTargetFrames + 1000));
+    CHECK(!rate.observe(t0, tox2::kFillTargetFrames + 1000));
+    CHECK(rate.observe(t0 + 1s, tox2::kFillTargetFrames + 1000));
     const double before = rate.ppm();
     CHECK(before < 0.0);
     CHECK(!rate.observe(t0 + 1500ms, std::nullopt));
-    CHECK(!rate.observe(t0 + 3s, dal::kFillTargetFrames + 1000));  // a new interval starts here
+    CHECK(!rate.observe(t0 + 3s, tox2::kFillTargetFrames + 1000));  // a new interval starts here
     CHECK(rate.ppm() == before);
 
     // No fill level, no correction.
-    dal::BlockRateController idle;
+    tox2::BlockRateController idle;
     for (int i = 0; i < 1000; ++i) CHECK(!idle.observe(t0 + i * 10ms, std::nullopt));
     CHECK(idle.ppm() == 0.0);
 }
@@ -832,7 +832,7 @@ struct Recording {
     }
 };
 
-class RecordingOutput final : public dal::AudioOutput {
+class RecordingOutput final : public tox2::AudioOutput {
 public:
     RecordingOutput(std::shared_ptr<Recording> recording, bool open_ok)
         : recording_(std::move(recording)), open_ok_(open_ok) {}
@@ -856,8 +856,8 @@ public:
         if (fill < 0) return std::nullopt;
         return static_cast<std::uint64_t>(fill);
     }
-    dal::AudioOutputStats stats() const override {
-        dal::AudioOutputStats stats;
+    tox2::AudioOutputStats stats() const override {
+        tox2::AudioOutputStats stats;
         stats.blocks_submitted = submitted_.load();
         return stats;
     }
@@ -868,8 +868,8 @@ private:
     std::atomic<std::uint64_t> submitted_{0};
 };
 
-dal::AudioEngineConfig engineConfig(const std::shared_ptr<Recording>& recording, bool open_ok, fs::path dump) {
-    dal::AudioEngineConfig config;
+tox2::AudioEngineConfig engineConfig(const std::shared_ptr<Recording>& recording, bool open_ok, fs::path dump) {
+    tox2::AudioEngineConfig config;
     config.make_output = [recording, open_ok] { return std::make_unique<RecordingOutput>(recording, open_ok); };
     config.dump = std::move(dump);
     return config;
@@ -885,12 +885,12 @@ struct ProducerState {
     std::chrono::milliseconds stall{0};
 };
 
-dal::AudioBlockProducer makeProducer(const std::shared_ptr<ProducerState>& state) {
+tox2::AudioBlockProducer makeProducer(const std::shared_ptr<ProducerState>& state) {
     return [state](std::span<float> block) {
         const std::uint64_t call = state->calls.fetch_add(1);
         if (call == state->stall_call) std::this_thread::sleep_for(state->stall);
         if (state->silent_every_fourth && call % 4 == 3) return;
-        fillRamp(block, call * dal::kAudioBlockFrames + 1);
+        fillRamp(block, call * tox2::kAudioBlockFrames + 1);
     };
 }
 
@@ -913,22 +913,22 @@ struct RecordedBlocks {
 
 RecordedBlocks analyse(std::span<const float> samples) {
     RecordedBlocks result;
-    result.total = samples.size() / dal::kAudioBlockSamples;
+    result.total = samples.size() / tox2::kAudioBlockSamples;
     for (std::size_t b = 0; b < result.total; ++b) {
-        const auto block = samples.subspan(b * dal::kAudioBlockSamples, dal::kAudioBlockSamples);
+        const auto block = samples.subspan(b * tox2::kAudioBlockSamples, tox2::kAudioBlockSamples);
         if (std::all_of(block.begin(), block.end(), [](float s) { return s == 0.0f; })) {
             ++result.silent;
             continue;
         }
-        const auto tag = static_cast<std::uint64_t>((static_cast<double>(block[0]) - 1.0) / dal::kAudioBlockFrames);
+        const auto tag = static_cast<std::uint64_t>((static_cast<double>(block[0]) - 1.0) / tox2::kAudioBlockFrames);
         result.tags.push_back(tag);
-        result.ramps_intact = result.ramps_intact && isRamp(block, tag * dal::kAudioBlockFrames + 1);
+        result.ramps_intact = result.ramps_intact && isRamp(block, tag * tox2::kAudioBlockFrames + 1);
     }
     return result;
 }
 
 double periodsToMs(std::uint64_t periods) {
-    return static_cast<double>(periods) * static_cast<double>(dal::kAudioBlockPeriod.count()) / 1e6;
+    return static_cast<double>(periods) * static_cast<double>(tox2::kAudioBlockPeriod.count()) / 1e6;
 }
 
 void testEngineBlocksAndDump() {
@@ -939,18 +939,18 @@ void testEngineBlocksAndDump() {
     state->silent_every_fourth = true;
     const auto other = std::make_shared<ProducerState>();
 
-    dal::configureAudioEngine(engineConfig(recording, true, dump_path));
+    tox2::configureAudioEngine(engineConfig(recording, true, dump_path));
     const Clock::time_point t0 = Clock::now();
-    dal::startAudioEngine(makeProducer(state));
-    dal::startAudioEngine(makeProducer(other));  // already running: ignored
+    tox2::startAudioEngine(makeProducer(state));
+    tox2::startAudioEngine(makeProducer(other));  // already running: ignored
     CHECK(waitFor([&] { return state->calls.load() >= 40; }));
     const Clock::time_point t_stop = Clock::now();
 
-    const dal::AudioEngineStats running = dal::audioEngineStats();
+    const tox2::AudioEngineStats running = tox2::audioEngineStats();
     CHECK(running.output == "fake");
 
-    dal::AudioEngineStats stats;
-    CHECK(dal::stopAudioEngineForTest(&stats));
+    tox2::AudioEngineStats stats;
+    CHECK(tox2::stopAudioEngineForTest(&stats));
     const Clock::time_point t1 = Clock::now();
     CHECK(other->calls.load() == 0);
 
@@ -974,10 +974,10 @@ void testEngineBlocksAndDump() {
     CHECK(recorded.silent == calls / 4 + stats.skipped_blocks);
 
     // The dump holds exactly what the output received.
-    const auto wav = dal::readWav(dump_path);
+    const auto wav = tox2::readWav(dump_path);
     CHECK(wav.has_value());
     if (wav) {
-        CHECK(wav->sample_rate == dal::kAudioSampleRate && wav->channels == dal::kAudioOutputChannels);
+        CHECK(wav->sample_rate == tox2::kAudioSampleRate && wav->channels == tox2::kAudioOutputChannels);
         CHECK(wav->samples == samples);
     }
 
@@ -988,7 +988,7 @@ void testEngineBlocksAndDump() {
     CHECK(periodsToMs(recorded.total) >= until_stop_ms - 80.0);
 
     // The engine is gone: the next test starts from a clean slate.
-    CHECK(dal::audioEngineStats().blocks == 0 && dal::audioEngineStats().output.empty());
+    CHECK(tox2::audioEngineStats().blocks == 0 && tox2::audioEngineStats().output.empty());
 }
 
 void testEngineSkipsLatePeriods() {
@@ -998,11 +998,11 @@ void testEngineSkipsLatePeriods() {
     state->stall_call = 5;
     state->stall = std::chrono::milliseconds(25);  // 4.7 periods
 
-    dal::configureAudioEngine(engineConfig(recording, true, dump_path));
-    dal::startAudioEngine(makeProducer(state));
+    tox2::configureAudioEngine(engineConfig(recording, true, dump_path));
+    tox2::startAudioEngine(makeProducer(state));
     CHECK(waitFor([&] { return state->calls.load() >= 20; }));
-    dal::AudioEngineStats stats;
-    CHECK(dal::stopAudioEngineForTest(&stats));
+    tox2::AudioEngineStats stats;
+    CHECK(tox2::stopAudioEngineForTest(&stats));
 
     const std::uint64_t calls = state->calls.load();
     const std::vector<float> samples = recording->take();
@@ -1025,18 +1025,18 @@ void testEngineSkipsLatePeriods() {
     std::size_t run = 0;
     std::size_t index_of_five = 0;
     for (std::size_t b = 0; b < recorded.total; ++b) {
-        if (samples[b * dal::kAudioBlockSamples] == 5.0f * dal::kAudioBlockFrames + 1.0f) index_of_five = b;
+        if (samples[b * tox2::kAudioBlockSamples] == 5.0f * tox2::kAudioBlockFrames + 1.0f) index_of_five = b;
     }
     for (std::size_t b = index_of_five + 1; b < recorded.total; ++b) {
-        const float first = samples[b * dal::kAudioBlockSamples];
+        const float first = samples[b * tox2::kAudioBlockSamples];
         if (first != 0.0f) break;
         ++run;
     }
     CHECK(run >= 3);
 
-    const auto wav = dal::readWav(dump_path);
+    const auto wav = tox2::readWav(dump_path);
     CHECK(wav.has_value() && wav->samples == samples);
-    CHECK(wav.has_value() && wav->frames() == recorded.total * dal::kAudioBlockFrames);
+    CHECK(wav.has_value() && wav->frames() == recorded.total * tox2::kAudioBlockFrames);
 }
 
 void testEngineStopDoesNotWait() {
@@ -1052,8 +1052,8 @@ void testEngineStopDoesNotWait() {
     std::mutex& gate = gate_state->mutex;
     std::atomic<int>& calls = gate_state->calls;
 
-    dal::configureAudioEngine(engineConfig(recording, true, {}));
-    dal::startAudioEngine([gate_state](std::span<float>) {
+    tox2::configureAudioEngine(engineConfig(recording, true, {}));
+    tox2::startAudioEngine([gate_state](std::span<float>) {
         gate_state->calls.fetch_add(1);
         std::lock_guard<std::mutex> hold(gate_state->mutex);
     });
@@ -1061,15 +1061,15 @@ void testEngineStopDoesNotWait() {
 
     // The producer is stuck on the gate; neither stopping nor reading the statistics waits for it.
     const Clock::time_point before = Clock::now();
-    dal::requestAudioEngineStop();
-    const dal::AudioEngineStats blocked = dal::audioEngineStats();
+    tox2::requestAudioEngineStop();
+    const tox2::AudioEngineStats blocked = tox2::audioEngineStats();
     const auto took = Clock::now() - before;
     CHECK(took < std::chrono::milliseconds(100));
     CHECK(blocked.blocks == 0);
 
     gate.unlock();
-    dal::AudioEngineStats stats;
-    CHECK(dal::stopAudioEngineForTest(&stats));
+    tox2::AudioEngineStats stats;
+    CHECK(tox2::stopAudioEngineForTest(&stats));
     // The thread ended at its next tick without calling the producer again.
     CHECK(calls.load() == 1);
     CHECK(stats.blocks == 1);
@@ -1078,7 +1078,7 @@ void testEngineStopDoesNotWait() {
 void testEngineOutputOpenFails() {
     std::mutex lines_mutex;
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) {
+    tox2::setLogSink([&](std::string_view line) {
         std::lock_guard<std::mutex> lock(lines_mutex);
         lines.emplace_back(line);
     });
@@ -1086,12 +1086,12 @@ void testEngineOutputOpenFails() {
     const auto recording = std::make_shared<Recording>();
     const auto state = std::make_shared<ProducerState>();
     // The dump cannot be created either: the engine reports it once and carries on without it.
-    dal::configureAudioEngine(engineConfig(recording, false, g_dir / "no_such_dir" / "x.wav"));
-    dal::startAudioEngine(makeProducer(state));
+    tox2::configureAudioEngine(engineConfig(recording, false, g_dir / "no_such_dir" / "x.wav"));
+    tox2::startAudioEngine(makeProducer(state));
     CHECK(waitFor([&] { return state->calls.load() >= 5; }));
-    dal::AudioEngineStats stats;
-    CHECK(dal::stopAudioEngineForTest(&stats));
-    dal::setLogSink({});
+    tox2::AudioEngineStats stats;
+    CHECK(tox2::stopAudioEngineForTest(&stats));
+    tox2::setLogSink({});
 
     CHECK(stats.output == "none (fake failed)");
     CHECK(stats.blocks >= 5);
@@ -1103,9 +1103,9 @@ void testEngineOutputOpenFails() {
         return std::count_if(lines.begin(), lines.end(),
                              [&](const std::string& line) { return line.find(needle) != std::string::npos; });
     };
-    CHECK(count("dal: audio: fake: device gone; continuing without sound") == 1);
+    CHECK(count("tox2: audio: fake: device gone; continuing without sound") == 1);
     CHECK(count("continuing without sound") == 1);
-    CHECK(count("dal: audio: output none") == 1);
+    CHECK(count("tox2: audio: output none") == 1);
     CHECK(count("continuing without a dump") == 1);
 }
 
@@ -1117,15 +1117,15 @@ void testEngineFinishDumpDuringOpen() {
     const auto recording = std::make_shared<Recording>();
     recording->open_delay = std::chrono::milliseconds(200);
     const auto state = std::make_shared<ProducerState>();
-    dal::configureAudioEngine(engineConfig(recording, true, dump_path));
-    dal::startAudioEngine(makeProducer(state));
+    tox2::configureAudioEngine(engineConfig(recording, true, dump_path));
+    tox2::startAudioEngine(makeProducer(state));
 
     // The engine thread is still inside the slow open(): there is no dump to finish yet. The finish
     // request must not be lost; the engine then creates no dump file.
-    dal::finishAudioDump();
+    tox2::finishAudioDump();
     CHECK(waitFor([&] { return state->calls.load() >= 3; }));
-    dal::AudioEngineStats stats;
-    CHECK(dal::stopAudioEngineForTest(&stats));
+    tox2::AudioEngineStats stats;
+    CHECK(tox2::stopAudioEngineForTest(&stats));
     CHECK(stats.blocks >= 3);
     CHECK(!recording->take().empty());
     CHECK(!fs::exists(dump_path));
@@ -1136,13 +1136,13 @@ void testEngineResumesAfterStop() {
     for (const bool wait_for_exit : {false, true}) {
         const auto recording = std::make_shared<Recording>();
         const auto state = std::make_shared<ProducerState>();
-        dal::configureAudioEngine(engineConfig(recording, true, dump_path));
-        dal::startAudioEngine(makeProducer(state));
+        tox2::configureAudioEngine(engineConfig(recording, true, dump_path));
+        tox2::startAudioEngine(makeProducer(state));
         CHECK(waitFor([&] { return state->calls.load() >= 5; }));
 
         // A start right after a stop request cancels it; one after the thread has ended starts a new
         // thread. Either way production goes on with the same output and dump.
-        dal::requestAudioEngineStop();
+        tox2::requestAudioEngineStop();
         if (wait_for_exit) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             const std::uint64_t settled = state->calls.load();
@@ -1150,17 +1150,17 @@ void testEngineResumesAfterStop() {
             CHECK(state->calls.load() == settled);
         }
         const std::uint64_t before = state->calls.load();
-        dal::startAudioEngine(makeProducer(std::make_shared<ProducerState>()));
+        tox2::startAudioEngine(makeProducer(std::make_shared<ProducerState>()));
         CHECK(waitFor([&] { return state->calls.load() >= before + 10; }));
 
-        dal::AudioEngineStats stats;
-        CHECK(dal::stopAudioEngineForTest(&stats));
+        tox2::AudioEngineStats stats;
+        CHECK(tox2::stopAudioEngineForTest(&stats));
         const std::vector<float> samples = recording->take();
         const RecordedBlocks recorded = analyse(samples);
         CHECK(recording->opens == 1);
         CHECK(stats.blocks == state->calls.load());
         CHECK(recorded.total == stats.blocks + stats.skipped_blocks);
-        const auto wav = dal::readWav(dump_path);
+        const auto wav = tox2::readWav(dump_path);
         CHECK(wav.has_value() && wav->samples == samples);
     }
 }
@@ -1171,22 +1171,22 @@ void testEngineFollowsReportedFill() {
     {
         const auto recording = std::make_shared<Recording>();
         recording->fill = 3000;
-        dal::configureAudioEngine(engineConfig(recording, true, {}));
-        dal::startAudioEngine(makeProducer(std::make_shared<ProducerState>()));
-        CHECK(waitFor([&] { return dal::audioEngineStats().clock_ppm != 0.0; }, 5s));
-        const double ppm = dal::audioEngineStats().clock_ppm;
-        CHECK(ppm < 0.0 && ppm >= -dal::kClockMaxPpm);
-        CHECK(dal::stopAudioEngineForTest());
+        tox2::configureAudioEngine(engineConfig(recording, true, {}));
+        tox2::startAudioEngine(makeProducer(std::make_shared<ProducerState>()));
+        CHECK(waitFor([&] { return tox2::audioEngineStats().clock_ppm != 0.0; }, 5s));
+        const double ppm = tox2::audioEngineStats().clock_ppm;
+        CHECK(ppm < 0.0 && ppm >= -tox2::kClockMaxPpm);
+        CHECK(tox2::stopAudioEngineForTest());
     }
     // An output without a fill level keeps the plain clock.
     {
         const auto recording = std::make_shared<Recording>();
-        dal::configureAudioEngine(engineConfig(recording, true, {}));
+        tox2::configureAudioEngine(engineConfig(recording, true, {}));
         const auto state = std::make_shared<ProducerState>();
-        dal::startAudioEngine(makeProducer(state));
+        tox2::startAudioEngine(makeProducer(state));
         CHECK(waitFor([&] { return state->calls.load() >= 250; }));
-        CHECK(dal::audioEngineStats().clock_ppm == 0.0);
-        CHECK(dal::stopAudioEngineForTest());
+        CHECK(tox2::audioEngineStats().clock_ppm == 0.0);
+        CHECK(tox2::stopAudioEngineForTest());
     }
 }
 
@@ -1208,22 +1208,22 @@ constexpr std::uint64_t kNotifyKey = 0x8000cafe02460300;  // the game mixer's fi
 // is stopped: its producer may be waiting for it.
 class AudioGuest {
 public:
-    AudioGuest() : caller_(0x01000000, dal::GuestThreadParams{}, 0, 0) {
-        dal::setLogSink([](std::string_view) {});
-        dal::resetSyncObjects();
-        dal::resetCellAudio();
-        dal::configureAudioEngine({});
-        CHECK(dal::process().memory.reserve());
-        base_ = dal::process().memory.base();
-        scratch_ = dal::process().main.allocate(0x10000, 0x10000);
+    AudioGuest() : caller_(0x01000000, tox2::GuestThreadParams{}, 0, 0) {
+        tox2::setLogSink([](std::string_view) {});
+        tox2::resetSyncObjects();
+        tox2::resetCellAudio();
+        tox2::configureAudioEngine({});
+        CHECK(tox2::process().memory.reserve());
+        base_ = tox2::process().memory.base();
+        scratch_ = tox2::process().main.allocate(0x10000, 0x10000);
         CHECK(scratch_ != 0);
-        dal::guestLock().lock();
+        tox2::guestLock().lock();
     }
     ~AudioGuest() {
-        dal::guestLock().unlock();
-        CHECK(dal::stopAudioEngineForTest());
-        dal::resetCellAudio();
-        dal::setLogSink({});
+        tox2::guestLock().unlock();
+        CHECK(tox2::stopAudioEngineForTest());
+        tox2::resetCellAudio();
+        tox2::setLogSink({});
     }
 
     std::uint8_t* base() const { return base_; }
@@ -1232,9 +1232,9 @@ public:
 
     // Calls the handler of a cellAudio import and returns its result as the guest sees it in r3.
     std::uint32_t call(std::string_view name, std::uint64_t r3 = 0, std::uint64_t r4 = 0, std::uint64_t r5 = 0) {
-        for (const dal::HleEntry& entry : dal::cellAudioHandlers()) {
+        for (const tox2::HleEntry& entry : tox2::cellAudioHandlers()) {
             if (name != entry.name) continue;
-            DalPpuContext* ctx = &caller_.context();
+            Tox2PpuContext* ctx = &caller_.context();
             ctx->gpr[3] = r3;
             ctx->gpr[4] = r4;
             ctx->gpr[5] = r5;
@@ -1250,48 +1250,48 @@ public:
     // A plain stop request is not enough, because one queued producer call still completes.
     std::uint32_t initWithoutEngine() {
         const std::uint32_t result = call("cellAudioInit");
-        dal::guestLock().unlock();
-        CHECK(dal::stopAudioEngineForTest());
-        dal::guestLock().lock();
+        tox2::guestLock().unlock();
+        CHECK(tox2::stopAudioEngineForTest());
+        tox2::guestLock().lock();
         return result;
     }
 
     // Writes a CellAudioPortParam at scratch `offset` and opens a port with it.
     std::uint32_t open(std::uint32_t offset, std::uint64_t channels, std::uint64_t blocks, std::uint64_t attr,
                        float level, std::uint32_t port_out) {
-        dalWrite64(base_, at(offset), channels);
-        dalWrite64(base_, at(offset + 8), blocks);
-        dalWrite64(base_, at(offset + 0x10), attr);
-        dalWrite32(base_, at(offset + 0x18), std::bit_cast<std::uint32_t>(level));
+        tox2Write64(base_, at(offset), channels);
+        tox2Write64(base_, at(offset + 8), blocks);
+        tox2Write64(base_, at(offset + 0x10), attr);
+        tox2Write32(base_, at(offset + 0x18), std::bit_cast<std::uint32_t>(level));
         return call("cellAudioPortOpen", at(offset), port_out);
     }
 
     // Creates an event queue with `key` (PPU queue, FIFO, depth 2) through the syscall; returns its id.
     std::uint32_t createQueue(std::uint64_t key) {
-        dalWrite32(base_, at(0x400), 1);
-        dalWrite32(base_, at(0x404), 1);
+        tox2Write32(base_, at(0x400), 1);
+        tox2Write32(base_, at(0x404), 1);
         const std::uint64_t result = syscall(128, at(0x410), at(0x400), key, 2);
         CHECK(result == 0);
-        return dalRead32(base_, at(0x410));
+        return tox2Read32(base_, at(0x410));
     }
 
     // The result of `sys_event_queue_receive(id, buffer, 1 ms)`; the event words come back in r4..r7.
     std::uint64_t receive(std::uint32_t id, std::array<std::uint64_t, 4>& event) {
         const std::uint64_t result = syscall(130, id, at(0x440), 1000);
-        DalPpuContext* ctx = &caller_.context();
+        Tox2PpuContext* ctx = &caller_.context();
         event = {ctx->gpr[4], ctx->gpr[5], ctx->gpr[6], ctx->gpr[7]};
         return result;
     }
 
     std::uint64_t syscall(std::uint32_t number, std::uint64_t r3, std::uint64_t r4 = 0, std::uint64_t r5 = 0,
                           std::uint64_t r6 = 0) {
-        DalPpuContext* ctx = &caller_.context();
+        Tox2PpuContext* ctx = &caller_.context();
         ctx->gpr[11] = number;
         ctx->gpr[3] = r3;
         ctx->gpr[4] = r4;
         ctx->gpr[5] = r5;
         ctx->gpr[6] = r6;
-        dalSyscall(ctx, base_, 0x10000);
+        tox2Syscall(ctx, base_, 0x10000);
         return ctx->gpr[3];
     }
 
@@ -1301,19 +1301,19 @@ public:
     }
 
 private:
-    dal::GuestThread caller_;
+    tox2::GuestThread caller_;
     std::uint8_t* base_ = nullptr;
     std::uint32_t scratch_ = 0;
 };
 
 void writeFloat(std::uint8_t* base, std::uint32_t addr, float value) {
-    dalWrite32(base, addr, std::bit_cast<std::uint32_t>(value));
+    tox2Write32(base, addr, std::bit_cast<std::uint32_t>(value));
 }
 
 // Runs one period and returns the stereo block.
-dal::AudioBlock runPeriod(AudioGuest& guest, std::uint64_t now_us) {
-    dal::AudioBlock out{};
-    dal::cellAudioPorts().producePeriod(guest.base(), now_us, out);
+tox2::AudioBlock runPeriod(AudioGuest& guest, std::uint64_t now_us) {
+    tox2::AudioBlock out{};
+    tox2::cellAudioPorts().producePeriod(guest.base(), now_us, out);
     return out;
 }
 
@@ -1330,7 +1330,7 @@ void testCellAudioStateErrors() {
     CHECK(guest.call("cellAudioInit") == kAudioAlreadyInit);
     CHECK(guest.call("cellAudioQuit") == 0);
     CHECK(guest.call("cellAudioQuit") == kAudioNotInit);
-    CHECK(dal::cellAudioHandlers().size() == 11);
+    CHECK(tox2::cellAudioHandlers().size() == 11);
 }
 
 void testCellAudioPortOpenAndConfig() {
@@ -1340,33 +1340,33 @@ void testCellAudioPortOpenAndConfig() {
 
     // The game's parameters.
     CHECK(guest.open(0x00, 8, 8, 0, 1.0f, guest.at(0x60)) == 0);
-    CHECK(dalRead32(base, guest.at(0x60)) == 0);
+    CHECK(tox2Read32(base, guest.at(0x60)) == 0);
     CHECK(guest.call("cellAudioGetPortConfig", 0, guest.at(0x80)) == 0);
-    const std::uint32_t cell = dalRead32(base, guest.at(0x80));
-    const std::uint32_t memory = dalRead32(base, guest.at(0x80 + 0x1c));
-    CHECK(cell != 0 && cell % 16 == 0 && dal::process().memory.isCommitted(cell, 8));
-    CHECK(dalRead64(base, cell) == 0);
-    CHECK(memory != 0 && memory % 0x10000 == 0 && dal::process().memory.isCommitted(memory, 0x10000));
-    CHECK(dalRead32(base, guest.at(0x80 + 4)) == 1);  // opened
-    CHECK(dalRead64(base, guest.at(0x80 + 8)) == 8);
-    CHECK(dalRead64(base, guest.at(0x80 + 0x10)) == 8);
-    CHECK(dalRead32(base, guest.at(0x80 + 0x18)) == 0x10000);
+    const std::uint32_t cell = tox2Read32(base, guest.at(0x80));
+    const std::uint32_t memory = tox2Read32(base, guest.at(0x80 + 0x1c));
+    CHECK(cell != 0 && cell % 16 == 0 && tox2::process().memory.isCommitted(cell, 8));
+    CHECK(tox2Read64(base, cell) == 0);
+    CHECK(memory != 0 && memory % 0x10000 == 0 && tox2::process().memory.isCommitted(memory, 0x10000));
+    CHECK(tox2Read32(base, guest.at(0x80 + 4)) == 1);  // opened
+    CHECK(tox2Read64(base, guest.at(0x80 + 8)) == 8);
+    CHECK(tox2Read64(base, guest.at(0x80 + 0x10)) == 8);
+    CHECK(tox2Read32(base, guest.at(0x80 + 0x18)) == 0x10000);
 
     // Start zeroes the port memory and marks the port running.
-    dalWrite32(base, memory + 0x100, 0x3f800000);
+    tox2Write32(base, memory + 0x100, 0x3f800000);
     CHECK(guest.call("cellAudioPortStart", 0) == 0);
-    CHECK(dalRead32(base, memory + 0x100) == 0);
+    CHECK(tox2Read32(base, memory + 0x100) == 0);
     CHECK(guest.call("cellAudioGetPortConfig", 0, guest.at(0x80)) == 0);
-    CHECK(dalRead32(base, guest.at(0x80 + 4)) == 2);
+    CHECK(tox2Read32(base, guest.at(0x80 + 4)) == 2);
     CHECK(guest.call("cellAudioPortStart", 0) == kAudioAlreadyRun);
 
     // A second port gets the next number and its own cell and memory.
     CHECK(guest.open(0x00, 2, 4, 0, 1.0f, guest.at(0x60)) == 0);
-    CHECK(dalRead32(base, guest.at(0x60)) == 1);
+    CHECK(tox2Read32(base, guest.at(0x60)) == 1);
     CHECK(guest.call("cellAudioGetPortConfig", 1, guest.at(0xc0)) == 0);
-    CHECK(dalRead32(base, guest.at(0xc0)) == cell + 16);
-    CHECK(dalRead32(base, guest.at(0xc0 + 0x1c)) != memory);
-    CHECK(dalRead32(base, guest.at(0xc0 + 0x18)) == 2 * 4 * 1024);
+    CHECK(tox2Read32(base, guest.at(0xc0)) == cell + 16);
+    CHECK(tox2Read32(base, guest.at(0xc0 + 0x1c)) != memory);
+    CHECK(tox2Read32(base, guest.at(0xc0 + 0x18)) == 2 * 4 * 1024);
 
     // Stop, start again; closing works from any open state; the number is reused.
     CHECK(guest.call("cellAudioPortStop", 1) == kAudioPortNotRun);
@@ -1377,9 +1377,9 @@ void testCellAudioPortOpenAndConfig() {
     CHECK(guest.call("cellAudioPortClose", 0) == kAudioPortNotOpen);
     CHECK(guest.call("cellAudioPortStart", 0) == kAudioPortNotOpen);
     CHECK(guest.call("cellAudioGetPortConfig", 0, guest.at(0x80)) == 0);
-    CHECK(dalRead32(base, guest.at(0x80 + 4)) == 0x1010);
+    CHECK(tox2Read32(base, guest.at(0x80 + 4)) == 0x1010);
     CHECK(guest.open(0x00, 8, 8, 0, 1.0f, guest.at(0x60)) == 0);
-    CHECK(dalRead32(base, guest.at(0x60)) == 0);
+    CHECK(tox2Read32(base, guest.at(0x60)) == 0);
 
     // Argument checks.
     CHECK(guest.call("cellAudioGetPortConfig", 8, guest.at(0x80)) == kAudioParam);
@@ -1408,51 +1408,51 @@ void testCellAudioTagsAndTimestamps() {
     // Periods before any port is open still count, so tags do not start at 0.
     constexpr std::uint64_t kStart = 1'000'000;
     for (std::uint64_t i = 0; i < 5; ++i) runPeriod(guest, kStart + i * 5333);
-    CHECK(dal::cellAudioPorts().stats().periods == 5);
+    CHECK(tox2::cellAudioPorts().stats().periods == 5);
 
     CHECK(guest.open(0x00, 8, 8, 0, 1.0f, guest.at(0x60)) == 0);
     CHECK(guest.call("cellAudioGetPortConfig", 0, guest.at(0x80)) == 0);
-    const std::uint32_t cell = dalRead32(base, guest.at(0x80));
+    const std::uint32_t cell = tox2Read32(base, guest.at(0x80));
     CHECK(guest.call("cellAudioPortStart", 0) == 0);
 
     const std::uint64_t t5 = kStart + 5 * 5333;
     const std::uint32_t tag_out = guest.at(0x100);
     const std::uint32_t stamp_out = guest.at(0x108);
     CHECK(guest.call("cellAudioGetPortBlockTag", 0, 0, tag_out) == 0);
-    CHECK(dalRead64(base, tag_out) == 5);
+    CHECK(tox2Read64(base, tag_out) == 5);
 
     // Period k publishes the next block with tag k; the cell holds the block the library mixes next.
     for (std::uint64_t i = 0; i < 12; ++i) {
         runPeriod(guest, t5 + i * 5333);
         const std::uint64_t index = (i + 1) % 8;
-        CHECK(dalRead64(base, cell) == index);
+        CHECK(tox2Read64(base, cell) == index);
         CHECK(guest.call("cellAudioGetPortBlockTag", 0, index, tag_out) == 0);
-        CHECK(dalRead64(base, tag_out) == 5 + i);
+        CHECK(tox2Read64(base, tag_out) == 5 + i);
         CHECK(guest.call("cellAudioGetPortBlockTag", 0, (index + 1) % 8, tag_out) == 0);
-        if ((index + 1) % 8 > index) CHECK(dalRead64(base, tag_out) == 5 + i + 1);
+        if ((index + 1) % 8 > index) CHECK(tox2Read64(base, tag_out) == 5 + i + 1);
     }
     // 12 periods since open: the latest period is number 16 at t5 + 11 periods.
     const std::uint64_t latest_time = t5 + 11 * 5333;
-    dalWrite64(base, stamp_out, 0xdeadbeef);
+    tox2Write64(base, stamp_out, 0xdeadbeef);
     CHECK(guest.call("cellAudioGetPortTimestamp", 0, 16, stamp_out) == 0);
-    CHECK(dalRead64(base, stamp_out) == latest_time);
+    CHECK(tox2Read64(base, stamp_out) == latest_time);
     CHECK(guest.call("cellAudioGetPortTimestamp", 0, 13, stamp_out) == 0);
-    CHECK(dalRead64(base, stamp_out) == latest_time - 3 * 5333);
+    CHECK(tox2Read64(base, stamp_out) == latest_time - 3 * 5333);
     // No history: tag 0 answers too, extrapolated back at one period per tag.
     CHECK(guest.call("cellAudioGetPortTimestamp", 0, 0, stamp_out) == 0);
-    CHECK(dalRead64(base, stamp_out) == latest_time - 16 * 5333);
+    CHECK(tox2Read64(base, stamp_out) == latest_time - 16 * 5333);
     CHECK(guest.call("cellAudioGetPortTimestamp", 0, 15, 0) == 0);  // null output: nothing written
 
     // A tag that was never issued: error, output untouched.
-    dalWrite64(base, stamp_out, 0xdeadbeef);
+    tox2Write64(base, stamp_out, 0xdeadbeef);
     CHECK(guest.call("cellAudioGetPortTimestamp", 0, 17, stamp_out) == kAudioTagNotFound);
-    CHECK(dalRead64(base, stamp_out) == 0xdeadbeef);
+    CHECK(tox2Read64(base, stamp_out) == 0xdeadbeef);
 
     // Stopping freezes the counters but they still answer.
     CHECK(guest.call("cellAudioPortStop", 0) == 0);
     runPeriod(guest, t5 + 20 * 5333);
     CHECK(guest.call("cellAudioGetPortTimestamp", 0, 16, stamp_out) == 0);
-    CHECK(dalRead64(base, stamp_out) == latest_time);
+    CHECK(tox2Read64(base, stamp_out) == latest_time);
     CHECK(guest.call("cellAudioGetPortTimestamp", 0, 17, stamp_out) == kAudioTagNotFound);
 
     // Argument checks: block number, port number, closed port, unwritten output.
@@ -1472,13 +1472,13 @@ void testCellAudioMixing() {
     // 8 channels: a ramp on all of them. Only the front pair reaches the output; the rest is counted.
     CHECK(guest.open(0x00, 8, 8, 0, 0.25f, guest.at(0x60)) == 0);  // attr 0: the level argument is ignored
     CHECK(guest.call("cellAudioGetPortConfig", 0, guest.at(0x80)) == 0);
-    const std::uint32_t cell = dalRead32(base, guest.at(0x80));
-    const std::uint32_t memory = dalRead32(base, guest.at(0x80 + 0x1c));
+    const std::uint32_t cell = tox2Read32(base, guest.at(0x80));
+    const std::uint32_t memory = tox2Read32(base, guest.at(0x80 + 0x1c));
 
     // Opened but not started: contributes nothing, the cell stays.
     writeFloat(base, memory, 0.5f);
     CHECK(std::ranges::all_of(runPeriod(guest, 1000), [](float s) { return s == 0.0f; }));
-    CHECK(dalRead64(base, cell) == 0);
+    CHECK(tox2Read64(base, cell) == 0);
 
     CHECK(guest.call("cellAudioPortStart", 0) == 0);
     for (std::uint32_t frame = 0; frame < 256; ++frame) {
@@ -1489,7 +1489,7 @@ void testCellAudioMixing() {
             writeFloat(base, memory + (frame * 8 + channel) * 4, value);
         }
     }
-    const dal::AudioBlock out = runPeriod(guest, 2000);
+    const tox2::AudioBlock out = runPeriod(guest, 2000);
     bool front_intact = true;
     for (std::uint32_t frame = 0; frame < 256; ++frame) {
         front_intact = front_intact && out[2 * frame] == static_cast<float>(frame) / 512.0f &&
@@ -1500,28 +1500,28 @@ void testCellAudioMixing() {
     // The consumed block is zeroed and the index advanced as a big-endian u64.
     bool zeroed = true;
     for (std::uint32_t offset = 0; offset < 0x2000; offset += 4)
-        zeroed = zeroed && dalRead32(base, memory + offset) == 0;
+        zeroed = zeroed && tox2Read32(base, memory + offset) == 0;
     CHECK(zeroed);
-    CHECK(base[cell + 7] == 1 && dalRead64(base, cell) == 1);
+    CHECK(base[cell + 7] == 1 && tox2Read64(base, cell) == 1);
 
-    const dal::CellAudioStats stats = dal::cellAudioPorts().stats();
+    const tox2::CellAudioStats stats = tox2::cellAudioPorts().stats();
     CHECK(stats.nonzero_samples[0] == 255 && stats.nonzero_samples[1] == 255);
     for (std::size_t channel = 2; channel < 8; ++channel) CHECK(stats.nonzero_samples[channel] == 256);
 
     // Block 1 was never written: the next period is silent and the index moves on.
     CHECK(std::ranges::all_of(runPeriod(guest, 3000), [](float s) { return s == 0.0f; }));
-    CHECK(dalRead64(base, cell) == 2);
+    CHECK(tox2Read64(base, cell) == 2);
     CHECK(guest.call("cellAudioPortClose", 0) == 0);
 
     // 2 channels: scaled by the initial level only when the attribute asks for it; ports add up.
     CHECK(guest.open(0x00, 2, 2, 0x1000, 0.5f, guest.at(0x60)) == 0);
-    const std::uint32_t scaled = dalRead32(base, guest.at(0x60));
+    const std::uint32_t scaled = tox2Read32(base, guest.at(0x60));
     CHECK(guest.open(0x00, 2, 4, 0, 0.25f, guest.at(0x60)) == 0);
-    const std::uint32_t plain = dalRead32(base, guest.at(0x60));
+    const std::uint32_t plain = tox2Read32(base, guest.at(0x60));
     CHECK(guest.call("cellAudioGetPortConfig", scaled, guest.at(0x80)) == 0);
-    const std::uint32_t scaled_memory = dalRead32(base, guest.at(0x80 + 0x1c));
+    const std::uint32_t scaled_memory = tox2Read32(base, guest.at(0x80 + 0x1c));
     CHECK(guest.call("cellAudioGetPortConfig", plain, guest.at(0xc0)) == 0);
-    const std::uint32_t plain_memory = dalRead32(base, guest.at(0xc0 + 0x1c));
+    const std::uint32_t plain_memory = tox2Read32(base, guest.at(0xc0 + 0x1c));
     CHECK(guest.call("cellAudioPortStart", scaled) == 0);
     CHECK(guest.call("cellAudioPortStart", plain) == 0);
     for (std::uint32_t frame = 0; frame < 256; ++frame) {
@@ -1533,11 +1533,11 @@ void testCellAudioMixing() {
     // Frame 255 overdrives: 3.0 * 0.5 + 0.125 clamps to 1.
     writeFloat(base, scaled_memory + 255 * 8, 3.0f);
     writeFloat(base, scaled_memory + 255 * 8 + 4, -3.0f);
-    const dal::AudioBlock mixed = runPeriod(guest, 4000);
+    const tox2::AudioBlock mixed = runPeriod(guest, 4000);
     CHECK(mixed[0] == 0.25f && mixed[1] == 0.3125f);
     CHECK(mixed[2 * 255] == 1.0f && mixed[2 * 255 + 1] == -1.0f);
-    CHECK(dalRead64(base, dalRead32(base, guest.at(0x80))) == 1);
-    CHECK(dalRead64(base, dalRead32(base, guest.at(0xc0))) == 1);
+    CHECK(tox2Read64(base, tox2Read32(base, guest.at(0x80))) == 1);
+    CHECK(tox2Read64(base, tox2Read32(base, guest.at(0xc0))) == 1);
 }
 
 void testCellAudioNotify() {
@@ -1565,7 +1565,7 @@ void testCellAudioNotify() {
     runPeriod(guest, 2000);
     runPeriod(guest, 3000);
     runPeriod(guest, 4000);
-    const dal::CellAudioStats stats = dal::cellAudioPorts().stats();
+    const tox2::CellAudioStats stats = tox2::cellAudioPorts().stats();
     CHECK(stats.notifies_sent == 3 && stats.notifies_failed == 1);
     CHECK(guest.receive(queue, event) == 0);
     CHECK(guest.receive(queue, event) == 0);
@@ -1576,18 +1576,18 @@ void testCellAudioNotify() {
     CHECK(guest.call("cellAudioRemoveNotifyEventQueue", kNotifyKey) == kAudioTransEvent);
     runPeriod(guest, 5000);
     CHECK(guest.receive(queue, event) == AudioGuest::err(0x8001000B));
-    CHECK(dal::cellAudioPorts().stats().notifies_sent == 3);
+    CHECK(tox2::cellAudioPorts().stats().notifies_sent == 3);
 
     // A destroyed queue only costs failed notifies, and its registration goes at the next Set.
     CHECK(guest.call("cellAudioSetNotifyEventQueue", kNotifyKey) == 0);
     CHECK(guest.syscall(129, queue, 0) == 0);
     runPeriod(guest, 6000);
-    CHECK(dal::cellAudioPorts().stats().notifies_failed == 2);
+    CHECK(tox2::cellAudioPorts().stats().notifies_failed == 2);
     const std::uint32_t second = guest.createQueue(kNotifyKey + 1);
     CHECK(guest.call("cellAudioSetNotifyEventQueue", kNotifyKey + 1) == 0);
     runPeriod(guest, 7000);
-    CHECK(dal::cellAudioPorts().stats().notifies_failed == 2);
-    CHECK(dal::cellAudioPorts().stats().notifies_sent == 4);
+    CHECK(tox2::cellAudioPorts().stats().notifies_failed == 2);
+    CHECK(tox2::cellAudioPorts().stats().notifies_sent == 4);
     CHECK(guest.receive(second, event) == 0);
     // The third successful registration since reset has its own source.
     CHECK(event[0] == 0x1'0e00'0000 + 2 * 0x100);
@@ -1596,30 +1596,30 @@ void testCellAudioNotify() {
 void testCellAudioEngine() {
     AudioGuest guest;
     CHECK(guest.call("cellAudioInit") == 0);
-    const auto periods = [] { return dal::cellAudioPorts().stats().periods; };
+    const auto periods = [] { return tox2::cellAudioPorts().stats().periods; };
 
     // Init starts the engine, which calls the producer once the guest lock is free.
-    dal::guestLock().unlock();
+    tox2::guestLock().unlock();
     CHECK(waitFor([&] { return periods() >= 5; }));
-    dal::guestLock().lock();
+    tox2::guestLock().lock();
 
     // Quit returns while the engine may be waiting for the lock we hold, and the engine stops
     // calling the producer (at most the call that was already under way completes).
     CHECK(guest.call("cellAudioQuit") == 0);
-    dal::guestLock().unlock();
+    tox2::guestLock().unlock();
     std::this_thread::sleep_for(std::chrono::milliseconds(60));
-    const std::uint64_t settled_calls = dal::audioEngineStats().blocks;
+    const std::uint64_t settled_calls = tox2::audioEngineStats().blocks;
     const std::uint64_t settled = periods();
     std::this_thread::sleep_for(std::chrono::milliseconds(60));
-    CHECK(dal::audioEngineStats().blocks == settled_calls);
+    CHECK(tox2::audioEngineStats().blocks == settled_calls);
     CHECK(periods() == settled);
-    dal::guestLock().lock();
+    tox2::guestLock().lock();
 
     // A second Init resumes the same engine.
     CHECK(guest.call("cellAudioInit") == 0);
-    dal::guestLock().unlock();
+    tox2::guestLock().unlock();
     CHECK(waitFor([&] { return periods() >= settled + 5; }));
-    dal::guestLock().lock();
+    tox2::guestLock().lock();
 }
 
 // Synthetic ATRAC3plus RIFF entries.
@@ -1709,7 +1709,7 @@ void testAt3ParseStereoWithLoop() {
     const Bytes file = riffEntry({chunk("fmt ", fmtBody(2)), chunk("fact", factBody(5097599, 3601, 3785)),
                                   chunk("smpl", smplBody(1, 3785, 5101383))},
                                  1275392);
-    const auto info = dal::parseAt3Header(file);
+    const auto info = tox2::parseAt3Header(file);
     CHECK(info.has_value());
     if (!info) return;
     CHECK(info->channels == 2);
@@ -1726,7 +1726,7 @@ void testAt3ParseStereoWithLoop() {
     CHECK(info->data_size == 1275392);
     CHECK(info->data_offset == file.size());
     CHECK(info->frameCount() == 2491);
-    CHECK(dal::kAtrac3plusFrameSamples == 2048);
+    CHECK(tox2::kAtrac3plusFrameSamples == 2048);
 }
 
 void testAt3ParseMonoWithoutLoop() {
@@ -1734,7 +1734,7 @@ void testAt3ParseMonoWithoutLoop() {
     const Bytes file = riffEntry(
             {chunk("fmt ", fmtBody(1)), chunk("LIST", Bytes{1, 2, 3}), chunk("fact", factBody(1000, 2048, 2232))},
             512 * 3);
-    const auto info = dal::parseAt3Header(file);
+    const auto info = tox2::parseAt3Header(file);
     CHECK(info.has_value());
     if (!info) return;
     CHECK(info->channels == 1);
@@ -1747,7 +1747,7 @@ void testAt3ParseMonoWithoutLoop() {
 
 void testAt3ParseOptionalChunks() {
     // No fact: nothing known about length or delay. A one-dword fact has a length but no delay.
-    auto info = dal::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2))}, 1024));
+    auto info = tox2::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2))}, 1024));
     CHECK(info.has_value());
     if (info) {
         CHECK(info->total_samples == 0);
@@ -1755,23 +1755,23 @@ void testAt3ParseOptionalChunks() {
     }
     Bytes one_dword;
     put32(one_dword, 777);
-    info = dal::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2)), chunk("fact", one_dword)}, 1024));
+    info = tox2::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2)), chunk("fact", one_dword)}, 1024));
     CHECK(info.has_value());
     if (info) {
         CHECK(info->total_samples == 777);
         CHECK(info->delay_samples == 0);
     }
     // smpl with no loops, and with two loops (the first one is reported).
-    info = dal::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2)), chunk("smpl", smplBody(0, 0, 0))}, 512));
+    info = tox2::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2)), chunk("smpl", smplBody(0, 0, 0))}, 512));
     CHECK(info.has_value() && !info->loop.has_value());
-    info = dal::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2)), chunk("smpl", smplBody(2, 10, 20))}, 512));
+    info = tox2::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2)), chunk("smpl", smplBody(2, 10, 20))}, 512));
     CHECK(info.has_value() && info->loop.has_value());
     if (info && info->loop) {
         CHECK(info->loop->start_sample == 10);
         CHECK(info->loop->end_sample == 20);
     }
     // A data size that is not a multiple of block_align is reported as it is; frameCount() rounds down.
-    info = dal::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2))}, 1300));
+    info = tox2::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2))}, 1300));
     CHECK(info.has_value() && info->data_size == 1300 && info->frameCount() == 2);
 }
 
@@ -1786,39 +1786,39 @@ void testAt3ParseRejects() {
     put16(plain, 0);
     put16(plain, 14);
     for (int i = 0; i < 14; ++i) plain.push_back(0);
-    auto info = dal::parseAt3Header(riffEntry({chunk("fmt ", plain)}, 384));
+    auto info = tox2::parseAt3Header(riffEntry({chunk("fmt ", plain)}, 384));
     CHECK(!info.has_value());
     if (!info) CHECK(info.error().find("0x0270") != std::string::npos);
 
     // Extensible with another sub-format GUID (the PCM one).
     constexpr std::uint8_t kPcmGuid[16] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
                                            0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71};
-    info = dal::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2, kPcmGuid))}, 512));
+    info = tox2::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2, kPcmGuid))}, 512));
     CHECK(!info.has_value());
 
-    CHECK(!dal::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2, kAt3Guid, 0))}, 512)).has_value());
-    CHECK(!dal::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(0))}, 512)).has_value());
-    CHECK(!dal::parseAt3Header(riffEntry({chunk("fmt ", Bytes(10, 0))}, 512)).has_value());
+    CHECK(!tox2::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2, kAt3Guid, 0))}, 512)).has_value());
+    CHECK(!tox2::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(0))}, 512)).has_value());
+    CHECK(!tox2::parseAt3Header(riffEntry({chunk("fmt ", Bytes(10, 0))}, 512)).has_value());
     // data before fmt, and no fmt at all.
-    CHECK(!dal::parseAt3Header(riffEntry({chunk("fact", factBody(1, 2, 3))}, 512)).has_value());
+    CHECK(!tox2::parseAt3Header(riffEntry({chunk("fact", factBody(1, 2, 3))}, 512)).has_value());
     // smpl that claims a loop it does not hold.
     Bytes short_smpl = smplBody(1, 0, 0);
     short_smpl.resize(40);
-    CHECK(!dal::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2)), chunk("smpl", short_smpl)}, 512)).has_value());
+    CHECK(!tox2::parseAt3Header(riffEntry({chunk("fmt ", fmtBody(2)), chunk("smpl", short_smpl)}, 512)).has_value());
     // Not RIFF/WAVE.
     Bytes bad_magic = riffEntry({chunk("fmt ", fmtBody(2))}, 512);
     bad_magic[8] = 'X';
-    CHECK(!dal::parseAt3Header(bad_magic).has_value());
-    CHECK(!dal::parseAt3Header(Bytes{}).has_value());
+    CHECK(!tox2::parseAt3Header(bad_magic).has_value());
+    CHECK(!tox2::parseAt3Header(Bytes{}).has_value());
 }
 
 void testAt3ParseTruncated() {
     const Bytes file = riffEntry({chunk("fmt ", fmtBody(2)), chunk("fact", factBody(5, 6, 7))}, 512);
-    CHECK(dal::parseAt3Header(file).has_value());
+    CHECK(tox2::parseAt3Header(file).has_value());
     // Every prefix that stops before the end of the data chunk header is an error, and none may crash.
     bool all_rejected = true;
     for (std::size_t cut = 0; cut < file.size(); ++cut) {
-        if (dal::parseAt3Header(std::span<const std::uint8_t>(file).first(cut)).has_value()) all_rejected = false;
+        if (tox2::parseAt3Header(std::span<const std::uint8_t>(file).first(cut)).has_value()) all_rejected = false;
     }
     CHECK(all_rejected);
 }
@@ -1840,7 +1840,7 @@ void testScanRiffEntries() {
     archive.insert(archive.end(), second.begin(), second.end());
     archive.insert(archive.end(), 7, 0x55);
 
-    auto entries = dal::scanRiffEntries(archive);
+    auto entries = tox2::scanRiffEntries(archive);
     CHECK(entries.size() == 2);
     if (entries.size() == 2) {
         CHECK(entries[0].first == first_at);
@@ -1848,36 +1848,36 @@ void testScanRiffEntries() {
         CHECK(entries[1].first == second_at);
     }
 
-    CHECK(dal::scanRiffEntries(Bytes{}).empty());
-    CHECK(dal::scanRiffEntries(Bytes(100, 'R')).empty());
+    CHECK(tox2::scanRiffEntries(Bytes{}).empty());
+    CHECK(tox2::scanRiffEntries(Bytes(100, 'R')).empty());
     // A declared size that runs past the archive still reports the entry.
     Bytes cut_entry(second.begin(), second.begin() + 20);
-    entries = dal::scanRiffEntries(cut_entry);
+    entries = tox2::scanRiffEntries(cut_entry);
     CHECK(entries.size() == 1);
     // "RIFF" without "WAVE" is not an entry.
     Bytes avi = first;
     avi[8] = 'A';
-    CHECK(dal::scanRiffEntries(avi).empty());
+    CHECK(tox2::scanRiffEntries(avi).empty());
 }
 
-class FakeAtracFactory : public dal::AtracDecoderFactory {
+class FakeAtracFactory : public tox2::AtracDecoderFactory {
 public:
-    std::unique_ptr<dal::AtracFrameDecoder> create(const dal::At3Info&, std::string& error) override {
+    std::unique_ptr<tox2::AtracFrameDecoder> create(const tox2::At3Info&, std::string& error) override {
         error = "fake";
         return nullptr;
     }
 };
 
 void testAtracFactorySlot() {
-    CHECK(dal::atracDecoderFactory() == nullptr);
+    CHECK(tox2::atracDecoderFactory() == nullptr);
     auto factory = std::make_unique<FakeAtracFactory>();
-    dal::AtracDecoderFactory* raw = factory.get();
-    dal::setAtracDecoderFactory(std::move(factory));
-    CHECK(dal::atracDecoderFactory() == raw);
+    tox2::AtracDecoderFactory* raw = factory.get();
+    tox2::setAtracDecoderFactory(std::move(factory));
+    CHECK(tox2::atracDecoderFactory() == raw);
     std::string error;
-    CHECK(dal::atracDecoderFactory()->create(dal::At3Info{}, error) == nullptr && error == "fake");
-    dal::setAtracDecoderFactory(nullptr);
-    CHECK(dal::atracDecoderFactory() == nullptr);
+    CHECK(tox2::atracDecoderFactory()->create(tox2::At3Info{}, error) == nullptr && error == "fake");
+    tox2::setAtracDecoderFactory(nullptr);
+    CHECK(tox2::atracDecoderFactory() == nullptr);
 }
 
 // ---- cellAtrac stream model and handlers ----
@@ -1910,7 +1910,7 @@ Bytes makeAt3File(std::uint32_t channels, std::uint32_t frames, std::uint32_t to
 }
 
 std::uint32_t at3DataOffset(const Bytes& file) {
-    const auto info = dal::parseAt3Header(file);
+    const auto info = tox2::parseAt3Header(file);
     CHECK(info.has_value());
     return info ? info->data_offset : 0;
 }
@@ -1923,7 +1923,7 @@ struct FakeDecoderStats {
 
 // Output sample j of frame f is f * 2048 + j on the left channel and its negative on the right, so
 // the output shows which decoder-output position every sample came from.
-class FakeFrameDecoder : public dal::AtracFrameDecoder {
+class FakeFrameDecoder : public tox2::AtracFrameDecoder {
 public:
     FakeFrameDecoder(std::uint32_t channels, FakeDecoderStats* stats) : channels_(channels), stats_(stats) {}
     bool decode(std::span<const std::uint8_t> frame, std::span<float> out, std::string&) override {
@@ -1954,7 +1954,7 @@ struct ModelRig {
     Bytes file;
     Bytes ring;
     FakeDecoderStats stats;
-    std::optional<dal::AtracStream> stream;
+    std::optional<tox2::AtracStream> stream;
     std::uint32_t data_offset = 0;
     std::uint32_t threshold = 0;
 
@@ -1965,12 +1965,12 @@ struct ModelRig {
         ring.assign(buffer_bytes, 0);
         std::copy_n(file.begin(), std::min<std::size_t>(read_bytes, file.size()), ring.begin());
         std::string error;
-        auto opened = dal::AtracStream::open(std::span<const std::uint8_t>(ring).first(read_bytes), kBufferAddr,
-                                             buffer_bytes, error);
+        auto opened = tox2::AtracStream::open(std::span<const std::uint8_t>(ring).first(read_bytes), kBufferAddr,
+                                              buffer_bytes, error);
         CHECK(opened.has_value());
         if (!opened) return false;
         stream.emplace(std::move(*opened));
-        std::unique_ptr<dal::AtracFrameDecoder> decoder;
+        std::unique_ptr<tox2::AtracFrameDecoder> decoder;
         if (with_decoder) decoder = std::make_unique<FakeFrameDecoder>(stream->info().channels, &stats);
         CHECK(stream->createDecoder(std::move(decoder)) == 0);
         const std::int32_t initial = stream->remain();
@@ -1996,7 +1996,7 @@ struct Collected {
 // Decode call, as the file thread would.
 Collected collect(ModelRig& rig, std::uint32_t max_calls, std::function<bool(const Collected&)> stop = {}) {
     Collected got;
-    dal::AtracStream& stream = *rig.stream;
+    tox2::AtracStream& stream = *rig.stream;
     const std::uint32_t channels = stream.info().channels;
     struct Pending {
         std::uint32_t read_pos, ring_offset, bytes;
@@ -2325,27 +2325,27 @@ void testAtracModelOpenErrors() {
     std::string error;
     const Bytes file = makeAt3File(2, 4, 5000, 2232);
     const auto size = static_cast<std::uint32_t>(file.size());
-    const auto over = dal::AtracStream::open(file, 0x30000000, size - 1, error);
+    const auto over = tox2::AtracStream::open(file, 0x30000000, size - 1, error);
     CHECK(!over.has_value() && over.error() == kAtracReadsizeOverBuffer);
 
     Bytes junk = file;
     junk[0] = 'X';
-    const auto bad = dal::AtracStream::open(junk, 0x30000000, size, error);
+    const auto bad = tox2::AtracStream::open(junk, 0x30000000, size, error);
     CHECK(!bad.has_value() && bad.error() == kAtracUnknownFormat);
     CHECK(!error.empty());
 
     // The header ends before the data chunk header: the parser cannot find the data.
     const auto truncated =
-            dal::AtracStream::open(std::span<const std::uint8_t>(file).first(40), 0x30000000, 0x20000, error);
+            tox2::AtracStream::open(std::span<const std::uint8_t>(file).first(40), 0x30000000, 0x20000, error);
     CHECK(!truncated.has_value() && truncated.error() == kAtracUnknownFormat);
 
     // No frame in the data chunk.
     const Bytes empty = makeAt3File(2, 0, 0, 0);
-    const auto none = dal::AtracStream::open(empty, 0x30000000, static_cast<std::uint32_t>(empty.size()), error);
+    const auto none = tox2::AtracStream::open(empty, 0x30000000, static_cast<std::uint32_t>(empty.size()), error);
     CHECK(!none.has_value() && none.error() == 0x80610315);
 
     // Decode before CreateDecoder.
-    auto opened = dal::AtracStream::open(file, 0x30000000, size, error);
+    auto opened = tox2::AtracStream::open(file, 0x30000000, size, error);
     CHECK(opened.has_value());
     if (!opened) return;
     std::vector<float> out(4096);
@@ -2355,7 +2355,7 @@ void testAtracModelOpenErrors() {
     // No `fact` chunk: the whole decoder output counts.
     Bytes no_fact = riffEntry({chunk("fmt ", fmtBody(2))}, 2 * kAt3Block);
     no_fact.resize(no_fact.size() + 2 * kAt3Block);
-    auto plain = dal::AtracStream::open(no_fact, 0x30000000, static_cast<std::uint32_t>(no_fact.size()), error);
+    auto plain = tox2::AtracStream::open(no_fact, 0x30000000, static_cast<std::uint32_t>(no_fact.size()), error);
     CHECK(plain.has_value());
     if (plain) CHECK(plain->soundInfo().end_sample == 2 * 2048 - 1);
 }
@@ -2368,32 +2368,32 @@ public:
     static constexpr std::uint32_t kBuffer = 0x10000;
     static constexpr std::uint32_t kOut = 0x40000;
 
-    AtracGuest() : caller_(0x01000000, dal::GuestThreadParams{}, 0, 0) {
-        dal::setLogSink([](std::string_view) {});
-        dal::resetCellAtrac();
-        CHECK(dal::process().memory.reserve());
-        base_ = dal::process().memory.base();
-        scratch_ = dal::process().main.allocate(0x80000, 0x10000);
+    AtracGuest() : caller_(0x01000000, tox2::GuestThreadParams{}, 0, 0) {
+        tox2::setLogSink([](std::string_view) {});
+        tox2::resetCellAtrac();
+        CHECK(tox2::process().memory.reserve());
+        base_ = tox2::process().memory.base();
+        scratch_ = tox2::process().main.allocate(0x80000, 0x10000);
         CHECK(scratch_ != 0);
     }
     ~AtracGuest() {
-        dal::resetCellAtrac();
-        dal::setLogSink({});
+        tox2::resetCellAtrac();
+        tox2::setLogSink({});
     }
 
     std::uint8_t* base() const { return base_; }
     std::uint32_t at(std::uint32_t offset) const { return scratch_ + offset; }
     std::uint32_t handle() const { return at(kHandle); }
     std::uint32_t cell(std::uint32_t n) const { return at(kCells + 4 * n); }
-    std::uint32_t read(std::uint32_t n) const { return dalRead32(base_, cell(n)); }
+    std::uint32_t read(std::uint32_t n) const { return tox2Read32(base_, cell(n)); }
 
     void put(std::uint32_t addr, const Bytes& bytes) { std::memcpy(base_ + addr, bytes.data(), bytes.size()); }
 
     std::uint32_t call(std::string_view name, std::uint64_t r3 = 0, std::uint64_t r4 = 0, std::uint64_t r5 = 0,
                        std::uint64_t r6 = 0, std::uint64_t r7 = 0) {
-        for (const dal::HleEntry& entry : dal::cellAtracHandlers()) {
+        for (const tox2::HleEntry& entry : tox2::cellAtracHandlers()) {
             if (name != entry.name) continue;
-            DalPpuContext* ctx = &caller_.context();
+            Tox2PpuContext* ctx = &caller_.context();
             ctx->gpr[3] = r3;
             ctx->gpr[4] = r4;
             ctx->gpr[5] = r5;
@@ -2413,7 +2413,7 @@ public:
     std::uint32_t createDecoder() { return call("cellAtracCreateDecoder", handle(), at(0x800), 0x64, 0x64); }
 
 private:
-    dal::GuestThread caller_;
+    tox2::GuestThread caller_;
     std::uint8_t* base_ = nullptr;
     std::uint32_t scratch_ = 0;
 };
@@ -2455,7 +2455,7 @@ HandlerDecode decodeAll(AtracGuest& guest, std::uint32_t channels,
 }
 
 void testAtracHandlersMemory() {
-    CHECK(dal::cellAtracHandlers().size() == 15);
+    CHECK(tox2::cellAtracHandlers().size() == 15);
     AtracGuest guest;
     std::uint8_t* base = guest.base();
     std::memset(base + guest.handle(), 0xaa, 0x200);
@@ -2469,7 +2469,7 @@ void testAtracHandlersMemory() {
 
     const Bytes file = makeAt3File(2, 4, 5000, 2232, std::pair{3000u, 7231u});
     const auto size = static_cast<std::uint32_t>(file.size());
-    dalWrite32(base, guest.cell(0), 0xdeadbeef);
+    tox2Write32(base, guest.cell(0), 0xdeadbeef);
     CHECK(guest.setData(file, size, size) == 0);
     CHECK(guest.read(0) == 0x1000);
 
@@ -2482,8 +2482,8 @@ void testAtracHandlersMemory() {
     CHECK(guest.call("cellAtracGetSoundInfo", guest.handle(), guest.cell(1), guest.cell(2), guest.cell(3)) == 0);
     CHECK(guest.read(1) == 4999 && guest.read(2) == 768 && guest.read(3) == 4999);
     CHECK(guest.call("cellAtracIsSecondBufferNeeded", guest.handle()) == 0);
-    dalWrite32(base, guest.cell(1), 7);
-    dalWrite32(base, guest.cell(2), 7);
+    tox2Write32(base, guest.cell(1), 7);
+    tox2Write32(base, guest.cell(2), 7);
     CHECK(guest.call("cellAtracGetSecondBufferInfo", guest.handle(), guest.cell(1), guest.cell(2)) == 0);
     CHECK(guest.read(1) == 0 && guest.read(2) == 0);
     CHECK(guest.call("cellAtracSetSecondBuffer", guest.handle(), guest.at(0x900), 0x100) == 0);
@@ -2617,7 +2617,7 @@ void testAtracHandlersReuseAndErrors() {
     // A bad header leaves the handle without data; the outputs are not written.
     Bytes junk = stereo;
     junk[1] = 'X';
-    dalWrite32(guest.base(), guest.cell(0), 0x1234);
+    tox2Write32(guest.base(), guest.cell(0), 0x1234);
     CHECK(guest.setData(junk, static_cast<std::uint32_t>(junk.size()), static_cast<std::uint32_t>(junk.size())) ==
           kAtracUnknownFormat);
     CHECK(guest.read(0) == 0x1234);
@@ -2635,7 +2635,7 @@ void testAtracHandlersReuseAndErrors() {
 }
 
 // A decoder that fills every sample with one value and rejects the frame whose index is `bad_frame`.
-class ConstantDecoder : public dal::AtracFrameDecoder {
+class ConstantDecoder : public tox2::AtracFrameDecoder {
 public:
     ConstantDecoder(float value, std::uint32_t bad_frame) : value_(value), bad_frame_(bad_frame) {}
     bool decode(std::span<const std::uint8_t> frame, std::span<float> out, std::string& error) override {
@@ -2654,10 +2654,10 @@ private:
     std::uint32_t bad_frame_;
 };
 
-class ConstantFactory : public dal::AtracDecoderFactory {
+class ConstantFactory : public tox2::AtracDecoderFactory {
 public:
     ConstantFactory(float value, std::uint32_t bad_frame) : value_(value), bad_frame_(bad_frame) {}
-    std::unique_ptr<dal::AtracFrameDecoder> create(const dal::At3Info&, std::string&) override {
+    std::unique_ptr<tox2::AtracFrameDecoder> create(const tox2::At3Info&, std::string&) override {
         return std::make_unique<ConstantDecoder>(value_, bad_frame_);
     }
 
@@ -2672,7 +2672,7 @@ void testAtracHandlersDecodeThroughFactory() {
     // 0.5f is 0x3f000000, so a byte-order mistake shows as a different first byte.
     constexpr std::uint8_t kHalf[4] = {0x3f, 0x00, 0x00, 0x00};
     AtracGuest guest;
-    dal::setAtracDecoderFactory(std::make_unique<ConstantFactory>(0.5f, 2));
+    tox2::setAtracDecoderFactory(std::make_unique<ConstantFactory>(0.5f, 2));
     const Bytes file = makeAt3File(2, 4, 5000, 2232);
     const auto size = static_cast<std::uint32_t>(file.size());
     CHECK(guest.setData(file, size, size) == 0);
@@ -2701,20 +2701,20 @@ void testAtracHandlersDecodeThroughFactory() {
     CHECK(bytes_ok);
 
     // Frames 0, 1 and 3 decode (the cut first frame included), frame 2 is rejected.
-    dal::CellAtracStats stats = dal::cellAtracStats();
+    tox2::CellAtracStats stats = tox2::cellAtracStats();
     CHECK(stats.decoders == 1 && stats.frames == 3 && stats.non_silent == 3 && stats.errors == 1);
     CHECK(stats.without_decoder == 0 && stats.starved == 0);
 
     // A factory that cannot make a decoder leaves the handle usable: silence, counted as such.
-    dal::setAtracDecoderFactory(std::make_unique<FakeAtracFactory>());
+    tox2::setAtracDecoderFactory(std::make_unique<FakeAtracFactory>());
     CHECK(guest.call("cellAtracDeleteDecoder", guest.handle()) == 0);
     CHECK(guest.setData(file, size, size) == 0);
     CHECK(guest.createDecoder() == 0);
     const HandlerDecode silent = decodeAll(guest, 2);
     CHECK(silent.ok && silent.finished && silent.total == 5000);
-    stats = dal::cellAtracStats();
+    stats = tox2::cellAtracStats();
     CHECK(stats.decoders == 2 && stats.frames == 3 && stats.without_decoder == 4);
-    dal::setAtracDecoderFactory(nullptr);
+    tox2::setAtracDecoderFactory(nullptr);
 }
 
 // A loop that ends before the valid audio starts is ignored, so it must not be advertised either.
@@ -2742,7 +2742,7 @@ int main(int argc, char** argv) {
         g_dir = argv[1];
     } else {
         g_dir = fs::temp_directory_path() /
-                std::format("dal_audio_core_{}", std::chrono::steady_clock::now().time_since_epoch().count());
+                std::format("tox2_audio_core_{}", std::chrono::steady_clock::now().time_since_epoch().count());
     }
     fs::create_directories(g_dir, ec);
     if (ec) {

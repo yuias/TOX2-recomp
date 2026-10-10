@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 std::uint32_t componentBytes(std::uint8_t type) {
@@ -208,4 +208,4 @@ bool indicesInRange(bool is_u16, std::span<const std::uint8_t> src, std::uint32_
     return true;
 }
 
-}  // namespace dal
+}  // namespace tox2

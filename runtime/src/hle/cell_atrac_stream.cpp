@@ -7,7 +7,7 @@
 #include <limits>
 #include <utility>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::uint32_t kFrameSamples = kAtrac3plusFrameSamples;
@@ -255,4 +255,4 @@ std::expected<AtracDecodeResult, std::uint32_t> AtracStream::decode(std::span<co
     return result;
 }
 
-}  // namespace dal
+}  // namespace tox2

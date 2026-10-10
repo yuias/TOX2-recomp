@@ -21,11 +21,11 @@
 
 #include "core/log.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
-constexpr wchar_t kWindowClass[] = L"DalGameWindow";
-constexpr wchar_t kWindowTitle[] = L"デート・ア・ライブ 凜祢ユートピア";
+constexpr wchar_t kWindowClass[] = L"Tox2GameWindow";
+constexpr wchar_t kWindowTitle[] = L"Tales of Xillia 2";
 constexpr std::uint64_t kAcquireTimeoutNs = 1'000'000'000ull;
 constexpr std::chrono::seconds kReportInterval{10};
 constexpr int kMaxSwapchainFailures = 3;
@@ -297,7 +297,7 @@ bool Presenter::ensureSwapchain() {
     if (broken_ || window_->minimized()) return false;
     VkSurfaceCapabilitiesKHR caps{};
     if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(context_.physicalDevice(), surface_, &caps) != VK_SUCCESS) {
-        logOnce(LogLevel::Warn, "window-surface-caps", "dal: render: window: cannot query the surface capabilities");
+        logOnce(LogLevel::Warn, "window-surface-caps", "tox2: render: window: cannot query the surface capabilities");
         return false;
     }
     VkExtent2D extent = caps.currentExtent;
@@ -318,7 +318,7 @@ bool Presenter::createSwapchain(const VkSurfaceCapabilitiesKHR& caps, VkExtent2D
     const VkDevice device = context_.device();
     if ((caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0) {
         logOnce(LogLevel::Warn, "window-no-transfer-dst",
-                "dal: render: window: swapchain images cannot be a transfer destination");
+                "tox2: render: window: swapchain images cannot be a transfer destination");
         broken_ = true;
         return false;
     }
@@ -346,7 +346,7 @@ bool Presenter::createSwapchain(const VkSurfaceCapabilitiesKHR& caps, VkExtent2D
         }
         if (!found) {
             logOnce(LogLevel::Warn, "window-no-format",
-                    "dal: render: window: no B8G8R8A8/R8G8B8A8 UNORM surface format with blit support");
+                    "tox2: render: window: no B8G8R8A8/R8G8B8A8 UNORM surface format with blit support");
             broken_ = true;
             return false;
         }
@@ -392,12 +392,12 @@ bool Presenter::createSwapchain(const VkSurfaceCapabilitiesKHR& caps, VkExtent2D
     if (swapchain_ != VK_NULL_HANDLE) vkDestroySwapchainKHR(device, swapchain_, nullptr);
     swapchain_ = VK_NULL_HANDLE;
     if (result != VK_SUCCESS) {
-        logOnce(LogLevel::Warn, "window-swapchain", "dal: render: window: vkCreateSwapchainKHR failed ({})",
+        logOnce(LogLevel::Warn, "window-swapchain", "tox2: render: window: vkCreateSwapchainKHR failed ({})",
                 static_cast<int>(result));
         needs_recreate_ = true;  // try again on a later frame
         if (++swapchain_failures_ >= kMaxSwapchainFailures) {
             logOnce(LogLevel::Warn, "window-swapchain-giving-up",
-                    "dal: render: window: giving up after {} failed swapchain creations", swapchain_failures_);
+                    "tox2: render: window: giving up after {} failed swapchain creations", swapchain_failures_);
             broken_ = true;
         }
         return false;
@@ -416,7 +416,7 @@ bool Presenter::createSwapchain(const VkSurfaceCapabilitiesKHR& caps, VkExtent2D
     for (VkSemaphore& semaphore : render_semaphores_) {
         if (vkCreateSemaphore(device, &semaphore_info, nullptr, &semaphore) != VK_SUCCESS) {
             semaphore = VK_NULL_HANDLE;
-            logOnce(LogLevel::Warn, "window-semaphore", "dal: render: window: vkCreateSemaphore failed");
+            logOnce(LogLevel::Warn, "window-semaphore", "tox2: render: window: vkCreateSemaphore failed");
             broken_ = true;
             destroySwapchainResources();
             return false;
@@ -431,7 +431,7 @@ bool Presenter::createSwapchain(const VkSurfaceCapabilitiesKHR& caps, VkExtent2D
 bool Presenter::acquire(std::size_t frame_slot, Target& target) {
     if (frame_slot >= acquire_semaphores_.size()) {
         logOnce(LogLevel::Warn, "window-frame-slot",
-                "dal: render: window: frame slot {} but the presenter has {} acquire semaphores", frame_slot,
+                "tox2: render: window: frame slot {} but the presenter has {} acquire semaphores", frame_slot,
                 acquire_semaphores_.size());
         return false;
     }
@@ -470,7 +470,7 @@ bool Presenter::acquire(std::size_t frame_slot, Target& target) {
         }
         stats_.skipped++;
         if (result != VK_TIMEOUT && result != VK_NOT_READY) {
-            logOnce(LogLevel::Warn, "window-acquire", "dal: render: window: vkAcquireNextImageKHR failed ({})",
+            logOnce(LogLevel::Warn, "window-acquire", "tox2: render: window: vkAcquireNextImageKHR failed ({})",
                     static_cast<int>(result));
             needs_recreate_ = true;
         }
@@ -498,7 +498,7 @@ void Presenter::present(const Target& target) {
         // A swapchain that no longer matches the window is rebuilt before the next acquire.
         needs_recreate_ = true;
         if (result != VK_SUBOPTIMAL_KHR && result != VK_ERROR_OUT_OF_DATE_KHR) {
-            logOnce(LogLevel::Warn, "window-present", "dal: render: window: vkQueuePresentKHR failed ({})",
+            logOnce(LogLevel::Warn, "window-present", "tox2: render: window: vkQueuePresentKHR failed ({})",
                     static_cast<int>(result));
         }
     }
@@ -514,7 +514,7 @@ void Presenter::reportStats() {
     const double acquires = static_cast<double>(std::max<std::uint64_t>(stats_.acquires, 1));
     const double presents = static_cast<double>(std::max<std::uint64_t>(stats_.presents, 1));
     logDebug(
-            "dal: render: window: {} presents in {:.1f} s ({:.1f}/s), acquire avg {:.2f} max {:.2f} ms, present avg {:.2f} max {:.2f} ms, "
+            "tox2: render: window: {} presents in {:.1f} s ({:.1f}/s), acquire avg {:.2f} max {:.2f} ms, present avg {:.2f} max {:.2f} ms, "
             "{} skipped, {} swapchain creations",
             stats_.presents, seconds, static_cast<double>(stats_.presents) / seconds,
             toMs(stats_.acquire_total) / acquires, toMs(stats_.acquire_max), toMs(stats_.present_total) / presents,
@@ -525,4 +525,4 @@ void Presenter::reportStats() {
     report_start_ = now;
 }
 
-}  // namespace dal
+}  // namespace tox2

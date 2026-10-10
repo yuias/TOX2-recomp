@@ -15,7 +15,7 @@
 #include <span>
 #include <vector>
 
-namespace dal {
+namespace tox2 {
 
 // CellAudioError.
 inline constexpr std::uint32_t kCellAudioErrorAlreadyInit = 0x80310701;
@@ -140,4 +140,4 @@ private:
 // The one cellAudio instance. Under the guest lock, except stats().
 CellAudioPorts& cellAudioPorts();
 
-}  // namespace dal
+}  // namespace tox2

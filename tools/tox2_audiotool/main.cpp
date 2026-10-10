@@ -1,4 +1,4 @@
-// dal_audiotool: audio utilities for the runtime. Subcommands:
+// tox2_audiotool: audio utilities for the runtime. Subcommands:
 //   wavstat FILE [--window S]   per-window levels of a WAV file (the audio dump, tool output)
 //   devices                     the active render devices and their mix formats
 //   tone [--output none|wasapi] [--seconds N] [--hz F] [--db L]   a sine through an output
@@ -50,12 +50,12 @@ struct Subcommand {
 
 void printUsage() {
     std::fputs(
-            "usage: dal_audiotool wavstat FILE [--window S]\n"
-            "       dal_audiotool devices\n"
-            "       dal_audiotool tone [--output none|wasapi] [--seconds N] [--hz F] [--db L]\n"
-            "       dal_audiotool play FILE.wav [--output none|wasapi]\n"
-            "       dal_audiotool at3scan FILE\n"
-            "       dal_audiotool at3 FILE [--offset N | --index N] [--wav OUT] [--hash] [--play]\n"
+            "usage: tox2_audiotool wavstat FILE [--window S]\n"
+            "       tox2_audiotool devices\n"
+            "       tox2_audiotool tone [--output none|wasapi] [--seconds N] [--hz F] [--db L]\n"
+            "       tox2_audiotool play FILE.wav [--output none|wasapi]\n"
+            "       tox2_audiotool at3scan FILE\n"
+            "       tox2_audiotool at3 FILE [--offset N | --index N] [--wav OUT] [--hash] [--play]\n"
             "                     [--expect-frames N] [--expect-samples N] [--expect-pcm SHA256]\n"
             "  wavstat   print RMS, peak and non-silent frame count per window of S seconds (default 1)\n"
             "  devices   list the active render devices with their mix format and device periods\n"
@@ -100,13 +100,13 @@ int runWavstat(std::span<const std::string_view> args) {
         return 2;
     }
 
-    const auto wav = dal::readWav(std::filesystem::path(file));
+    const auto wav = tox2::readWav(std::filesystem::path(file));
     if (!wav) {
         std::fprintf(stderr, "error: %s\n", wav.error().c_str());
         return 1;
     }
 
-    const auto windows = dal::wavStats(wav->samples, wav->sample_rate, wav->channels, window);
+    const auto windows = tox2::wavStats(wav->samples, wav->sample_rate, wav->channels, window);
     const double rate = wav->sample_rate;
     std::size_t non_silent_windows = 0;
     for (const auto& w : windows) {
@@ -125,7 +125,7 @@ int runDevices(std::span<const std::string_view> args) {
         std::fputs("error: devices takes no arguments\n", stderr);
         return 2;
     }
-    const auto devices = dal::listRenderDevices();
+    const auto devices = tox2::listRenderDevices();
     if (!devices) {
         std::fprintf(stderr, "error: %s\n", devices.error().c_str());
         return 1;
@@ -156,8 +156,9 @@ bool parseOutputName(std::string_view text, std::string_view& output) {
     return true;
 }
 
-std::unique_ptr<dal::AudioOutput> openOutput(std::string_view kind) {
-    std::unique_ptr<dal::AudioOutput> output = kind == "wasapi" ? dal::makeWasapiOutput() : dal::makeNullAudioOutput();
+std::unique_ptr<tox2::AudioOutput> openOutput(std::string_view kind) {
+    std::unique_ptr<tox2::AudioOutput> output =
+            kind == "wasapi" ? tox2::makeWasapiOutput() : tox2::makeNullAudioOutput();
     std::string error;
     if (!output->open(error)) {
         std::fprintf(stderr, "error: %.*s output: %s\n", static_cast<int>(kind.size()), kind.data(), error.c_str());
@@ -169,15 +170,15 @@ std::unique_ptr<dal::AudioOutput> openOutput(std::string_view kind) {
 
 // Submits `blocks` blocks at the cellAudio rate, each due at an absolute time so that a late wake-up
 // does not shift the schedule, then waits for the device to take them and prints the statistics.
-int playBlocks(dal::AudioOutput& output, std::uint64_t blocks,
+int playBlocks(tox2::AudioOutput& output, std::uint64_t blocks,
                const std::function<void(std::uint64_t block, std::span<float> samples)>& fill) {
-    dal::Sleeper sleeper;
-    dal::AudioBlock samples;
+    tox2::Sleeper sleeper;
+    tox2::AudioBlock samples;
     const Clock::time_point start = Clock::now();
     for (std::uint64_t i = 0; i < blocks; ++i) {
         const Clock::time_point due =
-                start + std::chrono::nanoseconds(static_cast<std::int64_t>(i * dal::kAudioBlockFrames *
-                                                                           1'000'000'000ULL / dal::kAudioSampleRate));
+                start + std::chrono::nanoseconds(static_cast<std::int64_t>(i * tox2::kAudioBlockFrames *
+                                                                           1'000'000'000ULL / tox2::kAudioSampleRate));
         sleeper.sleep(std::chrono::duration_cast<std::chrono::microseconds>(due - Clock::now()));
         fill(i, samples);
         output.submit(samples);
@@ -185,12 +186,12 @@ int playBlocks(dal::AudioOutput& output, std::uint64_t blocks,
 
     // frames_played counts frames handed to the device. The statistics are taken at that point: once
     // the last block is out, the device running dry is the end of the stream, not an underrun.
-    const std::uint64_t wanted_frames = blocks * dal::kAudioBlockFrames;
+    const std::uint64_t wanted_frames = blocks * tox2::kAudioBlockFrames;
     const Clock::time_point give_up = Clock::now() + std::chrono::seconds(2);
     while (output.stats().frames_played < wanted_frames && Clock::now() < give_up) {
         sleeper.sleep(std::chrono::milliseconds(2));
     }
-    const dal::AudioOutputStats stats = output.stats();
+    const tox2::AudioOutputStats stats = output.stats();
     // Let the device play what it still holds before the output is closed.
     sleeper.sleep(std::chrono::milliseconds(200));
 
@@ -223,7 +224,7 @@ int runTone(std::span<const std::string_view> args) {
         } else if (option == "--seconds") {
             ok = parsePositive(text, seconds);
         } else if (option == "--hz") {
-            ok = parsePositive(text, hz) && hz < dal::kAudioSampleRate / 2.0;
+            ok = parsePositive(text, hz) && hz < tox2::kAudioSampleRate / 2.0;
         } else {
             ok = parseNumber(text, db) && db <= 0.0;
         }
@@ -238,11 +239,12 @@ int runTone(std::span<const std::string_view> args) {
     if (!output) return 1;
     const float amplitude = static_cast<float>(std::pow(10.0, db / 20.0));
     printLine(std::format("tone: {} Hz, {} dBFS, {} s", hz, db, seconds));
-    const auto blocks = static_cast<std::uint64_t>(std::ceil(seconds * dal::kAudioSampleRate / dal::kAudioBlockFrames));
+    const auto blocks =
+            static_cast<std::uint64_t>(std::ceil(seconds * tox2::kAudioSampleRate / tox2::kAudioBlockFrames));
     return playBlocks(*output, blocks, [&](std::uint64_t block, std::span<float> samples) {
-        for (std::size_t frame = 0; frame < dal::kAudioBlockFrames; ++frame) {
+        for (std::size_t frame = 0; frame < tox2::kAudioBlockFrames; ++frame) {
             const double cycles =
-                    hz * static_cast<double>(block * dal::kAudioBlockFrames + frame) / dal::kAudioSampleRate;
+                    hz * static_cast<double>(block * tox2::kAudioBlockFrames + frame) / tox2::kAudioSampleRate;
             const float value =
                     amplitude * static_cast<float>(std::sin(2.0 * std::numbers::pi * (cycles - std::floor(cycles))));
             samples[2 * frame] = value;
@@ -252,13 +254,13 @@ int runTone(std::span<const std::string_view> args) {
 }
 
 // Plays interleaved mono or stereo samples at the cellAudio rate through `output`.
-int playInterleaved(dal::AudioOutput& output, std::span<const float> samples, std::uint32_t channels) {
+int playInterleaved(tox2::AudioOutput& output, std::span<const float> samples, std::uint32_t channels) {
     const std::uint64_t frames = samples.size() / channels;
-    printLine(std::format("play: {:.3f} s, {} ch", static_cast<double>(frames) / dal::kAudioSampleRate, channels));
-    const auto blocks = (frames + dal::kAudioBlockFrames - 1) / dal::kAudioBlockFrames;
+    printLine(std::format("play: {:.3f} s, {} ch", static_cast<double>(frames) / tox2::kAudioSampleRate, channels));
+    const auto blocks = (frames + tox2::kAudioBlockFrames - 1) / tox2::kAudioBlockFrames;
     return playBlocks(output, blocks, [&](std::uint64_t block, std::span<float> out) {
-        for (std::size_t frame = 0; frame < dal::kAudioBlockFrames; ++frame) {
-            const std::uint64_t index = block * dal::kAudioBlockFrames + frame;
+        for (std::size_t frame = 0; frame < tox2::kAudioBlockFrames; ++frame) {
+            const std::uint64_t index = block * tox2::kAudioBlockFrames + frame;
             float left = 0.0f;
             float right = 0.0f;
             if (index < frames) {
@@ -292,13 +294,13 @@ int runPlay(std::span<const std::string_view> args) {
         return 2;
     }
 
-    const auto wav = dal::readWav(std::filesystem::path(file));
+    const auto wav = tox2::readWav(std::filesystem::path(file));
     if (!wav) {
         std::fprintf(stderr, "error: %s\n", wav.error().c_str());
         return 1;
     }
-    if (wav->sample_rate != dal::kAudioSampleRate) {
-        std::fprintf(stderr, "error: play needs a %u Hz file, this one has %u Hz\n", dal::kAudioSampleRate,
+    if (wav->sample_rate != tox2::kAudioSampleRate) {
+        std::fprintf(stderr, "error: play needs a %u Hz file, this one has %u Hz\n", tox2::kAudioSampleRate,
                      wav->sample_rate);
         return 1;
     }
@@ -332,14 +334,14 @@ int runAt3scan(std::span<const std::string_view> args) {
     std::vector<std::uint8_t> bytes;
     if (!readWholeFile(args[0], bytes)) return 1;
 
-    const auto entries = dal::scanRiffEntries(bytes);
+    const auto entries = tox2::scanRiffEntries(bytes);
     std::size_t parsed = 0, errors = 0, looped = 0, mono = 0, stereo = 0;
     std::size_t unaligned = 0, overrun = 0, loop_start_valid = 0, loop_end_is_valid_end = 0;
     for (std::size_t index = 0; index < entries.size(); ++index) {
         const auto [offset, size] = entries[index];
         // The entry's bytes, clamped to the archive so that a bad size cannot read past the end.
         const std::uint64_t available = std::min<std::uint64_t>(std::uint64_t{size} + 8, bytes.size() - offset);
-        const auto info = dal::parseAt3Header(std::span<const std::uint8_t>(bytes).subspan(offset, available));
+        const auto info = tox2::parseAt3Header(std::span<const std::uint8_t>(bytes).subspan(offset, available));
         if (!info) {
             ++errors;
             printLine(std::format("{} offset {} size {}: error: {}", index, offset, size, info.error()));
@@ -491,7 +493,7 @@ int runAt3(std::span<const std::string_view> args) {
         }
         size = readLe32(&bytes[offset + 4]);
     } else {
-        const auto entries = dal::scanRiffEntries(bytes);
+        const auto entries = tox2::scanRiffEntries(bytes);
         const std::uint64_t index = options.index.value_or(0);
         if (index >= entries.size()) {
             std::fprintf(stderr, "error: entry %llu does not exist, the file has %zu\n",
@@ -503,7 +505,7 @@ int runAt3(std::span<const std::string_view> args) {
     }
     const std::span<const std::uint8_t> entry = std::span<const std::uint8_t>(bytes).subspan(
             offset, std::min<std::uint64_t>(size + 8, bytes.size() - offset));
-    const auto info = dal::parseAt3Header(entry);
+    const auto info = tox2::parseAt3Header(entry);
     if (!info) {
         std::fprintf(stderr, "error: %s\n", info.error().c_str());
         return 1;
@@ -513,7 +515,7 @@ int runAt3(std::span<const std::string_view> args) {
                           info->delay_samples));
 
     std::string error;
-    auto factory = dal::createFfmpegAtracDecoderFactory(error);
+    auto factory = tox2::createFfmpegAtracDecoderFactory(error);
     if (!factory) {
         std::fprintf(stderr, "error: no decoder: %s\n", error.c_str());
         return 1;
@@ -537,7 +539,7 @@ int runAt3(std::span<const std::string_view> args) {
 
     std::vector<float> pcm;
     pcm.reserve(std::size_t{info->total_samples} * channels);
-    std::vector<float> decoded(dal::kAtrac3plusFrameSamples * channels);
+    std::vector<float> decoded(tox2::kAtrac3plusFrameSamples * channels);
     std::uint64_t errors = 0;
     Clock::duration decode_time{};
     for (std::uint64_t frame = 0; frame < frames; ++frame) {
@@ -550,9 +552,9 @@ int runAt3(std::span<const std::string_view> args) {
                 std::fprintf(stderr, "error: frame %llu: %s\n", static_cast<unsigned long long>(frame), error.c_str());
             std::ranges::fill(decoded, 0.0f);
         }
-        const std::uint64_t first = frame * dal::kAtrac3plusFrameSamples;
+        const std::uint64_t first = frame * tox2::kAtrac3plusFrameSamples;
         const std::uint64_t from = std::max(first, valid_begin);
-        const std::uint64_t to = std::min(first + dal::kAtrac3plusFrameSamples, valid_end);
+        const std::uint64_t to = std::min(first + tox2::kAtrac3plusFrameSamples, valid_end);
         if (from < to) {
             pcm.insert(pcm.end(), decoded.begin() + static_cast<std::ptrdiff_t>((from - first) * channels),
                        decoded.begin() + static_cast<std::ptrdiff_t>((to - first) * channels));
@@ -595,8 +597,8 @@ int runAt3(std::span<const std::string_view> args) {
     }
 
     if (!options.wav.empty()) {
-        auto writer = dal::WavWriter::create(std::filesystem::path(options.wav), info->sample_rate,
-                                             static_cast<std::uint16_t>(channels));
+        auto writer = tox2::WavWriter::create(std::filesystem::path(options.wav), info->sample_rate,
+                                              static_cast<std::uint16_t>(channels));
         if (!writer) {
             fail("cannot write the WAV file: " + writer.error());
         } else if (!(*writer)->write(pcm) || !(*writer)->finish()) {
@@ -604,7 +606,7 @@ int runAt3(std::span<const std::string_view> args) {
         }
     }
     if (options.play && status == 0) {
-        if (info->sample_rate != dal::kAudioSampleRate || channels > 2) {
+        if (info->sample_rate != tox2::kAudioSampleRate || channels > 2) {
             fail("--play needs 48 kHz mono or stereo");
         } else if (auto output = openOutput("wasapi")) {
             status = playInterleaved(*output, pcm, info->channels);

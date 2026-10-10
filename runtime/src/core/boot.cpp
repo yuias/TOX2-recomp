@@ -15,7 +15,7 @@
 #include "core/threads.h"
 #include "lv2/sys_sync.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::uint32_t kTlsSystemArea = 0x30;
@@ -104,7 +104,7 @@ void freeTls(std::uint32_t r13) {
     }
 }
 
-std::uint32_t initializeTls(DalPpuContext* ctx, std::uint8_t* base, std::uint32_t thread_id, std::uint32_t vaddr,
+std::uint32_t initializeTls(Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t thread_id, std::uint32_t vaddr,
                             std::uint32_t filesz, std::uint32_t memsz) {
     if (ctx->gpr[13] != 0) {
         return static_cast<std::uint32_t>(ctx->gpr[13]);
@@ -130,7 +130,7 @@ std::uint32_t initializeTls(DalPpuContext* ctx, std::uint8_t* base, std::uint32_
         fatal(FatalKind::Internal, "sys_initialize_tls: no TLS block for the main thread");
     }
     ctx->gpr[13] = r13;
-    logInfo("dal: tls: thread {:#010x} area {:#010x} block {:#x} slots {} r13 {:#010x}", thread_id, area,
+    logInfo("tox2: tls: thread {:#010x} area {:#010x} block {:#x} slots {} r13 {:#010x}", thread_id, area,
             g_tls.block_size, g_tls.used.size(), r13);
 
     // The sync objects RPCS3 creates at this point: the atexit and `_lv2prx` lwmutexes and the
@@ -175,13 +175,13 @@ void bootMainThread(const LoadedExecutable& exe, std::string_view argv0) {
     const std::uint32_t argv = stack_top - block_bytes;
     const std::uint32_t envp = argv + 8 * (kArgc + 1);
     const std::uint32_t strings = argv + pointers_bytes;
-    dalWrite64(base, argv, strings);
-    dalWrite64(base, argv + 8, 0);
-    dalWrite64(base, envp, 0);
+    tox2Write64(base, argv, strings);
+    tox2Write64(base, argv + 8, 0);
+    tox2Write64(base, envp, 0);
     std::memcpy(base + strings, argv0.data(), argv0.size());
     base[strings + argv0.size()] = 0;
 
-    DalPpuContext& ctx = thread->context();
+    Tox2PpuContext& ctx = thread->context();
     ctx.gpr[1] -= block_bytes;
     initializeTls(&ctx, base, thread->id(), exe.tls_vaddr, exe.tls_filesz, exe.tls_memsz);
 
@@ -199,7 +199,7 @@ void bootMainThread(const LoadedExecutable& exe, std::string_view argv0) {
     ctx.gpr[12] = exe.malloc_pagesize;
     ctx.lr = 0;
 
-    logInfo("dal: boot: stack {:#010x}..{:#010x} entry {:#010x} toc {:#010x} r1 {:#010x} r2 {:#010x} "
+    logInfo("tox2: boot: stack {:#010x}..{:#010x} entry {:#010x} toc {:#010x} r1 {:#010x} r2 {:#010x} "
             "r3..r12 {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} r13 {:#010x}",
             thread->stackAddr(), stack_top, exe.entry_func, exe.entry_toc, ctx.gpr[1], ctx.gpr[2], ctx.gpr[3],
             ctx.gpr[4], ctx.gpr[5], ctx.gpr[6], ctx.gpr[7], ctx.gpr[8], ctx.gpr[9], ctx.gpr[10], ctx.gpr[11],
@@ -208,4 +208,4 @@ void bootMainThread(const LoadedExecutable& exe, std::string_view argv0) {
     startGuestThread(thread);
 }
 
-}  // namespace dal
+}  // namespace tox2

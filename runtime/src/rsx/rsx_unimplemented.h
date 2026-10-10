@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-namespace dal {
+namespace tox2 {
 
 // Thread-safe. Counts one occurrence of "<category> <key>".
 void rsxNoteUnimplemented(std::string_view category, std::string_view key);
@@ -24,4 +24,4 @@ std::uint64_t rsxUnimplementedDropped();
 // Forgets all counts. Intended for tests.
 void rsxUnimplementedReset();
 
-}  // namespace dal
+}  // namespace tox2

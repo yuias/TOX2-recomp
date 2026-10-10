@@ -3,7 +3,7 @@
 FPRs hold doubles. Single-precision forms compute in double and round the result to float
 (RPCS3 `f32`). The multiply-add family uses `__builtin_fma` (RPCS3 `FMADD` etc. with accurate
 DFMA); sign-bit operations work on the bit pattern. FPSCR is only partly modelled, see
-`runtime/include/dal/ppu_fp.h`. With Rc=1 every instruction ends by copying FPSCR[0:3] to CR1.
+`runtime/include/tox2/ppu_fp.h`. With Rc=1 every instruction ends by copying FPSCR[0:3] to CR1.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ _NOT_SIGN = "0x7fffffffffffffffull"
 
 def _finish(op: Op, lines: list[str]) -> list[str]:
     if op.rc:
-        lines.append("dalRecordFp(ctx);")
+        lines.append("tox2RecordFp(ctx);")
     return lines
 
 
@@ -109,8 +109,8 @@ def emit_frsp(op: Op) -> list[str] | None:
 @handler("fctiw", "fctiwz", "fctid", "fctidz")
 def emit_convert_to_integer(op: Op) -> list[str] | None:
     # RPCS3 FCTIW, FCTIWZ, FCTID, FCTIDZ: saturating; the 32-bit forms store the sign-extended word.
-    helper = {"fctiw": "dalFctiw", "fctiwz": "dalFctiwz", "fctid": "dalFctid",
-              "fctidz": "dalFctidz"}[op.name]
+    helper = {"fctiw": "tox2Fctiw", "fctiwz": "tox2Fctiwz", "fctid": "tox2Fctid",
+              "fctidz": "tox2Fctidz"}[op.name]
     return _set_bits(op, "%s(%s)" % (helper, _f64(op, "frB")))
 
 
@@ -132,39 +132,39 @@ def emit_sign_ops(op: Op) -> list[str] | None:
 @handler("fcmpu", "fcmpo")
 def emit_compare(op: Op) -> list[str] | None:
     # RPCS3 FCMPU, FCMPO (which forwards to FCMPU)
-    return ["dalFcmp(ctx, %d, %s, %s);" % (op.f("crfD"), _f64(op, "frA"), _f64(op, "frB"))]
+    return ["tox2Fcmp(ctx, %d, %s, %s);" % (op.f("crfD"), _f64(op, "frA"), _f64(op, "frB"))]
 
 
 @handler("mffs")
 def emit_mffs(op: Op) -> list[str] | None:
     # RPCS3 MFFS: the FPSCR image goes to the low 32 bits of frD.
-    return _set_bits(op, "dalMffs(ctx)")
+    return _set_bits(op, "tox2Mffs(ctx)")
 
 
 @handler("mtfsf")
 def emit_mtfsf(op: Op) -> list[str] | None:
     # Architecture: the low word of frB goes to the FPSCR fields selected by FM. RPCS3 `MTFSF` is
     # an empty stub that only records CR1.
-    return _finish(op, ["dalMtfsf(ctx, 0x%02xu, %s);" % (op.f("FM"), _u64(op, "frB"))])
+    return _finish(op, ["tox2Mtfsf(ctx, 0x%02xu, %s);" % (op.f("FM"), _u64(op, "frB"))])
 
 
 @handler("mtfsfi")
 def emit_mtfsfi(op: Op) -> list[str] | None:
     # RPCS3 MTFSFI (which only handles the FPCC field; the other fields are written here too).
     field = op.f("crfD")
-    return _finish(op, ["dalMtfsf(ctx, 0x%02xu, (uint64_t)%du << %d);"
+    return _finish(op, ["tox2Mtfsf(ctx, 0x%02xu, (uint64_t)%du << %d);"
                         % (0x80 >> field, op.f("IMM_fp"), 28 - 4 * field)])
 
 
 @handler("mtfsb0", "mtfsb1")
 def emit_mtfsb(op: Op) -> list[str] | None:
     # RPCS3 MTFSB0, MTFSB1
-    return _finish(op, ["dalMtfsb(ctx, %d, %d);" % (op.f("crbD"), op.name == "mtfsb1")])
+    return _finish(op, ["tox2Mtfsb(ctx, %d, %d);" % (op.f("crbD"), op.name == "mtfsb1")])
 
 
 @handler("mcrfs")
 def emit_mcrfs(op: Op) -> list[str] | None:
     # RPCS3 MCRFS: copies the FPSCR field; the architectural clearing of the copied exception
     # bits is not modelled.
-    return ["dalSetCrField(ctx, %d, (uint32_t)(dalMffs(ctx) >> %d) & 15u);"
+    return ["tox2SetCrField(ctx, %d, (uint32_t)(tox2Mffs(ctx) >> %d) & 15u);"
             % (op.f("crfD"), 28 - 4 * op.f("crfS"))]

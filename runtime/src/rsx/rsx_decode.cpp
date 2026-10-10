@@ -10,7 +10,7 @@
 #include "rsx/rsx_census.h"
 #include "rsx/rsx_unimplemented.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 // RPCS3 `gcm_enums.h` values used for validation.
@@ -466,4 +466,4 @@ const char* rsxIgnoredMethodName(std::uint32_t method) {
     return nullptr;
 }
 
-}  // namespace dal
+}  // namespace tox2

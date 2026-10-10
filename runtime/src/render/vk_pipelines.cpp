@@ -11,7 +11,7 @@
 #include "render/vp_translator.h"
 #include "rsx/rsx_unimplemented.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 // Cache keys of the built-in clear shaders; the GLSL hash in the file name keeps them distinct from the
@@ -165,7 +165,7 @@ const DrawPipelines::Program* DrawPipelines::vertexProgram(const RsxDraw& draw) 
                     if (!program->ok) fail("vkCreateShaderModule failed");
                     program->inputs_used = glsl.inputs_used;
                 } else {
-                    std::fprintf(stderr, "dal: render: vertex program %016llx did not compile: %s\n",
+                    std::fprintf(stderr, "tox2: render: vertex program %016llx did not compile: %s\n",
                                  static_cast<unsigned long long>(draw.vp_hash), spirv.error().c_str());
                     program->notes.push_back("vertex program compile error");
                 }
@@ -195,7 +195,7 @@ const DrawPipelines::Program* DrawPipelines::fragmentProgram(const RsxDraw& draw
                     if (!program->ok) fail("vkCreateShaderModule failed");
                     program->texture_units = glsl.texture_units;
                 } else {
-                    std::fprintf(stderr, "dal: render: fragment program %016llx did not compile: %s\n",
+                    std::fprintf(stderr, "tox2: render: fragment program %016llx did not compile: %s\n",
                                  static_cast<unsigned long long>(draw.fp_hash), spirv.error().c_str());
                     program->notes.push_back("fragment program compile error");
                 }
@@ -423,4 +423,4 @@ VkPipeline DrawPipelines::maskedClearPipeline(VkFormat color_format, VkColorComp
     return pipeline;
 }
 
-}  // namespace dal
+}  // namespace tox2

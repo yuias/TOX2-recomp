@@ -9,13 +9,13 @@
 #include <cstdint>
 #include <functional>
 
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 
-namespace dal {
+namespace tox2 {
 
 // Runs on the service thread with the guest lock held, with that thread's context and the guest
 // memory base; it may call guest functions through callGuestFunction.
-using SailCall = std::function<void(DalPpuContext*, std::uint8_t*)>;
+using SailCall = std::function<void(Tox2PpuContext*, std::uint8_t*)>;
 
 // Appends `call` to a FIFO and wakes the thread; calls run one at a time, in order. Starts the
 // thread on first use. Needs the guest lock and an initialised guest TLS area (so it works from any
@@ -27,4 +27,4 @@ bool queueSailCall(SailCall call);
 // one. Needs the guest lock, which is released while waiting for the thread. For tests.
 void stopSailService();
 
-}  // namespace dal
+}  // namespace tox2

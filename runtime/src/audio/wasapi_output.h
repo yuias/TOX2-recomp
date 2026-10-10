@@ -15,7 +15,7 @@
 
 #include "audio/audio_output.h"
 
-namespace dal {
+namespace tox2 {
 
 // The output owns a ring between the engine thread and the device thread. The device starts playing
 // once kPrimeBlocks are queued; above kHighWaterBlocks submit() drops the oldest block (device clock
@@ -77,4 +77,4 @@ struct RenderDeviceInfo {
 // enumeration itself failed.
 std::expected<std::vector<RenderDeviceInfo>, std::string> listRenderDevices();
 
-}  // namespace dal
+}  // namespace tox2

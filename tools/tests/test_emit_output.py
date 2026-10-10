@@ -56,18 +56,18 @@ class TrampolineTest(unittest.TestCase):
         self.assertTrue(saves)
         self.assertEqual(text.splitlines(), [
             "// sys_io cellPadInit 0x1cf98800",
-            "DAL_PPU_FUNC(imp_000dcf50) {",
-            "    DAL_ENTER(0x000dcf50u);",
-            "    dalWrite64(base, (uint32_t)(ctx->gpr[1] + 0x0000000000000028ull), ctx->gpr[2]);",
-            "    DAL_HLE(7);",
+            "TOX2_PPU_FUNC(imp_000dcf50) {",
+            "    TOX2_ENTER(0x000dcf50u);",
+            "    tox2Write64(base, (uint32_t)(ctx->gpr[1] + 0x0000000000000028ull), ctx->gpr[2]);",
+            "    TOX2_HLE(7);",
             "}"])
 
     def test_without_toc_save(self):
         words = [w for w in self.WITH_SAVE if w != STD_R2_40_R1] + [asm.nop()]
         text, saves = emit_output.render_trampoline(self.THUNK, 0, words)
         self.assertFalse(saves)
-        self.assertNotIn("dalWrite64", text)
-        self.assertIn("DAL_HLE(0);", text)
+        self.assertNotIn("tox2Write64", text)
+        self.assertIn("TOX2_HLE(0);", text)
 
     def test_other_store_is_not_a_toc_save(self):
         other = 62 << 26 | 3 << 21 | 1 << 16 | 40            # std r3,40(r1)
@@ -81,7 +81,7 @@ class TrampolineTest(unittest.TestCase):
     def test_unreadable_thunk(self):
         text, saves = emit_output.render_trampoline(self.THUNK, 1, None)
         self.assertFalse(saves)
-        self.assertIn("DAL_HLE(1);", text)
+        self.assertIn("TOX2_HLE(1);", text)
 
     def test_unnamed_import_and_string_escaping(self):
         thunk = DbThunk(0x1000, "m", 5, None, 0)
@@ -178,10 +178,10 @@ class EmitCliTest(TempDirTestCase):
                                                  re.M)]
         self.assertEqual(guests, sorted(guests))
         self.assertEqual(len(guests), 4)
-        self.assertIn("kDalPpuFuncMappingCount = 4;", text)
-        self.assertIn("kDalPpuImportCount = 1;", text)
+        self.assertIn("kTox2PpuFuncMappingCount = 4;", text)
+        self.assertIn("kTox2PpuImportCount = 1;", text)
         self.assertIn('{ 0x00030000u, 0x00001234u, "cellFoo", nullptr },', text)
-        self.assertIn('kDalPpuExecutableSha256[] = "%s";' % self.sha, text)
+        self.assertIn('kTox2PpuExecutableSha256[] = "%s";' % self.sha, text)
 
     def test_max_unhandled_exits_9_after_writing(self):
         # The all-zero word after blr is invalid code, so it stays unhandled whatever the handlers cover.

@@ -24,12 +24,12 @@
 #include "core/fatal.h"
 #include "core/log.h"
 #include "core/param_sfo.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 #include "lv2/vfs.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "cellGame";
@@ -109,7 +109,7 @@ std::filesystem::path hostPathOf(const std::string& guest) {
 bool isHddCategory(std::string_view cat) { return cat.size() == 2 && cat[1] != 'D' && cat != "DG" && cat != "MS"; }
 
 // cellGameDataCheck(u32 type, const char* dirName, CellGameContentSize* size)
-void gameDataCheck(DalPpuContext* ctx, std::uint8_t* base) {
+void gameDataCheck(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t type = argU32(ctx, 0);
     const std::uint32_t dir_name_addr = argU32(ctx, 1);
     const std::uint32_t size_addr = argU32(ctx, 2);
@@ -122,7 +122,7 @@ void gameDataCheck(DalPpuContext* ctx, std::uint8_t* base) {
     if (type != kTypeDisc) {
         name = readGuestString(base, dir_name_addr, kDirNameReadMax);
     }
-    logInfo("dal: game: cellGameDataCheck type {} dirName \"{}\"", type, name);
+    logInfo("tox2: game: cellGameDataCheck type {} dirName \"{}\"", type, name);
 
     if (g_permission.active) {
         ctx->gpr[3] = kErrorBusy;
@@ -140,7 +140,7 @@ void gameDataCheck(DalPpuContext* ctx, std::uint8_t* base) {
             file_missing = false;
         } else if (std::filesystem::exists(sfo_path)) {
             file_missing = false;  // present but unreadable: the category check below reports it
-            logWarn("dal: game: {}: {}", sfo_path.string(), parsed.error());
+            logWarn("tox2: game: {}: {}", sfo_path.string(), parsed.error());
         }
     }
 
@@ -150,16 +150,16 @@ void gameDataCheck(DalPpuContext* ctx, std::uint8_t* base) {
         const std::string_view cat = category != sfo.strings.end() ? category->second : std::string_view();
         const bool wrong = type == kTypeDisc ? cat != "DG" : type == kTypeGameData ? cat != "GD" : !isHddCategory(cat);
         if (wrong) {
-            logWarn("dal: game: cellGameDataCheck: type {} does not match CATEGORY '{}'", type, cat);
+            logWarn("tox2: game: cellGameDataCheck: type {} does not match CATEGORY '{}'", type, cat);
             ctx->gpr[3] = kErrorBroken;
             return;
         }
     }
 
     if (size_addr != 0) {
-        dalWrite32(base, size_addr + kSizeHddFree, static_cast<std::uint32_t>(kHddFreeSizeKb));
-        dalWrite32(base, size_addr + kSizeContent, sfo.empty() ? 0u : static_cast<std::uint32_t>(kSizeNotCalculated));
-        dalWrite32(base, size_addr + kSizeSystem, 0);
+        tox2Write32(base, size_addr + kSizeHddFree, static_cast<std::uint32_t>(kHddFreeSizeKb));
+        tox2Write32(base, size_addr + kSizeContent, sfo.empty() ? 0u : static_cast<std::uint32_t>(kSizeNotCalculated));
+        tox2Write32(base, size_addr + kSizeSystem, 0);
     }
 
     g_permission.reset();
@@ -167,7 +167,7 @@ void gameDataCheck(DalPpuContext* ctx, std::uint8_t* base) {
     g_permission.dir = std::move(name);
     g_permission.can_create = type == kTypeGameData;
     if (sfo.empty()) {
-        logInfo("dal: game: cellGameDataCheck: directory '{}' not found", dir);
+        logInfo("tox2: game: cellGameDataCheck: directory '{}' not found", dir);
         ctx->gpr[3] = kRetNone;
         return;
     }
@@ -177,7 +177,7 @@ void gameDataCheck(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellGameContentPermit(char contentInfoPath[128], char usrdirPath[128])
-void gameContentPermit(DalPpuContext* ctx, std::uint8_t* base) {
+void gameContentPermit(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t info_addr = argU32(ctx, 0);
     const std::uint32_t usrdir_addr = argU32(ctx, 1);
     if (info_addr == 0 || usrdir_addr == 0) {
@@ -214,9 +214,9 @@ void gameContentPermit(DalPpuContext* ctx, std::uint8_t* base) {
             ok = !ec;
         }
         if (ok) {
-            logInfo("dal: game: directory '{}' has been created", dir);
+            logInfo("tox2: game: directory '{}' has been created", dir);
         } else {
-            logError("dal: game: cellGameContentPermit: failed to initialize directory '{}' ({})", dir,
+            logError("tox2: game: cellGameContentPermit: failed to initialize directory '{}' ({})", dir,
                      ec ? ec.message() : std::string("target exists or cannot be written"));
             std::filesystem::remove_all(g_permission.temp, ec);
         }
@@ -225,13 +225,13 @@ void gameContentPermit(DalPpuContext* ctx, std::uint8_t* base) {
     g_permission.reset();
     storeGuestString(base, info_addr, kPathMax, dir);
     storeGuestString(base, usrdir_addr, kPathMax, dir + "/USRDIR");
-    logInfo("dal: game: cellGameContentPermit -> \"{}\"", dir + "/USRDIR");
+    logInfo("tox2: game: cellGameContentPermit -> \"{}\"", dir + "/USRDIR");
     ctx->gpr[3] = kCellOk;
 }
 
 // cellGameCreateGameData(CellGameSetInitParams* init, char tmpContentInfoPath[128],
 //                        char tmpUsrdirPath[128])
-void gameCreateGameData(DalPpuContext* ctx, std::uint8_t* base) {
+void gameCreateGameData(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t init_addr = argU32(ctx, 0);
     const std::uint32_t info_addr = argU32(ctx, 1);
     const std::uint32_t usrdir_addr = argU32(ctx, 2);
@@ -258,7 +258,7 @@ void gameCreateGameData(DalPpuContext* ctx, std::uint8_t* base) {
     const std::filesystem::path temp_host = hostPathOf(temp_guest);
     std::error_code ec;
     if (temp_host.empty() || !std::filesystem::create_directory(temp_host, ec)) {
-        logError("dal: game: cellGameCreateGameData: failed to create directory '{}' ({})", temp_guest, ec.message());
+        logError("tox2: game: cellGameCreateGameData: failed to create directory '{}' ({})", temp_guest, ec.message());
         ctx->gpr[3] = kErrorAccess;
         return;
     }
@@ -266,7 +266,7 @@ void gameCreateGameData(DalPpuContext* ctx, std::uint8_t* base) {
     if (info_addr != 0) storeGuestString(base, info_addr, kPathMax, temp_guest);
 
     if (!std::filesystem::create_directory(temp_host / "USRDIR", ec)) {
-        logError("dal: game: cellGameCreateGameData: failed to create '{}/USRDIR' ({})", temp_guest, ec.message());
+        logError("tox2: game: cellGameCreateGameData: failed to create '{}/USRDIR' ({})", temp_guest, ec.message());
         ctx->gpr[3] = kErrorAccess;
         return;
     }
@@ -281,13 +281,13 @@ void gameCreateGameData(DalPpuContext* ctx, std::uint8_t* base) {
     g_permission.sfo.strings["TITLE_ID"] = text(kInitTitleId, kInitTitleIdSize);
     g_permission.sfo.strings["TITLE"] = text(kInitTitle, kInitTitleSize);
     g_permission.sfo.strings["VERSION"] = text(kInitVersion, kInitVersionSize);
-    logInfo("dal: game: cellGameCreateGameData: temporary directory '{}' title \"{}\"", temp_guest,
+    logInfo("tox2: game: cellGameCreateGameData: temporary directory '{}' title \"{}\"", temp_guest,
             g_permission.sfo.strings["TITLE"]);
     ctx->gpr[3] = kCellOk;
 }
 
 // cellGameContentErrorDialog(s32 type, s32 errNeedSizeKB, const char* dirName)
-void gameContentErrorDialog(DalPpuContext* ctx, std::uint8_t* base) {
+void gameContentErrorDialog(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto type = static_cast<std::int32_t>(argU32(ctx, 0));
     const auto need_kb = static_cast<std::int32_t>(argU32(ctx, 1));
     const std::uint32_t dir_name_addr = argU32(ctx, 2);
@@ -321,10 +321,10 @@ void gameContentErrorDialog(DalPpuContext* ctx, std::uint8_t* base) {
 
     // There is no UI to show the dialog on. The terminating types end the application on the console;
     // here that is a game-data failure, so it stops with the fatal exit code instead of a clean exit.
-    logError("dal: game: cellGameContentErrorDialog: {}", message);
+    logError("tox2: game: cellGameContentErrorDialog: {}", message);
     if (type > kErrDialogNoSpace) {
         stopProcess(ExitCode::Fatal,
-                    std::format("dal: stop: cellGameContentErrorDialog (type {}) terminates the application: {}", type,
+                    std::format("tox2: stop: cellGameContentErrorDialog (type {}) terminates the application: {}", type,
                                 message));
     }
     ctx->gpr[3] = kCellOk;
@@ -343,4 +343,4 @@ std::span<const HleEntry> cellGameHandlers() { return kHandlers; }
 
 void resetCellGame() { g_permission.reset(); }
 
-}  // namespace dal
+}  // namespace tox2

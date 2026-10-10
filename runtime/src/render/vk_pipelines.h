@@ -15,7 +15,7 @@
 #include "render/vk_context.h"
 #include "rsx/rsx_frame.h"
 
-namespace dal {
+namespace tox2 {
 
 inline constexpr std::uint32_t kPipelineVertexSlots = 16;
 
@@ -95,4 +95,4 @@ private:
     std::map<std::pair<VkFormat, VkColorComponentFlags>, VkPipeline> clear_pipelines_;
 };
 
-}  // namespace dal
+}  // namespace tox2

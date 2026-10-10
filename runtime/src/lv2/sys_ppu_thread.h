@@ -5,7 +5,7 @@
 
 #include <cstdint>
 
-namespace dal {
+namespace tox2 {
 
 // RPCS3 `Modules/sys_ppu_thread_.cpp` `sys_ppu_thread_create`: takes a TLS block, creates the
 // thread (`lv2/sys_ppu_thread.cpp` `_sys_ppu_thread_create`) and starts it unless
@@ -18,4 +18,4 @@ std::uint32_t ppuThreadCreate(std::uint8_t* base, std::uint32_t thread_id, std::
 // Forgets which threads were joined. Intended for tests.
 void resetPpuThreadState();
 
-}  // namespace dal
+}  // namespace tox2

@@ -32,7 +32,7 @@ int g_failed;
 
 bool contains(const std::string& text, const std::string& part) { return text.find(part) != std::string::npos; }
 
-bool hasReport(const dal::GlslResult& result, const std::string& part) {
+bool hasReport(const tox2::GlslResult& result, const std::string& part) {
     return std::any_of(result.unimplemented.begin(), result.unimplemented.end(),
                        [&](const std::string& entry) { return contains(entry, part); });
 }
@@ -102,9 +102,9 @@ std::vector<std::uint32_t> program(const std::vector<Asm>& instructions) {
     return words;
 }
 
-dal::GlslResult translate(const std::vector<Asm>& instructions) {
+tox2::GlslResult translate(const std::vector<Asm>& instructions) {
     const std::vector<std::uint32_t> words = program(instructions);
-    return dal::translateVertexProgram(words, 0);
+    return tox2::translateVertexProgram(words, 0);
 }
 
 // ---- Dumps ----
@@ -116,9 +116,9 @@ struct Dump {
 
 std::vector<Dump> loadDumps() {
     std::vector<Dump> dumps;
-#ifdef DAL_RSX_DUMP_DIR
+#ifdef TOX2_RSX_DUMP_DIR
     std::error_code ec;
-    for (const auto& entry : std::filesystem::directory_iterator(DAL_RSX_DUMP_DIR, ec)) {
+    for (const auto& entry : std::filesystem::directory_iterator(TOX2_RSX_DUMP_DIR, ec)) {
         const std::string name = entry.path().filename().string();
         if (!name.starts_with("vp_") || entry.path().extension() != ".bin") continue;
         std::ifstream file(entry.path(), std::ios::binary);
@@ -196,7 +196,7 @@ void testDumps() {
     bool printed = false;
     int seen = 0;
     for (const Dump& dump : dumps) {
-        const dal::GlslResult result = dal::translateVertexProgram(dump.words, 0);
+        const tox2::GlslResult result = tox2::translateVertexProgram(dump.words, 0);
         CHECK(result.ok);
         CHECK(result.unimplemented.empty());
         for (const std::string& entry : result.unimplemented) {
@@ -210,7 +210,7 @@ void testDumps() {
         }
         CHECK(result.inputs_used == expectedInputs(dump.name));
 
-        auto spirv = dal::compileGlsl(dal::ShaderStage::Vertex, result.glsl, 0xd0d0);
+        auto spirv = tox2::compileGlsl(tox2::ShaderStage::Vertex, result.glsl, 0xd0d0);
         CHECK(spirv.has_value());
         if (!spirv) {
             std::fprintf(stderr, "%s: %s\n", dump.name.c_str(), spirv.error().c_str());
@@ -221,7 +221,7 @@ void testDumps() {
             printed = true;
         }
     }
-#ifdef DAL_RSX_DUMP_DIR
+#ifdef TOX2_RSX_DUMP_DIR
     CHECK(seen == 3);  // all three known programs must be present once the directory has dumps
 #endif
 }
@@ -247,11 +247,11 @@ void testMov() {
     mov.vec_op = 1;
     mov.slot = 0;
     mov.end = true;
-    const dal::GlslResult result = translate({mov});
+    const tox2::GlslResult result = translate({mov});
     CHECK(result.ok);
     CHECK(contains(result.glsl, "  out_0 = attr_0;\n"));
     CHECK(result.inputs_used == 1u);
-    auto spirv = dal::compileGlsl(dal::ShaderStage::Vertex, result.glsl, 0xd0d1);
+    auto spirv = tox2::compileGlsl(tox2::ShaderStage::Vertex, result.glsl, 0xd0d1);
     CHECK(spirv.has_value());
     if (!spirv) std::fprintf(stderr, "%s\n", spirv.error().c_str());
 }
@@ -271,7 +271,7 @@ void testOperations() {
     out.slot = 0;
     out.src0 = temp(1);
     out.end = true;
-    dal::GlslResult result = translate({add, out});
+    tox2::GlslResult result = translate({add, out});
     CHECK(result.ok);
     CHECK(contains(result.glsl, "  r_1 = attr_0 + -abs(r_2.wzyx);\n"));
 
@@ -294,7 +294,7 @@ void testOperations() {
     CHECK(result.ok);
     CHECK(contains(result.glsl, "  out_3.xy = clamp(vec4(1.0 / r_0.yyyy.x), 0.0, 1.0).xy;\n"));
     CHECK(contains(result.glsl, "    vec4 res = vec4(dot(attr_0.xyz, vp_consts.c[0].zzzw.xyz));\n"));
-    auto spirv = dal::compileGlsl(dal::ShaderStage::Vertex, result.glsl, 0xd0d2);
+    auto spirv = tox2::compileGlsl(tox2::ShaderStage::Vertex, result.glsl, 0xd0d2);
     CHECK(spirv.has_value());
     if (!spirv) std::fprintf(stderr, "%s\n%s\n", spirv.error().c_str(), result.glsl.c_str());
 }
@@ -329,7 +329,7 @@ void testAllOutputsCompile() {
         instructions.push_back(in);
     }
     instructions.back().end = true;
-    const dal::GlslResult result = translate(instructions);
+    const tox2::GlslResult result = translate(instructions);
     CHECK(result.ok);
     if (!result.ok) {
         for (const std::string& entry : result.unimplemented) std::fprintf(stderr, "%s\n", entry.c_str());
@@ -340,7 +340,7 @@ void testAllOutputsCompile() {
     // Front and back colours are exported when either of their mask bits is set.
     CHECK(contains(result.glsl, "var_back_diffuse = (draw.output_mask & 5u) != 0u ? out_3 :"));
     CHECK(contains(result.glsl, "var_front_specular = (draw.output_mask & 10u) != 0u ? out_2 :"));
-    auto spirv = dal::compileGlsl(dal::ShaderStage::Vertex, result.glsl, 0xd0d3);
+    auto spirv = tox2::compileGlsl(tox2::ShaderStage::Vertex, result.glsl, 0xd0d3);
     CHECK(spirv.has_value());
     if (!spirv) std::fprintf(stderr, "%s\n%s\n", spirv.error().c_str(), result.glsl.c_str());
 }
@@ -350,7 +350,7 @@ void testUnwrittenOutputsAreDefault() {
     pos.vec_op = 1;
     pos.slot = 0;
     pos.end = true;
-    const dal::GlslResult result = translate({pos});
+    const tox2::GlslResult result = translate({pos});
     CHECK(result.ok);
     CHECK(contains(result.glsl, "  var_front_diffuse = vec4(0.0, 0.0, 0.0, 1.0);\n"));
     CHECK(contains(result.glsl, "  var_tex0 = vec4(0.0, 0.0, 0.0, 1.0);\n"));
@@ -361,7 +361,7 @@ void testUnwrittenOutputsAreDefault() {
     color.vec_op = 1;
     color.slot = 1;
     color.end = true;
-    const dal::GlslResult disabled = translate({color});
+    const tox2::GlslResult disabled = translate({color});
     CHECK(disabled.ok);
     CHECK(contains(disabled.glsl, "  var_front_diffuse = vec4(0.0, 0.0, 0.0, 1.0);\n"));
     CHECK(contains(disabled.glsl, "vec4 pos = vec4(0.0, 0.0, 0.0, 1.0);"));
@@ -373,7 +373,7 @@ void testUnimplementedReports() {
     unknown.vec_op = 0x1f;
     unknown.slot = 0;
     unknown.end = true;
-    dal::GlslResult result = translate({unknown});
+    tox2::GlslResult result = translate({unknown});
     CHECK(!result.ok && result.glsl.empty());
     CHECK(hasReport(result, "vp opcode 0x1f"));
 
@@ -443,7 +443,7 @@ void testUnimplementedReports() {
     result = translate({never});
     CHECK(result.ok && !contains(result.glsl, "out_0 = attr_0"));
 
-    result = dal::translateVertexProgram({}, 0);
+    result = tox2::translateVertexProgram({}, 0);
     CHECK(!result.ok);
 }
 
@@ -458,24 +458,24 @@ void testScalarDualDestination() {
     scalar_both.sca_mask = 0x5;  // x and z
     scalar_both.src2 = input();
     scalar_both.end = true;
-    const dal::GlslResult result = translate({scalar_both});
+    const tox2::GlslResult result = translate({scalar_both});
     CHECK(result.ok);
     CHECK(contains(result.glsl, "r_2.xz = res.xz;"));
     CHECK(contains(result.glsl, "out_0.xz = res.xz;"));
 }
 
 void testLocations() {
-    CHECK(dal::vpOutputSlotLocation(0) == -1);
-    CHECK(dal::vpOutputSlotLocation(1) == 10);
-    CHECK(dal::vpOutputSlotLocation(2) == 12);
-    CHECK(dal::vpOutputSlotLocation(3) == 11);
-    CHECK(dal::vpOutputSlotLocation(4) == 13);
-    CHECK(dal::vpOutputSlotLocation(5) == 14);
-    CHECK(dal::vpOutputSlotLocation(6) == -1);
-    CHECK(dal::vpOutputSlotLocation(7) == 0);
-    CHECK(dal::vpOutputSlotLocation(14) == 7);
-    CHECK(dal::vpOutputSlotLocation(15) == 8);
-    CHECK(dal::vpOutputSlotLocation(16) == -1);
+    CHECK(tox2::vpOutputSlotLocation(0) == -1);
+    CHECK(tox2::vpOutputSlotLocation(1) == 10);
+    CHECK(tox2::vpOutputSlotLocation(2) == 12);
+    CHECK(tox2::vpOutputSlotLocation(3) == 11);
+    CHECK(tox2::vpOutputSlotLocation(4) == 13);
+    CHECK(tox2::vpOutputSlotLocation(5) == 14);
+    CHECK(tox2::vpOutputSlotLocation(6) == -1);
+    CHECK(tox2::vpOutputSlotLocation(7) == 0);
+    CHECK(tox2::vpOutputSlotLocation(14) == 7);
+    CHECK(tox2::vpOutputSlotLocation(15) == 8);
+    CHECK(tox2::vpOutputSlotLocation(16) == -1);
 }
 
 }  // namespace

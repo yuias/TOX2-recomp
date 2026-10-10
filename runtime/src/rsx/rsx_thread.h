@@ -26,7 +26,7 @@
 #include "rsx/rsx_frame_builder.h"
 #include "rsx/rsx_registers.h"
 
-namespace dal {
+namespace tox2 {
 
 enum class RsxInterrupt { VBlank, Flip, User };
 
@@ -216,7 +216,7 @@ void setRsxExecutorFactory(RsxExecutorFactory factory);
 // Turns the frame builder on for the consumer startRsxThread creates. Call before startRsxThread.
 void setRsxFrameBuilderEnabled(bool enabled);
 
-// Captures the listed frames (see RsxConsumer::enableCapture) into `<dir>/frame_<N>.dalcap`, written on
+// Captures the listed frames (see RsxConsumer::enableCapture) into `<dir>/frame_<N>.tox2cap`, written on
 // the RSX thread after the guest lock is released. Implies the frame builder. Call before startRsxThread.
 void setRsxCaptureFrames(std::vector<std::uint32_t> frames, std::filesystem::path dir);
 
@@ -228,4 +228,4 @@ void setRsxArgCensusFile(std::string json_path);
 // Call once after the RSX state is initialised; later calls do nothing.
 void startRsxThread(std::uint8_t* base);
 
-}  // namespace dal
+}  // namespace tox2

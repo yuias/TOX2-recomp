@@ -31,7 +31,7 @@ def _and_mask(expr: str, mask: int) -> str:
 
 
 def _rotl64(op: Op, rs: int, sh: int) -> str:
-    return op.gpr(rs) if sh == 0 else "dalRotl64(%s, %d)" % (op.gpr(rs), sh)
+    return op.gpr(rs) if sh == 0 else "tox2Rotl64(%s, %d)" % (op.gpr(rs), sh)
 
 
 def _insert(op: Op, rotated: str, mask: int) -> list[str]:
@@ -43,7 +43,7 @@ def _insert(op: Op, rotated: str, mask: int) -> list[str]:
 def emit_rlwinm(op: Op) -> list[str] | None:
     # RPCS3 RLWINM
     mask = _mask(op.f("MB") + 32, op.f("ME") + 32)
-    rotated = "dalRotl32Dup(%s, %d)" % (op.gpr(op.f("rS")), op.f("SH"))
+    rotated = "tox2Rotl32Dup(%s, %d)" % (op.gpr(op.f("rS")), op.f("SH"))
     return _store(op, op.f("rA"), _and_mask(rotated, mask))
 
 
@@ -51,7 +51,7 @@ def emit_rlwinm(op: Op) -> list[str] | None:
 def emit_rlwnm(op: Op) -> list[str] | None:
     # RPCS3 RLWNM: the count is the low 5 bits of rB.
     mask = _mask(op.f("MB") + 32, op.f("ME") + 32)
-    rotated = "dalRotl32Dup(%s, (uint32_t)%s)" % (op.gpr(op.f("rS")), op.gpr(op.f("rB")))
+    rotated = "tox2Rotl32Dup(%s, (uint32_t)%s)" % (op.gpr(op.f("rS")), op.gpr(op.f("rB")))
     return _store(op, op.f("rA"), _and_mask(rotated, mask))
 
 
@@ -59,7 +59,7 @@ def emit_rlwnm(op: Op) -> list[str] | None:
 def emit_rlwimi(op: Op) -> list[str] | None:
     # RPCS3 RLWIMI
     mask = _mask(op.f("MB") + 32, op.f("ME") + 32)
-    return _insert(op, "dalRotl32Dup(%s, %d)" % (op.gpr(op.f("rS")), op.f("SH")), mask)
+    return _insert(op, "tox2Rotl32Dup(%s, %d)" % (op.gpr(op.f("rS")), op.f("SH")), mask)
 
 
 @handler("rldicl")
@@ -94,18 +94,18 @@ def emit_rldimi(op: Op) -> list[str] | None:
 @handler("rldcl")
 def emit_rldcl(op: Op) -> list[str] | None:
     # RPCS3 RLDCL: the count is the low 6 bits of rB.
-    rotated = "dalRotl64(%s, (uint32_t)%s)" % (op.gpr(op.f("rS")), op.gpr(op.f("rB")))
+    rotated = "tox2Rotl64(%s, (uint32_t)%s)" % (op.gpr(op.f("rS")), op.gpr(op.f("rB")))
     return _store(op, op.f("rA"), _and_mask(rotated, _mask(op.f("MB64"), 63)))
 
 
 @handler("rldcr")
 def emit_rldcr(op: Op) -> list[str] | None:
     # RPCS3 RLDCR: the MB64 field holds me.
-    rotated = "dalRotl64(%s, (uint32_t)%s)" % (op.gpr(op.f("rS")), op.gpr(op.f("rB")))
+    rotated = "tox2Rotl64(%s, (uint32_t)%s)" % (op.gpr(op.f("rS")), op.gpr(op.f("rB")))
     return _store(op, op.f("rA"), _and_mask(rotated, _mask(0, op.f("MB64"))))
 
 
-_SHIFT_HELPER = {"slw": "dalSlw", "srw": "dalSrw", "sld": "dalSld", "srd": "dalSrd"}
+_SHIFT_HELPER = {"slw": "tox2Slw", "srw": "tox2Srw", "sld": "tox2Sld", "srd": "tox2Srd"}
 
 
 @handler(*_SHIFT_HELPER)
@@ -118,7 +118,7 @@ def emit_shift(op: Op) -> list[str] | None:
 @handler("sraw", "srad")
 def emit_algebraic_shift(op: Op) -> list[str] | None:
     # RPCS3 SRAW, SRAD: both write XER.CA.
-    helper = "dalSraw" if op.name == "sraw" else "dalSrad"
+    helper = "tox2Sraw" if op.name == "sraw" else "tox2Srad"
     expr = "%s(ctx, %s, %s)" % (helper, op.gpr(op.f("rS")), op.gpr(op.f("rB")))
     return _store(op, op.f("rA"), expr)
 
@@ -127,7 +127,7 @@ def emit_algebraic_shift(op: Op) -> list[str] | None:
 def emit_algebraic_shift_immediate(op: Op) -> list[str] | None:
     # RPCS3 SRAWI, SRADI
     if op.name == "srawi":
-        helper, amount = "dalSraw", op.f("SH")
+        helper, amount = "tox2Sraw", op.f("SH")
     else:
-        helper, amount = "dalSrad", op.f("SH64")
+        helper, amount = "tox2Srad", op.f("SH64")
     return _store(op, op.f("rA"), "%s(ctx, %s, %d)" % (helper, op.gpr(op.f("rS")), amount))

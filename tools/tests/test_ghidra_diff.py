@@ -459,13 +459,13 @@ class DiffCliTest(unittest.TestCase):
             self.assertEqual(ghidra_diff.main([str(self.elf_path)]), 2)
 
 
-@unittest.skipUnless(os.environ.get("DAL_EBOOT_ELF") and os.environ.get("DAL_GHIDRA_JSON"),
-                     "DAL_EBOOT_ELF and DAL_GHIDRA_JSON are not set")
+@unittest.skipUnless(os.environ.get("TOX2_EBOOT_ELF") and os.environ.get("TOX2_GHIDRA_JSON"),
+                     "TOX2_EBOOT_ELF and TOX2_GHIDRA_JSON are not set")
 class RealGhidraDiffTest(unittest.TestCase):
     def test_diff_invariants(self):
-        elf_path, json_path = os.environ["DAL_EBOOT_ELF"], os.environ["DAL_GHIDRA_JSON"]
+        elf_path, json_path = os.environ["TOX2_EBOOT_ELF"], os.environ["TOX2_GHIDRA_JSON"]
         if not (os.path.isfile(elf_path) and os.path.isfile(json_path)):
-            self.skipTest("DAL_EBOOT_ELF or DAL_GHIDRA_JSON does not point to a file")
+            self.skipTest("TOX2_EBOOT_ELF or TOX2_GHIDRA_JSON does not point to a file")
         with tempfile.TemporaryDirectory() as tmp:
             out_path = Path(tmp) / "report.json"
             started = time.monotonic()

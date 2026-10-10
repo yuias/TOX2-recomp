@@ -99,7 +99,7 @@ class Op:
         return "(%s + %s)" % (self.gpr(ra), self.gpr(rb))
 
     def record(self, value: str) -> str:
-        return "dalRecord(ctx, %s);" % value
+        return "tox2Record(ctx, %s);" % value
 
     def unsupported(self, reason: str) -> None:
         self.unhandled_key = "%s:%s" % (self.name, reason)
@@ -172,7 +172,7 @@ class _FunctionEmitter:
 
     def unhandled_stmt(self, key: str, site: int, word: int) -> list[str]:
         self.count_unhandled(key, site)
-        return ["DAL_UNHANDLED(%s, %s);" % (u32(site), u32(word))]
+        return ["TOX2_UNHANDLED(%s, %s);" % (u32(site), u32(word))]
 
     # Direct transfer targets are classified one of: intra, function, import, dynamic.
     def classify(self, target: int, *, allow_intra: bool) -> str:
@@ -195,18 +195,18 @@ class _FunctionEmitter:
             stmt = "goto L_%08x;" % target
             if target <= site:
                 self.stats.loop_hooks += 1
-                return ["{ DAL_LOOP(%s); %s }" % (u32(site), stmt)]
+                return ["{ TOX2_LOOP(%s); %s }" % (u32(site), stmt)]
             return [stmt]
         if kind == "dynamic":
             self.stats.dynamic_targets.append((site, target, dynamic_kind))
             self.stats.edges["fallthrough_tails" if edge == "fallthrough_tails"
                              else "tails_dynamic"] += 1
-            return ["DAL_TAIL_DYN(%s, %s);" % (u32(site), u32(target))]
+            return ["TOX2_TAIL_DYN(%s, %s);" % (u32(site), u32(target))]
         if edge == "fallthrough_tails":
             self.stats.edges[edge] += 1
         else:
             self.stats.edges["tails_direct" if kind == "function" else "tails_import"] += 1
-        return ["DAL_TAIL(%s);" % self.callee(kind, target)]
+        return ["TOX2_TAIL(%s);" % self.callee(kind, target)]
 
     def call_stmt(self, site: int, target: int) -> list[str]:
         ret = u32(site + 4)
@@ -214,16 +214,16 @@ class _FunctionEmitter:
         if kind == "dynamic":
             self.stats.dynamic_targets.append((site, target, "call"))
             self.stats.edges["calls_dynamic_const"] += 1
-            return ["DAL_CALL_DYN(%s, %s, %s);" % (u32(site), u32(target), ret)]
+            return ["TOX2_CALL_DYN(%s, %s, %s);" % (u32(site), u32(target), ret)]
         self.stats.edges["calls_direct" if kind == "function" else "calls_import"] += 1
-        return ["DAL_CALL(%s, %s);" % (self.callee(kind, target), ret)]
+        return ["TOX2_CALL(%s, %s);" % (self.callee(kind, target), ret)]
 
     def indirect_stmt(self, site: int, reg: str, link: bool) -> list[str]:
         if link:
             self.stats.edges["calls_indirect"] += 1
-            return ["DAL_CALL_DYN(%s, ctx->%s, %s);" % (u32(site), reg, u32(site + 4))]
+            return ["TOX2_CALL_DYN(%s, ctx->%s, %s);" % (u32(site), reg, u32(site + 4))]
         self.stats.edges["tails_dynamic"] += 1
-        return ["DAL_TAIL_DYN(%s, ctx->%s);" % (u32(site), reg)]
+        return ["TOX2_TAIL_DYN(%s, ctx->%s);" % (u32(site), reg)]
 
     def switch_stmt(self, site: int, targets: Iterable[int]) -> list[str]:
         """`bcctr` over a resolved jump table: switch on the CTR value (no index register is known)."""
@@ -242,7 +242,7 @@ class _FunctionEmitter:
         if hook:
             # One hook for the whole switch instead of one per backward case.
             self.stats.loop_hooks += 1
-            lines.append("DAL_LOOP(%s);" % u32(site))
+            lines.append("TOX2_LOOP(%s);" % u32(site))
         self.stats.edges["switches"] += 1
         self.stats.edges["switch_cases"] += len(cases)
         lines.append("switch ((uint32_t)ctx->ctr) {")
@@ -306,7 +306,7 @@ class _FunctionEmitter:
             if link:
                 # The target is read before LR is overwritten.
                 self.stats.edges["calls_indirect"] += 1
-                call = "DAL_CALL_DYN(%s, t0, %s);" % (u32(site), ret)
+                call = "TOX2_CALL_DYN(%s, t0, %s);" % (u32(site), ret)
                 return (["{", _INDENT + "uint32_t t0 = (uint32_t)ctx->lr;"]
                         + [_INDENT + line for line in pre + set_lr + self.guarded(cond, [call])]
                         + ["}"])
@@ -328,7 +328,7 @@ class _FunctionEmitter:
         if to == 0:
             return []
         self.stats.edges["traps"] += 1
-        trap = ["DAL_TRAP(%s);" % u32(site)]
+        trap = ["TOX2_TRAP(%s);" % u32(site)]
         if to == 31:
             return trap
         bits = 64 if op.name in ("td", "tdi") else 32
@@ -357,7 +357,7 @@ class _FunctionEmitter:
             return self.branch(op)
         if op.name == "sc":
             self.stats.edges["syscalls"] += 1
-            return ["DAL_SYSCALL(%s);" % u32(op.addr)]
+            return ["TOX2_SYSCALL(%s);" % u32(op.addr)]
         return self.trap(op)
 
     def instruction(self, addr: int) -> list[str]:
@@ -408,8 +408,8 @@ def emit_function(image: CodeImage, entry: int, addrs: Iterable[int], env: EmitE
     out: list[str] = []
     if title:
         out.append("// %s" % _comment_text(title))
-    out.append("DAL_PPU_FUNC(%s) {" % name)
-    out.append(_INDENT + "DAL_ENTER(%s);" % u32(entry))
+    out.append("TOX2_PPU_FUNC(%s) {" % name)
+    out.append(_INDENT + "TOX2_ENTER(%s);" % u32(entry))
     for addr, lines in blocks:
         if addr in em.targeted:
             out.append("L_%08x:" % addr)

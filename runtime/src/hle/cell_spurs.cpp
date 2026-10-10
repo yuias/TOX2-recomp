@@ -13,13 +13,13 @@
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_spu.h"
 #include "lv2/sys_sync.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "cellSpurs";
@@ -77,7 +77,7 @@ std::map<std::uint32_t, std::uint32_t> g_spurs_groups;
 
 // _cellSpursAttributeInitialize(attr*, revision, sdkVersion, nSpus, spuPriority, ppuPriority,
 //                               exitIfNoWork)
-void spursAttributeInitialize(DalPpuContext* ctx, std::uint8_t* base) {
+void spursAttributeInitialize(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t attr = argU32(ctx, 0);
     if (attr == 0) return setResultCode(ctx, kSpursErrorNullPointer);
     if (attr % kAttributeAlign != 0) return setResultCode(ctx, kSpursErrorAlign);
@@ -87,17 +87,17 @@ void spursAttributeInitialize(DalPpuContext* ctx, std::uint8_t* base) {
     }
 
     std::memset(base + attr, 0, kAttributeSize);
-    dalWrite32(base, attr + kAttrRevision, argU32(ctx, 1));
-    dalWrite32(base, attr + kAttrSdkVersion, argU32(ctx, 2));
-    dalWrite32(base, attr + kAttrNSpus, argU32(ctx, 3));
-    dalWrite32(base, attr + kAttrSpuPriority, argU32(ctx, 4));
-    dalWrite32(base, attr + kAttrPpuPriority, argU32(ctx, 5));
-    dalWrite8(base, attr + kAttrExitIfNoWork, (ctx->gpr[9] & 0xff) != 0 ? 1 : 0);
+    tox2Write32(base, attr + kAttrRevision, argU32(ctx, 1));
+    tox2Write32(base, attr + kAttrSdkVersion, argU32(ctx, 2));
+    tox2Write32(base, attr + kAttrNSpus, argU32(ctx, 3));
+    tox2Write32(base, attr + kAttrSpuPriority, argU32(ctx, 4));
+    tox2Write32(base, attr + kAttrPpuPriority, argU32(ctx, 5));
+    tox2Write8(base, attr + kAttrExitIfNoWork, (ctx->gpr[9] & 0xff) != 0 ? 1 : 0);
     setResultCode(ctx, kCellOk);
 }
 
 // cellSpursInitializeWithAttribute2(spurs*, const attr*)
-void spursInitializeWithAttribute2(DalPpuContext* ctx, std::uint8_t* base) {
+void spursInitializeWithAttribute2(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t spurs = argU32(ctx, 0);
     const std::uint32_t attr = argU32(ctx, 1);
     if (attr == 0) return setResultCode(ctx, kSpursErrorNullPointer);
@@ -107,13 +107,13 @@ void spursInitializeWithAttribute2(DalPpuContext* ctx, std::uint8_t* base) {
               std::format("cellSpursInitializeWithAttribute2: attr {:#010x} is not committed", attr));
     }
 
-    const std::uint32_t revision = dalRead32(base, attr + kAttrRevision);
+    const std::uint32_t revision = tox2Read32(base, attr + kAttrRevision);
     if (revision > 2) return setResultCode(ctx, kSpursErrorInval);
 
     // _spurs::initialize
     if (spurs == 0) return setResultCode(ctx, kSpursErrorNullPointer);
     if (spurs % kSpursAlign != 0) return setResultCode(ctx, kSpursErrorAlign);
-    const std::uint32_t prefix_size = dalRead32(base, attr + kAttrPrefixSize);
+    const std::uint32_t prefix_size = tox2Read32(base, attr + kAttrPrefixSize);
     if (prefix_size > kNameMaxLength) return setResultCode(ctx, kSpursErrorInval);
     if (!process().memory.isCommitted(spurs, kSpursSize2)) {
         fatal(FatalKind::GuestFault,
@@ -129,49 +129,49 @@ void spursInitializeWithAttribute2(DalPpuContext* ctx, std::uint8_t* base) {
     if (group == 0) return setResultCode(ctx, kCellEagain);
     g_spurs_groups[spurs] = group;
 
-    const std::uint32_t exit_if_no_work = (dalRead8(base, attr + kAttrExitIfNoWork) != 0 ? kAttrFlagExitIfNoWork : 0);
-    const std::uint32_t flags = dalRead32(base, attr + kAttrFlags) | exit_if_no_work | kAttrFlagSecondVersion;
-    const std::uint32_t n_spus = dalRead32(base, attr + kAttrNSpus);
+    const std::uint32_t exit_if_no_work = (tox2Read8(base, attr + kAttrExitIfNoWork) != 0 ? kAttrFlagExitIfNoWork : 0);
+    const std::uint32_t flags = tox2Read32(base, attr + kAttrFlags) | exit_if_no_work | kAttrFlagSecondVersion;
+    const std::uint32_t n_spus = tox2Read32(base, attr + kAttrNSpus);
 
     std::memset(base + spurs, 0, kSpursSize2);
-    dalWrite32(base, spurs + kSpursRevision, revision);
-    dalWrite32(base, spurs + kSpursSdkVersion, dalRead32(base, attr + kAttrSdkVersion));
-    dalWrite64(base, spurs + kSpursPpu0, 0xffffffffull);
-    dalWrite64(base, spurs + kSpursPpu1, 0xffffffffull);
-    dalWrite32(base, spurs + kSpursFlags, flags);
-    dalWrite8(base, spurs + kSpursPrefixSize, static_cast<std::uint8_t>(prefix_size));
+    tox2Write32(base, spurs + kSpursRevision, revision);
+    tox2Write32(base, spurs + kSpursSdkVersion, tox2Read32(base, attr + kAttrSdkVersion));
+    tox2Write64(base, spurs + kSpursPpu0, 0xffffffffull);
+    tox2Write64(base, spurs + kSpursPpu1, 0xffffffffull);
+    tox2Write32(base, spurs + kSpursFlags, flags);
+    tox2Write8(base, spurs + kSpursPrefixSize, static_cast<std::uint8_t>(prefix_size));
     std::memcpy(base + spurs + kSpursPrefix, base + attr + kAttrPrefix, prefix_size);
-    for (std::uint32_t i = 0; i < 8; i++) dalWrite8(base, spurs + kSpursSysSrvPreemptWklId + i, 0xff);
-    dalWrite32(base, spurs + kSpursWklInfoSysSrvSize, 0x2200);
-    dalWrite8(base, spurs + kSpursWklInfoSysSrvUniqueId, 0xff);
-    dalWrite32(base, spurs + kSpursUnk11, 0xffffffff);
-    dalWrite32(base, spurs + kSpursUnk12, 0xffffffff);
-    dalWrite8(base, spurs + kSpursNSpus, static_cast<std::uint8_t>(n_spus));
-    dalWrite32(base, spurs + kSpursSpuPriority, dalRead32(base, attr + kAttrSpuPriority));
-    dalWrite32(base, spurs + kSpursPpuPriority, dalRead32(base, attr + kAttrPpuPriority));
-    dalWrite32(base, spurs + kSpursSpuTg, group);
-    dalWrite8(base, spurs + kSpursFlags1,
-              ((flags & kAttrFlagExitIfNoWork) != 0 ? kFlags1ExitIfNoWork : 0) | kFlags1ThirtyTwoWorkloads);
-    dalWrite8(base, spurs + kSpursWklFlagReceiver, 0xff);
-    dalWrite32(base, spurs + kSpursWklFlag, 0xffffffff);
+    for (std::uint32_t i = 0; i < 8; i++) tox2Write8(base, spurs + kSpursSysSrvPreemptWklId + i, 0xff);
+    tox2Write32(base, spurs + kSpursWklInfoSysSrvSize, 0x2200);
+    tox2Write8(base, spurs + kSpursWklInfoSysSrvUniqueId, 0xff);
+    tox2Write32(base, spurs + kSpursUnk11, 0xffffffff);
+    tox2Write32(base, spurs + kSpursUnk12, 0xffffffff);
+    tox2Write8(base, spurs + kSpursNSpus, static_cast<std::uint8_t>(n_spus));
+    tox2Write32(base, spurs + kSpursSpuPriority, tox2Read32(base, attr + kAttrSpuPriority));
+    tox2Write32(base, spurs + kSpursPpuPriority, tox2Read32(base, attr + kAttrPpuPriority));
+    tox2Write32(base, spurs + kSpursSpuTg, group);
+    tox2Write8(base, spurs + kSpursFlags1,
+               ((flags & kAttrFlagExitIfNoWork) != 0 ? kFlags1ExitIfNoWork : 0) | kFlags1ThirtyTwoWorkloads);
+    tox2Write8(base, spurs + kSpursWklFlagReceiver, 0xff);
+    tox2Write32(base, spurs + kSpursWklFlag, 0xffffffff);
 
     logOnce(std::format("spurs-init-{:08x}", spurs),
-            "dal: spurs: initialized {:#010x} nSpus={} group={:#010x} (no SPU threads run)", spurs, n_spus, group);
+            "tox2: spurs: initialized {:#010x} nSpus={} group={:#010x} (no SPU threads run)", spurs, n_spus, group);
     setResultCode(ctx, kCellOk);
 }
 
 // cellSpursGetSpuThreadGroupId(spurs*, u32* group)
-void spursGetSpuThreadGroupId(DalPpuContext* ctx, std::uint8_t* base) {
+void spursGetSpuThreadGroupId(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t spurs = argU32(ctx, 0);
     const std::uint32_t group = argU32(ctx, 1);
     if (spurs == 0 || group == 0) return setResultCode(ctx, kSpursErrorNullPointer);
     if (spurs % kSpursAlign != 0) return setResultCode(ctx, kSpursErrorAlign);
-    dalWrite32(base, group, dalRead32(base, spurs + kSpursSpuTg));
+    tox2Write32(base, group, tox2Read32(base, spurs + kSpursSpuTg));
     setResultCode(ctx, kCellOk);
 }
 
 // cellSpursFinalize(spurs*): RPCS3 only validates the pointer (the rest is a todo there).
-void spursFinalize(DalPpuContext* ctx, std::uint8_t* base) {
+void spursFinalize(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const std::uint32_t spurs = argU32(ctx, 0);
     if (spurs == 0) return setResultCode(ctx, kSpursErrorNullPointer);
@@ -199,4 +199,4 @@ void resetSpurs() {
     g_spurs_groups.clear();
 }
 
-}  // namespace dal
+}  // namespace tox2

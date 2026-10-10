@@ -13,14 +13,14 @@
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/threads.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 // RPCS3 returns lv2 error codes as s32 converted to u64, so the high word is sign-extended.
-void setResult(DalPpuContext* ctx, std::uint32_t code) {
+void setResult(Tox2PpuContext* ctx, std::uint32_t code) {
     ctx->gpr[3] = static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(code)));
 }
 
@@ -31,9 +31,9 @@ constexpr std::uint64_t kPageSizeFlag64k = 0x200;
 constexpr std::int32_t kTtyChannelMax = 15;
 
 // Sleeps never get signalled; the timeout is the only way out.
-void sleepFor(DalPpuContext* ctx, std::uint8_t* base, std::uint64_t microseconds) {
+void sleepFor(Tox2PpuContext* ctx, std::uint8_t* base, std::uint64_t microseconds) {
     if (microseconds == 0) {
-        dalYield(ctx, base);
+        tox2Yield(ctx, base);
         return;
     }
     // Keeps the deadline arithmetic of the steady clock far from overflow.
@@ -47,20 +47,20 @@ void sleepFor(DalPpuContext* ctx, std::uint8_t* base, std::uint64_t microseconds
 }  // namespace
 
 // 22 _sys_process_exit(s32 status, ...)
-void sysProcessExit(DalPpuContext* ctx, std::uint8_t* base) {
+void sysProcessExit(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const auto status = static_cast<std::int32_t>(ctx->gpr[3]);
-    stopProcess(ExitCode::ProcessExit, std::format("dal: stop: process exit status {}", status));
+    stopProcess(ExitCode::ProcessExit, std::format("tox2: stop: process exit status {}", status));
 }
 
 // 402 sys_tty_read: RPCS3 has no input outside debug-console mode.
-void sysTtyRead(DalPpuContext* ctx, std::uint8_t* base) {
+void sysTtyRead(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResult(ctx, kCellEio);
 }
 
 // 403 sys_tty_write(s32 ch, const char* buf, u32 len, u32* pwritelen)
-void sysTtyWrite(DalPpuContext* ctx, std::uint8_t* base) {
+void sysTtyWrite(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto channel = static_cast<std::int32_t>(ctx->gpr[3]);
     const auto buf = static_cast<std::uint32_t>(ctx->gpr[4]);
     const auto len = static_cast<std::uint32_t>(ctx->gpr[5]);
@@ -75,30 +75,30 @@ void sysTtyWrite(DalPpuContext* ctx, std::uint8_t* base) {
         setResult(ctx, kCellEfault);
         return;
     }
-    dalWrite32(base, pwritelen, len);
+    tox2Write32(base, pwritelen, len);
     setResult(ctx, kCellOk);
 }
 
 // 141 sys_timer_usleep(u64 microseconds)
-void sysTimerUsleep(DalPpuContext* ctx, std::uint8_t* base) {
+void sysTimerUsleep(Tox2PpuContext* ctx, std::uint8_t* base) {
     sleepFor(ctx, base, ctx->gpr[3]);
     setResult(ctx, kCellOk);
 }
 
 // 142 sys_timer_sleep(u32 seconds)
-void sysTimerSleep(DalPpuContext* ctx, std::uint8_t* base) {
+void sysTimerSleep(Tox2PpuContext* ctx, std::uint8_t* base) {
     sleepFor(ctx, base, static_cast<std::uint32_t>(ctx->gpr[3]) * 1000000ull);
     setResult(ctx, kCellOk);
 }
 
 // 147 sys_time_get_timebase_frequency
-void sysTimeGetTimebaseFrequency(DalPpuContext* ctx, std::uint8_t* base) {
+void sysTimeGetTimebaseFrequency(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     ctx->gpr[3] = kTimebaseFrequency;
 }
 
 // 348 sys_memory_allocate(u64 size, u64 flags, u32* alloc_addr). The error order follows RPCS3.
-void sysMemoryAllocate(DalPpuContext* ctx, std::uint8_t* base) {
+void sysMemoryAllocate(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint64_t size = ctx->gpr[3];
     const std::uint64_t flags = ctx->gpr[4];
     const auto alloc_addr = static_cast<std::uint32_t>(ctx->gpr[5]);
@@ -139,12 +139,12 @@ void sysMemoryAllocate(DalPpuContext* ctx, std::uint8_t* base) {
         return;
     }
     p.user_memory_used += bytes;
-    dalWrite32(base, alloc_addr, addr);
+    tox2Write32(base, alloc_addr, addr);
     setResult(ctx, kCellOk);
 }
 
 // 349 sys_memory_free(u32 addr)
-void sysMemoryFree(DalPpuContext* ctx, std::uint8_t* base) {
+void sysMemoryFree(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const auto addr = static_cast<std::uint32_t>(ctx->gpr[3]);
     Process& p = process();
@@ -167,12 +167,12 @@ void sysMemoryFree(DalPpuContext* ctx, std::uint8_t* base) {
 
 // 352 sys_memory_get_user_memory_size(sys_memory_info_t* info): {total, available}, BE u32 each.
 // There are no memory containers, so the total is the whole default container.
-void sysMemoryGetUserMemorySize(DalPpuContext* ctx, std::uint8_t* base) {
+void sysMemoryGetUserMemorySize(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto info = static_cast<std::uint32_t>(ctx->gpr[3]);
     const Process& p = process();
-    dalWrite32(base, info, p.user_memory_total);
-    dalWrite32(base, info + 4, p.user_memory_total - p.user_memory_used);
+    tox2Write32(base, info, p.user_memory_total);
+    tox2Write32(base, info + 4, p.user_memory_total - p.user_memory_used);
     setResult(ctx, kCellOk);
 }
 
-}  // namespace dal
+}  // namespace tox2

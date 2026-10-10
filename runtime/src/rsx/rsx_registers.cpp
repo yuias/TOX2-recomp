@@ -2,7 +2,7 @@
 
 #include "rsx/fifo_parser.h"
 
-namespace dal {
+namespace tox2 {
 
 namespace {
 
@@ -455,4 +455,4 @@ void RsxRegisters::apply(std::uint32_t method, std::uint32_t value) {
     }
 }
 
-}  // namespace dal
+}  // namespace tox2

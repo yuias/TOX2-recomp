@@ -17,7 +17,7 @@
 #include "core/host_functions.h"
 #include "core/log.h"
 #include "core/threads.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
@@ -26,7 +26,7 @@
 #include "rsx/rsx_state.h"
 #include "rsx/rsx_thread.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "cellGcmSys";
@@ -101,30 +101,30 @@ void requireCommitted(std::uint32_t addr, std::uint32_t size, const char* what) 
 
 // Integer argument `n` (>= 8) that the caller passed in its stack parameter save area. The slot is
 // a doubleword; the argument is its low word.
-std::uint32_t stackArgU32(const DalPpuContext* ctx, const std::uint8_t* base, std::uint32_t n) {
+std::uint32_t stackArgU32(const Tox2PpuContext* ctx, const std::uint8_t* base, std::uint32_t n) {
     return static_cast<std::uint32_t>(
-            dalRead64(base, static_cast<std::uint32_t>(ctx->gpr[1]) + kStackArgBase + 8 * (n - 8)));
+            tox2Read64(base, static_cast<std::uint32_t>(ctx->gpr[1]) + kStackArgBase + 8 * (n - 8)));
 }
 
 // Appends a method header and its arguments at the context's `current` and advances it.
 void writeCommand(std::uint8_t* base, std::uint32_t context, std::uint32_t method,
                   std::initializer_list<std::uint32_t> args) {
     const std::uint32_t bytes = 4 * (static_cast<std::uint32_t>(args.size()) + 1);
-    std::uint32_t current = dalRead32(base, context + kContextCurrent);
+    std::uint32_t current = tox2Read32(base, context + kContextCurrent);
     requireCommitted(current, bytes, "command buffer");
     const std::uint32_t start = current;
-    dalWrite32(base, current, method | (static_cast<std::uint32_t>(args.size()) << kFifoCountShift));
+    tox2Write32(base, current, method | (static_cast<std::uint32_t>(args.size()) << kFifoCountShift));
     current += 4;
     for (const std::uint32_t arg : args) {
-        dalWrite32(base, current, arg);
+        tox2Write32(base, current, arg);
         current += 4;
     }
-    dalWrite32(base, context + kContextCurrent, start + bytes);
+    tox2Write32(base, context + kContextCurrent, start + bytes);
 }
 
 // Wrap callback of the default context: flush up to `current`, continue in the next fragment.
 // RPCS3 `cellGcmCallback`, `getNextCommandBufferBeginEnd`, `isInCommandBufferExcept`.
-void gcmCallback(DalPpuContext* ctx, std::uint8_t* base) {
+void gcmCallback(Tox2PpuContext* ctx, std::uint8_t* base) {
     RsxState& state = rsxState();
     const std::uint32_t context = argU32(ctx, 0);
     requireCommitted(context, kContextSize, "command buffer context");
@@ -138,8 +138,8 @@ void gcmCallback(DalPpuContext* ctx, std::uint8_t* base) {
         return offset;
     };
 
-    const std::uint32_t current = dalRead32(base, context + kContextCurrent);
-    dalWrite32(base, kRsxControlAddr + kControlPut, toOffset(current));
+    const std::uint32_t current = tox2Read32(base, context + kContextCurrent);
+    tox2Write32(base, kRsxControlAddr + kControlPut, toOffset(current));
 
     const std::uint32_t buffer_begin = state.command_begin;
     const std::uint32_t range = (current - buffer_begin) / kFragmentSize;
@@ -151,10 +151,10 @@ void gcmCallback(DalPpuContext* ctx, std::uint8_t* base) {
     }
 
     const std::uint32_t jump_target = toOffset(next_begin);
-    dalWrite32(base, current, kFifoOldJump | jump_target);
-    dalWrite32(base, context + kContextBegin, next_begin);
-    dalWrite32(base, context + kContextCurrent, next_begin);
-    dalWrite32(base, context + kContextEnd, next_end);
+    tox2Write32(base, current, kFifoOldJump | jump_target);
+    tox2Write32(base, context + kContextBegin, next_begin);
+    tox2Write32(base, context + kContextCurrent, next_begin);
+    tox2Write32(base, context + kContextEnd, next_end);
 
     // The consumer must have left the new fragment before the game writes into it. RPCS3 also has a
     // first test for `get` outside the whole default buffer, but its two comparisons can never hold
@@ -164,7 +164,7 @@ void gcmCallback(DalPpuContext* ctx, std::uint8_t* base) {
     blockingWait(
             rsxGetAdvanced(),
             [&] {
-                const std::uint32_t get = dalRead32(base, kRsxControlAddr + kControlGet);
+                const std::uint32_t get = tox2Read32(base, kRsxControlAddr + kControlGet);
                 return get < new_begin_offset || get > new_end_offset;
             },
             "gcm command buffer wait", std::nullopt);
@@ -172,7 +172,7 @@ void gcmCallback(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // _cellGcmInitBody(context**, cmdSize, ioSize, ioAddress)
-void gcmInitBodyHandler(DalPpuContext* ctx, std::uint8_t* base) {
+void gcmInitBodyHandler(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t result =
             gcmInitBody(base, argU32(ctx, 0), argU32(ctx, 1), argU32(ctx, 2), argU32(ctx, 3), kRsxLocalSize);
     // Only the import starts the interrupt thread and the consumer: tests call gcmInitBody and drive
@@ -185,46 +185,46 @@ void gcmInitBodyHandler(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellGcmGetConfiguration(CellGcmConfig*)
-void gcmGetConfiguration(DalPpuContext* ctx, std::uint8_t* base) {
+void gcmGetConfiguration(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t config = argU32(ctx, 0);
     requireCommitted(config, kConfigSize, "CellGcmConfig");
     const RsxState& state = rsxState();
     const bool ready = state.initialized;
-    dalWrite32(base, config + kConfigLocalAddress, ready ? kRsxLocalBase : 0);
-    dalWrite32(base, config + kConfigIoAddress, state.io_address);
-    dalWrite32(base, config + kConfigLocalSize, state.local_size);
-    dalWrite32(base, config + kConfigIoSize, state.io_size);
-    dalWrite32(base, config + kConfigMemoryFrequency, ready ? kMemoryFrequency : 0);
-    dalWrite32(base, config + kConfigCoreFrequency, ready ? kCoreFrequency : 0);
+    tox2Write32(base, config + kConfigLocalAddress, ready ? kRsxLocalBase : 0);
+    tox2Write32(base, config + kConfigIoAddress, state.io_address);
+    tox2Write32(base, config + kConfigLocalSize, state.local_size);
+    tox2Write32(base, config + kConfigIoSize, state.io_size);
+    tox2Write32(base, config + kConfigMemoryFrequency, ready ? kMemoryFrequency : 0);
+    tox2Write32(base, config + kConfigCoreFrequency, ready ? kCoreFrequency : 0);
 }
 
 // cellGcmMapMainMemory(ea, size, u32* offset)
-void gcmMapMainMemory(DalPpuContext* ctx, std::uint8_t* base) {
+void gcmMapMainMemory(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t offset_out = argU32(ctx, 2);
     std::uint32_t io = 0;
     const std::uint32_t error = rsxMapMainMemory(argU32(ctx, 0), argU32(ctx, 1), io);
     if (error == 0) {
         requireCommitted(offset_out, 4, "cellGcmMapMainMemory offset pointer");
-        dalWrite32(base, offset_out, io);
+        tox2Write32(base, offset_out, io);
     }
     setResultCode(ctx, error);
 }
 
 // cellGcmAddressToOffset(address, u32* offset)
-void gcmAddressToOffset(DalPpuContext* ctx, std::uint8_t* base) {
+void gcmAddressToOffset(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t offset_out = argU32(ctx, 1);
     std::uint32_t offset = 0;
     if (!rsxEaToOffset(argU32(ctx, 0), offset)) return setResultCode(ctx, kGcmErrorFailure);
     requireCommitted(offset_out, 4, "cellGcmAddressToOffset offset pointer");
-    dalWrite32(base, offset_out, offset);
+    tox2Write32(base, offset_out, offset);
     setResultCode(ctx, kCellOk);
 }
 
 // cellGcmUnmapEaIoAddress(ea)
-void gcmUnmapEaIoAddress(DalPpuContext* ctx, std::uint8_t*) { setResultCode(ctx, rsxUnmapEa(argU32(ctx, 0))); }
+void gcmUnmapEaIoAddress(Tox2PpuContext* ctx, std::uint8_t*) { setResultCode(ctx, rsxUnmapEa(argU32(ctx, 0))); }
 
 // cellGcmGetTiledPitchSize(size): the smallest tiled pitch that holds `size`, 0 when none does.
-void gcmGetTiledPitchSize(DalPpuContext* ctx, std::uint8_t*) {
+void gcmGetTiledPitchSize(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t size = argU32(ctx, 0);
     std::uint32_t result = 0;
     for (std::size_t i = 0; i + 1 < std::size(kTiledPitches); i++) {
@@ -236,64 +236,64 @@ void gcmGetTiledPitchSize(DalPpuContext* ctx, std::uint8_t*) {
     ctx->gpr[3] = result;
 }
 
-void gcmGetControlRegister(DalPpuContext* ctx, std::uint8_t*) { ctx->gpr[3] = kRsxControlAddr; }
+void gcmGetControlRegister(Tox2PpuContext* ctx, std::uint8_t*) { ctx->gpr[3] = kRsxControlAddr; }
 
-void gcmGetDefaultCommandWordSize(DalPpuContext* ctx, std::uint8_t*) { ctx->gpr[3] = rsxState().command_size; }
+void gcmGetDefaultCommandWordSize(Tox2PpuContext* ctx, std::uint8_t*) { ctx->gpr[3] = rsxState().command_size; }
 
-void gcmGetDefaultSegmentWordSize(DalPpuContext* ctx, std::uint8_t*) { ctx->gpr[3] = rsxState().segment_size; }
+void gcmGetDefaultSegmentWordSize(Tox2PpuContext* ctx, std::uint8_t*) { ctx->gpr[3] = rsxState().segment_size; }
 
 // cellGcmSetDefaultFifoSize(bufferSize, segmentSize): RPCS3 only logs.
-void gcmSetDefaultFifoSize(DalPpuContext* ctx, std::uint8_t*) {
-    logOnce("gcm-set-default-fifo-size", "dal: gcm: cellGcmSetDefaultFifoSize({:#x}, {:#x}) ignored", argU32(ctx, 0),
+void gcmSetDefaultFifoSize(Tox2PpuContext* ctx, std::uint8_t*) {
+    logOnce("gcm-set-default-fifo-size", "tox2: gcm: cellGcmSetDefaultFifoSize({:#x}, {:#x}) ignored", argU32(ctx, 0),
             argU32(ctx, 1));
     setResultCode(ctx, kCellOk);
 }
 
 // _cellGcmFunc15(context*): void in RPCS3 and a todo there.
-void gcmFunc15(DalPpuContext* ctx, std::uint8_t*) {
-    logOnce("gcm-func15", "dal: gcm: _cellGcmFunc15({:#010x}) ignored", argU32(ctx, 0));
+void gcmFunc15(Tox2PpuContext* ctx, std::uint8_t*) {
+    logOnce("gcm-func15", "tox2: gcm: _cellGcmFunc15({:#010x}) ignored", argU32(ctx, 0));
 }
 
 // cellGcmGetTimeStamp(index): the timestamp of local report `index`.
-void gcmGetTimeStamp(DalPpuContext* ctx, std::uint8_t* base) {
+void gcmGetTimeStamp(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t index = argU32(ctx, 0);
     if (index >= 2048) {
-        logError("dal: gcm: cellGcmGetTimeStamp: index {} is out of range", index);
+        logError("tox2: gcm: cellGcmGetTimeStamp: index {} is out of range", index);
         ctx->gpr[3] = 0;
         return;
     }
-    ctx->gpr[3] = dalRead64(base, kRsxLabelAddr + kRsxReportsReportOffset + 0x10 * index);
+    ctx->gpr[3] = tox2Read64(base, kRsxLabelAddr + kRsxReportsReportOffset + 0x10 * index);
 }
 
 // cellGcmSetDisplayBuffer(id, offset, pitch, width, height)
-void gcmSetDisplayBuffer(DalPpuContext* ctx, std::uint8_t*) {
+void gcmSetDisplayBuffer(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t id = argU32(ctx, 0) & 0xff;
     if (id > kMaxDisplayId) return setResultCode(ctx, kGcmErrorFailure);
     RsxState& state = rsxState();
     state.display[id] = {argU32(ctx, 1), argU32(ctx, 2), argU32(ctx, 3), argU32(ctx, 4)};
     const RsxDisplayBuffer& buffer = state.display[id];
     logOnce(std::format("gcm-display-{}-{}-{}-{}-{}", id, buffer.offset, buffer.pitch, buffer.width, buffer.height),
-            "dal: gcm: display buffer {}: offset {:#x} pitch {:#x} {}x{}", id, buffer.offset, buffer.pitch,
+            "tox2: gcm: display buffer {}: offset {:#x} pitch {:#x} {}x{}", id, buffer.offset, buffer.pitch,
             buffer.width, buffer.height);
     state.display_count = std::max(state.display_count, id + 1);
     setResultCode(ctx, kCellOk);
 }
 
 // cellGcmSetFlipMode(mode): void. Recorded only; it does not delay flips.
-void gcmSetFlipMode(DalPpuContext* ctx, std::uint8_t*) {
+void gcmSetFlipMode(Tox2PpuContext* ctx, std::uint8_t*) {
     rsxState().requested_vsync = argU32(ctx, 0) == kRsxDisplayVsync;
 }
 
 // cellGcmResetFlipStatus(): void
-void gcmResetFlipStatus(DalPpuContext*, std::uint8_t*) { rsxState().flip_status = kRsxFlipStatusWaiting; }
+void gcmResetFlipStatus(Tox2PpuContext*, std::uint8_t*) { rsxState().flip_status = kRsxFlipStatusWaiting; }
 
 // cellGcmGetLastFlipTime(): u64
-void gcmGetLastFlipTime(DalPpuContext* ctx, std::uint8_t*) { ctx->gpr[3] = rsxState().last_flip_time; }
+void gcmGetLastFlipTime(Tox2PpuContext* ctx, std::uint8_t*) { ctx->gpr[3] = rsxState().last_flip_time; }
 
 // cellGcmSetFlipHandler(handler), cellGcmSetVBlankHandler(handler), cellGcmSetUserHandler(handler):
 // void; the handler is ignored before initialisation, as RPCS3 does.
 template <std::uint32_t RsxState::* Member>
-void gcmSetHandler(DalPpuContext* ctx, std::uint8_t*) {
+void gcmSetHandler(Tox2PpuContext* ctx, std::uint8_t*) {
     RsxState& state = rsxState();
     if (state.initialized) state.*Member = argU32(ctx, 0);
 }
@@ -302,14 +302,14 @@ void gcmSetHandler(DalPpuContext* ctx, std::uint8_t*) {
 // RPCS3 `gcmSetPrepareFlip<true>`: no room check and no update of the put pointer.
 void writeFlipCommand(std::uint8_t* base, std::uint32_t context, std::uint32_t id, const char* name) {
     if (id > kMaxDisplayId) {
-        logError("dal: gcm: {}: display buffer id {} is out of range, nothing written", name, id);
+        logError("tox2: gcm: {}: display buffer id {} is out of range, nothing written", name, id);
         return;
     }
     writeCommand(base, context, kMethodGcmFlipCommand, {id});
 }
 
 // _cellGcmSetFlipCommand(context*, id): void
-void gcmSetFlipCommand(DalPpuContext* ctx, std::uint8_t* base) {
+void gcmSetFlipCommand(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t context = argU32(ctx, 0);
     requireCommitted(context, kContextSize, "command buffer context");
     writeFlipCommand(base, context, argU32(ctx, 1), "_cellGcmSetFlipCommand");
@@ -317,7 +317,7 @@ void gcmSetFlipCommand(DalPpuContext* ctx, std::uint8_t* base) {
 
 // _cellGcmSetFlipCommandWithWaitLabel(context*, id, label_index, label_value): void. The label
 // wait is written even when the flip itself is refused.
-void gcmSetFlipCommandWithWaitLabel(DalPpuContext* ctx, std::uint8_t* base) {
+void gcmSetFlipCommandWithWaitLabel(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t context = argU32(ctx, 0);
     requireCommitted(context, kContextSize, "command buffer context");
     writeCommand(base, context, kMethodNv406eSemaphoreOffset, {argU32(ctx, 2) * 0x10, argU32(ctx, 3)});
@@ -325,7 +325,7 @@ void gcmSetFlipCommandWithWaitLabel(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellGcmSetTileInfo(index, location, offset, size, pitch, comp, base, bank)
-void gcmSetTileInfo(DalPpuContext* ctx, std::uint8_t*) {
+void gcmSetTileInfo(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t index = argU32(ctx, 0) & 0xff, location = argU32(ctx, 1) & 0xff;
     const std::uint32_t offset = argU32(ctx, 2), size = argU32(ctx, 3), pitch = argU32(ctx, 4);
     const std::uint32_t comp = argU32(ctx, 5) & 0xff, tile_base = argU32(ctx, 6) & 0xffff, bank = argU32(ctx, 7) & 0xff;
@@ -349,7 +349,7 @@ void gcmSetTileInfo(DalPpuContext* ctx, std::uint8_t*) {
 
 // cellGcmBindTile(index), cellGcmUnbindTile(index)
 template <bool Bound>
-void gcmBindTile(DalPpuContext* ctx, std::uint8_t*) {
+void gcmBindTile(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t index = argU32(ctx, 0) & 0xff;
     if (index >= kRsxTileCount) return setResultCode(ctx, kGcmErrorInvalidValue);
     rsxState().tiles[index].bound = Bound;
@@ -360,7 +360,7 @@ void gcmBindTile(DalPpuContext* ctx, std::uint8_t*) {
 // sFunc, sRef, sMask). RPCS3 packs the region into the register layout of the lv1 call and its
 // handler (`sys_rsx_context_attribute`, package 0x301) validates and unpacks it again; the fields
 // are kept the way that round trip leaves them.
-void gcmBindZcull(DalPpuContext* ctx, std::uint8_t* base) {
+void gcmBindZcull(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t index = argU32(ctx, 0) & 0xff;
     const std::uint32_t offset = argU32(ctx, 1), width = argU32(ctx, 2), height = argU32(ctx, 3);
     const std::uint32_t cull_start = argU32(ctx, 4), z_format = argU32(ctx, 5), aa_format = argU32(ctx, 6);
@@ -402,7 +402,7 @@ void gcmBindZcull(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellGcmUnbindZcull(index)
-void gcmUnbindZcull(DalPpuContext* ctx, std::uint8_t*) {
+void gcmUnbindZcull(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t index = argU32(ctx, 0) & 0xff;
     if (index >= kRsxZcullCount) return setResultCode(ctx, kGcmErrorInvalidValue);
     rsxState().zculls[index].bound = false;
@@ -447,21 +447,21 @@ std::uint32_t gcmInitBody(std::uint8_t* base, std::uint32_t context_pp, std::uin
     RsxState& state = rsxState();
     if (state.initialized) {
         // RPCS3 supports one context only and throws on a second allocation.
-        logError("dal: gcm: _cellGcmInitBody called twice");
+        logError("tox2: gcm: _cellGcmInitBody called twice");
         return kGcmErrorFailure;
     }
     requireCommitted(context_pp, 4, "context out-pointer");
 
     GuestMemory& memory = process().memory;
     if (!memory.commit(kRsxDeviceAddr, kRsxContextCommitSize) || !memory.commit(kRsxLocalBase, local_size)) {
-        logError("dal: gcm: cannot commit the RSX memory areas");
+        logError("tox2: gcm: cannot commit the RSX memory areas");
         return kGcmErrorFailure;
     }
 
     state = RsxState{};
     state.local_size = local_size;
     if (const std::uint32_t error = rsxMapEaIo(io_address, 0, io_size); error != 0) {
-        logError("dal: gcm: cannot map the IO area ea={:#010x} size={:#x} (error {:#010x})", io_address, io_size,
+        logError("tox2: gcm: cannot map the IO area ea={:#010x} size={:#x} (error {:#010x})", io_address, io_size,
                  error);
         memory.decommit(kRsxDeviceAddr, kRsxContextCommitSize);
         memory.decommit(kRsxLocalBase, local_size);
@@ -472,40 +472,40 @@ std::uint32_t gcmInitBody(std::uint8_t* base, std::uint32_t context_pp, std::uin
     // Reports area (RPCS3 sys_rsx_context_allocate): semaphores, notify and report headers.
     std::memset(base + kRsxLabelAddr, 0, kRsxReportsSize);
     for (std::uint32_t i = 0; i < 1024; i += 4) {
-        dalWrite32(base, kRsxLabelAddr + 4 * (i + 0), 0x1337C0D3);
-        dalWrite32(base, kRsxLabelAddr + 4 * (i + 1), 0x1337BABE);
-        dalWrite32(base, kRsxLabelAddr + 4 * (i + 2), 0x1337BEEF);
-        dalWrite32(base, kRsxLabelAddr + 4 * (i + 3), 0x1337F001);
+        tox2Write32(base, kRsxLabelAddr + 4 * (i + 0), 0x1337C0D3);
+        tox2Write32(base, kRsxLabelAddr + 4 * (i + 1), 0x1337BABE);
+        tox2Write32(base, kRsxLabelAddr + 4 * (i + 2), 0x1337BEEF);
+        tox2Write32(base, kRsxLabelAddr + 4 * (i + 3), 0x1337F001);
     }
     for (std::uint32_t i = 0; i < 64; i++) {
-        dalWrite64(base, kRsxLabelAddr + kRsxReportsNotifyOffset + 0x10 * i, ~std::uint64_t{0});
+        tox2Write64(base, kRsxLabelAddr + kRsxReportsNotifyOffset + 0x10 * i, ~std::uint64_t{0});
     }
     for (std::uint32_t i = 0; i < 2048; i++) {
         const std::uint32_t report = kRsxLabelAddr + kRsxReportsReportOffset + 0x10 * i;
-        dalWrite64(base, report, ~std::uint64_t{0});
-        dalWrite32(base, report + 12, 0xffffffff);
+        tox2Write64(base, report, ~std::uint64_t{0});
+        tox2Write32(base, report + 12, 0xffffffff);
     }
 
     std::memset(base + kRsxDriverInfoAddr, 0, kDriverInfoSize);
-    dalWrite32(base, kRsxDriverInfoAddr + kDriverVersionDriver, 0x211);
-    dalWrite32(base, kRsxDriverInfoAddr + kDriverVersionGpu, 0x5c);
-    dalWrite32(base, kRsxDriverInfoAddr + kDriverMemorySize, local_size);
-    dalWrite32(base, kRsxDriverInfoAddr + kDriverHardwareChannel, 1);
-    dalWrite32(base, kRsxDriverInfoAddr + kDriverNvcoreFrequency, kCoreFrequency);
-    dalWrite32(base, kRsxDriverInfoAddr + kDriverMemoryFrequency, kMemoryFrequency);
-    dalWrite32(base, kRsxDriverInfoAddr + kDriverReportsNotifyOffset, kRsxReportsNotifyOffset);
-    dalWrite32(base, kRsxDriverInfoAddr + kDriverReportsOffset, 0);
-    dalWrite32(base, kRsxDriverInfoAddr + kDriverReportsReportOffset, kRsxReportsReportOffset);
-    dalWrite32(base, kRsxDriverInfoAddr + kDriverSystemModeFlags, 0);
+    tox2Write32(base, kRsxDriverInfoAddr + kDriverVersionDriver, 0x211);
+    tox2Write32(base, kRsxDriverInfoAddr + kDriverVersionGpu, 0x5c);
+    tox2Write32(base, kRsxDriverInfoAddr + kDriverMemorySize, local_size);
+    tox2Write32(base, kRsxDriverInfoAddr + kDriverHardwareChannel, 1);
+    tox2Write32(base, kRsxDriverInfoAddr + kDriverNvcoreFrequency, kCoreFrequency);
+    tox2Write32(base, kRsxDriverInfoAddr + kDriverMemoryFrequency, kMemoryFrequency);
+    tox2Write32(base, kRsxDriverInfoAddr + kDriverReportsNotifyOffset, kRsxReportsNotifyOffset);
+    tox2Write32(base, kRsxDriverInfoAddr + kDriverReportsOffset, 0);
+    tox2Write32(base, kRsxDriverInfoAddr + kDriverReportsReportOffset, kRsxReportsReportOffset);
+    tox2Write32(base, kRsxDriverInfoAddr + kDriverSystemModeFlags, 0);
 
     std::memset(base + kRsxDmaAddr, 0, 0x60);
-    dalWrite32(base, kRsxControlAddr + kControlPut, kControlStart);
-    dalWrite32(base, kRsxControlAddr + kControlGet, kControlStart);
-    dalWrite32(base, kRsxControlAddr + kControlRef, kControlRefInitial);
+    tox2Write32(base, kRsxControlAddr + kControlPut, kControlStart);
+    tox2Write32(base, kRsxControlAddr + kControlGet, kControlStart);
+    tox2Write32(base, kRsxControlAddr + kControlRef, kControlRefInitial);
 
     // RPCS3 `rsx::thread::init` marks the device as ready.
     std::memset(base + kRsxDeviceAddr, 0, 0x100);
-    dalWrite32(base, kRsxDeviceAddr + 0x30, 1);
+    tox2Write32(base, kRsxDeviceAddr + 0x30, 1);
 
     state.initialized = true;
     state.io_address = io_address;
@@ -518,15 +518,15 @@ std::uint32_t gcmInitBody(std::uint8_t* base, std::uint32_t context_pp, std::uin
     const std::uint64_t now = systemTimeUs();
     state.last_flip_time = now > kFlipTimeOffsetUs ? now - kFlipTimeOffsetUs : 0;
 
-    dalWrite32(base, kRsxDeviceAddr + kContextBegin, io_address + kFragmentReserved);
-    dalWrite32(base, kRsxDeviceAddr + kContextEnd, io_address + kFragmentSize - 4);
-    dalWrite32(base, kRsxDeviceAddr + kContextCurrent, io_address + kFragmentReserved);
-    dalWrite32(base, kRsxDeviceAddr + kContextCallback, state.wrap_callback);
-    dalWrite32(base, context_pp, kRsxDeviceAddr);
+    tox2Write32(base, kRsxDeviceAddr + kContextBegin, io_address + kFragmentReserved);
+    tox2Write32(base, kRsxDeviceAddr + kContextEnd, io_address + kFragmentSize - 4);
+    tox2Write32(base, kRsxDeviceAddr + kContextCurrent, io_address + kFragmentReserved);
+    tox2Write32(base, kRsxDeviceAddr + kContextCallback, state.wrap_callback);
+    tox2Write32(base, context_pp, kRsxDeviceAddr);
 
-    logInfo("dal: gcm: init local={:#010x}+{:#x} io={:#010x}+{:#x} commands={:#x} context={:#010x} control={:#010x}",
+    logInfo("tox2: gcm: init local={:#010x}+{:#x} io={:#010x}+{:#x} commands={:#x} context={:#010x} control={:#010x}",
             kRsxLocalBase, local_size, io_address, io_size, cmd_size, kRsxDeviceAddr, kRsxControlAddr);
     return kCellOk;
 }
 
-}  // namespace dal
+}  // namespace tox2

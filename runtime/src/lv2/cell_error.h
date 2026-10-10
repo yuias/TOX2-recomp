@@ -5,7 +5,7 @@
 // Error codes and sync constants shared by the lv2 syscalls and the HLE modules. Values follow
 // RPCS3 `Emu/Cell/ErrorCodes.h` and `Emu/Cell/lv2/sys_sync.h`, `sys_event_flag.h`, `sys_event.h`,
 // `sys_ppu_thread.h` and `Modules/sys_lwmutex_.h`.
-namespace dal {
+namespace tox2 {
 
 inline constexpr std::uint32_t kCellOk = 0;
 inline constexpr std::uint32_t kCellEagain = 0x80010001;
@@ -62,4 +62,4 @@ inline constexpr std::uint32_t kLwmutexFree = 0xffffffff;
 inline constexpr std::uint32_t kLwmutexDead = 0xfffffffe;
 inline constexpr std::uint32_t kLwmutexReserved = 0xfffffffd;
 
-}  // namespace dal
+}  // namespace tox2

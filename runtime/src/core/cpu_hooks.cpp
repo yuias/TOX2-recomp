@@ -8,7 +8,7 @@
 #include "core/census.h"
 #include "core/fatal.h"
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -48,79 +48,79 @@ std::uint64_t elapsedCounter() {
 
 }  // namespace
 
-namespace dal {
+namespace tox2 {
 
 std::uint64_t systemTimeUs() { return scaleCounter(elapsedCounter(), 1000000u); }
 
-}  // namespace dal
+}  // namespace tox2
 
 extern "C" {
 
-void dalUnhandled(DalPpuContext* ctx, uint8_t* base, uint32_t site, uint32_t word) {
+void tox2Unhandled(Tox2PpuContext* ctx, uint8_t* base, uint32_t site, uint32_t word) {
     (void)ctx;
     (void)base;
-    dal::fatal(dal::FatalKind::UnhandledInstruction, std::format("word {:#010x} at {:#010x}", word, site));
+    tox2::fatal(tox2::FatalKind::UnhandledInstruction, std::format("word {:#010x} at {:#010x}", word, site));
 }
 
-void dalTrap(DalPpuContext* ctx, uint8_t* base, uint32_t site) {
+void tox2Trap(Tox2PpuContext* ctx, uint8_t* base, uint32_t site) {
     (void)ctx;
     (void)base;
-    dal::fatal(dal::FatalKind::Trap, std::format("at {:#010x}", site));
+    tox2::fatal(tox2::FatalKind::Trap, std::format("at {:#010x}", site));
 }
 
 // All guest code runs under the guest lock, so a reservation holds while the address matches and
 // memory still contains the value that lwarx/ldarx observed (an ABA rewrite is accepted). Every
 // store-conditional clears it, successful or not.
-uint32_t dalLwarx(DalPpuContext* ctx, uint8_t* base, uint32_t ea) {
-    const uint32_t value = dalRead32(base, ea);
+uint32_t tox2Lwarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
+    const uint32_t value = tox2Read32(base, ea);
     ctx->reserve_addr = ea;
     ctx->reserve_value = value;
     ctx->reserve_valid = 1;
     return value;
 }
 
-uint64_t dalLdarx(DalPpuContext* ctx, uint8_t* base, uint32_t ea) {
-    const uint64_t value = dalRead64(base, ea);
+uint64_t tox2Ldarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
+    const uint64_t value = tox2Read64(base, ea);
     ctx->reserve_addr = ea;
     ctx->reserve_value = value;
     ctx->reserve_valid = 1;
     return value;
 }
 
-bool dalStwcx(DalPpuContext* ctx, uint8_t* base, uint32_t ea, uint32_t value) {
-    const bool ok = ctx->reserve_valid && ctx->reserve_addr == ea && dalRead32(base, ea) == ctx->reserve_value;
-    if (ok) dalWrite32(base, ea, value);
+bool tox2Stwcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint32_t value) {
+    const bool ok = ctx->reserve_valid && ctx->reserve_addr == ea && tox2Read32(base, ea) == ctx->reserve_value;
+    if (ok) tox2Write32(base, ea, value);
     ctx->reserve_valid = 0;
     return ok;
 }
 
-bool dalStdcx(DalPpuContext* ctx, uint8_t* base, uint32_t ea, uint64_t value) {
-    const bool ok = ctx->reserve_valid && ctx->reserve_addr == ea && dalRead64(base, ea) == ctx->reserve_value;
-    if (ok) dalWrite64(base, ea, value);
+bool tox2Stdcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint64_t value) {
+    const bool ok = ctx->reserve_valid && ctx->reserve_addr == ea && tox2Read64(base, ea) == ctx->reserve_value;
+    if (ok) tox2Write64(base, ea, value);
     ctx->reserve_valid = 0;
     return ok;
 }
 
-void dalDcbz(DalPpuContext* ctx, uint8_t* base, uint32_t ea) {
+void tox2Dcbz(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
     (void)ctx;
-    std::memset(base + (ea & ~static_cast<uint32_t>(kDalDcbzLine - 1)), 0, kDalDcbzLine);
+    std::memset(base + (ea & ~static_cast<uint32_t>(kTox2DcbzLine - 1)), 0, kTox2DcbzLine);
 }
 
 // Guest threads never run in parallel, so no instruction needs a host barrier.
-void dalSync(DalPpuContext* ctx, uint32_t kind) {
+void tox2Sync(Tox2PpuContext* ctx, uint32_t kind) {
     (void)ctx;
     (void)kind;
 }
 
-uint64_t dalMftb(DalPpuContext* ctx) {
+uint64_t tox2Mftb(Tox2PpuContext* ctx) {
     (void)ctx;
-    return scaleCounter(elapsedCounter(), dal::kTimebaseFrequency);
+    return scaleCounter(elapsedCounter(), tox2::kTimebaseFrequency);
 }
 
-uint64_t dalMffs(DalPpuContext* ctx) { return ctx->fpscr; }
+uint64_t tox2Mffs(Tox2PpuContext* ctx) { return ctx->fpscr; }
 
 // Field 0 is the most significant nibble of the 32-bit image.
-void dalMtfsf(DalPpuContext* ctx, uint32_t field_mask, uint64_t value) {
+void tox2Mtfsf(Tox2PpuContext* ctx, uint32_t field_mask, uint64_t value) {
     uint32_t mask = 0;
     for (uint32_t i = 0; i < 8; i++) {
         if (field_mask & (0x80u >> i)) mask |= 0xfu << (28 - 4 * i);
@@ -129,7 +129,7 @@ void dalMtfsf(DalPpuContext* ctx, uint32_t field_mask, uint64_t value) {
 }
 
 // Bit numbering is big-endian: bit 0 is the most significant bit of the image.
-void dalMtfsb(DalPpuContext* ctx, uint32_t bit, uint32_t value) {
+void tox2Mtfsb(Tox2PpuContext* ctx, uint32_t bit, uint32_t value) {
     const uint32_t mask = 0x80000000u >> (bit & 31);
     ctx->fpscr = value ? (ctx->fpscr | mask) : (ctx->fpscr & ~mask);
 }

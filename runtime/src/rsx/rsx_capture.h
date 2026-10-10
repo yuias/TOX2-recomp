@@ -2,8 +2,8 @@
 
 // Capture of one RSX frame as inputs (register writes, the guest bytes the frame builder read, and the
 // state the frame started from), so that a decoder or builder fix can be tested on an old capture.
-// The file is little-endian with the `.dalcap` extension:
-//   header  "DALRSXC1", u32 version (2), u64 flip index of the flip command that ends the frame
+// The file is little-endian with the `.tox2cap` extension:
+//   header  "TX2RSXC1", u32 version (2), u64 flip index of the flip command that ends the frame
 //   chunks  {u32 tag, u32 size, bytes}: REGS, DISP, SURF, then in stream order WRIT / MEMR / FLIP, END
 // A capture holds the writes after the previous flip command up to and including the next one. The
 // start registers are those the previous flip left behind: after its context reset and after the flip
@@ -24,7 +24,7 @@
 #include "rsx/rsx_registers.h"
 #include "rsx/rsx_state.h"
 
-namespace dal {
+namespace tox2 {
 
 // The REGS chunk size follows kRsxVpInstructionCount and kRsxVpConstantCount: changing either needs a
 // version bump, or old captures would be rejected as malformed. The writer writes this version; the
@@ -147,4 +147,4 @@ void replayCapture(const RsxCaptureReader& reader, ReplayRsxMemoryView& memory, 
 // Creates the parent directory and writes the file; false with a reason in `error`.
 bool writeCaptureFile(const std::filesystem::path& path, const RsxCaptureFile& file, std::string& error);
 
-}  // namespace dal
+}  // namespace tox2

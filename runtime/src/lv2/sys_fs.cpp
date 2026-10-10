@@ -16,7 +16,7 @@
 
 #include "core/guest_memory.h"
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
 #include "lv2/vfs.h"
@@ -25,7 +25,7 @@
 #define NOMINMAX
 #include <windows.h>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 namespace stdfs = std::filesystem;
@@ -151,9 +151,9 @@ void logPathOp(const char* op, std::string_view path, std::uint32_t code) {
     const std::string key = std::format("fs-{}:{}:{:x}", op, path, code);
     if (firstUse(key)) {
         if (code == kCellOk) {
-            logInfo("dal: fs: {} \"{}\" ok", op, path);
+            logInfo("tox2: fs: {} \"{}\" ok", op, path);
         } else {
-            logWarn("dal: fs: {} \"{}\" failed {:#010x}", op, path, code);
+            logWarn("tox2: fs: {} \"{}\" failed {:#010x}", op, path, code);
         }
     }
 }
@@ -163,7 +163,7 @@ std::uint32_t readOpPath(const char* op, const std::uint8_t* base, std::uint32_t
     const std::uint32_t code = readGuestPath(base, addr, out);
     if (code != kCellOk) {
         logOnce(std::format("fs-badpath-{}-{:x}", op, code),
-                "dal: fs: {} with an unusable path: {:#010x} (pointer {:#010x}, \"{}\")", op, code, addr,
+                "tox2: fs: {} with an unusable path: {:#010x} (pointer {:#010x}, \"{}\")", op, code, addr,
                 out.substr(0, 64));
     }
     return code;
@@ -198,7 +198,7 @@ std::uint32_t mapWinError(DWORD error, const stdfs::path& host) {
         case ERROR_NEGATIVE_SEEK:
         case ERROR_INVALID_PARAMETER: return kCellEinval;
         default:
-            logOnce(std::format("fs-win-error-{}", error), "dal: fs: unmapped host error {}", error);
+            logOnce(std::format("fs-win-error-{}", error), "tox2: fs: unmapped host error {}", error);
             return kCellEio;
     }
 }
@@ -249,7 +249,7 @@ std::uint32_t openFile(std::string_view path, std::int32_t flags, std::uint32_t&
         return kCellEinval;
     }
     if ((flags & kOUnk) != 0) {
-        logOnce("fs-open-unk-flag", "dal: fs: open with unknown flag 01000000 (flags {:#o})", flags);
+        logOnce("fs-open-unk-flag", "tox2: fs: open with unknown flag 01000000 (flags {:#o})", flags);
     }
 
     const std::int32_t access_mode = flags & kOAccMode;
@@ -418,7 +418,7 @@ constexpr std::uint64_t kArgSdata = 0x18000000010;
 constexpr std::uint64_t kArgEdata = 2;
 
 // Opens an sdata container file. The runtime does not decrypt: it serves a copy decrypted ahead
-// of time (tools/dal_sdat) from the --sdata-cache directory, which holds each file at its path
+// of time (outside this repository) from the --sdata-cache directory, which holds each file at its path
 // relative to the game directory, or a file override. Without either the file is reported missing.
 std::uint32_t openSdata(std::string_view path, std::uint32_t& fd) {
     const VfsResolution res = resolveVfs(path);
@@ -430,7 +430,7 @@ std::uint32_t openSdata(std::string_view path, std::uint32_t& fd) {
     }
     const std::optional<stdfs::path> cached = sdataHostPath(res);
     if (!cached) {
-        logOnce(LogLevel::Warn, std::format("fs-sdata:{}", path), "dal: fs: sdata open not supported: {}", path);
+        logOnce(LogLevel::Warn, std::format("fs-sdata:{}", path), "tox2: fs: sdata open not supported: {}", path);
         return kCellEnoent;
     }
     const HANDLE handle =
@@ -438,7 +438,7 @@ std::uint32_t openSdata(std::string_view path, std::uint32_t& fd) {
                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         logOnce(LogLevel::Warn, std::format("fs-sdata:{}", path),
-                "dal: fs: no readable decrypted copy of sdata file {}", path);
+                "tox2: fs: no readable decrypted copy of sdata file {}", path);
         return kCellEnoent;
     }
     auto object = std::make_shared<FsObject>();
@@ -465,7 +465,7 @@ std::uint32_t openGuest(std::uint8_t* base, std::uint32_t path_addr, std::int32_
         }
     } else {
         if (kind == FileKind::Edata) {
-            logOnce("fs-open-edata", "dal: fs: edata open is not decrypted, \"{}\" opens as a plain file", path);
+            logOnce("fs-open-edata", "tox2: fs: edata open is not decrypted, \"{}\" opens as a plain file", path);
         }
         code = openFile(path, flags, fd);
         logPathOp("open", path, code);
@@ -475,7 +475,7 @@ std::uint32_t openGuest(std::uint8_t* base, std::uint32_t path_addr, std::int32_
         code = kCellEfault;
     }
     if (code == kCellOk) {
-        dalWrite32(base, fd_addr, fd);
+        tox2Write32(base, fd_addr, fd);
     }
     return code;
 }
@@ -522,14 +522,14 @@ std::uint32_t fsStatFd(std::uint32_t fd, FsStat& out) {
 }
 
 void writeCellFsStat(std::uint8_t* base, std::uint32_t addr, const FsStat& stat) {
-    dalWrite32(base, addr, static_cast<std::uint32_t>(stat.mode));
-    dalWrite32(base, addr + 4, static_cast<std::uint32_t>(stat.uid));
-    dalWrite32(base, addr + 8, static_cast<std::uint32_t>(stat.gid));
-    dalWrite64(base, addr + 12, static_cast<std::uint64_t>(stat.atime));
-    dalWrite64(base, addr + 20, static_cast<std::uint64_t>(stat.mtime));
-    dalWrite64(base, addr + 28, static_cast<std::uint64_t>(stat.ctime));
-    dalWrite64(base, addr + 36, stat.size);
-    dalWrite64(base, addr + 44, stat.blksize);
+    tox2Write32(base, addr, static_cast<std::uint32_t>(stat.mode));
+    tox2Write32(base, addr + 4, static_cast<std::uint32_t>(stat.uid));
+    tox2Write32(base, addr + 8, static_cast<std::uint32_t>(stat.gid));
+    tox2Write64(base, addr + 12, static_cast<std::uint64_t>(stat.atime));
+    tox2Write64(base, addr + 20, static_cast<std::uint64_t>(stat.mtime));
+    tox2Write64(base, addr + 28, static_cast<std::uint64_t>(stat.ctime));
+    tox2Write64(base, addr + 36, stat.size);
+    tox2Write64(base, addr + 44, stat.blksize);
 }
 
 // The mode argument is not used: host permissions are not modelled.
@@ -540,7 +540,7 @@ std::uint32_t fsOpenGuest(std::uint8_t* base, std::uint32_t path_addr, std::int3
         if (!guestRangeOk(arg_addr, 8)) {
             return kCellEfault;
         }
-        const std::uint64_t marker = dalRead64(base, arg_addr);
+        const std::uint64_t marker = tox2Read64(base, arg_addr);
         kind = marker == kArgSdata ? FileKind::Sdata : marker == kArgEdata ? FileKind::Edata : FileKind::Plain;
     }
     return openGuest(base, path_addr, flags, fd_addr, kind);
@@ -648,7 +648,7 @@ std::uint32_t fsReadWithOffset(std::uint8_t* base, std::uint32_t fd, std::uint64
     }
     const auto finish = [&](std::uint32_t code, std::uint64_t done) {
         if (nread_addr != 0) {
-            dalWrite64(base, nread_addr, code == kCellOk ? done : 0);
+            tox2Write64(base, nread_addr, code == kCellOk ? done : 0);
         }
         return code;
     };
@@ -672,7 +672,7 @@ std::uint32_t fsWriteWithOffset(std::uint8_t* base, std::uint32_t fd, std::uint6
     }
     const auto finish = [&](std::uint32_t code, std::uint64_t done) {
         if (nwrite_addr != 0) {
-            dalWrite64(base, nwrite_addr, code == kCellOk ? done : 0);
+            tox2Write64(base, nwrite_addr, code == kCellOk ? done : 0);
         }
         return code;
     };
@@ -697,14 +697,14 @@ std::uint32_t fsWriteWithOffset(std::uint8_t* base, std::uint32_t fd, std::uint6
 }
 
 // 801 sys_fs_open(const char* path, s32 flags, u32* fd, s32 mode, const void* arg, u64 size).
-void sysFsOpen(DalPpuContext* ctx, std::uint8_t* base) {
+void sysFsOpen(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, fsOpenGuest(base, static_cast<std::uint32_t>(ctx->gpr[3]),
                                    static_cast<std::int32_t>(ctx->gpr[4]), static_cast<std::uint32_t>(ctx->gpr[5]),
                                    static_cast<std::uint32_t>(ctx->gpr[7]), ctx->gpr[8]));
 }
 
 // 802 sys_fs_read(u32 fd, void* buf, u64 nbytes, u64* nread)
-void sysFsRead(DalPpuContext* ctx, std::uint8_t* base) {
+void sysFsRead(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto fd = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto buf = static_cast<std::uint32_t>(ctx->gpr[4]);
     const std::uint64_t nbytes = ctx->gpr[5];
@@ -715,30 +715,30 @@ void sysFsRead(DalPpuContext* ctx, std::uint8_t* base) {
         return;
     }
     if (buf == 0) {
-        dalWrite64(base, nread, 0);
+        tox2Write64(base, nread, 0);
         setResultCode(ctx, kCellEfault);
         return;
     }
     const std::shared_ptr<FsObject> file = findObject(fd, false);
     if (file == nullptr || (nbytes != 0 && (file->flags & kOWronly) != 0)) {
-        dalWrite64(base, nread, 0);
+        tox2Write64(base, nread, 0);
         setResultCode(ctx, kCellEbadf);
         return;
     }
     if (nbytes != 0 && !guestRangeOk(buf, nbytes)) {
-        dalWrite64(base, nread, 0);
+        tox2Write64(base, nread, 0);
         setResultCode(ctx, kCellEfault);
         return;
     }
 
     std::uint32_t code = kCellOk;
     const std::uint64_t total = transfer(file->file, false, base + buf, nbytes, code);
-    dalWrite64(base, nread, total);
+    tox2Write64(base, nread, total);
     setResultCode(ctx, code);
 }
 
 // 803 sys_fs_write(u32 fd, const void* buf, u64 nbytes, u64* nwrite)
-void sysFsWrite(DalPpuContext* ctx, std::uint8_t* base) {
+void sysFsWrite(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto fd = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto buf = static_cast<std::uint32_t>(ctx->gpr[4]);
     const std::uint64_t nbytes = ctx->gpr[5];
@@ -749,28 +749,28 @@ void sysFsWrite(DalPpuContext* ctx, std::uint8_t* base) {
         return;
     }
     if (buf == 0) {
-        dalWrite64(base, nwrite, 0);
+        tox2Write64(base, nwrite, 0);
         setResultCode(ctx, kCellEfault);
         return;
     }
     const std::shared_ptr<FsObject> file = findObject(fd, false);
     if (file == nullptr || (nbytes != 0 && (file->flags & kOAccMode) == 0)) {
-        dalWrite64(base, nwrite, 0);
+        tox2Write64(base, nwrite, 0);
         setResultCode(ctx, kCellEbadf);
         return;
     }
     if (nbytes == 0) {
-        dalWrite64(base, nwrite, 0);
+        tox2Write64(base, nwrite, 0);
         setResultCode(ctx, kCellOk);
         return;
     }
     if (file->read_only) {
-        dalWrite64(base, nwrite, 0);
+        tox2Write64(base, nwrite, 0);
         setResultCode(ctx, kCellErofs);
         return;
     }
     if (!guestRangeOk(buf, nbytes)) {
-        dalWrite64(base, nwrite, 0);
+        tox2Write64(base, nwrite, 0);
         setResultCode(ctx, kCellEfault);
         return;
     }
@@ -780,18 +780,18 @@ void sysFsWrite(DalPpuContext* ctx, std::uint8_t* base) {
     }
     std::uint32_t code = kCellOk;
     const std::uint64_t total = transfer(file->file, true, base + buf, nbytes, code);
-    dalWrite64(base, nwrite, total);
+    tox2Write64(base, nwrite, total);
     setResultCode(ctx, code);
 }
 
 // 804 sys_fs_close(u32 fd)
-void sysFsClose(DalPpuContext* ctx, std::uint8_t* base) {
+void sysFsClose(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResultCode(ctx, fsCloseFd(static_cast<std::uint32_t>(ctx->gpr[3])));
 }
 
 // 805 sys_fs_opendir(const char* path, u32* fd)
-void sysFsOpendir(DalPpuContext* ctx, std::uint8_t* base) {
+void sysFsOpendir(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto path_addr = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto fd_addr = static_cast<std::uint32_t>(ctx->gpr[4]);
 
@@ -807,14 +807,14 @@ void sysFsOpendir(DalPpuContext* ctx, std::uint8_t* base) {
         logPathOp("opendir", path, code);
     }
     if (code == kCellOk) {
-        dalWrite32(base, fd_addr, fd);
+        tox2Write32(base, fd_addr, fd);
     }
     setResultCode(ctx, code);
 }
 
 // 806 sys_fs_readdir(u32 fd, CellFsDirent* dirent, u64* nread). At the end the dirent is zeroed and
 // nread is 0; on hdd1 the console writes the last entry again instead.
-void sysFsReaddir(DalPpuContext* ctx, std::uint8_t* base) {
+void sysFsReaddir(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto fd = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto dirent = static_cast<std::uint32_t>(ctx->gpr[4]);
     const auto nread = static_cast<std::uint32_t>(ctx->gpr[5]);
@@ -845,40 +845,40 @@ void sysFsReaddir(DalPpuContext* ctx, std::uint8_t* base) {
         base[dirent + 1] = static_cast<std::uint8_t>(length);
         std::memcpy(base + dirent + 2, entry->name.data(), length);
     }
-    dalWrite64(base, nread, at_end ? 0 : kDirentSize);
+    tox2Write64(base, nread, at_end ? 0 : kDirentSize);
     setResultCode(ctx, kCellOk);
 }
 
 // 807 sys_fs_closedir(u32 fd)
-void sysFsClosedir(DalPpuContext* ctx, std::uint8_t* base) {
+void sysFsClosedir(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResultCode(ctx, removeObject(static_cast<std::uint32_t>(ctx->gpr[3]), true) ? kCellOk : kCellEbadf);
 }
 
 // 808 sys_fs_stat(const char* path, CellFsStat* sb)
-void sysFsStat(DalPpuContext* ctx, std::uint8_t* base) {
+void sysFsStat(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx,
                   fsStatGuest(base, static_cast<std::uint32_t>(ctx->gpr[3]), static_cast<std::uint32_t>(ctx->gpr[4])));
 }
 
 // 809 sys_fs_fstat(u32 fd, CellFsStat* sb)
-void sysFsFstat(DalPpuContext* ctx, std::uint8_t* base) {
+void sysFsFstat(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx,
                   fsFstatGuest(base, static_cast<std::uint32_t>(ctx->gpr[3]), static_cast<std::uint32_t>(ctx->gpr[4])));
 }
 
 // 811 sys_fs_mkdir(const char* path, s32 mode)
-void sysFsMkdir(DalPpuContext* ctx, std::uint8_t* base) {
+void sysFsMkdir(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, fsMkdirGuest(base, static_cast<std::uint32_t>(ctx->gpr[3])));
 }
 
 // 814 sys_fs_unlink(const char* path)
-void sysFsUnlink(DalPpuContext* ctx, std::uint8_t* base) {
+void sysFsUnlink(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, fsUnlinkGuest(base, static_cast<std::uint32_t>(ctx->gpr[3])));
 }
 
 // 818 sys_fs_lseek(u32 fd, s64 offset, s32 whence, u64* pos)
-void sysFsLseek(DalPpuContext* ctx, std::uint8_t* base) {
+void sysFsLseek(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto fd = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto offset = static_cast<std::int64_t>(ctx->gpr[4]);
     const auto whence = static_cast<std::uint32_t>(ctx->gpr[5]);
@@ -903,8 +903,8 @@ void sysFsLseek(DalPpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, mapWinError(GetLastError(), {}));
         return;
     }
-    dalWrite64(base, pos, result);
+    tox2Write64(base, pos, result);
     setResultCode(ctx, kCellOk);
 }
 
-}  // namespace dal
+}  // namespace tox2

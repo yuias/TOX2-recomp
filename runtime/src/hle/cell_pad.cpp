@@ -22,11 +22,11 @@
 #include <utility>
 
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "sys_io";
@@ -121,14 +121,14 @@ PadPortState pollPort(std::uint32_t port) {
     if (state.connected != reported) {
         entry.port_status = state.connected ? (kStatusConnected | kStatusAssignChanges) : kStatusAssignChanges;
         entry.buffer_cleared = true;
-        logOnce(std::format("pad-port-{}-{}", port, state.connected), "dal: pad: port {} {}", port,
+        logOnce(std::format("pad-port-{}-{}", port, state.connected), "tox2: pad: port {} {}", port,
                 state.connected ? "connected" : "disconnected");
     }
     return state;
 }
 
 // cellPadInit(u32 max_connect)
-void padInit(DalPpuContext* ctx, std::uint8_t*) {
+void padInit(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t max_connect = argU32(ctx, 0);
     if (g_pad.max_connect != 0) {
         ctx->gpr[3] = kErrorAlreadyInitialized;
@@ -143,12 +143,12 @@ void padInit(DalPpuContext* ctx, std::uint8_t*) {
     for (std::uint32_t port = 0; port < portCount(); port++) {
         pollPort(port);
     }
-    logInfo("dal: pad: init max_connect {}", max_connect);
+    logInfo("tox2: pad: init max_connect {}", max_connect);
     ctx->gpr[3] = kCellOk;
 }
 
 // cellPadEnd()
-void padEnd(DalPpuContext* ctx, std::uint8_t*) {
+void padEnd(Tox2PpuContext* ctx, std::uint8_t*) {
     if (g_pad.max_connect == 0) {
         ctx->gpr[3] = kErrorUninitialized;
         return;
@@ -158,7 +158,7 @@ void padEnd(DalPpuContext* ctx, std::uint8_t*) {
 }
 
 // cellPadSetPortSetting(u32 port_no, u32 port_setting)
-void padSetPortSetting(DalPpuContext* ctx, std::uint8_t*) {
+void padSetPortSetting(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t port = argU32(ctx, 0);
     const std::uint32_t setting = argU32(ctx, 1);
     if (g_pad.max_connect == 0) {
@@ -175,14 +175,14 @@ void padSetPortSetting(DalPpuContext* ctx, std::uint8_t*) {
         g_pad.ports[port].setting = masked;
         // Press mode decides whether pressure words reach the game, which matters to input providers.
         logOnce(std::format("pad-setting-{}-{:#x}", port, masked),
-                "dal: pad: port {} setting {:#x} (press {}, sensor {})", port, masked,
+                "tox2: pad: port {} setting {:#x} (press {}, sensor {})", port, masked,
                 (masked & kSettingPressOn) != 0 ? "on" : "off", (masked & kSettingSensorOn) != 0 ? "on" : "off");
     }
     ctx->gpr[3] = kCellOk;
 }
 
 // cellPadGetData(u32 port_no, CellPadData* data)
-void padGetData(DalPpuContext* ctx, std::uint8_t* base) {
+void padGetData(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t port = argU32(ctx, 0);
     const std::uint32_t data = argU32(ctx, 1);
     if (g_pad.max_connect == 0) {
@@ -229,14 +229,14 @@ void padGetData(DalPpuContext* ctx, std::uint8_t* base) {
     }
     entry.buffer_cleared = false;
 
-    dalWrite32(base, data, len);
+    tox2Write32(base, data, len);
     if (len == kLenNoChange) {
         ctx->gpr[3] = kCellOk;
         return;
     }
 
     const auto put = [&](std::size_t index, std::uint16_t value) {
-        dalWrite16(base, data + kDataButtons + static_cast<std::uint32_t>(index) * 2, value);
+        tox2Write16(base, data + kDataButtons + static_cast<std::uint32_t>(index) * 2, value);
     };
     put(0, 0);
     put(1, static_cast<std::uint16_t>((0x7 << 4) | std::min<std::uint32_t>(len / 2, 15)));
@@ -252,7 +252,7 @@ void padGetData(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellPadGetInfo2(CellPadInfo2* info)
-void padGetInfo2(DalPpuContext* ctx, std::uint8_t* base) {
+void padGetInfo2(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t info = argU32(ctx, 0);
     if (g_pad.max_connect == 0) {
         ctx->gpr[3] = kErrorUninitialized;
@@ -263,27 +263,27 @@ void padGetInfo2(DalPpuContext* ctx, std::uint8_t* base) {
         return;
     }
     std::fill_n(base + info, kInfo2Size, std::uint8_t{0});
-    dalWrite32(base, info, portCount());  // clamped, unlike the value passed to cellPadInit
-    dalWrite32(base, info + kInfo2SystemInfo, 0);
+    tox2Write32(base, info, portCount());  // clamped, unlike the value passed to cellPadInit
+    tox2Write32(base, info + kInfo2SystemInfo, 0);
 
     std::uint32_t now_connect = 0;
     for (std::uint32_t port = 0; port < portCount(); port++) {
         const PadPortState state = pollPort(port);
         Port& entry = g_pad.ports[port];
-        dalWrite32(base, info + kInfo2PortStatus + 4 * port, entry.port_status);
-        dalWrite32(base, info + kInfo2PortSetting + 4 * port, entry.setting);
+        tox2Write32(base, info + kInfo2PortStatus + 4 * port, entry.port_status);
+        tox2Write32(base, info + kInfo2PortSetting + 4 * port, entry.setting);
         entry.port_status &= ~kStatusAssignChanges;
         if (!state.connected) continue;
-        dalWrite32(base, info + kInfo2DeviceCapability + 4 * port, state.device_capability);
-        dalWrite32(base, info + kInfo2DeviceType + 4 * port, state.device_type);
+        tox2Write32(base, info + kInfo2DeviceCapability + 4 * port, state.device_capability);
+        tox2Write32(base, info + kInfo2DeviceType + 4 * port, state.device_type);
         now_connect++;
     }
-    dalWrite32(base, info + kInfo2NowConnect, now_connect);
+    tox2Write32(base, info + kInfo2NowConnect, now_connect);
     ctx->gpr[3] = kCellOk;
 }
 
 // cellPadSetActDirect(u32 port_no, CellPadActParam* param)
-void padSetActDirect(DalPpuContext* ctx, std::uint8_t* base) {
+void padSetActDirect(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t port = argU32(ctx, 0);
     const std::uint32_t param = argU32(ctx, 1);
     if (g_pad.max_connect == 0) {
@@ -359,4 +359,4 @@ bool setPadBackend(std::string_view name) {
 
 void resetCellPad() { g_pad = {}; }
 
-}  // namespace dal
+}  // namespace tox2

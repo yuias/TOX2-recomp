@@ -8,7 +8,7 @@
 #include <string_view>
 #include <utility>
 
-namespace dal {
+namespace tox2 {
 
 enum class LogLevel { Trace, Debug, Info, Warn, Error };
 
@@ -90,4 +90,4 @@ void logOnce(std::string_view key, std::format_string<Args...> fmt, Args&&... ar
     logOnce(LogLevel::Info, key, fmt, std::forward<Args>(args)...);
 }
 
-}  // namespace dal
+}  // namespace tox2

@@ -35,12 +35,12 @@
 
 #include "core/fatal.h"
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 #include "lv2/vfs.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "sceNpTrophy";
@@ -294,7 +294,7 @@ bool saveUnlockState(const std::string& name, const std::vector<Trophy>& trophie
 }
 
 // sceNpTrophyInit(void* pool, u32 poolSize, u32 containerId, u64 options)
-void trophyInit(DalPpuContext* ctx, std::uint8_t*) {
+void trophyInit(Tox2PpuContext* ctx, std::uint8_t*) {
     if (g_initialized) {
         ctx->gpr[3] = kErrorAlreadyInitialized;
         return;
@@ -308,7 +308,7 @@ void trophyInit(DalPpuContext* ctx, std::uint8_t*) {
 }
 
 // sceNpTrophyTerm()
-void trophyTerm(DalPpuContext* ctx, std::uint8_t*) {
+void trophyTerm(Tox2PpuContext* ctx, std::uint8_t*) {
     if (!g_initialized) {
         ctx->gpr[3] = kErrorNotInitialized;
         return;
@@ -319,7 +319,7 @@ void trophyTerm(DalPpuContext* ctx, std::uint8_t*) {
 }
 
 // sceNpTrophyCreateHandle(u32* handle)
-void trophyCreateHandle(DalPpuContext* ctx, std::uint8_t* base) {
+void trophyCreateHandle(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t handle_addr = argU32(ctx, 0);
     if (!g_initialized) {
         ctx->gpr[3] = kErrorNotInitialized;
@@ -332,7 +332,7 @@ void trophyCreateHandle(DalPpuContext* ctx, std::uint8_t* base) {
     for (std::uint32_t id = kIdBase; id < kIdBase + kIdCount; id++) {
         if (g_handles[id].used) continue;
         g_handles[id] = {true, g_next_serial++};
-        dalWrite32(base, handle_addr, id);
+        tox2Write32(base, handle_addr, id);
         ctx->gpr[3] = kCellOk;
         return;
     }
@@ -340,7 +340,7 @@ void trophyCreateHandle(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // sceNpTrophyDestroyHandle(u32 handle)
-void trophyDestroyHandle(DalPpuContext* ctx, std::uint8_t*) {
+void trophyDestroyHandle(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t handle = argU32(ctx, 0);
     if (handle < kIdBase || handle >= kIdBase + kIdCount) {
         ctx->gpr[3] = kErrorInvalidArgument;
@@ -356,7 +356,7 @@ void trophyDestroyHandle(DalPpuContext* ctx, std::uint8_t*) {
 
 // sceNpTrophyCreateContext(u32* context, const SceNpCommunicationId* commId,
 //                          const SceNpCommunicationSignature* commSign, u64 options)
-void trophyCreateContext(DalPpuContext* ctx, std::uint8_t* base) {
+void trophyCreateContext(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t context_addr = argU32(ctx, 0);
     const std::uint32_t comm_id = argU32(ctx, 1);
     const std::uint32_t comm_sign = argU32(ctx, 2);
@@ -377,7 +377,7 @@ void trophyCreateContext(DalPpuContext* ctx, std::uint8_t* base) {
         ctx->gpr[3] = kErrorNotSupported;
         return;
     }
-    const std::uint32_t num = dalRead8(base, comm_id + kCommIdNum);
+    const std::uint32_t num = tox2Read8(base, comm_id + kCommIdNum);
     if (num > kCommIdNumMax) {
         ctx->gpr[3] = kErrorInvalidNpCommId;
         return;
@@ -385,9 +385,9 @@ void trophyCreateContext(DalPpuContext* ctx, std::uint8_t* base) {
 
     // The signature must carry the magic and version 1.00, and 6 zero padding bytes after them.
     bool padding_zero = true;
-    for (std::uint32_t i = 6; i < 12; i++) padding_zero &= dalRead8(base, comm_sign + i) == 0;
-    if (dalRead32(base, comm_sign) != kCommSignMagic || !padding_zero ||
-        dalRead16(base, comm_sign + 4) != kCommSignVersion) {
+    for (std::uint32_t i = 6; i < 12; i++) padding_zero &= tox2Read8(base, comm_sign + i) == 0;
+    if (tox2Read32(base, comm_sign) != kCommSignMagic || !padding_zero ||
+        tox2Read16(base, comm_sign + 4) != kCommSignVersion) {
         ctx->gpr[3] = kErrorInvalidNpCommId;
         return;
     }
@@ -401,8 +401,8 @@ void trophyCreateContext(DalPpuContext* ctx, std::uint8_t* base) {
         created.serial = g_next_serial++;
         created.name = name;
         created.read_only = (options & kOptionsReadOnly) != 0;
-        dalWrite32(base, context_addr, id);
-        logInfo("dal: trophy: context {} for \"{}\"", id, name);
+        tox2Write32(base, context_addr, id);
+        logInfo("tox2: trophy: context {} for \"{}\"", id, name);
         ctx->gpr[3] = kCellOk;
         return;
     }
@@ -410,7 +410,7 @@ void trophyCreateContext(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // sceNpTrophyDestroyContext(u32 context)
-void trophyDestroyContext(DalPpuContext* ctx, std::uint8_t*) {
+void trophyDestroyContext(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t context = argU32(ctx, 0);
     if (!g_initialized) {
         ctx->gpr[3] = kErrorNotInitialized;
@@ -429,7 +429,7 @@ void trophyDestroyContext(DalPpuContext* ctx, std::uint8_t*) {
 }
 
 // sceNpTrophyGetRequiredDiskSpace(u32 context, u32 handle, u64* reqspace, u64 options)
-void trophyGetRequiredDiskSpace(DalPpuContext* ctx, std::uint8_t* base) {
+void trophyGetRequiredDiskSpace(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t context = argU32(ctx, 0);
     const std::uint32_t handle = argU32(ctx, 1);
     const std::uint32_t reqspace_addr = argU32(ctx, 2);
@@ -458,7 +458,7 @@ void trophyGetRequiredDiskSpace(DalPpuContext* ctx, std::uint8_t* base) {
         const std::filesystem::path trp_path = trpHostPath(ctxt->name);
         std::ifstream in(trp_path, std::ios::binary);
         if (trp_path.empty() || !in) {
-            logError("dal: trophy: cannot open the trophy pack of \"{}\"", ctxt->name);
+            logError("tox2: trophy: cannot open the trophy pack of \"{}\"", ctxt->name);
             ctx->gpr[3] = kErrorConfDoesNotExist;
             return;
         }
@@ -466,11 +466,11 @@ void trophyGetRequiredDiskSpace(DalPpuContext* ctx, std::uint8_t* base) {
         if (readTrpHeader(in, header)) {
             space = trpRequiredSpace(header);
         } else {
-            logError("dal: trophy: invalid trophy pack header (trp_name={})", ctxt->name);
+            logError("tox2: trophy: invalid trophy pack header (trp_name={})", ctxt->name);
         }
     }
-    logInfo("dal: trophy: sceNpTrophyGetRequiredDiskSpace -> {:#x}", space);
-    dalWrite64(base, reqspace_addr, space);
+    logInfo("tox2: trophy: sceNpTrophyGetRequiredDiskSpace -> {:#x}", space);
+    tox2Write64(base, reqspace_addr, space);
     ctx->gpr[3] = kCellOk;
 }
 
@@ -481,26 +481,26 @@ std::uint32_t installTrophies(TrophyContext& ctxt) {
     TrpHeader header;
     std::vector<TrpEntry> entries;
     if (trp_path.empty() || !in || !readTrpHeader(in, header) || !readTrpEntries(in, header, entries)) {
-        logError("dal: trophy: failed to load the trophy config header of \"{}\"", ctxt.name);
+        logError("tox2: trophy: failed to load the trophy config header of \"{}\"", ctxt.name);
         return kErrorIllegalUpdate;
     }
     const TrpEntry* config = findConfigEntry(entries);
     if (config == nullptr || config->size > (std::uint64_t{1} << 24)) {
-        logError("dal: trophy: invalid or incomplete trophy config in \"{}\"", ctxt.name);
+        logError("tox2: trophy: invalid or incomplete trophy config in \"{}\"", ctxt.name);
         return kErrorIllegalUpdate;
     }
     std::string xml(static_cast<std::size_t>(config->size), '\0');
     in.clear();
     in.seekg(static_cast<std::streamoff>(config->offset));
     if (!in.read(xml.data(), static_cast<std::streamsize>(xml.size()))) {
-        logError("dal: trophy: failed to read the trophy config of \"{}\"", ctxt.name);
+        logError("tox2: trophy: failed to read the trophy config of \"{}\"", ctxt.name);
         return kErrorIllegalUpdate;
     }
 
     const std::filesystem::path dir = userDirHostPath(ctxt.name);
     std::error_code ec;
     if (dir.empty() || (std::filesystem::create_directories(dir, ec), ec)) {
-        logError("dal: trophy: failed to create the trophy directory of \"{}\" ({})", ctxt.name,
+        logError("tox2: trophy: failed to create the trophy directory of \"{}\" ({})", ctxt.name,
                  ec ? ec.message() : std::string("no hdd directory configured"));
         return kErrorIllegalUpdate;
     }
@@ -508,25 +508,25 @@ std::uint32_t installTrophies(TrophyContext& ctxt) {
         std::ofstream out(dir / kConfigFile, std::ios::binary | std::ios::trunc);
         out.write(xml.data(), static_cast<std::streamsize>(xml.size()));
         if (!out.good()) {
-            logError("dal: trophy: failed to write the trophy config of \"{}\"", ctxt.name);
+            logError("tox2: trophy: failed to write the trophy config of \"{}\"", ctxt.name);
             return kErrorIllegalUpdate;
         }
     }
     ctxt.trophies = parseTrophyConfig(xml);
     loadUnlockState(dir, ctxt.trophies);
     if (!saveUnlockState(ctxt.name, ctxt.trophies)) {
-        logError("dal: trophy: failed to write the unlock state of \"{}\"", ctxt.name);
+        logError("tox2: trophy: failed to write the unlock state of \"{}\"", ctxt.name);
         return kErrorIllegalUpdate;
     }
     ctxt.registered = true;
-    logInfo("dal: trophy: registered \"{}\": {} trophies", ctxt.name, ctxt.trophies.size());
+    logInfo("tox2: trophy: registered \"{}\": {} trophies", ctxt.name, ctxt.trophies.size());
     return 0;
 }
 
 // sceNpTrophyRegisterContext(u32 context, u32 handle, SceNpTrophyStatusCallback statusCb,
 //                            void* arg, u64 options)
 // The callback is s32(u32 context, u32 status, s32 completed, s32 total, void* arg).
-void trophyRegisterContext(DalPpuContext* ctx, std::uint8_t* base) {
+void trophyRegisterContext(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t context = argU32(ctx, 0);
     const std::uint32_t handle = argU32(ctx, 1);
     const std::uint32_t status_cb = argU32(ctx, 2);
@@ -553,7 +553,7 @@ void trophyRegisterContext(DalPpuContext* ctx, std::uint8_t* base) {
     const auto on_error = [&] {
         if ((options & kOptionsShowErrorExit) != 0) {
             stopProcess(ExitCode::Fatal,
-                        "dal: stop: sceNpTrophyRegisterContext failed: Error during trophy registration! "
+                        "tox2: stop: sceNpTrophyRegisterContext failed: Error during trophy registration! "
                         "The game will now be terminated.");
         }
     };
@@ -561,7 +561,7 @@ void trophyRegisterContext(DalPpuContext* ctx, std::uint8_t* base) {
     const std::filesystem::path trp_path = trpHostPath(ctxt->name);
     std::error_code ec;
     if (trp_path.empty() || !std::filesystem::exists(trp_path, ec)) {
-        logError("dal: trophy: failed to open the trophy pack of \"{}\"", ctxt->name);
+        logError("tox2: trophy: failed to open the trophy pack of \"{}\"", ctxt->name);
         ctx->gpr[3] = kErrorConfDoesNotExist;
         return;
     }
@@ -572,7 +572,7 @@ void trophyRegisterContext(DalPpuContext* ctx, std::uint8_t* base) {
     // The first call asks whether to install; a negative result aborts the registration.
     const std::uint32_t context_serial = ctxt->serial;
     const std::uint32_t handle_serial = g_handles[handle].serial;
-    logInfo("dal: trophy: register callback status {}", trp_status);
+    logInfo("tox2: trophy: register callback status {}", trp_status);
     const auto first =
             static_cast<std::int32_t>(callGuestFunction(ctx, base, status_cb, {context, trp_status, 0, 0, arg}));
     if (first < 0) {
@@ -645,7 +645,7 @@ std::uint32_t unlockedPlatinumId(const std::vector<Trophy>& trophies, std::uint3
 }
 
 // sceNpTrophyUnlockTrophy(u32 context, u32 handle, s32 trophyId, u32* platinumId)
-void trophyUnlockTrophy(DalPpuContext* ctx, std::uint8_t* base) {
+void trophyUnlockTrophy(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t context = argU32(ctx, 0);
     const std::uint32_t handle = argU32(ctx, 1);
     const auto trophy_id = static_cast<std::int32_t>(argU32(ctx, 2));
@@ -681,24 +681,24 @@ void trophyUnlockTrophy(DalPpuContext* ctx, std::uint8_t* base) {
     const std::uint64_t tick = currentRtcTick();
     trophies[index].unlocked = true;
     trophies[index].timestamp = tick;
-    logInfo("dal: trophy: trophy {} unlocked", trophy_id);
+    logInfo("tox2: trophy: trophy {} unlocked", trophy_id);
 
     const std::uint32_t platinum = unlockedPlatinumId(trophies, index);
     if (platinum != kInvalidTrophyId && platinum < trophies.size()) {
         trophies[platinum].unlocked = true;
         trophies[platinum].timestamp = tick;
-        logInfo("dal: trophy: platinum trophy {} unlocked", platinum);
+        logInfo("tox2: trophy: platinum trophy {} unlocked", platinum);
     }
-    if (platinum_addr != 0) dalWrite32(base, platinum_addr, platinum);
+    if (platinum_addr != 0) tox2Write32(base, platinum_addr, platinum);
 
     if (!saveUnlockState(ctxt->name, trophies)) {
-        logError("dal: trophy: failed to save the unlock state of \"{}\"", ctxt->name);
+        logError("tox2: trophy: failed to save the unlock state of \"{}\"", ctxt->name);
     }
     ctx->gpr[3] = kCellOk;
 }
 
 // sceNpTrophyGetTrophyUnlockState(u32 context, u32 handle, SceNpTrophyFlagArray* flags, u32* count)
-void trophyGetTrophyUnlockState(DalPpuContext* ctx, std::uint8_t* base) {
+void trophyGetTrophyUnlockState(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t context = argU32(ctx, 0);
     const std::uint32_t handle = argU32(ctx, 1);
     const std::uint32_t flags_addr = argU32(ctx, 2);
@@ -729,9 +729,9 @@ void trophyGetTrophyUnlockState(DalPpuContext* ctx, std::uint8_t* base) {
             loadUnlockState(dir, loaded);
             trophies = &loaded;
         } else {
-            dalWrite32(base, count_addr, 0);
+            tox2Write32(base, count_addr, 0);
             for (std::uint32_t word = 0; word < kMaxFlagTrophies / 32; word++) {
-                dalWrite32(base, flags_addr + 4 * word, 0);
+                tox2Write32(base, flags_addr + 4 * word, 0);
             }
             ctx->gpr[3] = kCellOk;
             return;
@@ -742,13 +742,13 @@ void trophyGetTrophyUnlockState(DalPpuContext* ctx, std::uint8_t* base) {
     }
 
     const auto count = static_cast<std::uint32_t>(trophies->size());
-    dalWrite32(base, count_addr, count);
+    tox2Write32(base, count_addr, count);
     std::uint32_t words[kMaxFlagTrophies / 32] = {};
     for (std::uint32_t id = 0; id < std::min(count, kMaxFlagTrophies); id++) {
         if ((*trophies)[id].unlocked) words[id / 32] |= 1u << (id % 32);
     }
     for (std::uint32_t word = 0; word < kMaxFlagTrophies / 32; word++) {
-        dalWrite32(base, flags_addr + 4 * word, words[word]);
+        tox2Write32(base, flags_addr + 4 * word, words[word]);
     }
     ctx->gpr[3] = kCellOk;
 }
@@ -776,4 +776,4 @@ void resetSceNpTrophy() {
     clearTables();
 }
 
-}  // namespace dal
+}  // namespace tox2

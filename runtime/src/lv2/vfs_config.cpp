@@ -17,7 +17,7 @@
 
 #include <yyjson.h>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 using Json = const yyjson_val*;
@@ -479,4 +479,4 @@ std::expected<VfsLayout, std::string> composeVfsLayout(const VfsConfigFile* conf
     return layout;
 }
 
-}  // namespace dal
+}  // namespace tox2

@@ -27,13 +27,13 @@
 
 #include "core/guest_memory.h"
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/cell_atrac_stream.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "cellAtrac";
@@ -77,12 +77,12 @@ bool guestRange(std::uint32_t addr, std::uint32_t size) {
 bool cellOk(std::uint32_t addr) { return guestRange(addr, 4); }
 
 void writeS32(std::uint8_t* base, std::uint32_t addr, std::int32_t value) {
-    dalWrite32(base, addr, std::bit_cast<std::uint32_t>(value));
+    tox2Write32(base, addr, std::bit_cast<std::uint32_t>(value));
 }
 
 // cellAtracSetDataAndGetMemSize(CellAtracHandle* handle, u8* buffer, u32 read_bytes, u32 buffer_bytes,
 //                               u32* work_memory_bytes)
-void atracSetDataAndGetMemSize(DalPpuContext* ctx, std::uint8_t* base) {
+void atracSetDataAndGetMemSize(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t handle = argU32(ctx, 0);
     const std::uint32_t buffer = argU32(ctx, 1);
     const std::uint32_t read_bytes = argU32(ctx, 2);
@@ -101,21 +101,21 @@ void atracSetDataAndGetMemSize(DalPpuContext* ctx, std::uint8_t* base) {
             AtracStream::open(std::span<const std::uint8_t>(base + buffer, read_bytes), buffer, buffer_bytes, error);
     if (!stream) {
         if (unusableReported().insert(handle).second) {
-            logWarn("dal: atrac: handle {:#x}: unusable data: {}", handle, error);
+            logWarn("tox2: atrac: handle {:#x}: unusable data: {}", handle, error);
         }
         setResultCode(ctx, stream.error());
         return;
     }
     unusableReported().erase(handle);
     sounds().insert_or_assign(handle, std::move(*stream));
-    dalWrite32(base, work_out, kAtracWorkMemoryBytes);
+    tox2Write32(base, work_out, kAtracWorkMemoryBytes);
     setResultCode(ctx, kCellOk);
 }
 
 // cellAtracCreateDecoder(CellAtracHandle* handle, u8* work_memory, u32 ppu_priority, u32 spu_priority)
 // The work memory and priorities have no meaning here: the decoder state is host side. A handle
 // without a decoder still plays (as silence), so a failure to make one is not an error to the game.
-void atracCreateDecoder(DalPpuContext* ctx, std::uint8_t* base) {
+void atracCreateDecoder(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const std::uint32_t handle = argU32(ctx, 0);
     AtracStream* sound = findSound(handle);
@@ -129,7 +129,7 @@ void atracCreateDecoder(DalPpuContext* ctx, std::uint8_t* base) {
         std::string error;
         decoder = factory->create(sound->info(), error);
         if (!decoder && !g_decoder_warned.exchange(true)) {
-            logWarn("dal: atrac: no decoder: {}", error);
+            logWarn("tox2: atrac: no decoder: {}", error);
         }
     }
     const std::uint32_t result = sound->createDecoder(std::move(decoder));
@@ -138,20 +138,20 @@ void atracCreateDecoder(DalPpuContext* ctx, std::uint8_t* base) {
         const At3Info& info = sound->info();
         const std::string loop =
                 info.loop ? std::format("{}-{}", info.loop->start_sample, info.loop->end_sample) : std::string("none");
-        logInfo("dal: atrac: decoder {:#x}: {} ch {} Hz, {} frames, loop {}, {}", handle, info.channels,
+        logInfo("tox2: atrac: decoder {:#x}: {} ch {} Hz, {} frames, loop {}, {}", handle, info.channels,
                 info.sample_rate, sound->frames(), loop, sound->memoryMode() ? "all on memory" : "streaming");
     }
     setResultCode(ctx, result);
 }
 
 // cellAtracDeleteDecoder(CellAtracHandle* handle)
-void atracDeleteDecoder(DalPpuContext* ctx, std::uint8_t* base) {
+void atracDeleteDecoder(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResultCode(ctx, sounds().erase(argU32(ctx, 0)) != 0 ? kCellOk : kAtracErrorUnsetData);
 }
 
 // cellAtracDecode(CellAtracHandle* handle, float* out, u32* samples, u32* finish, s32* remain)
-void atracDecode(DalPpuContext* ctx, std::uint8_t* base) {
+void atracDecode(Tox2PpuContext* ctx, std::uint8_t* base) {
     AtracStream* sound = findSound(argU32(ctx, 0));
     if (sound == nullptr) {
         setResultCode(ctx, kAtracErrorUnsetData);
@@ -186,20 +186,20 @@ void atracDecode(DalPpuContext* ctx, std::uint8_t* base) {
     add(t.without_decoder, result->counts.without_decoder);
     if (result->samples == 0 && !result->finish) add(t.starved, 1);
     if (const std::string reason = sound->takeFirstError(); !reason.empty()) {
-        logWarn("dal: atrac: handle {:#x}: decode error, playing silence for such frames: {}", argU32(ctx, 0), reason);
+        logWarn("tox2: atrac: handle {:#x}: decode error, playing silence for such frames: {}", argU32(ctx, 0), reason);
     }
     const std::size_t count = std::size_t{result->samples} * channels;
     for (std::size_t i = 0; i < count; ++i) {
-        dalWrite32(base, out + static_cast<std::uint32_t>(i * 4), std::bit_cast<std::uint32_t>(pcm[i]));
+        tox2Write32(base, out + static_cast<std::uint32_t>(i * 4), std::bit_cast<std::uint32_t>(pcm[i]));
     }
-    dalWrite32(base, samples_out, result->samples);
-    dalWrite32(base, finish_out, result->finish ? 1 : 0);
+    tox2Write32(base, samples_out, result->samples);
+    tox2Write32(base, finish_out, result->finish ? 1 : 0);
     writeS32(base, remain_out, result->remain);
     setResultCode(ctx, kCellOk);
 }
 
 // cellAtracGetStreamDataInfo(CellAtracHandle* handle, u8** write_ptr, u32* writable_bytes, u32* read_pos)
-void atracGetStreamDataInfo(DalPpuContext* ctx, std::uint8_t* base) {
+void atracGetStreamDataInfo(Tox2PpuContext* ctx, std::uint8_t* base) {
     AtracStream* sound = findSound(argU32(ctx, 0));
     if (sound == nullptr) {
         setResultCode(ctx, kAtracErrorUnsetData);
@@ -217,21 +217,21 @@ void atracGetStreamDataInfo(DalPpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, info.error());
         return;
     }
-    dalWrite32(base, write_ptr_out, info->write_addr);
-    dalWrite32(base, writable_out, info->writable);
-    dalWrite32(base, read_pos_out, info->read_pos);
+    tox2Write32(base, write_ptr_out, info->write_addr);
+    tox2Write32(base, writable_out, info->writable);
+    tox2Write32(base, read_pos_out, info->read_pos);
     setResultCode(ctx, kCellOk);
 }
 
 // cellAtracAddStreamData(CellAtracHandle* handle, u32 bytes)
-void atracAddStreamData(DalPpuContext* ctx, std::uint8_t* base) {
+void atracAddStreamData(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     AtracStream* sound = findSound(argU32(ctx, 0));
     setResultCode(ctx, sound != nullptr ? sound->addStreamData(argU32(ctx, 1)) : kAtracErrorUnsetData);
 }
 
 // cellAtracGetRemainFrame(CellAtracHandle* handle, s32* remain)
-void atracGetRemainFrame(DalPpuContext* ctx, std::uint8_t* base) {
+void atracGetRemainFrame(Tox2PpuContext* ctx, std::uint8_t* base) {
     AtracStream* sound = findSound(argU32(ctx, 0));
     if (sound == nullptr) {
         setResultCode(ctx, kAtracErrorUnsetData);
@@ -247,7 +247,7 @@ void atracGetRemainFrame(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellAtracGetChannel(CellAtracHandle* handle, u32* channels)
-void atracGetChannel(DalPpuContext* ctx, std::uint8_t* base) {
+void atracGetChannel(Tox2PpuContext* ctx, std::uint8_t* base) {
     AtracStream* sound = findSound(argU32(ctx, 0));
     if (sound == nullptr) {
         setResultCode(ctx, kAtracErrorUnsetData);
@@ -258,12 +258,12 @@ void atracGetChannel(DalPpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, kCellEfault);
         return;
     }
-    dalWrite32(base, out, sound->info().channels);
+    tox2Write32(base, out, sound->info().channels);
     setResultCode(ctx, kCellOk);
 }
 
 // cellAtracGetMaxSample(CellAtracHandle* handle, u32* max_samples)
-void atracGetMaxSample(DalPpuContext* ctx, std::uint8_t* base) {
+void atracGetMaxSample(Tox2PpuContext* ctx, std::uint8_t* base) {
     if (findSound(argU32(ctx, 0)) == nullptr) {
         setResultCode(ctx, kAtracErrorUnsetData);
         return;
@@ -273,12 +273,12 @@ void atracGetMaxSample(DalPpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, kCellEfault);
         return;
     }
-    dalWrite32(base, out, kAtracMaxSample);
+    tox2Write32(base, out, kAtracMaxSample);
     setResultCode(ctx, kCellOk);
 }
 
 // cellAtracSetLoopNum(CellAtracHandle* handle, s32 loop_num)
-void atracSetLoopNum(DalPpuContext* ctx, std::uint8_t* base) {
+void atracSetLoopNum(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     AtracStream* sound = findSound(argU32(ctx, 0));
     if (sound == nullptr) {
@@ -290,7 +290,7 @@ void atracSetLoopNum(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellAtracGetLoopInfo(CellAtracHandle* handle, s32* loop_num, u32* status)
-void atracGetLoopInfo(DalPpuContext* ctx, std::uint8_t* base) {
+void atracGetLoopInfo(Tox2PpuContext* ctx, std::uint8_t* base) {
     AtracStream* sound = findSound(argU32(ctx, 0));
     if (sound == nullptr) {
         setResultCode(ctx, kAtracErrorUnsetData);
@@ -303,12 +303,12 @@ void atracGetLoopInfo(DalPpuContext* ctx, std::uint8_t* base) {
         return;
     }
     writeS32(base, loops_out, sound->loopNum());
-    dalWrite32(base, status_out, sound->loopStatus());
+    tox2Write32(base, status_out, sound->loopStatus());
     setResultCode(ctx, kCellOk);
 }
 
 // cellAtracGetSoundInfo(CellAtracHandle* handle, s32* end_sample, s32* loop_start, s32* loop_end)
-void atracGetSoundInfo(DalPpuContext* ctx, std::uint8_t* base) {
+void atracGetSoundInfo(Tox2PpuContext* ctx, std::uint8_t* base) {
     AtracStream* sound = findSound(argU32(ctx, 0));
     if (sound == nullptr) {
         setResultCode(ctx, kAtracErrorUnsetData);
@@ -330,14 +330,14 @@ void atracGetSoundInfo(DalPpuContext* ctx, std::uint8_t* base) {
 
 // cellAtracIsSecondBufferNeeded(CellAtracHandle* handle): the answer is the result itself, and this
 // model never needs a second buffer.
-void atracIsSecondBufferNeeded(DalPpuContext* ctx, std::uint8_t* base) {
+void atracIsSecondBufferNeeded(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResultCode(ctx, findSound(argU32(ctx, 0)) != nullptr ? 0 : kAtracErrorUnsetData);
 }
 
 // cellAtracGetSecondBufferInfo(CellAtracHandle* handle, u32* read_pos, u32* data_bytes)
 // Unreachable while IsSecondBufferNeeded answers 0.
-void atracGetSecondBufferInfo(DalPpuContext* ctx, std::uint8_t* base) {
+void atracGetSecondBufferInfo(Tox2PpuContext* ctx, std::uint8_t* base) {
     if (findSound(argU32(ctx, 0)) == nullptr) {
         setResultCode(ctx, kAtracErrorUnsetData);
         return;
@@ -348,13 +348,13 @@ void atracGetSecondBufferInfo(DalPpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, kCellEfault);
         return;
     }
-    dalWrite32(base, pos_out, 0);
-    dalWrite32(base, size_out, 0);
+    tox2Write32(base, pos_out, 0);
+    tox2Write32(base, size_out, 0);
     setResultCode(ctx, kCellOk);
 }
 
 // cellAtracSetSecondBuffer(CellAtracHandle* handle, u8* buffer, u32 bytes)
-void atracSetSecondBuffer(DalPpuContext* ctx, std::uint8_t* base) {
+void atracSetSecondBuffer(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResultCode(ctx, findSound(argU32(ctx, 0)) != nullptr ? kCellOk : kAtracErrorUnsetData);
 }
@@ -404,4 +404,4 @@ void resetCellAtrac() {
     g_decoder_warned.store(false);
 }
 
-}  // namespace dal
+}  // namespace tox2

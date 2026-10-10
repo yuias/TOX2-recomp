@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace dal {
+namespace tox2 {
 
 struct GlslResult {
     std::string glsl;                        // empty unless ok
@@ -81,4 +81,4 @@ constexpr int vpOutputSlotLocation(std::uint32_t slot) {
 // location = attribute slot, and the renderer binds default values for unbound slots.
 GlslResult translateVertexProgram(std::span<const std::uint32_t> ucode, std::uint32_t input_mask);
 
-}  // namespace dal
+}  // namespace tox2

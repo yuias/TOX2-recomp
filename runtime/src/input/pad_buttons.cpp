@@ -2,7 +2,7 @@
 
 #include <array>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::uint16_t kPressedPressure = 0xFF;
@@ -74,4 +74,4 @@ std::optional<PadButton> padButtonFromName(std::string_view name) {
     return std::nullopt;
 }
 
-}  // namespace dal
+}  // namespace tox2

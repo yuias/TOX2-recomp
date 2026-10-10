@@ -11,7 +11,7 @@
 #include <condition_variable>
 #include <cstdint>
 
-namespace dal {
+namespace tox2 {
 
 inline constexpr std::uint32_t kRsxDeviceAddr = 0x10000000;      // default CellGcmContextData
 inline constexpr std::uint32_t kRsxDmaAddr = 0x10100000;         // RsxDmaControl
@@ -127,4 +127,4 @@ std::uint32_t rsxMapMainMemory(std::uint32_t ea, std::uint32_t size, std::uint32
 // cellGcmUnmapEaIoAddress: the low 20 bits of `ea` are ignored.
 std::uint32_t rsxUnmapEa(std::uint32_t ea);
 
-}  // namespace dal
+}  // namespace tox2

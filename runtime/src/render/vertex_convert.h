@@ -15,7 +15,7 @@
 
 #include <volk.h>
 
-namespace dal {
+namespace tox2 {
 
 // Vertex base types of SET_VERTEX_DATA_ARRAY_FORMAT bits 0..2.
 inline constexpr std::uint8_t kVertexTypeSnorm16 = 1;
@@ -66,4 +66,4 @@ bool indexRange(bool is_u16, std::span<const std::uint8_t> src, std::uint32_t co
 bool indicesInRange(bool is_u16, std::span<const std::uint8_t> src, std::uint32_t count, std::uint32_t min_index,
                     std::uint32_t max_index, bool restart, std::uint32_t restart_index);
 
-}  // namespace dal
+}  // namespace tox2

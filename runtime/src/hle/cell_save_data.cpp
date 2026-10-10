@@ -55,12 +55,12 @@
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/param_sfo.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 #include "lv2/vfs.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 namespace stdfs = std::filesystem;
@@ -378,7 +378,7 @@ std::optional<SaveEntry> loadEntry(const stdfs::path& root, const std::string& e
     entry.subtitle = sfoString(*parsed, "SUB_TITLE");
     entry.details = sfoString(*parsed, "DETAIL");
     if (!isValidDirName(entry.dir_name)) {
-        logError("dal: savedata: '{}' has an invalid SAVEDATA_DIRECTORY entry ('{}')", escaped, entry.dir_name);
+        logError("tox2: savedata: '{}' has an invalid SAVEDATA_DIRECTORY entry ('{}')", escaped, entry.dir_name);
         return std::nullopt;
     }
     std::error_code ec;
@@ -394,13 +394,13 @@ std::optional<SaveEntry> loadEntry(const stdfs::path& root, const std::string& e
 
 // Everything one savedata_op call works with.
 struct OpState {
-    DalPpuContext* ctx = nullptr;
+    Tox2PpuContext* ctx = nullptr;
     std::uint8_t* base = nullptr;
     std::uint32_t result = 0, list_get = 0, list_set = 0, stat_get = 0, stat_set = 0, file_get = 0, file_set = 0;
 };
 
 std::int32_t read32s(const OpState& s, std::uint32_t addr) {
-    return static_cast<std::int32_t>(dalRead32(s.base, addr));
+    return static_cast<std::int32_t>(tox2Read32(s.base, addr));
 }
 
 // Runs a (result, get, set) callback and returns the CBRESULT it stored. Only the part of the
@@ -422,26 +422,26 @@ std::uint32_t reportCallbackError(const OpState& s, std::int32_t result, std::ui
         case kCbErrBroken: msg = "the save data is corrupted"; break;
         case kCbErrNoData: msg = "there is no save data"; break;
         case kCbErrInvalid: {
-            const std::uint32_t text = dalRead32(s.base, s.result + kResultInvalidMsg);
+            const std::uint32_t text = tox2Read32(s.base, s.result + kResultInvalidMsg);
             msg = text != 0 ? getText(s.base, text, 256) : std::string("invalid");
             break;
         }
         default:
-            logError("dal: savedata: callback returned result {} (parameter error 22)", result);
+            logError("tox2: savedata: callback returned result {} (parameter error 22)", result);
             return kErrorParam;
     }
     const bool repeat = result == g_last_error_dialog;
     if (err_dialog == kErrDialogNoRepeat) g_last_error_dialog = result;
     if (err_dialog == kErrDialogNone || (err_dialog == kErrDialogNoRepeat && repeat)) {
-        logInfo("dal: savedata: callback result {}: {} (no dialog requested)", result, msg);
+        logInfo("tox2: savedata: callback result {}: {} (no dialog requested)", result, msg);
     } else {
-        logWarn("dal: savedata: error dialog (headless, not shown): {}", msg);
+        logWarn("tox2: savedata: error dialog (headless, not shown): {}", msg);
     }
     return kErrorCbResult;
 }
 
 std::uint32_t paramError(int number, std::string_view detail = {}) {
-    logError("dal: savedata: parameter error {}{}{}", number, detail.empty() ? "" : " ", detail);
+    logError("tox2: savedata: parameter error {}{}{}", number, detail.empty() ? "" : " ", detail);
     return kErrorParam;
 }
 
@@ -460,9 +460,9 @@ int checkArgs(const std::uint8_t* base, Op op, std::uint32_t version, std::uint3
         }
     } else {
         if (set_list == 0) return 11;
-        if (dalRead32(base, set_list + kSetListSortType) > kSortSubtitle) return 12;
-        if (dalRead32(base, set_list + kSetListSortOrder) > kOrderAscent) return 13;
-        const std::uint32_t prefix = dalRead32(base, set_list + kSetListPrefix);
+        if (tox2Read32(base, set_list + kSetListSortType) > kSortSubtitle) return 12;
+        if (tox2Read32(base, set_list + kSetListSortOrder) > kOrderAscent) return 13;
+        const std::uint32_t prefix = tox2Read32(base, set_list + kSetListPrefix);
         if (prefix == 0) return 15;
         if (std::memchr(base + prefix, 0, kPrefixSize) == nullptr || base[prefix] == 0) return 17;
 
@@ -482,21 +482,21 @@ int checkArgs(const std::uint8_t* base, Op op, std::uint32_t version, std::uint3
             }
             pos = bar + 1;
         }
-        if (dalRead32(base, set_list + kSetListReserved) != 0) return 14;
+        if (tox2Read32(base, set_list + kSetListReserved) != 0) return 14;
     }
 
     if (set_buf == 0) return 74;
-    const std::uint32_t dir_list_max = dalRead32(base, set_buf + kSetBufDirListMax);
-    const std::uint32_t file_list_max = dalRead32(base, set_buf + kSetBufFileListMax);
-    const std::uint32_t buf_size = dalRead32(base, set_buf + kSetBufBufSize);
+    const std::uint32_t dir_list_max = tox2Read32(base, set_buf + kSetBufDirListMax);
+    const std::uint32_t file_list_max = tox2Read32(base, set_buf + kSetBufFileListMax);
+    const std::uint32_t buf_size = tox2Read32(base, set_buf + kSetBufBufSize);
     if (isListOp(op)) {
         if (dir_list_max > kDirListMax) return 8;
         if (static_cast<std::uint64_t>(dir_list_max) * kDirListSize > buf_size) return 7;
     }
     if (static_cast<std::uint64_t>(file_list_max) * kFileStatSize > buf_size) return 7;
-    if (buf_size != 0 && dalRead32(base, set_buf + kSetBufBuf) == 0) return 6;
+    if (buf_size != 0 && tox2Read32(base, set_buf + kSetBufBuf) == 0) return 6;
     for (std::uint32_t i = 0; i < 6; i++) {
-        if (dalRead32(base, set_buf + kSetBufReserved + 4 * i) != 0) return 10;
+        if (tox2Read32(base, set_buf + kSetBufReserved + 4 * i) != 0) return 10;
     }
     if (isListOp(op) && func_list == 0) return 18;
     if (!isListOp(op) && func_stat == 0) return 20;
@@ -514,19 +514,19 @@ struct ListResult {
 ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_t set_list, std::uint32_t set_buf,
                        std::uint32_t func_list, const stdfs::path& root) {
     std::uint8_t* base = s.base;
-    const std::uint32_t dir_list_max = dalRead32(base, set_buf + kSetBufDirListMax);
-    const std::uint32_t buf_size = dalRead32(base, set_buf + kSetBufBufSize);
-    const std::uint32_t buf = dalRead32(base, set_buf + kSetBufBuf);
+    const std::uint32_t dir_list_max = tox2Read32(base, set_buf + kSetBufDirListMax);
+    const std::uint32_t buf_size = tox2Read32(base, set_buf + kSetBufBufSize);
+    const std::uint32_t buf = tox2Read32(base, set_buf + kSetBufBuf);
     auto fail = [](std::uint32_t code) { return ListResult{true, code, {}}; };
     auto clearBuf = [&] {
         if (buf_size != 0) std::memset(base + buf, 0, buf_size);
     };
 
-    dalWrite32(base, s.list_get + kListGetDirList, buf);
+    tox2Write32(base, s.list_get + kListGetDirList, buf);
 
     std::vector<std::string> prefixes;
     {
-        const std::string text = readGuestString(base, dalRead32(base, set_list + kSetListPrefix), kPrefixSize);
+        const std::string text = readGuestString(base, tox2Read32(base, set_list + kSetListPrefix), kPrefixSize);
         std::size_t pos = 0;
         while (pos <= text.size()) {
             std::size_t bar = text.find('|', pos);
@@ -551,17 +551,17 @@ ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_
             break;
         }
     }
-    dalWrite32(base, s.list_get + kListGetDirNum, dir_num);
-    dalWrite32(base, s.list_get + kListGetDirListNum, dir_list_num);
+    tox2Write32(base, s.list_get + kListGetDirNum, dir_num);
+    tox2Write32(base, s.list_get + kListGetDirListNum, dir_list_num);
 
-    const std::uint32_t sort_type = dalRead32(base, set_list + kSetListSortType);
+    const std::uint32_t sort_type = tox2Read32(base, set_list + kSetListSortType);
     const auto less = [sort_type](const SaveEntry& a, const SaveEntry& b) {
         if (sort_type == kSortModifiedTime) {
             return a.times.mtime == b.times.mtime ? a.subtitle < b.subtitle : a.times.mtime < b.times.mtime;
         }
         return a.subtitle == b.subtitle ? a.times.mtime < b.times.mtime : a.subtitle < b.subtitle;
     };
-    if (dalRead32(base, set_list + kSetListSortOrder) == kOrderAscent) {
+    if (tox2Read32(base, set_list + kSetListSortOrder) == kOrderAscent) {
         std::sort(entries.begin(), entries.end(), less);
     } else {
         std::sort(entries.rbegin(), entries.rend(), less);
@@ -572,16 +572,16 @@ ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_
         putText(base, item + kDirListListParam, kListParamSize, entries[i].list_param);
     }
 
-    dalWrite32(base, s.list_set + kListSetFocusPosition, kFocusListHead);
+    tox2Write32(base, s.list_set + kListSetFocusPosition, kFocusListHead);
     const std::int32_t cb = runCallback(s, func_list, s.list_get, s.list_set);
     if (cb != kCbOkNext) {
-        logInfo("dal: savedata: funcList returned result {}", cb);
+        logInfo("tox2: savedata: funcList returned result {}", cb);
         if (cb == kCbOkLast || cb == kCbOkLastNoConfirm) return fail(kCellOk);
         return fail(reportCallbackError(s, cb, err_dialog));
     }
 
-    const std::uint32_t fixed_num = dalRead32(base, s.list_set + kListSetFixedListNum);
-    const std::uint32_t fixed_list = dalRead32(base, s.list_set + kListSetFixedList);
+    const std::uint32_t fixed_num = tox2Read32(base, s.list_set + kListSetFixedListNum);
+    const std::uint32_t fixed_list = tox2Read32(base, s.list_set + kListSetFixedList);
     if (fixed_num > kListItemMax) return fail(paramError(38, std::format("(fixedListNum={})", fixed_num)));
     if (fixed_num != 0 && fixed_list == 0) return fail(paramError(39));
     std::set<std::string> selected_list;
@@ -598,13 +598,13 @@ ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_
     }
     std::erase_if(entries, [&](const SaveEntry& e) { return !selected_list.contains(e.dir_name); });
 
-    const std::uint32_t new_data = dalRead32(base, s.list_set + kListSetNewData);
+    const std::uint32_t new_data = tox2Read32(base, s.list_set + kListSetNewData);
     std::string new_dir;
     std::uint32_t new_icon_pos = 0;
     if (new_data != 0) {
-        new_icon_pos = dalRead32(base, new_data + kNewDataIconPosition);
+        new_icon_pos = tox2Read32(base, new_data + kNewDataIconPosition);
         if (new_icon_pos > kIconPosTail) return fail(paramError(43, std::format("(iconPosition={:#x})", new_icon_pos)));
-        const std::uint32_t name_addr = dalRead32(base, new_data + kNewDataDirName);
+        const std::uint32_t name_addr = tox2Read32(base, new_data + kNewDataDirName);
         if (name_addr == 0) return fail(paramError(44));
         new_dir = getText(base, name_addr, kDirNameSize);
         switch (checkNameString(new_dir, 1, kDirNameSize)) {
@@ -616,12 +616,12 @@ ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_
         }
     }
 
-    const std::uint32_t focus_pos = dalRead32(base, s.list_set + kListSetFocusPosition);
+    const std::uint32_t focus_pos = tox2Read32(base, s.list_set + kListSetFocusPosition);
     const auto count = static_cast<std::int32_t>(entries.size());
     std::int32_t focused = -1;
     switch (focus_pos) {
         case kFocusDirName: {
-            const std::uint32_t name_addr = dalRead32(base, s.list_set + kListSetFocusDirName);
+            const std::uint32_t name_addr = tox2Read32(base, s.list_set + kListSetFocusDirName);
             if (name_addr == 0) return fail(paramError(35));
             const std::string name = getText(base, name_addr, kDirNameSize);
             switch (checkNameString(name, 1, kDirNameSize)) {
@@ -687,17 +687,17 @@ ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_
         selected = -1;
     }
     if (selected == -2) {
-        logInfo("dal: savedata: {}: no entry to choose without a save list dialog, cancelling", opName(op));
+        logInfo("tox2: savedata: {}: no entry to choose without a save list dialog, cancelling", opName(op));
         return fail(kCancel);
     }
 
     if (dir_num != 0) clearBuf();  // funcStat gets a clean buffer
     if (selected == -1) {
-        logInfo("dal: savedata: {}: new save '{}' chosen", opName(op), new_dir);
+        logInfo("tox2: savedata: {}: new save '{}' chosen", opName(op), new_dir);
         return {false, kCellOk, new_dir};
     }
     const std::string& chosen = entries[static_cast<std::size_t>(selected)].dir_name;
-    logInfo("dal: savedata: {}: entry '{}' chosen of {}", opName(op), chosen, count);
+    logInfo("tox2: savedata: {}: entry '{}' chosen of {}", opName(op), chosen, count);
     return {false, kCellOk, chosen};
 }
 
@@ -712,31 +712,31 @@ bool commitSave(const stdfs::path& root, const std::string& escaped, const FileM
     std::error_code ec;
     stdfs::remove_all(new_dir, ec);
     if (!stdfs::create_directory(new_dir, ec) || ec) {
-        logError("dal: savedata: cannot create '{}' ({})", new_dir.string(), ec.message());
+        logError("tox2: savedata: cannot create '{}' ({})", new_dir.string(), ec.message());
         return false;
     }
     for (const auto& [name, bytes] : files) {
         if (name == "PARAM.SFO") continue;
         if (!writeFile(new_dir / name, bytes)) {
-            logError("dal: savedata: cannot write '{}'", (new_dir / name).string());
+            logError("tox2: savedata: cannot write '{}'", (new_dir / name).string());
             return false;
         }
     }
     if (!writeFile(new_dir / "PARAM.SFO", serializeParamSfo(sfo))) {
-        logError("dal: savedata: cannot write PARAM.SFO in '{}'", new_dir.string());
+        logError("tox2: savedata: cannot write PARAM.SFO in '{}'", new_dir.string());
         return false;
     }
     stdfs::remove_all(old_dir, ec);
     if (stdfs::exists(dir, ec)) {
         stdfs::rename(dir, old_dir, ec);
         if (ec) {
-            logError("dal: savedata: cannot move '{}' ({})", dir.string(), ec.message());
+            logError("tox2: savedata: cannot move '{}' ({})", dir.string(), ec.message());
             return false;
         }
     }
     stdfs::rename(new_dir, dir, ec);
     if (ec) {
-        logError("dal: savedata: cannot move '{}' ({})", new_dir.string(), ec.message());
+        logError("tox2: savedata: cannot move '{}' ({})", new_dir.string(), ec.message());
         return false;
     }
     stdfs::remove_all(old_dir, ec);
@@ -754,11 +754,11 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
     }();
     std::error_code ec;
     if (root.empty() || (stdfs::create_directories(root, ec), ec)) {
-        logError("dal: savedata: {} is not available (is --hdd-dir set?)", kSaveRoot);
+        logError("tox2: savedata: {} is not available (is --hdd-dir set?)", kSaveRoot);
         return kErrorAccess;
     }
 
-    dalWrite32(base, s.result + kResultUserdata, userdata);
+    tox2Write32(base, s.result + kResultUserdata, userdata);
 
     SaveEntry save;
     if (isListOp(op)) {
@@ -769,7 +769,7 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
         save.dir_name = getText(base, dir_name_addr, kDirNameSize);
     }
     if (!isValidDirName(save.dir_name)) {
-        logError("dal: savedata: invalid save directory name '{}'", save.dir_name);
+        logError("tox2: savedata: invalid save directory name '{}'", save.dir_name);
         return kErrorBroken;
     }
     save.escaped = save.dir_name;
@@ -783,28 +783,28 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
 
     // Stat step.
     {
-        const std::uint32_t buf = dalRead32(base, set_buf + kSetBufBuf);
-        const std::uint32_t buf_size = dalRead32(base, set_buf + kSetBufBufSize);
-        const std::uint32_t file_list_max = dalRead32(base, set_buf + kSetBufFileListMax);
+        const std::uint32_t buf = tox2Read32(base, set_buf + kSetBufBuf);
+        const std::uint32_t buf_size = tox2Read32(base, set_buf + kSetBufBufSize);
+        const std::uint32_t file_list_max = tox2Read32(base, set_buf + kSetBufFileListMax);
         if (func_stat == 0) return paramError(20);
 
         const Times times = statTimes(guest_dir);
         save.is_new = sfo.empty();
-        dalWrite32(base, s.stat_get + kStatGetHddFreeSizeKb, static_cast<std::uint32_t>(kHddFreeSizeKb));
-        dalWrite32(base, s.stat_get + kStatGetIsNewData, save.is_new ? 1 : 0);
-        dalWrite64(base, s.stat_get + kStatGetAtime, static_cast<std::uint64_t>(times.atime));
-        dalWrite64(base, s.stat_get + kStatGetMtime, static_cast<std::uint64_t>(times.mtime));
-        dalWrite64(base, s.stat_get + kStatGetCtime, static_cast<std::uint64_t>(times.ctime));
+        tox2Write32(base, s.stat_get + kStatGetHddFreeSizeKb, static_cast<std::uint32_t>(kHddFreeSizeKb));
+        tox2Write32(base, s.stat_get + kStatGetIsNewData, save.is_new ? 1 : 0);
+        tox2Write64(base, s.stat_get + kStatGetAtime, static_cast<std::uint64_t>(times.atime));
+        tox2Write64(base, s.stat_get + kStatGetMtime, static_cast<std::uint64_t>(times.mtime));
+        tox2Write64(base, s.stat_get + kStatGetCtime, static_cast<std::uint64_t>(times.ctime));
         putText(base, s.stat_get + kStatGetDirName, kDirNameSize, save.dir_name);
         if (!sfo.empty()) {
-            dalWrite32(base, s.stat_get + kStatGetParentalLevel, sfoInt(sfo, "PARENTAL_LEVEL"));
-            dalWrite32(base, s.stat_get + kStatGetAttribute, sfoInt(sfo, "ATTRIBUTE"));
+            tox2Write32(base, s.stat_get + kStatGetParentalLevel, sfoInt(sfo, "PARENTAL_LEVEL"));
+            tox2Write32(base, s.stat_get + kStatGetAttribute, sfoInt(sfo, "ATTRIBUTE"));
             putText(base, s.stat_get + kStatGetTitle, kTitleSize, sfoString(sfo, "TITLE"));
             putText(base, s.stat_get + kStatGetSubTitle, kSubTitleSize, sfoString(sfo, "SUB_TITLE"));
             putText(base, s.stat_get + kStatGetDetail, kDetailSize, sfoString(sfo, "DETAIL"));
             putText(base, s.stat_get + kStatGetListParam, kListParamSize, sfoString(sfo, "SAVEDATA_LIST_PARAM"));
         }
-        dalWrite32(base, s.stat_get + kStatGetFileList, buf);
+        tox2Write32(base, s.stat_get + kStatGetFileList, buf);
         if (!save.is_new && buf_size != 0) std::memset(base + buf, 0, buf_size);
 
         std::vector<std::pair<std::string, std::uint64_t>> files;
@@ -839,32 +839,32 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
                 type = kFileTypeSnd0;
             else if (sfoInt(sfo, "*" + name) != 0)
                 type = kFileTypeSecure;
-            dalWrite32(base, item + kFileStatFileType, type);
-            dalWrite64(base, item + kFileStatSizeOff, size);
-            dalWrite64(base, item + kFileStatAtime, static_cast<std::uint64_t>(file_times.atime));
-            dalWrite64(base, item + kFileStatMtime, static_cast<std::uint64_t>(file_times.mtime));
-            dalWrite64(base, item + kFileStatCtime, static_cast<std::uint64_t>(file_times.ctime));
+            tox2Write32(base, item + kFileStatFileType, type);
+            tox2Write64(base, item + kFileStatSizeOff, size);
+            tox2Write64(base, item + kFileStatAtime, static_cast<std::uint64_t>(file_times.atime));
+            tox2Write64(base, item + kFileStatMtime, static_cast<std::uint64_t>(file_times.mtime));
+            tox2Write64(base, item + kFileStatCtime, static_cast<std::uint64_t>(file_times.ctime));
             putText(base, item + kFileStatFileName, kFileNameSize, name);
         }
-        dalWrite32(base, s.stat_get + kStatGetFileNum, file_num);
-        dalWrite32(base, s.stat_get + kStatGetFileListNum, file_list_num);
-        dalWrite32(base, s.stat_get + kStatGetSysSizeKb, static_cast<std::uint32_t>(kSysSizeKb));
-        dalWrite32(base, s.stat_get + kStatGetSizeKb,
-                   save.is_new ? 0u : static_cast<std::uint32_t>(size_bytes / 1024 + kSysSizeKb));
+        tox2Write32(base, s.stat_get + kStatGetFileNum, file_num);
+        tox2Write32(base, s.stat_get + kStatGetFileListNum, file_list_num);
+        tox2Write32(base, s.stat_get + kStatGetSysSizeKb, static_cast<std::uint32_t>(kSysSizeKb));
+        tox2Write32(base, s.stat_get + kStatGetSizeKb,
+                    save.is_new ? 0u : static_cast<std::uint32_t>(size_bytes / 1024 + kSysSizeKb));
 
-        logInfo("dal: savedata: {} '{}': new {}, {} file(s), calling funcStat", opName(op), save.dir_name, save.is_new,
+        logInfo("tox2: savedata: {} '{}': new {}, {} file(s), calling funcStat", opName(op), save.dir_name, save.is_new,
                 file_num);
         const std::int32_t cb = runCallback(s, func_stat, s.stat_get, s.stat_set);
         if (cb != kCbOkNext) {
-            logInfo("dal: savedata: funcStat returned result {}", cb);
+            logInfo("tox2: savedata: funcStat returned result {}", cb);
             if (cb == kCbOkLast) return kCellOk;
             return reportCallbackError(s, cb, err_dialog);
         }
 
-        const std::uint32_t set_param = dalRead32(base, s.stat_set + kStatSetSetParam);
+        const std::uint32_t set_param = tox2Read32(base, s.stat_set + kStatSetSetParam);
         if (set_param != 0) {
-            const std::uint32_t attribute = dalRead32(base, set_param + kParamAttribute);
-            const std::uint32_t parental = dalRead32(base, set_param + kParamParentalLevel);
+            const std::uint32_t attribute = tox2Read32(base, set_param + kParamAttribute);
+            const std::uint32_t parental = tox2Read32(base, set_param + kParamParentalLevel);
             if (attribute > kAttrNoDuplicate) return paramError(57, std::format("(attribute={:#x})", attribute));
             if (parental > 11) return paramError(58, std::format("(parental_level={})", parental));
             for (std::uint32_t i = 0;; i++) {
@@ -892,27 +892,27 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
             return paramError(50);
         }
 
-        switch (dalRead32(base, s.stat_set + kStatSetReCreateMode) & kRecreateMask) {
+        switch (tox2Read32(base, s.stat_set + kStatSetReCreateMode) & kRecreateMask) {
             case kRecreateNo:
             case kRecreateNoNoBroken: break;
             case kRecreateYes:
             case kRecreateYesResetOwner:
                 if (set_param == 0) return paramError(50);
-                logWarn("dal: savedata: recreating '{}'", save.dir_name);
+                logWarn("tox2: savedata: recreating '{}'", save.dir_name);
                 std::erase_if(sfo.ints, [](const auto& kv) { return kv.first[0] == '*'; });
                 recreated = true;
                 has_modified = true;
                 break;
             default:
                 return paramError(
-                        48, std::format("(reCreateMode={:#x})", dalRead32(base, s.stat_set + kStatSetReCreateMode)));
+                        48, std::format("(reCreateMode={:#x})", tox2Read32(base, s.stat_set + kStatSetReCreateMode)));
         }
     }
 
     if (!sfo.empty() && save.is_new) {
         stdfs::create_directory(dir_path, ec);
         if (ec) {
-            logWarn("dal: savedata: cannot create '{}' ({})", dir_path.string(), ec.message());
+            logWarn("tox2: savedata: cannot create '{}' ({})", dir_path.string(), ec.message());
             return kErrorAccess;
         }
     }
@@ -930,7 +930,7 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
         ec.clear();
     }
 
-    dalWrite32(base, s.file_get + kFileGetExcSize, 0);
+    tox2Write32(base, s.file_get + kFileGetExcSize, 0);
     std::uint32_t savedata_result = kCellOk;
     std::int32_t last_cb = 0;
 
@@ -941,7 +941,7 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
         last_cb = cb;
         if (cb != kCbOkNext) {
             if (cb == kCbOkLast || cb == kCbOkLastNoConfirm) break;
-            logInfo("dal: savedata: funcFile returned result {}", cb);
+            logInfo("tox2: savedata: funcFile returned result {}", cb);
             if (cb < kCbErrInvalid || cb > kCbOkLastNoConfirm) {
                 savedata_result = paramError(22);
             } else {
@@ -950,13 +950,13 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
             break;
         }
 
-        const std::uint32_t operation = dalRead32(base, s.file_set + kFileSetOperation);
-        const std::uint32_t file_type = dalRead32(base, s.file_set + kFileSetFileType);
+        const std::uint32_t operation = tox2Read32(base, s.file_set + kFileSetOperation);
+        const std::uint32_t file_type = tox2Read32(base, s.file_set + kFileSetFileType);
         std::string path;
         switch (file_type) {
             case kFileTypeSecure:
             case kFileTypeNormal: {
-                const std::uint32_t name_addr = dalRead32(base, s.file_set + kFileSetFileName);
+                const std::uint32_t name_addr = tox2Read32(base, s.file_set + kFileSetFileName);
                 if (name_addr == 0) {
                     savedata_result = paramError(69);
                     break;
@@ -977,11 +977,11 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
         }
         if (savedata_result != kCellOk) break;
 
-        const std::uint32_t file_buf = dalRead32(base, s.file_set + kFileSetFileBuf);
-        const std::uint32_t file_buf_size = dalRead32(base, s.file_set + kFileSetFileBufSize);
-        const std::uint32_t file_size = dalRead32(base, s.file_set + kFileSetFileSize);
-        const std::uint32_t file_offset = dalRead32(base, s.file_set + kFileSetFileOffset);
-        logInfo("dal: savedata: file op {} '{}' type {} offset {} size {} buffer {}", operation, path, file_type,
+        const std::uint32_t file_buf = tox2Read32(base, s.file_set + kFileSetFileBuf);
+        const std::uint32_t file_buf_size = tox2Read32(base, s.file_set + kFileSetFileBufSize);
+        const std::uint32_t file_size = tox2Read32(base, s.file_set + kFileSetFileSize);
+        const std::uint32_t file_offset = tox2Read32(base, s.file_set + kFileSetFileOffset);
+        logInfo("tox2: savedata: file op {} '{}' type {} offset {} size {} buffer {}", operation, path, file_type,
                 file_offset, file_size, file_buf_size);
 
         const bool writes = operation == kFileOpWrite || operation == kFileOpWriteNoTrunc;
@@ -1001,14 +1001,14 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
             case kFileOpRead: {
                 const auto file = files.find(path);
                 if (file == files.end() || file->second.size() <= file_offset) {
-                    logError("dal: savedata: cannot read '{}' (size {}, offset {})", path,
+                    logError("tox2: savedata: cannot read '{}' (size {}, offset {})", path,
                              file == files.end() ? -1 : static_cast<std::int64_t>(file->second.size()), file_offset);
                     savedata_result = kErrorFailure;
                     break;
                 }
                 const std::size_t n = std::min<std::size_t>(file_size, file->second.size() - file_offset);
                 std::memcpy(base + file_buf, file->second.data() + file_offset, n);
-                dalWrite32(base, s.file_get + kFileGetExcSize, static_cast<std::uint32_t>(n));
+                tox2Write32(base, s.file_get + kFileGetExcSize, static_cast<std::uint32_t>(n));
                 break;
             }
             case kFileOpWrite:
@@ -1018,18 +1018,18 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
                 if (bytes.size() < end) bytes.resize(end, 0);
                 std::memcpy(bytes.data() + file_offset, base + file_buf, file_size);
                 if (operation == kFileOpWrite) bytes.resize(end);
-                dalWrite32(base, s.file_get + kFileGetExcSize, file_size);
+                tox2Write32(base, s.file_get + kFileGetExcSize, file_size);
                 has_modified = true;
                 break;
             }
             case kFileOpDelete:
                 if (files.erase(path) == 0) {
-                    logError("dal: savedata: cannot delete '{}'", path);
+                    logError("tox2: savedata: cannot delete '{}'", path);
                     savedata_result = kErrorFailure;
                     break;
                 }
                 sfo.ints.erase("*" + path);
-                dalWrite32(base, s.file_get + kFileGetExcSize, 0);
+                tox2Write32(base, s.file_get + kFileGetExcSize, 0);
                 has_modified = true;
                 break;
             default: savedata_result = paramError(60, std::format("(fileOperation={:#x})", operation)); break;
@@ -1042,7 +1042,7 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
 
     if (!sfo.empty() && has_modified) {
         if (!commitSave(root, save.escaped, files, sfo)) return kErrorAccess;
-        logInfo("dal: savedata: committed '{}' ({} file(s))", save.dir_name, files.size());
+        logInfo("tox2: savedata: committed '{}' ({} file(s))", save.dir_name, files.size());
     }
 
     if (savedata_result == kErrorCbResult) return reportCallbackError(s, last_cb, err_dialog);
@@ -1050,16 +1050,16 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
 }
 
 // Shared entry: argument check, busy flag, scratch block, then the operation.
-void runOp(DalPpuContext* ctx, std::uint8_t* base, Op op, std::uint32_t version, std::uint32_t dir_name,
+void runOp(Tox2PpuContext* ctx, std::uint8_t* base, Op op, std::uint32_t version, std::uint32_t dir_name,
            std::uint32_t err_dialog, std::uint32_t set_list, std::uint32_t set_buf, std::uint32_t func_list,
            std::uint32_t func_stat, std::uint32_t func_file, std::uint32_t container, std::uint32_t userdata) {
-    logInfo("dal: savedata: cellSaveData{}(version {}, dirName \"{}\", errDialog {}, setBuf {:#x}, "
+    logInfo("tox2: savedata: cellSaveData{}(version {}, dirName \"{}\", errDialog {}, setBuf {:#x}, "
             "funcStat {:#x}, funcFile {:#x}, container {:#x}, userdata {:#x})",
             opName(op), version, dir_name != 0 && !isListOp(op) ? getText(base, dir_name, kDirNameSize) : "",
             err_dialog, set_buf, func_stat, func_file, container, userdata);
 
     if (const int error = checkArgs(base, op, version, dir_name, err_dialog, set_list, set_buf, func_list, func_stat)) {
-        logError("dal: savedata: {} parameter error {}", opName(op), error);
+        logError("tox2: savedata: {} parameter error {}", opName(op), error);
         ctx->gpr[3] = kErrorParam;
         return;
     }
@@ -1070,7 +1070,7 @@ void runOp(DalPpuContext* ctx, std::uint8_t* base, Op op, std::uint32_t version,
     if (g_scratch == 0) {
         g_scratch = process().main.allocate(kScratchUsed, 16);
         if (g_scratch == 0) {
-            logError("dal: savedata: cannot allocate the callback structures");
+            logError("tox2: savedata: cannot allocate the callback structures");
             ctx->gpr[3] = kErrorFailure;
             return;
         }
@@ -1091,39 +1091,39 @@ void runOp(DalPpuContext* ctx, std::uint8_t* base, Op op, std::uint32_t version,
     const std::uint32_t code =
             savedataOp(state, op, err_dialog, dir_name, set_list, set_buf, func_list, func_stat, func_file, userdata);
     g_busy = false;
-    logInfo("dal: savedata: {} returns {:#x}", opName(op), code);
+    logInfo("tox2: savedata: {} returns {:#x}", opName(op), code);
     ctx->gpr[3] = code;
 }
 
 // cellSaveDataAutoLoad2(u32 version, const char* dirName, u32 errDialog, CellSaveDataSetBuf* setBuf,
 //                       funcStat, funcFile, u32 container, void* userdata)
-void autoLoad2(DalPpuContext* ctx, std::uint8_t* base) {
+void autoLoad2(Tox2PpuContext* ctx, std::uint8_t* base) {
     runOp(ctx, base, Op::AutoLoad, argU32(ctx, 0), argU32(ctx, 1), argU32(ctx, 2), 0, argU32(ctx, 3), 0, argU32(ctx, 4),
           argU32(ctx, 5), argU32(ctx, 6), argU32(ctx, 7));
 }
 
 // cellSaveDataAutoSave2: same parameters as AutoLoad2.
-void autoSave2(DalPpuContext* ctx, std::uint8_t* base) {
+void autoSave2(Tox2PpuContext* ctx, std::uint8_t* base) {
     runOp(ctx, base, Op::AutoSave, argU32(ctx, 0), argU32(ctx, 1), argU32(ctx, 2), 0, argU32(ctx, 3), 0, argU32(ctx, 4),
           argU32(ctx, 5), argU32(ctx, 6), argU32(ctx, 7));
 }
 
 // cellSaveDataListLoad2(u32 version, CellSaveDataSetList* setList, CellSaveDataSetBuf* setBuf,
 //                       funcList, funcStat, funcFile, u32 container, void* userdata)
-void listLoad2(DalPpuContext* ctx, std::uint8_t* base) {
+void listLoad2(Tox2PpuContext* ctx, std::uint8_t* base) {
     runOp(ctx, base, Op::ListLoad, argU32(ctx, 0), 0, kErrDialogAlways, argU32(ctx, 1), argU32(ctx, 2), argU32(ctx, 3),
           argU32(ctx, 4), argU32(ctx, 5), argU32(ctx, 6), argU32(ctx, 7));
 }
 
 // cellSaveDataListSave2: same parameters as ListLoad2.
-void listSave2(DalPpuContext* ctx, std::uint8_t* base) {
+void listSave2(Tox2PpuContext* ctx, std::uint8_t* base) {
     runOp(ctx, base, Op::ListSave, argU32(ctx, 0), 0, kErrDialogAlways, argU32(ctx, 1), argU32(ctx, 2), argU32(ctx, 3),
           argU32(ctx, 4), argU32(ctx, 5), argU32(ctx, 6), argU32(ctx, 7));
 }
 
 // cellSaveDataDelete2(u32 container): RPCS3 `select_and_delete` is a selection UI only.
-void delete2(DalPpuContext* ctx, std::uint8_t*) {
-    logInfo("dal: savedata: cellSaveDataDelete2(container {:#x}): no selection UI, cancelling", argU32(ctx, 0));
+void delete2(Tox2PpuContext* ctx, std::uint8_t*) {
+    logInfo("tox2: savedata: cellSaveDataDelete2(container {:#x}): no selection UI, cancelling", argU32(ctx, 0));
     ctx->gpr[3] = kCancel;
 }
 
@@ -1146,4 +1146,4 @@ void resetCellSaveData() {
     g_scratch = 0;
 }
 
-}  // namespace dal
+}  // namespace tox2

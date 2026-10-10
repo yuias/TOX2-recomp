@@ -24,7 +24,7 @@
 #include "rsx/rsx_decode.h"
 #include "rsx/rsx_unimplemented.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::uint64_t kFenceTimeoutNs = 10'000'000'000ull;
@@ -1450,7 +1450,7 @@ bool RsxRenderer::dumpDue() const {
 void RsxRenderer::dumpDisplay() {
     if (!dumper_->hasRoom()) {
         dumper_->countSkipped();
-        logOnce(LogLevel::Warn, "render-dump-skipped", "dal: render: dump skipped (queue full) at flip {}",
+        logOnce(LogLevel::Warn, "render-dump-skipped", "tox2: render: dump skipped (queue full) at flip {}",
                 stats_.flips);
         return;
     }
@@ -1488,4 +1488,4 @@ bool RsxRenderer::readDisplay(std::vector<std::uint8_t>& bgra, std::uint32_t& wi
     return true;
 }
 
-}  // namespace dal
+}  // namespace tox2

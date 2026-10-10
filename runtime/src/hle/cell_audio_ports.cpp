@@ -10,11 +10,11 @@
 #include "audio/audio_output.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 static_assert(kCellAudioBlockFrames == kAudioBlockFrames);
@@ -97,9 +97,9 @@ std::uint32_t CellAudioPorts::portOpen(std::uint8_t* base, std::uint32_t param_a
     if (!initialised_) return kCellAudioErrorNotInit;
     if (!guestRange(param_addr, kParamSize) || !guestRange(port_out_addr, 4)) return kCellAudioErrorParam;
 
-    const std::uint64_t channels = dalRead64(base, param_addr + kParamChannels);
-    const std::uint64_t blocks = dalRead64(base, param_addr + kParamBlocks);
-    const std::uint64_t attr = dalRead64(base, param_addr + kParamAttr);
+    const std::uint64_t channels = tox2Read64(base, param_addr + kParamChannels);
+    const std::uint64_t blocks = tox2Read64(base, param_addr + kParamBlocks);
+    const std::uint64_t attr = tox2Read64(base, param_addr + kParamAttr);
     if (!validChannels(channels) || !validBlocks(blocks)) return kCellAudioErrorParam;
     if (free_ports_.empty()) return kCellAudioErrorPortFull;
 
@@ -119,7 +119,7 @@ std::uint32_t CellAudioPorts::portOpen(std::uint8_t* base, std::uint32_t param_a
     port.addr = addr;
     port.level = 1.0f;
     if ((attr & kCellAudioPortAttrInitLevel) != 0) {
-        port.level = std::bit_cast<float>(dalRead32(base, param_addr + kParamLevel));
+        port.level = std::bit_cast<float>(tox2Read32(base, param_addr + kParamLevel));
     }
     port.position = 0;
     // The next period gets number period_, so the tags of this port continue from there.
@@ -127,10 +127,10 @@ std::uint32_t CellAudioPorts::portOpen(std::uint8_t* base, std::uint32_t param_a
     port.time_us = last_period_us_;
 
     // A reopened slot would otherwise keep its previous user's position until the first period.
-    dalWrite64(base, cellAddress(port_no), 0);
-    dalWrite32(base, port_out_addr, port_no);
+    tox2Write64(base, cellAddress(port_no), 0);
+    tox2Write32(base, port_out_addr, port_no);
 
-    logInfo("dal: audio: port {} open: {} ch, {} blocks, attr {:#x}, level {}", port_no, channels, blocks, attr,
+    logInfo("tox2: audio: port {} open: {} ch, {} blocks, attr {:#x}, level {}", port_no, channels, blocks, attr,
             port.level);
     return kCellOk;
 }
@@ -145,12 +145,12 @@ std::uint32_t CellAudioPorts::getPortConfig(std::uint8_t* base, std::uint32_t po
     if (port.state == PortState::Opened) status = kCellAudioStatusReady;
     if (port.state == PortState::Started) status = kCellAudioStatusRun;
 
-    dalWrite32(base, config_addr + kConfigReadIndexAddr, cellAddress(port_no));
-    dalWrite32(base, config_addr + kConfigStatus, status);
-    dalWrite64(base, config_addr + kConfigChannels, port.channels);
-    dalWrite64(base, config_addr + kConfigBlocks, port.blocks);
-    dalWrite32(base, config_addr + kConfigPortSize, port.size);
-    dalWrite32(base, config_addr + kConfigPortAddr, port.addr);
+    tox2Write32(base, config_addr + kConfigReadIndexAddr, cellAddress(port_no));
+    tox2Write32(base, config_addr + kConfigStatus, status);
+    tox2Write64(base, config_addr + kConfigChannels, port.channels);
+    tox2Write64(base, config_addr + kConfigBlocks, port.blocks);
+    tox2Write32(base, config_addr + kConfigPortSize, port.size);
+    tox2Write32(base, config_addr + kConfigPortAddr, port.addr);
     return kCellOk;
 }
 
@@ -199,7 +199,7 @@ std::uint32_t CellAudioPorts::getPortBlockTag(std::uint8_t* base, std::uint32_t 
 
     // Unsigned arithmetic without a modulo: the block the next period mixes carries the number of the
     // period that published it, the following blocks the numbers after it.
-    if (tag_addr != 0) dalWrite64(base, tag_addr, port.tag + block_no - port.position);
+    if (tag_addr != 0) tox2Write64(base, tag_addr, port.tag + block_no - port.position);
     return kCellOk;
 }
 
@@ -214,7 +214,7 @@ std::uint32_t CellAudioPorts::getPortTimestamp(std::uint8_t* base, std::uint32_t
 
     // No history: an older tag is extrapolated back from the latest period at the nominal length.
     const std::uint64_t back = (port.tag - tag) * kCellAudioPeriodUs;
-    if (stamp_addr != 0) dalWrite64(base, stamp_addr, port.time_us > back ? port.time_us - back : 0);
+    if (stamp_addr != 0) tox2Write64(base, stamp_addr, port.time_us > back ? port.time_us - back : 0);
     return kCellOk;
 }
 
@@ -222,7 +222,7 @@ std::uint32_t CellAudioPorts::setNotifyEventQueue(std::uint64_t key) {
     if (!initialised_) return kCellAudioErrorNotInit;
 
     const std::uint32_t queue_id = eventQueueIdByKey(key);
-    logInfo("dal: audio: notify queue key {:#x} -> {}", key,
+    logInfo("tox2: audio: notify queue key {:#x} -> {}", key,
             queue_id != 0 ? std::format("{:#x}", queue_id) : std::string("not found"));
     if (queue_id == 0) return kCellAudioErrorTransEvent;
 
@@ -294,7 +294,7 @@ void CellAudioPorts::producePeriod(std::uint8_t* base, std::uint64_t now_us, std
         port.tag = period_;
         port.time_us = now_us;
         port.position = (port.position + 1) % port.blocks;
-        dalWrite64(base, cellAddress(port_no), port.position);
+        tox2Write64(base, cellAddress(port_no), port.position);
     }
 
     for (std::uint32_t c = 0; c < kCellAudioMaxChannels; ++c) {
@@ -302,7 +302,7 @@ void CellAudioPorts::producePeriod(std::uint8_t* base, std::uint64_t now_us, std
         nonzero_samples_[c].fetch_add(nonzero[c], std::memory_order_relaxed);
         if (c >= 2 && !dropped_logged_[c]) {
             dropped_logged_[c] = true;
-            logInfo("dal: audio: input channel {} carries signal; the stereo downmix drops it", c);
+            logInfo("tox2: audio: input channel {} carries signal; the stereo downmix drops it", c);
         }
     }
 
@@ -351,4 +351,4 @@ CellAudioPorts& cellAudioPorts() {
     return instance;
 }
 
-}  // namespace dal
+}  // namespace tox2

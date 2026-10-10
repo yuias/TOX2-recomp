@@ -71,12 +71,12 @@ def plan_chunks(counts: Sequence[int], chunks: int) -> list[tuple[int, int]]:
 
 
 def toc_save_statement(words: Sequence[int], addr: int) -> str | None:
-    """`dalWrite64` statement for the `std r2,D(r1)` of an import stub, or None if it has none."""
+    """`tox2Write64` statement for the `std r2,D(r1)` of an import stub, or None if it has none."""
     for i, word in enumerate(words):
         insn = ppu.decode(word, addr + 4 * i, strict=True)
         if insn.spec is not None and insn.spec.name == "std" and insn.field("rS") == 2 \
                 and insn.field("rA") == 1:
-            return "dalWrite64(base, %s, ctx->gpr[2]);" % Op(insn).ea_d("DS")
+            return "tox2Write64(base, %s, ctx->gpr[2]);" % Op(insn).ea_d("DS")
     return None
 
 
@@ -94,11 +94,11 @@ def render_trampoline(thunk: DbThunk, index: int,
     lines = ["// %s %s %s" % (_comment_text(thunk.module),
                              _comment_text(thunk.name) if thunk.name else "-",
                              hexs(thunk.fnid)),
-             "DAL_PPU_FUNC(%s) {" % import_name(thunk.addr),
-             "    DAL_ENTER(%s);" % u32(thunk.addr)]
+             "TOX2_PPU_FUNC(%s) {" % import_name(thunk.addr),
+             "    TOX2_ENTER(%s);" % u32(thunk.addr)]
     if save is not None:
         lines.append("    " + save)
-    lines.append("    DAL_HLE(%d);" % index)
+    lines.append("    TOX2_HLE(%d);" % index)
     lines.append("}")
     return "\n".join(lines) + "\n", save is not None
 
@@ -116,9 +116,9 @@ def c_string(text: str | None) -> str:
 
 
 def render_funcs_header(sha256: str, entries: Sequence[int], thunks: Sequence[DbThunk]) -> str:
-    lines = [banner(sha256).rstrip("\n"), "#pragma once", "", '#include "dal/ppu.h"', ""]
-    lines += ["DAL_PPU_FUNC(%s);" % func_name(entry) for entry in entries]
-    lines += ["DAL_PPU_FUNC(%s);" % import_name(t.addr) for t in thunks]
+    lines = [banner(sha256).rstrip("\n"), "#pragma once", "", '#include "tox2/ppu.h"', ""]
+    lines += ["TOX2_PPU_FUNC(%s);" % func_name(entry) for entry in entries]
+    lines += ["TOX2_PPU_FUNC(%s);" % import_name(t.addr) for t in thunks]
     return "\n".join(lines) + "\n"
 
 
@@ -132,22 +132,22 @@ def render_tables(sha256: str, entries: Sequence[int], thunks: Sequence[DbThunk]
     mappings = sorted([(e, func_name(e)) for e in entries]
                       + [(t.addr, import_name(t.addr)) for t in thunks])
     lines = [banner(sha256).rstrip("\n"), "", '#include "%s"' % HEADER_NAME, "",
-             "const DalFuncMapping kDalPpuFuncMappings[] = {"]
+             "const Tox2FuncMapping kTox2PpuFuncMappings[] = {"]
     lines += ["    { %s, %s }," % (u32(guest), name) for guest, name in mappings]
     lines += ["};",
-              "const uint32_t kDalPpuFuncMappingCount = %d;" % len(mappings), "",
-              "const DalImportInfo kDalPpuImports[] = {"]
+              "const uint32_t kTox2PpuFuncMappingCount = %d;" % len(mappings), "",
+              "const Tox2ImportInfo kTox2PpuImports[] = {"]
     lines += ["    { %s, %s, %s, %s }," % (u32(t.addr), u32(t.fnid), c_string(t.module),
                                            c_string(t.name)) for t in thunks]
     lines += ["};",
-              "const uint32_t kDalPpuImportCount = %d;" % len(thunks), "",
-              'const char kDalPpuExecutableSha256[] = "%s";' % sha256]
+              "const uint32_t kTox2PpuImportCount = %d;" % len(thunks), "",
+              'const char kTox2PpuExecutableSha256[] = "%s";' % sha256]
     return "\n".join(lines) + "\n"
 
 
 def render_sources(sha256: str, files: Sequence[str]) -> str:
     # CMake comments start with '#', so this file cannot use the C-style banner.
-    lines = [banner(sha256, "#").rstrip("\n"), "set(DAL_PPU_GENERATED_SOURCES"]
+    lines = [banner(sha256, "#").rstrip("\n"), "set(TOX2_PPU_GENERATED_SOURCES"]
     lines += ['    "${CMAKE_CURRENT_LIST_DIR}/%s"' % name for name in files]
     lines.append(")")
     return "\n".join(lines) + "\n"

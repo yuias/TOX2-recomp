@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace dal {
+namespace tox2 {
 
 // Frames between header patches. A file cut short (the process ends with std::_Exit, which flushes
 // nothing) is valid up to the last multiple of this many frames.
@@ -84,4 +84,4 @@ struct WavWindowStats {
 std::vector<WavWindowStats> wavStats(std::span<const float> samples, std::uint32_t sample_rate, std::uint32_t channels,
                                      double window_seconds);
 
-}  // namespace dal
+}  // namespace tox2

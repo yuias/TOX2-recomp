@@ -1,9 +1,9 @@
 """Group `vmx_int`: integer vector add, subtract, average, min/max and compare.
 
-Vector registers are byte-reversed in the host (see `runtime/include/dal/ppu_context.h`), which is
+Vector registers are byte-reversed in the host (see `runtime/include/tox2/ppu_context.h`), which is
 invisible to lane-wise operations: they are emitted as one expression on the matching element view
 (`u8`/`s8`, `u16`/`s16`, `u32`/`s32`). The saturating forms, the averages, the carry forms and the
-CR6 update live in `runtime/include/dal/ppu_vmx.h`.
+CR6 update live in `runtime/include/tox2/ppu_vmx.h`.
 """
 
 from __future__ import annotations
@@ -15,9 +15,9 @@ from .emit_db import GROUPS
 
 # Element size letter -> (unsigned view, signed view, unsigned vector type).
 _VIEWS = {
-    "b": ("u8", "s8", "DalU8x16"),
-    "h": ("u16", "s16", "DalU16x8"),
-    "w": ("u32", "s32", "DalU32x4"),
+    "b": ("u8", "s8", "Tox2U8x16"),
+    "h": ("u16", "s16", "Tox2U16x8"),
+    "w": ("u32", "s32", "Tox2U32x4"),
 }
 
 
@@ -47,21 +47,21 @@ def emit_modulo(op: Op) -> list[str] | None:
 def emit_saturate(op: Op) -> list[str] | None:
     # RPCS3 VADDUBS ... VSUBSWS: clamp each lane and set SAT when any lane clamped.
     d, a, b = _regs(op)
-    return ["%s = dal%s(ctx, %s, %s);" % (d, op.name.capitalize(), a, b)]
+    return ["%s = tox2%s(ctx, %s, %s);" % (d, op.name.capitalize(), a, b)]
 
 
 @handler("vaddcuw", "vsubcuw")
 def emit_carry(op: Op) -> list[str] | None:
     # RPCS3 VADDCUW, VSUBCUW
     d, a, b = _regs(op)
-    return ["%s = dal%s(%s, %s);" % (d, op.name.capitalize(), a, b)]
+    return ["%s = tox2%s(%s, %s);" % (d, op.name.capitalize(), a, b)]
 
 
 @handler(*_names(r"vavg[us][bhw]"))
 def emit_average(op: Op) -> list[str] | None:
     # RPCS3 VAVGSB ... VAVGUW: (a + b + 1) >> 1 without losing the carry-out bit.
     d, a, b = _regs(op)
-    return ["%s = dal%s(%s, %s);" % (d, op.name.capitalize(), a, b)]
+    return ["%s = tox2%s(%s, %s);" % (d, op.name.capitalize(), a, b)]
 
 
 @handler(*_names(r"v(max|min)[us][bhw]"))
@@ -86,5 +86,5 @@ def emit_compare(op: Op) -> list[str] | None:
     lines = ["%s.%s = (%s)(%s.%s %s %s.%s);" % (d, _view(letter, False), _VIEWS[letter][2], a, view,
                                                 comparison, b, view)]
     if op.rc:
-        lines.append("dalSetCr6(ctx, %s);" % d)
+        lines.append("tox2SetCr6(ctx, %s);" % d)
     return lines

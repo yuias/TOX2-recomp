@@ -22,11 +22,11 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
-namespace dal {
+namespace tox2 {
 
 // Every FFmpeg function the runtime calls, grouped by the library that exports it.
 // X(library, function)
-#define DAL_FFMPEG_FUNCTIONS(X)              \
+#define TOX2_FFMPEG_FUNCTIONS(X)             \
     X(avutil, avutil_version)                \
     X(avutil, av_malloc)                     \
     X(avutil, av_free)                       \
@@ -65,9 +65,9 @@ namespace dal {
 // Member names match FFmpeg's own, so a call site reads like the FFmpeg documentation. The types
 // come from the headers, so a signature change breaks the build instead of the run.
 struct FfmpegApi {
-#define DAL_FFMPEG_MEMBER(library, name) decltype(&::name) name = nullptr;
-    DAL_FFMPEG_FUNCTIONS(DAL_FFMPEG_MEMBER)
-#undef DAL_FFMPEG_MEMBER
+#define TOX2_FFMPEG_MEMBER(library, name) decltype(&::name) name = nullptr;
+    TOX2_FFMPEG_FUNCTIONS(TOX2_FFMPEG_MEMBER)
+#undef TOX2_FFMPEG_MEMBER
 };
 
 // Loads avutil, swresample, swscale and avcodec from `dir` (an absolute directory) and checks that
@@ -82,4 +82,4 @@ std::expected<FfmpegApi, std::string> loadFfmpeg(const std::filesystem::path& di
 // Loads from the directory of the running executable once and returns the same result afterwards.
 const std::expected<FfmpegApi, std::string>& defaultFfmpeg();
 
-}  // namespace dal
+}  // namespace tox2

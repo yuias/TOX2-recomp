@@ -1,4 +1,4 @@
-// Minimal runtime for the contract hooks in dal/ppu_context.h. It lets generated code be linked
+// Minimal runtime for the contract hooks in tox2/ppu_context.h. It lets generated code be linked
 // and exercised without the real runtime: dispatch works, everything that would need the system
 // (HLE calls, unknown targets, unhandled instructions) reports and exits.
 
@@ -10,21 +10,21 @@
 #include <cstring>
 #include <vector>
 
-#include "dal/ppu_context.h"
-#include "dal/ppu_stub.h"
+#include "tox2/ppu_context.h"
+#include "tox2/ppu_stub.h"
 
 // Generated code defines these. They are weak so that targets without generated code still link;
-// dalHleCall then reports the bare index.
+// tox2HleCall then reports the bare index.
 extern "C" {
-extern const DalImportInfo kDalPpuImports[] __attribute__((weak));
-extern const uint32_t kDalPpuImportCount __attribute__((weak));
+extern const Tox2ImportInfo kTox2PpuImports[] __attribute__((weak));
+extern const uint32_t kTox2PpuImportCount __attribute__((weak));
 }
 
 namespace {
 
 // Function-local so registration is safe during static initialisation of other translation units.
-std::vector<DalFuncMapping>& funcTable() {
-    static std::vector<DalFuncMapping> table;
+std::vector<Tox2FuncMapping>& funcTable() {
+    static std::vector<Tox2FuncMapping> table;
     return table;
 }
 
@@ -33,7 +33,7 @@ std::vector<DalFuncMapping>& funcTable() {
 const char* g_label = nullptr;
 
 [[noreturn]] void fatalExit() {
-    if (g_label != nullptr) std::fprintf(stderr, "dal: while running %s\n", g_label);
+    if (g_label != nullptr) std::fprintf(stderr, "tox2: while running %s\n", g_label);
     std::fflush(stdout);
     std::fflush(stderr);
     std::_Exit(3);
@@ -43,131 +43,131 @@ const char* g_label = nullptr;
 
 extern "C" {
 
-void dalStubResetFuncs(void) { funcTable().clear(); }
+void tox2StubResetFuncs(void) { funcTable().clear(); }
 
-void dalStubSetLabel(const char* label) { g_label = label; }
+void tox2StubSetLabel(const char* label) { g_label = label; }
 
-void dalRegisterFuncs(const DalFuncMapping* mappings, uint32_t count) {
-    std::vector<DalFuncMapping>& table = funcTable();
+void tox2RegisterFuncs(const Tox2FuncMapping* mappings, uint32_t count) {
+    std::vector<Tox2FuncMapping>& table = funcTable();
     table.insert(table.end(), mappings, mappings + count);
     std::stable_sort(table.begin(), table.end(),
-                     [](const DalFuncMapping& a, const DalFuncMapping& b) { return a.guest < b.guest; });
+                     [](const Tox2FuncMapping& a, const Tox2FuncMapping& b) { return a.guest < b.guest; });
 }
 
-DalPpuFunc* dalLookup(uint32_t addr) {
-    const std::vector<DalFuncMapping>& table = funcTable();
+Tox2PpuFunc* tox2Lookup(uint32_t addr) {
+    const std::vector<Tox2FuncMapping>& table = funcTable();
     auto it = std::lower_bound(table.begin(), table.end(), addr,
-                               [](const DalFuncMapping& m, uint32_t a) { return m.guest < a; });
+                               [](const Tox2FuncMapping& m, uint32_t a) { return m.guest < a; });
     return (it != table.end() && it->guest == addr) ? it->host : nullptr;
 }
 
-void dalUnknownTarget(DalPpuContext* ctx, uint8_t* base, uint32_t target, uint32_t site) {
+void tox2UnknownTarget(Tox2PpuContext* ctx, uint8_t* base, uint32_t target, uint32_t site) {
     (void)ctx;
     (void)base;
-    std::fprintf(stderr, "dal: unknown dynamic target 0x%08x (from 0x%08x)\n", target, site);
+    std::fprintf(stderr, "tox2: unknown dynamic target 0x%08x (from 0x%08x)\n", target, site);
     fatalExit();
 }
 
 // The musttail keeps dynamic transfers from adding a host frame per hop.
-void dalDispatch(DalPpuContext* __restrict ctx, uint8_t* __restrict base) {
-    DalPpuFunc* f = dalLookup(ctx->jump_target);
+void tox2Dispatch(Tox2PpuContext* __restrict ctx, uint8_t* __restrict base) {
+    Tox2PpuFunc* f = tox2Lookup(ctx->jump_target);
     if (f != nullptr) {
         [[clang::musttail]] return f(ctx, base);
     }
-    dalUnknownTarget(ctx, base, ctx->jump_target, ctx->jump_site);
+    tox2UnknownTarget(ctx, base, ctx->jump_target, ctx->jump_site);
 }
 
-void dalHleCall(DalPpuContext* ctx, uint8_t* base, uint32_t import_index) {
+void tox2HleCall(Tox2PpuContext* ctx, uint8_t* base, uint32_t import_index) {
     (void)ctx;
     (void)base;
-    if (kDalPpuImports != nullptr && &kDalPpuImportCount != nullptr && import_index < kDalPpuImportCount) {
-        const DalImportInfo& info = kDalPpuImports[import_index];
-        std::fprintf(stderr, "dal: HLE call %s::%s (import %u, stub 0x%08x, fnid 0x%08x)\n", info.module, info.name,
+    if (kTox2PpuImports != nullptr && &kTox2PpuImportCount != nullptr && import_index < kTox2PpuImportCount) {
+        const Tox2ImportInfo& info = kTox2PpuImports[import_index];
+        std::fprintf(stderr, "tox2: HLE call %s::%s (import %u, stub 0x%08x, fnid 0x%08x)\n", info.module, info.name,
                      import_index, info.stub, info.fnid);
     } else {
-        std::fprintf(stderr, "dal: HLE call, import index %u\n", import_index);
+        std::fprintf(stderr, "tox2: HLE call, import index %u\n", import_index);
     }
     fatalExit();
 }
 
 // Reports success so that a harness can observe the call.
-void dalSyscall(DalPpuContext* ctx, uint8_t* base, uint32_t site) {
+void tox2Syscall(Tox2PpuContext* ctx, uint8_t* base, uint32_t site) {
     (void)base;
     (void)site;
     ctx->gpr[3] = 0;
 }
 
-void dalYield(DalPpuContext* ctx, uint8_t* base) {
+void tox2Yield(Tox2PpuContext* ctx, uint8_t* base) {
     (void)base;
-    ctx->preempt_budget = kDalPreemptBudget;
+    ctx->preempt_budget = kTox2PreemptBudget;
 }
 
-void dalUnhandled(DalPpuContext* ctx, uint8_t* base, uint32_t site, uint32_t word) {
+void tox2Unhandled(Tox2PpuContext* ctx, uint8_t* base, uint32_t site, uint32_t word) {
     (void)ctx;
     (void)base;
-    std::fprintf(stderr, "dal: unhandled instruction 0x%08x at 0x%08x\n", word, site);
+    std::fprintf(stderr, "tox2: unhandled instruction 0x%08x at 0x%08x\n", word, site);
     fatalExit();
 }
 
-void dalTrap(DalPpuContext* ctx, uint8_t* base, uint32_t site) {
+void tox2Trap(Tox2PpuContext* ctx, uint8_t* base, uint32_t site) {
     (void)ctx;
     (void)base;
-    std::fprintf(stderr, "dal: trap at 0x%08x\n", site);
+    std::fprintf(stderr, "tox2: trap at 0x%08x\n", site);
     fatalExit();
 }
 
 // Single-threaded reservation: it holds while the address matches and memory still contains the
 // value that lwarx/ldarx observed. Every store-conditional clears it, successful or not.
-uint32_t dalLwarx(DalPpuContext* ctx, uint8_t* base, uint32_t ea) {
-    uint32_t value = dalRead32(base, ea);
+uint32_t tox2Lwarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
+    uint32_t value = tox2Read32(base, ea);
     ctx->reserve_addr = ea;
     ctx->reserve_value = value;
     ctx->reserve_valid = 1;
     return value;
 }
 
-uint64_t dalLdarx(DalPpuContext* ctx, uint8_t* base, uint32_t ea) {
-    uint64_t value = dalRead64(base, ea);
+uint64_t tox2Ldarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
+    uint64_t value = tox2Read64(base, ea);
     ctx->reserve_addr = ea;
     ctx->reserve_value = value;
     ctx->reserve_valid = 1;
     return value;
 }
 
-bool dalStwcx(DalPpuContext* ctx, uint8_t* base, uint32_t ea, uint32_t value) {
-    bool ok = ctx->reserve_valid && ctx->reserve_addr == ea && dalRead32(base, ea) == ctx->reserve_value;
-    if (ok) dalWrite32(base, ea, value);
+bool tox2Stwcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint32_t value) {
+    bool ok = ctx->reserve_valid && ctx->reserve_addr == ea && tox2Read32(base, ea) == ctx->reserve_value;
+    if (ok) tox2Write32(base, ea, value);
     ctx->reserve_valid = 0;
     return ok;
 }
 
-bool dalStdcx(DalPpuContext* ctx, uint8_t* base, uint32_t ea, uint64_t value) {
-    bool ok = ctx->reserve_valid && ctx->reserve_addr == ea && dalRead64(base, ea) == ctx->reserve_value;
-    if (ok) dalWrite64(base, ea, value);
+bool tox2Stdcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint64_t value) {
+    bool ok = ctx->reserve_valid && ctx->reserve_addr == ea && tox2Read64(base, ea) == ctx->reserve_value;
+    if (ok) tox2Write64(base, ea, value);
     ctx->reserve_valid = 0;
     return ok;
 }
 
-void dalDcbz(DalPpuContext* ctx, uint8_t* base, uint32_t ea) {
+void tox2Dcbz(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
     (void)ctx;
-    std::memset(base + (ea & ~(uint32_t)(kDalDcbzLine - 1)), 0, kDalDcbzLine);
+    std::memset(base + (ea & ~(uint32_t)(kTox2DcbzLine - 1)), 0, kTox2DcbzLine);
 }
 
-void dalSync(DalPpuContext* ctx, uint32_t kind) {
+void tox2Sync(Tox2PpuContext* ctx, uint32_t kind) {
     (void)ctx;
     (void)kind;
 }
 
-uint64_t dalMftb(DalPpuContext* ctx) {
+uint64_t tox2Mftb(Tox2PpuContext* ctx) {
     (void)ctx;
     static std::atomic<uint64_t> counter{0};
     return counter.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
-uint64_t dalMffs(DalPpuContext* ctx) { return ctx->fpscr; }
+uint64_t tox2Mffs(Tox2PpuContext* ctx) { return ctx->fpscr; }
 
 // Field 0 is the most significant nibble of the 32-bit image.
-void dalMtfsf(DalPpuContext* ctx, uint32_t field_mask, uint64_t value) {
+void tox2Mtfsf(Tox2PpuContext* ctx, uint32_t field_mask, uint64_t value) {
     uint32_t mask = 0;
     for (uint32_t i = 0; i < 8; i++) {
         if (field_mask & (0x80u >> i)) mask |= 0xfu << (28 - 4 * i);
@@ -176,7 +176,7 @@ void dalMtfsf(DalPpuContext* ctx, uint32_t field_mask, uint64_t value) {
 }
 
 // Bit numbering is big-endian: bit 0 is the most significant bit of the image.
-void dalMtfsb(DalPpuContext* ctx, uint32_t bit, uint32_t value) {
+void tox2Mtfsb(Tox2PpuContext* ctx, uint32_t bit, uint32_t value) {
     uint32_t mask = 0x80000000u >> (bit & 31);
     ctx->fpscr = value ? (ctx->fpscr | mask) : (ctx->fpscr & ~mask);
 }

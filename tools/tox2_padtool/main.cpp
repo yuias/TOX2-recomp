@@ -1,4 +1,4 @@
-// dal_padtool: gamepad utilities for the runtime. Subcommands:
+// tox2_padtool: gamepad utilities for the runtime. Subcommands:
 //   devices                         the GameInput source, the Steam context and every game controller
 //   watch [--seconds N] [--raw]     print a line per change of every device's reading (default 10 s)
 //   rumble [--seconds N]            run each rumble motor of every pad for N seconds each (default 1)
@@ -44,9 +44,9 @@ struct Subcommand {
 
 void printUsage() {
     std::fputs(
-            "usage: dal_padtool devices\n"
-            "       dal_padtool watch [--seconds N] [--raw]\n"
-            "       dal_padtool rumble [--seconds N]\n"
+            "usage: tox2_padtool devices\n"
+            "       tox2_padtool watch [--seconds N] [--raw]\n"
+            "       tox2_padtool rumble [--seconds N]\n"
             "  devices   the GameInput source, the Steam context and one line per game controller:\n"
             "            id vid:pid kinds rumble yes|no \"name\" path\n"
             "  watch     poll every device every 10 ms and print a line per change (default 10 s);\n"
@@ -80,7 +80,7 @@ bool parseSeconds(std::span<const std::string_view> args, double default_seconds
         } else if (allow_raw && args[i] == "--raw") {
             raw = true;
         } else {
-            std::fprintf(stderr, "dal_padtool: bad argument '%.*s'\n", static_cast<int>(args[i].size()),
+            std::fprintf(stderr, "tox2_padtool: bad argument '%.*s'\n", static_cast<int>(args[i].size()),
                          args[i].data());
             printUsage();
             return false;
@@ -89,21 +89,21 @@ bool parseSeconds(std::span<const std::string_view> args, double default_seconds
     return true;
 }
 
-std::string idText(const dal::GamepadDeviceInfo& info) {
-    return std::format("{} {}", info.id, dal::formatGamepadVidPid(info));
+std::string idText(const tox2::GamepadDeviceInfo& info) {
+    return std::format("{} {}", info.id, tox2::formatGamepadVidPid(info));
 }
 
-std::string deviceLine(const dal::GamepadDeviceInfo& info) {
-    return std::format("{} {} rumble {} \"{}\" {}", idText(info), dal::formatGamepadKinds(info.kinds),
+std::string deviceLine(const tox2::GamepadDeviceInfo& info) {
+    return std::format("{} {} rumble {} \"{}\" {}", idText(info), tox2::formatGamepadKinds(info.kinds),
                        info.rumble ? "yes" : "no", info.display_name, info.pnp_path);
 }
 
 // The runtime reports some devices a few tens of milliseconds after its blocking enumeration has
 // returned, so one-shot commands wait until the device list has been quiet for a moment.
-void waitForDevices(dal::GamepadBackend& backend) {
+void waitForDevices(tox2::GamepadBackend& backend) {
     constexpr auto kQuiet = 250ms;
     constexpr auto kLimit = 2s;
-    dal::Sleeper sleeper;
+    tox2::Sleeper sleeper;
     const Clock::time_point start = Clock::now();
     std::uint64_t generation = backend.deviceGeneration();
     Clock::time_point changed = start;
@@ -117,24 +117,24 @@ void waitForDevices(dal::GamepadBackend& backend) {
 }
 
 // Prints the reason on stderr and returns null when GameInput is unavailable (the callers exit 1).
-std::shared_ptr<dal::GameInputBackend> openBackend(bool settle) {
-    auto backend = dal::makeGameInputBackend({.background_input = true});
+std::shared_ptr<tox2::GameInputBackend> openBackend(bool settle) {
+    auto backend = tox2::makeGameInputBackend({.background_input = true});
     if (!backend) {
-        std::fprintf(stderr, "dal_padtool: GameInput unavailable: %s\n", backend.error().c_str());
+        std::fprintf(stderr, "tox2_padtool: GameInput unavailable: %s\n", backend.error().c_str());
         return nullptr;
     }
     if (settle) waitForDevices(**backend);
     return *backend;
 }
 
-std::string rawText(const dal::GameInputRawReading& r) {
+std::string rawText(const tox2::GameInputRawReading& r) {
     std::string buttons;
     for (std::size_t i = 0; i < r.buttons.size(); ++i) {
         if (r.buttons[i] != 0) buttons += std::format("{}{}", buttons.empty() ? "" : ",", i);
     }
     std::string axes;
     for (std::size_t i = 0; i < r.axes.size(); ++i) {
-        axes += std::format("{}{}:{}", axes.empty() ? "" : " ", i, dal::formatGamepadValue(r.axes[i]));
+        axes += std::format("{}{}:{}", axes.empty() ? "" : " ", i, tox2::formatGamepadValue(r.axes[i]));
     }
     std::string switches;
     for (std::size_t i = 0; i < r.switches.size(); ++i) {
@@ -153,11 +153,11 @@ int runDevices(std::span<const std::string_view> args) {
     const auto backend = openBackend(true);
     if (!backend) return 1;
     printLine(std::format("gameinput {}", backend->description()));
-    const dal::SteamContext steam = dal::detectSteamContext();
+    const tox2::SteamContext steam = tox2::detectSteamContext();
     printLine(std::format("steam overlay {}", steam.overlay_loaded ? "loaded" : "not loaded"));
     for (const auto& [name, value] : steam.env) printLine(std::format("steam {}={}", name, value));
-    const std::vector<dal::GamepadDeviceInfo> devices = backend->devices();
-    for (const dal::GamepadDeviceInfo& info : devices) printLine(deviceLine(info));
+    const std::vector<tox2::GamepadDeviceInfo> devices = backend->devices();
+    for (const tox2::GamepadDeviceInfo& info : devices) printLine(deviceLine(info));
     printLine(std::format("{} devices", devices.size()));
     return 0;
 }
@@ -173,17 +173,17 @@ int runWatch(std::span<const std::string_view> args) {
     const auto stamp = [&] { return std::format("{:.3f} s", secondsSince(start)); };
     std::map<std::uint64_t, std::string> last_gamepad;  // last printed text per device
     std::map<std::uint64_t, std::string> last_raw;
-    std::map<std::uint64_t, dal::GamepadDeviceInfo> known;
+    std::map<std::uint64_t, tox2::GamepadDeviceInfo> known;
     std::optional<std::uint64_t> generation;
-    dal::Sleeper sleeper;
-    std::vector<dal::GamepadDeviceInfo> devices;
+    tox2::Sleeper sleeper;
+    std::vector<tox2::GamepadDeviceInfo> devices;
 
     while (secondsSince(start) < seconds) {
         if (!generation || backend->deviceGeneration() != *generation) {
             generation = backend->deviceGeneration();
             devices = backend->devices();
-            std::map<std::uint64_t, dal::GamepadDeviceInfo> now_known;
-            for (const dal::GamepadDeviceInfo& info : devices) {
+            std::map<std::uint64_t, tox2::GamepadDeviceInfo> now_known;
+            for (const tox2::GamepadDeviceInfo& info : devices) {
                 now_known.emplace(info.id, info);
                 if (!known.contains(info.id)) printLine(std::format("{} device + {}", stamp(), deviceLine(info)));
             }
@@ -196,10 +196,10 @@ int runWatch(std::span<const std::string_view> args) {
             known = std::move(now_known);
         }
 
-        for (const dal::GamepadDeviceInfo& info : devices) {
-            if ((info.kinds & dal::kGamepadKindGamepad) != 0) {
+        for (const tox2::GamepadDeviceInfo& info : devices) {
+            if ((info.kinds & tox2::kGamepadKindGamepad) != 0) {
                 if (const auto reading = backend->read(info.id)) {
-                    const std::string text = dal::formatGamepadReading(*reading);
+                    const std::string text = tox2::formatGamepadReading(*reading);
                     std::string& last = last_gamepad[info.id];
                     if (text != last) {
                         last = text;
@@ -207,7 +207,7 @@ int runWatch(std::span<const std::string_view> args) {
                     }
                 }
             }
-            if (raw && (info.kinds & dal::kGamepadKindController) != 0) {
+            if (raw && (info.kinds & tox2::kGamepadKindController) != 0) {
                 if (const auto reading = backend->readRaw(info.id)) {
                     const std::string text = rawText(*reading);
                     std::string& last = last_raw[info.id];
@@ -230,15 +230,15 @@ int runRumble(std::span<const std::string_view> args) {
     const auto backend = openBackend(true);
     if (!backend) return 1;
 
-    dal::Sleeper sleeper;
-    const auto step = [&](const dal::GamepadDeviceInfo& info, const char* what, const dal::GamepadRumble& rumble) {
+    tox2::Sleeper sleeper;
+    const auto step = [&](const tox2::GamepadDeviceInfo& info, const char* what, const tox2::GamepadRumble& rumble) {
         backend->setRumble(info.id, rumble);
         printLine(std::format("{} {}", idText(info), what));
         sleeper.sleep(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::duration<double>(seconds)));
     };
 
     int count = 0;
-    for (const dal::GamepadDeviceInfo& info : backend->devices()) {
+    for (const tox2::GamepadDeviceInfo& info : backend->devices()) {
         if (!info.rumble) continue;
         ++count;
         step(info, "low frequency motor", {.low_frequency = 1.0f});
@@ -260,7 +260,7 @@ constexpr Subcommand kSubcommands[] = {
 
 int main(int argc, char** argv) {
     // The backend's device lines are for the game's log; the tool prints its own device lines.
-    dal::setLogLevel(dal::LogLevel::Warn);
+    tox2::setLogLevel(tox2::LogLevel::Warn);
     std::vector<std::string_view> args(argv + 1, argv + argc);
     if (args.empty()) {
         printUsage();
@@ -269,7 +269,7 @@ int main(int argc, char** argv) {
     for (const Subcommand& command : kSubcommands) {
         if (args[0] == command.name) return command.run(std::span<const std::string_view>(args).subspan(1));
     }
-    std::fprintf(stderr, "dal_padtool: unknown subcommand '%.*s'\n", static_cast<int>(args[0].size()), args[0].data());
+    std::fprintf(stderr, "tox2_padtool: unknown subcommand '%.*s'\n", static_cast<int>(args[0].size()), args[0].data());
     printUsage();
     return 2;
 }

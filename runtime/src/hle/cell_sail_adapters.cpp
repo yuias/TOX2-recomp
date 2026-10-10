@@ -25,14 +25,14 @@
 
 #include "core/guest_memory.h"
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/cell_sail_internal.h"
 #include "hle/cell_sail_types.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "cellSail";
@@ -72,7 +72,7 @@ std::array<std::uint8_t, N> unspecifiedFormat() {
 }
 
 // cellSailGraphicsAdapterInitialize(adapter, CellSailGraphicsAdapterFuncs* callbacks, void* arg)
-void graphicsInitialize(DalPpuContext* ctx, std::uint8_t* base) {
+void graphicsInitialize(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t adapter = argU32(ctx, 0);
     const std::uint32_t callbacks = argU32(ctx, 1);
     if (adapter == 0 || !guestMapped(callbacks, sail::kGraphicsAdapterFuncsSize)) {
@@ -85,34 +85,34 @@ void graphicsInitialize(DalPpuContext* ctx, std::uint8_t* base) {
     }
     GraphicsAdapter state;
     state.arg = argU32(ctx, 2);
-    state.makeup = dalRead32(base, callbacks + sail::kGraphicsAdapterFuncsMakeup);
-    state.cleanup = dalRead32(base, callbacks + sail::kGraphicsAdapterFuncsCleanup);
-    state.format_changed = dalRead32(base, callbacks + sail::kGraphicsAdapterFuncsFormatChanged);
-    state.alloc = dalRead32(base, callbacks + sail::kGraphicsAdapterFuncsAlloc);
-    state.free = dalRead32(base, callbacks + sail::kGraphicsAdapterFuncsFree);
+    state.makeup = tox2Read32(base, callbacks + sail::kGraphicsAdapterFuncsMakeup);
+    state.cleanup = tox2Read32(base, callbacks + sail::kGraphicsAdapterFuncsCleanup);
+    state.format_changed = tox2Read32(base, callbacks + sail::kGraphicsAdapterFuncsFormatChanged);
+    state.alloc = tox2Read32(base, callbacks + sail::kGraphicsAdapterFuncsAlloc);
+    state.free = tox2Read32(base, callbacks + sail::kGraphicsAdapterFuncsFree);
     state.preferred = unspecifiedFormat<sail::kVideoFormatSize>();
     state.format = state.preferred;
     g_graphics.emplace(adapter, state);
-    logDebug("dal: sail: graphics adapter {:#010x} initialised (alloc {:#010x}, free {:#010x})", adapter, state.alloc,
+    logDebug("tox2: sail: graphics adapter {:#010x} initialised (alloc {:#010x}, free {:#010x})", adapter, state.alloc,
              state.free);
     setResultCode(ctx, kCellOk);
 }
 
 // cellSailGraphicsAdapterFinalize(adapter)
-void graphicsFinalize(DalPpuContext* ctx, std::uint8_t*) {
+void graphicsFinalize(Tox2PpuContext* ctx, std::uint8_t*) {
     const auto it = g_graphics.find(argU32(ctx, 0));
     if (it == g_graphics.end() || it->second.player != 0) {
         setResultCode(ctx, sail::kErrorInvalidState);
         return;
     }
-    logDebug("dal: sail: graphics adapter {:#010x} finalized after {} av-sync updates", it->first,
+    logDebug("tox2: sail: graphics adapter {:#010x} finalized after {} av-sync updates", it->first,
              it->second.av_sync_updates);
     g_graphics.erase(it);
     setResultCode(ctx, kCellOk);
 }
 
 // cellSailGraphicsAdapterSetPreferredFormat(adapter, const CellSailVideoFormat* format)
-void graphicsSetPreferredFormat(DalPpuContext* ctx, std::uint8_t* base) {
+void graphicsSetPreferredFormat(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto it = g_graphics.find(argU32(ctx, 0));
     if (it == g_graphics.end()) {
         setResultCode(ctx, sail::kErrorInvalidState);
@@ -129,7 +129,7 @@ void graphicsSetPreferredFormat(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellSailGraphicsAdapterGetFormat(adapter, CellSailVideoFormat* format)
-void graphicsGetFormat(DalPpuContext* ctx, std::uint8_t* base) {
+void graphicsGetFormat(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto it = g_graphics.find(argU32(ctx, 0));
     if (it == g_graphics.end()) {
         setResultCode(ctx, sail::kErrorInvalidState);
@@ -145,7 +145,7 @@ void graphicsGetFormat(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellSailSoundAdapterInitialize(adapter, CellSailSoundAdapterFuncs* callbacks, void* arg)
-void soundInitialize(DalPpuContext* ctx, std::uint8_t* base) {
+void soundInitialize(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t adapter = argU32(ctx, 0);
     const std::uint32_t callbacks = argU32(ctx, 1);
     if (adapter == 0 || !guestMapped(callbacks, sail::kSoundAdapterFuncsSize)) {
@@ -158,31 +158,31 @@ void soundInitialize(DalPpuContext* ctx, std::uint8_t* base) {
     }
     SoundAdapter state;
     state.arg = argU32(ctx, 2);
-    state.makeup = dalRead32(base, callbacks + sail::kSoundAdapterFuncsMakeup);
-    state.cleanup = dalRead32(base, callbacks + sail::kSoundAdapterFuncsCleanup);
-    state.format_changed = dalRead32(base, callbacks + sail::kSoundAdapterFuncsFormatChanged);
+    state.makeup = tox2Read32(base, callbacks + sail::kSoundAdapterFuncsMakeup);
+    state.cleanup = tox2Read32(base, callbacks + sail::kSoundAdapterFuncsCleanup);
+    state.format_changed = tox2Read32(base, callbacks + sail::kSoundAdapterFuncsFormatChanged);
     state.preferred = unspecifiedFormat<sail::kAudioFormatSize>();
     state.format = state.preferred;
     g_sound.emplace(adapter, state);
-    logDebug("dal: sail: sound adapter {:#010x} initialised", adapter);
+    logDebug("tox2: sail: sound adapter {:#010x} initialised", adapter);
     setResultCode(ctx, kCellOk);
 }
 
 // cellSailSoundAdapterFinalize(adapter)
-void soundFinalize(DalPpuContext* ctx, std::uint8_t*) {
+void soundFinalize(Tox2PpuContext* ctx, std::uint8_t*) {
     const auto it = g_sound.find(argU32(ctx, 0));
     if (it == g_sound.end() || it->second.player != 0) {
         setResultCode(ctx, sail::kErrorInvalidState);
         return;
     }
-    logDebug("dal: sail: sound adapter {:#010x} finalized after {} av-sync updates", it->first,
+    logDebug("tox2: sail: sound adapter {:#010x} finalized after {} av-sync updates", it->first,
              it->second.av_sync_updates);
     g_sound.erase(it);
     setResultCode(ctx, kCellOk);
 }
 
 // cellSailSoundAdapterSetPreferredFormat(adapter, const CellSailAudioFormat* format)
-void soundSetPreferredFormat(DalPpuContext* ctx, std::uint8_t* base) {
+void soundSetPreferredFormat(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto it = g_sound.find(argU32(ctx, 0));
     if (it == g_sound.end()) {
         setResultCode(ctx, sail::kErrorInvalidState);
@@ -199,7 +199,7 @@ void soundSetPreferredFormat(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellSailSoundAdapterGetFormat(adapter, CellSailAudioFormat* format)
-void soundGetFormat(DalPpuContext* ctx, std::uint8_t* base) {
+void soundGetFormat(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto it = g_sound.find(argU32(ctx, 0));
     if (it == g_sound.end()) {
         setResultCode(ctx, sail::kErrorInvalidState);
@@ -217,17 +217,17 @@ void soundGetFormat(DalPpuContext* ctx, std::uint8_t* base) {
 // The game does not clear the sound info, so every field is written on every path.
 void writeFrameInfo(std::uint8_t* base, std::uint32_t info, std::uint32_t buffer, std::uint32_t session_id,
                     std::uint32_t tag, std::int64_t pts) {
-    dalWrite32(base, info + sail::kFrameInfoBuffer, buffer);
-    dalWrite32(base, info + sail::kFrameInfoSessionId, session_id);
-    dalWrite32(base, info + sail::kFrameInfoTag, tag);
-    dalWrite32(base, info + sail::kFrameInfoStatus, 0);
-    dalWrite64(base, info + sail::kFrameInfoPts, static_cast<std::uint64_t>(pts));
+    tox2Write32(base, info + sail::kFrameInfoBuffer, buffer);
+    tox2Write32(base, info + sail::kFrameInfoSessionId, session_id);
+    tox2Write32(base, info + sail::kFrameInfoTag, tag);
+    tox2Write32(base, info + sail::kFrameInfoStatus, 0);
+    tox2Write64(base, info + sail::kFrameInfoPts, static_cast<std::uint64_t>(pts));
 }
 
 // cellSailGraphicsAdapterGetFrame(adapter, CellSailGraphicsFrameInfo* info)
 // The game polls this once per tick from its movie thread and copies the buffer at once, so the
 // frame is written into one of the buffers the player allocated and the call returns.
-void graphicsGetFrame(DalPpuContext* ctx, std::uint8_t* base) {
+void graphicsGetFrame(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto it = g_graphics.find(argU32(ctx, 0));
     if (it == g_graphics.end() || it->second.player == 0) {
         setResultCode(ctx, sail::kErrorInvalidState);
@@ -251,7 +251,7 @@ void graphicsGetFrame(DalPpuContext* ctx, std::uint8_t* base) {
 // cellSailGraphicsAdapterUpdateAvSync(adapter, u32 tag, u64 time)
 // The game reports the flip time of the frame it drew. The player's clock is the host clock, so the
 // report is only counted.
-void graphicsUpdateAvSync(DalPpuContext* ctx, std::uint8_t*) {
+void graphicsUpdateAvSync(Tox2PpuContext* ctx, std::uint8_t*) {
     const auto it = g_graphics.find(argU32(ctx, 0));
     if (it == g_graphics.end()) {
         setResultCode(ctx, sail::kErrorInvalidState);
@@ -262,7 +262,7 @@ void graphicsUpdateAvSync(DalPpuContext* ctx, std::uint8_t*) {
 }
 
 // cellSailSoundAdapterGetFrame(adapter, u32 samples, CellSailSoundFrameInfo* info)
-void soundGetFrame(DalPpuContext* ctx, std::uint8_t* base) {
+void soundGetFrame(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto it = g_sound.find(argU32(ctx, 0));
     if (it == g_sound.end() || it->second.player == 0) {
         setResultCode(ctx, sail::kErrorInvalidState);
@@ -283,7 +283,7 @@ void soundGetFrame(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellSailSoundAdapterUpdateAvSync(adapter, u32 tag, u64 time)
-void soundUpdateAvSync(DalPpuContext* ctx, std::uint8_t*) {
+void soundUpdateAvSync(Tox2PpuContext* ctx, std::uint8_t*) {
     const auto it = g_sound.find(argU32(ctx, 0));
     if (it == g_sound.end()) {
         setResultCode(ctx, sail::kErrorInvalidState);
@@ -385,4 +385,4 @@ void setSoundFormat(std::uint32_t player, std::span<const std::uint8_t> format) 
 }
 
 }  // namespace sail_hle
-}  // namespace dal
+}  // namespace tox2

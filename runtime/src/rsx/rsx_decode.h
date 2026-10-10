@@ -13,7 +13,7 @@
 #include "rsx/rsx_frame.h"
 #include "rsx/rsx_registers.h"
 
-namespace dal {
+namespace tox2 {
 
 // CLEAR_SURFACE mask bits (RPCS3 `RSX_GCM_CLEAR_*_BIT`).
 inline constexpr std::uint32_t kRsxClearDepth = 0x01;
@@ -144,4 +144,4 @@ RsxClear decodeClear(const RsxRegisters& regs, std::uint32_t mask);
 // vertex data other than 4F, element and inline arrays, blit triggers); nullptr otherwise.
 const char* rsxIgnoredMethodName(std::uint32_t method);
 
-}  // namespace dal
+}  // namespace tox2

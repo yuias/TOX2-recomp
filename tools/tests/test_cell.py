@@ -225,13 +225,13 @@ class FindCodeRangeTest(unittest.TestCase):
         self.assertEqual(cell.find_code_range(elf), (0x10000, 0x10080))
 
 
-@unittest.skipUnless(os.environ.get("DAL_EBOOT_ELF"), "DAL_EBOOT_ELF is not set")
+@unittest.skipUnless(os.environ.get("TOX2_EBOOT_ELF"), "TOX2_EBOOT_ELF is not set")
 class RealEbootCellTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        path = os.environ["DAL_EBOOT_ELF"]
+        path = os.environ["TOX2_EBOOT_ELF"]
         if not os.path.isfile(path):
-            raise unittest.SkipTest("DAL_EBOOT_ELF does not point to a file")
+            raise unittest.SkipTest("TOX2_EBOOT_ELF does not point to a file")
         cls.elf = ElfFile.from_path(path)
 
     def test_text_range(self):

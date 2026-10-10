@@ -1,5 +1,5 @@
 // --pad-probe: logs what the gamepad backend reports, independent of what the game uses. Also the
-// formatting that dal_padtool and the device log lines share, so the texts match everywhere.
+// formatting that tox2_padtool and the device log lines share, so the texts match everywhere.
 
 #pragma once
 
@@ -14,7 +14,7 @@
 
 #include "input/gamepad_backend.h"
 
-namespace dal {
+namespace tox2 {
 
 inline constexpr std::chrono::milliseconds kGamepadProbeInterval{50};
 
@@ -32,8 +32,8 @@ std::string formatGamepadVidPid(const GamepadDeviceInfo& info);
 std::string formatSteamContext(const SteamContext& steam);
 
 // Reads every device the backend lists, used by the game or not, and logs
-// `dal: pad: probe <id> <vid:pid> <formatted reading>` at Info when the text changed, and
-// `dal: pad: probe <id> <vid:pid> no gamepad reading` once per device that has none.
+// `tox2: pad: probe <id> <vid:pid> <formatted reading>` at Info when the text changed, and
+// `tox2: pad: probe <id> <vid:pid> no gamepad reading` once per device that has none.
 class GamepadProbe {
 public:
     explicit GamepadProbe(std::shared_ptr<GamepadBackend> backend) : backend_(std::move(backend)) {}
@@ -55,4 +55,4 @@ void logSteamVirtualGamepadInfo(const SteamContext& steam);
 
 using GamepadBackendFactory = std::function<std::expected<std::shared_ptr<GamepadBackend>, std::string>()>;
 
-}  // namespace dal
+}  // namespace tox2

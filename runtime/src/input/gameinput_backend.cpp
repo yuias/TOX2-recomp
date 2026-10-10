@@ -27,7 +27,7 @@
 
 static_assert(GAMEINPUT_API_VERSION == 3, "the pinned v3 GameInput.h must win over the SDK's header");
 
-namespace dal {
+namespace tox2 {
 
 namespace {
 
@@ -259,9 +259,9 @@ private:
             generation_.fetch_add(1, std::memory_order_release);
         }
         // Logged outside the lock: the logger may block on its own output.
-        logInfo("dal: pad: device + {} {} rumble {} \"{}\"", formatGamepadVidPid(info), formatGamepadKinds(info.kinds),
+        logInfo("tox2: pad: device + {} {} rumble {} \"{}\"", formatGamepadVidPid(info), formatGamepadKinds(info.kinds),
                 info.rumble ? "yes" : "no", info.display_name);
-        logDebug("dal: pad: device {} path {}", info.id, info.pnp_path);
+        logDebug("tox2: pad: device {} path {}", info.id, info.pnp_path);
     }
 
     void removeDevice(IGameInputDevice* device) {
@@ -276,7 +276,7 @@ private:
             table_.erase(it);
             generation_.fetch_add(1, std::memory_order_release);
         }
-        logInfo("dal: pad: device - {}", formatGamepadVidPid(info));
+        logInfo("tox2: pad: device - {}", formatGamepadVidPid(info));
     }
 
     // A reference to the device with `id`, or null when it is gone or lacks any of `required_kinds`.
@@ -351,4 +351,4 @@ bool processOwnsForegroundWindow() {
     return process_id == GetCurrentProcessId();
 }
 
-}  // namespace dal
+}  // namespace tox2

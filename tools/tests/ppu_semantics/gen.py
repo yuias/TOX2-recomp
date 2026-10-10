@@ -2,7 +2,7 @@
 
 Every `CASES` entry of the `cases_<group>` modules that exist is emitted through
 `emit_core.emit_function` and written to `ppu_semantics_cases.h` / `ppu_semantics_cases.c`.
-Per case the C side gets an init function, a check function and a `kDalSemanticsCases[]` row;
+Per case the C side gets an init function, a check function and a `kTox2SemanticsCases[]` row;
 the driver (`runtime/tests/ppu_semantics_main.c`) runs init, the case entry, then check.
 """
 
@@ -105,11 +105,11 @@ def _init_stmt(key: str, kind: str, index: int, value: object) -> str:
     if kind == "fpr":
         return "ctx->fpr[%d].u64 = %s;" % (index, u64(value))
     if kind == "vr":
-        return "ctx->vr[%d] = dalVrFromBeWords(%s);" % (index, ", ".join(u32(w) for w in value))
+        return "ctx->vr[%d] = tox2VrFromBeWords(%s);" % (index, ", ".join(u32(w) for w in value))
     if kind == "crf":
-        return "dalSetCrField(ctx, %d, %du);" % (index, value)
+        return "tox2SetCrField(ctx, %d, %du);" % (index, value)
     if kind == "cr":
-        return "dalMtcrf(ctx, 0xffu, %s);" % u32(value)
+        return "tox2Mtcrf(ctx, 0xffu, %s);" % u32(value)
     if kind in ("lr", "ctr"):
         return "ctx->%s = %s;" % (kind, u64(value))
     if kind in ("vrsave", "fpscr"):
@@ -133,9 +133,9 @@ def _check_stmt(key: str, kind: str, index: int, value: object) -> str:
         return 'n += checkVr(msg, msg_size, n, "%s", ctx->vr[%d], %s);' % (
             key, index, ", ".join(u32(w) for w in value))
     if kind == "crf":
-        got, digits = "dalGetCrField(ctx, %d)" % index, 1
+        got, digits = "tox2GetCrField(ctx, %d)" % index, 1
     elif kind == "cr":
-        got, digits = "dalMfcr(ctx)", 8
+        got, digits = "tox2Mfcr(ctx)", 8
     elif kind in ("vrsave", "fpscr"):
         got, digits = "ctx->%s" % kind, 8
     elif kind == "xer_count":
@@ -248,15 +248,15 @@ def _render_case(case: Case) -> tuple[list[str], str, list[tuple[int, str]]]:
     mappings = sorted((entry, names[entry]) for entry in functions)
     body = ["// %s" % _comment_text("%s: %s" % (case.name, case.ref)),
             "\n".join(texts),
-            "static void init_%s(DalPpuContext* ctx, uint8_t* base) {" % case.name]
+            "static void init_%s(Tox2PpuContext* ctx, uint8_t* base) {" % case.name]
     body += ["    " + line for line in init_lines] + ["}", ""]
-    body.append("static uint32_t check_%s(DalPpuContext* ctx, const uint8_t* base, char* msg,"
+    body.append("static uint32_t check_%s(Tox2PpuContext* ctx, const uint8_t* base, char* msg,"
                 % case.name)
     body.append("                           uint32_t msg_size) {")
     body += ["    " + line for line in check_lines] + ["}", ""]
-    body.append("static const DalFuncMapping mappings_%s[] = {" % case.name)
+    body.append("static const Tox2FuncMapping mappings_%s[] = {" % case.name)
     body += ["    { %s, %s }," % (u32(guest), name) for guest, name in mappings] + ["};", ""]
-    return ["DAL_PPU_FUNC(%s);" % names[e] for e in sorted(names)], "\n".join(body), mappings
+    return ["TOX2_PPU_FUNC(%s);" % names[e] for e in sorted(names)], "\n".join(body), mappings
 
 
 # --- files ------------------------------------------------------------------------------------
@@ -264,23 +264,23 @@ def _render_case(case: Case) -> tuple[list[str], str, list[tuple[int, str]]]:
 _HEADER_HEAD = """\
 #pragma once
 
-#include "dal/ppu.h"
+#include "tox2/ppu.h"
 
 // Runs before the case function; sets the registers and memory the case starts from.
-typedef void DalSemanticsInitFn(DalPpuContext* ctx, uint8_t* base);
+typedef void Tox2SemanticsInitFn(Tox2PpuContext* ctx, uint8_t* base);
 // Returns the number of mismatching expectations; for the first one it writes
 // "<field>: expected 0x<value> got 0x<value>" into msg (NUL-terminated, truncated to msg_size).
-typedef uint32_t DalSemanticsCheckFn(DalPpuContext* ctx, const uint8_t* base, char* msg,
+typedef uint32_t Tox2SemanticsCheckFn(Tox2PpuContext* ctx, const uint8_t* base, char* msg,
                                      uint32_t msg_size);
 
-typedef struct DalSemanticsCase {
+typedef struct Tox2SemanticsCase {
     const char* name;
-    DalPpuFunc* entry;      // guest CODE_BASE
-    DalSemanticsInitFn* init;
-    DalSemanticsCheckFn* check;
-    const DalFuncMapping* mappings;     // entry and callees, sorted by guest address
+    Tox2PpuFunc* entry;      // guest CODE_BASE
+    Tox2SemanticsInitFn* init;
+    Tox2SemanticsCheckFn* check;
+    const Tox2FuncMapping* mappings;     // entry and callees, sorted by guest address
     uint32_t mapping_count;
-} DalSemanticsCase;
+} Tox2SemanticsCase;
 
 // Case and callee functions are named after the case and the guest address (generated names).
 """
@@ -329,11 +329,11 @@ _SOURCE_HELPERS = """\
 }
 
 [[maybe_unused]] static uint32_t checkVr(char* msg, uint32_t size, uint32_t n, const char* field,
-                                         DalVr got, uint32_t w0, uint32_t w1, uint32_t w2,
+                                         Tox2Vr got, uint32_t w0, uint32_t w1, uint32_t w2,
                                          uint32_t w3) {
     uint64_t exp_hi = (uint64_t)w0 << 32 | w1, exp_lo = (uint64_t)w2 << 32 | w3;
-    uint64_t got_hi = (uint64_t)dalVrBeWord(got, 0) << 32 | dalVrBeWord(got, 1);
-    uint64_t got_lo = (uint64_t)dalVrBeWord(got, 2) << 32 | dalVrBeWord(got, 3);
+    uint64_t got_hi = (uint64_t)tox2VrBeWord(got, 0) << 32 | tox2VrBeWord(got, 1);
+    uint64_t got_lo = (uint64_t)tox2VrBeWord(got, 2) << 32 | tox2VrBeWord(got, 3);
     if (got_hi == exp_hi && got_lo == exp_lo) return 0;
     if (n == 0) report(msg, size, field, -1, 32, exp_hi, exp_lo, got_hi, got_lo);
     return 1;
@@ -356,7 +356,7 @@ def _check_unique(prototypes: Iterable[str]) -> None:
     seen: set[str] = set()
     for proto in prototypes:
         if proto in seen:
-            raise CaseError("duplicate generated function %s" % proto[len("DAL_PPU_FUNC("):-2])
+            raise CaseError("duplicate generated function %s" % proto[len("TOX2_PPU_FUNC("):-2])
         seen.add(proto)
 
 
@@ -380,13 +380,13 @@ def render(cases: Sequence[Case]) -> tuple[str, str]:
 
     header = "\n".join([BANNER, _HEADER_HEAD.rstrip("\n"), ""] + prototypes + [
         "",
-        "extern const DalSemanticsCase kDalSemanticsCases[];",
-        "extern const uint32_t kDalSemanticsCaseCount;",
+        "extern const Tox2SemanticsCase kTox2SemanticsCases[];",
+        "extern const uint32_t kTox2SemanticsCaseCount;",
         ""])
     source = "\n".join([BANNER, "", '#include "%s"' % HEADER_NAME, "", _SOURCE_HELPERS]
                        + bodies
-                       + ["const DalSemanticsCase kDalSemanticsCases[] = {"] + rows + ["};",
-                          "const uint32_t kDalSemanticsCaseCount = %d;" % len(rows), ""])
+                       + ["const Tox2SemanticsCase kTox2SemanticsCases[] = {"] + rows + ["};",
+                          "const uint32_t kTox2SemanticsCaseCount = %d;" % len(rows), ""])
     return header, source
 
 

@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 
 namespace {
 
@@ -20,20 +20,20 @@ int g_failures;
 }  // namespace
 
 int main() {
-    const uint32_t count = kDalPpuFuncMappingCount;
-    dalRegisterFuncs(kDalPpuFuncMappings, count);
+    const uint32_t count = kTox2PpuFuncMappingCount;
+    tox2RegisterFuncs(kTox2PpuFuncMappings, count);
 
     for (uint32_t i = 0; i < count; i++) {
-        const DalFuncMapping& m = kDalPpuFuncMappings[i];
+        const Tox2FuncMapping& m = kTox2PpuFuncMappings[i];
         CHECK(m.host != nullptr);
-        CHECK(i == 0 || kDalPpuFuncMappings[i - 1].guest < m.guest);
-        CHECK(dalLookup(m.guest) == m.host);
+        CHECK(i == 0 || kTox2PpuFuncMappings[i - 1].guest < m.guest);
+        CHECK(tox2Lookup(m.guest) == m.host);
     }
 
-    for (uint32_t i = 0; i < kDalPpuImportCount; i++) {
-        const DalImportInfo& info = kDalPpuImports[i];
+    for (uint32_t i = 0; i < kTox2PpuImportCount; i++) {
+        const Tox2ImportInfo& info = kTox2PpuImports[i];
         CHECK(info.module != nullptr);
-        DalPpuFunc* host = dalLookup(info.stub);
+        Tox2PpuFunc* host = tox2Lookup(info.stub);
         CHECK(host != nullptr);
     }
 
@@ -41,7 +41,7 @@ int main() {
         std::fprintf(stderr, "ppu link: %d failure(s)\n", g_failures);
         return 1;
     }
-    std::printf("ppu link ok: %u mappings, %u imports, executable %.16s\n", count, kDalPpuImportCount,
-                kDalPpuExecutableSha256);
+    std::printf("ppu link ok: %u mappings, %u imports, executable %.16s\n", count, kTox2PpuImportCount,
+                kTox2PpuExecutableSha256);
     return 0;
 }

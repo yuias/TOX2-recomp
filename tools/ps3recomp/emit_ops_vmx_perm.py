@@ -1,10 +1,10 @@
 """Group `vmx_perm`: permutes, merges, splats, packs, unpacks and whole-register shifts.
 
-Vector registers are byte-reversed in the host (see `runtime/include/dal/ppu_context.h`): host lane
+Vector registers are byte-reversed in the host (see `runtime/include/tox2/ppu_context.h`): host lane
 i of an n-lane view holds big-endian element n-1-i. Merges, `vsldoi`, splats and the truncating
 packs are emitted as `__builtin_shufflevector` calls; `be_shuffle` converts a result described in
 big-endian element numbers into the host lane indices. The rest lives in
-`runtime/include/dal/ppu_vmx.h`.
+`runtime/include/tox2/ppu_vmx.h`.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def _shuffle(op: Op, size: int, a: int, b: int, be_sources: list[int]) -> str:
 @handler("vperm")
 def emit_vperm(op: Op) -> list[str] | None:
     # RPCS3 VPERM
-    return ["%s = dalVperm(%s, %s, %s);" % (op.vr(op.f("vD")), op.vr(op.f("vA")),
+    return ["%s = tox2Vperm(%s, %s, %s);" % (op.vr(op.f("vD")), op.vr(op.f("vA")),
                                           op.vr(op.f("vB")), op.vr(op.f("vC")))]
 
 
@@ -80,7 +80,7 @@ def emit_splat(op: Op) -> list[str] | None:
     return [_shuffle(op, size, op.f("vB"), op.f("vB"), [element] * lanes)]
 
 
-_SPLAT_IMMEDIATES = {"vspltisb": "dalVspltisb", "vspltish": "dalVspltish", "vspltisw": "dalVspltisw"}
+_SPLAT_IMMEDIATES = {"vspltisb": "tox2Vspltisb", "vspltish": "tox2Vspltish", "vspltisw": "tox2Vspltisw"}
 
 
 @handler(*_SPLAT_IMMEDIATES)
@@ -98,8 +98,8 @@ def emit_pack_modulo(op: Op) -> list[str] | None:
 
 
 _SATURATING_PACKS = {
-    "vpkshss": "dalVpkshss", "vpkshus": "dalVpkshus", "vpkuhus": "dalVpkuhus",
-    "vpkswss": "dalVpkswss", "vpkswus": "dalVpkswus", "vpkuwus": "dalVpkuwus",
+    "vpkshss": "tox2Vpkshss", "vpkshus": "tox2Vpkshus", "vpkuhus": "tox2Vpkuhus",
+    "vpkswss": "tox2Vpkswss", "vpkswus": "tox2Vpkswus", "vpkuwus": "tox2Vpkuwus",
 }
 
 
@@ -113,13 +113,13 @@ def emit_pack_saturate(op: Op) -> list[str] | None:
 @handler("vpkpx")
 def emit_vpkpx(op: Op) -> list[str] | None:
     # RPCS3 VPKPX
-    return ["%s = dalVpkpx(%s, %s);" % (op.vr(op.f("vD")), op.vr(op.f("vA")),
+    return ["%s = tox2Vpkpx(%s, %s);" % (op.vr(op.f("vD")), op.vr(op.f("vA")),
                                         op.vr(op.f("vB")))]
 
 
 _UNPACKS = {
-    "vupkhsb": "dalVupkhsb", "vupklsb": "dalVupklsb", "vupkhsh": "dalVupkhsh",
-    "vupklsh": "dalVupklsh", "vupkhpx": "dalVupkhpx", "vupklpx": "dalVupklpx",
+    "vupkhsb": "tox2Vupkhsb", "vupklsb": "tox2Vupklsb", "vupkhsh": "tox2Vupkhsh",
+    "vupklsh": "tox2Vupklsh", "vupkhpx": "tox2Vupkhpx", "vupklpx": "tox2Vupklpx",
 }
 
 
@@ -129,7 +129,7 @@ def emit_unpack(op: Op) -> list[str] | None:
     return ["%s = %s(%s);" % (op.vr(op.f("vD")), _UNPACKS[op.name], op.vr(op.f("vB")))]
 
 
-_SHIFTS = {"vsl": "dalVsl", "vsr": "dalVsr", "vslo": "dalVslo", "vsro": "dalVsro"}
+_SHIFTS = {"vsl": "tox2Vsl", "vsr": "tox2Vsr", "vslo": "tox2Vslo", "vsro": "tox2Vsro"}
 
 
 @handler(*_SHIFTS)

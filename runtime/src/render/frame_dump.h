@@ -1,6 +1,6 @@
 #pragma once
 
-// PNG output of rendered frames and the image comparison used by `dal_rsxreplay --compare`.
+// PNG output of rendered frames and the image comparison used by `tox2_rsxreplay --compare`.
 
 #include <atomic>
 #include <chrono>
@@ -15,7 +15,7 @@
 #include <thread>
 #include <vector>
 
-namespace dal {
+namespace tox2 {
 
 // Tightly packed 8-bit RGB rows, top row first.
 struct RgbImage {
@@ -104,4 +104,4 @@ private:
     std::atomic<std::uint64_t> skipped_{0};
 };
 
-}  // namespace dal
+}  // namespace tox2

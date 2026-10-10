@@ -10,7 +10,7 @@
 
 #include "core/log.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr const char* kValidationLayer = "VK_LAYER_KHRONOS_validation";
@@ -21,7 +21,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBits
                                              const VkDebugUtilsMessengerCallbackDataEXT* data, void* user) {
     if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) == 0) return VK_FALSE;
     static_cast<std::atomic<std::uint32_t>*>(user)->fetch_add(1, std::memory_order_relaxed);
-    logError("dal: render: validation: {}",
+    logError("tox2: render: validation: {}",
              data != nullptr && data->pMessage != nullptr ? data->pMessage : "(no message)");
     return VK_FALSE;
 }
@@ -169,7 +169,7 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
 
     VkApplicationInfo app{};
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app.pApplicationName = "dal";
+    app.pApplicationName = "tox2";
     app.apiVersion = kRequiredApiVersion;
 
     VkInstanceCreateInfo instance_info{};
@@ -304,4 +304,4 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
     return ctx;
 }
 
-}  // namespace dal
+}  // namespace tox2

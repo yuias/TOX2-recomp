@@ -12,7 +12,7 @@
 
 #include "input/gamepad_backend.h"
 
-namespace dal {
+namespace tox2 {
 
 // Steam's virtual pad, presented to a hooked process as an Xbox 360 pad (VID 045E, PID 028E).
 struct SteamVirtualPad {
@@ -58,4 +58,4 @@ std::vector<GamepadSelection> selectGamepads(std::span<const GamepadDeviceInfo> 
 
 std::string_view gamepadUseName(GamepadUse use);  // "used", "handled by steam", ...
 
-}  // namespace dal
+}  // namespace tox2

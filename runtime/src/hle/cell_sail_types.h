@@ -2,7 +2,7 @@
 
 // Guest-visible layouts, enums and error codes of cellSail (and the few cellPamf values the game
 // uses). Guest memory is big-endian: the constants below are byte offsets and sizes for
-// dalRead*/dalWrite*, not host structs.
+// tox2Read*/tox2Write*, not host structs.
 //
 // The layouts follow the RPCS3 header `rpcs3/Emu/Cell/Modules/cellSail.h` (struct definitions and
 // the enums and error codes next to them) and `rpcs3/Emu/Cell/Modules/cellPamf.h` (`CellPamfReader`,
@@ -12,7 +12,7 @@
 
 #include <cstdint>
 
-namespace dal::sail {
+namespace tox2::sail {
 
 // Error codes: `CellSailError` in cellSail.h.
 inline constexpr std::uint32_t kErrorInvalidArg = 0x80610701;
@@ -182,4 +182,4 @@ inline constexpr std::uint32_t kPamfErrorStreamNotFound = 0x80610501, kPamfError
                                kPamfErrorUnsupportedVersion = 0x80610505, kPamfErrorUnknownStream = 0x80610506,
                                kPamfErrorEpNotFound = 0x80610507, kPamfErrorNotAvailable = 0x80610508;
 
-}  // namespace dal::sail
+}  // namespace tox2::sail

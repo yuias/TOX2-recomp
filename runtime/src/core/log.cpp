@@ -12,7 +12,7 @@
 #include <mutex>
 #include <unordered_set>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 struct LogState;
@@ -55,7 +55,7 @@ struct LogState {
     LogState() {
         stderr_sink = std::make_shared<spdlog::sinks::stderr_sink_mt>();
         stderr_sink->set_formatter(makeFormatter("\n"));
-        logger = std::make_shared<spdlog::logger>("dal", stderr_sink);
+        logger = std::make_shared<spdlog::logger>("tox2", stderr_sink);
         logger->set_level(spdlog::level::info);
         // Each emitted line must reach the stream before a fatal path ends the process. This is
         // independent of the visible level, which drops lines before they get here.
@@ -200,4 +200,4 @@ void logWrite(LogLevel level, std::string_view message) {
     s.logger->log(toSpdlogLevel(level), spdlog::string_view_t(message.data(), message.size()));
 }
 
-}  // namespace dal
+}  // namespace tox2

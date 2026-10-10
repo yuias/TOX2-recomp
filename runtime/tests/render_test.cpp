@@ -58,34 +58,34 @@ void main() { color = vec4(1.0, 0.0, 0.0, 1.0); }
 // Needs no Vulkan device, so it runs before the context is created.
 void testShaderCompiler() {
     std::error_code ec;
-    const std::filesystem::path dir = std::filesystem::temp_directory_path(ec) / "dal_shader_compiler_test";
+    const std::filesystem::path dir = std::filesystem::temp_directory_path(ec) / "tox2_shader_compiler_test";
     std::filesystem::remove_all(dir, ec);
-    dal::setShaderCacheDir(dir);
+    tox2::setShaderCacheDir(dir);
 
-    const dal::ShaderCompilerStats start = dal::shaderCompilerStats();
-    auto vert = dal::compileGlsl(dal::ShaderStage::Vertex, kTrivialVertex, 0x1111);
-    auto frag = dal::compileGlsl(dal::ShaderStage::Fragment, kTrivialFragment, 0x2222);
+    const tox2::ShaderCompilerStats start = tox2::shaderCompilerStats();
+    auto vert = tox2::compileGlsl(tox2::ShaderStage::Vertex, kTrivialVertex, 0x1111);
+    auto frag = tox2::compileGlsl(tox2::ShaderStage::Fragment, kTrivialFragment, 0x2222);
     CHECK(vert.has_value() && vert->size() > 5 && vert->front() == 0x07230203);
     CHECK(frag.has_value() && frag->size() > 5 && frag->front() == 0x07230203);
     if (!vert) std::fprintf(stderr, "vertex: %s\n", vert.error().c_str());
     if (!frag) std::fprintf(stderr, "fragment: %s\n", frag.error().c_str());
 
     // Not cached, and the shaderc message reaches the caller.
-    auto bad = dal::compileGlsl(dal::ShaderStage::Fragment, "#version 450\nvoid main() { oops }\n", 0x3333);
+    auto bad = tox2::compileGlsl(tox2::ShaderStage::Fragment, "#version 450\nvoid main() { oops }\n", 0x3333);
     CHECK(!bad.has_value());
     if (!bad) {
         std::printf("shader syntax error message: %s", bad.error().c_str());
         CHECK(bad.error().find("error") != std::string::npos);
     }
 
-    const dal::ShaderCompilerStats compiled = dal::shaderCompilerStats();
+    const tox2::ShaderCompilerStats compiled = tox2::shaderCompilerStats();
     CHECK(compiled.compiles - start.compiles == 3);
     CHECK(compiled.cache_hits == start.cache_hits);
 
     // Second round: both good shaders come from disk and match the first result.
-    auto vert2 = dal::compileGlsl(dal::ShaderStage::Vertex, kTrivialVertex, 0x1111);
-    auto frag2 = dal::compileGlsl(dal::ShaderStage::Fragment, kTrivialFragment, 0x2222);
-    const dal::ShaderCompilerStats cached = dal::shaderCompilerStats();
+    auto vert2 = tox2::compileGlsl(tox2::ShaderStage::Vertex, kTrivialVertex, 0x1111);
+    auto frag2 = tox2::compileGlsl(tox2::ShaderStage::Fragment, kTrivialFragment, 0x2222);
+    const tox2::ShaderCompilerStats cached = tox2::shaderCompilerStats();
     CHECK(vert2.has_value() && vert && *vert2 == *vert);
     CHECK(frag2.has_value() && frag && *frag2 == *frag);
     CHECK(cached.cache_hits - compiled.cache_hits == 2);
@@ -100,8 +100,8 @@ void testShaderCompiler() {
     }
     CHECK(!file.empty() && std::filesystem::exists(file, ec));
     std::filesystem::resize_file(file, 10, ec);
-    auto vert3 = dal::compileGlsl(dal::ShaderStage::Vertex, kTrivialVertex, 0x1111);
-    const dal::ShaderCompilerStats repaired = dal::shaderCompilerStats();
+    auto vert3 = tox2::compileGlsl(tox2::ShaderStage::Vertex, kTrivialVertex, 0x1111);
+    const tox2::ShaderCompilerStats repaired = tox2::shaderCompilerStats();
     CHECK(vert3.has_value() && vert && *vert3 == *vert);
     CHECK(repaired.compiles - cached.compiles == 1);
     CHECK(std::filesystem::file_size(file, ec) == vert->size() * 4);
@@ -111,14 +111,14 @@ void testShaderCompiler() {
 layout(location = 0) in vec4 position;
 void main() { gl_Position = position * 2.0; }
 )";
-    auto vert4 = dal::compileGlsl(dal::ShaderStage::Vertex, variant_vertex, 0x1111);
-    const dal::ShaderCompilerStats variant = dal::shaderCompilerStats();
+    auto vert4 = tox2::compileGlsl(tox2::ShaderStage::Vertex, variant_vertex, 0x1111);
+    const tox2::ShaderCompilerStats variant = tox2::shaderCompilerStats();
     CHECK(vert4.has_value() && vert && *vert4 != *vert);
     CHECK(variant.compiles - repaired.compiles == 1);
     CHECK(variant.cache_hits == repaired.cache_hits);
-    auto vert5 = dal::compileGlsl(dal::ShaderStage::Vertex, variant_vertex, 0x1111);
-    auto vert6 = dal::compileGlsl(dal::ShaderStage::Vertex, kTrivialVertex, 0x1111);
-    const dal::ShaderCompilerStats variant_cached = dal::shaderCompilerStats();
+    auto vert5 = tox2::compileGlsl(tox2::ShaderStage::Vertex, variant_vertex, 0x1111);
+    auto vert6 = tox2::compileGlsl(tox2::ShaderStage::Vertex, kTrivialVertex, 0x1111);
+    const tox2::ShaderCompilerStats variant_cached = tox2::shaderCompilerStats();
     CHECK(vert5.has_value() && vert4 && *vert5 == *vert4);
     CHECK(vert6.has_value() && vert && *vert6 == *vert);
     CHECK(variant_cached.cache_hits - variant.cache_hits == 2);
@@ -127,7 +127,7 @@ void main() { gl_Position = position * 2.0; }
     std::printf("shader cache: %llu hits, %llu compiles\n",
                 static_cast<unsigned long long>(variant_cached.cache_hits - start.cache_hits),
                 static_cast<unsigned long long>(variant_cached.compiles - start.compiles));
-    dal::setShaderCacheDir({});
+    tox2::setShaderCacheDir({});
     std::filesystem::remove_all(dir, ec);
 }
 
@@ -153,7 +153,7 @@ void imageBarrier(VkCommandBuffer cmd, VkImage image, VkPipelineStageFlags2 src_
 }
 
 // Clears a 4x4 B8G8R8A8 image to ARGB 0xFF102030 and reads it back through a host buffer.
-void testClearAndReadback(dal::VkContext& ctx) {
+void testClearAndReadback(tox2::VkContext& ctx) {
     constexpr std::uint32_t kSize = 4;
     constexpr VkDeviceSize kBytes = kSize * kSize * 4;
     VkDevice device = ctx.device();
@@ -274,19 +274,19 @@ void testClearAndReadback(dal::VkContext& ctx) {
 }
 
 std::uint64_t unimplementedCount(const std::string& kind) {
-    for (const auto& [name, count] : dal::rsxUnimplementedSnapshot()) {
+    for (const auto& [name, count] : tox2::rsxUnimplementedSnapshot()) {
         if (name == kind) return count;
     }
     return 0;
 }
 
-std::vector<dal::RsxCommand> replaySynthetic(const std::vector<std::uint8_t>& file) {
-    dal::RsxCaptureReader reader;
+std::vector<tox2::RsxCommand> replaySynthetic(const std::vector<std::uint8_t>& file) {
+    tox2::RsxCaptureReader reader;
     std::string error;
     CHECK(reader.parse(file, error));
-    dal::ReplayRsxMemoryView view;
-    dal::RsxFrameBuilder builder(view);
-    dal::replayCapture(reader, view, builder);
+    tox2::ReplayRsxMemoryView view;
+    tox2::RsxFrameBuilder builder(view);
+    tox2::replayCapture(reader, view, builder);
     return builder.takeCommands();
 }
 
@@ -301,7 +301,7 @@ bool displayIsUniform(const std::vector<std::uint8_t>& bgra, std::uint32_t width
 
 // Needs no Vulkan device.
 void testFrameDump() {
-    dal::RgbImage image;
+    tox2::RgbImage image;
     image.width = 5;
     image.height = 3;
     image.rgb.resize(5 * 3 * 3);
@@ -309,37 +309,37 @@ void testFrameDump() {
 
     // BGRA to RGB drops alpha and swaps the first and third channel.
     const std::uint8_t bgra[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-    const dal::RgbImage converted = dal::rgbFromBgra(bgra, 2, 1);
+    const tox2::RgbImage converted = tox2::rgbFromBgra(bgra, 2, 1);
     CHECK(converted.rgb == std::vector<std::uint8_t>({3, 2, 1, 7, 6, 5}));
 
     std::error_code ec;
-    const std::filesystem::path dir = std::filesystem::temp_directory_path(ec) / "dal_frame_dump_test";
+    const std::filesystem::path dir = std::filesystem::temp_directory_path(ec) / "tox2_frame_dump_test";
     std::filesystem::remove_all(dir, ec);
     const std::filesystem::path path = dir / "nested" / "image.png";
     std::string error;
-    CHECK(dal::writePngRgb(path, image, error));
-    dal::RgbImage read;
-    CHECK(dal::readPngRgb(path, read, error));
+    CHECK(tox2::writePngRgb(path, image, error));
+    tox2::RgbImage read;
+    CHECK(tox2::readPngRgb(path, read, error));
     CHECK(read.width == 5 && read.height == 3 && read.rgb == image.rgb);
 
-    dal::ImageDiff diff;
-    CHECK(dal::diffImages(image, read, diff, error));
+    tox2::ImageDiff diff;
+    CHECK(tox2::diffImages(image, read, diff, error));
     CHECK(diff.max == 0 && diff.mean == 0.0 && diff.differing_percent == 0.0);
 
     // One pixel off by 10 in one channel, another by 2 (not counted as differing).
-    dal::RgbImage other = image;
+    tox2::RgbImage other = image;
     other.rgb[0] = static_cast<std::uint8_t>(other.rgb[0] + 10);
     other.rgb[3 * 4 + 1] = static_cast<std::uint8_t>(other.rgb[3 * 4 + 1] + 2);
-    CHECK(dal::diffImages(image, other, diff, error));
+    CHECK(tox2::diffImages(image, other, diff, error));
     CHECK(diff.max == 10);
     CHECK(diff.mean > 12.0 / 45.0 - 1e-9 && diff.mean < 12.0 / 45.0 + 1e-9);
     CHECK(diff.differing_percent > 100.0 / 15.0 - 1e-9 && diff.differing_percent < 100.0 / 15.0 + 1e-9);
 
-    dal::RgbImage small = image;
+    tox2::RgbImage small = image;
     small.width = 4;
     small.rgb.resize(4 * 3 * 3);
-    CHECK(!dal::diffImages(image, small, diff, error));
-    CHECK(!dal::readPngRgb(dir / "missing.png", read, error));
+    CHECK(!tox2::diffImages(image, small, diff, error));
+    CHECK(!tox2::readPngRgb(dir / "missing.png", read, error));
 
     // The dump worker writes the same bytes as converting and encoding on the calling thread.
     {
@@ -347,11 +347,11 @@ void testFrameDump() {
         constexpr std::uint32_t kH = 5;
         std::vector<std::uint8_t> pixels(kW * kH * 4);
         for (std::size_t i = 0; i < pixels.size(); i++) pixels[i] = static_cast<std::uint8_t>(i * 13 + 5);
-        CHECK(dal::writePngRgb(dir / "direct.png", dal::rgbFromBgra(pixels, kW, kH), error));
+        CHECK(tox2::writePngRgb(dir / "direct.png", tox2::rgbFromBgra(pixels, kW, kH), error));
 
-        dal::FrameDumper dumper(2);
+        tox2::FrameDumper dumper(2);
         for (int i = 0; i < 3; i++) {
-            dal::DumpFrame frame;
+            tox2::DumpFrame frame;
             frame.bgra = dumper.takeBuffer();  // recycled after the first frame
             frame.bgra.assign(pixels.begin(), pixels.end());
             frame.width = kW;
@@ -365,10 +365,10 @@ void testFrameDump() {
         // flush waits for the frames submitted before the call, failed ones included, and reports what is
         // still pending when the timeout passes.
         CHECK(dumper.flush(std::chrono::milliseconds(0)) == 0);  // nothing submitted since the last flush
-        dal::DumpFrame bad;                                      // no pixels: the encoder refuses it
+        tox2::DumpFrame bad;                                     // no pixels: the encoder refuses it
         bad.path = dir / "dumper" / "bad.png";
         CHECK(dumper.submit(std::move(bad)));
-        dal::DumpFrame good;
+        tox2::DumpFrame good;
         good.bgra = pixels;
         good.width = kW;
         good.height = kH;
@@ -388,8 +388,8 @@ void testFrameDump() {
         for (int i = 0; i < 3; i++) CHECK(bytesOf(dir / "dumper" / std::format("{}.png", i)) == direct);
 
         // A full queue drops the frame and counts it; capacity 0 is always full.
-        dal::FrameDumper full(0);
-        dal::DumpFrame dropped;
+        tox2::FrameDumper full(0);
+        tox2::DumpFrame dropped;
         dropped.bgra = pixels;
         dropped.width = kW;
         dropped.height = kH;
@@ -401,17 +401,17 @@ void testFrameDump() {
     std::filesystem::remove_all(dir, ec);
 }
 
-dal::RenderOptions readbackAllOptions() {
-    dal::RenderOptions options;
+tox2::RenderOptions readbackAllOptions() {
+    tox2::RenderOptions options;
     options.readback_all = true;
     return options;
 }
 
 // Clear-only captures through the renderer: the display equals the clear color, across more frames
 // than there are frames in flight, and a flip of an unseen buffer reads back black.
-void testRendererClear(dal::VkContext& ctx) {
-    dal::rsxUnimplementedReset();
-    dal::RsxRenderer renderer(ctx, readbackAllOptions());
+void testRendererClear(tox2::VkContext& ctx) {
+    tox2::rsxUnimplementedReset();
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
     CHECK(renderer.valid());
 
     std::vector<std::uint8_t> bgra;
@@ -421,11 +421,11 @@ void testRendererClear(dal::VkContext& ctx) {
 
     constexpr std::uint32_t kColors[] = {0xFF102030, 0xFF405060, 0x80FF0000, 0xFF000000};
     for (const std::uint32_t argb : kColors) {
-        std::vector<dal::RsxCommand> commands = replaySynthetic(dal::rsx_synthetic::makeClearCapture(argb));
+        std::vector<tox2::RsxCommand> commands = replaySynthetic(tox2::rsx_synthetic::makeClearCapture(argb));
         renderer.execute(commands);
         CHECK(renderer.valid());
         CHECK(renderer.readDisplay(bgra, width, height));
-        CHECK(width == dal::rsx_synthetic::kSurfaceSize && height == dal::rsx_synthetic::kSurfaceSize);
+        CHECK(width == tox2::rsx_synthetic::kSurfaceSize && height == tox2::rsx_synthetic::kSurfaceSize);
         const std::uint8_t expected[4] = {static_cast<std::uint8_t>(argb), static_cast<std::uint8_t>(argb >> 8),
                                           static_cast<std::uint8_t>(argb >> 16), static_cast<std::uint8_t>(argb >> 24)};
         CHECK(displayIsUniform(bgra, width, height, expected));
@@ -434,8 +434,8 @@ void testRendererClear(dal::VkContext& ctx) {
     CHECK(unimplementedCount("state surface resize") == 0);
 
     // A buffer no clear or draw touched: black, and counted.
-    std::vector<dal::RsxCommand> flip_only;
-    dal::RsxFlip flip;
+    std::vector<tox2::RsxCommand> flip_only;
+    tox2::RsxFlip flip;
     flip.offset = 0x40000;
     flip.width = 8;
     flip.height = 4;
@@ -446,30 +446,30 @@ void testRendererClear(dal::VkContext& ctx) {
     CHECK(displayIsUniform(bgra, width, height, {0, 0, 0, 0xFF}));
     CHECK(unimplementedCount("state flip of non-render-target") == 1);
     CHECK(renderer.valid());
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
 }
 
 // Without readback_all the display is only copied for dumped flips: readDisplay reports false for the
 // others, and the dumped ones land in the directory as frame_<flip number>.png.
-void testRendererReadbackGate(dal::VkContext& ctx) {
-    dal::rsxUnimplementedReset();
+void testRendererReadbackGate(tox2::VkContext& ctx) {
+    tox2::rsxUnimplementedReset();
     std::error_code ec;
     const std::filesystem::path dir =
             std::filesystem::temp_directory_path() /
-            std::format("dal_render_test_dump_{}",
+            std::format("tox2_render_test_dump_{}",
                         std::chrono::steady_clock::now().time_since_epoch().count());  // unique under parallel runs
     std::filesystem::remove_all(dir, ec);
 
-    dal::RenderOptions options;
+    tox2::RenderOptions options;
     options.dump_dir = dir;
     options.dump_every = 2;
-    dal::RsxRenderer renderer(ctx, options);
+    tox2::RsxRenderer renderer(ctx, options);
     CHECK(renderer.valid());
     std::vector<std::uint8_t> bgra;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     for (std::uint32_t flip = 1; flip <= 4; flip++) {
-        std::vector<dal::RsxCommand> commands = replaySynthetic(dal::rsx_synthetic::makeClearCapture(0xFF102030));
+        std::vector<tox2::RsxCommand> commands = replaySynthetic(tox2::rsx_synthetic::makeClearCapture(0xFF102030));
         renderer.execute(commands);
         CHECK(renderer.valid());
         // The dumped flips read back too; an odd one was gated off.
@@ -477,16 +477,16 @@ void testRendererReadbackGate(dal::VkContext& ctx) {
     }
     // The dump worker writes in the background.
     CHECK(renderer.flushDumps(std::chrono::seconds(10)) == 0);
-    const dal::DumpCounts dumps = renderer.dumpCounts();
+    const tox2::DumpCounts dumps = renderer.dumpCounts();
     CHECK(dumps.written == 2 && dumps.failed == 0 && dumps.skipped == 0);
     CHECK(std::filesystem::exists(dir / "frame_000002.png") && std::filesystem::exists(dir / "frame_000004.png"));
     CHECK(!std::filesystem::exists(dir / "frame_000001.png") && !std::filesystem::exists(dir / "frame_000003.png"));
-    dal::RgbImage image;
+    tox2::RgbImage image;
     std::string error;
-    CHECK(dal::readPngRgb(dir / "frame_000002.png", image, error) && image.width == width && image.height == height);
+    CHECK(tox2::readPngRgb(dir / "frame_000002.png", image, error) && image.width == width && image.height == height);
     CHECK(image.rgb.size() >= 3 && image.rgb[0] == 0x10 && image.rgb[1] == 0x20 && image.rgb[2] == 0x30);
     std::filesystem::remove_all(dir, ec);
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
 }
 
 std::uint32_t pixelArgb(const std::vector<std::uint8_t>& bgra, std::uint32_t width, std::uint32_t x, std::uint32_t y) {
@@ -499,21 +499,21 @@ std::uint32_t pixelArgb(const std::vector<std::uint8_t>& bgra, std::uint32_t wid
 std::vector<std::uint8_t> makeScissoredClearCapture(std::uint32_t first, std::uint32_t second, std::uint32_t mask,
                                                     std::uint32_t x, std::uint32_t y, std::uint32_t w,
                                                     std::uint32_t h) {
-    dal::rsx_synthetic::SceneBuilder scene;
+    tox2::rsx_synthetic::SceneBuilder scene;
     scene.setSurface();
     scene.clear(first);
-    scene.write(dal::kMethodNv4097SetScissorHorizontal, x | (w << 16));
-    scene.write(dal::kMethodNv4097SetScissorVertical, y | (h << 16));
-    scene.write(dal::kMethodNv4097SetColorClearValue, second);
-    scene.write(dal::kMethodNv4097ClearSurface, mask);
+    scene.write(tox2::kMethodNv4097SetScissorHorizontal, x | (w << 16));
+    scene.write(tox2::kMethodNv4097SetScissorVertical, y | (h << 16));
+    scene.write(tox2::kMethodNv4097SetColorClearValue, second);
+    scene.write(tox2::kMethodNv4097ClearSurface, mask);
     return scene.finish();
 }
 
 // A clear inside a sub-rectangle changes only that rectangle; a partial color mask changes only the
 // masked channels. Depth and stencil values are not checked: the renderer has no depth readback.
-void testRendererScissorAndMask(dal::VkContext& ctx) {
-    dal::rsxUnimplementedReset();
-    dal::RsxRenderer renderer(ctx, readbackAllOptions());
+void testRendererScissorAndMask(tox2::VkContext& ctx) {
+    tox2::rsxUnimplementedReset();
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
     CHECK(renderer.valid());
     std::vector<std::uint8_t> bgra;
     std::uint32_t width = 0;
@@ -521,7 +521,7 @@ void testRendererScissorAndMask(dal::VkContext& ctx) {
 
     constexpr std::uint32_t kA = 0xFF102030;
     constexpr std::uint32_t kB = 0xFF405060;
-    std::vector<dal::RsxCommand> commands = replaySynthetic(makeScissoredClearCapture(kA, kB, 0xF3, 8, 16, 16, 8));
+    std::vector<tox2::RsxCommand> commands = replaySynthetic(makeScissoredClearCapture(kA, kB, 0xF3, 8, 16, 16, 8));
     renderer.execute(commands);
     CHECK(renderer.readDisplay(bgra, width, height) && width == 64 && height == 64);
     if (bgra.size() == 64 * 64 * 4) {
@@ -557,38 +557,38 @@ void testRendererScissorAndMask(dal::VkContext& ctx) {
     }
     CHECK(unimplementedCount("state partial color clear mask") == 0);
     CHECK(renderer.valid());
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
 }
 
 // ---- vertex_convert (no Vulkan device needed) ----
 
 void testVertexConvert() {
-    using dal::vertexAttribFormat;
+    using tox2::vertexAttribFormat;
 
     // Formats and sizes. Three-component 16-bit and 8-bit attributes are padded to four components.
-    const auto f3 = vertexAttribFormat(dal::kVertexTypeFloat, 3);
+    const auto f3 = vertexAttribFormat(tox2::kVertexTypeFloat, 3);
     CHECK(f3 && f3->format == VK_FORMAT_R32G32B32_SFLOAT && f3->guest_size == 12 && f3->host_size == 12);
-    const auto ub4 = vertexAttribFormat(dal::kVertexTypeUnorm8, 4);
+    const auto ub4 = vertexAttribFormat(tox2::kVertexTypeUnorm8, 4);
     CHECK(ub4 && ub4->format == VK_FORMAT_R8G8B8A8_UNORM && ub4->guest_size == 4 && ub4->host_size == 4);
-    const auto ub3 = vertexAttribFormat(dal::kVertexTypeUnorm8, 3);
+    const auto ub3 = vertexAttribFormat(tox2::kVertexTypeUnorm8, 3);
     CHECK(ub3 && ub3->guest_size == 3 && ub3->host_size == 4);
-    const auto sf3 = vertexAttribFormat(dal::kVertexTypeHalf, 3);
+    const auto sf3 = vertexAttribFormat(tox2::kVertexTypeHalf, 3);
     CHECK(sf3 && sf3->format == VK_FORMAT_R16G16B16A16_SFLOAT && sf3->guest_size == 6 && sf3->host_size == 8);
-    const auto s2 = vertexAttribFormat(dal::kVertexTypeSnorm16, 2);
+    const auto s2 = vertexAttribFormat(tox2::kVertexTypeSnorm16, 2);
     CHECK(s2 && s2->format == VK_FORMAT_R16G16_SNORM && s2->host_size == 4);
-    const auto ub256 = vertexAttribFormat(dal::kVertexTypeUint8, 4);
+    const auto ub256 = vertexAttribFormat(tox2::kVertexTypeUint8, 4);
     CHECK(ub256 && ub256->format == VK_FORMAT_R8G8B8A8_USCALED);
-    CHECK(!vertexAttribFormat(dal::kVertexTypeUint8, 3));
-    CHECK(!vertexAttribFormat(dal::kVertexTypeCmp, 1));
+    CHECK(!vertexAttribFormat(tox2::kVertexTypeUint8, 3));
+    CHECK(!vertexAttribFormat(tox2::kVertexTypeCmp, 1));
     CHECK(!vertexAttribFormat(0, 4));
-    CHECK(!vertexAttribFormat(dal::kVertexTypeFloat, 0) && !vertexAttribFormat(dal::kVertexTypeFloat, 5));
+    CHECK(!vertexAttribFormat(tox2::kVertexTypeFloat, 0) && !vertexAttribFormat(tox2::kVertexTypeFloat, 5));
 
     // f3, stride 16: two big-endian vertices become little-endian floats, tightly packed.
     const std::uint8_t f3_source[32] = {0x3F, 0x80, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0xC0, 0x40, 0x00,
                                         0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0x00, 0x00, 0x00, 0x00, 0x3E, 0x80,
                                         0x00, 0x00, 0x41, 0x20, 0x00, 0x00, 0xAA, 0xAA, 0xAA, 0xAA};
     std::uint8_t out[24] = {};
-    CHECK(dal::convertVertexElements(*f3, f3_source, 16, 2, out) == 2);
+    CHECK(tox2::convertVertexElements(*f3, f3_source, 16, 2, out) == 2);
     float floats[6];
     std::memcpy(floats, out, sizeof(floats));
     CHECK(floats[0] == 1.0f && floats[1] == 2.0f && floats[2] == -3.0f);
@@ -597,87 +597,87 @@ void testVertexConvert() {
     // The source ends before the third vertex: two elements are written, the rest of dst is untouched.
     std::uint8_t out3[36];
     std::memset(out3, 0x55, sizeof(out3));
-    CHECK(dal::convertVertexElements(*f3, f3_source, 16, 3, out3) == 2);
+    CHECK(tox2::convertVertexElements(*f3, f3_source, 16, 3, out3) == 2);
     CHECK(out3[24] == 0x55);
-    CHECK(dal::vertexElementsAvailable(*f3, 16, sizeof(f3_source)) == 2);
-    CHECK(dal::vertexElementsAvailable(*f3, 16, 11) == 0);
-    CHECK(dal::vertexElementsAvailable(*f3, 0, 12) == 1);
+    CHECK(tox2::vertexElementsAvailable(*f3, 16, sizeof(f3_source)) == 2);
+    CHECK(tox2::vertexElementsAvailable(*f3, 16, 11) == 0);
+    CHECK(tox2::vertexElementsAvailable(*f3, 0, 12) == 1);
 
     // Stride 0: one shared element.
     std::uint8_t shared[12] = {};
-    CHECK(dal::convertVertexElements(*f3, f3_source, 0, 5, shared) == 1);
+    CHECK(tox2::convertVertexElements(*f3, f3_source, 0, 5, shared) == 1);
     std::memcpy(floats, shared, 12);
     CHECK(floats[0] == 1.0f && floats[1] == 2.0f && floats[2] == -3.0f);
 
     // ub4: bytes stay in stored order.
     const std::uint8_t colors[8] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
     std::uint8_t ub_out[8] = {};
-    CHECK(dal::convertVertexElements(*ub4, colors, 4, 2, ub_out) == 2);
+    CHECK(tox2::convertVertexElements(*ub4, colors, 4, 2, ub_out) == 2);
     CHECK(std::memcmp(ub_out, colors, 8) == 0);
 
     // ub3: padded with an opaque fourth byte.
     const std::uint8_t rgb[3] = {1, 2, 3};
     std::uint8_t ub3_out[4] = {};
-    CHECK(dal::convertVertexElements(*ub3, rgb, 3, 1, ub3_out) == 1);
+    CHECK(tox2::convertVertexElements(*ub3, rgb, 3, 1, ub3_out) == 1);
     CHECK(ub3_out[0] == 1 && ub3_out[1] == 2 && ub3_out[2] == 3 && ub3_out[3] == 0xFF);
 
     // sf3: 16-bit components are swapped and the fourth is half-float 1.0 (0x3C00).
     const std::uint8_t halves[6] = {0x3C, 0x00, 0x40, 0x00, 0x44, 0x00};
     std::uint8_t half_out[8] = {};
-    CHECK(dal::convertVertexElements(*sf3, halves, 6, 1, half_out) == 1);
+    CHECK(tox2::convertVertexElements(*sf3, halves, 6, 1, half_out) == 1);
     const std::uint8_t expected_halves[8] = {0x00, 0x3C, 0x00, 0x40, 0x00, 0x44, 0x00, 0x3C};
     CHECK(std::memcmp(half_out, expected_halves, 8) == 0);
 
     // Indices.
     const std::uint8_t u16_source[6] = {0x01, 0x02, 0x00, 0x0A, 0xFF, 0xFE};
     std::uint8_t u16_out[6] = {};
-    dal::convertIndices(true, u16_source, 3, u16_out);
+    tox2::convertIndices(true, u16_source, 3, u16_out);
     const std::uint8_t expected_u16[6] = {0x02, 0x01, 0x0A, 0x00, 0xFE, 0xFF};
     CHECK(std::memcmp(u16_out, expected_u16, 6) == 0);
     const std::uint8_t u32_source[8] = {0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x07};
     std::uint8_t u32_out[8] = {};
-    dal::convertIndices(false, u32_source, 2, u32_out);
+    tox2::convertIndices(false, u32_source, 2, u32_out);
     const std::uint8_t expected_u32[8] = {0x02, 0x01, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00};
     CHECK(std::memcmp(u32_out, expected_u32, 8) == 0);
 
     std::uint32_t low = 0, high = 0;
-    CHECK(dal::indexRange(true, u16_source, 3, low, high) && low == 0x0A && high == 0xFFFE);
-    CHECK(dal::indexRange(false, u32_source, 2, low, high) && low == 7 && high == 0x102);
-    CHECK(!dal::indexRange(true, u16_source, 4, low, high) && !dal::indexRange(true, u16_source, 0, low, high));
+    CHECK(tox2::indexRange(true, u16_source, 3, low, high) && low == 0x0A && high == 0xFFFE);
+    CHECK(tox2::indexRange(false, u32_source, 2, low, high) && low == 7 && high == 0x102);
+    CHECK(!tox2::indexRange(true, u16_source, 4, low, high) && !tox2::indexRange(true, u16_source, 0, low, high));
 
     // Range check with a restart index: 0x0102 and 0xFFFE are outside [10, 20].
-    CHECK(!dal::indicesInRange(true, u16_source, 3, 10, 20, false, 0));
-    CHECK(!dal::indicesInRange(true, u16_source, 3, 10, 20, true, 0xFFFF));
+    CHECK(!tox2::indicesInRange(true, u16_source, 3, 10, 20, false, 0));
+    CHECK(!tox2::indicesInRange(true, u16_source, 3, 10, 20, true, 0xFFFF));
     const std::uint8_t restart_u32[12] = {0, 0, 0, 5, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 7};
-    CHECK(dal::indicesInRange(false, restart_u32, 3, 5, 7, true, 0xFFFFFFFF));
-    CHECK(!dal::indicesInRange(false, restart_u32, 3, 5, 7, false, 0xFFFFFFFF));
-    CHECK(!dal::indicesInRange(false, restart_u32, 4, 5, 7, true, 0xFFFFFFFF));  // source too short
+    CHECK(tox2::indicesInRange(false, restart_u32, 3, 5, 7, true, 0xFFFFFFFF));
+    CHECK(!tox2::indicesInRange(false, restart_u32, 3, 5, 7, false, 0xFFFFFFFF));
+    CHECK(!tox2::indicesInRange(false, restart_u32, 4, 5, 7, true, 0xFFFFFFFF));  // source too short
 
     // Scaled-integer types can be widened to floats: s32k is signed, ub256 is not normalized.
-    const auto s32k3 = vertexAttribFormat(dal::kVertexTypeSint16, 3);
+    const auto s32k3 = vertexAttribFormat(tox2::kVertexTypeSint16, 3);
     CHECK(s32k3 && s32k3->format == VK_FORMAT_R16G16B16A16_SSCALED);
-    const dal::VertexAttribFormat wide = dal::widenedFormat(*s32k3);
+    const tox2::VertexAttribFormat wide = tox2::widenedFormat(*s32k3);
     CHECK(wide.widen && wide.format == VK_FORMAT_R32G32B32A32_SFLOAT && wide.host_size == 16);
     const std::uint8_t shorts[6] = {0x00, 0x07, 0xFF, 0xFE, 0x01, 0x00};  // 7, -2, 256
     float wide_out[4] = {};
-    CHECK(dal::convertVertexElements(wide, shorts, 6, 1,
-                                     std::span<std::uint8_t>(reinterpret_cast<std::uint8_t*>(wide_out), 16)) == 1);
+    CHECK(tox2::convertVertexElements(wide, shorts, 6, 1,
+                                      std::span<std::uint8_t>(reinterpret_cast<std::uint8_t*>(wide_out), 16)) == 1);
     CHECK(wide_out[0] == 7.0f && wide_out[1] == -2.0f && wide_out[2] == 256.0f && wide_out[3] == 1.0f);
-    const dal::VertexAttribFormat wide_bytes = dal::widenedFormat(*ub256);
+    const tox2::VertexAttribFormat wide_bytes = tox2::widenedFormat(*ub256);
     const std::uint8_t bytes4[4] = {0, 1, 200, 255};
     float bytes_out[4] = {};
-    CHECK(dal::convertVertexElements(wide_bytes, bytes4, 4, 1,
-                                     std::span<std::uint8_t>(reinterpret_cast<std::uint8_t*>(bytes_out), 16)) == 1);
+    CHECK(tox2::convertVertexElements(wide_bytes, bytes4, 4, 1,
+                                      std::span<std::uint8_t>(reinterpret_cast<std::uint8_t*>(bytes_out), 16)) == 1);
     CHECK(bytes_out[0] == 0.0f && bytes_out[1] == 1.0f && bytes_out[2] == 200.0f && bytes_out[3] == 255.0f);
-    CHECK(!dal::widenedFormat(*f3).widen);
+    CHECK(!tox2::widenedFormat(*f3).widen);
 
     // Restart support: strips and fans, and only the all-ones value of the index type.
-    using dal::RsxPrimitive;
-    CHECK(dal::rsxPrimitiveRestartSupported(RsxPrimitive::TriangleStrip, dal::kRsxIndexTypeU32, 0xFFFFFFFF));
-    CHECK(dal::rsxPrimitiveRestartSupported(RsxPrimitive::TriangleFan, dal::kRsxIndexTypeU16, 0xFFFF));
-    CHECK(!dal::rsxPrimitiveRestartSupported(RsxPrimitive::TriangleStrip, dal::kRsxIndexTypeU16, 0xFFFFFFFF));
-    CHECK(!dal::rsxPrimitiveRestartSupported(RsxPrimitive::Triangles, dal::kRsxIndexTypeU32, 0xFFFFFFFF));
-    CHECK(!dal::rsxPrimitiveRestartSupported(RsxPrimitive::TriangleStrip, dal::kRsxIndexTypeU32, 5));
+    using tox2::RsxPrimitive;
+    CHECK(tox2::rsxPrimitiveRestartSupported(RsxPrimitive::TriangleStrip, tox2::kRsxIndexTypeU32, 0xFFFFFFFF));
+    CHECK(tox2::rsxPrimitiveRestartSupported(RsxPrimitive::TriangleFan, tox2::kRsxIndexTypeU16, 0xFFFF));
+    CHECK(!tox2::rsxPrimitiveRestartSupported(RsxPrimitive::TriangleStrip, tox2::kRsxIndexTypeU16, 0xFFFFFFFF));
+    CHECK(!tox2::rsxPrimitiveRestartSupported(RsxPrimitive::Triangles, tox2::kRsxIndexTypeU32, 0xFFFFFFFF));
+    CHECK(!tox2::rsxPrimitiveRestartSupported(RsxPrimitive::TriangleStrip, tox2::kRsxIndexTypeU32, 5));
 }
 
 // ---- Drawing ----
@@ -703,13 +703,13 @@ std::vector<std::uint32_t> fpMoveColor() {
     const std::uint32_t src_input = 1u | kSwizzle, src_temp = kSwizzle;
     const std::uint32_t w0 = 1u /* end */ | (0u << 1) | (0xFu << 9) | (1u << 13) /* COL0 */ | (1u << 24) /* MOV */;
     const std::uint32_t w1 = src_input | (7u << 18) | (0xE4u << 21);
-    return {dal::fpFixupWord(w0), dal::fpFixupWord(w1), dal::fpFixupWord(src_temp), dal::fpFixupWord(src_temp)};
+    return {tox2::fpFixupWord(w0), tox2::fpFixupWord(w1), tox2::fpFixupWord(src_temp), tox2::fpFixupWord(src_temp)};
 }
 
 // Position in slot 0, color bytes (A, R, G, B in memory) in slot 3: the program moves the position to
 // the output and the color, rotated to R, G, B, A, to the front diffuse output.
-dal::rsx_synthetic::Programs quadPrograms() {
-    dal::rsx_synthetic::Programs programs;
+tox2::rsx_synthetic::Programs quadPrograms() {
+    tox2::rsx_synthetic::Programs programs;
     programs.vertex.clear();
     for (const auto& instruction : {vpMove(0, 0, "xyzw", false), vpMove(1, 3, "yzwx", true)}) {
         programs.vertex.insert(programs.vertex.end(), instruction.begin(), instruction.end());
@@ -718,15 +718,15 @@ dal::rsx_synthetic::Programs quadPrograms() {
     return programs;
 }
 
-void setQuadRenderState(dal::rsx_synthetic::SceneBuilder& scene) {
+void setQuadRenderState(tox2::rsx_synthetic::SceneBuilder& scene) {
     constexpr float kScale[4] = {32.0f, 32.0f, 0.5f, 0.0f};
     constexpr float kOffset[4] = {32.0f, 32.0f, 0.5f, 0.0f};
     for (std::uint32_t i = 0; i < 4; i++) {
-        scene.write(dal::kMethodNv4097SetViewportScale + i * 4, std::bit_cast<std::uint32_t>(kScale[i]));
-        scene.write(dal::kMethodNv4097SetViewportOffset + i * 4, std::bit_cast<std::uint32_t>(kOffset[i]));
+        scene.write(tox2::kMethodNv4097SetViewportScale + i * 4, std::bit_cast<std::uint32_t>(kScale[i]));
+        scene.write(tox2::kMethodNv4097SetViewportOffset + i * 4, std::bit_cast<std::uint32_t>(kOffset[i]));
     }
-    scene.write(dal::kMethodNv4097SetVertexAttribOutputMask, 0x1);  // front diffuse only
-    scene.write(dal::kMethodNv4097SetShaderControl, 0x40);          // color from R0
+    scene.write(tox2::kMethodNv4097SetVertexAttribOutputMask, 0x1);  // front diffuse only
+    scene.write(tox2::kMethodNv4097SetShaderControl, 0x40);          // color from R0
 }
 
 enum class QuadDraw {
@@ -756,7 +756,7 @@ constexpr std::uint32_t kQuadColors[4] = {0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0x
 
 // Clear, then the quad drawn the way `options` says, flip.
 std::vector<std::uint8_t> makeRenderedQuadCapture(const QuadOptions& options) {
-    using namespace dal::rsx_synthetic;
+    using namespace tox2::rsx_synthetic;
     SceneBuilder scene;
     scene.setSurface();
     scene.clear(options.clear);
@@ -774,20 +774,20 @@ std::vector<std::uint8_t> makeRenderedQuadCapture(const QuadOptions& options) {
             const float value[4] = {options.default_color == 1 ? 1.0f : 0.0f, 0.0f, 0.0f,
                                     options.default_color == 1 ? 1.0f : 0.0f};
             for (std::uint32_t i = 0; i < 4; i++) {
-                scene.write(dal::kMethodNv4097SetVertexData4fM + 5 * 16 + i * 4,
+                scene.write(tox2::kMethodNv4097SetVertexData4fM + 5 * 16 + i * 4,
                             std::bit_cast<std::uint32_t>(value[i]));
             }
         }
     }
     scene.setPrograms(programs);
-    scene.write(dal::kMethodNv4097SetCullFaceEnable, options.cull ? 1 : 0);
-    scene.write(dal::kMethodNv4097SetCullFace, options.cull_face);
-    scene.write(dal::kMethodNv4097SetFrontFace, options.front_face);
+    scene.write(tox2::kMethodNv4097SetCullFaceEnable, options.cull ? 1 : 0);
+    scene.write(tox2::kMethodNv4097SetCullFace, options.cull_face);
+    scene.write(tox2::kMethodNv4097SetFrontFace, options.front_face);
     if (options.blend) {
-        scene.write(dal::kMethodNv4097SetBlendEnable, 1);
-        scene.write(dal::kMethodNv4097SetBlendFuncSfactor, 0x302 | (0x302u << 16));  // SRC_ALPHA
-        scene.write(dal::kMethodNv4097SetBlendFuncDfactor, 0x303 | (0x303u << 16));  // ONE_MINUS_SRC_ALPHA
-        scene.write(dal::kMethodNv4097SetBlendEquation, 0x8006 | (0x8006u << 16));   // ADD
+        scene.write(tox2::kMethodNv4097SetBlendEnable, 1);
+        scene.write(tox2::kMethodNv4097SetBlendFuncSfactor, 0x302 | (0x302u << 16));  // SRC_ALPHA
+        scene.write(tox2::kMethodNv4097SetBlendFuncDfactor, 0x303 | (0x303u << 16));  // ONE_MINUS_SRC_ALPHA
+        scene.write(tox2::kMethodNv4097SetBlendEquation, 0x8006 | (0x8006u << 16));   // ADD
     }
 
     const auto putVertex = [&](std::uint32_t element, const float (&corner)[3], std::uint32_t color) {
@@ -796,8 +796,8 @@ std::vector<std::uint8_t> makeRenderedQuadCapture(const QuadOptions& options) {
         scene.memory().putWord(1, kColorsOffset + element * 4,
                                options.uniform_color != 0 ? options.uniform_color : color);
     };
-    const auto beginDraw = [&](dal::RsxPrimitive primitive) {
-        scene.write(dal::kMethodNv4097SetBeginEnd, static_cast<std::uint32_t>(primitive));
+    const auto beginDraw = [&](tox2::RsxPrimitive primitive) {
+        scene.write(tox2::kMethodNv4097SetBeginEnd, static_cast<std::uint32_t>(primitive));
     };
     constexpr std::uint32_t kIndexOffset = 0x1300;
 
@@ -810,9 +810,9 @@ std::vector<std::uint8_t> makeRenderedQuadCapture(const QuadOptions& options) {
             // top left, top right, bottom right, bottom left
             constexpr std::uint32_t kOrder[4] = {0, 1, 3, 2};
             for (std::uint32_t v = 0; v < 4; v++) putVertex(v, kQuadCorners[kOrder[v]], kQuadColors[kOrder[v]]);
-            beginDraw(dal::RsxPrimitive::TriangleFan);
-            scene.write(dal::kMethodNv4097DrawArrays, 3u << 24);
-            scene.write(dal::kMethodNv4097SetBeginEnd, 0);
+            beginDraw(tox2::RsxPrimitive::TriangleFan);
+            scene.write(tox2::kMethodNv4097DrawArrays, 3u << 24);
+            scene.write(tox2::kMethodNv4097SetBeginEnd, 0);
             break;
         }
         case QuadDraw::IndexedU16: {
@@ -820,11 +820,11 @@ std::vector<std::uint8_t> makeRenderedQuadCapture(const QuadOptions& options) {
             for (std::uint32_t v = 0; v < 4; v++) putVertex(kFirst + v, kQuadCorners[v], kQuadColors[v]);
             scene.memory().putWord(1, kIndexOffset, (kFirst << 16) | (kFirst + 1));
             scene.memory().putWord(1, kIndexOffset + 4, ((kFirst + 2) << 16) | (kFirst + 3));
-            scene.write(dal::kMethodNv4097SetIndexArrayAddress, kIndexOffset);
-            scene.write(dal::kMethodNv4097SetIndexArrayDma, 1u | (dal::kRsxIndexTypeU16 << 4));  // main memory, u16
-            beginDraw(dal::RsxPrimitive::TriangleStrip);
-            scene.write(dal::kMethodNv4097DrawIndexArray, 3u << 24);
-            scene.write(dal::kMethodNv4097SetBeginEnd, 0);
+            scene.write(tox2::kMethodNv4097SetIndexArrayAddress, kIndexOffset);
+            scene.write(tox2::kMethodNv4097SetIndexArrayDma, 1u | (tox2::kRsxIndexTypeU16 << 4));  // main memory, u16
+            beginDraw(tox2::RsxPrimitive::TriangleStrip);
+            scene.write(tox2::kMethodNv4097DrawIndexArray, 3u << 24);
+            scene.write(tox2::kMethodNv4097SetBeginEnd, 0);
             break;
         }
         case QuadDraw::IndexedU32Restart:
@@ -832,14 +832,14 @@ std::vector<std::uint8_t> makeRenderedQuadCapture(const QuadOptions& options) {
             for (std::uint32_t v = 0; v < 4; v++) putVertex(v, kQuadCorners[v], kQuadColors[v]);
             constexpr std::uint32_t kIndices[7] = {0, 1, 2, 0xFFFFFFFF, 1, 3, 2};
             for (std::uint32_t i = 0; i < 7; i++) scene.memory().putWord(1, kIndexOffset + i * 4, kIndices[i]);
-            scene.write(dal::kMethodNv4097SetIndexArrayAddress, kIndexOffset);
-            scene.write(dal::kMethodNv4097SetIndexArrayDma, 1u | (dal::kRsxIndexTypeU32 << 4));  // main memory, u32
-            scene.write(dal::kMethodNv4097SetRestartIndexEnable, 1);
-            scene.write(dal::kMethodNv4097SetRestartIndex, 0xFFFFFFFF);
-            beginDraw(options.draw == QuadDraw::ListRestart ? dal::RsxPrimitive::Triangles
-                                                            : dal::RsxPrimitive::TriangleStrip);
-            scene.write(dal::kMethodNv4097DrawIndexArray, 6u << 24);
-            scene.write(dal::kMethodNv4097SetBeginEnd, 0);
+            scene.write(tox2::kMethodNv4097SetIndexArrayAddress, kIndexOffset);
+            scene.write(tox2::kMethodNv4097SetIndexArrayDma, 1u | (tox2::kRsxIndexTypeU32 << 4));  // main memory, u32
+            scene.write(tox2::kMethodNv4097SetRestartIndexEnable, 1);
+            scene.write(tox2::kMethodNv4097SetRestartIndex, 0xFFFFFFFF);
+            beginDraw(options.draw == QuadDraw::ListRestart ? tox2::RsxPrimitive::Triangles
+                                                            : tox2::RsxPrimitive::TriangleStrip);
+            scene.write(tox2::kMethodNv4097DrawIndexArray, 6u << 24);
+            scene.write(tox2::kMethodNv4097SetBeginEnd, 0);
             break;
         }
     }
@@ -872,9 +872,9 @@ void checkQuadPixels(const std::vector<std::uint8_t>& bgra, std::uint32_t width,
 // A quad with big-endian float positions and ub4 colors and real vertex and fragment programs: strip, fan,
 // indexed with a nonzero minimum index, indexed with a restart index, culling, blending and default
 // attribute values.
-void testRendererQuad(dal::VkContext& ctx) {
-    dal::rsxUnimplementedReset();
-    dal::RsxRenderer renderer(ctx, readbackAllOptions());
+void testRendererQuad(tox2::VkContext& ctx) {
+    tox2::rsxUnimplementedReset();
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
     CHECK(renderer.valid());
     std::vector<std::uint8_t> bgra;
     std::uint32_t width = 0;
@@ -882,8 +882,8 @@ void testRendererQuad(dal::VkContext& ctx) {
 
     // Renders one scene and returns the display; renderer-side notes are left in the census.
     const auto render = [&](const QuadOptions& options) {
-        std::vector<dal::RsxCommand> commands = replaySynthetic(makeRenderedQuadCapture(options));
-        dal::rsxUnimplementedReset();
+        std::vector<tox2::RsxCommand> commands = replaySynthetic(makeRenderedQuadCapture(options));
+        tox2::rsxUnimplementedReset();
         renderer.execute(commands);
         CHECK(renderer.valid());
         CHECK(renderer.readDisplay(bgra, width, height));
@@ -891,10 +891,10 @@ void testRendererQuad(dal::VkContext& ctx) {
         if (bgra.size() != 64 * 64 * 4) bgra.assign(64 * 64 * 4, 0);
     };
     const auto expectNoNotes = [] {
-        for (const auto& [name, count] : dal::rsxUnimplementedSnapshot()) {
+        for (const auto& [name, count] : tox2::rsxUnimplementedSnapshot()) {
             std::fprintf(stderr, "unimplemented: %s: %llu\n", name.c_str(), static_cast<unsigned long long>(count));
         }
-        CHECK(dal::rsxUnimplementedSnapshot().empty());
+        CHECK(tox2::rsxUnimplementedSnapshot().empty());
     };
 
     for (const QuadDraw draw : {QuadDraw::Strip, QuadDraw::IndexedU16, QuadDraw::Fan, QuadDraw::IndexedU32Restart}) {
@@ -961,7 +961,7 @@ void testRendererQuad(dal::VkContext& ctx) {
     CHECK(pixelArgb(bgra, width, 2, 2) == 0xFF404040);
 
     CHECK(renderer.valid());
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
 }
 
 // ---- Textures ----
@@ -975,38 +975,38 @@ void testTextureMapping() {
                          VkComponentSwizzle a) { return m.r == r && m.g == g && m.b == b && m.a == a; };
 
     // Every sampled image is B8G8R8A8, so the identity remap gives an identity view.
-    CHECK(same(dal::textureComponentMapping(0xAAE4), kR, kG, kB, kA));
+    CHECK(same(tox2::textureComponentMapping(0xAAE4), kR, kG, kB, kA));
     // Red and blue exchanged (R reads B, B reads R).
-    CHECK(same(dal::textureComponentMapping(0xAA6C), kB, kG, kR, kA));
+    CHECK(same(tox2::textureComponentMapping(0xAA6C), kB, kG, kR, kA));
     // Alpha forced to one, then every channel forced to zero.
-    CHECK(same(dal::textureComponentMapping(0xA9E4), kR, kG, kB, kOne));
-    CHECK(same(dal::textureComponentMapping(0x0000), kZero, kZero, kZero, kZero));
+    CHECK(same(tox2::textureComponentMapping(0xA9E4), kR, kG, kB, kOne));
+    CHECK(same(tox2::textureComponentMapping(0x0000), kZero, kZero, kZero, kZero));
     // The high half (override bits) does not change the mapping.
-    CHECK(same(dal::textureComponentMapping(0x1234AAE4), kR, kG, kB, kA));
+    CHECK(same(tox2::textureComponentMapping(0x1234AAE4), kR, kG, kB, kA));
 
     // The border word (ARGB) goes through the same remap.
-    CHECK(dal::remapBorderColor(0x80402010, 0xAAE4) == 0x80402010);
-    CHECK(dal::remapBorderColor(0x80402010, 0xAA6C) == 0x80102040);  // R and B exchanged
-    CHECK(dal::remapBorderColor(0x80402010, 0xA9E4) == 0xFF402010);  // alpha forced to one
-    CHECK(dal::remapBorderColor(0x80402010, 0x0000) == 0);
+    CHECK(tox2::remapBorderColor(0x80402010, 0xAAE4) == 0x80402010);
+    CHECK(tox2::remapBorderColor(0x80402010, 0xAA6C) == 0x80102040);  // R and B exchanged
+    CHECK(tox2::remapBorderColor(0x80402010, 0xA9E4) == 0xFF402010);  // alpha forced to one
+    CHECK(tox2::remapBorderColor(0x80402010, 0x0000) == 0);
 
-    dal::RsxTextureDesc texture;
+    tox2::RsxTextureDesc texture;
     texture.filter = (3u << 16) | (4u << 24);  // NEAREST_NEAREST, CONVOLUTION_MAG
     texture.address = 1u | (4u << 8) | (3u << 16);
     texture.border = 0xFF000000;
     texture.remap = 0xAAE4;
-    dal::rsxUnimplementedReset();
-    dal::SamplerSettings sampler = dal::samplerSettings(texture);
+    tox2::rsxUnimplementedReset();
+    tox2::SamplerSettings sampler = tox2::samplerSettings(texture);
     CHECK(sampler.min_filter == VK_FILTER_NEAREST && sampler.mag_filter == VK_FILTER_LINEAR);
     CHECK(sampler.wrap_s == VK_SAMPLER_ADDRESS_MODE_REPEAT &&
           sampler.wrap_t == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER &&
           sampler.wrap_r == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
     CHECK(sampler.border == VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK);
-    CHECK(dal::rsxUnimplementedSnapshot().empty());
+    CHECK(tox2::rsxUnimplementedSnapshot().empty());
 
     texture.filter = (6u << 16) | (2u << 24);  // LINEAR_LINEAR, LINEAR
     texture.address = 2u | (5u << 8) | (1u << 16);
-    sampler = dal::samplerSettings(texture);
+    sampler = tox2::samplerSettings(texture);
     CHECK(sampler.min_filter == VK_FILTER_LINEAR && sampler.mag_filter == VK_FILTER_LINEAR);
     CHECK(sampler.wrap_s == VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT &&
           sampler.wrap_t == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
@@ -1015,25 +1015,25 @@ void testTextureMapping() {
     // A mirror-once wrap and a custom border color are replaced and counted.
     texture.address = 6u | (4u << 8);
     texture.border = 0xFF204060;
-    sampler = dal::samplerSettings(texture);
+    sampler = tox2::samplerSettings(texture);
     CHECK(sampler.wrap_s == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
           sampler.border == VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK);
     CHECK(unimplementedCount("texture sampler mirror once wrap") == 1 &&
           unimplementedCount("texture sampler custom border color") == 1);
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
 }
 
 // Position in slot 0, 2D texture coordinates in slot 8 (TEX0): the vertex program moves both to its
 // outputs; the fragment program is TEX H0, TEX0.
-dal::rsx_synthetic::Programs texturedPrograms() {
-    dal::rsx_synthetic::Programs programs;
+tox2::rsx_synthetic::Programs texturedPrograms() {
+    tox2::rsx_synthetic::Programs programs;
     programs.vertex.clear();
     for (const auto& instruction : {vpMove(0, 0, "xyzw", false), vpMove(7, 8, "xyzw", true)}) {
         programs.vertex.insert(programs.vertex.end(), instruction.begin(), instruction.end());
     }
     constexpr std::array<std::uint32_t, 4> kTex = {0x17009e81, 0x1c9dc801, 0x0001c800, 0x0001c800};
     programs.fragment.clear();
-    for (const std::uint32_t word : kTex) programs.fragment.push_back(dal::fpFixupWord(word));
+    for (const std::uint32_t word : kTex) programs.fragment.push_back(tox2::fpFixupWord(word));
     return programs;
 }
 
@@ -1061,13 +1061,13 @@ constexpr std::uint32_t kAliasColor = 0xFF336699;
 // A quad covering pixels 16..48 whose corners carry the texture coordinates (0, 0), (1, 0), (0, 1), (1, 1)
 // times coord_scale, in strip order top left, top right, bottom left, bottom right.
 std::vector<std::uint8_t> makeTexturedCapture(const TextureOptions& options) {
-    using namespace dal::rsx_synthetic;
+    using namespace tox2::rsx_synthetic;
     SceneBuilder scene;
     scene.setSurface();
     if (options.scene == TextureScene::Alias) {
-        scene.write(dal::kMethodNv4097SetSurfaceColorAOffset, kAliasOffset);
+        scene.write(tox2::kMethodNv4097SetSurfaceColorAOffset, kAliasOffset);
         scene.clear(kAliasColor);
-        scene.write(dal::kMethodNv4097SetSurfaceColorAOffset, kSurfaceOffset);
+        scene.write(tox2::kMethodNv4097SetSurfaceColorAOffset, kSurfaceOffset);
         scene.clear(0xFF000000);
         scene.bindTexture(kAliasOffset, kSurfaceSize, kSurfaceSize);
     } else if (options.scene == TextureScene::Feedback) {
@@ -1099,20 +1099,21 @@ std::vector<std::uint8_t> makeTexturedCapture(const TextureOptions& options) {
             scene.memory().putWord(0, at, 0x00F81F00);
             scene.memory().putWord(0, at + 4, 0x0055AAFF);
             // The pitch register of a compressed texture is ignored; give it a value that is not the row size.
-            scene.write(dal::kMethodNv4097SetTextureFormat, 1u | (2u << 4) | ((options.dxt | 0x20u) << 8) | (1u << 16));
-            scene.write(dal::kMethodNv4097SetTextureImageRect, (4u << 16) | 4u);
-            scene.write(dal::kMethodNv4097SetTextureControl3, 0);
+            scene.write(tox2::kMethodNv4097SetTextureFormat,
+                        1u | (2u << 4) | ((options.dxt | 0x20u) << 8) | (1u << 16));
+            scene.write(tox2::kMethodNv4097SetTextureImageRect, (4u << 16) | 4u);
+            scene.write(tox2::kMethodNv4097SetTextureControl3, 0);
         }
-        if (options.zero_height) scene.write(dal::kMethodNv4097SetTextureImageRect, kTextureSize << 16);
+        if (options.zero_height) scene.write(tox2::kMethodNv4097SetTextureImageRect, kTextureSize << 16);
     }
-    scene.write(dal::kMethodNv4097SetTextureControl1, options.remap);
-    scene.write(dal::kMethodNv4097SetTextureAddress, options.wrap | (options.wrap << 8) | (1u << 16));
-    scene.write(dal::kMethodNv4097SetTextureBorderColor, options.border);
+    scene.write(tox2::kMethodNv4097SetTextureControl1, options.remap);
+    scene.write(tox2::kMethodNv4097SetTextureAddress, options.wrap | (options.wrap << 8) | (1u << 16));
+    scene.write(tox2::kMethodNv4097SetTextureBorderColor, options.border);
 
     setQuadRenderState(scene);
-    scene.write(dal::kMethodNv4097SetVertexAttribOutputMask, 1u << 14);  // TEX0
-    scene.write(dal::kMethodNv4097SetShaderControl, 0x400);              // color from H0
-    scene.write(dal::kMethodNv4097SetTexCoordControl, 1);                // 2D coordinate
+    scene.write(tox2::kMethodNv4097SetVertexAttribOutputMask, 1u << 14);  // TEX0
+    scene.write(tox2::kMethodNv4097SetShaderControl, 0x400);              // color from H0
+    scene.write(tox2::kMethodNv4097SetTexCoordControl, 1);                // 2D coordinate
     for (std::uint32_t v = 0; v < 4; v++) {
         for (std::uint32_t c = 0; c < 3; c++)
             scene.memory().putFloat(1, kPositionsOffset + v * 12 + c * 4, kQuadCorners[v][c]);
@@ -1129,15 +1130,15 @@ std::vector<std::uint8_t> makeTexturedCapture(const TextureOptions& options) {
 // Two quads (pixels 4..28 and 36..60) textured by the same 2x2 texture; the texel words change between
 // the draws, so the second quad must show yellow, cyan, magenta and grey instead.
 std::vector<std::uint8_t> makeChangedTextureCapture() {
-    using namespace dal::rsx_synthetic;
+    using namespace tox2::rsx_synthetic;
     SceneBuilder scene;
     scene.setSurface();
     scene.clear(0xFF000000);
     scene.setTexture();
     setQuadRenderState(scene);
-    scene.write(dal::kMethodNv4097SetVertexAttribOutputMask, 1u << 14);
-    scene.write(dal::kMethodNv4097SetShaderControl, 0x400);
-    scene.write(dal::kMethodNv4097SetTexCoordControl, 1);
+    scene.write(tox2::kMethodNv4097SetVertexAttribOutputMask, 1u << 14);
+    scene.write(tox2::kMethodNv4097SetShaderControl, 0x400);
+    scene.write(tox2::kMethodNv4097SetTexCoordControl, 1);
     scene.setFloatAttrib(0, 3, kPositionsOffset);
     scene.setFloatAttrib(8, 2, kTexCoordsOffset);
     scene.setPrograms(texturedPrograms());
@@ -1163,17 +1164,17 @@ std::vector<std::uint8_t> makeChangedTextureCapture() {
     return scene.finish();
 }
 
-void testRendererTextures(dal::VkContext& ctx) {
-    using namespace dal::rsx_synthetic;
-    dal::RsxRenderer renderer(ctx, readbackAllOptions());
+void testRendererTextures(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
     CHECK(renderer.valid());
     std::vector<std::uint8_t> bgra;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
 
     const auto render = [&](const TextureOptions& options) {
-        std::vector<dal::RsxCommand> commands = replaySynthetic(makeTexturedCapture(options));
-        dal::rsxUnimplementedReset();
+        std::vector<tox2::RsxCommand> commands = replaySynthetic(makeTexturedCapture(options));
+        tox2::rsxUnimplementedReset();
         renderer.execute(commands);
         CHECK(renderer.valid());
         CHECK(renderer.readDisplay(bgra, width, height));
@@ -1181,10 +1182,10 @@ void testRendererTextures(dal::VkContext& ctx) {
         if (bgra.size() != 64 * 64 * 4) bgra.assign(64 * 64 * 4, 0);
     };
     const auto expectNoNotes = [] {
-        for (const auto& [name, count] : dal::rsxUnimplementedSnapshot()) {
+        for (const auto& [name, count] : tox2::rsxUnimplementedSnapshot()) {
             std::fprintf(stderr, "unimplemented: %s: %llu\n", name.c_str(), static_cast<unsigned long long>(count));
         }
-        CHECK(dal::rsxUnimplementedSnapshot().empty());
+        CHECK(tox2::rsxUnimplementedSnapshot().empty());
     };
 
     // The 2x2 texture magnified 16 times with NEAREST filters: each texel fills a quarter of the quad, and
@@ -1268,8 +1269,8 @@ void testRendererTextures(dal::VkContext& ctx) {
     // Two draws of one texture (same key) with the guest bytes changed in between: each quad shows the
     // bytes of its own draw.
     {
-        std::vector<dal::RsxCommand> commands = replaySynthetic(makeChangedTextureCapture());
-        dal::rsxUnimplementedReset();
+        std::vector<tox2::RsxCommand> commands = replaySynthetic(makeChangedTextureCapture());
+        tox2::rsxUnimplementedReset();
         renderer.execute(commands);
         CHECK(renderer.valid());
         CHECK(renderer.readDisplay(bgra, width, height));
@@ -1349,53 +1350,53 @@ void testRendererTextures(dal::VkContext& ctx) {
     CHECK(unimplementedCount("texture placeholder: no texture data") == 1);
 
     CHECK(renderer.valid());
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
 }
 
 // A clear that includes stencil under a write mask other than 0 or 0xFF is counted by the frame
 // builder (the renderer clears the whole byte).
 void testPartialStencilNote() {
     const auto clearWithStencilMask = [](std::uint32_t stencil_mask) {
-        dal::rsx_synthetic::SceneBuilder scene;
+        tox2::rsx_synthetic::SceneBuilder scene;
         scene.setSurface();
-        scene.write(dal::kMethodNv4097SetStencilMask, stencil_mask);
+        scene.write(tox2::kMethodNv4097SetStencilMask, stencil_mask);
         scene.clear(0xFF000000);
         // Recording runs a frame builder of its own; only the replay's notes are counted.
         const std::vector<std::uint8_t> file = scene.finish();
-        dal::rsxUnimplementedReset();
+        tox2::rsxUnimplementedReset();
         return replaySynthetic(file);
     };
     clearWithStencilMask(0xFF);
     CHECK(unimplementedCount("state partial stencil clear mask") == 0);
     clearWithStencilMask(0x00);
     CHECK(unimplementedCount("state partial stencil clear mask") == 0);
-    const std::vector<dal::RsxCommand> commands = clearWithStencilMask(0x0F);
-    CHECK(commands.size() == 2 && std::get<dal::RsxClear>(commands[0]).mask == 0xF3);
+    const std::vector<tox2::RsxCommand> commands = clearWithStencilMask(0x0F);
+    CHECK(commands.size() == 2 && std::get<tox2::RsxClear>(commands[0]).mask == 0xF3);
     CHECK(unimplementedCount("state partial stencil clear mask") == 1);
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
 }
 
-bool sameRect(const dal::PixelRect& rect, std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
+bool sameRect(const tox2::PixelRect& rect, std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
     return rect.x == x && rect.y == y && rect.width == width && rect.height == height;
 }
 
 void testLetterbox() {
-    CHECK(sameRect(dal::letterboxRect(1280, 720, 16, 9), 0, 0, 1280, 720));
-    CHECK(sameRect(dal::letterboxRect(1920, 1080, 16, 9), 0, 0, 1920, 1080));
+    CHECK(sameRect(tox2::letterboxRect(1280, 720, 16, 9), 0, 0, 1280, 720));
+    CHECK(sameRect(tox2::letterboxRect(1920, 1080, 16, 9), 0, 0, 1920, 1080));
     // Wider than 16:9: pillarbox bars left and right.
-    CHECK(sameRect(dal::letterboxRect(1600, 720, 16, 9), 160, 0, 1280, 720));
+    CHECK(sameRect(tox2::letterboxRect(1600, 720, 16, 9), 160, 0, 1280, 720));
     // Taller than 16:9: letterbox bars above and below.
-    CHECK(sameRect(dal::letterboxRect(1280, 1024, 16, 9), 0, 152, 1280, 720));
-    CHECK(sameRect(dal::letterboxRect(800, 800, 16, 9), 0, 175, 800, 450));
+    CHECK(sameRect(tox2::letterboxRect(1280, 1024, 16, 9), 0, 152, 1280, 720));
+    CHECK(sameRect(tox2::letterboxRect(800, 800, 16, 9), 0, 175, 800, 450));
     // Odd sizes round down; the margins differ by at most one pixel.
-    CHECK(sameRect(dal::letterboxRect(641, 361, 16, 9), 0, 0, 641, 360));
+    CHECK(sameRect(tox2::letterboxRect(641, 361, 16, 9), 0, 0, 641, 360));
     // Empty areas and ratios give an empty rectangle.
-    CHECK(sameRect(dal::letterboxRect(0, 720, 16, 9), 0, 0, 0, 0));
-    CHECK(sameRect(dal::letterboxRect(1280, 0, 16, 9), 0, 0, 0, 0));
-    CHECK(sameRect(dal::letterboxRect(1280, 720, 0, 9), 0, 0, 0, 0));
-    CHECK(sameRect(dal::letterboxRect(1, 1, 16, 9), 0, 0, 0, 0));  // 1 x 0 after rounding
+    CHECK(sameRect(tox2::letterboxRect(0, 720, 16, 9), 0, 0, 0, 0));
+    CHECK(sameRect(tox2::letterboxRect(1280, 0, 16, 9), 0, 0, 0, 0));
+    CHECK(sameRect(tox2::letterboxRect(1280, 720, 0, 9), 0, 0, 0, 0));
+    CHECK(sameRect(tox2::letterboxRect(1, 1, 16, 9), 0, 0, 0, 0));  // 1 x 0 after rounding
     // A very large area does not overflow.
-    CHECK(sameRect(dal::letterboxRect(0xFFFFFFFFu, 0xFFFFFFFFu, 16, 9), 0, 939524096, 0xFFFFFFFFu, 2415919103u));
+    CHECK(sameRect(tox2::letterboxRect(0xFFFFFFFFu, 0xFFFFFFFFu, 16, 9), 0, 939524096, 0xFFFFFFFFu, 2415919103u));
 }
 
 // lParam of a key message: repeat count, scan code (bits 16..23), extended (24), previous state (30).
@@ -1408,44 +1409,44 @@ void testKeyMessages() {
     constexpr std::uint32_t kSize = 0x5, kKillFocus = 0x8;
     constexpr std::uint64_t kVkZ = 0x5A, kVkUp = 0x26, kVkV = 0x56;
 
-    auto key = dal::keyMessageFromWin32(kKeyDown, kVkZ, keyLparam(0x2C, false, false));
+    auto key = tox2::keyMessageFromWin32(kKeyDown, kVkZ, keyLparam(0x2C, false, false));
     CHECK(key && key->scan_code == 0x2C && key->down && !key->repeat);
 
-    key = dal::keyMessageFromWin32(kKeyDown, kVkZ, keyLparam(0x2C, false, true));
+    key = tox2::keyMessageFromWin32(kKeyDown, kVkZ, keyLparam(0x2C, false, true));
     CHECK(key && key->scan_code == 0x2C && key->down && key->repeat);
 
-    key = dal::keyMessageFromWin32(kKeyDown, kVkUp, keyLparam(0x48, true, false));
+    key = tox2::keyMessageFromWin32(kKeyDown, kVkUp, keyLparam(0x48, true, false));
     CHECK(key && key->scan_code == 0xE048 && key->down);
     // The same scan code without the extended bit is numpad 8.
-    key = dal::keyMessageFromWin32(kKeyDown, kVkUp, keyLparam(0x48, false, false));
+    key = tox2::keyMessageFromWin32(kKeyDown, kVkUp, keyLparam(0x48, false, false));
     CHECK(key && key->scan_code == 0x48);
 
     // A key-up always carries the previous-state bit; it is not a repeat.
-    key = dal::keyMessageFromWin32(kKeyUp, kVkZ, keyLparam(0x2C, false, true) | (1ull << 31));
+    key = tox2::keyMessageFromWin32(kKeyUp, kVkZ, keyLparam(0x2C, false, true) | (1ull << 31));
     CHECK(key && key->scan_code == 0x2C && !key->down && !key->repeat);
 
     // Alt held: bit 29 is set and the message is the SYS variant.
-    key = dal::keyMessageFromWin32(kSysKeyDown, kVkV, keyLparam(0x2F, false, false) | (1ull << 29));
+    key = tox2::keyMessageFromWin32(kSysKeyDown, kVkV, keyLparam(0x2F, false, false) | (1ull << 29));
     CHECK(key && key->scan_code == 0x2F && key->down && !key->repeat);
-    key = dal::keyMessageFromWin32(kSysKeyUp, kVkV, keyLparam(0x2F, false, true) | (1ull << 29) | (1ull << 31));
+    key = tox2::keyMessageFromWin32(kSysKeyUp, kVkV, keyLparam(0x2F, false, true) | (1ull << 29) | (1ull << 31));
     CHECK(key && key->scan_code == 0x2F && !key->down);
 
     // A zero scan code falls back to the virtual key; the extended bit still tells the arrow from numpad 8.
     // (Arrow keys only: letter keys map through the active layout.)
-    key = dal::keyMessageFromWin32(kKeyDown, kVkUp, keyLparam(0, true, false));
+    key = tox2::keyMessageFromWin32(kKeyDown, kVkUp, keyLparam(0, true, false));
     CHECK(key && key->scan_code == 0xE048 && key->down);
-    key = dal::keyMessageFromWin32(kKeyDown, kVkUp, keyLparam(0, false, false));
+    key = tox2::keyMessageFromWin32(kKeyDown, kVkUp, keyLparam(0, false, false));
     CHECK(key && key->scan_code == 0x48);
 
-    CHECK(!dal::keyMessageFromWin32(kChar, kVkZ, keyLparam(0x2C, false, false)));
-    CHECK(!dal::keyMessageFromWin32(kSize, 0, 0x02D00500));
-    CHECK(!dal::keyMessageFromWin32(kKillFocus, 0, 0));
+    CHECK(!tox2::keyMessageFromWin32(kChar, kVkZ, keyLparam(0x2C, false, false)));
+    CHECK(!tox2::keyMessageFromWin32(kSize, 0, 0x02D00500));
+    CHECK(!tox2::keyMessageFromWin32(kKillFocus, 0, 0));
 }
 
 }  // namespace
 
 int main() {
-    const bool layer = dal::vkValidationLayerAvailable();
+    const bool layer = tox2::vkValidationLayerAvailable();
     std::printf("validation layer: %s\n", layer ? "installed" : "not installed");
     testLetterbox();
     testKeyMessages();
@@ -1455,10 +1456,10 @@ int main() {
     testPartialStencilNote();
     testVertexConvert();
 
-    dal::VkContextOptions options;
+    tox2::VkContextOptions options;
     options.validation = true;
     std::string error;
-    std::unique_ptr<dal::VkContext> ctx = dal::createVkContext(options, error);
+    std::unique_ptr<tox2::VkContext> ctx = tox2::createVkContext(options, error);
     if (!ctx) {
         std::printf("vulkan: %s\n", error.c_str());
         std::printf("render tests: skipped: no Vulkan device\n");

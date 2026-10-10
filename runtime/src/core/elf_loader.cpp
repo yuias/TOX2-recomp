@@ -10,14 +10,14 @@
 
 #include "core/guest_memory.h"
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 #include <bcrypt.h>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::uint16_t kMachinePpc64 = 21;
@@ -122,7 +122,7 @@ std::expected<LoadedExecutable, std::string> loadExecutable(const std::filesyste
         // Same predicate as RPCS3 `ppu_load_exec`: raw flags equal to their low three bits mark a
         // very old executable with a private area below 0x10000000.
         const bool low_flags = (ph.flags & 7) == ph.flags;
-        logInfo("dal: load: phdr {} type {:#x} flags {:#010x} vaddr {:#010x} filesz {:#x} memsz {:#x} "
+        logInfo("tox2: load: phdr {} type {:#x} flags {:#010x} vaddr {:#010x} filesz {:#x} memsz {:#x} "
                 "(flags & 7) == flags: {}",
                 i, ph.type, ph.flags, ph.vaddr, ph.filesz, ph.memsz, low_flags ? "yes" : "no");
 
@@ -176,8 +176,8 @@ std::expected<LoadedExecutable, std::string> loadExecutable(const std::filesyste
     if (entry < kMainRegion.begin || entry + 8 > image_end) {
         return Error(std::format("entry descriptor {:#x} is outside the image", entry));
     }
-    exe.entry_func = dalRead32(base, exe.entry_opd);
-    exe.entry_toc = dalRead32(base, exe.entry_opd + 4);
+    exe.entry_func = tox2Read32(base, exe.entry_opd);
+    exe.entry_toc = tox2Read32(base, exe.entry_opd + 4);
 
     exe.sha256 = sha256Hex(file);
     if (exe.sha256.empty()) {
@@ -186,4 +186,4 @@ std::expected<LoadedExecutable, std::string> loadExecutable(const std::filesyste
     return exe;
 }
 
-}  // namespace dal
+}  // namespace tox2

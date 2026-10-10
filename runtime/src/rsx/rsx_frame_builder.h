@@ -15,7 +15,7 @@
 #include "rsx/rsx_registers.h"
 #include "rsx/rsx_state.h"
 
-namespace dal {
+namespace tox2 {
 
 // RSX-visible memory; location 0 = local (offset from kRsxLocalBase), 1 = main memory through the IO map.
 class RsxMemoryView {
@@ -100,4 +100,4 @@ private:
     bool draw_pending_ = false;  // the clause ended and buildDraw() has not run yet
 };
 
-}  // namespace dal
+}  // namespace tox2

@@ -11,7 +11,7 @@
 
 #include "core/log.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::size_t kInfoFileLimit = 4096;
@@ -92,13 +92,13 @@ void GamepadProbe::step() {
         if (!reading) {
             if (!state.reported_missing) {
                 state.reported_missing = true;
-                logInfo("dal: pad: probe {} {} no gamepad reading", info.id, formatGamepadVidPid(info));
+                logInfo("tox2: pad: probe {} {} no gamepad reading", info.id, formatGamepadVidPid(info));
             }
             continue;
         }
         std::string text = formatGamepadReading(*reading);
         if (text == state.last_text) continue;
-        logInfo("dal: pad: probe {} {} {}", info.id, formatGamepadVidPid(info), text);
+        logInfo("tox2: pad: probe {} {} {}", info.id, formatGamepadVidPid(info), text);
         state.last_text = std::move(text);
     }
 }
@@ -106,20 +106,20 @@ void GamepadProbe::step() {
 void logSteamVirtualGamepadInfo(const SteamContext& steam) {
     const auto it = steam.env.find("SteamVirtualGamepadInfo");
     if (it == steam.env.end()) {
-        logInfo("dal: pad: probe SteamVirtualGamepadInfo unset");
+        logInfo("tox2: pad: probe SteamVirtualGamepadInfo unset");
         return;
     }
     const std::u8string utf8(it->second.begin(), it->second.end());
     std::ifstream file{std::filesystem::path(utf8), std::ios::binary};
     if (!file) {
-        logInfo("dal: pad: probe SteamVirtualGamepadInfo unreadable");
+        logInfo("tox2: pad: probe SteamVirtualGamepadInfo unreadable");
         return;
     }
     std::string content(kInfoFileLimit, '\0');
     file.read(content.data(), static_cast<std::streamsize>(content.size()));
     content.resize(static_cast<std::size_t>(file.gcount()));
     if (content.empty()) {
-        logInfo("dal: pad: probe SteamVirtualGamepadInfo empty");
+        logInfo("tox2: pad: probe SteamVirtualGamepadInfo empty");
         return;
     }
     std::string_view rest = content;
@@ -128,8 +128,8 @@ void logSteamVirtualGamepadInfo(const SteamContext& steam) {
         std::string_view line = rest.substr(0, end);
         rest = end == std::string_view::npos ? std::string_view{} : rest.substr(end + 1);
         if (line.ends_with('\r')) line.remove_suffix(1);
-        logInfo("dal: pad: probe SteamVirtualGamepadInfo: {}", line);
+        logInfo("tox2: pad: probe SteamVirtualGamepadInfo: {}", line);
     }
 }
 
-}  // namespace dal
+}  // namespace tox2

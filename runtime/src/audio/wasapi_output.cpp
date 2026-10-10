@@ -34,7 +34,7 @@
 #include "core/log.h"
 #include "core/sleeper.h"
 
-namespace dal {
+namespace tox2 {
 
 namespace {
 
@@ -339,7 +339,7 @@ public:
                 const RenderStatus status = serve(*stream);
                 if (stopping()) return;
                 shared_.device_errors.fetch_add(1, std::memory_order_relaxed);
-                logWarn("dal: audio: wasapi: device lost ({}); retrying", hresultText(status));
+                logWarn("tox2: audio: wasapi: device lost ({}); retrying", hresultText(status));
                 stream.reset();
                 // The first attempt follows at once: after a switch of the default device the new one is
                 // usually ready already.
@@ -359,9 +359,9 @@ public:
                     std::lock_guard<std::mutex> lock(shared_.mutex);
                     shared_.description = description;
                 }
-                logInfo("dal: audio: wasapi: reopened {}", description);
+                logInfo("tox2: audio: wasapi: reopened {}", description);
             } else {
-                logDebug("dal: audio: wasapi: reopen failed: {}", reopen_error);
+                logDebug("tox2: audio: wasapi: reopen failed: {}", reopen_error);
             }
         }
     }
@@ -510,9 +510,9 @@ void deviceThread(std::shared_ptr<Shared> shared) {
         const MmThreadCharacteristics mmcss;
         DevicePump(*shared).run();
     } catch (const std::exception& error) {
-        logWarn("dal: audio: wasapi: device thread failed: {}", error.what());
+        logWarn("tox2: audio: wasapi: device thread failed: {}", error.what());
     } catch (...) {
-        logWarn("dal: audio: wasapi: device thread failed");
+        logWarn("tox2: audio: wasapi: device thread failed");
     }
     std::lock_guard<std::mutex> lock(shared->mutex);
     if (!shared->open_done) {
@@ -670,4 +670,4 @@ std::expected<std::vector<RenderDeviceInfo>, std::string> listRenderDevices() {
     return devices;
 }
 
-}  // namespace dal
+}  // namespace tox2

@@ -9,7 +9,7 @@
 
 #include "rsx/rsx_thread.h"
 
-namespace dal {
+namespace tox2 {
 
 struct GcmInterruptCounts {
     std::uint64_t vblank = 0, flip = 0, user = 0;  // handler calls made so far
@@ -33,4 +33,4 @@ GcmInterruptCounts gcmInterruptCounts();
 // lock, which is released while waiting for the thread. For tests.
 void stopGcmInterruptThread();
 
-}  // namespace dal
+}  // namespace tox2

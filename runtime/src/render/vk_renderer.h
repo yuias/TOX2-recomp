@@ -22,7 +22,7 @@
 #include "render/vk_window.h"
 #include "rsx/rsx_frame.h"
 
-namespace dal {
+namespace tox2 {
 
 struct RenderOptions {
     // Every dump_every-th flip (counted from 1) is written to `<dump_dir>/frame_<flip number>.png`. An
@@ -162,4 +162,4 @@ private:
     std::uint32_t display_height_ = 0;
 };
 
-}  // namespace dal
+}  // namespace tox2

@@ -8,7 +8,7 @@
 #include <string_view>
 #include <utility>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::uint32_t kMagic = 0x46535000;  // "\0PSF" read as a little-endian u32 is 0x46535000
@@ -179,4 +179,4 @@ const ParamSfo& gameParamSfo() { return gameSfoStorage(); }
 
 void setGameParamSfo(ParamSfo sfo) { gameSfoStorage() = std::move(sfo); }
 
-}  // namespace dal
+}  // namespace tox2

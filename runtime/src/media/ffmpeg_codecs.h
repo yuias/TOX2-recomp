@@ -13,7 +13,7 @@
 #include "media/ffmpeg_api.h"
 #include "media/movie_decoder.h"
 
-namespace dal {
+namespace tox2 {
 
 struct FfmpegCodecOptions {
     // H.264 frame-thread count; 0 picks min(4, hardware threads). More threads delay the first output
@@ -170,4 +170,4 @@ private:
 std::unique_ptr<MediaCodecFactory> createFfmpegCodecFactory(std::string& error, const FfmpegCodecOptions& options = {});
 std::unique_ptr<AtracDecoderFactory> createFfmpegAtracDecoderFactory(std::string& error);
 
-}  // namespace dal
+}  // namespace tox2

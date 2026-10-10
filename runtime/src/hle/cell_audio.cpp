@@ -17,13 +17,13 @@
 #include "core/census.h"
 #include "core/guest_memory.h"
 #include "core/threads.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/cell_audio_ports.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "cellAudio";
@@ -37,14 +37,14 @@ void produceBlock(std::span<float> block) {
     cellAudioPorts().producePeriod(process().memory.base(), now_us, block);
 }
 
-void audioInit(DalPpuContext* ctx, std::uint8_t* base) {
+void audioInit(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const std::uint32_t result = cellAudioPorts().init();
     if (result == kCellOk) startAudioEngine(produceBlock);
     setResultCode(ctx, result);
 }
 
-void audioQuit(DalPpuContext* ctx, std::uint8_t* base) {
+void audioQuit(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const std::uint32_t result = cellAudioPorts().quit();
     if (result == kCellOk) requestAudioEngineStop();
@@ -52,46 +52,46 @@ void audioQuit(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellAudioPortOpen(CellAudioPortParam* param, u32* port_num)
-void audioPortOpen(DalPpuContext* ctx, std::uint8_t* base) {
+void audioPortOpen(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, cellAudioPorts().portOpen(base, argU32(ctx, 0), argU32(ctx, 1)));
 }
 
 // cellAudioGetPortConfig(u32 port, CellAudioPortConfig* config)
-void audioGetPortConfig(DalPpuContext* ctx, std::uint8_t* base) {
+void audioGetPortConfig(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, cellAudioPorts().getPortConfig(base, argU32(ctx, 0), argU32(ctx, 1)));
 }
 
-void audioPortStart(DalPpuContext* ctx, std::uint8_t* base) {
+void audioPortStart(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, cellAudioPorts().portStart(base, argU32(ctx, 0)));
 }
 
-void audioPortStop(DalPpuContext* ctx, std::uint8_t* base) {
+void audioPortStop(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResultCode(ctx, cellAudioPorts().portStop(argU32(ctx, 0)));
 }
 
-void audioPortClose(DalPpuContext* ctx, std::uint8_t* base) {
+void audioPortClose(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResultCode(ctx, cellAudioPorts().portClose(argU32(ctx, 0)));
 }
 
 // cellAudioGetPortBlockTag(u32 port, u64 block_no, u64* tag)
-void audioGetPortBlockTag(DalPpuContext* ctx, std::uint8_t* base) {
+void audioGetPortBlockTag(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, cellAudioPorts().getPortBlockTag(base, argU32(ctx, 0), ctx->gpr[4], argU32(ctx, 2)));
 }
 
 // cellAudioGetPortTimestamp(u32 port, u64 tag, u64* stamp)
-void audioGetPortTimestamp(DalPpuContext* ctx, std::uint8_t* base) {
+void audioGetPortTimestamp(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, cellAudioPorts().getPortTimestamp(base, argU32(ctx, 0), ctx->gpr[4], argU32(ctx, 2)));
 }
 
 // cellAudioSetNotifyEventQueue(u64 key) and cellAudioRemoveNotifyEventQueue(u64 key)
-void audioSetNotifyEventQueue(DalPpuContext* ctx, std::uint8_t* base) {
+void audioSetNotifyEventQueue(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResultCode(ctx, cellAudioPorts().setNotifyEventQueue(ctx->gpr[3]));
 }
 
-void audioRemoveNotifyEventQueue(DalPpuContext* ctx, std::uint8_t* base) {
+void audioRemoveNotifyEventQueue(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResultCode(ctx, cellAudioPorts().removeNotifyEventQueue(ctx->gpr[3]));
 }
@@ -116,4 +116,4 @@ std::span<const HleEntry> cellAudioHandlers() { return kHandlers; }
 
 void resetCellAudio() { cellAudioPorts().reset(); }
 
-}  // namespace dal
+}  // namespace tox2

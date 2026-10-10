@@ -22,7 +22,7 @@
 #include "rsx/rsx_registers.h"
 #include "rsx/rsx_state.h"
 
-namespace dal::rsx_synthetic {
+namespace tox2::rsx_synthetic {
 
 inline constexpr std::uint32_t kSurfaceSize = 64;  // the color target and display buffer are 64x64
 inline constexpr std::uint32_t kSurfacePitch = kSurfaceSize * 4;
@@ -241,4 +241,4 @@ inline std::vector<std::uint8_t> makeTexturedQuadCapture(const Programs& program
     return scene.finish();
 }
 
-}  // namespace dal::rsx_synthetic
+}  // namespace tox2::rsx_synthetic

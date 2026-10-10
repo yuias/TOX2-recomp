@@ -5,7 +5,7 @@
 
 #include "rsx/rsx_registers.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::uint32_t kNoTemp = 63;
@@ -525,4 +525,4 @@ GlslResult translateVertexProgram(std::span<const std::uint32_t> ucode, std::uin
     return Translator().run(ucode);
 }
 
-}  // namespace dal
+}  // namespace tox2

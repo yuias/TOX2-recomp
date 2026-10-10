@@ -30,11 +30,11 @@
 
 #include "core/guest_memory.h"
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "cellSysutil";
@@ -100,13 +100,13 @@ std::string describeType(std::uint32_t type) {
 // Ends the dialog (RPCS3 `on_close`): DRAWING_END to the system callbacks, then the dialog's own
 // callback, both on the next cellSysutilCheckCallback.
 void finish(std::int32_t result) {
-    logInfo("dal: msgdialog: closed with button {}", result);
+    logInfo("tox2: msgdialog: closed with button {}", result);
     const std::uint32_t callback = g_dialog.callback;
     const std::uint32_t userdata = g_dialog.userdata;
     g_dialog = {};
     queueSysutilEvent(kSysutilDrawingEnd, 0);
     if (callback != 0) {
-        queueSysutilCall([callback, userdata, result](DalPpuContext* ctx, std::uint8_t* base) {
+        queueSysutilCall([callback, userdata, result](Tox2PpuContext* ctx, std::uint8_t* base) {
             callGuestFunction(ctx, base, callback,
                               {static_cast<std::uint64_t>(static_cast<std::int64_t>(result)), userdata});
         });
@@ -116,7 +116,7 @@ void finish(std::int32_t result) {
 // Re-queues itself until the dialog it was started for ends, so each cellSysutilCheckCallback
 // looks at the deadlines once.
 void poll(std::uint32_t id) {
-    queueSysutilCall([id](DalPpuContext*, std::uint8_t*) {
+    queueSysutilCall([id](Tox2PpuContext*, std::uint8_t*) {
         if (!g_dialog.open || g_dialog.id != id) return;
         const Clock::time_point now = Clock::now();
         const bool answer_due = g_dialog.answer_at && *g_dialog.answer_at <= now;
@@ -134,7 +134,7 @@ void poll(std::uint32_t id) {
 
 // cellMsgDialogOpen2(u32 type, const char* msgString, CellMsgDialogCallback callback,
 //                    void* userData, void* extParam)
-void open2(DalPpuContext* ctx, std::uint8_t* base) {
+void open2(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t type = argU32(ctx, 0);
     const std::uint32_t text_addr = argU32(ctx, 1);
     const std::uint32_t callback = argU32(ctx, 2);
@@ -184,17 +184,17 @@ void open2(DalPpuContext* ctx, std::uint8_t* base) {
         g_dialog.answer = buttonType(type) == kButtonOk ? kResultYes : g_yes_no_answer;
         g_dialog.answer_at = Clock::now() + g_answer_delay;
     }
-    logInfo("dal: msgdialog: open type {:#x} ({}) callback {:#x} userdata {:#x}: {}", type, describeType(type),
+    logInfo("tox2: msgdialog: open type {:#x} ({}) callback {:#x} userdata {:#x}: {}", type, describeType(type),
             callback, userdata, text);
     if (g_dialog.answer_at) {
-        logInfo("dal: msgdialog: auto-answer {} in {} ms", g_dialog.answer, g_answer_delay.count());
+        logInfo("tox2: msgdialog: auto-answer {} in {} ms", g_dialog.answer, g_answer_delay.count());
     }
     poll(g_dialog.id);
     ctx->gpr[3] = kCellOk;
 }
 
 // cellMsgDialogClose(f32 delay): `delay` in milliseconds.
-void closeDialog(DalPpuContext* ctx, std::uint8_t*) {
+void closeDialog(Tox2PpuContext* ctx, std::uint8_t*) {
     if (!g_dialog.open) {
         ctx->gpr[3] = kErrorNotOpened;
         return;
@@ -202,12 +202,12 @@ void closeDialog(DalPpuContext* ctx, std::uint8_t*) {
     const float delay = std::max(static_cast<float>(ctx->fpr[1].f64), 0.0f);
     g_dialog.close_at =
             Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<float, std::milli>(delay));
-    logInfo("dal: msgdialog: close requested in {} ms", delay);
+    logInfo("tox2: msgdialog: close requested in {} ms", delay);
     ctx->gpr[3] = kCellOk;
 }
 
 // Shared by the two progress bar handlers: a dialog must be open and the index within its bars.
-bool checkBar(DalPpuContext* ctx, std::uint32_t index) {
+bool checkBar(Tox2PpuContext* ctx, std::uint32_t index) {
     if (!g_dialog.open) {
         ctx->gpr[3] = kErrorNotOpened;
         return false;
@@ -220,13 +220,13 @@ bool checkBar(DalPpuContext* ctx, std::uint32_t index) {
 }
 
 // cellMsgDialogProgressBarReset(u32 progressBarIndex)
-void progressBarReset(DalPpuContext* ctx, std::uint8_t*) {
+void progressBarReset(Tox2PpuContext* ctx, std::uint8_t*) {
     if (!checkBar(ctx, argU32(ctx, 0))) return;
     ctx->gpr[3] = kCellOk;
 }
 
 // cellMsgDialogProgressBarInc(u32 progressBarIndex, u32 delta)
-void progressBarInc(DalPpuContext* ctx, std::uint8_t*) {
+void progressBarInc(Tox2PpuContext* ctx, std::uint8_t*) {
     if (!checkBar(ctx, argU32(ctx, 0))) return;
     ctx->gpr[3] = kCellOk;
 }
@@ -262,4 +262,4 @@ void resetCellMsgDialog() {
     g_answer_delay = std::chrono::milliseconds(200);
 }
 
-}  // namespace dal
+}  // namespace tox2

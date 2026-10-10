@@ -15,7 +15,7 @@
 #include <string_view>
 #include <vector>
 
-namespace dal {
+namespace tox2 {
 
 inline constexpr std::uint32_t kAudioSampleRate = 48000;
 inline constexpr std::uint32_t kAudioBlockFrames = 256;   // one cellAudio period, 5.333 ms
@@ -92,4 +92,4 @@ private:
     alignas(kCacheLine) std::atomic<std::uint32_t> pending_drops_{0};
 };
 
-}  // namespace dal
+}  // namespace tox2

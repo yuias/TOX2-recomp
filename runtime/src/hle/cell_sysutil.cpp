@@ -23,11 +23,11 @@
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/param_sfo.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "cellSysutil";
@@ -53,32 +53,32 @@ bool g_draw_started = false;
 std::uint8_t g_bgm_enable_state = kBgmDisable;
 
 // cellSysutilRegisterCallback(u32 slot, CellSysutilCallback func, void* userdata)
-void registerCallback(DalPpuContext* ctx, std::uint8_t*) {
+void registerCallback(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t slot = argU32(ctx, 0);
     if (slot >= kSlotCount) {
         ctx->gpr[3] = kSysutilErrorValue;
         return;
     }
     g_slots[slot] = {argU32(ctx, 1), argU32(ctx, 2)};
-    logInfo("dal: sysutil: callback slot {} = {:#010x} (userdata {:#x})", slot, g_slots[slot].func,
+    logInfo("tox2: sysutil: callback slot {} = {:#010x} (userdata {:#x})", slot, g_slots[slot].func,
             g_slots[slot].userdata);
     ctx->gpr[3] = kCellOk;
 }
 
 // cellSysutilUnregisterCallback(u32 slot)
-void unregisterCallback(DalPpuContext* ctx, std::uint8_t*) {
+void unregisterCallback(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t slot = argU32(ctx, 0);
     if (slot >= kSlotCount) {
         ctx->gpr[3] = kSysutilErrorValue;
         return;
     }
     g_slots[slot] = {};
-    logInfo("dal: sysutil: callback slot {} cleared", slot);
+    logInfo("tox2: sysutil: callback slot {} cleared", slot);
     ctx->gpr[3] = kCellOk;
 }
 
 // cellSysutilCheckCallback()
-void checkCallback(DalPpuContext* ctx, std::uint8_t* base) {
+void checkCallback(Tox2PpuContext* ctx, std::uint8_t* base) {
     // Take the whole queue first: what a callback queues runs on the next check, as in RPCS3's
     // pop_all.
     std::deque<SysutilCall> batch;
@@ -90,21 +90,21 @@ void checkCallback(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // cellSysutilEnableBgmPlayback()
-void enableBgmPlayback(DalPpuContext* ctx, std::uint8_t*) {
+void enableBgmPlayback(Tox2PpuContext* ctx, std::uint8_t*) {
     g_bgm_enable_state = kBgmEnable;
     ctx->gpr[3] = kCellOk;
 }
 
 // cellSysutilGetBgmPlaybackStatus(CellSysutilBgmPlaybackStatus* status)
-void getBgmPlaybackStatus(DalPpuContext* ctx, std::uint8_t* base) {
+void getBgmPlaybackStatus(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t status_addr = argU32(ctx, 0);
     if (status_addr == 0) {
         ctx->gpr[3] = kBgmErrorParam;
         return;
     }
-    for (std::uint32_t i = 0; i < kBgmStatusSize; i++) dalWrite8(base, status_addr + i, 0);
-    dalWrite8(base, status_addr, kBgmPlayerStop);
-    dalWrite8(base, status_addr + 1, g_bgm_enable_state);
+    for (std::uint32_t i = 0; i < kBgmStatusSize; i++) tox2Write8(base, status_addr + i, 0);
+    tox2Write8(base, status_addr, kBgmPlayerStop);
+    tox2Write8(base, status_addr + 1, g_bgm_enable_state);
     ctx->gpr[3] = kCellOk;
 }
 
@@ -194,7 +194,7 @@ bool sfoAllows(std::uint32_t resolution_id, std::uint32_t aspect) {
 }
 
 // cellVideoOutGetState(u32 videoOut, u32 deviceIndex, CellVideoOutState* state)
-void videoOutGetState(DalPpuContext* ctx, std::uint8_t* base) {
+void videoOutGetState(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t video_out = argU32(ctx, 0);
     const std::uint32_t device_index = argU32(ctx, 1);
     const std::uint32_t state = argU32(ctx, 2);
@@ -209,20 +209,20 @@ void videoOutGetState(DalPpuContext* ctx, std::uint8_t* base) {
         return;
     }
     const VideoMode mode = g_video_configured ? g_video_mode : defaultVideoMode();
-    for (std::uint32_t i = 0; i < kVideoStateSize; i++) dalWrite8(base, state + i, 0);
-    dalWrite8(base, state + 0, 0);  // CELL_VIDEO_OUT_OUTPUT_STATE_ENABLED
-    dalWrite8(base, state + 1, kColorSpaceRgb);
-    dalWrite8(base, state + 8, mode.resolution_id);
-    dalWrite8(base, state + 9, kScanProgressive);
-    dalWrite8(base, state + 10, 0);  // CELL_VIDEO_OUT_DISPLAY_CONVERSION_NONE
-    dalWrite8(base, state + 11, mode.aspect);
-    dalWrite16(base, state + 14, kRefreshRate5994);
+    for (std::uint32_t i = 0; i < kVideoStateSize; i++) tox2Write8(base, state + i, 0);
+    tox2Write8(base, state + 0, 0);  // CELL_VIDEO_OUT_OUTPUT_STATE_ENABLED
+    tox2Write8(base, state + 1, kColorSpaceRgb);
+    tox2Write8(base, state + 8, mode.resolution_id);
+    tox2Write8(base, state + 9, kScanProgressive);
+    tox2Write8(base, state + 10, 0);  // CELL_VIDEO_OUT_DISPLAY_CONVERSION_NONE
+    tox2Write8(base, state + 11, mode.aspect);
+    tox2Write16(base, state + 14, kRefreshRate5994);
     ctx->gpr[3] = kCellOk;
 }
 
 // cellVideoOutGetResolutionAvailability(u32 videoOut, u32 resolutionId, u32 aspect, u32 option)
 // returns a boolean in r3.
-void videoOutGetResolutionAvailability(DalPpuContext* ctx, std::uint8_t*) {
+void videoOutGetResolutionAvailability(Tox2PpuContext* ctx, std::uint8_t*) {
     const std::uint32_t video_out = argU32(ctx, 0);
     const std::uint32_t resolution_id = argU32(ctx, 1);
     const std::uint32_t aspect = argU32(ctx, 2);
@@ -236,22 +236,22 @@ void videoOutGetResolutionAvailability(DalPpuContext* ctx, std::uint8_t*) {
     }
     const bool available = sfoAllows(resolution_id, aspect);
     logOnce(std::format("videoout-avail-{}-{}", resolution_id, aspect),
-            "dal: videoout: availability of resolution {:#x} aspect {}: {}", resolution_id, aspect, available ? 1 : 0);
+            "tox2: videoout: availability of resolution {:#x} aspect {}: {}", resolution_id, aspect, available ? 1 : 0);
     ctx->gpr[3] = available ? 1 : 0;
 }
 
 // cellVideoOutConfigure(u32 videoOut, CellVideoOutConfiguration* config, CellVideoOutOption* option,
 //                       u32 waitForEvent)
-void videoOutConfigure(DalPpuContext* ctx, std::uint8_t* base) {
+void videoOutConfigure(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t config = argU32(ctx, 1);
     if (config == 0) {
         ctx->gpr[3] = kVideoErrorIllegalParameter;
         return;
     }
-    const std::uint8_t resolution_id = dalRead8(base, config);
-    const std::uint8_t format = dalRead8(base, config + 1);
-    const std::uint8_t aspect = dalRead8(base, config + 2);
-    const std::uint32_t pitch = dalRead32(base, config + 12);
+    const std::uint8_t resolution_id = tox2Read8(base, config);
+    const std::uint8_t format = tox2Read8(base, config + 1);
+    const std::uint8_t aspect = tox2Read8(base, config + 2);
+    const std::uint32_t pitch = tox2Read32(base, config + 12);
     if (pitch == 0) {
         ctx->gpr[3] = kVideoErrorOutOfRange;
         return;
@@ -261,7 +261,7 @@ void videoOutConfigure(DalPpuContext* ctx, std::uint8_t* base) {
         return;
     }
     if (!knownResolution(resolution_id)) {
-        logError("dal: videoout: unsupported resolution {:#x} requested", resolution_id);
+        logError("tox2: videoout: unsupported resolution {:#x} requested", resolution_id);
         ctx->gpr[3] = kVideoErrorUnsupportedDisplayMode;
         return;
     }
@@ -273,7 +273,7 @@ void videoOutConfigure(DalPpuContext* ctx, std::uint8_t* base) {
     mode.aspect = aspect == kAspect4x3 || aspect == kAspect16x9 ? aspect : kAspect16x9;
     g_video_mode = mode;
     g_video_configured = true;
-    logInfo("dal: videoout: configured resolution {:#x} aspect {}=>{} format {:#x} pitch {:#x}", resolution_id, aspect,
+    logInfo("tox2: videoout: configured resolution {:#x} aspect {}=>{} format {:#x} pitch {:#x}", resolution_id, aspect,
             mode.aspect, format, pitch);
     ctx->gpr[3] = kCellOk;
 }
@@ -291,7 +291,7 @@ constexpr std::uint8_t kAudioFs48k = 0x04;
 constexpr std::uint32_t kAudioLayout2ch = 0x00000001;
 
 // cellAudioOutGetState(u32 audioOut, u32 deviceIndex, CellAudioOutState* state)
-void audioOutGetState(DalPpuContext* ctx, std::uint8_t* base) {
+void audioOutGetState(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t audio_out = argU32(ctx, 0);
     const std::uint32_t device_index = argU32(ctx, 1);
     const std::uint32_t state = argU32(ctx, 2);
@@ -304,25 +304,25 @@ void audioOutGetState(DalPpuContext* ctx, std::uint8_t* base) {
         return;
     }
     const std::uint32_t device_count = audio_out == 0 ? 1 : 0;
-    for (std::uint32_t i = 0; i < kAudioStateSize; i++) dalWrite8(base, state + i, 0);
+    for (std::uint32_t i = 0; i < kAudioStateSize; i++) tox2Write8(base, state + i, 0);
     if (device_index >= device_count) {
         if (audio_out == 1) {
             // RPCS3 returns what it saw on hardware: uninitialised stack data that was constant.
-            dalWrite8(base, state, 0x10);
-            dalWrite32(base, state + 16, 0xD00C1680);
+            tox2Write8(base, state, 0x10);
+            tox2Write32(base, state + 16, 0xD00C1680);
             ctx->gpr[3] = kCellOk;
         } else {
             ctx->gpr[3] = kAudioErrorOutOfRange;
         }
         return;
     }
-    dalWrite8(base, state + 0, 0);   // CELL_AUDIO_OUT_OUTPUT_STATE_ENABLED
-    dalWrite8(base, state + 1, 0);   // CELL_AUDIO_OUT_CODING_TYPE_LPCM
-    dalWrite32(base, state + 8, 0);  // CELL_AUDIO_OUT_DOWNMIXER_NONE
-    dalWrite8(base, state + 12, 0);  // sound mode type: LPCM
-    dalWrite8(base, state + 13, kAudioChannels2);
-    dalWrite8(base, state + 14, kAudioFs48k);
-    dalWrite32(base, state + 16, kAudioLayout2ch);
+    tox2Write8(base, state + 0, 0);   // CELL_AUDIO_OUT_OUTPUT_STATE_ENABLED
+    tox2Write8(base, state + 1, 0);   // CELL_AUDIO_OUT_CODING_TYPE_LPCM
+    tox2Write32(base, state + 8, 0);  // CELL_AUDIO_OUT_DOWNMIXER_NONE
+    tox2Write8(base, state + 12, 0);  // sound mode type: LPCM
+    tox2Write8(base, state + 13, kAudioChannels2);
+    tox2Write8(base, state + 14, kAudioFs48k);
+    tox2Write32(base, state + 16, kAudioLayout2ch);
     ctx->gpr[3] = kCellOk;
 }
 
@@ -347,13 +347,13 @@ void queueSysutilCall(SysutilCall call) { g_queue.push_back(std::move(call)); }
 std::int32_t queueSysutilEvent(std::uint64_t status, std::uint64_t param) {
     if (status == kSysutilDrawingBegin) {
         if (g_draw_started) {
-            logError("dal: sysutil: a second DRAWING_BEGIN was queued");
+            logError("tox2: sysutil: a second DRAWING_BEGIN was queued");
             return static_cast<std::int32_t>(kSysutilErrorBusy);
         }
         g_draw_started = true;
     } else if (status == kSysutilDrawingEnd) {
         if (!g_draw_started) {
-            logError("dal: sysutil: DRAWING_END was queued without a DRAWING_BEGIN");
+            logError("tox2: sysutil: DRAWING_END was queued without a DRAWING_BEGIN");
             return -1;
         }
         g_draw_started = false;
@@ -363,7 +363,7 @@ std::int32_t queueSysutilEvent(std::uint64_t status, std::uint64_t param) {
     std::int32_t count = 0;
     for (const Slot slot : g_slots) {
         if (slot.func == 0) continue;
-        g_queue.push_back([slot, status, param](DalPpuContext* ctx, std::uint8_t* base) {
+        g_queue.push_back([slot, status, param](Tox2PpuContext* ctx, std::uint8_t* base) {
             callGuestFunction(ctx, base, slot.func, {status, param, slot.userdata});
         });
         count++;
@@ -380,4 +380,4 @@ void resetCellSysutil() {
     g_video_configured = false;
 }
 
-}  // namespace dal
+}  // namespace tox2

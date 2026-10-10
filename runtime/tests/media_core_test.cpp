@@ -28,7 +28,7 @@
 #include "core/host_functions.h"
 #include "core/log.h"
 #include "core/threads.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/cell_sail_types.h"
 #include "hle/hle.h"
 #include "hle/sail_service.h"
@@ -54,7 +54,7 @@ int g_failed;
     } while (0)
 
 void testGuestLayouts() {
-    namespace sail = dal::sail;
+    namespace sail = tox2::sail;
 
     // Sizes and offsets of the structs the HLE reads and writes.
     CHECK(sail::kVideoFormatSize == 32 && sail::kVideoFormatWidth == 4 && sail::kVideoFormatHeight == 6 &&
@@ -95,22 +95,22 @@ void testGuestLayouts() {
           sail::kErrorFatal == 0x806107FF);
     CHECK(sail::kPamfErrorStreamNotFound == 0x80610501 && sail::kPamfErrorNotAvailable == 0x80610508);
     CHECK(sail::kPamfStreamTypeVideo == 20 && sail::kPamfStreamTypeAudio == 21);
-    CHECK(static_cast<int>(dal::PamfCodec::Avc) == sail::kPamfStreamTypeAvc &&
-          static_cast<int>(dal::PamfCodec::Atrac3plus) == sail::kPamfStreamTypeAtrac3plus &&
-          static_cast<int>(dal::PamfCodec::UserData) == sail::kPamfStreamTypeUserData);
+    CHECK(static_cast<int>(tox2::PamfCodec::Avc) == sail::kPamfStreamTypeAvc &&
+          static_cast<int>(tox2::PamfCodec::Atrac3plus) == sail::kPamfStreamTypeAtrac3plus &&
+          static_cast<int>(tox2::PamfCodec::UserData) == sail::kPamfStreamTypeUserData);
 }
 
-class CountingFactory : public dal::MediaCodecFactory {
+class CountingFactory : public tox2::MediaCodecFactory {
 public:
     explicit CountingFactory(int* destroyed) : destroyed_(destroyed) {}
     ~CountingFactory() override { ++*destroyed_; }
-    std::unique_ptr<dal::VideoDecoder> createVideo(const dal::PamfStream&, const dal::VideoOutputFormat&,
-                                                   std::string& error) override {
+    std::unique_ptr<tox2::VideoDecoder> createVideo(const tox2::PamfStream&, const tox2::VideoOutputFormat&,
+                                                    std::string& error) override {
         error = "no video";
         return nullptr;
     }
-    std::unique_ptr<dal::AudioDecoder> createAudio(const dal::PamfStream&, const dal::AudioOutputFormat&,
-                                                   std::string& error) override {
+    std::unique_ptr<tox2::AudioDecoder> createAudio(const tox2::PamfStream&, const tox2::AudioOutputFormat&,
+                                                    std::string& error) override {
         error = "no audio";
         return nullptr;
     }
@@ -120,26 +120,26 @@ private:
 };
 
 void testCodecFactory() {
-    CHECK(dal::mediaCodecFactory() == nullptr);
+    CHECK(tox2::mediaCodecFactory() == nullptr);
 
     int destroyed_a = 0, destroyed_b = 0;
     auto a = std::make_unique<CountingFactory>(&destroyed_a);
-    dal::MediaCodecFactory* raw_a = a.get();
-    dal::setMediaCodecFactory(std::move(a));
-    CHECK(dal::mediaCodecFactory() == raw_a);
+    tox2::MediaCodecFactory* raw_a = a.get();
+    tox2::setMediaCodecFactory(std::move(a));
+    CHECK(tox2::mediaCodecFactory() == raw_a);
 
     std::string error;
-    CHECK(dal::mediaCodecFactory()->createVideo({}, {}, error) == nullptr && error == "no video");
-    CHECK(dal::mediaCodecFactory()->createAudio({}, {}, error) == nullptr && error == "no audio");
+    CHECK(tox2::mediaCodecFactory()->createVideo({}, {}, error) == nullptr && error == "no video");
+    CHECK(tox2::mediaCodecFactory()->createAudio({}, {}, error) == nullptr && error == "no audio");
 
     // Replacing destroys the previous factory.
     auto b = std::make_unique<CountingFactory>(&destroyed_b);
-    dal::MediaCodecFactory* raw_b = b.get();
-    dal::setMediaCodecFactory(std::move(b));
-    CHECK(dal::mediaCodecFactory() == raw_b && destroyed_a == 1 && destroyed_b == 0);
+    tox2::MediaCodecFactory* raw_b = b.get();
+    tox2::setMediaCodecFactory(std::move(b));
+    CHECK(tox2::mediaCodecFactory() == raw_b && destroyed_a == 1 && destroyed_b == 0);
 
-    dal::setMediaCodecFactory(nullptr);
-    CHECK(dal::mediaCodecFactory() == nullptr && destroyed_b == 1);
+    tox2::setMediaCodecFactory(nullptr);
+    CHECK(tox2::mediaCodecFactory() == nullptr && destroyed_b == 1);
 }
 
 struct ServiceCall {
@@ -151,28 +151,28 @@ struct ServiceCall {
 std::vector<ServiceCall> g_calls;  // written under the guest lock
 std::condition_variable_any g_calls_cv;
 
-DAL_PPU_FUNC(sailFakeGuestFunction) {
+TOX2_PPU_FUNC(sailFakeGuestFunction) {
     (void)base;
     ctx->gpr[3] = ctx->gpr[3] * 2;
 }
 
 template <class Pred>
 bool waitUntil(Pred done) {
-    return dal::blockingWait(g_calls_cv, done, "test wait", std::chrono::seconds(5));
+    return tox2::blockingWait(g_calls_cv, done, "test wait", std::chrono::seconds(5));
 }
 
 void pauseUnlocked() {
     std::condition_variable_any cv;
-    dal::blockingWait(cv, [] { return false; }, "test pause", std::chrono::milliseconds(2));
+    tox2::blockingWait(cv, [] { return false; }, "test pause", std::chrono::milliseconds(2));
 }
 
-dal::SailCall recordingCall(int id, std::uint32_t guest_opd, std::function<void()> then = {}) {
-    return [id, guest_opd, then = std::move(then)](DalPpuContext* ctx, std::uint8_t* base) {
-        const dal::GuestThread* thread = dal::currentThread();
+tox2::SailCall recordingCall(int id, std::uint32_t guest_opd, std::function<void()> then = {}) {
+    return [id, guest_opd, then = std::move(then)](Tox2PpuContext* ctx, std::uint8_t* base) {
+        const tox2::GuestThread* thread = tox2::currentThread();
         const bool on_service = thread != nullptr && thread->service() && thread->name() == "_libsail-control" &&
                                 ctx->gpr[13] == thread->tlsR13() && ctx->gpr[13] != 0;
         // The service thread can call guest functions through an OPD, as the cellSail callbacks do.
-        const std::uint64_t result = dal::callGuestFunction(ctx, base, guest_opd, {static_cast<std::uint64_t>(id)});
+        const std::uint64_t result = tox2::callGuestFunction(ctx, base, guest_opd, {static_cast<std::uint64_t>(id)});
         g_calls.push_back({id, on_service, result, thread != nullptr ? thread->id() : 0});
         if (then) then();
         g_calls_cv.notify_all();
@@ -180,12 +180,12 @@ dal::SailCall recordingCall(int id, std::uint32_t guest_opd, std::function<void(
 }
 
 void testSailService() {
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetSyncObjects();
-    dal::resetHostFunctions();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetSyncObjects();
+    tox2::resetHostFunctions();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -193,18 +193,18 @@ void testSailService() {
     const std::uint32_t tls_image = scratch + 0x100;
     g_calls.clear();
 
-    std::lock_guard<dal::GuestLock> guard(dal::guestLock());
-    auto boot_ctx = std::make_unique<DalPpuContext>();
-    dalWrite32(base, tls_image, 0xCAFEF00D);
-    CHECK(dal::initializeTls(boot_ctx.get(), base, 0x01000000, tls_image, 4, 0x20) != 0);
-    const std::uint32_t guest_opd = dal::registerHostFunction("sailFakeGuestFunction", sailFakeGuestFunction);
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+    auto boot_ctx = std::make_unique<Tox2PpuContext>();
+    tox2Write32(base, tls_image, 0xCAFEF00D);
+    CHECK(tox2::initializeTls(boot_ctx.get(), base, 0x01000000, tls_image, 4, 0x20) != 0);
+    const std::uint32_t guest_opd = tox2::registerHostFunction("sailFakeGuestFunction", sailFakeGuestFunction);
     CHECK(guest_opd != 0);
 
     // The thread cannot run while this test holds the guest lock, so all of these queue up. The first
     // call queues one more from the service thread itself, which runs after the three already queued.
-    dal::queueSailCall(recordingCall(1, guest_opd, [guest_opd] { dal::queueSailCall(recordingCall(4, guest_opd)); }));
-    dal::queueSailCall(recordingCall(2, guest_opd));
-    dal::queueSailCall(recordingCall(3, guest_opd));
+    tox2::queueSailCall(recordingCall(1, guest_opd, [guest_opd] { tox2::queueSailCall(recordingCall(4, guest_opd)); }));
+    tox2::queueSailCall(recordingCall(2, guest_opd));
+    tox2::queueSailCall(recordingCall(3, guest_opd));
     CHECK(g_calls.empty());
     CHECK(waitUntil([] { return g_calls.size() >= 4; }));
     CHECK(g_calls.size() == 4);
@@ -217,39 +217,39 @@ void testSailService() {
     }
 
     // Idle, the thread is a service thread: the census says so and the supervisor does not count it.
-    const dal::GuestThread* thread = g_calls.empty() ? nullptr : dal::findThread(g_calls[0].thread_id);
+    const tox2::GuestThread* thread = g_calls.empty() ? nullptr : tox2::findThread(g_calls[0].thread_id);
     CHECK(thread != nullptr);
     if (thread == nullptr) return;
-    for (int i = 0; i < 2500 && thread->state() != dal::ThreadState::Blocked; i++) pauseUnlocked();
-    CHECK(thread->state() == dal::ThreadState::Blocked && thread->service());
-    CHECK(dal::formatCensus().find("_libsail-control: blocked in sail control wait [service]") != std::string::npos);
-    const dal::ThreadHealth service_health{thread->state(), thread->indefiniteWait(), thread->blockedSinceMs(),
-                                           thread->service()};
+    for (int i = 0; i < 2500 && thread->state() != tox2::ThreadState::Blocked; i++) pauseUnlocked();
+    CHECK(thread->state() == tox2::ThreadState::Blocked && thread->service());
+    CHECK(tox2::formatCensus().find("_libsail-control: blocked in sail control wait [service]") != std::string::npos);
+    const tox2::ThreadHealth service_health{thread->state(), thread->indefiniteWait(), thread->blockedSinceMs(),
+                                            thread->service()};
     const std::int64_t later = service_health.blocked_since_ms + 10000;
-    CHECK(dal::judgeThreads({service_health}, later) == dal::ThreadVerdict::NoThreads);
-    const dal::ThreadHealth running_game{dal::ThreadState::Running, false, 0, false};
-    CHECK(dal::judgeThreads({service_health, running_game}, later) == dal::ThreadVerdict::Ok);
+    CHECK(tox2::judgeThreads({service_health}, later) == tox2::ThreadVerdict::NoThreads);
+    const tox2::ThreadHealth running_game{tox2::ThreadState::Running, false, 0, false};
+    CHECK(tox2::judgeThreads({service_health, running_game}, later) == tox2::ThreadVerdict::Ok);
 
     // stopSailService drops calls that have not run and joins the thread.
     const std::size_t before_stop = g_calls.size();
-    dal::queueSailCall(recordingCall(5, guest_opd));
-    dal::queueSailCall(recordingCall(6, guest_opd));
-    dal::stopSailService();
-    CHECK(thread->state() == dal::ThreadState::Exited);
+    tox2::queueSailCall(recordingCall(5, guest_opd));
+    tox2::queueSailCall(recordingCall(6, guest_opd));
+    tox2::stopSailService();
+    CHECK(thread->state() == tox2::ThreadState::Exited);
     CHECK(g_calls.size() == before_stop);
 
     // A later call starts a new thread.
-    dal::queueSailCall(recordingCall(7, guest_opd));
+    tox2::queueSailCall(recordingCall(7, guest_opd));
     CHECK(waitUntil([&] { return g_calls.size() > before_stop; }));
     CHECK(g_calls.size() == before_stop + 1 && g_calls.back().id == 7 && g_calls.back().on_service_thread);
-    dal::stopSailService();
+    tox2::stopSailService();
 
-    dal::resetHostFunctions();
-    dal::resetSyncObjects();
+    tox2::resetHostFunctions();
+    tox2::resetSyncObjects();
     p.main.free(scratch);
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 using Bytes = std::vector<std::uint8_t>;
@@ -296,30 +296,30 @@ Bytes makePamfHeader(std::uint32_t data_units) {
 
 void testPamfHeader() {
     const Bytes h = makePamfHeader(7);
-    auto info = dal::parsePamfHeader(h);
+    auto info = tox2::parsePamfHeader(h);
     CHECK(info.has_value());
     if (!info) return;
     CHECK(info->header_size == 2048 && info->data_offset == 2048 && info->data_size == 7 * 2048);
     CHECK(info->start_pts == 89310 && info->end_pts == 722910 && info->mux_rate_bound == 120000);
     CHECK(info->streams.size() == 2);
     if (info->streams.size() != 2) return;
-    const dal::PamfStream& v = info->streams[0];
-    CHECK(v.codec == dal::PamfCodec::Avc && v.stream_id == 0xE0 && v.channel == 0 && v.width == 1280 &&
+    const tox2::PamfStream& v = info->streams[0];
+    CHECK(v.codec == tox2::PamfCodec::Avc && v.stream_id == 0xE0 && v.channel == 0 && v.width == 1280 &&
           v.height == 720 && v.codec_info.size() == 32);
-    const dal::PamfStream& a = info->streams[1];
-    CHECK(a.codec == dal::PamfCodec::Atrac3plus && a.stream_id == 0xBD && a.private_stream_id == 0 && a.channels == 2 &&
-          a.sample_rate == 48000);
+    const tox2::PamfStream& a = info->streams[1];
+    CHECK(a.codec == tox2::PamfCodec::Atrac3plus && a.stream_id == 0xBD && a.private_stream_id == 0 &&
+          a.channels == 2 && a.sample_rate == 48000);
 
     // Only the sequence information is needed, not the whole 2048-byte header.
-    CHECK(dal::parsePamfHeader(std::span<const std::uint8_t>(h).first(0xE8)).has_value());
+    CHECK(tox2::parsePamfHeader(std::span<const std::uint8_t>(h).first(0xE8)).has_value());
 
     auto fails = [&](auto mutate) {
         Bytes bad = h;
         mutate(bad);
-        return !dal::parsePamfHeader(bad).has_value();
+        return !tox2::parsePamfHeader(bad).has_value();
     };
-    CHECK(!dal::parsePamfHeader(std::span<const std::uint8_t>(h).first(0xE0)).has_value());
-    CHECK(!dal::parsePamfHeader({}).has_value());
+    CHECK(!tox2::parsePamfHeader(std::span<const std::uint8_t>(h).first(0xE0)).has_value());
+    CHECK(!tox2::parsePamfHeader({}).has_value());
     CHECK(fails([](Bytes& b) { b[0] = 'X'; }));
     CHECK(fails([](Bytes& b) { b[7] = '9'; }));
     CHECK(fails([](Bytes& b) { put32(b, 0x08, 0); }));
@@ -354,31 +354,32 @@ std::vector<AllocatorCall> g_alloc_calls, g_free_calls;
 std::uint32_t g_alloc_next = 0;
 
 // The player's notify callback: (arg, event, arg0, arg1).
-DAL_PPU_FUNC(sailFakeNotify) {
+TOX2_PPU_FUNC(sailFakeNotify) {
     (void)base;
-    const dal::GuestThread* thread = dal::currentThread();
+    const tox2::GuestThread* thread = tox2::currentThread();
     const bool on_service = thread != nullptr && thread->service() && thread->name() == "_libsail-control";
     g_notify_events.push_back({ctx->gpr[3], ctx->gpr[4], ctx->gpr[5], ctx->gpr[6], on_service});
     g_calls_cv.notify_all();
 }
 
 // The game's allocator callbacks: pAlloc(arg, boundary, size) and pFree(arg, boundary, pointer).
-DAL_PPU_FUNC(sailFakeAlloc) {
+TOX2_PPU_FUNC(sailFakeAlloc) {
     (void)base;
     g_alloc_calls.push_back({ctx->gpr[3], ctx->gpr[4], ctx->gpr[5]});
     ctx->gpr[3] = g_alloc_next;
     g_alloc_next += 0x100;
 }
 
-DAL_PPU_FUNC(sailFakeFree) {
+TOX2_PPU_FUNC(sailFakeFree) {
     (void)base;
     g_free_calls.push_back({ctx->gpr[3], ctx->gpr[4], ctx->gpr[5]});
     ctx->gpr[3] = 0;
 }
 
-dal::GuestHandler sailHandlerNamed(std::string_view name) {
-    for (const auto& list : {dal::cellSailPlayerHandlers(), dal::cellSailAdapterHandlers(), dal::cellPamfHandlers()}) {
-        for (const dal::HleEntry& entry : list) {
+tox2::GuestHandler sailHandlerNamed(std::string_view name) {
+    for (const auto& list :
+         {tox2::cellSailPlayerHandlers(), tox2::cellSailAdapterHandlers(), tox2::cellPamfHandlers()}) {
+        for (const tox2::HleEntry& entry : list) {
             if (name == entry.name) return entry.handler;
         }
     }
@@ -386,14 +387,14 @@ dal::GuestHandler sailHandlerNamed(std::string_view name) {
 }
 
 void testSailPlayerHandlers() {
-    namespace sail = dal::sail;
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetSyncObjects();
-    dal::resetHostFunctions();
-    dal::resetCellSail();
-    dal::Process& p = dal::process();
+    namespace sail = tox2::sail;
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetSyncObjects();
+    tox2::resetHostFunctions();
+    tox2::resetCellSail();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -415,36 +416,36 @@ void testSailPlayerHandlers() {
     constexpr std::uint64_t kAllocArg = 0xA11C, kNotifyArg = 0xCB;
 
     std::error_code ec;
-    const std::filesystem::path movie_path = std::filesystem::temp_directory_path(ec) / "dal_sail_player_test.pam";
+    const std::filesystem::path movie_path = std::filesystem::temp_directory_path(ec) / "tox2_sail_player_test.pam";
     {
         const Bytes header = makePamfHeader(0);
         std::ofstream out(movie_path, std::ios::binary | std::ios::trunc);
         out.write(reinterpret_cast<const char*>(header.data()), static_cast<std::streamsize>(header.size()));
     }
-    const std::string movie_guest = "/dev_bdvd/PS3_GAME/USRDIR/Movie/dal_sail_player_test.pam";
-    dal::VfsLayout layout;
+    const std::string movie_guest = "/dev_bdvd/PS3_GAME/USRDIR/Movie/tox2_sail_player_test.pam";
+    tox2::VfsLayout layout;
     layout.files.push_back({movie_guest, movie_path, true});
-    dal::configureVfs(layout);
+    tox2::configureVfs(layout);
     auto putString = [&](std::uint32_t addr, const std::string& text) {
         std::memcpy(base + addr, text.c_str(), text.size() + 1);
     };
     putString(uri, "x-cell-fs://" + movie_guest);
     putString(uri_bad, "http://example.invalid/movie.pam");
-    putString(uri_missing, "x-cell-fs:///dev_bdvd/PS3_GAME/USRDIR/Movie/dal_sail_missing.pam");
+    putString(uri_missing, "x-cell-fs:///dev_bdvd/PS3_GAME/USRDIR/Movie/tox2_sail_missing.pam");
 
-    std::lock_guard<dal::GuestLock> guard(dal::guestLock());
-    auto boot_ctx = std::make_unique<DalPpuContext>();
-    dalWrite32(base, tls_image, 0xCAFEF00D);
-    CHECK(dal::initializeTls(boot_ctx.get(), base, 0x01000000, tls_image, 4, 0x20) != 0);
-    DalPpuContext* ctx = boot_ctx.get();
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+    auto boot_ctx = std::make_unique<Tox2PpuContext>();
+    tox2Write32(base, tls_image, 0xCAFEF00D);
+    CHECK(tox2::initializeTls(boot_ctx.get(), base, 0x01000000, tls_image, 4, 0x20) != 0);
+    Tox2PpuContext* ctx = boot_ctx.get();
     ctx->gpr[1] = stack;
-    const std::uint32_t notify_opd = dal::registerHostFunction("sailFakeNotify", sailFakeNotify);
-    const std::uint32_t alloc_opd = dal::registerHostFunction("sailFakeAlloc", sailFakeAlloc);
-    const std::uint32_t free_opd = dal::registerHostFunction("sailFakeFree", sailFakeFree);
+    const std::uint32_t notify_opd = tox2::registerHostFunction("sailFakeNotify", sailFakeNotify);
+    const std::uint32_t alloc_opd = tox2::registerHostFunction("sailFakeAlloc", sailFakeAlloc);
+    const std::uint32_t free_opd = tox2::registerHostFunction("sailFakeFree", sailFakeFree);
     CHECK(notify_opd != 0 && alloc_opd != 0 && free_opd != 0);
 
     const auto call = [&](std::string_view name, std::initializer_list<std::uint64_t> args) {
-        const dal::GuestHandler handler = sailHandlerNamed(name);
+        const tox2::GuestHandler handler = sailHandlerNamed(name);
         CHECK(handler != nullptr);
         if (handler == nullptr) return std::uint32_t{0xdeadbeef};
         int reg = 3;
@@ -464,14 +465,14 @@ void testSailPlayerHandlers() {
 
     // Allocator object, then Initialize2: the allocator is copied and the INITIALIZED state is
     // reported from the service thread.
-    dalWrite32(base, funcs, alloc_opd);
-    dalWrite32(base, funcs + 4, free_opd);
+    tox2Write32(base, funcs, alloc_opd);
+    tox2Write32(base, funcs + 4, free_opd);
     CHECK(call("cellSailMemAllocatorInitialize", {allocator, funcs, kAllocArg}) == 0);
-    CHECK(dalRead32(base, allocator) == funcs && dalRead32(base, allocator + 4) == kAllocArg);
+    CHECK(tox2Read32(base, allocator) == funcs && tox2Read32(base, allocator + 4) == kAllocArg);
     CHECK(call("cellSailMemAllocatorInitialize", {0, funcs, kAllocArg}) == sail::kErrorInvalidArg);
-    dalWrite32(base, attribute, 6);
-    dalWrite32(base, attribute + 4, 1);
-    dalWrite32(base, attribute + 8, 1);
+    tox2Write32(base, attribute, 6);
+    tox2Write32(base, attribute + 4, 1);
+    tox2Write32(base, attribute + 8, 1);
     CHECK(call("cellSailPlayerInitialize2", {player, allocator, notify_opd, kNotifyArg, attribute, resource}) == 0);
     CHECK(g_notify_events.empty());  // delivery is asynchronous
     CHECK(waitForEvents(1) && eventIs(0, stateEvent(0)));
@@ -481,8 +482,8 @@ void testSailPlayerHandlers() {
           sail::kErrorInvalidArg);
 
     // Adapters: initialise once, preferred format round trip, registration with the player.
-    for (std::uint32_t i = 0; i < 3; i++) dalWrite32(base, sound_funcs + 4 * i, 0x1000 + i);
-    for (std::uint32_t i = 0; i < 5; i++) dalWrite32(base, gfx_funcs + 4 * i, 0x2000 + i);
+    for (std::uint32_t i = 0; i < 3; i++) tox2Write32(base, sound_funcs + 4 * i, 0x1000 + i);
+    for (std::uint32_t i = 0; i < 5; i++) tox2Write32(base, gfx_funcs + 4 * i, 0x2000 + i);
     CHECK(call("cellSailSoundAdapterInitialize", {sound, sound_funcs, kNotifyArg}) == 0);
     CHECK(call("cellSailSoundAdapterInitialize", {sound, sound_funcs, kNotifyArg}) == sail::kErrorInvalidState);
     CHECK(call("cellSailGraphicsAdapterInitialize", {gfx, gfx_funcs, kNotifyArg}) == 0);
@@ -490,18 +491,18 @@ void testSailPlayerHandlers() {
     CHECK(call("cellSailGraphicsAdapterInitialize", {gfx + 0x100, 0, kNotifyArg}) == sail::kErrorInvalidArg);
     std::memset(base + format_out, 0, 32);
     CHECK(call("cellSailGraphicsAdapterGetFormat", {gfx, format_out}) == 0);
-    CHECK(dalRead8(base, format_out) == 0xff);  // nothing preferred yet: unspecified
+    CHECK(tox2Read8(base, format_out) == 0xff);  // nothing preferred yet: unspecified
     std::memset(base + video_format, 0xff, sail::kVideoFormatSize);
-    dalWrite8(base, video_format, sail::kVideoCodingArgbInterleaved);
-    dalWrite32(base, video_format + sail::kVideoFormatAlpha, 255);
+    tox2Write8(base, video_format, sail::kVideoCodingArgbInterleaved);
+    tox2Write32(base, video_format + sail::kVideoFormatAlpha, 255);
     CHECK(call("cellSailGraphicsAdapterSetPreferredFormat", {gfx, video_format}) == 0);
     std::memset(base + format_out, 0, 32);
     CHECK(call("cellSailGraphicsAdapterGetFormat", {gfx, format_out}) == 0);
     CHECK(std::memcmp(base + format_out, base + video_format, sail::kVideoFormatSize) == 0);
     std::memset(base + audio_format, 0xff, sail::kAudioFormatSize);
-    dalWrite8(base, audio_format, sail::kAudioCodingLpcmFloat32);
-    dalWrite8(base, audio_format + 1, 2);
-    dalWrite32(base, audio_format + sail::kAudioFormatFs, 48000);
+    tox2Write8(base, audio_format, sail::kAudioCodingLpcmFloat32);
+    tox2Write8(base, audio_format + 1, 2);
+    tox2Write32(base, audio_format + sail::kAudioFormatFs, 48000);
     CHECK(call("cellSailSoundAdapterSetPreferredFormat", {sound, audio_format}) == 0);
     std::memset(base + format_out, 0, 32);
     CHECK(call("cellSailSoundAdapterGetFormat", {sound, format_out}) == 0);
@@ -527,10 +528,10 @@ void testSailPlayerHandlers() {
 
     // Descriptor: the block comes from the game's allocator and the header is read through the VFS.
     CHECK(call("cellSailPlayerCreateDescriptor", {player, 0, 0, uri_bad, pp_desc}) == sail::kErrorUnsupportedStream);
-    CHECK(dalRead32(base, pp_desc) == 0 && g_alloc_calls.empty());
+    CHECK(tox2Read32(base, pp_desc) == 0 && g_alloc_calls.empty());
     CHECK(call("cellSailPlayerCreateDescriptor", {player, 1, 0, uri, pp_desc}) == sail::kErrorUnsupportedStream);
     CHECK(call("cellSailPlayerCreateDescriptor", {player, 0, 0, uri, pp_desc}) == 0);
-    const std::uint32_t desc = dalRead32(base, pp_desc);
+    const std::uint32_t desc = tox2Read32(base, pp_desc);
     CHECK(desc == scratch + 0x4000 && g_alloc_calls.size() == 1);
     if (g_alloc_calls.size() == 1) {
         CHECK(g_alloc_calls[0].arg == kAllocArg && g_alloc_calls[0].boundary == 0x10 &&
@@ -558,9 +559,9 @@ void testSailPlayerHandlers() {
     CHECK(call("cellPamfReaderGetNumberOfSpecificStreams", {format_out, 21}) == 0);  // not a database
 
     // Capabilities: four word outputs, all reported clear.
-    for (std::uint32_t i = 0; i < 4; i++) dalWrite32(base, caps + 4 * i, 0xdeadbeef);
+    for (std::uint32_t i = 0; i < 4; i++) tox2Write32(base, caps + 4 * i, 0xdeadbeef);
     CHECK(call("cellSailDescriptorGetCapabilities", {desc, caps, caps + 4, caps + 8, caps + 12}) == 0);
-    CHECK(dalRead32(base, caps) == 0 && dalRead32(base, caps + 12) == 0);
+    CHECK(tox2Read32(base, caps) == 0 && tox2Read32(base, caps + 12) == 0);
     CHECK(call("cellSailDescriptorGetCapabilities", {desc, 0, 0, 0, 0}) == 0);
 
     CHECK(call("cellSailDescriptorDestroyDatabase", {desc, database}) == 0);
@@ -569,7 +570,7 @@ void testSailPlayerHandlers() {
 
     // A file that is missing still gets a descriptor; the database call reports why.
     CHECK(call("cellSailPlayerCreateDescriptor", {player, 0, 0, uri_missing, pp_desc}) == 0);
-    const std::uint32_t missing = dalRead32(base, pp_desc);
+    const std::uint32_t missing = tox2Read32(base, pp_desc);
     CHECK(missing != 0 && missing != desc);
     CHECK(call("cellSailDescriptorCreateDatabase", {missing, database, 0x80, 0}) == sail::kErrorInvalidFd);
     CHECK(call("cellSailPlayerDestroyDescriptor", {player, missing}) == 0);  // never added
@@ -599,16 +600,16 @@ void testSailPlayerHandlers() {
     CHECK(call("cellSailPlayerInitialize2", {player, allocator, notify_opd, kNotifyArg, attribute, resource}) == 0);
     CHECK(call("cellSailPlayerFinalize", {player}) == 0);
 
-    dal::stopSailService();
-    dal::resetCellSail();
-    dal::configureVfs(dal::VfsLayout{});
+    tox2::stopSailService();
+    tox2::resetCellSail();
+    tox2::configureVfs(tox2::VfsLayout{});
     std::filesystem::remove(movie_path, ec);
-    dal::resetHostFunctions();
-    dal::resetSyncObjects();
+    tox2::resetHostFunctions();
+    tox2::resetSyncObjects();
     p.main.free(scratch);
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 struct FrameAllocCall {
@@ -634,34 +635,34 @@ std::uint32_t bumpAllocate(std::uint64_t size) {
 }
 
 // The game's allocator callback: pAlloc(arg, boundary, size).
-DAL_PPU_FUNC(sailFakeBumpAlloc) {
+TOX2_PPU_FUNC(sailFakeBumpAlloc) {
     (void)base;
     g_alloc_calls.push_back({ctx->gpr[3], ctx->gpr[4], ctx->gpr[5]});
     ctx->gpr[3] = bumpAllocate(ctx->gpr[5]);
 }
 
 // The graphics adapter's frame callbacks: pAlloc(arg, size, num, ppFrame) and pFree(arg, num, ppFrame).
-DAL_PPU_FUNC(sailFakeFrameAlloc) {
+TOX2_PPU_FUNC(sailFakeFrameAlloc) {
     g_frame_allocs.push_back({ctx->gpr[3], ctx->gpr[4], ctx->gpr[5], ctx->gpr[6]});
     for (std::uint32_t i = 0; i < ctx->gpr[5]; i++) {
         const std::uint32_t buffer = bumpAllocate(ctx->gpr[4]);
         g_frame_buffers.push_back(buffer);
-        dalWrite32(base, static_cast<std::uint32_t>(ctx->gpr[6]) + 4 * i, buffer);
+        tox2Write32(base, static_cast<std::uint32_t>(ctx->gpr[6]) + 4 * i, buffer);
     }
     ctx->gpr[3] = 0;
 }
 
-DAL_PPU_FUNC(sailFakeFrameFree) {
+TOX2_PPU_FUNC(sailFakeFrameFree) {
     FrameFreeCall call{ctx->gpr[3], ctx->gpr[4], {}};
     for (std::uint32_t i = 0; i < ctx->gpr[4]; i++) {
-        call.pointers.push_back(dalRead32(base, static_cast<std::uint32_t>(ctx->gpr[5]) + 4 * i));
+        call.pointers.push_back(tox2Read32(base, static_cast<std::uint32_t>(ctx->gpr[5]) + 4 * i));
     }
     g_frame_frees.push_back(std::move(call));
     ctx->gpr[3] = 0;
 }
 
 // pFormatChanged(arg, format, sessionId) of either adapter.
-DAL_PPU_FUNC(sailFakeFormatChanged) {
+TOX2_PPU_FUNC(sailFakeFormatChanged) {
     (void)base;
     g_format_changes.push_back({ctx->gpr[3], ctx->gpr[4], ctx->gpr[5]});
     ctx->gpr[3] = 0;
@@ -676,15 +677,15 @@ Bytes makeShortPamfHeader() {
 }
 
 void testSailPlayback() {
-    namespace sail = dal::sail;
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetSyncObjects();
-    dal::resetHostFunctions();
-    dal::resetCellSail();
-    dal::setMediaCodecFactory(nullptr);  // black frames: no FFmpeg here
-    dal::Process& p = dal::process();
+    namespace sail = tox2::sail;
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetSyncObjects();
+    tox2::resetHostFunctions();
+    tox2::resetCellSail();
+    tox2::setMediaCodecFactory(nullptr);  // black frames: no FFmpeg here
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     constexpr std::uint32_t kArena = 0x2000000;  // two streams of three frames of 3,686,400 bytes, and the small blocks
@@ -710,39 +711,39 @@ void testSailPlayback() {
     constexpr std::uint64_t kAllocArg = 0xA11C, kNotifyArg = 0xCB, kSoundArg = 0x5D, kGfxArg = 0x6F;
 
     std::error_code ec;
-    const std::filesystem::path movie_path = std::filesystem::temp_directory_path(ec) / "dal_sail_playback_test.pam";
+    const std::filesystem::path movie_path = std::filesystem::temp_directory_path(ec) / "tox2_sail_playback_test.pam";
     {
         const Bytes header = makeShortPamfHeader();
         std::ofstream out(movie_path, std::ios::binary | std::ios::trunc);
         out.write(reinterpret_cast<const char*>(header.data()), static_cast<std::streamsize>(header.size()));
     }
-    const std::string movie_guest = "/dev_bdvd/PS3_GAME/USRDIR/Movie/dal_sail_playback_test.pam";
-    dal::VfsLayout layout;
+    const std::string movie_guest = "/dev_bdvd/PS3_GAME/USRDIR/Movie/tox2_sail_playback_test.pam";
+    tox2::VfsLayout layout;
     layout.files.push_back({movie_guest, movie_path, true});
-    dal::configureVfs(layout);
+    tox2::configureVfs(layout);
     auto putString = [&](std::uint32_t addr, const std::string& text) {
         std::memcpy(base + addr, text.c_str(), text.size() + 1);
     };
     putString(uri, "x-cell-fs://" + movie_guest);
-    putString(uri_missing, "x-cell-fs:///dev_bdvd/PS3_GAME/USRDIR/Movie/dal_sail_playback_missing.pam");
+    putString(uri_missing, "x-cell-fs:///dev_bdvd/PS3_GAME/USRDIR/Movie/tox2_sail_playback_missing.pam");
 
-    std::lock_guard<dal::GuestLock> guard(dal::guestLock());
-    auto boot_ctx = std::make_unique<DalPpuContext>();
-    dalWrite32(base, tls_image, 0xCAFEF00D);
-    CHECK(dal::initializeTls(boot_ctx.get(), base, 0x01000000, tls_image, 4, 0x20) != 0);
-    DalPpuContext* ctx = boot_ctx.get();
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+    auto boot_ctx = std::make_unique<Tox2PpuContext>();
+    tox2Write32(base, tls_image, 0xCAFEF00D);
+    CHECK(tox2::initializeTls(boot_ctx.get(), base, 0x01000000, tls_image, 4, 0x20) != 0);
+    Tox2PpuContext* ctx = boot_ctx.get();
     ctx->gpr[1] = stack;
-    const std::uint32_t notify_opd = dal::registerHostFunction("sailFakeNotify", sailFakeNotify);
-    const std::uint32_t alloc_opd = dal::registerHostFunction("sailFakeBumpAlloc", sailFakeBumpAlloc);
-    const std::uint32_t free_opd = dal::registerHostFunction("sailFakeFree", sailFakeFree);
-    const std::uint32_t frame_alloc_opd = dal::registerHostFunction("sailFakeFrameAlloc", sailFakeFrameAlloc);
-    const std::uint32_t frame_free_opd = dal::registerHostFunction("sailFakeFrameFree", sailFakeFrameFree);
-    const std::uint32_t changed_opd = dal::registerHostFunction("sailFakeFormatChanged", sailFakeFormatChanged);
+    const std::uint32_t notify_opd = tox2::registerHostFunction("sailFakeNotify", sailFakeNotify);
+    const std::uint32_t alloc_opd = tox2::registerHostFunction("sailFakeBumpAlloc", sailFakeBumpAlloc);
+    const std::uint32_t free_opd = tox2::registerHostFunction("sailFakeFree", sailFakeFree);
+    const std::uint32_t frame_alloc_opd = tox2::registerHostFunction("sailFakeFrameAlloc", sailFakeFrameAlloc);
+    const std::uint32_t frame_free_opd = tox2::registerHostFunction("sailFakeFrameFree", sailFakeFrameFree);
+    const std::uint32_t changed_opd = tox2::registerHostFunction("sailFakeFormatChanged", sailFakeFormatChanged);
     CHECK(notify_opd != 0 && alloc_opd != 0 && free_opd != 0 && frame_alloc_opd != 0 && frame_free_opd != 0 &&
           changed_opd != 0);
 
     const auto call = [&](std::string_view name, std::initializer_list<std::uint64_t> args) {
-        const dal::GuestHandler handler = sailHandlerNamed(name);
+        const tox2::GuestHandler handler = sailHandlerNamed(name);
         CHECK(handler != nullptr);
         if (handler == nullptr) return std::uint32_t{0xdeadbeef};
         int reg = 3;
@@ -773,34 +774,34 @@ void testSailPlayback() {
         CHECK(call("cellSailPlayerSetGraphicsAdapter", {player_address, 0, gfx_address}) == 0);
         CHECK(call("cellSailPlayerBoot", {player_address, 0}) == 0);
         CHECK(call("cellSailPlayerCreateDescriptor", {player_address, 0, 0, uri_address, pp_desc}) == 0);
-        const std::uint32_t desc = dalRead32(base, pp_desc);
+        const std::uint32_t desc = tox2Read32(base, pp_desc);
         CHECK(call("cellSailPlayerAddDescriptor", {player_address, desc}) == 0);
         return desc;
     };
 
-    dalWrite32(base, funcs, alloc_opd);
-    dalWrite32(base, funcs + 4, free_opd);
+    tox2Write32(base, funcs, alloc_opd);
+    tox2Write32(base, funcs + 4, free_opd);
     CHECK(call("cellSailMemAllocatorInitialize", {allocator, funcs, kAllocArg}) == 0);
-    dalWrite32(base, attribute, 6);
-    dalWrite32(base, attribute + 4, 1);
-    dalWrite32(base, attribute + 8, 1);
+    tox2Write32(base, attribute, 6);
+    tox2Write32(base, attribute + 4, 1);
+    tox2Write32(base, attribute + 8, 1);
     // The game's callbacks: only the sound format change and the graphics format and frame callbacks do
     // anything here.
-    dalWrite32(base, sound_funcs + 0, 0);
-    dalWrite32(base, sound_funcs + 4, 0);
-    dalWrite32(base, sound_funcs + 8, changed_opd);
-    dalWrite32(base, gfx_funcs + 0, 0);
-    dalWrite32(base, gfx_funcs + 4, 0);
-    dalWrite32(base, gfx_funcs + 8, changed_opd);
-    dalWrite32(base, gfx_funcs + 12, frame_alloc_opd);
-    dalWrite32(base, gfx_funcs + 16, frame_free_opd);
+    tox2Write32(base, sound_funcs + 0, 0);
+    tox2Write32(base, sound_funcs + 4, 0);
+    tox2Write32(base, sound_funcs + 8, changed_opd);
+    tox2Write32(base, gfx_funcs + 0, 0);
+    tox2Write32(base, gfx_funcs + 4, 0);
+    tox2Write32(base, gfx_funcs + 8, changed_opd);
+    tox2Write32(base, gfx_funcs + 12, frame_alloc_opd);
+    tox2Write32(base, gfx_funcs + 16, frame_free_opd);
     std::memset(base + video_format, 0xff, sail::kVideoFormatSize);  // as the game: ARGB, alpha 255
-    dalWrite8(base, video_format, sail::kVideoCodingArgbInterleaved);
-    dalWrite32(base, video_format + sail::kVideoFormatAlpha, 255);
+    tox2Write8(base, video_format, sail::kVideoCodingArgbInterleaved);
+    tox2Write32(base, video_format + sail::kVideoFormatAlpha, 255);
     std::memset(base + audio_format, 0xff, sail::kAudioFormatSize);
-    dalWrite8(base, audio_format, sail::kAudioCodingLpcmFloat32);
-    dalWrite8(base, audio_format + 1, 2);
-    dalWrite32(base, audio_format + sail::kAudioFormatFs, 48000);
+    tox2Write8(base, audio_format, sail::kAudioCodingLpcmFloat32);
+    tox2Write8(base, audio_format + 1, 2);
+    tox2Write32(base, audio_format + sail::kAudioFormatFs, 48000);
 
     const std::uint32_t desc = bootPlayer(player, sound, gfx, uri);
     CHECK(waitForEvents(4));  // INITIALIZED and the three Boot events
@@ -816,16 +817,16 @@ void testSailPlayback() {
     CHECK(call("cellSailPlayerOpenStream", {player, 0}) == sail::kErrorInvalidState);  // not Closed any more
     std::memset(base + format_out, 0, 32);
     CHECK(call("cellSailGraphicsAdapterGetFormat", {gfx, format_out}) == 0);
-    CHECK(dalRead8(base, format_out + sail::kVideoFormatCoding) == sail::kVideoCodingArgbInterleaved);
-    CHECK(dalRead16(base, format_out + sail::kVideoFormatWidth) == 1280 &&
-          dalRead16(base, format_out + sail::kVideoFormatHeight) == 720 &&
-          dalRead32(base, format_out + sail::kVideoFormatPitch) == 5120 &&
-          dalRead32(base, format_out + sail::kVideoFormatAlpha) == 255);
-    CHECK(dalRead8(base, format_out + sail::kVideoFormatFrameRate) == sail::kVideoFrameRate30000Over1001);
+    CHECK(tox2Read8(base, format_out + sail::kVideoFormatCoding) == sail::kVideoCodingArgbInterleaved);
+    CHECK(tox2Read16(base, format_out + sail::kVideoFormatWidth) == 1280 &&
+          tox2Read16(base, format_out + sail::kVideoFormatHeight) == 720 &&
+          tox2Read32(base, format_out + sail::kVideoFormatPitch) == 5120 &&
+          tox2Read32(base, format_out + sail::kVideoFormatAlpha) == 255);
+    CHECK(tox2Read8(base, format_out + sail::kVideoFormatFrameRate) == sail::kVideoFrameRate30000Over1001);
     std::memset(base + format_out, 0, 32);
     CHECK(call("cellSailSoundAdapterGetFormat", {sound, format_out}) == 0);
-    CHECK(dalRead8(base, format_out + sail::kAudioFormatChNum) == 2 &&
-          dalRead32(base, format_out + sail::kAudioFormatFs) == 48000);
+    CHECK(tox2Read8(base, format_out + sail::kAudioFormatChNum) == 2 &&
+          tox2Read32(base, format_out + sail::kAudioFormatFs) == 48000);
     CHECK(waitForEvents(booted + 4));
     CHECK(g_notify_events.size() == booted + 4 && eventIs(booted, stateEvent(3)) &&
           eventIs(booted + 1, {sail::makeEvent(4, 0), 0}) && eventIs(booted + 2, stateEvent(4)) &&
@@ -858,31 +859,31 @@ void testSailPlayback() {
     // The first frame: the black frame of a movie without codecs, in one of the game's buffers.
     const std::uint32_t frame_taken = call("cellSailGraphicsAdapterGetFrame", {gfx, info});
     CHECK(frame_taken == static_cast<std::uint32_t>(sail::kSyncNextOnTime));
-    const std::uint32_t buffer = dalRead32(base, info + sail::kFrameInfoBuffer);
+    const std::uint32_t buffer = tox2Read32(base, info + sail::kFrameInfoBuffer);
     CHECK(std::ranges::find(g_frame_buffers, buffer) != g_frame_buffers.end());
-    CHECK(dalRead32(base, info + sail::kFrameInfoTag) == 1 && dalRead32(base, info + sail::kFrameInfoStatus) == 0 &&
-          dalRead32(base, info + sail::kFrameInfoSessionId) != 0);
-    CHECK(dalRead64(base, info + sail::kFrameInfoPts) == 89310);
+    CHECK(tox2Read32(base, info + sail::kFrameInfoTag) == 1 && tox2Read32(base, info + sail::kFrameInfoStatus) == 0 &&
+          tox2Read32(base, info + sail::kFrameInfoSessionId) != 0);
+    CHECK(tox2Read64(base, info + sail::kFrameInfoPts) == 89310);
     // ARGB black with alpha 255, all the way down to the last pixel.
-    CHECK(dalRead8(base, buffer) == 255 && dalRead8(base, buffer + 1) == 0 && dalRead8(base, buffer + 3) == 0 &&
-          dalRead8(base, buffer + 5120 * 720 - 4) == 255);
+    CHECK(tox2Read8(base, buffer) == 255 && tox2Read8(base, buffer + 1) == 0 && tox2Read8(base, buffer + 3) == 0 &&
+          tox2Read8(base, buffer + 5120 * 720 - 4) == 255);
     CHECK(call("cellSailGraphicsAdapterGetFrame", {gfx, info}) == static_cast<std::uint32_t>(sail::kSyncNoFrame));
-    CHECK(dalRead32(base, info + sail::kFrameInfoBuffer) == 0);  // every field written
+    CHECK(tox2Read32(base, info + sail::kFrameInfoBuffer) == 0);  // every field written
     CHECK(call("cellSailGraphicsAdapterUpdateAvSync", {gfx, 1, 12345}) == 0);
 
     // Sound frames: silence of the requested length, timestamped along the clock.
     std::memset(base + info, 0xee, sail::kFrameInfoSize);  // the game does not clear this one
     CHECK(call("cellSailSoundAdapterGetFrame", {sound, 256, info}) ==
           static_cast<std::uint32_t>(sail::kSyncNextOnTime));
-    const std::uint32_t pcm = dalRead32(base, info + sail::kFrameInfoBuffer);
-    CHECK(pcm != 0 && dalRead32(base, info + sail::kFrameInfoStatus) == 0 &&
-          dalRead32(base, info + sail::kFrameInfoTag) == 1 && dalRead64(base, info + sail::kFrameInfoPts) == 89310);
+    const std::uint32_t pcm = tox2Read32(base, info + sail::kFrameInfoBuffer);
+    CHECK(pcm != 0 && tox2Read32(base, info + sail::kFrameInfoStatus) == 0 &&
+          tox2Read32(base, info + sail::kFrameInfoTag) == 1 && tox2Read64(base, info + sail::kFrameInfoPts) == 89310);
     bool silent = true;
-    for (std::uint32_t i = 0; i < 256 * 8; i++) silent = silent && dalRead8(base, pcm + i) == 0;
+    for (std::uint32_t i = 0; i < 256 * 8; i++) silent = silent && tox2Read8(base, pcm + i) == 0;
     CHECK(silent);
     CHECK(call("cellSailSoundAdapterGetFrame", {sound, 256, info}) ==
           static_cast<std::uint32_t>(sail::kSyncNextOnTime));
-    CHECK(dalRead64(base, info + sail::kFrameInfoPts) == 89310 + 256 * 90000 / 48000);
+    CHECK(tox2Read64(base, info + sail::kFrameInfoPts) == 89310 + 256 * 90000 / 48000);
     CHECK(call("cellSailSoundAdapterGetFrame", {sound, 4096, info}) == sail::kErrorInvalidArg);
     CHECK(call("cellSailSoundAdapterUpdateAvSync", {sound, 2, 99}) == 0);
 
@@ -910,7 +911,7 @@ void testSailPlayback() {
     // The scratch block is the one allocated after the descriptor's 0x100-byte block.
     CHECK(g_free_calls.size() == frees + 1 && g_free_calls[frees].arg == kAllocArg &&
           g_free_calls[frees].value == scratch + 0x20000 + 0x100);
-    const std::string census = dal::formatCensus();
+    const std::string census = tox2::formatCensus();
     CHECK(census.find("census: sail 1 movies") != std::string::npos);
     CHECK(census.find("movie " + movie_guest + ": 1280x720 29.97 fps") != std::string::npos);
     // No codecs here: both sound pulls were silence, counted as underruns.
@@ -934,13 +935,13 @@ void testSailPlayback() {
     CHECK(g_frame_allocs.size() == allocs);
     std::memset(base + format_out, 0, 32);
     CHECK(call("cellSailGraphicsAdapterGetFormat", {gfx_b, format_out}) == 0);
-    CHECK(dalRead16(base, format_out + sail::kVideoFormatWidth) == 1280 &&
-          dalRead32(base, format_out + sail::kVideoFormatPitch) == 5120);
+    CHECK(tox2Read16(base, format_out + sail::kVideoFormatWidth) == 1280 &&
+          tox2Read32(base, format_out + sail::kVideoFormatPitch) == 5120);
     CHECK(call("cellSailDescriptorCreateDatabase", {missing, database, 0x80, 0}) == sail::kErrorInvalidFd);
     CHECK(call("cellSailPlayerStart", {player_b, command, 0}) == sail::kErrorInvalidState);
     CHECK(call("cellSailPlayerFinalize", {player_b}) == 0);
-    CHECK(dal::formatCensus().find("census: sail 2 movies") != std::string::npos);
-    CHECK(dal::formatCensus().find("dal_sail_playback_missing.pam: not played") != std::string::npos);
+    CHECK(tox2::formatCensus().find("census: sail 2 movies") != std::string::npos);
+    CHECK(tox2::formatCensus().find("tox2_sail_playback_missing.pam: not played") != std::string::npos);
 
     // Finalize right after Start, before the service thread has drained: whatever was queued before it
     // is delivered, nothing follows, and the frames and the scratch block are handed back exactly once.
@@ -970,18 +971,18 @@ void testSailPlayback() {
     }
     CHECK(g_free_calls.size() == scratch_frees_before + 1 && g_free_calls.back().value == expected_scratch);
     CHECK(call("cellSailGraphicsAdapterGetFrame", {gfx_b, info}) == sail::kErrorInvalidState);  // unbound
-    CHECK(dal::formatCensus().find("census: sail 3 movies") != std::string::npos);
+    CHECK(tox2::formatCensus().find("census: sail 3 movies") != std::string::npos);
 
-    dal::stopSailService();
-    dal::resetCellSail();
-    dal::configureVfs(dal::VfsLayout{});
+    tox2::stopSailService();
+    tox2::resetCellSail();
+    tox2::configureVfs(tox2::VfsLayout{});
     std::filesystem::remove(movie_path, ec);
-    dal::resetHostFunctions();
-    dal::resetSyncObjects();
+    tox2::resetHostFunctions();
+    tox2::resetSyncObjects();
     p.main.free(scratch);
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 void appendTimestamp(Bytes& v, int prefix, std::int64_t ts) {
@@ -1053,21 +1054,21 @@ Bytes makeAudioPayload(const Bytes& es, std::size_t from, std::size_t to, std::u
 }
 
 struct DemuxResult {
-    std::vector<std::vector<dal::PamfAccessUnit>> aus;  // per stream
+    std::vector<std::vector<tox2::PamfAccessUnit>> aus;  // per stream
     std::uint64_t errors = 0;
     std::size_t audio_before_end = 0;
 };
 
-void drainAll(dal::PamfDemuxer& demux, DemuxResult& r) {
+void drainAll(tox2::PamfDemuxer& demux, DemuxResult& r) {
     for (std::uint32_t i = 0; i < r.aus.size(); i++) {
         while (auto au = demux.next(i)) r.aus[i].push_back(std::move(*au));
     }
 }
 
 // Feeds `data` cut at the given offsets, or in pieces of `chunk` bytes when `cuts` is empty.
-DemuxResult runDemux(const dal::PamfInfo& info, const Bytes& data, std::vector<std::size_t> cuts, std::size_t chunk = 0,
-                     bool end_of_stream = true) {
-    dal::PamfDemuxer demux(info);
+DemuxResult runDemux(const tox2::PamfInfo& info, const Bytes& data, std::vector<std::size_t> cuts,
+                     std::size_t chunk = 0, bool end_of_stream = true) {
+    tox2::PamfDemuxer demux(info);
     DemuxResult r;
     r.aus.resize(info.streams.size());
     cuts.push_back(data.size());
@@ -1090,7 +1091,7 @@ bool sameAus(const DemuxResult& a, const DemuxResult& b) {
     for (std::size_t s = 0; s < a.aus.size(); s++) {
         if (a.aus[s].size() != b.aus[s].size()) return false;
         for (std::size_t i = 0; i < a.aus[s].size(); i++) {
-            const dal::PamfAccessUnit &x = a.aus[s][i], &y = b.aus[s][i];
+            const tox2::PamfAccessUnit &x = a.aus[s][i], &y = b.aus[s][i];
             if (x.stream_index != y.stream_index || x.pts != y.pts || x.dts != y.dts || x.bytes != y.bytes)
                 return false;
         }
@@ -1121,7 +1122,7 @@ Bytes makeSyntheticStream(const Bytes& es) {
 
 void testPamfDemuxSynthetic() {
     const Bytes header = makePamfHeader(6);
-    const auto info = dal::parsePamfHeader(header);
+    const auto info = tox2::parsePamfHeader(header);
     CHECK(info.has_value());
     if (!info) return;
     const Bytes es = makeAtracFrames(6);
@@ -1159,7 +1160,7 @@ void testPamfDemuxSynthetic() {
 }
 
 void testPamfDemuxDamage() {
-    const auto info = dal::parsePamfHeader(makePamfHeader(8));
+    const auto info = tox2::parsePamfHeader(makePamfHeader(8));
     CHECK(info.has_value());
     if (!info) return;
     const Bytes es = makeAtracFrames(6);
@@ -1247,7 +1248,7 @@ void testPamfDemuxDamage() {
     Bytes other = makePack({makePes(0xE3, kVideoPayload2), makePes(0xBD, Bytes{0x31, 0, 0, 0, 1, 2})});
     const DemuxResult skipped = runDemux(*info, other, {});
     CHECK(skipped.errors == 0 && skipped.aus[0].empty() && skipped.aus[1].empty());
-    dal::PamfDemuxer demux(*info);
+    tox2::PamfDemuxer demux(*info);
     CHECK(!demux.next(2).has_value() && demux.errors() == 0);
 
     // A PES with the MPEG-1 style header byte is damage.
@@ -1287,7 +1288,7 @@ void fakePatternPcm(std::uint8_t* out, std::uint64_t first_frame, std::uint32_t 
     }
 }
 
-class FakeVideoDecoder : public dal::VideoDecoder {
+class FakeVideoDecoder : public tox2::VideoDecoder {
 public:
     explicit FakeVideoDecoder(FakeShared* shared) : shared_(shared) {}
     bool send(std::span<const std::uint8_t>, std::int64_t pts, std::int64_t) override {
@@ -1295,7 +1296,7 @@ public:
         const int index = shared_->video_sent++;
         // Like the real decoder: a frame without a PTS continues after the previous one.
         last_pts_ = pts >= 0 ? pts : last_pts_ + 3003;
-        dal::VideoFrame frame;
+        tox2::VideoFrame frame;
         frame.pts = last_pts_;
         frame.width = 4;
         frame.height = 2;
@@ -1304,7 +1305,7 @@ public:
         pending_.push_back(std::move(frame));
         return true;
     }
-    bool receive(dal::VideoFrame& out) override {
+    bool receive(tox2::VideoFrame& out) override {
         if (pending_.empty()) return false;
         out = std::move(pending_.front());
         pending_.erase(pending_.begin());
@@ -1315,15 +1316,15 @@ public:
 private:
     FakeShared* shared_;
     std::int64_t last_pts_ = 0;
-    std::vector<dal::VideoFrame> pending_;
+    std::vector<tox2::VideoFrame> pending_;
 };
 
-class FakeAudioDecoder : public dal::AudioDecoder {
+class FakeAudioDecoder : public tox2::AudioDecoder {
 public:
     FakeAudioDecoder(FakeShared* shared, std::uint32_t channels) : shared_(shared), channels_(channels) {}
     bool send(std::span<const std::uint8_t>, std::int64_t pts) override {
         const int index = shared_->audio_sent++;
-        dal::AudioChunk chunk;
+        tox2::AudioChunk chunk;
         chunk.pts = pts;
         chunk.frames = kFakeChunkFrames;
         if (shared_->audio_pattern) {
@@ -1336,7 +1337,7 @@ public:
         pending_.push_back(std::move(chunk));
         return true;
     }
-    bool receive(dal::AudioChunk& out) override {
+    bool receive(tox2::AudioChunk& out) override {
         if (pending_.empty()) return false;
         out = std::move(pending_.front());
         pending_.erase(pending_.begin());
@@ -1347,14 +1348,14 @@ public:
 private:
     FakeShared* shared_;
     std::uint32_t channels_;
-    std::vector<dal::AudioChunk> pending_;
+    std::vector<tox2::AudioChunk> pending_;
 };
 
-class FakeFactory : public dal::MediaCodecFactory {
+class FakeFactory : public tox2::MediaCodecFactory {
 public:
     explicit FakeFactory(FakeShared* shared) : shared_(shared) {}
-    std::unique_ptr<dal::VideoDecoder> createVideo(const dal::PamfStream&, const dal::VideoOutputFormat& format,
-                                                   std::string& error) override {
+    std::unique_ptr<tox2::VideoDecoder> createVideo(const tox2::PamfStream&, const tox2::VideoOutputFormat& format,
+                                                    std::string& error) override {
         shared_->format_start_pts = format.start_pts;
         if (shared_->fail_video) {
             error = "fake video failure";
@@ -1362,8 +1363,8 @@ public:
         }
         return std::make_unique<FakeVideoDecoder>(shared_);
     }
-    std::unique_ptr<dal::AudioDecoder> createAudio(const dal::PamfStream&, const dal::AudioOutputFormat& format,
-                                                   std::string& error) override {
+    std::unique_ptr<tox2::AudioDecoder> createAudio(const tox2::PamfStream&, const tox2::AudioOutputFormat& format,
+                                                    std::string& error) override {
         shared_->audio_channels = format.channels;
         shared_->audio_rate = format.sample_rate;
         if (shared_->fail_audio) {
@@ -1395,7 +1396,7 @@ Bytes makePlayerStream(int video_packs, int audio_packs) {
 
 struct TempMovie {
     std::filesystem::path path;
-    explicit TempMovie(const Bytes& data, const char* name = "dal_movie_player_test.pam") {
+    explicit TempMovie(const Bytes& data, const char* name = "tox2_movie_player_test.pam") {
         std::error_code ec;
         path = std::filesystem::temp_directory_path(ec) / name;
         Bytes file = makePamfHeader(static_cast<std::uint32_t>(data.size() / 2048));
@@ -1425,24 +1426,24 @@ constexpr std::int64_t kPlayerDuration = 722910 - 89310;
 struct PlayerFixture {
     FakeShared shared;
     std::atomic<std::int64_t> clock{1000};
-    dal::MoviePlayerOptions options;
+    tox2::MoviePlayerOptions options;
     PlayerFixture() {
         options.clock = [this] { return clock.load(); };
-        dal::setMediaCodecFactory(std::make_unique<FakeFactory>(&shared));
+        tox2::setMediaCodecFactory(std::make_unique<FakeFactory>(&shared));
     }
-    ~PlayerFixture() { dal::setMediaCodecFactory(nullptr); }
+    ~PlayerFixture() { tox2::setMediaCodecFactory(nullptr); }
 };
 
-bool decodeFinished(const dal::MoviePlayer& player) { return player.stats().decode_finished; }
+bool decodeFinished(const tox2::MoviePlayer& player) { return player.stats().decode_finished; }
 
 void testMoviePlayerOrderAndTiming() {
     PlayerFixture fx;
     fx.options.video_queue_frames = 64;  // everything fits, so decoding ends without a consumer
     const TempMovie movie(makePlayerStream(10, 4));
-    dal::MoviePlayer player(fx.options);
+    tox2::MoviePlayer player(fx.options);
 
     CHECK(!player.start());
-    CHECK(!player.open(std::filesystem::temp_directory_path() / "dal_movie_player_missing.pam", {}, {}).has_value());
+    CHECK(!player.open(std::filesystem::temp_directory_path() / "tox2_movie_player_missing.pam", {}, {}).has_value());
     CHECK(!player.start());
     const auto info = player.open(movie.path, {}, {});
     CHECK(info.has_value());
@@ -1455,7 +1456,7 @@ void testMoviePlayerOrderAndTiming() {
     // The decoder is told the file's start PTS even though the caller passed none.
     CHECK(fx.shared.format_start_pts == kPlayerStartPts);
 
-    dal::MoviePlayerStats stats = player.stats();
+    tox2::MoviePlayerStats stats = player.stats();
     CHECK(stats.video_decoder && stats.audio_decoder && stats.codec_error.empty());
     CHECK(stats.video_decoded == 10 && stats.audio_decoded_frames == 8 * kFakeChunkFrames);
     CHECK(stats.demux_errors == 0 && stats.read_errors == 0);
@@ -1496,14 +1497,14 @@ void testMoviePlayerOrderAndTiming() {
     CHECK(player.stats().played_ticks == kPlayerDuration);
 
     // Audio keeps its own PTS on the video's origin, including the frame before the start PTS.
-    const dal::MovieAudioBlock a = player.takeAudio(100);
+    const tox2::MovieAudioBlock a = player.takeAudio(100);
     CHECK(a.pts == 85470 && a.pts < kPlayerStartPts && a.frames == 100 && a.real_frames == 100);
     CHECK(a.bytes.size() == 100 * kFakeFrameBytes && a.bytes[0] == 1);
     // A partial chunk advances the PTS by the samples taken (100 frames = 187.5 ticks, rounded down).
-    const dal::MovieAudioBlock b = player.takeAudio(100);
+    const tox2::MovieAudioBlock b = player.takeAudio(100);
     CHECK(b.pts == 85470 + 187 && b.real_frames == 100);
     // A block that spans three chunks: 1848 frames of chunk 0, all of chunk 1, 1104 frames of chunk 2.
-    const dal::MovieAudioBlock c = player.takeAudio(5000);
+    const tox2::MovieAudioBlock c = player.takeAudio(5000);
     CHECK(c.pts == 85470 + 200 * 90000 / 48000 && c.frames == 5000 && c.real_frames == 5000);
     CHECK(c.bytes.size() == 5000 * kFakeFrameBytes);
     if (c.bytes.size() == 5000 * kFakeFrameBytes) {
@@ -1512,13 +1513,13 @@ void testMoviePlayerOrderAndTiming() {
         CHECK(c.bytes[3896 * kFakeFrameBytes] == 3 && c.bytes[4999 * kFakeFrameBytes + 7] == 3);
     }
     // Asking for more than is left gives the rest and then zero-filled silence.
-    const dal::MovieAudioBlock d = player.takeAudio(20000);
+    const tox2::MovieAudioBlock d = player.takeAudio(20000);
     const std::uint32_t left = 8 * kFakeChunkFrames - 5200;
     CHECK(d.frames == 20000 && d.real_frames == left);
     CHECK(d.bytes.size() == 20000 * kFakeFrameBytes && d.bytes[left * kFakeFrameBytes - 1] == 8);
     CHECK(d.bytes[left * kFakeFrameBytes] == 0 && d.bytes.back() == 0);
     // Silence continues where the previous block ended.
-    const dal::MovieAudioBlock e = player.takeAudio(64);
+    const tox2::MovieAudioBlock e = player.takeAudio(64);
     CHECK(e.real_frames == 0 && e.pts == d.pts + 20000 * 90000 / 48000);
     CHECK(e.bytes == Bytes(64 * kFakeFrameBytes, 0));
     stats = player.stats();
@@ -1536,13 +1537,13 @@ void testMoviePlayerDecodeTime() {
     fx.options.video_queue_frames = 64;
     fx.shared.video_delay_ms = 3;
     const TempMovie movie(makePlayerStream(6, 0));
-    dal::MoviePlayer player(fx.options);
+    tox2::MoviePlayer player(fx.options);
     CHECK(player.open(movie.path, {}, {}).has_value());
     CHECK(player.stats().video_decode_ns == 0 && player.stats().video_decode_max_ns == 0);
     CHECK(player.start());
     CHECK(pollFor([&] { return decodeFinished(player); }));
     // Six sends of at least 3 ms each; the longest call is one of them and cannot exceed the sum.
-    const dal::MoviePlayerStats stats = player.stats();
+    const tox2::MoviePlayerStats stats = player.stats();
     CHECK(stats.video_decoded == 6);
     CHECK(stats.video_decode_ns >= 6 * 3'000'000ull);
     CHECK(stats.video_decode_max_ns >= 3'000'000ull && stats.video_decode_max_ns <= stats.video_decode_ns);
@@ -1554,7 +1555,7 @@ void testMoviePlayerDecodeTime() {
 void testMoviePlayerBackpressure() {
     PlayerFixture fx;
     const TempMovie movie(makePlayerStream(40, 0));
-    dal::MoviePlayer player(fx.options);
+    tox2::MoviePlayer player(fx.options);
     CHECK(player.open(movie.path, {}, {}).has_value());
     CHECK(player.start());
 
@@ -1590,7 +1591,7 @@ void testMoviePlayerUnpulledAudio() {
     fx.options.read_chunk_bytes = 2048;  // many small reads, so a stalled read shows up
     fx.options.audio_queue_frames = 4096;
     const TempMovie movie(makePlayerStream(40, 20));
-    dal::MoviePlayer player(fx.options);
+    tox2::MoviePlayer player(fx.options);
     CHECK(player.open(movie.path, {}, {}).has_value());
     CHECK(player.start());
 
@@ -1602,7 +1603,7 @@ void testMoviePlayerUnpulledAudio() {
         player.takeDueVideo(far);
         return decodeFinished(player);
     }));
-    const dal::MoviePlayerStats stats = player.stats();
+    const tox2::MoviePlayerStats stats = player.stats();
     CHECK(stats.video_decoded == 40 && stats.audio_decoded_frames == 40 * kFakeChunkFrames);
     CHECK(stats.audio_stale_frames > 0 && stats.audio_overflow_frames == 0);
 
@@ -1611,7 +1612,7 @@ void testMoviePlayerUnpulledAudio() {
     std::uint64_t real = 0;
     bool increasing = true;
     for (;;) {
-        const dal::MovieAudioBlock block = player.takeAudio(1000);
+        const tox2::MovieAudioBlock block = player.takeAudio(1000);
         if (block.real_frames == 0) break;
         if (block.pts <= last_pts) increasing = false;
         last_pts = block.pts;
@@ -1628,14 +1629,14 @@ void testMoviePlayerAudioHardCap() {
     fx.options.audio_queue_frames = 4096;
     fx.options.audio_queue_cap_frames = 8192;
     const TempMovie movie(makePlayerStream(40, 20));
-    dal::MoviePlayer player(fx.options);
+    tox2::MoviePlayer player(fx.options);
     CHECK(player.open(movie.path, {}, {}).has_value());
     CHECK(player.start());
     CHECK(pollFor([&] {
         player.takeDueVideo(1000 + 100000000);  // frames only; the player's clock stays at the origin
         return decodeFinished(player);
     }));
-    const dal::MoviePlayerStats stats = player.stats();
+    const tox2::MoviePlayerStats stats = player.stats();
     CHECK(stats.audio_decoded_frames == 40 * kFakeChunkFrames);
     CHECK(stats.audio_stale_frames == 0 && stats.audio_overflow_frames > 0);
     // The lead is measured against the stalled clock: all of the audio ends beyond it.
@@ -1645,7 +1646,7 @@ void testMoviePlayerAudioHardCap() {
     std::int64_t last_pts = -1;
     bool increasing = true;
     for (;;) {
-        const dal::MovieAudioBlock block = player.takeAudio(1000);
+        const tox2::MovieAudioBlock block = player.takeAudio(1000);
         if (block.real_frames == 0) break;
         if (block.pts <= last_pts) increasing = false;
         last_pts = block.pts;
@@ -1664,7 +1665,7 @@ void testMoviePlayerStop() {
     {
         PlayerFixture fx;
         const TempMovie movie(makePlayerStream(40, 0));
-        dal::MoviePlayer player(fx.options);
+        tox2::MoviePlayer player(fx.options);
         CHECK(player.open(movie.path, {}, {}).has_value());
         CHECK(player.start());
         CHECK(pollFor([&] { return fx.shared.video_sent >= 5; }));
@@ -1682,7 +1683,7 @@ void testMoviePlayerStop() {
         fx.options.video_queue_frames = 1000;
         fx.shared.video_delay_ms = 20;
         const TempMovie movie(makePlayerStream(200, 0));
-        dal::MoviePlayer player(fx.options);
+        tox2::MoviePlayer player(fx.options);
         CHECK(player.open(movie.path, {}, {}).has_value());
         CHECK(player.start());
         CHECK(pollFor([&] { return fx.shared.video_sent >= 2; }));
@@ -1698,7 +1699,7 @@ void testMoviePlayerStop() {
         const TempMovie movie(makePlayerStream(40, 0));
         const auto before = std::chrono::steady_clock::now();
         {
-            dal::MoviePlayer player(fx.options);
+            tox2::MoviePlayer player(fx.options);
             CHECK(player.open(movie.path, {}, {}).has_value());
             CHECK(player.start());
             CHECK(pollFor([&] { return fx.shared.video_sent >= 5; }));
@@ -1708,20 +1709,20 @@ void testMoviePlayerStop() {
 }
 
 void testMoviePlayerWithoutCodecs() {
-    dal::setMediaCodecFactory(nullptr);
+    tox2::setMediaCodecFactory(nullptr);
     const TempMovie movie(makePlayerStream(5, 2));
     std::atomic<std::int64_t> clock{100};
-    dal::MoviePlayerOptions options;
+    tox2::MoviePlayerOptions options;
     options.clock = [&] { return clock.load(); };
-    dal::MoviePlayer player(options);
+    tox2::MoviePlayer player(options);
 
-    dal::VideoOutputFormat video;
+    tox2::VideoOutputFormat video;
     video.alpha = 0x80;
     CHECK(player.open(movie.path, video, {}).has_value());
     CHECK(player.start());
     CHECK(player.waitPrerolled(std::chrono::seconds(5)));
     CHECK(pollFor([&] { return decodeFinished(player); }));
-    dal::MoviePlayerStats stats = player.stats();
+    tox2::MoviePlayerStats stats = player.stats();
     CHECK(!stats.video_decoder && !stats.audio_decoder && stats.video_decoded == 0);
     CHECK(stats.codec_error.find("no codec factory") != std::string::npos);
 
@@ -1729,7 +1730,7 @@ void testMoviePlayerWithoutCodecs() {
     auto black = player.takeDueVideo(100);
     CHECK(black.has_value());
     if (black) {
-        const dal::VideoFrame& f = black->frame;
+        const tox2::VideoFrame& f = black->frame;
         CHECK(f.pts == kPlayerStartPts && f.width == 1280 && f.height == 720 && f.pitch == 5120);
         CHECK(f.bytes.size() == 5120u * 720u);
         if (f.bytes.size() == 5120u * 720u) {
@@ -1740,7 +1741,7 @@ void testMoviePlayerWithoutCodecs() {
     CHECK(!player.takeDueVideo(100 + 10000000).has_value());
 
     // Silence for the whole movie: the PTS runs on from the start PTS.
-    const dal::MovieAudioBlock a = player.takeAudio(480);
+    const tox2::MovieAudioBlock a = player.takeAudio(480);
     CHECK(a.pts == kPlayerStartPts && a.frames == 480 && a.real_frames == 0);
     CHECK(a.bytes == Bytes(480 * kFakeFrameBytes, 0));
     CHECK(player.takeAudio(480).pts == kPlayerStartPts + 900);
@@ -1754,7 +1755,7 @@ void testMoviePlayerWithoutCodecs() {
     CHECK(player.atEnd(200 + kPlayerDuration));
 
     // Other pixel formats; the same player opens another movie.
-    video.coding = dal::VideoCoding::Rgba;
+    video.coding = tox2::VideoCoding::Rgba;
     CHECK(player.open(movie.path, video, {}).has_value());
     CHECK(player.start());
     CHECK(player.waitPrerolled(std::chrono::seconds(5)));
@@ -1763,7 +1764,7 @@ void testMoviePlayerWithoutCodecs() {
     if (black && black->frame.bytes.size() == 5120u * 720u) {
         CHECK(black->frame.bytes[0] == 0 && black->frame.bytes[3] == 0x80);
     }
-    video.coding = dal::VideoCoding::Yuv420Planar;
+    video.coding = tox2::VideoCoding::Yuv420Planar;
     video.width = 16;
     video.height = 8;
     CHECK(player.open(movie.path, video, {}).has_value());
@@ -1783,17 +1784,17 @@ void testMoviePlayerPartialCodecs() {
         PlayerFixture fx;
         fx.shared.fail_video = true;
         const TempMovie movie(makePlayerStream(5, 2));
-        dal::MoviePlayer player(fx.options);
+        tox2::MoviePlayer player(fx.options);
         CHECK(player.open(movie.path, {}, {}).has_value());
         CHECK(player.start());
         CHECK(pollFor([&] { return decodeFinished(player); }));
         // Nothing takes audio, so decoding of the 4 chunks stays within the queue and finishes.
-        const dal::MoviePlayerStats stats = player.stats();
+        const tox2::MoviePlayerStats stats = player.stats();
         CHECK(!stats.video_decoder && stats.audio_decoder);
         CHECK(stats.codec_error.find("fake video failure") != std::string::npos);
         auto black = player.takeDueVideo(1000);
         CHECK(black.has_value() && black->frame.pts == kPlayerStartPts);
-        const dal::MovieAudioBlock a = player.takeAudio(300);
+        const tox2::MovieAudioBlock a = player.takeAudio(300);
         CHECK(a.real_frames == 300 && a.pts == 85470);
     }
     // The audio decoder cannot be created: video plays, audio is silence.
@@ -1802,19 +1803,19 @@ void testMoviePlayerPartialCodecs() {
         fx.shared.fail_audio = true;
         fx.options.video_queue_frames = 64;  // no consumer here
         const TempMovie movie(makePlayerStream(5, 2));
-        dal::MoviePlayer player(fx.options);
+        tox2::MoviePlayer player(fx.options);
         CHECK(player.open(movie.path, {}, {}).has_value());
         CHECK(player.start());
         CHECK(pollFor([&] { return decodeFinished(player); }));
-        const dal::MoviePlayerStats stats = player.stats();
+        const tox2::MoviePlayerStats stats = player.stats();
         CHECK(stats.video_decoder && !stats.audio_decoder && stats.video_decoded == 5);
-        const dal::MovieAudioBlock a = player.takeAudio(300);
+        const tox2::MovieAudioBlock a = player.takeAudio(300);
         CHECK(a.real_frames == 0 && a.frames == 300);
     }
     // A file that is not PAMF is refused by open().
     {
-        const TempMovie garbage(Bytes(4096, 0x5A), "dal_movie_player_garbage.pam");
-        dal::MoviePlayer player;
+        const TempMovie garbage(Bytes(4096, 0x5A), "tox2_movie_player_garbage.pam");
+        tox2::MoviePlayer player;
         std::ofstream(garbage.path, std::ios::binary | std::ios::trunc) << "not a movie";
         const auto info = player.open(garbage.path, {}, {});
         CHECK(!info.has_value() && !info.error().empty());
@@ -1826,18 +1827,18 @@ void testMoviePlayerPartialCodecs() {
 // counts delivered samples and underruns. Video is black (no decoder), so the audio decode waits for
 // this test's pulls instead of running ahead.
 void testSailSoundDelivery() {
-    namespace sail = dal::sail;
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetSyncObjects();
-    dal::resetHostFunctions();
-    dal::resetCellSail();
+    namespace sail = tox2::sail;
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetSyncObjects();
+    tox2::resetHostFunctions();
+    tox2::resetCellSail();
     FakeShared shared;
     shared.fail_video = true;
     shared.audio_pattern = true;
-    dal::setMediaCodecFactory(std::make_unique<FakeFactory>(&shared));
-    dal::Process& p = dal::process();
+    tox2::setMediaCodecFactory(std::make_unique<FakeFactory>(&shared));
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x100000, 0x10000);
@@ -1854,25 +1855,25 @@ void testSailSoundDelivery() {
                         sound = scratch + 0x2800, stack = scratch + 0x9000;
     constexpr std::uint64_t kAllocArg = 0xA11C, kNotifyArg = 0xCB, kSoundArg = 0x5D;
 
-    const TempMovie movie(makePlayerStream(8, 5), "dal_sail_sound_test.pam");
-    const std::string movie_guest = "/dev_bdvd/PS3_GAME/USRDIR/Movie/dal_sail_sound_test.pam";
-    dal::VfsLayout layout;
+    const TempMovie movie(makePlayerStream(8, 5), "tox2_sail_sound_test.pam");
+    const std::string movie_guest = "/dev_bdvd/PS3_GAME/USRDIR/Movie/tox2_sail_sound_test.pam";
+    tox2::VfsLayout layout;
     layout.files.push_back({movie_guest, movie.path, true});
-    dal::configureVfs(layout);
+    tox2::configureVfs(layout);
     std::memcpy(base + uri, ("x-cell-fs://" + movie_guest).c_str(), movie_guest.size() + 13);
 
-    std::lock_guard<dal::GuestLock> guard(dal::guestLock());
-    auto boot_ctx = std::make_unique<DalPpuContext>();
-    dalWrite32(base, tls_image, 0xCAFEF00D);
-    CHECK(dal::initializeTls(boot_ctx.get(), base, 0x01000000, tls_image, 4, 0x20) != 0);
-    DalPpuContext* ctx = boot_ctx.get();
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+    auto boot_ctx = std::make_unique<Tox2PpuContext>();
+    tox2Write32(base, tls_image, 0xCAFEF00D);
+    CHECK(tox2::initializeTls(boot_ctx.get(), base, 0x01000000, tls_image, 4, 0x20) != 0);
+    Tox2PpuContext* ctx = boot_ctx.get();
     ctx->gpr[1] = stack;
-    const std::uint32_t notify_opd = dal::registerHostFunction("sailFakeNotify", sailFakeNotify);
-    const std::uint32_t alloc_opd = dal::registerHostFunction("sailFakeBumpAlloc", sailFakeBumpAlloc);
-    const std::uint32_t free_opd = dal::registerHostFunction("sailFakeFree", sailFakeFree);
+    const std::uint32_t notify_opd = tox2::registerHostFunction("sailFakeNotify", sailFakeNotify);
+    const std::uint32_t alloc_opd = tox2::registerHostFunction("sailFakeBumpAlloc", sailFakeBumpAlloc);
+    const std::uint32_t free_opd = tox2::registerHostFunction("sailFakeFree", sailFakeFree);
     CHECK(notify_opd != 0 && alloc_opd != 0 && free_opd != 0);
     const auto call = [&](std::string_view name, std::initializer_list<std::uint64_t> args) {
-        const dal::GuestHandler handler = sailHandlerNamed(name);
+        const tox2::GuestHandler handler = sailHandlerNamed(name);
         CHECK(handler != nullptr);
         if (handler == nullptr) return std::uint32_t{0xdeadbeef};
         int reg = 3;
@@ -1884,12 +1885,12 @@ void testSailSoundDelivery() {
         return waitUntil([&] { return g_notify_events.size() >= count; });
     };
 
-    dalWrite32(base, funcs, alloc_opd);
-    dalWrite32(base, funcs + 4, free_opd);
+    tox2Write32(base, funcs, alloc_opd);
+    tox2Write32(base, funcs + 4, free_opd);
     CHECK(call("cellSailMemAllocatorInitialize", {allocator, funcs, kAllocArg}) == 0);
-    dalWrite32(base, attribute, 6);
-    dalWrite32(base, attribute + 4, 1);
-    dalWrite32(base, attribute + 8, 1);
+    tox2Write32(base, attribute, 6);
+    tox2Write32(base, attribute + 4, 1);
+    tox2Write32(base, attribute + 8, 1);
     std::memset(base + sound_funcs, 0, sail::kSoundAdapterFuncsSize);
 
     // One movie played to the end of its decoded audio, for a sound adapter asking for `channels` channels
@@ -1901,9 +1902,9 @@ void testSailSoundDelivery() {
         shared.audio_channels = 0;
         shared.audio_rate = 0;
         std::memset(base + audio_format, 0xff, sail::kAudioFormatSize);
-        dalWrite8(base, audio_format, sail::kAudioCodingLpcmFloat32);
-        dalWrite8(base, audio_format + 1, static_cast<std::uint8_t>(channels));
-        dalWrite32(base, audio_format + sail::kAudioFormatFs, static_cast<std::uint32_t>(rate));
+        tox2Write8(base, audio_format, sail::kAudioCodingLpcmFloat32);
+        tox2Write8(base, audio_format + 1, static_cast<std::uint8_t>(channels));
+        tox2Write32(base, audio_format + sail::kAudioFormatFs, static_cast<std::uint32_t>(rate));
 
         std::size_t seen = g_notify_events.size();
         CHECK(call("cellSailPlayerInitialize2", {player, allocator, notify_opd, kNotifyArg, attribute, resource}) == 0);
@@ -1912,7 +1913,7 @@ void testSailSoundDelivery() {
         CHECK(call("cellSailPlayerSetSoundAdapter", {player, 0, sound}) == 0);
         CHECK(call("cellSailPlayerBoot", {player, 0}) == 0);
         CHECK(call("cellSailPlayerCreateDescriptor", {player, 0, 0, uri, pp_desc}) == 0);
-        const std::uint32_t desc = dalRead32(base, pp_desc);
+        const std::uint32_t desc = tox2Read32(base, pp_desc);
         CHECK(call("cellSailPlayerAddDescriptor", {player, desc}) == 0);
         CHECK(waitForEvents(seen += 4));
         CHECK(call("cellSailPlayerOpenStream", {player, 0}) == 0);
@@ -1946,15 +1947,15 @@ void testSailSoundDelivery() {
             fakePatternPcm(expected.data(), consumed, real, static_cast<std::uint32_t>(channels));
             std::memset(base + info, 0xee, sail::kFrameInfoSize);  // the game does not clear it
             const std::uint32_t result = call("cellSailSoundAdapterGetFrame", {sound, n, info});
-            const std::uint32_t buffer = dalRead32(base, info + sail::kFrameInfoBuffer);
+            const std::uint32_t buffer = tox2Read32(base, info + sail::kFrameInfoBuffer);
             info_ok = info_ok && result == static_cast<std::uint32_t>(sail::kSyncNextOnTime) && buffer != 0 &&
-                      dalRead32(base, info + sail::kFrameInfoStatus) == 0 &&
-                      dalRead32(base, info + sail::kFrameInfoTag) == pull + 1 &&
-                      dalRead32(base, info + sail::kFrameInfoSessionId) != 0;
+                      tox2Read32(base, info + sail::kFrameInfoStatus) == 0 &&
+                      tox2Read32(base, info + sail::kFrameInfoTag) == pull + 1 &&
+                      tox2Read32(base, info + sail::kFrameInfoSessionId) != 0;
             bytes_exact = bytes_exact && p.memory.isCommitted(buffer, n * frame_bytes) &&
                           std::memcmp(base + buffer, expected.data(), expected.size()) == 0;
             pts_exact =
-                    pts_exact && dalRead64(base, info + sail::kFrameInfoPts) ==
+                    pts_exact && tox2Read64(base, info + sail::kFrameInfoPts) ==
                                          static_cast<std::uint64_t>(kPlayerStartPts - 3840 + position * 90000 / 48000);
             consumed += real;
             position += n;
@@ -1967,33 +1968,33 @@ void testSailSoundDelivery() {
 
         // The summary reports the samples that were real PCM and the pulls that needed silence.
         CHECK(call("cellSailPlayerFinalize", {player}) == 0);
-        const std::string census = dal::formatCensus();
+        const std::string census = tox2::formatCensus();
         CHECK(census.find(std::format("audio {} samples ({} underruns), played", total, underruns)) !=
               std::string::npos);
         CHECK(call("cellSailPlayerDestroyDescriptor", {player, desc}) == 0);
         CHECK(call("cellSailSoundAdapterFinalize", {sound}) == 0);
-        dal::resetCellSail();  // forgets the summary, so the next run's line is the only one
+        tox2::resetCellSail();  // forgets the summary, so the next run's line is the only one
     };
 
     playStream(2, 48000);  // what the game asks for
     playStream(1, 44100);  // a format the decoder has to be configured for
 
-    dal::stopSailService();
-    dal::resetCellSail();
-    dal::configureVfs(dal::VfsLayout{});
-    dal::setMediaCodecFactory(nullptr);
-    dal::resetHostFunctions();
-    dal::resetSyncObjects();
+    tox2::stopSailService();
+    tox2::resetCellSail();
+    tox2::configureVfs(tox2::VfsLayout{});
+    tox2::setMediaCodecFactory(nullptr);
+    tox2::resetHostFunctions();
+    tox2::resetSyncObjects();
     p.main.free(scratch);
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 }  // namespace
 
 int main() {
-    dal::installProcessSettings();
+    tox2::installProcessSettings();
     testGuestLayouts();
     testCodecFactory();
     testSailService();

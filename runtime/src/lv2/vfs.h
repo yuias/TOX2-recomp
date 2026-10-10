@@ -10,7 +10,7 @@
 #include <string_view>
 #include <vector>
 
-namespace dal {
+namespace tox2 {
 
 // Other: a device the VFS configuration mounts under a name the console does not define here.
 enum class VfsDevice { None, Root, Bdvd, AppHome, Hdd0, Hdd1, Other };
@@ -142,4 +142,4 @@ std::uint32_t fsReadWithOffset(std::uint8_t* base, std::uint32_t fd, std::uint64
 std::uint32_t fsWriteWithOffset(std::uint8_t* base, std::uint32_t fd, std::uint64_t offset, std::uint32_t buf,
                                 std::uint64_t size, std::uint32_t count_addr);
 
-}  // namespace dal
+}  // namespace tox2

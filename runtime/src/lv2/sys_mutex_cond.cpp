@@ -10,11 +10,11 @@
 
 #include "core/guest_memory.h"
 #include "core/threads.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 // Owner value of a thread that is not a guest thread (host-side callers such as tests).
@@ -77,7 +77,7 @@ std::uint32_t recurse(bool recursive, std::uint32_t& count) {
 
 }  // namespace
 
-std::uint32_t callerThreadId(const DalPpuContext* ctx) {
+std::uint32_t callerThreadId(const Tox2PpuContext* ctx) {
     if (ctx != nullptr && ctx->runtime != nullptr) {
         return static_cast<const GuestThread*>(ctx->runtime)->id();
     }
@@ -103,7 +103,7 @@ std::uint32_t mutexDestroy(std::uint32_t id) {
     return kCellOk;
 }
 
-std::uint32_t mutexLock(const DalPpuContext* ctx, std::uint32_t id, std::uint64_t timeout_us) {
+std::uint32_t mutexLock(const Tox2PpuContext* ctx, std::uint32_t id, std::uint64_t timeout_us) {
     const auto m = g_mutexes.find(id);
     if (m == nullptr) return kCellEsrch;
     const std::uint32_t tid = callerThreadId(ctx);
@@ -111,7 +111,7 @@ std::uint32_t mutexLock(const DalPpuContext* ctx, std::uint32_t id, std::uint64_
     return acquireMutex(m, tid, timeout_us, "sys_mutex_lock");
 }
 
-std::uint32_t mutexTryLock(const DalPpuContext* ctx, std::uint32_t id) {
+std::uint32_t mutexTryLock(const Tox2PpuContext* ctx, std::uint32_t id) {
     const auto m = g_mutexes.find(id);
     if (m == nullptr) return kCellEsrch;
     const std::uint32_t tid = callerThreadId(ctx);
@@ -121,7 +121,7 @@ std::uint32_t mutexTryLock(const DalPpuContext* ctx, std::uint32_t id) {
     return kCellOk;
 }
 
-std::uint32_t mutexUnlock(const DalPpuContext* ctx, std::uint32_t id) {
+std::uint32_t mutexUnlock(const Tox2PpuContext* ctx, std::uint32_t id) {
     const auto m = g_mutexes.find(id);
     if (m == nullptr) return kCellEsrch;
     if (m->owner != callerThreadId(ctx)) return kCellEperm;
@@ -138,44 +138,44 @@ namespace {
 
 std::uint32_t lwmutexCreateObject(std::uint8_t* base, std::uint32_t lwmutex, std::uint32_t protocol,
                                   std::uint32_t recursive) {
-    dalWrite32(base, lwmutex + kLwmutexOwner, kLwmutexFree);
-    dalWrite32(base, lwmutex + kLwmutexWaiter, 0);
-    dalWrite32(base, lwmutex + kLwmutexAttribute, recursive | protocol);
-    dalWrite32(base, lwmutex + kLwmutexRecursiveCount, 0);
-    dalWrite32(base, lwmutex + kLwmutexSleepQueue, g_lwmutexes.add(std::make_shared<Lwmutex>()));
+    tox2Write32(base, lwmutex + kLwmutexOwner, kLwmutexFree);
+    tox2Write32(base, lwmutex + kLwmutexWaiter, 0);
+    tox2Write32(base, lwmutex + kLwmutexAttribute, recursive | protocol);
+    tox2Write32(base, lwmutex + kLwmutexRecursiveCount, 0);
+    tox2Write32(base, lwmutex + kLwmutexSleepQueue, g_lwmutexes.add(std::make_shared<Lwmutex>()));
     return kCellOk;
 }
 
 // The two lock paths differ only in what happens when another thread owns the lwmutex.
-std::uint32_t lwmutexAcquire(const DalPpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex, bool block,
+std::uint32_t lwmutexAcquire(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex, bool block,
                              std::uint64_t timeout_us) {
     const std::uint32_t tid = callerThreadId(ctx);
-    const std::uint32_t owner = dalRead32(base, lwmutex + kLwmutexOwner);
+    const std::uint32_t owner = tox2Read32(base, lwmutex + kLwmutexOwner);
     if (owner == kLwmutexFree) {
-        dalWrite32(base, lwmutex + kLwmutexOwner, tid);
+        tox2Write32(base, lwmutex + kLwmutexOwner, tid);
         return kCellOk;
     }
     if (owner == tid) {
-        std::uint32_t count = dalRead32(base, lwmutex + kLwmutexRecursiveCount);
+        std::uint32_t count = tox2Read32(base, lwmutex + kLwmutexRecursiveCount);
         const std::uint32_t result =
-                recurse((dalRead32(base, lwmutex + kLwmutexAttribute) & kSyncRecursive) != 0, count);
-        if (result == kCellOk) dalWrite32(base, lwmutex + kLwmutexRecursiveCount, count);
+                recurse((tox2Read32(base, lwmutex + kLwmutexAttribute) & kSyncRecursive) != 0, count);
+        if (result == kCellOk) tox2Write32(base, lwmutex + kLwmutexRecursiveCount, count);
         return result;
     }
     if (owner == kLwmutexDead) return kCellEinval;
     if (!block) return kCellEbusy;
 
-    const auto object = g_lwmutexes.find(dalRead32(base, lwmutex + kLwmutexSleepQueue));
+    const auto object = g_lwmutexes.find(tox2Read32(base, lwmutex + kLwmutexSleepQueue));
     if (object == nullptr) return kCellEsrch;
     object->waiters++;
-    dalWrite32(base, lwmutex + kLwmutexWaiter, object->waiters);
+    tox2Write32(base, lwmutex + kLwmutexWaiter, object->waiters);
     const bool taken = blockingWait(
-            object->cv, [&] { return dalRead32(base, lwmutex + kLwmutexOwner) == kLwmutexFree; }, "sys_lwmutex_lock",
+            object->cv, [&] { return tox2Read32(base, lwmutex + kLwmutexOwner) == kLwmutexFree; }, "sys_lwmutex_lock",
             waitTimeout(timeout_us));
     object->waiters--;
-    dalWrite32(base, lwmutex + kLwmutexWaiter, object->waiters);
+    tox2Write32(base, lwmutex + kLwmutexWaiter, object->waiters);
     if (!taken) return kCellEtimedout;
-    dalWrite32(base, lwmutex + kLwmutexOwner, tid);
+    tox2Write32(base, lwmutex + kLwmutexOwner, tid);
     return kCellOk;
 }
 
@@ -183,8 +183,8 @@ std::uint32_t lwmutexAcquire(const DalPpuContext* ctx, std::uint8_t* base, std::
 
 std::uint32_t lwmutexCreate(std::uint8_t* base, std::uint32_t lwmutex, std::uint32_t attr) {
     if (lwmutex == 0 || attr == 0) return kCellEfault;
-    const std::uint32_t protocol = dalRead32(base, attr);
-    const std::uint32_t recursive = dalRead32(base, attr + 4);
+    const std::uint32_t protocol = tox2Read32(base, attr);
+    const std::uint32_t recursive = tox2Read32(base, attr + 4);
     if (recursive != kSyncRecursive && recursive != kSyncNotRecursive) return kCellEinval;
     if (protocol != kSyncFifo && protocol != kSyncRetry && protocol != kSyncPriority) {
         return kCellEinval;
@@ -192,38 +192,38 @@ std::uint32_t lwmutexCreate(std::uint8_t* base, std::uint32_t lwmutex, std::uint
     return lwmutexCreateObject(base, lwmutex, protocol, recursive);
 }
 
-std::uint32_t lwmutexDestroy(const DalPpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex) {
-    const std::uint32_t owner = dalRead32(base, lwmutex + kLwmutexOwner);
+std::uint32_t lwmutexDestroy(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex) {
+    const std::uint32_t owner = tox2Read32(base, lwmutex + kLwmutexOwner);
     if (owner == callerThreadId(ctx)) return kCellEbusy;
     if (owner == kLwmutexDead) return kCellEinval;
     if (owner != kLwmutexFree) return kCellEbusy;
-    const std::uint32_t id = dalRead32(base, lwmutex + kLwmutexSleepQueue);
+    const std::uint32_t id = tox2Read32(base, lwmutex + kLwmutexSleepQueue);
     const auto object = g_lwmutexes.find(id);
     if (object == nullptr) return kCellEsrch;
     if (object->waiters != 0) return kCellEbusy;
     g_lwmutexes.erase(id);
-    dalWrite32(base, lwmutex + kLwmutexOwner, kLwmutexDead);
+    tox2Write32(base, lwmutex + kLwmutexOwner, kLwmutexDead);
     return kCellOk;
 }
 
-std::uint32_t lwmutexLock(const DalPpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex,
+std::uint32_t lwmutexLock(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex,
                           std::uint64_t timeout_us) {
     return lwmutexAcquire(ctx, base, lwmutex, true, timeout_us);
 }
 
-std::uint32_t lwmutexTryLock(const DalPpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex) {
+std::uint32_t lwmutexTryLock(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex) {
     return lwmutexAcquire(ctx, base, lwmutex, false, 0);
 }
 
-std::uint32_t lwmutexUnlock(const DalPpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex) {
-    if (dalRead32(base, lwmutex + kLwmutexOwner) != callerThreadId(ctx)) return kCellEperm;
-    const std::uint32_t count = dalRead32(base, lwmutex + kLwmutexRecursiveCount);
+std::uint32_t lwmutexUnlock(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex) {
+    if (tox2Read32(base, lwmutex + kLwmutexOwner) != callerThreadId(ctx)) return kCellEperm;
+    const std::uint32_t count = tox2Read32(base, lwmutex + kLwmutexRecursiveCount);
     if (count != 0) {
-        dalWrite32(base, lwmutex + kLwmutexRecursiveCount, count - 1);
+        tox2Write32(base, lwmutex + kLwmutexRecursiveCount, count - 1);
         return kCellOk;
     }
-    dalWrite32(base, lwmutex + kLwmutexOwner, kLwmutexFree);
-    const auto object = g_lwmutexes.find(dalRead32(base, lwmutex + kLwmutexSleepQueue));
+    tox2Write32(base, lwmutex + kLwmutexOwner, kLwmutexFree);
+    const auto object = g_lwmutexes.find(tox2Read32(base, lwmutex + kLwmutexSleepQueue));
     if (object != nullptr) object->cv.notify_one();
     return kCellOk;
 }
@@ -252,7 +252,7 @@ void resetSyncObjects() {
 }
 
 // 100 sys_mutex_create(u32* mutex_id, sys_mutex_attribute_t* attr)
-void sysMutexCreate(DalPpuContext* ctx, std::uint8_t* base) {
+void sysMutexCreate(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto id_addr = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto attr = static_cast<std::uint32_t>(ctx->gpr[4]);
     if (id_addr == 0 || attr == 0) {
@@ -260,37 +260,37 @@ void sysMutexCreate(DalPpuContext* ctx, std::uint8_t* base) {
         return;
     }
     std::uint32_t id = 0;
-    const std::uint32_t result = mutexCreate(dalRead32(base, attr), dalRead32(base, attr + 4), &id);
-    if (result == kCellOk) dalWrite32(base, id_addr, id);
+    const std::uint32_t result = mutexCreate(tox2Read32(base, attr), tox2Read32(base, attr + 4), &id);
+    if (result == kCellOk) tox2Write32(base, id_addr, id);
     setResultCode(ctx, result);
 }
 
 // 101 sys_mutex_destroy(u32 mutex_id)
-void sysMutexDestroy(DalPpuContext* ctx, std::uint8_t* base) {
+void sysMutexDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResultCode(ctx, mutexDestroy(static_cast<std::uint32_t>(ctx->gpr[3])));
 }
 
 // 102 sys_mutex_lock(u32 mutex_id, u64 timeout)
-void sysMutexLock(DalPpuContext* ctx, std::uint8_t* base) {
+void sysMutexLock(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResultCode(ctx, mutexLock(ctx, static_cast<std::uint32_t>(ctx->gpr[3]), ctx->gpr[4]));
 }
 
 // 103 sys_mutex_trylock(u32 mutex_id)
-void sysMutexTryLock(DalPpuContext* ctx, std::uint8_t* base) {
+void sysMutexTryLock(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResultCode(ctx, mutexTryLock(ctx, static_cast<std::uint32_t>(ctx->gpr[3])));
 }
 
 // 104 sys_mutex_unlock(u32 mutex_id)
-void sysMutexUnlock(DalPpuContext* ctx, std::uint8_t* base) {
+void sysMutexUnlock(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     setResultCode(ctx, mutexUnlock(ctx, static_cast<std::uint32_t>(ctx->gpr[3])));
 }
 
 // 105 sys_cond_create(u32* cond_id, u32 mutex_id, sys_cond_attribute_t* attr)
-void sysCondCreate(DalPpuContext* ctx, std::uint8_t* base) {
+void sysCondCreate(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto id_addr = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto mutex = g_mutexes.find(static_cast<std::uint32_t>(ctx->gpr[4]));
     const auto attr = static_cast<std::uint32_t>(ctx->gpr[5]);
@@ -305,12 +305,12 @@ void sysCondCreate(DalPpuContext* ctx, std::uint8_t* base) {
     auto cond = std::make_shared<Cond>();
     cond->mutex = mutex;
     mutex->cond_count++;
-    dalWrite32(base, id_addr, g_conds.add(std::move(cond)));
+    tox2Write32(base, id_addr, g_conds.add(std::move(cond)));
     setResultCode(ctx, kCellOk);
 }
 
 // 106 sys_cond_destroy(u32 cond_id)
-void sysCondDestroy(DalPpuContext* ctx, std::uint8_t* base) {
+void sysCondDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const auto id = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto cond = g_conds.find(id);
@@ -328,7 +328,7 @@ void sysCondDestroy(DalPpuContext* ctx, std::uint8_t* base) {
 // 107 sys_cond_wait(u32 cond_id, u64 timeout): the bound mutex must be held by the caller. It is
 // released for the wait and taken again, with its recursion count, before the call returns, also
 // on a timeout.
-void sysCondWait(DalPpuContext* ctx, std::uint8_t* base) {
+void sysCondWait(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const auto cond = g_conds.find(static_cast<std::uint32_t>(ctx->gpr[3]));
     if (cond == nullptr) {
@@ -360,7 +360,7 @@ void sysCondWait(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // 108 sys_cond_signal(u32 cond_id): wakes one waiter. Without waiters the signal is dropped.
-void sysCondSignal(DalPpuContext* ctx, std::uint8_t* base) {
+void sysCondSignal(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const auto cond = g_conds.find(static_cast<std::uint32_t>(ctx->gpr[3]));
     if (cond == nullptr) {
@@ -375,7 +375,7 @@ void sysCondSignal(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // 109 sys_cond_signal_all(u32 cond_id)
-void sysCondSignalAll(DalPpuContext* ctx, std::uint8_t* base) {
+void sysCondSignalAll(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const auto cond = g_conds.find(static_cast<std::uint32_t>(ctx->gpr[3]));
     if (cond == nullptr) {
@@ -387,4 +387,4 @@ void sysCondSignalAll(DalPpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, kCellOk);
 }
 
-}  // namespace dal
+}  // namespace tox2

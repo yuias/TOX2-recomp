@@ -55,8 +55,8 @@ def _build_table() -> dict[str, _Access]:
 
 
 _TABLE = _build_table()
-_READ = {1: "dalRead8", 2: "dalRead16", 4: "dalRead32", 8: "dalRead64"}
-_WRITE = {1: "dalWrite8", 2: "dalWrite16", 4: "dalWrite32", 8: "dalWrite64"}
+_READ = {1: "tox2Read8", 2: "tox2Read16", 4: "tox2Read32", 8: "tox2Read64"}
+_WRITE = {1: "tox2Write8", 2: "tox2Write16", 4: "tox2Write32", 8: "tox2Write64"}
 _UNSIGNED = {1: "uint8_t", 2: "uint16_t", 4: "uint32_t", 8: "uint64_t"}
 _SIGNED = {2: "int16_t", 4: "int32_t"}
 
@@ -71,7 +71,7 @@ def _load_value(access: _Access, ea: str) -> str:
     if kind == "reversed":
         # Memory is big-endian, so the reversed value is the little-endian read.
         if width == 2:
-            return "(uint64_t)__builtin_bswap16(dalRead16(base, %s))" % ea
+            return "(uint64_t)__builtin_bswap16(tox2Read16(base, %s))" % ea
         return "(uint64_t)__builtin_bswap%d(%s(base, %s))" % (width * 8, _READ[width], ea)
     raise AssertionError(kind)
 
@@ -91,17 +91,17 @@ def _access_statement(op: Op, access: _Access, ea: str) -> str:
     kind = access.kind
     if not access.store:
         if kind == "single":
-            return "%s.f64 = dalReadF32(base, %s);" % (op.fpr(op.f("frD")), ea)
+            return "%s.f64 = tox2ReadF32(base, %s);" % (op.fpr(op.f("frD")), ea)
         if kind == "float":
-            return "%s.u64 = dalRead64(base, %s);" % (op.fpr(op.f("frD")), ea)
+            return "%s.u64 = tox2Read64(base, %s);" % (op.fpr(op.f("frD")), ea)
         return "%s = %s;" % (op.gpr(op.f("rD")), _load_value(access, ea))
     if kind == "single":
-        return "dalWriteF32(base, %s, %s.f64);" % (ea, op.fpr(op.f("frS")))
+        return "tox2WriteF32(base, %s, %s.f64);" % (ea, op.fpr(op.f("frS")))
     if kind == "float":
-        return "dalWrite64(base, %s, %s.u64);" % (ea, op.fpr(op.f("frS")))
+        return "tox2Write64(base, %s, %s.u64);" % (ea, op.fpr(op.f("frS")))
     if kind == "word":
         # stfiwx stores the low word of the FPR bits (RPCS3 `STFIWX`).
-        return "dalWrite32(base, %s, (uint32_t)%s.u64);" % (ea, op.fpr(op.f("frS")))
+        return "tox2Write32(base, %s, (uint32_t)%s.u64);" % (ea, op.fpr(op.f("frS")))
     return "%s(base, %s, %s);" % (_WRITE[access.width],
                                   ea, _store_value(access, op.gpr(op.f("rS"))))
 
@@ -131,9 +131,9 @@ def emit_multiple(op: Op) -> list[str] | None:
     for k, reg in enumerate(range(first, 32)):
         ea = "(uint32_t)(t0 + %d)" % (4 * k) if k else "(uint32_t)t0"
         if op.name == "lmw":
-            lines.append("%s = dalRead32(base, %s);" % (op.gpr(reg), ea))
+            lines.append("%s = tox2Read32(base, %s);" % (op.gpr(reg), ea))
         else:
-            lines.append("dalWrite32(base, %s, (uint32_t)%s);" % (ea, op.gpr(reg)))
+            lines.append("tox2Write32(base, %s, (uint32_t)%s);" % (ea, op.gpr(reg)))
     return lines
 
 
@@ -150,11 +150,11 @@ def _string_ea_and_count(op: Op, indexed: bool) -> tuple[str, str]:
 def emit_load_string(op: Op) -> list[str] | None:
     # RPCS3 LSWI, LSWX
     ea, count = _string_ea_and_count(op, op.name == "lswx")
-    return ["dalLoadString(ctx, base, %s, %d, %s);" % (ea, op.f("rD"), count)]
+    return ["tox2LoadString(ctx, base, %s, %d, %s);" % (ea, op.f("rD"), count)]
 
 
 @handler("stswi", "stswx")
 def emit_store_string(op: Op) -> list[str] | None:
     # RPCS3 STSWI, STSWX
     ea, count = _string_ea_and_count(op, op.name == "stswx")
-    return ["dalStoreString(ctx, base, %s, %d, %s);" % (ea, op.f("rS"), count)]
+    return ["tox2StoreString(ctx, base, %s, %d, %s);" % (ea, op.f("rS"), count)]

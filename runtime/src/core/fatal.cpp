@@ -16,12 +16,12 @@
 
 #include <crtdbg.h>
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 std::atomic<CensusPrinterFn> g_census_printer{nullptr};
 std::atomic<bool> g_stopping{false};
-thread_local const DalPpuContext* t_fatal_context = nullptr;
+thread_local const Tox2PpuContext* t_fatal_context = nullptr;
 thread_local bool t_in_stop = false;
 
 // Takes the single right to end the process. A second host thread parks until the first one
@@ -61,21 +61,21 @@ bool readableStackWord(const std::uint8_t* base, std::uint64_t addr) {
     return (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
 }
 
-void dumpContext(const DalPpuContext& ctx) {
+void dumpContext(const Tox2PpuContext& ctx) {
     logInfo("registers:");
     for (int row = 0; row < 32; row += 4) {
         logInfo("  r{:<2} {:016x}  r{:<2} {:016x}  r{:<2} {:016x}  r{:<2} {:016x}", row, ctx.gpr[row], row + 1,
                 ctx.gpr[row + 1], row + 2, ctx.gpr[row + 2], row + 3, ctx.gpr[row + 3]);
     }
-    logInfo("  lr {:016x}  ctr {:016x}  cr {:08x}  xer {:08x}", ctx.lr, ctx.ctr, dalMfcr(&ctx),
-            static_cast<std::uint32_t>(dalMfxer(&ctx)));
+    logInfo("  lr {:016x}  ctr {:016x}  cr {:08x}  xer {:08x}", ctx.lr, ctx.ctr, tox2Mfcr(&ctx),
+            static_cast<std::uint32_t>(tox2Mfxer(&ctx)));
 
-    const std::uint32_t count = ctx.trace_pos < kDalTraceSize ? ctx.trace_pos : kDalTraceSize;
+    const std::uint32_t count = ctx.trace_pos < kTox2TraceSize ? ctx.trace_pos : kTox2TraceSize;
     logInfo("trace (oldest -> newest, {} entries):", count);
     std::string line;
     for (std::uint32_t i = 0; i < count; i++) {
         // Entry i of the logical sequence ending at trace_pos - 1.
-        const std::uint32_t slot = (ctx.trace_pos - count + i) & (kDalTraceSize - 1);
+        const std::uint32_t slot = (ctx.trace_pos - count + i) & (kTox2TraceSize - 1);
         line += std::format(" {:08x}", ctx.trace[slot]);
         if ((i & 7) == 7 || i + 1 == count) {
             logInfo("{}", line);
@@ -97,7 +97,7 @@ void dumpContext(const DalPpuContext& ctx) {
 
 }  // namespace
 
-std::size_t walkGuestStack(const DalPpuContext& ctx, const std::uint8_t* base, GuestFrame* out,
+std::size_t walkGuestStack(const Tox2PpuContext& ctx, const std::uint8_t* base, GuestFrame* out,
                            std::size_t max_frames) {
     if (base == nullptr) {
         return 0;
@@ -105,12 +105,12 @@ std::size_t walkGuestStack(const DalPpuContext& ctx, const std::uint8_t* base, G
     std::uint64_t sp = ctx.gpr[1];
     std::size_t count = 0;
     while (count < max_frames && readableStackWord(base, sp)) {
-        const std::uint64_t back_chain = dalRead64(base, static_cast<std::uint32_t>(sp));
+        const std::uint64_t back_chain = tox2Read64(base, static_cast<std::uint32_t>(sp));
         // The stack grows down, so a valid chain strictly ascends; this also rules out cycles.
         if (back_chain <= sp || !readableStackWord(base, back_chain) || !readableStackWord(base, back_chain + 16)) {
             break;
         }
-        const std::uint64_t lr = dalRead64(base, static_cast<std::uint32_t>(back_chain + 16));
+        const std::uint64_t lr = tox2Read64(base, static_cast<std::uint32_t>(back_chain + 16));
         if (lr == 0 || lr > 0xFFFFFFFFull) {
             break;
         }
@@ -133,11 +133,11 @@ std::string_view fatalKindName(FatalKind kind) {
 
 void setCensusPrinter(CensusPrinterFn fn) { g_census_printer.store(fn); }
 
-void setFatalContext(const DalPpuContext* ctx) { t_fatal_context = ctx; }
+void setFatalContext(const Tox2PpuContext* ctx) { t_fatal_context = ctx; }
 
 void fatal(FatalKind kind, std::string_view message) {
     enterStop();
-    logInfo("dal: stop: fatal {}: {}", fatalKindName(kind), message);
+    logInfo("tox2: stop: fatal {}: {}", fatalKindName(kind), message);
     if (t_fatal_context != nullptr) {
         dumpContext(*t_fatal_context);
     }
@@ -179,4 +179,4 @@ std::filesystem::path executableDirectory() {
     }
 }
 
-}  // namespace dal
+}  // namespace tox2

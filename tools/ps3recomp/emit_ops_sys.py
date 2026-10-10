@@ -20,9 +20,9 @@ _TBR_UPPER = 269
 def _timebase(op: Op, spr: int) -> list[str] | None:
     """`rD` = lower or upper half of the time base, or None for any other number."""
     if spr == _TBR_LOWER:
-        return ["%s = dalMftb(ctx);" % op.gpr(op.f("rD"))]
+        return ["%s = tox2Mftb(ctx);" % op.gpr(op.f("rD"))]
     if spr == _TBR_UPPER:
-        return ["%s = dalMftb(ctx) >> 32;" % op.gpr(op.f("rD"))]
+        return ["%s = tox2Mftb(ctx) >> 32;" % op.gpr(op.f("rD"))]
     return None
 
 
@@ -30,7 +30,7 @@ def _timebase(op: Op, spr: int) -> list[str] | None:
 def emit_mfspr(op: Op) -> list[str] | None:
     # RPCS3 MFSPR (it also serves the time base through SPR 268/269)
     spr, rd = op.f("SPR"), op.gpr(op.f("rD"))
-    simple = {_SPR_XER: "dalMfxer(ctx)", _SPR_LR: "ctx->lr", _SPR_CTR: "ctx->ctr",
+    simple = {_SPR_XER: "tox2Mfxer(ctx)", _SPR_LR: "ctx->lr", _SPR_CTR: "ctx->ctr",
               _SPR_VRSAVE: "ctx->vrsave"}
     if spr in simple:
         return ["%s = %s;" % (rd, simple[spr])]
@@ -42,7 +42,7 @@ def emit_mtspr(op: Op) -> list[str] | None:
     # RPCS3 MTSPR
     spr, rs = op.f("SPR"), op.gpr(op.f("rS"))
     if spr == _SPR_XER:
-        return ["dalMtxer(ctx, %s);" % rs]
+        return ["tox2Mtxer(ctx, %s);" % rs]
     if spr in (_SPR_LR, _SPR_CTR):
         return ["ctx->%s = %s;" % ("lr" if spr == _SPR_LR else "ctr", rs)]
     if spr == _SPR_VRSAVE:
@@ -65,7 +65,7 @@ def _first_field(mask: int) -> int:
 @handler("mfcr")
 def emit_mfcr(op: Op) -> list[str] | None:
     # RPCS3 MFCR
-    return ["%s = dalMfcr(ctx);" % op.gpr(op.f("rD"))]
+    return ["%s = tox2Mfcr(ctx);" % op.gpr(op.f("rD"))]
 
 
 @handler("mfocrf")
@@ -75,7 +75,7 @@ def emit_mfocrf(op: Op) -> list[str] | None:
     if crm == 0:
         return op.unsupported("crm=0")
     field = _first_field(crm)
-    return ["%s = (uint64_t)dalGetCrField(ctx, %d) << %d;" % (op.gpr(op.f("rD")), field,
+    return ["%s = (uint64_t)tox2GetCrField(ctx, %d) << %d;" % (op.gpr(op.f("rD")), field,
                                                                28 - 4 * field)]
 
 
@@ -85,7 +85,7 @@ def emit_mtcrf(op: Op) -> list[str] | None:
     crm, rs = op.f("CRM"), op.gpr(op.f("rS"))
     if crm == 0:
         return []
-    return ["dalMtcrf(ctx, 0x%02xu, (uint32_t)%s);" % (crm, rs)]
+    return ["tox2Mtcrf(ctx, 0x%02xu, (uint32_t)%s);" % (crm, rs)]
 
 
 @handler("mtocrf")
@@ -95,14 +95,14 @@ def emit_mtocrf(op: Op) -> list[str] | None:
     if crm == 0:
         return op.unsupported("crm=0")
     field = _first_field(crm)
-    return ["dalSetCrField(ctx, %d, (uint32_t)(%s >> %d) & 15u);" % (field, op.gpr(op.f("rS")),
+    return ["tox2SetCrField(ctx, %d, (uint32_t)(%s >> %d) & 15u);" % (field, op.gpr(op.f("rS")),
                                                                     28 - 4 * field)]
 
 
 @handler("mcrf")
 def emit_mcrf(op: Op) -> list[str] | None:
     # RPCS3 MCRF
-    return ["dalSetCrField(ctx, %d, dalGetCrField(ctx, %d));" % (op.f("crfD"), op.f("crfS"))]
+    return ["tox2SetCrField(ctx, %d, tox2GetCrField(ctx, %d));" % (op.f("crfD"), op.f("crfS"))]
 
 
 # Operands are 0/1 bytes, so `^ 1` is logical not.
@@ -133,25 +133,25 @@ def emit_cr_logical(op: Op) -> list[str] | None:
 @handler("sync")
 def emit_sync(op: Op) -> list[str] | None:
     # RPCS3 SYNC: L = 1 is lwsync; L = 0 and the reserved/ptesync values are full barriers.
-    kind = "kDalSyncLight" if op.f("L_sync") == 1 else "kDalSyncHeavy"
-    return ["dalSync(ctx, %s);" % kind]
+    kind = "kTox2SyncLight" if op.f("L_sync") == 1 else "kTox2SyncHeavy"
+    return ["tox2Sync(ctx, %s);" % kind]
 
 
 @handler("eieio")
 def emit_eieio(op: Op) -> list[str] | None:
-    return ["dalSync(ctx, kDalSyncEieio);"]
+    return ["tox2Sync(ctx, kTox2SyncEieio);"]
 
 
 @handler("isync")
 def emit_isync(op: Op) -> list[str] | None:
     # RPCS3 ISYNC
-    return ["dalSync(ctx, kDalSyncIsync);"]
+    return ["tox2Sync(ctx, kTox2SyncIsync);"]
 
 
 @handler("lwarx", "ldarx")
 def emit_load_reserved(op: Op) -> list[str] | None:
     # RPCS3 LWARX, LDARX: the runtime records the reservation; lwarx zero-extends.
-    helper = "dalLwarx" if op.name == "lwarx" else "dalLdarx"
+    helper = "tox2Lwarx" if op.name == "lwarx" else "tox2Ldarx"
     return ["%s = %s(ctx, base, %s);" % (op.gpr(op.f("rD")), helper, op.ea_x())]
 
 
@@ -160,15 +160,15 @@ def emit_store_conditional(op: Op) -> list[str] | None:
     # RPCS3 STWCX, STDCX: CR0 = {lt 0, gt 0, eq success, so XER.SO}.
     word = op.name == "stwcx."
     value = "(uint32_t)%s" % op.gpr(op.f("rS")) if word else op.gpr(op.f("rS"))
-    return ["bool t0 = %s(ctx, base, %s, %s);" % ("dalStwcx" if word else "dalStdcx",
+    return ["bool t0 = %s(ctx, base, %s, %s);" % ("tox2Stwcx" if word else "tox2Stdcx",
                                                   op.ea_x(), value),
-            "dalSetCr0Conditional(ctx, t0);"]
+            "tox2SetCr0Conditional(ctx, t0);"]
 
 
 @handler("dcbz")
 def emit_dcbz(op: Op) -> list[str] | None:
     # RPCS3 DCBZ: clears the whole 128-byte line containing the address.
-    return ["dalDcbz(ctx, base, %s);" % op.ea_x()]
+    return ["tox2Dcbz(ctx, base, %s);" % op.ea_x()]
 
 
 # Prefetch and cache-maintenance hints have no architectural effect on guest-visible state here.

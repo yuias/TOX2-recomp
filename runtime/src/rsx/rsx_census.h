@@ -1,6 +1,6 @@
 #pragma once
 
-// Opt-in census of the register arguments the RSX consumer is fed (dal_game --rsx-census FILE). It
+// Opt-in census of the register arguments the RSX consumer is fed (tox2_game --rsx-census FILE). It
 // answers "what does the game ask the GPU to do": surface and texture formats, vertex layouts,
 // primitive types, draw sizes, render state, the fragment and vertex programs (dumped to disk) and
 // the flip rate. The consumer calls the on*() hooks only while the census is enabled.
@@ -23,7 +23,7 @@
 
 #include "rsx/rsx_registers.h"
 
-namespace dal {
+namespace tox2 {
 
 inline constexpr std::uint32_t kRsxFpMaxInstructions = 2048;  // scan limit for a program without an end flag
 
@@ -153,4 +153,4 @@ private:
     std::vector<std::uint32_t> flips_per_second_, vblanks_per_second_, draws_per_second_;
 };
 
-}  // namespace dal
+}  // namespace tox2

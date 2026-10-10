@@ -13,11 +13,11 @@
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/threads.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 // RPCS3 `c_max_ppu_name_size` is 28 including the terminator.
@@ -33,10 +33,10 @@ constexpr std::uint32_t kCellCancel = 1;
 enum class JoinState { Claimed, Joined };
 std::map<std::uint32_t, JoinState> g_join_states;
 
-GuestThread* threadOf(DalPpuContext* ctx) { return static_cast<GuestThread*>(ctx->runtime); }
+GuestThread* threadOf(Tox2PpuContext* ctx) { return static_cast<GuestThread*>(ctx->runtime); }
 
 // A thread that has exited and will never be joined is removed from the id manager in RPCS3.
-GuestThread* findLiveThread(DalPpuContext* ctx, std::uint32_t id) {
+GuestThread* findLiveThread(Tox2PpuContext* ctx, std::uint32_t id) {
     if (GuestThread* self = threadOf(ctx); self != nullptr && self->id() == id) return self;
     GuestThread* thread = findThread(id);
     if (thread == nullptr || thread->state() != ThreadState::Exited) return thread;
@@ -89,7 +89,7 @@ std::uint32_t ppuThreadCreate(std::uint8_t* base, std::uint32_t thread_id, std::
         return result;
     }
 
-    dalWrite64(base, thread_id, thread->id());
+    tox2Write64(base, thread_id, thread->id());
     if ((flags & kCreateInterrupt) != 0) return kCellOk;
 
     // lv2 would run a higher-priority thread at once. The game relies on it: its mixer thread (90)
@@ -99,33 +99,33 @@ std::uint32_t ppuThreadCreate(std::uint8_t* base, std::uint32_t thread_id, std::
         startGuestThread(thread);
         return kCellOk;
     }
-    logDebug("dal: thread: {:#010x} {} prio {} starts before creator {:#010x} prio {}", thread->id(), thread->name(),
+    logDebug("tox2: thread: {:#010x} {} prio {} starts before creator {:#010x} prio {}", thread->id(), thread->name(),
              priority, creator->id(), creator->priority());
     if (!startGuestThreadFirst(thread)) {
-        logInfo("dal: thread: {:#010x} {} not queued within {} ms; creator continues", thread->id(), thread->name(),
+        logInfo("tox2: thread: {:#010x} {} not queued within {} ms; creator continues", thread->id(), thread->name(),
                 kStartFirstBound.count() / 1000);
     }
-    creator->context().preempt_budget = kDalPreemptBudget;
+    creator->context().preempt_budget = kTox2PreemptBudget;
     return kCellOk;
 }
 
 void resetPpuThreadState() { g_join_states.clear(); }
 
 // 41 _sys_ppu_thread_exit(u64 value): the raw syscall; the HLE wrapper frees the TLS block first.
-void sysPpuThreadExit(DalPpuContext* ctx, std::uint8_t* base) {
+void sysPpuThreadExit(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     exitCurrentThread(ctx->gpr[3]);
 }
 
 // 43 sys_ppu_thread_yield: 0 after a switch to another thread, CELL_CANCEL when none was runnable.
-void sysPpuThreadYield(DalPpuContext* ctx, std::uint8_t* base) {
+void sysPpuThreadYield(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
-    ctx->preempt_budget = kDalPreemptBudget;
+    ctx->preempt_budget = kTox2PreemptBudget;
     ctx->gpr[3] = yieldGuestLock() ? kCellOk : kCellCancel;
 }
 
 // 44 sys_ppu_thread_join(u32 thread_id, u64* vptr)
-void sysPpuThreadJoin(DalPpuContext* ctx, std::uint8_t* base) {
+void sysPpuThreadJoin(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto id = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto vptr = static_cast<std::uint32_t>(ctx->gpr[4]);
 
@@ -155,13 +155,13 @@ void sysPpuThreadJoin(DalPpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, kCellEfault);
         return;
     }
-    dalWrite64(base, vptr, thread->exitValue());
+    tox2Write64(base, vptr, thread->exitValue());
     setResultCode(ctx, kCellOk);
 }
 
 // 47 sys_ppu_thread_set_priority(u32 thread_id, s32 prio): stored only (no priority scheduling).
 // ppuThreadCreate compares the stored value of the creator with the priority of a new thread.
-void sysPpuThreadSetPriority(DalPpuContext* ctx, std::uint8_t* base) {
+void sysPpuThreadSetPriority(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const auto prio = static_cast<std::int32_t>(ctx->gpr[4]);
     if (prio < kMinPriority || prio > kMaxPriority) {
@@ -178,14 +178,14 @@ void sysPpuThreadSetPriority(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // 48 sys_ppu_thread_get_priority(u32 thread_id, s32* priop)
-void sysPpuThreadGetPriority(DalPpuContext* ctx, std::uint8_t* base) {
+void sysPpuThreadGetPriority(Tox2PpuContext* ctx, std::uint8_t* base) {
     GuestThread* thread = findLiveThread(ctx, static_cast<std::uint32_t>(ctx->gpr[3]));
     if (thread == nullptr) {
         setResultCode(ctx, kCellEsrch);
         return;
     }
-    dalWrite32(base, static_cast<std::uint32_t>(ctx->gpr[4]), static_cast<std::uint32_t>(thread->priority()));
+    tox2Write32(base, static_cast<std::uint32_t>(ctx->gpr[4]), static_cast<std::uint32_t>(thread->priority()));
     setResultCode(ctx, kCellOk);
 }
 
-}  // namespace dal
+}  // namespace tox2

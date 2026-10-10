@@ -5,7 +5,7 @@
 #include <map>
 #include <memory>
 
-namespace dal {
+namespace tox2 {
 
 // One address range of the guest address space with its own allocator. `guard` bytes below and
 // above every allocation stay uncommitted so that a stray access faults instead of corrupting a
@@ -39,7 +39,7 @@ public:
     GuestMemory(const GuestMemory&) = delete;
     GuestMemory& operator=(const GuestMemory&) = delete;
 
-    // Reserves 4 GiB + kDalGuestGuardSize as PAGE_NOACCESS. The newest reservation is the one the
+    // Reserves 4 GiB + kTox2GuestGuardSize as PAGE_NOACCESS. The newest reservation is the one the
     // fault handler recognises.
     bool reserve();
     std::uint8_t* base() const { return base_; }
@@ -115,4 +115,4 @@ void installFaultHandler();
 // a stack overflow. Call it on every thread that runs guest code.
 void reserveFaultStack();
 
-}  // namespace dal
+}  // namespace tox2

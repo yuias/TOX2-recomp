@@ -4,15 +4,15 @@
 #include <string_view>
 
 #include "core/elf_loader.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 
-namespace dal {
+namespace tox2 {
 
 // Process-wide thread-local storage setup of RPCS3 `sys_initialize_tls`: does nothing when r13 is
 // already set; otherwise reserves the TLS area, gives the calling thread its block and stores the
 // thread pointer in ctx->gpr[13]. Returns r13. Call with the guest lock held (or before any guest
 // thread runs). The internal lwmutexes and mutexes the HLE version also creates are not made here.
-std::uint32_t initializeTls(DalPpuContext* ctx, std::uint8_t* base, std::uint32_t thread_id, std::uint32_t vaddr,
+std::uint32_t initializeTls(Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t thread_id, std::uint32_t vaddr,
                             std::uint32_t filesz, std::uint32_t memsz);
 
 // Takes a TLS block for a new thread and returns its r13, or 0 when initializeTls has not run or
@@ -28,4 +28,4 @@ void freeTls(std::uint32_t r13);
 // lock, so it begins once this function has returned.
 void bootMainThread(const LoadedExecutable& exe, std::string_view argv0);
 
-}  // namespace dal
+}  // namespace tox2

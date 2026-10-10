@@ -13,7 +13,7 @@
 
 #include "input/gamepad_backend.h"
 
-namespace dal {
+namespace tox2 {
 
 struct GameInputBackendOptions {
     // false: foreground-only (the game); true: background input enabled (console tools, whose
@@ -47,4 +47,4 @@ SteamContext detectSteamContext();
 // it does not, whatever GameInput reports for a background process.
 bool processOwnsForegroundWindow();
 
-}  // namespace dal
+}  // namespace tox2

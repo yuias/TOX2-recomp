@@ -13,7 +13,7 @@
 #include "core/log.h"
 #include "rsx/rsx_census.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::uint32_t kSpirvMagic = 0x07230203;
@@ -53,7 +53,7 @@ void writeCache(const std::filesystem::path& path, const std::vector<std::uint32
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     if (ec) {
-        logOnce(LogLevel::Warn, "shader-cache-dir", "dal: shader cache: cannot create {}: {}",
+        logOnce(LogLevel::Warn, "shader-cache-dir", "tox2: shader cache: cannot create {}: {}",
                 path.parent_path().string(), ec.message());
         return;
     }
@@ -118,4 +118,4 @@ std::expected<std::vector<std::uint32_t>, std::string> compileGlsl(ShaderStage s
     return words;
 }
 
-}  // namespace dal
+}  // namespace tox2

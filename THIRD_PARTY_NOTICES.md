@@ -30,7 +30,7 @@ redistributes the runtime.
 `GameInput.lib` is a static loader: it links no GameInput DLL, so the executables start on a machine
 without a GameInput runtime. At the first GameInput call it uses the runtime installed on the
 machine (the in-box `GameInput.dll` or the installed `GameInputRedist.dll`). If no runtime that
-implements API version 3 is found, `dal_game` logs one warning that names `GameInputRedist.msi` and
+implements API version 3 is found, `tox2_game` logs one warning that names `GameInputRedist.msi` and
 the gamepads are disabled; the keyboard keeps working.
 
 ## FFmpeg
@@ -41,7 +41,7 @@ also imports `libswresample`, none of whose functions the runtime calls). FFmpeg
 this repository and no FFmpeg binary is tracked. `tools/fetch-ffmpeg.ps1` downloads a pinned,
 SHA-256 verified build into `generated/deps/ffmpeg` (`-From <zip>` takes a local copy of the
 pinned zip and applies the same check); the pin is in `cmake/ffmpeg.cmake`. The build copies the
-four DLLs, the FFmpeg `LICENSE.txt` and this notice next to `dal_game` (`bin/` of the build
+four DLLs, the FFmpeg `LICENSE.txt` and this notice next to `tox2_game` (`bin/` of the build
 directory, the licence and notice under `bin/licenses/ffmpeg/`).
 
 | | |
@@ -67,7 +67,7 @@ and in the Windows system directory (not in `PATH` or the working directory). Th
 by another build of the same major versions (`avcodec-63`, `avutil-61`, `swresample-7`,
 `swscale-10`) without rebuilding this project; a different major version is reported as
 unavailable. Without usable DLLs the runtime logs two warnings,
-`dal: sail: codecs unavailable: <reason>` and `dal: atrac: no decoder: <reason>`. Every movie then
+`tox2: sail: codecs unavailable: <reason>` and `tox2: atrac: no decoder: <reason>`. Every movie then
 plays as black frames without sound for the duration of its stream and ends normally, and the
 game's music and sound effects (`cellAtrac`) are silent.
 

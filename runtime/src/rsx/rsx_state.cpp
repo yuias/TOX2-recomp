@@ -4,7 +4,7 @@
 
 #include "core/guest_memory.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 RsxState g_state;
@@ -113,4 +113,4 @@ std::uint32_t rsxUnmapEa(std::uint32_t ea) {
     return 0;
 }
 
-}  // namespace dal
+}  // namespace tox2

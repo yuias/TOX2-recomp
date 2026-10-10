@@ -13,7 +13,7 @@
 
 #include "core/log.h"
 
-namespace dal {
+namespace tox2 {
 
 namespace {
 
@@ -784,4 +784,4 @@ std::unique_ptr<AtracDecoderFactory> createFfmpegAtracDecoderFactory(std::string
     return std::make_unique<FfmpegAtracDecoderFactory>(*api);
 }
 
-}  // namespace dal
+}  // namespace tox2

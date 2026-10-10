@@ -31,7 +31,7 @@ constexpr int kExitSkip = 77;
 
 // The runtime reports some devices a few tens of milliseconds after its blocking enumeration has
 // returned; wait until the list has been quiet so the stability checks below are not racing it.
-void waitForDevices(dal::GamepadBackend& backend) {
+void waitForDevices(tox2::GamepadBackend& backend) {
     constexpr auto kQuiet = std::chrono::milliseconds(250);
     constexpr auto kLimit = std::chrono::seconds(2);
     const auto start = std::chrono::steady_clock::now();
@@ -46,17 +46,17 @@ void waitForDevices(dal::GamepadBackend& backend) {
     }
 }
 
-void testBackend(dal::GameInputBackend& backend) {
+void testBackend(tox2::GameInputBackend& backend) {
     CHECK(!backend.description().empty());
     waitForDevices(backend);
 
     const std::uint64_t generation = backend.deviceGeneration();
-    const std::vector<dal::GamepadDeviceInfo> devices = backend.devices();
+    const std::vector<tox2::GamepadDeviceInfo> devices = backend.devices();
     std::printf("input gameinput: %s, %zu devices\n", backend.description().c_str(), devices.size());
 
     std::set<std::uint64_t> ids;
     bool all_valid = true;
-    for (const dal::GamepadDeviceInfo& info : devices) {
+    for (const tox2::GamepadDeviceInfo& info : devices) {
         ids.insert(info.id);
         // The device callback is registered for these kinds only.
         all_valid = all_valid && info.id != 0 && info.kinds != 0;
@@ -78,8 +78,8 @@ void testBackend(dal::GameInputBackend& backend) {
     CHECK(backend.deviceGeneration() == generation);
 
     // A present pad answers read() without crashing; whether it has a reading is up to the hardware.
-    for (const dal::GamepadDeviceInfo& info : devices) {
-        if ((info.kinds & dal::kGamepadKindGamepad) == 0) {
+    for (const tox2::GamepadDeviceInfo& info : devices) {
+        if ((info.kinds & tox2::kGamepadKindGamepad) == 0) {
             CHECK(!backend.read(info.id).has_value());
             continue;
         }
@@ -91,10 +91,10 @@ void testBackend(dal::GameInputBackend& backend) {
 }
 
 void testSteamContext() {
-    const dal::SteamContext steam = dal::detectSteamContext();
+    const tox2::SteamContext steam = tox2::detectSteamContext();
     CHECK(steam.process_id != 0);
     for (const auto& [name, value] : steam.env) {
-        CHECK(std::ranges::find(dal::kSteamEnvVars, name) != dal::kSteamEnvVars.end());
+        CHECK(std::ranges::find(tox2::kSteamEnvVars, name) != tox2::kSteamEnvVars.end());
         CHECK(!value.empty());
     }
 }
@@ -104,7 +104,7 @@ void testSteamContext() {
 int main() {
     testSteamContext();
 
-    auto backend = dal::makeGameInputBackend({.background_input = true});
+    auto backend = tox2::makeGameInputBackend({.background_input = true});
     if (!backend) {
         std::printf("input gameinput: skipped, GameInput unavailable: %s\n", backend.error().c_str());
         return g_failed == 0 ? kExitSkip : 1;

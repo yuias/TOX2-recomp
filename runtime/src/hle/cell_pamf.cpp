@@ -14,12 +14,12 @@
 
 #include "core/guest_memory.h"
 #include "core/log.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/cell_sail_internal.h"
 #include "hle/cell_sail_types.h"
 #include "hle/hle.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "cellPamf";
@@ -27,7 +27,7 @@ constexpr char kModule[] = "cellPamf";
 constexpr std::uint32_t kCodecCount = 6;  // PamfCodec::Avc .. UserData
 
 // Block layout (big-endian words): magic, total stream count, then one count per PamfCodec.
-constexpr std::uint32_t kDatabaseMagic = 0x44414c44;  // "DALD"
+constexpr std::uint32_t kDatabaseMagic = 0x54583244;  // "TX2D"
 constexpr std::uint32_t kDatabaseTotal = 4;
 constexpr std::uint32_t kDatabaseCounts = 8;
 static_assert(kDatabaseCounts + 4 * kCodecCount <= sail::kPamfReaderSize);
@@ -46,19 +46,19 @@ std::uint32_t countStreams(const std::array<std::uint32_t, kCodecCount>& counts,
 }
 
 // cellPamfReaderGetNumberOfSpecificStreams(CellPamfReader* pSelf, u8 streamType)
-void pamfGetNumberOfSpecificStreams(DalPpuContext* ctx, std::uint8_t* base) {
+void pamfGetNumberOfSpecificStreams(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t reader = argU32(ctx, 0);
     const auto type = static_cast<std::uint32_t>(ctx->gpr[4] & 0xff);
     std::uint32_t found = 0;
-    if (sail_hle::guestMapped(reader, sail::kPamfReaderSize) && dalRead32(base, reader) == kDatabaseMagic) {
+    if (sail_hle::guestMapped(reader, sail::kPamfReaderSize) && tox2Read32(base, reader) == kDatabaseMagic) {
         std::array<std::uint32_t, kCodecCount> counts{};
         for (std::uint32_t i = 0; i < kCodecCount; i++) {
-            counts[i] = dalRead32(base, reader + kDatabaseCounts + 4 * i);
+            counts[i] = tox2Read32(base, reader + kDatabaseCounts + 4 * i);
         }
         found = countStreams(counts, type);
     } else {
         logOnce(LogLevel::Warn, "pamf-reader-unknown",
-                "dal: pamf: reader {:#010x} is not a database from cellSailDescriptorCreateDatabase", reader);
+                "tox2: pamf: reader {:#010x} is not a database from cellSailDescriptorCreateDatabase", reader);
     }
     ctx->gpr[3] = found > 0xff ? 0xff : found;
 }
@@ -81,19 +81,19 @@ bool writePamfDatabase(std::uint8_t* base, std::uint32_t addr, const PamfInfo& i
         const auto codec = static_cast<std::size_t>(stream.codec);
         if (codec < kCodecCount) counts[codec]++;
     }
-    dalWrite32(base, addr, kDatabaseMagic);
-    dalWrite32(base, addr + kDatabaseTotal, static_cast<std::uint32_t>(info.streams.size()));
+    tox2Write32(base, addr, kDatabaseMagic);
+    tox2Write32(base, addr + kDatabaseTotal, static_cast<std::uint32_t>(info.streams.size()));
     for (std::uint32_t i = 0; i < kCodecCount; i++) {
-        dalWrite32(base, addr + kDatabaseCounts + 4 * i, counts[i]);
+        tox2Write32(base, addr + kDatabaseCounts + 4 * i, counts[i]);
     }
     return true;
 }
 
 bool clearPamfDatabase(std::uint8_t* base, std::uint32_t addr) {
-    if (!guestMapped(addr, sail::kPamfReaderSize) || dalRead32(base, addr) != kDatabaseMagic) return false;
+    if (!guestMapped(addr, sail::kPamfReaderSize) || tox2Read32(base, addr) != kDatabaseMagic) return false;
     std::memset(base + addr, 0, sail::kPamfReaderSize);
     return true;
 }
 
 }  // namespace sail_hle
-}  // namespace dal
+}  // namespace tox2

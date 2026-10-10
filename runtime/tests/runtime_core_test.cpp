@@ -35,7 +35,7 @@
 #include "core/param_sfo.h"
 #include "core/threads.h"
 #include "core/timer_resolution.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "input/keyboard_pad.h"
 #include "input/pad_buttons.h"
@@ -87,17 +87,17 @@ std::optional<std::uint32_t> fakeThreadId() { return g_thread_id; }
 
 void testLogLevelsAndPrefix() {
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::setGuestThreadIdProvider(&fakeThreadId);
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::setGuestThreadIdProvider(&fakeThreadId);
 
     g_thread_id = std::nullopt;
-    dal::logInfo("value {}", 7);
+    tox2::logInfo("value {}", 7);
     g_thread_id = 0x01000000u;
-    dal::logWarn("w {:#x}", 255u);
-    dal::logError("e");
+    tox2::logWarn("w {:#x}", 255u);
+    tox2::logError("e");
 
-    dal::setLogSink({});
-    dal::setGuestThreadIdProvider(nullptr);
+    tox2::setLogSink({});
+    tox2::setGuestThreadIdProvider(nullptr);
 
     CHECK(lines.size() == 3);
     if (lines.size() == 3) {
@@ -109,27 +109,27 @@ void testLogLevelsAndPrefix() {
 
 void testLogVisibleLevel() {
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::setGuestThreadIdProvider(nullptr);
-    dal::resetLogOnce();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::setGuestThreadIdProvider(nullptr);
+    tox2::resetLogOnce();
 
-    CHECK(!dal::logEnabled(dal::LogLevel::Debug));
-    CHECK(dal::logEnabled(dal::LogLevel::Info));
-    dal::logTrace("t0");
-    dal::logDebug("d0");
-    dal::logInfo("i0");
+    CHECK(!tox2::logEnabled(tox2::LogLevel::Debug));
+    CHECK(tox2::logEnabled(tox2::LogLevel::Info));
+    tox2::logTrace("t0");
+    tox2::logDebug("d0");
+    tox2::logInfo("i0");
     const std::size_t default_count = lines.size();
 
     // A suppressed logOnce does not use up its key.
-    dal::logOnce(dal::LogLevel::Debug, "level-key", "once");
+    tox2::logOnce(tox2::LogLevel::Debug, "level-key", "once");
 
-    dal::setLogLevel(dal::LogLevel::Debug);
-    dal::logTrace("t1");
-    dal::logDebug("d1 {}", 5);
-    dal::logOnce(dal::LogLevel::Debug, "level-key", "once");
+    tox2::setLogLevel(tox2::LogLevel::Debug);
+    tox2::logTrace("t1");
+    tox2::logDebug("d1 {}", 5);
+    tox2::logOnce(tox2::LogLevel::Debug, "level-key", "once");
 
-    dal::setLogLevel(dal::LogLevel::Info);
-    dal::setLogSink({});
+    tox2::setLogLevel(tox2::LogLevel::Info);
+    tox2::setLogSink({});
 
     CHECK(default_count == 1);
     CHECK(lines.size() == 3);
@@ -138,25 +138,25 @@ void testLogVisibleLevel() {
         CHECK(lines[1] == "[host] debug: d1 5");
         CHECK(lines[2] == "[host] debug: once");
     }
-    CHECK(!dal::logEnabled(dal::LogLevel::Debug));
+    CHECK(!tox2::logEnabled(tox2::LogLevel::Debug));
 }
 
 void testLogOnce() {
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetLogOnce();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetLogOnce();
 
     for (int i = 0; i < 3; i++) {
-        dal::logOnce("key-a", "a {}", i);
+        tox2::logOnce("key-a", "a {}", i);
     }
-    dal::logOnce("key-b", "b");
-    dal::logOnce(dal::LogLevel::Warn, "key-b", "b again");
-    dal::logOnce(dal::LogLevel::Warn, "key-c", "c");
+    tox2::logOnce("key-b", "b");
+    tox2::logOnce(tox2::LogLevel::Warn, "key-b", "b again");
+    tox2::logOnce(tox2::LogLevel::Warn, "key-c", "c");
 
-    dal::resetLogOnce();
-    dal::logOnce("key-a", "a after reset");
+    tox2::resetLogOnce();
+    tox2::logOnce("key-a", "a after reset");
 
-    dal::setLogSink({});
+    tox2::setLogSink({});
 
     CHECK(lines.size() == 4);
     if (lines.size() == 4) {
@@ -169,8 +169,8 @@ void testLogOnce() {
 
 constexpr std::uint64_t kGuestSpace = 1ull << 32;
 
-dal::GuestMemory* newMemory() {
-    auto* memory = new dal::GuestMemory;
+tox2::GuestMemory* newMemory() {
+    auto* memory = new tox2::GuestMemory;
     if (!memory->reserve()) {
         std::fprintf(stderr, "cannot reserve guest memory\n");
         std::exit(1);
@@ -178,14 +178,14 @@ dal::GuestMemory* newMemory() {
     return memory;
 }
 
-DWORD queryState(const dal::GuestMemory& memory, std::uint64_t guest_addr) {
+DWORD queryState(const tox2::GuestMemory& memory, std::uint64_t guest_addr) {
     MEMORY_BASIC_INFORMATION info{};
     VirtualQuery(memory.base() + guest_addr, &info, sizeof info);
     return info.State;
 }
 
 void testGuestMemoryRoundTrip() {
-    std::unique_ptr<dal::GuestMemory> memory(newMemory());
+    std::unique_ptr<tox2::GuestMemory> memory(newMemory());
     std::uint8_t* base = memory->base();
 
     CHECK(base != nullptr);
@@ -193,29 +193,29 @@ void testGuestMemoryRoundTrip() {
     CHECK(memory->commit(0x10001, 0x10));  // rounds out to the whole page
     CHECK(queryState(*memory, 0x10000) == MEM_COMMIT);
     CHECK(queryState(*memory, 0x11000) == MEM_RESERVE);
-    CHECK(dalRead32(base, 0x10100) == 0);  // zero-filled
+    CHECK(tox2Read32(base, 0x10100) == 0);  // zero-filled
 
-    dalWrite32(base, 0x10100, 0x11223344u);
+    tox2Write32(base, 0x10100, 0x11223344u);
     CHECK(base[0x10100] == 0x11 && base[0x10101] == 0x22 && base[0x10102] == 0x33 && base[0x10103] == 0x44);
-    CHECK(dalRead32(base, 0x10100) == 0x11223344u);
-    CHECK(dalRead16(base, 0x10101) == 0x2233);
+    CHECK(tox2Read32(base, 0x10100) == 0x11223344u);
+    CHECK(tox2Read16(base, 0x10101) == 0x2233);
 
     // Commit keeps contents, decommit discards them.
     CHECK(memory->commit(0x10000, 0x1000));
-    CHECK(dalRead32(base, 0x10100) == 0x11223344u);
+    CHECK(tox2Read32(base, 0x10100) == 0x11223344u);
     memory->decommit(0x10000, 0x1000);
     CHECK(queryState(*memory, 0x10000) == MEM_RESERVE);
     CHECK(memory->commit(0x10000, 0x1000));
-    CHECK(dalRead32(base, 0x10100) == 0);
+    CHECK(tox2Read32(base, 0x10100) == 0);
 
     CHECK(memory->containsHost(base));
-    CHECK(memory->containsHost(base + kGuestSpace + kDalGuestGuardSize - 1));
-    CHECK(!memory->containsHost(base + kGuestSpace + kDalGuestGuardSize));
+    CHECK(memory->containsHost(base + kGuestSpace + kTox2GuestGuardSize - 1));
+    CHECK(!memory->containsHost(base + kGuestSpace + kTox2GuestGuardSize));
     CHECK(!memory->containsHost(base - 1));
 }
 
 void testIsCommittedAndRangeNames() {
-    std::unique_ptr<dal::GuestMemory> memory(newMemory());
+    std::unique_ptr<tox2::GuestMemory> memory(newMemory());
     CHECK(!memory->isCommitted(0x10000, 4));
     CHECK(memory->commit(0x10000, 0x2000));
     CHECK(memory->isCommitted(0x10000, 4));
@@ -224,7 +224,7 @@ void testIsCommittedAndRangeNames() {
     CHECK(!memory->isCommitted(0x11ffe, 4));    // runs into the uncommitted page after
     CHECK(!memory->isCommitted(0x12000, 4));
     CHECK(!memory->isCommitted(0xFFFFFFFEu, 4));  // past the 32-bit space
-    dal::GuestMemory unreserved;
+    tox2::GuestMemory unreserved;
     CHECK(!unreserved.isCommitted(0x10000, 4));
 
     // The page bitmap holds 64 pages per word: ranges across word boundaries, partial decommit, top page.
@@ -242,28 +242,28 @@ void testIsCommittedAndRangeNames() {
     CHECK(memory->isCommitted(0xFFFFFFFCu, 4));
     CHECK(!memory->isCommitted(0xFFFFFFFCu, 5));
 
-    CHECK(std::string_view(dal::guestRangeName(0x10000)) == "main");
-    CHECK(std::string_view(dal::guestRangeName(0x0FFFFFFF)) == "main");
-    CHECK(std::string_view(dal::guestRangeName(0x10000000)) == "rsx-context");
-    CHECK(std::string_view(dal::guestRangeName(0x20000000)) == "user1m");
-    CHECK(std::string_view(dal::guestRangeName(0x30000000)) == "user64k");
-    CHECK(std::string_view(dal::guestRangeName(0xC0000000)) == "rsx-local");
-    CHECK(std::string_view(dal::guestRangeName(0xD0000000)) == "stack");
-    CHECK(dal::guestRangeName(0) == nullptr);
-    CHECK(dal::guestRangeName(0x40000000) == nullptr);
-    CHECK(dal::guestRangeName(0xE0000000) == nullptr);
+    CHECK(std::string_view(tox2::guestRangeName(0x10000)) == "main");
+    CHECK(std::string_view(tox2::guestRangeName(0x0FFFFFFF)) == "main");
+    CHECK(std::string_view(tox2::guestRangeName(0x10000000)) == "rsx-context");
+    CHECK(std::string_view(tox2::guestRangeName(0x20000000)) == "user1m");
+    CHECK(std::string_view(tox2::guestRangeName(0x30000000)) == "user64k");
+    CHECK(std::string_view(tox2::guestRangeName(0xC0000000)) == "rsx-local");
+    CHECK(std::string_view(tox2::guestRangeName(0xD0000000)) == "stack");
+    CHECK(tox2::guestRangeName(0) == nullptr);
+    CHECK(tox2::guestRangeName(0x40000000) == nullptr);
+    CHECK(tox2::guestRangeName(0xE0000000) == nullptr);
 }
 
 void testTopOfAddressSpace() {
-    std::unique_ptr<dal::GuestMemory> memory(newMemory());
+    std::unique_ptr<tox2::GuestMemory> memory(newMemory());
     std::uint8_t* base = memory->base();
 
     CHECK(memory->commit(0xFFFFF000u, 0x1000));
     CHECK(!memory->commit(0xFFFFFFFCu, 8));  // would run past the 32-bit space
-    dalWrite64(base, 0xFFFFFFF8u, 0x0102030405060708ull);
-    CHECK(dalRead64(base, 0xFFFFFFF8u) == 0x0102030405060708ull);
-    dalWrite32(base, 0xFFFFFFFCu, 0xA1B2C3D4u);
-    CHECK(dalRead32(base, 0xFFFFFFFCu) == 0xA1B2C3D4u);
+    tox2Write64(base, 0xFFFFFFF8u, 0x0102030405060708ull);
+    CHECK(tox2Read64(base, 0xFFFFFFF8u) == 0x0102030405060708ull);
+    tox2Write32(base, 0xFFFFFFFCu, 0xA1B2C3D4u);
+    CHECK(tox2Read32(base, 0xFFFFFFFCu) == 0xA1B2C3D4u);
 
     // An 8-byte access at 0xFFFFFFFC spills into the guard tail. The tail belongs to the same
     // reservation and stays inaccessible, so it faults instead of touching foreign memory.
@@ -271,12 +271,12 @@ void testTopOfAddressSpace() {
     VirtualQuery(base + kGuestSpace, &tail, sizeof tail);
     CHECK(tail.AllocationBase == base);
     CHECK(tail.State == MEM_RESERVE);
-    CHECK(tail.RegionSize >= static_cast<SIZE_T>(kDalGuestGuardSize));
+    CHECK(tail.RegionSize >= static_cast<SIZE_T>(kTox2GuestGuardSize));
 }
 
 void testAllocatorFirstFit() {
-    std::unique_ptr<dal::GuestMemory> memory(newMemory());
-    dal::RegionAllocator alloc(*memory, dal::kMainRegion);
+    std::unique_ptr<tox2::GuestMemory> memory(newMemory());
+    tox2::RegionAllocator alloc(*memory, tox2::kMainRegion);
 
     const std::uint32_t a = alloc.allocate(0x1000, 0);
     const std::uint32_t b = alloc.allocate(0x10001, 0);
@@ -295,22 +295,22 @@ void testAllocatorFirstFit() {
     CHECK(alloc.free(0x10010) == 0);  // not an allocation start
     CHECK(queryState(*memory, b) == MEM_RESERVE);
     CHECK(alloc.allocate(0x20000, 0) == b);  // reuse of the freed hole
-    CHECK(dalRead32(memory->base(), b) == 0);
+    CHECK(tox2Read32(memory->base(), b) == 0);
 
     CHECK(alloc.allocate(0, 0) == 0);
     CHECK(alloc.allocate(0x1000, 0x30000) == 0);  // not a power of two
 
     // Memory returned by a reuse is zero again.
-    dalWrite32(memory->base(), a, 0xFFFFFFFFu);
+    tox2Write32(memory->base(), a, 0xFFFFFFFFu);
     CHECK(alloc.free(a) == 0x10000);
     CHECK(alloc.allocate(0x10000, 0) == a);
-    CHECK(dalRead32(memory->base(), a) == 0);
+    CHECK(tox2Read32(memory->base(), a) == 0);
 }
 
 void testAllocatorMarkUsedAndExhaustion() {
-    std::unique_ptr<dal::GuestMemory> memory(newMemory());
-    const dal::GuestRegion tiny{0x10000, 0x50000, 0x10000, 0, "tiny"};
-    dal::RegionAllocator alloc(*memory, tiny);
+    std::unique_ptr<tox2::GuestMemory> memory(newMemory());
+    const tox2::GuestRegion tiny{0x10000, 0x50000, 0x10000, 0, "tiny"};
+    tox2::RegionAllocator alloc(*memory, tiny);
 
     alloc.markUsed(0x20000, 0x10000);
     CHECK(alloc.allocate(0x10000, 0) == 0x10000);
@@ -323,17 +323,17 @@ void testAllocatorMarkUsedAndExhaustion() {
     CHECK(alloc.allocate(0x10000, 0) == 0x20000);
 
     // Marking outside the region or over an existing range is rejected.
-    dal::setLogSink([](std::string_view) {});
+    tox2::setLogSink([](std::string_view) {});
     alloc.markUsed(0x60000, 0x1000);
     alloc.markUsed(0x30000, 0x1000);
-    dal::setLogSink({});
+    tox2::setLogSink({});
     CHECK(alloc.free(0x60000) == 0);
     CHECK(alloc.free(0x30000) == 0x10000);
 }
 
 void testStackGuards() {
-    std::unique_ptr<dal::GuestMemory> memory(newMemory());
-    dal::RegionAllocator stack(*memory, dal::kStackRegion);
+    std::unique_ptr<tox2::GuestMemory> memory(newMemory());
+    tox2::RegionAllocator stack(*memory, tox2::kStackRegion);
 
     const std::uint32_t a = stack.allocate(0x10000, 0x1000);
     CHECK(a == 0xD0001000);
@@ -351,9 +351,9 @@ void testStackGuards() {
 }
 
 void testProcessSingleton() {
-    dal::Process& p = dal::process();
-    CHECK(&p == &dal::process());
-    CHECK(p.main.region().begin == dal::kMainRegion.begin);
+    tox2::Process& p = tox2::process();
+    CHECK(&p == &tox2::process());
+    CHECK(p.main.region().begin == tox2::kMainRegion.begin);
     CHECK(p.stack.region().guard == 0x1000);
     CHECK(p.user_memory_total == 0xD500000);
     CHECK(!p.strict);
@@ -412,19 +412,19 @@ std::vector<std::uint8_t> syntheticElf(std::uint16_t machine) {
 std::filesystem::path writeTempFile(const char* name, const std::vector<std::uint8_t>& bytes) {
     const std::filesystem::path path =
             std::filesystem::temp_directory_path() /
-            (std::string("dal_runtime_test_") + std::to_string(GetCurrentProcessId()) + name);
+            (std::string("tox2_runtime_test_") + std::to_string(GetCurrentProcessId()) + name);
     std::ofstream out(path, std::ios::binary);
     out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     return path;
 }
 
 void testElfLoader() {
-    dal::setLogSink([](std::string_view) {});
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
 
     const auto bad_path = writeTempFile("_bad.elf", syntheticElf(62));
-    const auto bad = dal::loadExecutable(bad_path);
+    const auto bad = tox2::loadExecutable(bad_path);
     std::filesystem::remove(bad_path);
     CHECK(!bad.has_value());
     if (!bad) {
@@ -432,16 +432,16 @@ void testElfLoader() {
     }
 
     const auto path = writeTempFile("_ok.elf", syntheticElf(21));
-    const auto loaded = dal::loadExecutable(path);
+    const auto loaded = tox2::loadExecutable(path);
     std::filesystem::remove(path);
-    dal::setLogSink({});
+    tox2::setLogSink({});
 
     CHECK(loaded.has_value());
     if (!loaded) {
         std::fprintf(stderr, "load error: %s\n", loaded.error().c_str());
         return;
     }
-    const dal::LoadedExecutable& exe = *loaded;
+    const tox2::LoadedExecutable& exe = *loaded;
     CHECK(exe.entry_opd == 0x10080);
     CHECK(exe.entry_func == 0x10010);
     CHECK(exe.entry_toc == 0x18000);
@@ -455,18 +455,18 @@ void testElfLoader() {
     CHECK(exe.sha256.size() == 64);
 
     const std::uint8_t* base = p.memory.base();
-    CHECK(dalRead32(base, 0x30000) == 0xcafef00d);
-    CHECK(dalRead32(base, 0x30020) == 0 && dalRead32(base, 0x30ffc) == 0);  // bss
+    CHECK(tox2Read32(base, 0x30000) == 0xcafef00d);
+    CHECK(tox2Read32(base, 0x30020) == 0 && tox2Read32(base, 0x30ffc) == 0);  // bss
     // The image range is taken, so the first free block starts after it.
     CHECK(p.main.allocate(0x10000, 0x10000) == 0x40000);
 }
 
-DAL_PPU_FUNC(testFuncA) {
+TOX2_PPU_FUNC(testFuncA) {
     (void)base;
     ctx->gpr[3] = 1;
 }
 
-DAL_PPU_FUNC(testFuncB) {
+TOX2_PPU_FUNC(testFuncB) {
     (void)base;
     ctx->gpr[3] = 2;
 }
@@ -481,31 +481,31 @@ std::size_t countContaining(const std::vector<std::string>& lines, std::string_v
 
 void testDispatch() {
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 
-    const DalFuncMapping mappings[] = {{0x10200, testFuncA}, {0x10210, testFuncB}, {0x10400, testFuncA}};
-    dalRegisterFuncs(mappings, 3);
-    CHECK(countContaining(lines, "dal: dispatch: 3 entries, span 0x00010200..0x00010404") == 1);
+    const Tox2FuncMapping mappings[] = {{0x10200, testFuncA}, {0x10210, testFuncB}, {0x10400, testFuncA}};
+    tox2RegisterFuncs(mappings, 3);
+    CHECK(countContaining(lines, "tox2: dispatch: 3 entries, span 0x00010200..0x00010404") == 1);
 
-    CHECK(dalLookup(0x10200) == testFuncA);
-    CHECK(dalLookup(0x10210) == testFuncB);
-    CHECK(dalLookup(0x10400) == testFuncA);
-    CHECK(dalLookup(0x10204) == nullptr);  // inside the span, no function
-    CHECK(dalLookup(0x10201) == nullptr);  // misaligned
-    CHECK(dalLookup(0x10211) == nullptr);
-    CHECK(dalLookup(0x101fc) == nullptr);  // below the span
-    CHECK(dalLookup(0x10404) == nullptr);  // above the span
-    CHECK(dalLookup(0) == nullptr);
-    CHECK(dalLookup(0xFFFFFFFCu) == nullptr);
+    CHECK(tox2Lookup(0x10200) == testFuncA);
+    CHECK(tox2Lookup(0x10210) == testFuncB);
+    CHECK(tox2Lookup(0x10400) == testFuncA);
+    CHECK(tox2Lookup(0x10204) == nullptr);  // inside the span, no function
+    CHECK(tox2Lookup(0x10201) == nullptr);  // misaligned
+    CHECK(tox2Lookup(0x10211) == nullptr);
+    CHECK(tox2Lookup(0x101fc) == nullptr);  // below the span
+    CHECK(tox2Lookup(0x10404) == nullptr);  // above the span
+    CHECK(tox2Lookup(0) == nullptr);
+    CHECK(tox2Lookup(0xFFFFFFFCu) == nullptr);
 
-    auto ctx = std::make_unique<DalPpuContext>();
+    auto ctx = std::make_unique<Tox2PpuContext>();
     ctx->jump_target = 0x10210;
-    dalDispatch(ctx.get(), nullptr);
+    tox2Dispatch(ctx.get(), nullptr);
     CHECK(ctx->gpr[3] == 2);
     ctx->jump_target = 0x10200;
-    dalDispatch(ctx.get(), nullptr);
+    tox2Dispatch(ctx.get(), nullptr);
     CHECK(ctx->gpr[3] == 1);
 
     // Not strict: the unknown transfer returns, leaves the registers alone, and logs once per pair.
@@ -517,28 +517,28 @@ void testDispatch() {
     for (int i = 0; i < 3; i++) {
         ctx->jump_target = 0x10204;
         ctx->jump_site = 0x10300;
-        dalDispatch(ctx.get(), nullptr);
+        tox2Dispatch(ctx.get(), nullptr);
     }
     CHECK(ctx->gpr[3] == 77);
     CHECK(countContaining(lines, "unknown target 0x00010204 from 0x00010300: inside the code span") == 1);
     CHECK(countContaining(lines, "trace (oldest -> newest): 00010200 00010210") == 1);
 
     ctx->jump_target = 0x20000;
-    dalDispatch(ctx.get(), nullptr);
+    tox2Dispatch(ctx.get(), nullptr);
     CHECK(countContaining(lines, "unknown target 0x00020000 from 0x00010300: outside the code span") == 1);
 
-    const std::string census = dal::formatCensus();
+    const std::string census = tox2::formatCensus();
     CHECK(census.find("census: unknown targets 2 distinct\n  0x00010204 from 0x00010300: 3\n"
                       "  0x00020000 from 0x00010300: 1") != std::string::npos);
 
-    dalRegisterFuncs(nullptr, 0);
-    CHECK(dalLookup(0x10200) == nullptr);
-    dal::setLogSink({});
-    dal::resetCensus();
+    tox2RegisterFuncs(nullptr, 0);
+    CHECK(tox2Lookup(0x10200) == nullptr);
+    tox2::setLogSink({});
+    tox2::resetCensus();
 }
 
-std::vector<dal::ThreadCensusEntry> fakeThreads() {
-    using State = dal::ThreadCensusEntry::State;
+std::vector<tox2::ThreadCensusEntry> fakeThreads() {
+    using State = tox2::ThreadCensusEntry::State;
     return {{0x01000000, "main_thread", State::Blocked, "sys_event_queue_receive"},
             {0x01000001, "worker", State::Exited, ""},
             {0x01000002, "idle", State::Running, ""}};
@@ -546,24 +546,24 @@ std::vector<dal::ThreadCensusEntry> fakeThreads() {
 
 void testCensus() {
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
 
-    dal::censusSyscall(141, "sys_timer_usleep", true);
-    dal::censusSyscall(988, nullptr, false);
-    for (int i = 0; i < 119; i++) dal::censusSyscall(141, "sys_timer_usleep", true);
-    dal::censusSyscall(988, nullptr, false);
-    dal::censusSyscall(988, nullptr, false);
-    dal::censusHle("sysPrxForUser", "sys_lwmutex_lock", true);
-    dal::censusHle("cellSysutil", "cellSysutilRegisterCallback", false);
-    dal::censusHle("sysPrxForUser", "sys_lwmutex_lock", true);
-    dal::setThreadCensusProvider(&fakeThreads);
+    tox2::censusSyscall(141, "sys_timer_usleep", true);
+    tox2::censusSyscall(988, nullptr, false);
+    for (int i = 0; i < 119; i++) tox2::censusSyscall(141, "sys_timer_usleep", true);
+    tox2::censusSyscall(988, nullptr, false);
+    tox2::censusSyscall(988, nullptr, false);
+    tox2::censusHle("sysPrxForUser", "sys_lwmutex_lock", true);
+    tox2::censusHle("cellSysutil", "cellSysutilRegisterCallback", false);
+    tox2::censusHle("sysPrxForUser", "sys_lwmutex_lock", true);
+    tox2::setThreadCensusProvider(&fakeThreads);
 
     CHECK(lines.size() == 4);
-    CHECK(countContaining(lines, "dal: first sc 141 sys_timer_usleep") == 1);
-    CHECK(countContaining(lines, "dal: first sc 988 ?") == 1);
-    CHECK(countContaining(lines, "dal: first hle sysPrxForUser::sys_lwmutex_lock") == 1);
-    CHECK(countContaining(lines, "dal: first hle cellSysutil::cellSysutilRegisterCallback") == 1);
+    CHECK(countContaining(lines, "tox2: first sc 141 sys_timer_usleep") == 1);
+    CHECK(countContaining(lines, "tox2: first sc 988 ?") == 1);
+    CHECK(countContaining(lines, "tox2: first hle sysPrxForUser::sys_lwmutex_lock") == 1);
+    CHECK(countContaining(lines, "tox2: first hle cellSysutil::cellSysutilRegisterCallback") == 1);
 
     const std::string expected =
             "census: syscalls 123 calls, 2 distinct, 1 default-handled\n"
@@ -577,23 +577,23 @@ void testCensus() {
             "  0x01000000 main_thread: blocked in sys_event_queue_receive\n"
             "  0x01000001 worker: exited\n"
             "  0x01000002 idle: running";
-    const std::string actual = dal::formatCensus();
+    const std::string actual = tox2::formatCensus();
     CHECK(actual == expected);
     if (actual != expected) std::fprintf(stderr, "census was:\n%s\n", actual.c_str());
 
     lines.clear();
-    dal::printCensus();
+    tox2::printCensus();
     CHECK(lines.size() == 11);
     CHECK(!lines.empty() && lines[0].find("census: syscalls 123 calls") != std::string::npos);
 
-    dal::setLogSink({});
-    dal::resetCensus();
+    tox2::setLogSink({});
+    tox2::resetCensus();
 }
 
 bool g_fake_rendering = false;
 
-dal::RsxCensus fakeRenderingCensus() {
-    dal::RsxCensus census;
+tox2::RsxCensus fakeRenderingCensus() {
+    tox2::RsxCensus census;
     census.headers = 10;
     census.flips = 2;
     census.rendering = g_fake_rendering;
@@ -604,23 +604,23 @@ dal::RsxCensus fakeRenderingCensus() {
 
 // The rsx census line ends with the draw counts only while a renderer runs.
 void testCensusRenderSuffix() {
-    dal::resetCensus();
-    dal::setRsxCensusProvider(&fakeRenderingCensus);
+    tox2::resetCensus();
+    tox2::setRsxCensusProvider(&fakeRenderingCensus);
 
     g_fake_rendering = false;
-    std::string census = dal::formatCensus();
+    std::string census = tox2::formatCensus();
     CHECK(census.find("census: rsx 10 headers, 0 distinct methods, 2 flips") != std::string::npos);
     CHECK(census.find("rendered") == std::string::npos);
 
     g_fake_rendering = true;
-    census = dal::formatCensus();
+    census = tox2::formatCensus();
     CHECK(census.find("census: rsx 10 headers, 0 distinct methods, 2 flips, rendered 7 draws, skipped 3\n") !=
           std::string::npos);
-    dal::resetCensus();
+    tox2::resetCensus();
 }
 
 void testDisableFrameBuilder() {
-    dal::RsxConsumer plain(nullptr);  // the base is only dereferenced when commands are parsed
+    tox2::RsxConsumer plain(nullptr);  // the base is only dereferenced when commands are parsed
     CHECK(!plain.frameBuilderEnabled());
     plain.enableFrameBuilder();
     CHECK(plain.frameBuilderEnabled());
@@ -628,7 +628,7 @@ void testDisableFrameBuilder() {
     CHECK(!plain.frameBuilderEnabled());
     CHECK(plain.takeCommands().empty());
 
-    dal::RsxConsumer capturing(nullptr);
+    tox2::RsxConsumer capturing(nullptr);
     capturing.enableCapture({2});
     CHECK(capturing.frameBuilderEnabled());
     capturing.disableFrameBuilder();  // a capture needs the builder
@@ -637,49 +637,49 @@ void testDisableFrameBuilder() {
 
 void testSyscalls() {
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 
-    const auto table = dal::syscallTable();
+    const auto table = tox2::syscallTable();
     CHECK(table.size() == 61);  // the 53 census numbers plus the implemented 22, 41, 43 and 103
     bool sorted = true;
     for (std::size_t i = 1; i < table.size(); i++) sorted = sorted && table[i - 1].number < table[i].number;
     CHECK(sorted);
-    const dal::SyscallEntry* usleep_entry = dal::findSyscall(141);
+    const tox2::SyscallEntry* usleep_entry = tox2::findSyscall(141);
     CHECK(usleep_entry != nullptr && std::string_view(usleep_entry->name) == "sys_timer_usleep");
     CHECK(usleep_entry != nullptr && usleep_entry->handler != nullptr);
-    const dal::SyscallEntry* unnamed = dal::findSyscall(988);
+    const tox2::SyscallEntry* unnamed = tox2::findSyscall(988);
     CHECK(unnamed != nullptr && unnamed->name == nullptr);
-    CHECK(dal::findSyscall(999) == nullptr);
+    CHECK(tox2::findSyscall(999) == nullptr);
 
-    auto ctx = std::make_unique<DalPpuContext>();
+    auto ctx = std::make_unique<Tox2PpuContext>();
     ctx->gpr[11] = 181;  // sys_spu_thread_write_ls has no handler
     ctx->gpr[3] = 0x1234;
-    dalSyscall(ctx.get(), nullptr, 0x10000);
-    CHECK(ctx->gpr[3] == dal::kCellOk);
-    dalSyscall(ctx.get(), nullptr, 0x10000);
+    tox2Syscall(ctx.get(), nullptr, 0x10000);
+    CHECK(ctx->gpr[3] == tox2::kCellOk);
+    tox2Syscall(ctx.get(), nullptr, 0x10000);
     ctx->gpr[11] = 999;
     ctx->gpr[3] = 0x1234;
-    dalSyscall(ctx.get(), nullptr, 0x10004);
-    CHECK(ctx->gpr[3] == dal::kCellOk);
+    tox2Syscall(ctx.get(), nullptr, 0x10004);
+    CHECK(ctx->gpr[3] == tox2::kCellOk);
 
-    CHECK(countContaining(lines, "dal: first sc 181 sys_spu_thread_write_ls") == 1);
-    CHECK(countContaining(lines, "dal: first sc 999 ?") == 1);
-    CHECK(countContaining(lines, "dal: default sc 181 sys_spu_thread_write_ls(0x1234") == 1);
-    CHECK(countContaining(lines, "dal: default sc 999 ?(0x1234") == 1);
+    CHECK(countContaining(lines, "tox2: first sc 181 sys_spu_thread_write_ls") == 1);
+    CHECK(countContaining(lines, "tox2: first sc 999 ?") == 1);
+    CHECK(countContaining(lines, "tox2: default sc 181 sys_spu_thread_write_ls(0x1234") == 1);
+    CHECK(countContaining(lines, "tox2: default sc 999 ?(0x1234") == 1);
 
-    const std::string census = dal::formatCensus();
+    const std::string census = tox2::formatCensus();
     CHECK(census.find("census: syscalls 3 calls, 2 distinct, 2 default-handled") != std::string::npos);
     CHECK(census.find("  sc 181 sys_spu_thread_write_ls: 2 [default]") != std::string::npos);
     CHECK(census.find("  sc 999 ?: 1 [default]") != std::string::npos);
 
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
-DAL_PPU_FUNC(opdTarget) {
+TOX2_PPU_FUNC(opdTarget) {
     (void)base;
     ctx->gpr[3] = ctx->gpr[2] + 1;  // proves r2 holds the descriptor's TOC
     ctx->gpr[4] = ctx->lr;
@@ -689,81 +689,81 @@ DAL_PPU_FUNC(opdTarget) {
 
 void testHle() {
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0xdeadbeef, "cellTestModule", "cellTestFirst"},
             {0x00800010, 0xcafef00d, "cellTestModule", "cellTestSecond"},
     };
-    dal::installImports(imports, 2);
-    CHECK(countContaining(lines, "dal: hle: 2 imports, 0 with handlers") == 1);
+    tox2::installImports(imports, 2);
+    CHECK(countContaining(lines, "tox2: hle: 2 imports, 0 with handlers") == 1);
 
-    auto ctx = std::make_unique<DalPpuContext>();
+    auto ctx = std::make_unique<Tox2PpuContext>();
     for (int i = 0; i < 10; i++) {
         ctx->gpr[3] = 0x55;
         ctx->gpr[4] = 0x66;
-        dalHleCall(ctx.get(), nullptr, 0);
+        tox2HleCall(ctx.get(), nullptr, 0);
         CHECK(ctx->gpr[3] == 0);
     }
-    CHECK(countContaining(lines, "dal: default hle cellTestModule::cellTestFirst(0x55, 0x66,") == 8);
-    CHECK(countContaining(lines, "dal: default hle cellTestModule::cellTestFirst(") == 8);
-    CHECK(countContaining(lines, "dal: first hle cellTestModule::cellTestFirst") == 1);
+    CHECK(countContaining(lines, "tox2: default hle cellTestModule::cellTestFirst(0x55, 0x66,") == 8);
+    CHECK(countContaining(lines, "tox2: default hle cellTestModule::cellTestFirst(") == 8);
+    CHECK(countContaining(lines, "tox2: first hle cellTestModule::cellTestFirst") == 1);
 
-    dal::setQuietHle(true);
+    tox2::setQuietHle(true);
     ctx->gpr[3] = 0x55;
-    dalHleCall(ctx.get(), nullptr, 1);
-    dal::setQuietHle(false);
+    tox2HleCall(ctx.get(), nullptr, 1);
+    tox2::setQuietHle(false);
     CHECK(ctx->gpr[3] == 0);
     CHECK(countContaining(lines, "cellTestSecond(") == 0);
-    CHECK(countContaining(lines, "dal: first hle cellTestModule::cellTestSecond") == 1);
+    CHECK(countContaining(lines, "tox2: first hle cellTestModule::cellTestSecond") == 1);
 
-    const std::string census = dal::formatCensus();
+    const std::string census = tox2::formatCensus();
     CHECK(census.find("census: hle 11 calls, 2 distinct, 2 default-handled") != std::string::npos);
     CHECK(census.find("  cellTestModule::cellTestFirst: 10 [default]") != std::string::npos);
 
     // callGuestOpd: the descriptor holds the entry address and the TOC.
     std::vector<std::uint8_t> memory(0x20000);
     std::uint8_t* base = memory.data();
-    const DalFuncMapping mappings[] = {{0x10200, opdTarget}};
-    dalRegisterFuncs(mappings, 1);
-    dalWrite32(base, 0x18000, 0x10200);
-    dalWrite32(base, 0x18004, 0xd0000);
+    const Tox2FuncMapping mappings[] = {{0x10200, opdTarget}};
+    tox2RegisterFuncs(mappings, 1);
+    tox2Write32(base, 0x18000, 0x10200);
+    tox2Write32(base, 0x18004, 0xd0000);
     ctx->gpr[2] = 0x1111;
     ctx->lr = 0x2222;
-    dal::callGuestOpd(ctx.get(), base, 0x18000);
+    tox2::callGuestOpd(ctx.get(), base, 0x18000);
     CHECK(ctx->gpr[3] == 0xd0001);
     CHECK(ctx->gpr[4] == 0);
     CHECK(ctx->gpr[2] == 0x1111);
     CHECK(ctx->lr == 0x2222);
 
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 void testHleOutPointerHints() {
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
-    CHECK(dal::process().memory.reserve());
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    CHECK(tox2::process().memory.reserve());
 
     // 0x500000 and 0x501000 are committed data, 0x700000 is not, 0x10200 is committed code.
-    CHECK(dal::process().memory.commit(0x500000, 0x2000));
-    CHECK(dal::process().memory.commit(0x10000, 0x1000));
-    const DalFuncMapping mappings[] = {{0x10200, opdTarget}};
-    dalRegisterFuncs(mappings, 1);
+    CHECK(tox2::process().memory.commit(0x500000, 0x2000));
+    CHECK(tox2::process().memory.commit(0x10000, 0x1000));
+    const Tox2FuncMapping mappings[] = {{0x10200, opdTarget}};
+    tox2RegisterFuncs(mappings, 1);
 
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x11111111, "cellHintModule", "cellHintFirst"},
             {0x00800010, 0x22222222, "cellHintModule", "cellHintSecond"},
             {0x00800020, 0x33333333, "cellHintModule", "cellHintThird"},
     };
-    dal::installImports(imports, 3);
+    tox2::installImports(imports, 3);
 
-    auto ctx = std::make_unique<DalPpuContext>();
+    auto ctx = std::make_unique<Tox2PpuContext>();
     ctx->gpr[3] = 0;                          // null
     ctx->gpr[4] = 0x500000;                   // candidate
     ctx->gpr[5] = 0x100000000ull | 0x500000;  // upper bits set
@@ -771,41 +771,41 @@ void testHleOutPointerHints() {
     ctx->gpr[7] = 0x10200;                    // code address
     ctx->gpr[8] = 0x501000;                   // candidate
     ctx->gpr[9] = 0x20;                       // small integer, not committed
-    dal::setQuietHle(true);                   // the hint is printed anyway
-    dalHleCall(ctx.get(), nullptr, 0);
-    dalHleCall(ctx.get(), nullptr, 0);  // only the first default call scans
-    dal::setQuietHle(false);
-    CHECK(ctx->gpr[3] == dal::kCellOk);
+    tox2::setQuietHle(true);                  // the hint is printed anyway
+    tox2HleCall(ctx.get(), nullptr, 0);
+    tox2HleCall(ctx.get(), nullptr, 0);  // only the first default call scans
+    tox2::setQuietHle(false);
+    CHECK(ctx->gpr[3] == tox2::kCellOk);
     CHECK(countContaining(lines, "possible out-pointer") == 2);
     CHECK(countContaining(lines,
-                          "dal: default hle cellHintModule::cellHintFirst: possible out-pointer "
+                          "tox2: default hle cellHintModule::cellHintFirst: possible out-pointer "
                           "r4=0x00500000 (main)") == 1);
     CHECK(countContaining(lines, "r8=0x00501000 (main)") == 1);
 
     ctx->gpr[3] = 0x500000;
     for (int reg = 4; reg <= 10; reg++) ctx->gpr[reg] = 0;
-    dalHleCall(ctx.get(), nullptr, 1);
-    dalHleCall(ctx.get(), nullptr, 2);  // no candidates: no note
+    tox2HleCall(ctx.get(), nullptr, 1);
+    tox2HleCall(ctx.get(), nullptr, 2);  // no candidates: no note
     CHECK(countContaining(lines, "cellHintSecond: possible out-pointer r3=0x00500000 (main)") == 1);
 
-    const std::string census = dal::formatCensus();
+    const std::string census = tox2::formatCensus();
     CHECK(census.find("  cellHintModule::cellHintFirst: 2 [default] ptr r4,r8\n") != std::string::npos);
     CHECK(census.find("  cellHintModule::cellHintSecond: 1 [default] ptr r3\n") != std::string::npos);
     CHECK(census.find("  cellHintModule::cellHintThird: 1 [default]\n") != std::string::npos);
 
-    dal::process().memory.decommit(0x500000, 0x2000);
-    dal::process().memory.decommit(0x10000, 0x1000);
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::process().memory.decommit(0x500000, 0x2000);
+    tox2::process().memory.decommit(0x10000, 0x1000);
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
-DAL_PPU_FUNC(hostFunctionA) {
+TOX2_PPU_FUNC(hostFunctionA) {
     (void)base;
     ctx->gpr[3] = ctx->gpr[3] + 100;
 }
 
-DAL_PPU_FUNC(hostFunctionB) {
+TOX2_PPU_FUNC(hostFunctionB) {
     (void)base;
     ctx->gpr[3] = 0xB0B;
 }
@@ -815,8 +815,8 @@ struct CallSnapshot {
 };
 CallSnapshot g_call_snapshot;
 
-DAL_PPU_FUNC(sumTarget) {
-    g_call_snapshot = {ctx->gpr[1], ctx->gpr[2], ctx->lr, dalRead64(base, static_cast<std::uint32_t>(ctx->gpr[1]))};
+TOX2_PPU_FUNC(sumTarget) {
+    g_call_snapshot = {ctx->gpr[1], ctx->gpr[2], ctx->lr, tox2Read64(base, static_cast<std::uint32_t>(ctx->gpr[1]))};
     ctx->gpr[3] = ctx->gpr[3] + ctx->gpr[4] + ctx->gpr[5];
     ctx->gpr[1] = 0;  // callee-side clobbers must not leak to the caller
     ctx->gpr[2] = 0;
@@ -824,49 +824,49 @@ DAL_PPU_FUNC(sumTarget) {
 }
 
 void testHostFunctionsAndCallGuestFunction() {
-    dal::resetHostFunctions();
-    CHECK(dal::process().memory.reserve());
-    std::uint8_t* base = dal::process().memory.base();
-    CHECK(dal::process().memory.commit(0x500000, 0x2000));
-    CHECK(dal::process().memory.commit(0x10000, 0x10000));
-    const DalFuncMapping mappings[] = {{0x10200, sumTarget}};
-    dalRegisterFuncs(mappings, 1);
+    tox2::resetHostFunctions();
+    CHECK(tox2::process().memory.reserve());
+    std::uint8_t* base = tox2::process().memory.base();
+    CHECK(tox2::process().memory.commit(0x500000, 0x2000));
+    CHECK(tox2::process().memory.commit(0x10000, 0x10000));
+    const Tox2FuncMapping mappings[] = {{0x10200, sumTarget}};
+    tox2RegisterFuncs(mappings, 1);
 
-    CHECK(dalLookup(dal::kHostFunctionBase) == nullptr);  // nothing registered yet
-    const std::uint32_t opd_a = dal::registerHostFunction("hostFunctionA", hostFunctionA);
-    const std::uint32_t opd_b = dal::registerHostFunction("hostFunctionB", hostFunctionB);
+    CHECK(tox2Lookup(tox2::kHostFunctionBase) == nullptr);  // nothing registered yet
+    const std::uint32_t opd_a = tox2::registerHostFunction("hostFunctionA", hostFunctionA);
+    const std::uint32_t opd_b = tox2::registerHostFunction("hostFunctionB", hostFunctionB);
     CHECK(opd_a != 0 && opd_b == opd_a + 8);
-    CHECK(dal::process().memory.isCommitted(opd_a, 16));
-    CHECK(dalRead32(base, opd_a) == dal::kHostFunctionBase);
-    CHECK(dalRead32(base, opd_a + 4) == 0);
-    CHECK(dalRead32(base, opd_b) == dal::kHostFunctionBase + 4);
+    CHECK(tox2::process().memory.isCommitted(opd_a, 16));
+    CHECK(tox2Read32(base, opd_a) == tox2::kHostFunctionBase);
+    CHECK(tox2Read32(base, opd_a + 4) == 0);
+    CHECK(tox2Read32(base, opd_b) == tox2::kHostFunctionBase + 4);
 
-    CHECK(dalLookup(dal::kHostFunctionBase) == hostFunctionA);
-    CHECK(dalLookup(dal::kHostFunctionBase + 4) == hostFunctionB);
-    CHECK(dalLookup(dal::kHostFunctionBase + 8) == nullptr);  // not registered
-    CHECK(dalLookup(dal::kHostFunctionBase + 2) == nullptr);  // misaligned
-    CHECK(dalLookup(dal::kHostFunctionBase - 4) == nullptr);
-    CHECK(dalLookup(0xFFFFFFFCu) == nullptr);
-    CHECK(dalLookup(0x10200) == sumTarget);  // the code table still resolves
+    CHECK(tox2Lookup(tox2::kHostFunctionBase) == hostFunctionA);
+    CHECK(tox2Lookup(tox2::kHostFunctionBase + 4) == hostFunctionB);
+    CHECK(tox2Lookup(tox2::kHostFunctionBase + 8) == nullptr);  // not registered
+    CHECK(tox2Lookup(tox2::kHostFunctionBase + 2) == nullptr);  // misaligned
+    CHECK(tox2Lookup(tox2::kHostFunctionBase - 4) == nullptr);
+    CHECK(tox2Lookup(0xFFFFFFFCu) == nullptr);
+    CHECK(tox2Lookup(0x10200) == sumTarget);  // the code table still resolves
 
     // Guest code reaches a host function through the OPD's entry word.
-    auto ctx = std::make_unique<DalPpuContext>();
+    auto ctx = std::make_unique<Tox2PpuContext>();
     ctx->gpr[3] = 5;
-    ctx->jump_target = dalRead32(base, opd_a);
-    dalDispatch(ctx.get(), base);
+    ctx->jump_target = tox2Read32(base, opd_a);
+    tox2Dispatch(ctx.get(), base);
     CHECK(ctx->gpr[3] == 105);
-    ctx->jump_target = dalRead32(base, opd_b);
-    dalDispatch(ctx.get(), base);
+    ctx->jump_target = tox2Read32(base, opd_b);
+    tox2Dispatch(ctx.get(), base);
     CHECK(ctx->gpr[3] == 0xB0B);
 
     // callGuestFunction: arguments in r3..r5, a lowered and aligned r1 with a back chain, and
     // r1/r2/lr restored afterwards.
-    dalWrite32(base, 0x18000, 0x10200);
-    dalWrite32(base, 0x18004, 0xd0000);
+    tox2Write32(base, 0x18000, 0x10200);
+    tox2Write32(base, 0x18004, 0xd0000);
     ctx->gpr[1] = 0x500808;  // deliberately not 16-aligned
     ctx->gpr[2] = 0x1111;
     ctx->lr = 0x2222;
-    const std::uint64_t result = dal::callGuestFunction(ctx.get(), base, 0x18000, {10, 20, 30});
+    const std::uint64_t result = tox2::callGuestFunction(ctx.get(), base, 0x18000, {10, 20, 30});
     CHECK(result == 60);
     CHECK(g_call_snapshot.r1 == 0x500800 - 0x70);
     CHECK(g_call_snapshot.r2 == 0xd0000);
@@ -874,39 +874,39 @@ void testHostFunctionsAndCallGuestFunction() {
     CHECK(g_call_snapshot.back_chain == 0x500808);
     CHECK(ctx->gpr[1] == 0x500808 && ctx->gpr[2] == 0x1111 && ctx->lr == 0x2222);
 
-    CHECK(dal::callGuestFunction(ctx.get(), base, opd_a, {7}) == 107);  // host function OPD
+    CHECK(tox2::callGuestFunction(ctx.get(), base, opd_a, {7}) == 107);  // host function OPD
     CHECK(ctx->gpr[1] == 0x500808);
 
-    CHECK(dal::argU32(ctx.get(), 0) == 107);
+    CHECK(tox2::argU32(ctx.get(), 0) == 107);
     ctx->gpr[5] = 0x1ffffffffull;
-    CHECK(dal::argU32(ctx.get(), 2) == 0xffffffffu);
+    CHECK(tox2::argU32(ctx.get(), 2) == 0xffffffffu);
 
     std::memcpy(base + 0x500100, "hello\0world", 12);
-    CHECK(dal::readGuestString(base, 0x500100, 64) == "hello");
-    CHECK(dal::readGuestString(base, 0x500100, 3) == "hel");
-    CHECK(dal::readGuestString(base, 0x500100, 0).empty());
+    CHECK(tox2::readGuestString(base, 0x500100, 64) == "hello");
+    CHECK(tox2::readGuestString(base, 0x500100, 3) == "hel");
+    CHECK(tox2::readGuestString(base, 0x500100, 0).empty());
     // A string that reaches the end of the committed range stops there instead of reading on.
     std::memcpy(base + 0x501ff8, "abcdefgh", 8);
-    CHECK(!dal::process().memory.isCommitted(0x502000, 1));
-    CHECK(dal::readGuestString(base, 0x501ff8, 64) == "abcdefgh");
-    CHECK(dal::readGuestString(base, 0x502000, 64).empty());
+    CHECK(!tox2::process().memory.isCommitted(0x502000, 1));
+    CHECK(tox2::readGuestString(base, 0x501ff8, 64) == "abcdefgh");
+    CHECK(tox2::readGuestString(base, 0x502000, 64).empty());
 
-    dalRegisterFuncs(nullptr, 0);
-    dal::resetHostFunctions();
-    dal::process().memory.decommit(0x500000, 0x2000);
-    dal::process().memory.decommit(0x10000, 0x10000);
+    tox2RegisterFuncs(nullptr, 0);
+    tox2::resetHostFunctions();
+    tox2::process().memory.decommit(0x500000, 0x2000);
+    tox2::process().memory.decommit(0x10000, 0x10000);
 }
 
 // Issues a syscall through the dispatcher and returns r3.
 std::uint64_t syscall(std::uint32_t number, std::uint64_t r3 = 0, std::uint64_t r4 = 0, std::uint64_t r5 = 0,
                       std::uint64_t r6 = 0) {
-    auto ctx = std::make_unique<DalPpuContext>();
+    auto ctx = std::make_unique<Tox2PpuContext>();
     ctx->gpr[11] = number;
     ctx->gpr[3] = r3;
     ctx->gpr[4] = r4;
     ctx->gpr[5] = r5;
     ctx->gpr[6] = r6;
-    dalSyscall(ctx.get(), dal::process().memory.base(), 0x10000);
+    tox2Syscall(ctx.get(), tox2::process().memory.base(), 0x10000);
     return ctx->gpr[3];
 }
 
@@ -916,9 +916,9 @@ constexpr std::uint64_t err(std::uint32_t code) {
 }
 
 void testStartupSyscalls() {
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -927,57 +927,57 @@ void testStartupSyscalls() {
     // User memory size bookkeeping.
     const std::uint32_t used_before = p.user_memory_used;
     CHECK(syscall(352, scratch) == 0);
-    CHECK(dalRead32(base, scratch) == p.user_memory_total);
-    CHECK(dalRead32(base, scratch + 4) == p.user_memory_total - used_before);
+    CHECK(tox2Read32(base, scratch) == p.user_memory_total);
+    CHECK(tox2Read32(base, scratch + 4) == p.user_memory_total - used_before);
 
     // Allocation: 1 MiB pages by default and for 0x400, 64 KiB pages for 0x200.
     CHECK(syscall(348, 0x100000, 0x400, scratch) == 0);
-    const std::uint32_t a = dalRead32(base, scratch);
-    CHECK(a >= dal::kUser1mRegion.begin && a < dal::kUser1mRegion.end && a % 0x100000 == 0);
+    const std::uint32_t a = tox2Read32(base, scratch);
+    CHECK(a >= tox2::kUser1mRegion.begin && a < tox2::kUser1mRegion.end && a % 0x100000 == 0);
     CHECK(p.user_memory_used == used_before + 0x100000);
     CHECK(syscall(352, scratch) == 0);
-    CHECK(dalRead32(base, scratch + 4) == p.user_memory_total - used_before - 0x100000);
+    CHECK(tox2Read32(base, scratch + 4) == p.user_memory_total - used_before - 0x100000);
     CHECK(syscall(348, 0x200000, 0, scratch) == 0);
-    const std::uint32_t b = dalRead32(base, scratch);
-    CHECK(b >= dal::kUser1mRegion.begin && b != a);
+    const std::uint32_t b = tox2Read32(base, scratch);
+    CHECK(b >= tox2::kUser1mRegion.begin && b != a);
     CHECK(syscall(348, 0x30000, 0x200, scratch) == 0);
-    const std::uint32_t c = dalRead32(base, scratch);
-    CHECK(c >= dal::kUser64kRegion.begin && c < dal::kUser64kRegion.end && c % 0x10000 == 0);
-    dalWrite32(base, c, 0xdeadbeef);  // committed and writable
+    const std::uint32_t c = tox2Read32(base, scratch);
+    CHECK(c >= tox2::kUser64kRegion.begin && c < tox2::kUser64kRegion.end && c % 0x10000 == 0);
+    tox2Write32(base, c, 0xdeadbeef);  // committed and writable
 
     // Error cases leave the bookkeeping alone.
     const std::uint32_t used = p.user_memory_used;
-    CHECK(syscall(348, 0, 0x400, scratch) == err(dal::kCellEalign));
-    CHECK(syscall(348, 0x100000, 0x123, scratch) == err(dal::kCellEinval));
-    CHECK(syscall(348, 0x10000, 0x400, scratch) == err(dal::kCellEalign));
-    CHECK(syscall(348, 0x180000, 0, scratch) == err(dal::kCellEalign));
-    CHECK(syscall(348, 0xF000000, 0x400, scratch) == err(dal::kCellEnomem));  // above the total
-    CHECK(syscall(348, 0x100000, 0x400, 0) == err(dal::kCellEfault));
+    CHECK(syscall(348, 0, 0x400, scratch) == err(tox2::kCellEalign));
+    CHECK(syscall(348, 0x100000, 0x123, scratch) == err(tox2::kCellEinval));
+    CHECK(syscall(348, 0x10000, 0x400, scratch) == err(tox2::kCellEalign));
+    CHECK(syscall(348, 0x180000, 0, scratch) == err(tox2::kCellEalign));
+    CHECK(syscall(348, 0xF000000, 0x400, scratch) == err(tox2::kCellEnomem));  // above the total
+    CHECK(syscall(348, 0x100000, 0x400, 0) == err(tox2::kCellEfault));
     CHECK(p.user_memory_used == used);
 
     // Free: only allocation starts are accepted, once.
-    CHECK(syscall(349, a + 0x10000) == err(dal::kCellEinval));
-    CHECK(syscall(349, 0x1234) == err(dal::kCellEinval));
+    CHECK(syscall(349, a + 0x10000) == err(tox2::kCellEinval));
+    CHECK(syscall(349, 0x1234) == err(tox2::kCellEinval));
     CHECK(syscall(349, a) == 0);
-    CHECK(syscall(349, a) == err(dal::kCellEinval));
+    CHECK(syscall(349, a) == err(tox2::kCellEinval));
     CHECK(syscall(349, b) == 0);
     CHECK(syscall(349, c) == 0);
     CHECK(p.user_memory_used == used_before);
-    CHECK(syscall(348, 0x100000, 0x400, scratch) == 0 && dalRead32(base, scratch) == a);  // reuse
+    CHECK(syscall(348, 0x100000, 0x400, scratch) == 0 && tox2Read32(base, scratch) == a);  // reuse
     CHECK(syscall(349, a) == 0);
 
     // tty: writes to channels outside 0..15 are dropped but still reported; reads fail.
     CHECK(syscall(403, 16, scratch + 0x100, 5, scratch) == 0);
-    CHECK(dalRead32(base, scratch) == 5);
+    CHECK(tox2Read32(base, scratch) == 5);
     CHECK(syscall(403, 0, scratch + 0x100, 0, scratch) == 0);
-    CHECK(dalRead32(base, scratch) == 0);
-    CHECK(syscall(403, 0, scratch + 0x100, 5, 0) == err(dal::kCellEfault));
-    CHECK(syscall(402, 0, scratch + 0x100, 4, scratch) == err(dal::kCellEio));
+    CHECK(tox2Read32(base, scratch) == 0);
+    CHECK(syscall(403, 0, scratch + 0x100, 5, 0) == err(tox2::kCellEfault));
+    CHECK(syscall(402, 0, scratch + 0x100, 4, scratch) == err(tox2::kCellEio));
 
     // Time base and sleeps (the sleeps wait on the guest lock, which the caller holds).
-    CHECK(syscall(147) == dal::kTimebaseFrequency);
+    CHECK(syscall(147) == tox2::kTimebaseFrequency);
     {
-        std::lock_guard<dal::GuestLock> guard(dal::guestLock());
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
         const auto start = std::chrono::steady_clock::now();
         CHECK(syscall(141, 20000) == 0);
         CHECK(std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(15));
@@ -986,15 +986,15 @@ void testStartupSyscalls() {
     }
 
     p.main.free(scratch);
-    dal::setLogSink({});
-    dal::resetCensus();
+    tox2::setLogSink({});
+    tox2::resetCensus();
 }
 
 void testFileSystem() {
     namespace stdfs = std::filesystem;
-    dal::setLogSink([](std::string_view) {});
-    dal::resetLogOnce();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetLogOnce();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -1014,7 +1014,7 @@ void testFileSystem() {
         put(path_a, path);
         return syscall(801, path_a, flags, out);
     };
-    auto fdOut = [&] { return dalRead32(base, out); };
+    auto fdOut = [&] { return tox2Read32(base, out); };
     auto hostFile = [](const stdfs::path& path, std::string_view data) {
         stdfs::create_directories(path.parent_path());
         std::ofstream(path, std::ios::binary) << data;
@@ -1024,7 +1024,7 @@ void testFileSystem() {
         return std::string(std::istreambuf_iterator<char>(in), {});
     };
 
-    const stdfs::path root = stdfs::temp_directory_path() / ("dal_vfs_test_" + std::to_string(GetCurrentProcessId()));
+    const stdfs::path root = stdfs::temp_directory_path() / ("tox2_vfs_test_" + std::to_string(GetCurrentProcessId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
     const stdfs::path game = root / "game";
@@ -1033,70 +1033,70 @@ void testFileSystem() {
     stdfs::create_directories(game / "sub");
 
     // Resolution rules.
-    dal::configureVfs(game, std::nullopt);
+    tox2::configureVfs(game, std::nullopt);
     bool read_only = false;
-    const auto resolved = dal::resolveGuestPath("/dev_bdvd/sub/../b.txt", read_only);
+    const auto resolved = tox2::resolveGuestPath("/dev_bdvd/sub/../b.txt", read_only);
     CHECK(resolved && read_only && stdfs::equivalent(*resolved, game / "b.txt"));
-    CHECK(!dal::resolveGuestPath("/dev_bdvd/../b.txt", read_only));
-    CHECK(!dal::resolveGuestPath("/dev_bdvd/sub/../../x", read_only));
-    CHECK(!dal::resolveGuestPath("/dev_bdvd/a:b", read_only));
-    CHECK(!dal::resolveGuestPath("/dev_bdvd/NUL.txt", read_only));
-    CHECK(!dal::resolveGuestPath("/dev_hdd0/x", read_only));  // no hdd directory configured
-    CHECK(!dal::resolveGuestPath("/dev_usb000/x", read_only));
-    CHECK(!dal::resolveGuestPath("relative", read_only));
+    CHECK(!tox2::resolveGuestPath("/dev_bdvd/../b.txt", read_only));
+    CHECK(!tox2::resolveGuestPath("/dev_bdvd/sub/../../x", read_only));
+    CHECK(!tox2::resolveGuestPath("/dev_bdvd/a:b", read_only));
+    CHECK(!tox2::resolveGuestPath("/dev_bdvd/NUL.txt", read_only));
+    CHECK(!tox2::resolveGuestPath("/dev_hdd0/x", read_only));  // no hdd directory configured
+    CHECK(!tox2::resolveGuestPath("/dev_usb000/x", read_only));
+    CHECK(!tox2::resolveGuestPath("relative", read_only));
 
     // open/read/lseek/close.
     CHECK(open("/dev_bdvd/b.txt", 0) == 0);
     const std::uint32_t fd = fdOut();
     CHECK(fd == 3);
-    CHECK(syscall(802, fd, buf, 4, out) == 0 && dalRead64(base, out) == 4);
+    CHECK(syscall(802, fd, buf, 4, out) == 0 && tox2Read64(base, out) == 4);
     CHECK(std::memcmp(base + buf, "0123", 4) == 0);
-    CHECK(syscall(818, fd, 2, 0, out) == 0 && dalRead64(base, out) == 2);
-    CHECK(syscall(802, fd, buf, 3, out) == 0 && dalRead64(base, out) == 3);
+    CHECK(syscall(818, fd, 2, 0, out) == 0 && tox2Read64(base, out) == 2);
+    CHECK(syscall(802, fd, buf, 3, out) == 0 && tox2Read64(base, out) == 3);
     CHECK(std::memcmp(base + buf, "234", 3) == 0);
-    CHECK(syscall(818, fd, static_cast<std::uint64_t>(-2), 2, out) == 0 && dalRead64(base, out) == 8);
-    CHECK(syscall(802, fd, buf, 100, out) == 0 && dalRead64(base, out) == 2);  // short read at the end
-    CHECK(syscall(802, fd, buf, 100, out) == 0 && dalRead64(base, out) == 0);
-    CHECK(syscall(818, fd, 0, 3, out) == err(dal::kCellEinval));
-    CHECK(syscall(818, fd, static_cast<std::uint64_t>(-100), 0, out) == err(dal::kCellEinval));
-    CHECK(syscall(802, fd, 0, 1, out) == err(dal::kCellEfault));
-    CHECK(syscall(802, fd, buf, 1, 0) == err(dal::kCellEfault));
-    CHECK(syscall(803, fd, buf, 1, out) == err(dal::kCellEbadf));  // opened read-only
+    CHECK(syscall(818, fd, static_cast<std::uint64_t>(-2), 2, out) == 0 && tox2Read64(base, out) == 8);
+    CHECK(syscall(802, fd, buf, 100, out) == 0 && tox2Read64(base, out) == 2);  // short read at the end
+    CHECK(syscall(802, fd, buf, 100, out) == 0 && tox2Read64(base, out) == 0);
+    CHECK(syscall(818, fd, 0, 3, out) == err(tox2::kCellEinval));
+    CHECK(syscall(818, fd, static_cast<std::uint64_t>(-100), 0, out) == err(tox2::kCellEinval));
+    CHECK(syscall(802, fd, 0, 1, out) == err(tox2::kCellEfault));
+    CHECK(syscall(802, fd, buf, 1, 0) == err(tox2::kCellEfault));
+    CHECK(syscall(803, fd, buf, 1, out) == err(tox2::kCellEbadf));  // opened read-only
     // fstat reports a read-only regular file on the disc.
     CHECK(syscall(809, fd, sb) == 0);
-    CHECK(dalRead32(base, sb) == 0100444 && dalRead32(base, sb + 4) == 0xFFFFFFFFu);
-    CHECK(dalRead64(base, sb + 36) == 10 && dalRead64(base, sb + 44) == 2048);
+    CHECK(tox2Read32(base, sb) == 0100444 && tox2Read32(base, sb + 4) == 0xFFFFFFFFu);
+    CHECK(tox2Read64(base, sb + 36) == 10 && tox2Read64(base, sb + 44) == 2048);
     CHECK(syscall(804, fd) == 0);
-    CHECK(syscall(804, fd) == err(dal::kCellEbadf));
-    CHECK(syscall(802, fd, buf, 1, out) == err(dal::kCellEbadf) && dalRead64(base, out) == 0);
+    CHECK(syscall(804, fd) == err(tox2::kCellEbadf));
+    CHECK(syscall(802, fd, buf, 1, out) == err(tox2::kCellEbadf) && tox2Read64(base, out) == 0);
 
     // Read-only enforcement on the disc.
-    CHECK(open("/dev_bdvd/b.txt", 1) == err(dal::kCellEperm));
-    CHECK(open("/dev_bdvd/b.txt", 02) == err(dal::kCellEperm));
-    CHECK(open("/dev_bdvd/new.bin", 0101) == err(dal::kCellEperm));
-    CHECK(open("/dev_bdvd/new.bin", 0) == err(dal::kCellEnoent));
-    CHECK(open("/dev_bdvd/b.txt", 03) == err(dal::kCellEinval));
+    CHECK(open("/dev_bdvd/b.txt", 1) == err(tox2::kCellEperm));
+    CHECK(open("/dev_bdvd/b.txt", 02) == err(tox2::kCellEperm));
+    CHECK(open("/dev_bdvd/new.bin", 0101) == err(tox2::kCellEperm));
+    CHECK(open("/dev_bdvd/new.bin", 0) == err(tox2::kCellEnoent));
+    CHECK(open("/dev_bdvd/b.txt", 03) == err(tox2::kCellEinval));
     put(path_a, "/dev_bdvd/x");
-    CHECK(syscall(811, path_a, 0777) == err(dal::kCellErofs));
+    CHECK(syscall(811, path_a, 0777) == err(tox2::kCellErofs));
     put(path_a, "/dev_bdvd/b.txt");
-    CHECK(syscall(814, path_a) == err(dal::kCellErofs));
+    CHECK(syscall(814, path_a) == err(tox2::kCellErofs));
     CHECK(stdfs::exists(game / "b.txt"));
 
     // Path errors.
-    CHECK(open("/dev_bdvd/../b.txt", 0) == err(dal::kCellEnoent));
-    CHECK(open("b.txt", 0) == err(dal::kCellEnoent));
-    CHECK(open("/dev_usb000/b.txt", 0) == err(dal::kCellEnotmounted));
-    CHECK(open("/dev_bdvd", 0) == err(dal::kCellEisdir));
-    CHECK(open("/", 0) == err(dal::kCellEisdir));
-    CHECK(open("/dev_bdvd/b.txt/x", 0) == err(dal::kCellEnotdir));
-    CHECK(syscall(801, 0, 0, out) == err(dal::kCellEfault));
+    CHECK(open("/dev_bdvd/../b.txt", 0) == err(tox2::kCellEnoent));
+    CHECK(open("b.txt", 0) == err(tox2::kCellEnoent));
+    CHECK(open("/dev_usb000/b.txt", 0) == err(tox2::kCellEnotmounted));
+    CHECK(open("/dev_bdvd", 0) == err(tox2::kCellEisdir));
+    CHECK(open("/", 0) == err(tox2::kCellEisdir));
+    CHECK(open("/dev_bdvd/b.txt/x", 0) == err(tox2::kCellEnotdir));
+    CHECK(syscall(801, 0, 0, out) == err(tox2::kCellEfault));
     CHECK(!p.memory.isCommitted(0x0D000000, 1));
-    CHECK(syscall(801, 0x0D000000, 0, out) == err(dal::kCellEfault));
+    CHECK(syscall(801, 0x0D000000, 0, out) == err(tox2::kCellEfault));
     std::memset(base + big, 'a', 1100);
     base[big] = '/';
     base[big + 1100] = 0;
-    CHECK(syscall(801, big, 0, out) == err(dal::kCellEnametoolong));
-    CHECK(open("/dev_hdd0/x", 0) == err(dal::kCellEnoent));  // not configured
+    CHECK(syscall(801, big, 0, out) == err(tox2::kCellEnametoolong));
+    CHECK(open("/dev_hdd0/x", 0) == err(tox2::kCellEnoent));  // not configured
     CHECK(open("/app_home/a.bin", 0) == 0);
     const std::uint32_t app_fd = fdOut();
     CHECK(syscall(802, app_fd, buf, 6, out) == 0 && std::memcmp(base + buf, "usrdir", 6) == 0);
@@ -1104,19 +1104,19 @@ void testFileSystem() {
 
     // stat.
     put(path_a, "/dev_bdvd/b.txt");
-    CHECK(syscall(808, path_a, sb) == 0 && dalRead32(base, sb) == 0100444);
-    CHECK(dalRead64(base, sb + 36) == 10);
+    CHECK(syscall(808, path_a, sb) == 0 && tox2Read32(base, sb) == 0100444);
+    CHECK(tox2Read64(base, sb + 36) == 10);
     put(path_a, "/dev_bdvd/sub");
-    CHECK(syscall(808, path_a, sb) == 0 && dalRead32(base, sb) == 040555);
-    CHECK(dalRead64(base, sb + 36) == 2048);  // a directory reports its block size
+    CHECK(syscall(808, path_a, sb) == 0 && tox2Read32(base, sb) == 040555);
+    CHECK(tox2Read64(base, sb + 36) == 2048);  // a directory reports its block size
     put(path_a, "/dev_bdvd/b.txt/");
-    CHECK(syscall(808, path_a, sb) == err(dal::kCellEnotdir));
+    CHECK(syscall(808, path_a, sb) == err(tox2::kCellEnotdir));
     put(path_a, "/dev_bdvd/missing");
-    CHECK(syscall(808, path_a, sb) == err(dal::kCellEnoent));
+    CHECK(syscall(808, path_a, sb) == err(tox2::kCellEnoent));
     put(path_a, "/");
-    CHECK(syscall(808, path_a, sb) == 0 && dalRead32(base, sb) == 040711);
+    CHECK(syscall(808, path_a, sb) == 0 && tox2Read32(base, sb) == 040711);
     put(path_a, "/dev_usb000");
-    CHECK(syscall(808, path_a, sb) == err(dal::kCellEnotmounted));
+    CHECK(syscall(808, path_a, sb) == err(tox2::kCellEnotmounted));
 
     // opendir/readdir: ".", "..", then names in byte order; at the end nread is 0 and the entry is
     // zeroed.
@@ -1128,10 +1128,10 @@ void testFileSystem() {
     for (int i = 0; i < 10; i++) {
         std::memset(base + ent, 0xEE, 258);
         CHECK(syscall(806, dir, ent, out + 8) == 0);
-        if (dalRead64(base, out + 8) == 0) {
+        if (tox2Read64(base, out + 8) == 0) {
             break;
         }
-        CHECK(dalRead64(base, out + 8) == 258);
+        CHECK(tox2Read64(base, out + 8) == 258);
         names.emplace_back(reinterpret_cast<const char*>(base + ent + 2), base[ent + 1]);
         types.push_back(base[ent]);
     }
@@ -1142,49 +1142,49 @@ void testFileSystem() {
         zeroed = zeroed && base[ent + i] == 0;
     }
     CHECK(zeroed);
-    CHECK(syscall(806, dir, ent, out + 8) == 0 && dalRead64(base, out + 8) == 0);  // stays at the end
-    CHECK(syscall(804, dir) == err(dal::kCellEbadf));                              // a directory is not a file
+    CHECK(syscall(806, dir, ent, out + 8) == 0 && tox2Read64(base, out + 8) == 0);  // stays at the end
+    CHECK(syscall(804, dir) == err(tox2::kCellEbadf));                              // a directory is not a file
     CHECK(syscall(807, dir) == 0);
-    CHECK(syscall(807, dir) == err(dal::kCellEbadf));
-    CHECK(syscall(806, dir, ent, out + 8) == err(dal::kCellEbadf));
+    CHECK(syscall(807, dir) == err(tox2::kCellEbadf));
+    CHECK(syscall(806, dir, ent, out + 8) == err(tox2::kCellEbadf));
     put(path_a, "/dev_bdvd/b.txt");
-    CHECK(syscall(805, path_a, out) == err(dal::kCellEnotdir));
+    CHECK(syscall(805, path_a, out) == err(tox2::kCellEnotdir));
     put(path_a, "/dev_bdvd/missing");
-    CHECK(syscall(805, path_a, out) == err(dal::kCellEnoent));
+    CHECK(syscall(805, path_a, out) == err(tox2::kCellEnoent));
     put(path_a, "/");
     CHECK(syscall(805, path_a, out) == 0);  // the virtual root lists the mounted devices
     CHECK(syscall(807, fdOut()) == 0);
 
     // Writable device.
     const stdfs::path hdd = root / "hdd";
-    dal::configureVfs(game, hdd);
+    tox2::configureVfs(game, hdd);
     CHECK(stdfs::is_directory(hdd / "dev_hdd0") && stdfs::is_directory(hdd / "dev_hdd1"));
-    CHECK(open("/dev_hdd0/out.bin", 0101) == err(dal::kCellEacces));  // direct child of /dev_hdd0
+    CHECK(open("/dev_hdd0/out.bin", 0101) == err(tox2::kCellEacces));  // direct child of /dev_hdd0
     CHECK(stdfs::is_directory(hdd / "dev_hdd0" / "game") && stdfs::is_directory(hdd / "dev_hdd0" / "tmp"));
     put(path_a, "/dev_hdd0/game");
-    CHECK(syscall(811, path_a, 0777) == err(dal::kCellEexist));
+    CHECK(syscall(811, path_a, 0777) == err(tox2::kCellEexist));
     put(path_a, "/dev_hdd0/newdir");
-    CHECK(syscall(811, path_a, 0777) == err(dal::kCellEacces));  // games cannot add to /dev_hdd0
+    CHECK(syscall(811, path_a, 0777) == err(tox2::kCellEacces));  // games cannot add to /dev_hdd0
     put(path_a, "/dev_hdd0/game/NEWGAME");
-    CHECK(syscall(811, path_a, 0777) == err(dal::kCellEacces));
+    CHECK(syscall(811, path_a, 0777) == err(tox2::kCellEacces));
     put(path_a, "/dev_hdd0/tmp/data");
     CHECK(syscall(811, path_a, 0777) == 0);
-    CHECK(syscall(811, path_a, 0777) == err(dal::kCellEexist));
+    CHECK(syscall(811, path_a, 0777) == err(tox2::kCellEexist));
     put(path_a, "/dev_hdd0/tmp/nope/x");
-    CHECK(syscall(811, path_a, 0777) == err(dal::kCellEnoent));
+    CHECK(syscall(811, path_a, 0777) == err(tox2::kCellEnoent));
 
     CHECK(open("/dev_hdd0/tmp/data/out.bin", 01101) == 0);  // WRONLY | CREAT | TRUNC
     const std::uint32_t wfd = fdOut();
     put(buf, "hello");
-    CHECK(syscall(803, wfd, buf, 5, out) == 0 && dalRead64(base, out) == 5);
-    CHECK(syscall(802, wfd, buf, 1, out) == err(dal::kCellEbadf));  // write-only
+    CHECK(syscall(803, wfd, buf, 5, out) == 0 && tox2Read64(base, out) == 5);
+    CHECK(syscall(802, wfd, buf, 1, out) == err(tox2::kCellEbadf));  // write-only
     CHECK(syscall(804, wfd) == 0);
     CHECK(hostRead(hdd / "dev_hdd0" / "tmp" / "data" / "out.bin") == "hello");
-    CHECK(open("/dev_hdd0/tmp/data/out.bin", 0201 | 0100) == err(dal::kCellEexist));  // CREAT | EXCL
-    CHECK(open("/dev_hdd0/tmp/data/out.bin", 02001) == 0);                            // WRONLY | APPEND
+    CHECK(open("/dev_hdd0/tmp/data/out.bin", 0201 | 0100) == err(tox2::kCellEexist));  // CREAT | EXCL
+    CHECK(open("/dev_hdd0/tmp/data/out.bin", 02001) == 0);                             // WRONLY | APPEND
     const std::uint32_t afd = fdOut();
     put(buf, "!!");
-    CHECK(syscall(803, afd, buf, 2, out) == 0 && dalRead64(base, out) == 2);
+    CHECK(syscall(803, afd, buf, 2, out) == 0 && tox2Read64(base, out) == 2);
     CHECK(syscall(804, afd) == 0);
     CHECK(hostRead(hdd / "dev_hdd0" / "tmp" / "data" / "out.bin") == "hello!!");
     CHECK(open("/dev_hdd0/tmp/data/out.bin", 02) == 0);  // RDWR keeps the contents
@@ -1193,17 +1193,17 @@ void testFileSystem() {
     put(buf, "E");
     CHECK(syscall(803, rfd, buf, 1, out) == 0);
     CHECK(syscall(818, rfd, 0, 0, out) == 0 && syscall(802, rfd, buf + 0x100, 16, out) == 0);
-    CHECK(dalRead64(base, out) == 7 && std::memcmp(base + buf + 0x100, "hEllo!!", 7) == 0);
-    CHECK(syscall(809, rfd, sb) == 0 && dalRead32(base, sb) == 0100666 && dalRead64(base, sb + 36) == 7);
+    CHECK(tox2Read64(base, out) == 7 && std::memcmp(base + buf + 0x100, "hEllo!!", 7) == 0);
+    CHECK(syscall(809, rfd, sb) == 0 && tox2Read32(base, sb) == 0100666 && tox2Read64(base, sb + 36) == 7);
     CHECK(syscall(804, rfd) == 0);
     CHECK(open("/dev_hdd0/tmp/data/out.bin", 01000) == 0);  // RDONLY | TRUNC empties it
     CHECK(syscall(804, fdOut()) == 0);
     CHECK(hostRead(hdd / "dev_hdd0" / "tmp" / "data" / "out.bin").empty());
     put(path_a, "/dev_hdd0/tmp/data");
-    CHECK(syscall(814, path_a) == err(dal::kCellEisdir));
+    CHECK(syscall(814, path_a) == err(tox2::kCellEisdir));
     put(path_a, "/dev_hdd0/tmp/data/out.bin");
     CHECK(syscall(814, path_a) == 0);
-    CHECK(syscall(814, path_a) == err(dal::kCellEnoent));
+    CHECK(syscall(814, path_a) == err(tox2::kCellEnoent));
     CHECK(!stdfs::exists(hdd / "dev_hdd0" / "tmp" / "data" / "out.bin"));
     put(path_a, "/dev_hdd1/y");
     CHECK(syscall(811, path_a, 0777) == 0);
@@ -1211,10 +1211,10 @@ void testFileSystem() {
     CHECK(syscall(805, path_a, out) == 0);
     const std::uint32_t d1 = fdOut();
     for (int i = 0; i < 3; i++) {
-        CHECK(syscall(806, d1, ent, out + 8) == 0 && dalRead64(base, out + 8) == 258);
+        CHECK(syscall(806, d1, ent, out + 8) == 0 && tox2Read64(base, out + 8) == 258);
     }
     // hdd1 repeats its last entry at the end instead of zeroing it.
-    CHECK(syscall(806, d1, ent, out + 8) == 0 && dalRead64(base, out + 8) == 0);
+    CHECK(syscall(806, d1, ent, out + 8) == 0 && tox2Read64(base, out + 8) == 0);
     CHECK(base[ent + 1] == 1 && base[ent + 2] == 'y');
     CHECK(syscall(807, d1) == 0);
 
@@ -1224,9 +1224,9 @@ void testFileSystem() {
         fds.push_back(fdOut());
     }
     CHECK(fds.size() == 252 && fds.front() == 3 && fds.back() == 254);
-    CHECK(open("/dev_bdvd/b.txt", 0) == err(dal::kCellEmfile));
+    CHECK(open("/dev_bdvd/b.txt", 0) == err(tox2::kCellEmfile));
     put(path_a, "/dev_bdvd");
-    CHECK(syscall(805, path_a, out) == err(dal::kCellEmfile));
+    CHECK(syscall(805, path_a, out) == err(tox2::kCellEmfile));
     CHECK(syscall(804, fds[1]) == 0);
     CHECK(open("/dev_bdvd/b.txt", 0) == 0 && fdOut() == fds[1]);  // the lowest free id is reused
     for (const std::uint32_t id : fds) {
@@ -1235,21 +1235,21 @@ void testFileSystem() {
 
     p.main.free(scratch);
     stdfs::remove_all(root, ec);
-    dal::configureVfs({}, std::nullopt);
-    dal::setLogSink({});
+    tox2::configureVfs({}, std::nullopt);
+    tox2::setLogSink({});
 }
 
 void testSysPrxForUser() {
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
 
     constexpr const char* kModule = "sysPrxForUser";
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0xb2fcf2c8, kModule, "_sys_heap_create_heap"},
             {0x00800010, 0xaede4b03, kModule, "_sys_heap_delete_heap"},
             {0x00800020, 0x35168520, kModule, "_sys_heap_malloc"},
@@ -1260,16 +1260,16 @@ void testSysPrxForUser() {
             {0x00800070, 0x45fe2fce, kModule, "_sys_spu_printf_initialize"},
             {0x00800080, 0x12345678, kModule, "sys_unknown"},
     };
-    dal::installImports(imports, 9);
-    CHECK(countContaining(lines, "dal: hle: 9 imports, 8 with handlers") == 1);
+    tox2::installImports(imports, 9);
+    CHECK(countContaining(lines, "tox2: hle: 9 imports, 8 with handlers") == 1);
     CHECK(countContaining(lines, "is registered as") == 0);
 
     auto call = [&](std::uint32_t index, std::uint64_t r3 = 0, std::uint64_t r4 = 0, std::uint64_t r5 = 0) {
-        auto ctx = std::make_unique<DalPpuContext>();
+        auto ctx = std::make_unique<Tox2PpuContext>();
         ctx->gpr[3] = r3;
         ctx->gpr[4] = r4;
         ctx->gpr[5] = r5;
-        dalHleCall(ctx.get(), base, index);
+        tox2HleCall(ctx.get(), base, index);
         return ctx->gpr[3];
     };
 
@@ -1278,7 +1278,7 @@ void testSysPrxForUser() {
     CHECK(call(0, 0x1000) == 2);
     const std::uint64_t block = call(2, 1, 0x100);
     CHECK(block != 0 && block % 0x10000 == 0);
-    CHECK(block >= dal::kMainRegion.begin && block < dal::kMainRegion.end);
+    CHECK(block >= tox2::kMainRegion.begin && block < tox2::kMainRegion.end);
     const std::uint64_t aligned = call(3, 1, 0x40000, 0x10);
     CHECK(aligned != 0 && aligned % 0x40000 == 0);
     const std::uint64_t small_align = call(3, 1, 0x10, 0x10);
@@ -1293,52 +1293,52 @@ void testSysPrxForUser() {
 
     // sys_initialize_tls is a no-op once r13 is set (the boot did it natively).
     {
-        auto ctx = std::make_unique<DalPpuContext>();
+        auto ctx = std::make_unique<Tox2PpuContext>();
         ctx->gpr[13] = 0x00123456;
         ctx->gpr[3] = 0x01000000;
         ctx->gpr[4] = 0x0010245c;
         ctx->gpr[5] = 4;
         ctx->gpr[6] = 0x110;
-        dalHleCall(ctx.get(), base, 5);
+        tox2HleCall(ctx.get(), base, 5);
         CHECK(ctx->gpr[13] == 0x00123456);
         CHECK(ctx->gpr[3] == 0x01000000);
-        CHECK(countContaining(lines, "dal: tls:") == 0);
+        CHECK(countContaining(lines, "tox2: tls:") == 0);
     }
 
     const std::uint64_t t0 = call(6);
     CHECK(t0 != 0 && call(6) >= t0);
     CHECK(call(7, 0x55) == 0);
     CHECK(call(8, 0x55) == 0);
-    CHECK(dal::sysPrxForUserHandlers().size() == 23);
+    CHECK(tox2::sysPrxForUserHandlers().size() == 23);
 
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 // A guest thread object that is not registered or started: it only gives a syscall caller an id.
-std::unique_ptr<dal::GuestThread> makeCaller(std::uint32_t id) {
-    return std::make_unique<dal::GuestThread>(id, dal::GuestThreadParams{}, 0, 0);
+std::unique_ptr<tox2::GuestThread> makeCaller(std::uint32_t id) {
+    return std::make_unique<tox2::GuestThread>(id, tox2::GuestThreadParams{}, 0, 0);
 }
 
-std::uint64_t syscallAs(dal::GuestThread& caller, std::uint32_t number, std::uint64_t r3 = 0, std::uint64_t r4 = 0,
+std::uint64_t syscallAs(tox2::GuestThread& caller, std::uint32_t number, std::uint64_t r3 = 0, std::uint64_t r4 = 0,
                         std::uint64_t r5 = 0, std::uint64_t r6 = 0, std::uint64_t r7 = 0) {
-    DalPpuContext* ctx = &caller.context();
+    Tox2PpuContext* ctx = &caller.context();
     ctx->gpr[11] = number;
     ctx->gpr[3] = r3;
     ctx->gpr[4] = r4;
     ctx->gpr[5] = r5;
     ctx->gpr[6] = r6;
     ctx->gpr[7] = r7;
-    dalSyscall(ctx, dal::process().memory.base(), 0x10000);
+    tox2Syscall(ctx, tox2::process().memory.base(), 0x10000);
     return ctx->gpr[3];
 }
 
 void testMutexAndCond() {
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetSyncObjects();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -1348,144 +1348,144 @@ void testMutexAndCond() {
     auto a = makeCaller(0x01000000);
     auto b = makeCaller(0x01000001);
     auto setMutexAttr = [&](std::uint32_t protocol, std::uint32_t recursive) {
-        dalWrite32(base, attr, protocol);
-        dalWrite32(base, attr + 4, recursive);
+        tox2Write32(base, attr, protocol);
+        tox2Write32(base, attr + 4, recursive);
     };
 
     // Recursive mutex: the count survives nested locks, only the owner may unlock.
     setMutexAttr(2, 0x10);
     CHECK(syscallAs(*a, 100, id_out, attr) == 0);
-    const std::uint32_t m = dalRead32(base, id_out);
+    const std::uint32_t m = tox2Read32(base, id_out);
     CHECK(m == 0x85000000);
     CHECK(syscallAs(*a, 102, m, 0) == 0);
     CHECK(syscallAs(*a, 102, m, 0) == 0);
     CHECK(syscallAs(*a, 103, m) == 0);
-    CHECK(syscallAs(*b, 103, m) == err(dal::kCellEbusy));
-    CHECK(syscallAs(*b, 104, m) == err(dal::kCellEperm));
-    CHECK(syscallAs(*a, 101, m) == err(dal::kCellEbusy));
+    CHECK(syscallAs(*b, 103, m) == err(tox2::kCellEbusy));
+    CHECK(syscallAs(*b, 104, m) == err(tox2::kCellEperm));
+    CHECK(syscallAs(*a, 101, m) == err(tox2::kCellEbusy));
     CHECK(syscallAs(*a, 104, m) == 0);
     CHECK(syscallAs(*a, 104, m) == 0);
-    CHECK(syscallAs(*b, 104, m) == err(dal::kCellEperm));  // still owned
+    CHECK(syscallAs(*b, 104, m) == err(tox2::kCellEperm));  // still owned
     CHECK(syscallAs(*a, 104, m) == 0);
-    CHECK(syscallAs(*a, 104, m) == err(dal::kCellEperm));  // now free
+    CHECK(syscallAs(*a, 104, m) == err(tox2::kCellEperm));  // now free
     CHECK(syscallAs(*a, 101, m) == 0);
-    CHECK(syscallAs(*a, 101, m) == err(dal::kCellEsrch));
-    CHECK(syscallAs(*a, 102, m, 0) == err(dal::kCellEsrch));
+    CHECK(syscallAs(*a, 101, m) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 102, m, 0) == err(tox2::kCellEsrch));
 
     // A non-recursive mutex reports a relock as a deadlock.
     setMutexAttr(1, 0x20);
     CHECK(syscallAs(*a, 100, id_out, attr) == 0);
-    const std::uint32_t plain = dalRead32(base, id_out);
+    const std::uint32_t plain = tox2Read32(base, id_out);
     CHECK(plain == 0x85000100);
     CHECK(syscallAs(*a, 102, plain, 0) == 0);
-    CHECK(syscallAs(*a, 102, plain, 0) == err(dal::kCellEdeadlk));
-    CHECK(syscallAs(*a, 103, plain) == err(dal::kCellEdeadlk));
+    CHECK(syscallAs(*a, 102, plain, 0) == err(tox2::kCellEdeadlk));
+    CHECK(syscallAs(*a, 103, plain) == err(tox2::kCellEdeadlk));
     CHECK(syscallAs(*a, 104, plain) == 0);
 
     setMutexAttr(9, 0x20);
-    CHECK(syscallAs(*a, 100, id_out, attr) == err(dal::kCellEinval));
+    CHECK(syscallAs(*a, 100, id_out, attr) == err(tox2::kCellEinval));
     setMutexAttr(1, 0x21);
-    CHECK(syscallAs(*a, 100, id_out, attr) == err(dal::kCellEinval));
-    CHECK(syscallAs(*a, 100, 0, attr) == err(dal::kCellEfault));
+    CHECK(syscallAs(*a, 100, id_out, attr) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 100, 0, attr) == err(tox2::kCellEfault));
 
     // Condition variable: the mutex must be held, and a timed-out wait still hands it back.
-    CHECK(syscallAs(*a, 105, cond_out, 0x85000fff, attr) == err(dal::kCellEsrch));
+    CHECK(syscallAs(*a, 105, cond_out, 0x85000fff, attr) == err(tox2::kCellEsrch));
     CHECK(syscallAs(*a, 105, cond_out, plain, attr) == 0);
-    const std::uint32_t c = dalRead32(base, cond_out);
+    const std::uint32_t c = tox2Read32(base, cond_out);
     CHECK(c == 0x86000000);
-    CHECK(syscallAs(*a, 107, c, 0) == err(dal::kCellEperm));   // mutex not held
-    CHECK(syscallAs(*a, 101, plain) == err(dal::kCellEperm));  // bound to a condition variable
-    CHECK(syscallAs(*a, 108, c) == 0);                         // no waiters: dropped
+    CHECK(syscallAs(*a, 107, c, 0) == err(tox2::kCellEperm));   // mutex not held
+    CHECK(syscallAs(*a, 101, plain) == err(tox2::kCellEperm));  // bound to a condition variable
+    CHECK(syscallAs(*a, 108, c) == 0);                          // no waiters: dropped
     CHECK(syscallAs(*a, 109, c) == 0);
     {
-        std::lock_guard<dal::GuestLock> guard(dal::guestLock());
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
         CHECK(syscallAs(*a, 102, plain, 0) == 0);
-        CHECK(syscallAs(*a, 107, c, 1000) == err(dal::kCellEtimedout));
-        CHECK(syscallAs(*b, 103, plain) == err(dal::kCellEbusy));  // reacquired by the waiter
+        CHECK(syscallAs(*a, 107, c, 1000) == err(tox2::kCellEtimedout));
+        CHECK(syscallAs(*b, 103, plain) == err(tox2::kCellEbusy));  // reacquired by the waiter
         CHECK(syscallAs(*a, 104, plain) == 0);
     }
     setMutexAttr(2, 0x10);
     CHECK(syscallAs(*a, 100, id_out, attr) == 0);
-    const std::uint32_t rec = dalRead32(base, id_out);
+    const std::uint32_t rec = tox2Read32(base, id_out);
     CHECK(syscallAs(*a, 105, cond_out, rec, attr) == 0);
-    const std::uint32_t rc = dalRead32(base, cond_out);
+    const std::uint32_t rc = tox2Read32(base, cond_out);
     {
-        std::lock_guard<dal::GuestLock> guard(dal::guestLock());
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
         CHECK(syscallAs(*a, 102, rec, 0) == 0);
         CHECK(syscallAs(*a, 102, rec, 0) == 0);
-        CHECK(syscallAs(*a, 107, rc, 1000) == err(dal::kCellEtimedout));
+        CHECK(syscallAs(*a, 107, rc, 1000) == err(tox2::kCellEtimedout));
         CHECK(syscallAs(*a, 104, rec) == 0);  // the recursion count came back
         CHECK(syscallAs(*a, 104, rec) == 0);
-        CHECK(syscallAs(*a, 104, rec) == err(dal::kCellEperm));
+        CHECK(syscallAs(*a, 104, rec) == err(tox2::kCellEperm));
     }
     CHECK(syscallAs(*a, 106, rc) == 0);
-    CHECK(syscallAs(*a, 106, rc) == err(dal::kCellEsrch));
+    CHECK(syscallAs(*a, 106, rc) == err(tox2::kCellEsrch));
     CHECK(syscallAs(*a, 101, rec) == 0);
 
     // Contention: a second host thread blocks on a held mutex and gets it after the unlock. The
     // worker holds the guest lock from the flag write until its blocking wait releases it, so seeing
     // the flag while holding the lock means the worker is waiting.
     CHECK(syscallAs(*a, 100, id_out, attr) == 0);
-    const std::uint32_t contended = dalRead32(base, id_out);
+    const std::uint32_t contended = tox2Read32(base, id_out);
     std::atomic<bool> b_ready{false};
     std::uint64_t b_result = ~0ull;
     {
-        std::lock_guard<dal::GuestLock> guard(dal::guestLock());
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
         CHECK(syscallAs(*a, 102, contended, 0) == 0);
         std::thread worker([&] {
-            std::lock_guard<dal::GuestLock> worker_guard(dal::guestLock());
+            std::lock_guard<tox2::GuestLock> worker_guard(tox2::guestLock());
             b_ready = true;
             b_result = syscallAs(*b, 102, contended, 0);
         });
-        dal::guestLock().unlock();
+        tox2::guestLock().unlock();
         while (!b_ready) std::this_thread::yield();
-        dal::guestLock().lock();
+        tox2::guestLock().lock();
         CHECK(syscallAs(*a, 104, contended) == 0);
-        dal::guestLock().unlock();
+        tox2::guestLock().unlock();
         worker.join();
-        dal::guestLock().lock();
+        tox2::guestLock().lock();
     }
     CHECK(b_result == 0);
-    CHECK(syscallAs(*a, 104, contended) == err(dal::kCellEperm));
+    CHECK(syscallAs(*a, 104, contended) == err(tox2::kCellEperm));
     CHECK(syscallAs(*b, 104, contended) == 0);
 
     // A waiter is woken by a signal and returns holding the mutex again.
     CHECK(syscallAs(*a, 105, cond_out, contended, attr) == 0);
-    const std::uint32_t cv = dalRead32(base, cond_out);
+    const std::uint32_t cv = tox2Read32(base, cond_out);
     b_ready = false;
     b_result = ~0ull;
     {
-        std::lock_guard<dal::GuestLock> guard(dal::guestLock());
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
         std::thread worker([&] {
-            std::lock_guard<dal::GuestLock> worker_guard(dal::guestLock());
+            std::lock_guard<tox2::GuestLock> worker_guard(tox2::guestLock());
             syscallAs(*b, 102, contended, 0);
             b_ready = true;
             b_result = syscallAs(*b, 107, cv, 0);
         });
-        dal::guestLock().unlock();
+        tox2::guestLock().unlock();
         while (!b_ready) std::this_thread::yield();
-        dal::guestLock().lock();
+        tox2::guestLock().lock();
         CHECK(syscallAs(*a, 102, contended, 0) == 0);  // free: the waiter released it
         CHECK(syscallAs(*a, 108, cv) == 0);
         CHECK(syscallAs(*a, 104, contended) == 0);
-        dal::guestLock().unlock();
+        tox2::guestLock().unlock();
         worker.join();
-        dal::guestLock().lock();
+        tox2::guestLock().lock();
     }
     CHECK(b_result == 0);
     CHECK(syscallAs(*b, 104, contended) == 0);  // held by the waiter after the wait
 
     p.main.free(scratch);
-    dal::resetSyncObjects();
-    dal::setLogSink({});
-    dal::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::setLogSink({});
+    tox2::resetCensus();
 }
 
 void testEventObjects() {
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetSyncObjects();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -1495,45 +1495,45 @@ void testEventObjects() {
     auto a = makeCaller(0x01000000);
     auto b = makeCaller(0x01000001);
     // Waiting calls need the guest lock; the helpers below hand it over to the worker threads.
-    std::lock_guard<dal::GuestLock> guard(dal::guestLock());
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
 
     // Event flag: attribute checks, then OR / AND waits with the clear modes.
-    dalWrite32(base, attr, 1);             // protocol FIFO
-    dalWrite32(base, attr + 20, 0x20000);  // multiple waiters
-    CHECK(syscallAs(*a, 82, 0, attr, 0) == err(dal::kCellEfault));
-    dalWrite32(base, attr + 20, 0x30000);
-    CHECK(syscallAs(*a, 82, id_out, attr, 0) == err(dal::kCellEinval));
-    dalWrite32(base, attr + 20, 0x20000);
+    tox2Write32(base, attr, 1);             // protocol FIFO
+    tox2Write32(base, attr + 20, 0x20000);  // multiple waiters
+    CHECK(syscallAs(*a, 82, 0, attr, 0) == err(tox2::kCellEfault));
+    tox2Write32(base, attr + 20, 0x30000);
+    CHECK(syscallAs(*a, 82, id_out, attr, 0) == err(tox2::kCellEinval));
+    tox2Write32(base, attr + 20, 0x20000);
     CHECK(syscallAs(*a, 82, id_out, attr, 0x5) == 0);
-    const std::uint32_t flag = dalRead32(base, id_out);
+    const std::uint32_t flag = tox2Read32(base, id_out);
     CHECK(flag == 0x98000000);
     CHECK(syscallAs(*a, 139, flag, result) == 0);
-    CHECK(dalRead64(base, result) == 0x5);
+    CHECK(tox2Read64(base, result) == 0x5);
 
-    CHECK(syscallAs(*a, 85, flag, 0x4, dal::kWaitOr, result, 0) == 0);  // already set
-    CHECK(dalRead64(base, result) == 0x5);
-    CHECK(syscallAs(*a, 85, flag, 0x4, dal::kWaitOr | dal::kWaitClear, result, 1000) == 0);
-    CHECK(dalRead64(base, result) == 0x5);  // the value before the clear
+    CHECK(syscallAs(*a, 85, flag, 0x4, tox2::kWaitOr, result, 0) == 0);  // already set
+    CHECK(tox2Read64(base, result) == 0x5);
+    CHECK(syscallAs(*a, 85, flag, 0x4, tox2::kWaitOr | tox2::kWaitClear, result, 1000) == 0);
+    CHECK(tox2Read64(base, result) == 0x5);  // the value before the clear
     CHECK(syscallAs(*a, 139, flag, result) == 0);
-    CHECK(dalRead64(base, result) == 0x1);
+    CHECK(tox2Read64(base, result) == 0x1);
     CHECK(syscallAs(*a, 87, flag, 0x6) == 0);
     CHECK(syscallAs(*a, 139, flag, result) == 0);
-    CHECK(dalRead64(base, result) == 0x7);
-    CHECK(syscallAs(*a, 85, flag, 0x3, dal::kWaitAnd | dal::kWaitClearAll, result, 1000) == 0);
-    CHECK(dalRead64(base, result) == 0x7);
+    CHECK(tox2Read64(base, result) == 0x7);
+    CHECK(syscallAs(*a, 85, flag, 0x3, tox2::kWaitAnd | tox2::kWaitClearAll, result, 1000) == 0);
+    CHECK(tox2Read64(base, result) == 0x7);
     CHECK(syscallAs(*a, 139, flag, result) == 0);
-    CHECK(dalRead64(base, result) == 0);
+    CHECK(tox2Read64(base, result) == 0);
     CHECK(syscallAs(*a, 87, flag, 0x3) == 0);
-    CHECK(syscallAs(*a, 85, flag, 0x7, dal::kWaitAnd, result, 1000) == err(dal::kCellEtimedout));
-    CHECK(dalRead64(base, result) == 0x3);  // the pattern at the time of the timeout
+    CHECK(syscallAs(*a, 85, flag, 0x7, tox2::kWaitAnd, result, 1000) == err(tox2::kCellEtimedout));
+    CHECK(tox2Read64(base, result) == 0x3);  // the pattern at the time of the timeout
     CHECK(syscallAs(*a, 118, flag, 0x2) == 0);
     CHECK(syscallAs(*a, 139, flag, result) == 0);
-    CHECK(dalRead64(base, result) == 0x2);
-    CHECK(syscallAs(*a, 85, flag, 0x1, 0x3, result, 1000) == err(dal::kCellEinval));  // AND|OR
-    CHECK(syscallAs(*a, 85, flag, 0x1, 0x4, result, 1000) == err(dal::kCellEinval));
-    CHECK(syscallAs(*a, 85, 0x98000fff, 0x1, dal::kWaitOr, result, 1000) == err(dal::kCellEsrch));
-    CHECK(syscallAs(*a, 139, 0x98000fff, result) == err(dal::kCellEsrch));
-    CHECK(syscallAs(*a, 87, 0x98000fff, 1) == err(dal::kCellEsrch));
+    CHECK(tox2Read64(base, result) == 0x2);
+    CHECK(syscallAs(*a, 85, flag, 0x1, 0x3, result, 1000) == err(tox2::kCellEinval));  // AND|OR
+    CHECK(syscallAs(*a, 85, flag, 0x1, 0x4, result, 1000) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 85, 0x98000fff, 0x1, tox2::kWaitOr, result, 1000) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 139, 0x98000fff, result) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 87, 0x98000fff, 1) == err(tox2::kCellEsrch));
 
     // A waiter on another host thread is woken by a set and cancelled by a cancel. The worker holds
     // the guest lock from the flag write until its blocking wait releases it.
@@ -1543,54 +1543,54 @@ void testEventObjects() {
         b_ready = false;
         b_result = ~0ull;
         std::thread worker([&, id, pattern, mode] {
-            std::lock_guard<dal::GuestLock> worker_guard(dal::guestLock());
+            std::lock_guard<tox2::GuestLock> worker_guard(tox2::guestLock());
             b_ready = true;
             b_result = syscallAs(*b, 85, id, pattern, mode, result + 0x20, 0);
         });
-        dal::guestLock().unlock();
+        tox2::guestLock().unlock();
         while (!b_ready) std::this_thread::yield();
-        dal::guestLock().lock();
+        tox2::guestLock().lock();
         return worker;
     };
     const auto finish = [&](std::thread& worker) {
-        dal::guestLock().unlock();
+        tox2::guestLock().unlock();
         worker.join();
-        dal::guestLock().lock();
+        tox2::guestLock().lock();
     };
     {
         CHECK(syscallAs(*a, 118, flag, 0) == 0);
-        std::thread worker = runWaiter(flag, 0x8, dal::kWaitOr | dal::kWaitClear);
-        CHECK(syscallAs(*a, 83, flag) == err(dal::kCellEbusy));
+        std::thread worker = runWaiter(flag, 0x8, tox2::kWaitOr | tox2::kWaitClear);
+        CHECK(syscallAs(*a, 83, flag) == err(tox2::kCellEbusy));
         CHECK(syscallAs(*a, 87, flag, 0x1) == 0);  // does not match: still waiting
         CHECK(b_result == ~0ull);
         CHECK(syscallAs(*a, 87, flag, 0x8) == 0);
         finish(worker);
         CHECK(b_result == 0);
-        CHECK(dalRead64(base, result + 0x20) == 0x9);
+        CHECK(tox2Read64(base, result + 0x20) == 0x9);
         CHECK(syscallAs(*a, 139, flag, result) == 0);
-        CHECK(dalRead64(base, result) == 0x1);  // the waiter cleared its bit only
+        CHECK(tox2Read64(base, result) == 0x1);  // the waiter cleared its bit only
 
-        std::thread canceled = runWaiter(flag, 0x10, dal::kWaitAnd);
+        std::thread canceled = runWaiter(flag, 0x10, tox2::kWaitAnd);
         CHECK(syscallAs(*a, 132, flag, num) == 0);
-        CHECK(dalRead32(base, num) == 1);
+        CHECK(tox2Read32(base, num) == 1);
         finish(canceled);
-        CHECK(b_result == err(dal::kCellEcanceled));
-        CHECK(dalRead64(base, result + 0x20) == 0x1);
+        CHECK(b_result == err(tox2::kCellEcanceled));
+        CHECK(tox2Read64(base, result + 0x20) == 0x1);
         CHECK(syscallAs(*a, 132, flag, num) == 0);
-        CHECK(dalRead32(base, num) == 0);
-        CHECK(syscallAs(*a, 132, 0x98000fff, num) == err(dal::kCellEsrch));
+        CHECK(tox2Read32(base, num) == 0);
+        CHECK(syscallAs(*a, 132, 0x98000fff, num) == err(tox2::kCellEsrch));
     }
     CHECK(syscallAs(*a, 83, flag) == 0);
-    CHECK(syscallAs(*a, 83, flag) == err(dal::kCellEsrch));
+    CHECK(syscallAs(*a, 83, flag) == err(tox2::kCellEsrch));
 
     // A single-waiter flag refuses a second waiter.
-    dalWrite32(base, attr + 20, 0x10000);
+    tox2Write32(base, attr + 20, 0x10000);
     CHECK(syscallAs(*a, 82, id_out, attr, 0) == 0);
-    const std::uint32_t single = dalRead32(base, id_out);
+    const std::uint32_t single = tox2Read32(base, id_out);
     CHECK(single == 0x98000100);
     {
-        std::thread worker = runWaiter(single, 0x1, dal::kWaitOr);
-        CHECK(syscallAs(*a, 85, single, 0x2, dal::kWaitOr, result, 0) == err(dal::kCellEperm));
+        std::thread worker = runWaiter(single, 0x1, tox2::kWaitOr);
+        CHECK(syscallAs(*a, 85, single, 0x2, tox2::kWaitOr, result, 0) == err(tox2::kCellEperm));
         CHECK(syscallAs(*a, 87, single, 0x1) == 0);
         finish(worker);
         CHECK(b_result == 0);
@@ -1599,99 +1599,99 @@ void testEventObjects() {
 
     // Event queue and port: send then receive delivers source/data1..3 in r4..r7.
     const std::uint32_t queue_id = scratch + 0xa0, port_id = scratch + 0xb0, sys_event = scratch + 0xc0;
-    dalWrite32(base, attr, 2);                                                   // protocol PRIORITY
-    dalWrite32(base, attr + 4, 1);                                               // PPU queue
-    CHECK(syscallAs(*a, 128, queue_id, attr, 0, 0) == err(dal::kCellEinval));    // size 0
-    CHECK(syscallAs(*a, 128, queue_id, attr, 0, 128) == err(dal::kCellEinval));  // size 128
-    dalWrite32(base, attr + 4, 3);
-    CHECK(syscallAs(*a, 128, queue_id, attr, 0, 2) == err(dal::kCellEinval));  // type
-    dalWrite32(base, attr + 4, 1);
+    tox2Write32(base, attr, 2);                                                   // protocol PRIORITY
+    tox2Write32(base, attr + 4, 1);                                               // PPU queue
+    CHECK(syscallAs(*a, 128, queue_id, attr, 0, 0) == err(tox2::kCellEinval));    // size 0
+    CHECK(syscallAs(*a, 128, queue_id, attr, 0, 128) == err(tox2::kCellEinval));  // size 128
+    tox2Write32(base, attr + 4, 3);
+    CHECK(syscallAs(*a, 128, queue_id, attr, 0, 2) == err(tox2::kCellEinval));  // type
+    tox2Write32(base, attr + 4, 1);
     CHECK(syscallAs(*a, 128, queue_id, attr, 0, 2) == 0);
-    const std::uint32_t queue = dalRead32(base, queue_id);
+    const std::uint32_t queue = tox2Read32(base, queue_id);
     CHECK(queue == 0x8d000000);
-    CHECK(syscallAs(*a, 134, port_id, 2, 0) == err(dal::kCellEinval));
+    CHECK(syscallAs(*a, 134, port_id, 2, 0) == err(tox2::kCellEinval));
     CHECK(syscallAs(*a, 134, port_id, 1, 0) == 0);
-    const std::uint32_t port = dalRead32(base, port_id);
+    const std::uint32_t port = tox2Read32(base, port_id);
     CHECK(port == 0x0e000000);
-    CHECK(syscallAs(*a, 138, port, 1, 2, 3) == err(dal::kCellEnotconn));
-    CHECK(syscallAs(*a, 136, port, 0x8d000fff) == err(dal::kCellEsrch));
+    CHECK(syscallAs(*a, 138, port, 1, 2, 3) == err(tox2::kCellEnotconn));
+    CHECK(syscallAs(*a, 136, port, 0x8d000fff) == err(tox2::kCellEsrch));
     CHECK(syscallAs(*a, 136, port, queue) == 0);
-    CHECK(syscallAs(*a, 136, port, queue) == err(dal::kCellEisconn));
-    CHECK(syscallAs(*a, 135, port) == err(dal::kCellEisconn));
+    CHECK(syscallAs(*a, 136, port, queue) == err(tox2::kCellEisconn));
+    CHECK(syscallAs(*a, 135, port) == err(tox2::kCellEisconn));
 
     CHECK(syscallAs(*a, 138, port, 0x11, 0x22, 0x33) == 0);
     CHECK(syscallAs(*a, 138, port, 0x44, 0x55, 0x66) == 0);
-    CHECK(syscallAs(*a, 138, port, 0x77, 0x88, 0x99) == err(dal::kCellEbusy));  // queue full
+    CHECK(syscallAs(*a, 138, port, 0x77, 0x88, 0x99) == err(tox2::kCellEbusy));  // queue full
     CHECK(syscallAs(*a, 130, queue, sys_event, 1000) == 0);
-    DalPpuContext* actx = &a->context();
+    Tox2PpuContext* actx = &a->context();
     CHECK(actx->gpr[4] == ((std::uint64_t{1} << 32) | port));  // unnamed port: pid << 32 | id
     CHECK(actx->gpr[5] == 0x11 && actx->gpr[6] == 0x22 && actx->gpr[7] == 0x33);
-    CHECK(dalRead64(base, sys_event) == 0);  // the event pointer is never written
-    CHECK(syscallAs(*a, 133, queue) == 0);   // drain
-    CHECK(syscallAs(*a, 130, queue, sys_event, 1000) == err(dal::kCellEtimedout));
+    CHECK(tox2Read64(base, sys_event) == 0);  // the event pointer is never written
+    CHECK(syscallAs(*a, 133, queue) == 0);    // drain
+    CHECK(syscallAs(*a, 130, queue, sys_event, 1000) == err(tox2::kCellEtimedout));
 
     // A named port reports its name; a blocked receiver gets the event directly.
     CHECK(syscallAs(*a, 137, port) == 0);
-    CHECK(syscallAs(*a, 137, port) == err(dal::kCellEnotconn));
+    CHECK(syscallAs(*a, 137, port) == err(tox2::kCellEnotconn));
     CHECK(syscallAs(*a, 135, port) == 0);
     CHECK(syscallAs(*a, 134, port_id, 1, 0xabcd) == 0);
-    const std::uint32_t named = dalRead32(base, port_id);
+    const std::uint32_t named = tox2Read32(base, port_id);
     CHECK(syscallAs(*a, 136, named, queue) == 0);
     {
         std::atomic<bool> receiving{false};
         std::thread worker([&] {
-            std::lock_guard<dal::GuestLock> worker_guard(dal::guestLock());
+            std::lock_guard<tox2::GuestLock> worker_guard(tox2::guestLock());
             receiving = true;
             b_result = syscallAs(*b, 130, queue, sys_event, 0);
         });
-        dal::guestLock().unlock();
+        tox2::guestLock().unlock();
         while (!receiving) std::this_thread::yield();
-        dal::guestLock().lock();
-        CHECK(syscallAs(*a, 129, queue, 0) == err(dal::kCellEbusy));  // a receiver waits
+        tox2::guestLock().lock();
+        CHECK(syscallAs(*a, 129, queue, 0) == err(tox2::kCellEbusy));  // a receiver waits
         CHECK(syscallAs(*a, 138, named, 7, 8, 9) == 0);
-        dal::guestLock().unlock();
+        tox2::guestLock().unlock();
         worker.join();
-        dal::guestLock().lock();
+        tox2::guestLock().lock();
     }
     CHECK(b_result == 0);
-    DalPpuContext* bctx = &b->context();
+    Tox2PpuContext* bctx = &b->context();
     CHECK(bctx->gpr[4] == 0xabcd && bctx->gpr[5] == 7 && bctx->gpr[6] == 8 && bctx->gpr[7] == 9);
 
     // Forced destroy cancels receivers; the port is then disconnected.
     {
         std::atomic<bool> receiving{false};
         std::thread worker([&] {
-            std::lock_guard<dal::GuestLock> worker_guard(dal::guestLock());
+            std::lock_guard<tox2::GuestLock> worker_guard(tox2::guestLock());
             receiving = true;
             b_result = syscallAs(*b, 130, queue, sys_event, 0);
         });
-        dal::guestLock().unlock();
+        tox2::guestLock().unlock();
         while (!receiving) std::this_thread::yield();
-        dal::guestLock().lock();
-        CHECK(syscallAs(*a, 129, queue, 2) == err(dal::kCellEinval));
+        tox2::guestLock().lock();
+        CHECK(syscallAs(*a, 129, queue, 2) == err(tox2::kCellEinval));
         CHECK(syscallAs(*a, 129, queue, 1) == 0);
-        dal::guestLock().unlock();
+        tox2::guestLock().unlock();
         worker.join();
-        dal::guestLock().lock();
+        tox2::guestLock().lock();
     }
-    CHECK(b_result == err(dal::kCellEcanceled));
-    CHECK(syscallAs(*a, 129, queue, 0) == err(dal::kCellEsrch));
-    CHECK(syscallAs(*a, 130, queue, sys_event, 1000) == err(dal::kCellEsrch));
-    CHECK(syscallAs(*a, 138, named, 1, 2, 3) == err(dal::kCellEnotconn));
+    CHECK(b_result == err(tox2::kCellEcanceled));
+    CHECK(syscallAs(*a, 129, queue, 0) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 130, queue, sys_event, 1000) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 138, named, 1, 2, 3) == err(tox2::kCellEnotconn));
     CHECK(syscallAs(*a, 135, named) == 0);
-    CHECK(syscallAs(*a, 135, named) == err(dal::kCellEsrch));
+    CHECK(syscallAs(*a, 135, named) == err(tox2::kCellEsrch));
 
     p.main.free(scratch);
-    dal::resetSyncObjects();
-    dal::setLogSink({});
-    dal::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::setLogSink({});
+    tox2::resetCensus();
 }
 
 void testEventQueueIpcKeys() {
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetSyncObjects();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -1700,46 +1700,46 @@ void testEventQueueIpcKeys() {
 
     auto a = makeCaller(0x01000000);
     auto b = makeCaller(0x01000001);
-    std::lock_guard<dal::GuestLock> guard(dal::guestLock());
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
 
     constexpr std::uint64_t kKey = 0x8000cafe02460300;  // the game mixer's first notify queue key
-    dalWrite32(base, attr, 1);                          // protocol FIFO
-    dalWrite32(base, attr + 4, 1);                      // PPU queue
+    tox2Write32(base, attr, 1);                         // protocol FIFO
+    tox2Write32(base, attr + 4, 1);                     // PPU queue
 
     // A keyed queue is found by its key.
-    CHECK(dal::eventQueueIdByKey(kKey) == 0);
+    CHECK(tox2::eventQueueIdByKey(kKey) == 0);
     CHECK(syscallAs(*a, 128, id_out, attr, kKey, 2) == 0);
-    const std::uint32_t first = dalRead32(base, id_out);
+    const std::uint32_t first = tox2Read32(base, id_out);
     CHECK(first == 0x8d000000);
-    CHECK(dal::eventQueueIdByKey(kKey) == first);
-    CHECK(dal::eventQueueIdByKey(kKey + 1) == 0);
-    CHECK(dal::eventQueueIdByKey(0) == 0);
+    CHECK(tox2::eventQueueIdByKey(kKey) == first);
+    CHECK(tox2::eventQueueIdByKey(kKey + 1) == 0);
+    CHECK(tox2::eventQueueIdByKey(0) == 0);
 
     // A duplicate key fails with EEXIST and creates nothing: `*id` stays and the id counter does not
     // move. The game's retry with key + 1 then succeeds.
-    dalWrite32(base, id_out, 0xdeadbeef);
-    CHECK(syscallAs(*a, 128, id_out, attr, kKey, 2) == err(dal::kCellEexist));
-    CHECK(dalRead32(base, id_out) == 0xdeadbeef);
-    CHECK(dal::eventQueueIdByKey(kKey) == first);
+    tox2Write32(base, id_out, 0xdeadbeef);
+    CHECK(syscallAs(*a, 128, id_out, attr, kKey, 2) == err(tox2::kCellEexist));
+    CHECK(tox2Read32(base, id_out) == 0xdeadbeef);
+    CHECK(tox2::eventQueueIdByKey(kKey) == first);
     CHECK(syscallAs(*a, 128, id_out, attr, kKey + 1, 2) == 0);
-    const std::uint32_t second = dalRead32(base, id_out);
+    const std::uint32_t second = tox2Read32(base, id_out);
     CHECK(second == first + 0x100);
-    CHECK(dal::eventQueueIdByKey(kKey + 1) == second);
-    CHECK(dal::eventQueueIdByKey(kKey) == first);
+    CHECK(tox2::eventQueueIdByKey(kKey + 1) == second);
+    CHECK(tox2::eventQueueIdByKey(kKey) == first);
 
     // Argument checks come before the key rules.
-    dalWrite32(base, attr + 4, 3);
-    CHECK(syscallAs(*a, 128, id_out, attr, kKey, 2) == err(dal::kCellEinval));
-    dalWrite32(base, attr + 4, 1);
-    CHECK(syscallAs(*a, 128, id_out, attr, kKey, 0) == err(dal::kCellEinval));
+    tox2Write32(base, attr + 4, 3);
+    CHECK(syscallAs(*a, 128, id_out, attr, kKey, 2) == err(tox2::kCellEinval));
+    tox2Write32(base, attr + 4, 1);
+    CHECK(syscallAs(*a, 128, id_out, attr, kKey, 0) == err(tox2::kCellEinval));
 
     // Key 0 is local: any number of queues, none findable by key.
     CHECK(syscallAs(*a, 128, id_out, attr, 0, 2) == 0);
-    const std::uint32_t local_a = dalRead32(base, id_out);
+    const std::uint32_t local_a = tox2Read32(base, id_out);
     CHECK(syscallAs(*a, 128, id_out, attr, 0, 2) == 0);
-    const std::uint32_t local_b = dalRead32(base, id_out);
+    const std::uint32_t local_b = tox2Read32(base, id_out);
     CHECK(local_a != local_b && local_a != 0 && local_b != 0);
-    CHECK(dal::eventQueueIdByKey(0) == 0);
+    CHECK(tox2::eventQueueIdByKey(0) == 0);
 
     // Destroying a queue forgets its key; the key can then be used again. A refused destroy (a
     // receiver waits) keeps it.
@@ -1747,48 +1747,48 @@ void testEventQueueIpcKeys() {
         std::atomic<bool> receiving{false};
         std::uint64_t b_result = ~0ull;
         std::thread worker([&] {
-            std::lock_guard<dal::GuestLock> worker_guard(dal::guestLock());
+            std::lock_guard<tox2::GuestLock> worker_guard(tox2::guestLock());
             receiving = true;
             b_result = syscallAs(*b, 130, second, sys_event, 0);
         });
-        dal::guestLock().unlock();
+        tox2::guestLock().unlock();
         while (!receiving) std::this_thread::yield();
-        dal::guestLock().lock();
-        CHECK(syscallAs(*a, 129, second, 0) == err(dal::kCellEbusy));
-        CHECK(dal::eventQueueIdByKey(kKey + 1) == second);
+        tox2::guestLock().lock();
+        CHECK(syscallAs(*a, 129, second, 0) == err(tox2::kCellEbusy));
+        CHECK(tox2::eventQueueIdByKey(kKey + 1) == second);
 
         // sendEventToQueue wakes the blocked receiver; the event arrives in r4..r7.
-        CHECK(dal::sendEventToQueue(second, 0x1111, 1, 2, 3) == 0);
-        dal::guestLock().unlock();
+        CHECK(tox2::sendEventToQueue(second, 0x1111, 1, 2, 3) == 0);
+        tox2::guestLock().unlock();
         worker.join();
-        dal::guestLock().lock();
+        tox2::guestLock().lock();
         CHECK(b_result == 0);
-        DalPpuContext* bctx = &b->context();
+        Tox2PpuContext* bctx = &b->context();
         CHECK(bctx->gpr[4] == 0x1111 && bctx->gpr[5] == 1 && bctx->gpr[6] == 2 && bctx->gpr[7] == 3);
     }
     CHECK(syscallAs(*a, 129, second, 0) == 0);
-    CHECK(dal::eventQueueIdByKey(kKey + 1) == 0);
-    CHECK(dal::eventQueueIdByKey(kKey) == first);
+    CHECK(tox2::eventQueueIdByKey(kKey + 1) == 0);
+    CHECK(tox2::eventQueueIdByKey(kKey) == first);
     CHECK(syscallAs(*a, 128, id_out, attr, kKey + 1, 2) == 0);
-    const std::uint32_t reused = dalRead32(base, id_out);
+    const std::uint32_t reused = tox2Read32(base, id_out);
     CHECK(reused != second);  // ids are never handed out twice
-    CHECK(dal::eventQueueIdByKey(kKey + 1) == reused);
+    CHECK(tox2::eventQueueIdByKey(kKey + 1) == reused);
 
     // With nobody waiting the event is stored; a size-2 queue refuses the third one.
-    CHECK(dal::sendEventToQueue(first, 0xa1, 10, 11, 12) == 0);
-    CHECK(dal::sendEventToQueue(first, 0xa2, 20, 21, 22) == 0);
-    CHECK(dal::sendEventToQueue(first, 0xa3, 30, 31, 32) == dal::kCellEbusy);
-    CHECK(dal::sendEventToQueue(0x8d000fff, 1, 2, 3, 4) == dal::kCellEsrch);
-    DalPpuContext* actx = &a->context();
+    CHECK(tox2::sendEventToQueue(first, 0xa1, 10, 11, 12) == 0);
+    CHECK(tox2::sendEventToQueue(first, 0xa2, 20, 21, 22) == 0);
+    CHECK(tox2::sendEventToQueue(first, 0xa3, 30, 31, 32) == tox2::kCellEbusy);
+    CHECK(tox2::sendEventToQueue(0x8d000fff, 1, 2, 3, 4) == tox2::kCellEsrch);
+    Tox2PpuContext* actx = &a->context();
     CHECK(syscallAs(*a, 130, first, sys_event, 1000) == 0);
     CHECK(actx->gpr[4] == 0xa1 && actx->gpr[5] == 10 && actx->gpr[6] == 11 && actx->gpr[7] == 12);
     CHECK(syscallAs(*a, 130, first, sys_event, 1000) == 0);
     CHECK(actx->gpr[4] == 0xa2 && actx->gpr[5] == 20 && actx->gpr[6] == 21 && actx->gpr[7] == 22);
-    CHECK(syscallAs(*a, 130, first, sys_event, 1000) == err(dal::kCellEtimedout));  // the third was lost
+    CHECK(syscallAs(*a, 130, first, sys_event, 1000) == err(tox2::kCellEtimedout));  // the third was lost
 
     // A local port connected by queue id reaches a keyed queue (the game's shutdown path).
     CHECK(syscallAs(*a, 134, port_out, 1, 0) == 0);
-    const std::uint32_t port = dalRead32(base, port_out);
+    const std::uint32_t port = tox2Read32(base, port_out);
     CHECK(syscallAs(*a, 136, port, first) == 0);
     CHECK(syscallAs(*a, 138, port, 0x51, 0x52, 0x53) == 0);
     CHECK(syscallAs(*a, 130, first, sys_event, 1000) == 0);
@@ -1797,25 +1797,25 @@ void testEventQueueIpcKeys() {
 
     // Destroying the keyed queue frees its key even though a port still points at it.
     CHECK(syscallAs(*a, 129, first, 0) == 0);
-    CHECK(dal::eventQueueIdByKey(kKey) == 0);
-    CHECK(dal::sendEventToQueue(first, 1, 2, 3, 4) == dal::kCellEsrch);
-    CHECK(syscallAs(*a, 138, port, 1, 2, 3) == err(dal::kCellEnotconn));
+    CHECK(tox2::eventQueueIdByKey(kKey) == 0);
+    CHECK(tox2::sendEventToQueue(first, 1, 2, 3, 4) == tox2::kCellEsrch);
+    CHECK(syscallAs(*a, 138, port, 1, 2, 3) == err(tox2::kCellEnotconn));
     CHECK(syscallAs(*a, 128, id_out, attr, kKey, 2) == 0);
 
     p.main.free(scratch);
-    dal::resetSyncObjects();
-    CHECK(dal::eventQueueIdByKey(kKey) == 0);  // a reset forgets the keys too
-    dal::setLogSink({});
-    dal::resetCensus();
+    tox2::resetSyncObjects();
+    CHECK(tox2::eventQueueIdByKey(kKey) == 0);  // a reset forgets the keys too
+    tox2::setLogSink({});
+    tox2::resetCensus();
 }
 
 void testSpuAndSysmodule() {
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetSyncObjects();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetSyncObjects();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -1823,74 +1823,74 @@ void testSpuAndSysmodule() {
     const std::uint32_t queue_id_out = scratch, attr = scratch + 0x40, spup = scratch + 0x80;
 
     auto a = makeCaller(0x01000000);
-    std::lock_guard<dal::GuestLock> guard(dal::guestLock());
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
 
     // sys_spu_initialize: more than 5 raw SPUs is invalid.
     CHECK(syscallAs(*a, 169, 6, 5) == 0);
-    CHECK(syscallAs(*a, 169, 6, 6) == err(dal::kCellEinval));
+    CHECK(syscallAs(*a, 169, 6, 6) == err(tox2::kCellEinval));
     CHECK(syscallAs(*a, 169, 0, 0) == 0);
 
-    dalWrite32(base, attr, 1);      // protocol FIFO
-    dalWrite32(base, attr + 4, 2);  // SPU queue
+    tox2Write32(base, attr, 1);      // protocol FIFO
+    tox2Write32(base, attr + 4, 2);  // SPU queue
     CHECK(syscallAs(*a, 128, queue_id_out, attr, 0, 2) == 0);
-    const std::uint32_t queue = dalRead32(base, queue_id_out);
+    const std::uint32_t queue = tox2Read32(base, queue_id_out);
 
     // sc 251: req 0 is invalid, an unknown group or queue is ESRCH, the port is the lowest
     // requested bit.
-    dal::resetSpuThreadGroups();
-    CHECK(syscallAs(*a, 251, 0x04000100, queue, 4, spup) == err(dal::kCellEsrch));
-    CHECK(dal::createSpuThreadGroup() == 0x04000100);
-    CHECK(!dal::spuThreadGroupExists(0x04000101));
-    dalWrite8(base, spup, 0xee);
-    CHECK(syscallAs(*a, 251, 0x04000100, queue, 0, spup) == err(dal::kCellEinval));
-    CHECK(syscallAs(*a, 251, 0x04000100, 0x8d000fff, 4, spup) == err(dal::kCellEsrch));
-    CHECK(dalRead8(base, spup) == 0xee);
+    tox2::resetSpuThreadGroups();
+    CHECK(syscallAs(*a, 251, 0x04000100, queue, 4, spup) == err(tox2::kCellEsrch));
+    CHECK(tox2::createSpuThreadGroup() == 0x04000100);
+    CHECK(!tox2::spuThreadGroupExists(0x04000101));
+    tox2Write8(base, spup, 0xee);
+    CHECK(syscallAs(*a, 251, 0x04000100, queue, 0, spup) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 251, 0x04000100, 0x8d000fff, 4, spup) == err(tox2::kCellEsrch));
+    CHECK(tox2Read8(base, spup) == 0xee);
     CHECK(syscallAs(*a, 251, 0x04000100, queue, 4, spup) == 0);
-    CHECK(dalRead8(base, spup) == 2);
+    CHECK(tox2Read8(base, spup) == 2);
     CHECK(syscallAs(*a, 251, 0x04000100, queue, 0x28, spup) == 0);
-    CHECK(dalRead8(base, spup) == 3);
+    CHECK(tox2Read8(base, spup) == 3);
     CHECK(syscallAs(*a, 251, 0x04000100, queue, std::uint64_t{1} << 63, spup) == 0);
-    CHECK(dalRead8(base, spup) == 63);
-    CHECK(syscallAs(*a, 251, 0x04000100, queue, 4, 0) == err(dal::kCellEfault));
+    CHECK(tox2Read8(base, spup) == 63);
+    CHECK(syscallAs(*a, 251, 0x04000100, queue, 4, 0) == err(tox2::kCellEfault));
 
-    const std::string census = dal::formatCensus();
+    const std::string census = tox2::formatCensus();
     CHECK(census.find("sc 169 sys_spu_initialize: 3 [impl]") != std::string::npos);
     CHECK(census.find("sc 251 sys_spu_thread_group_connect_event_all_threads: 7 [impl]") != std::string::npos);
 
     // cellSysmodule: any id succeeds; the first load and unload of each id is logged once.
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x32267a31, "cellSysmodule", "cellSysmoduleLoadModule"},
             {0x00800010, 0x112a5ee9, "cellSysmodule", "cellSysmoduleUnloadModule"},
     };
-    dal::installImports(imports, 2);
-    DalPpuContext* ctx = &a->context();
+    tox2::installImports(imports, 2);
+    Tox2PpuContext* ctx = &a->context();
     for (int i = 0; i < 2; i++) {
         ctx->gpr[3] = 0xf;
-        dalHleCall(ctx, base, 0);
+        tox2HleCall(ctx, base, 0);
         CHECK(ctx->gpr[3] == 0);
     }
     ctx->gpr[3] = 0x10001;  // only the low 16 bits are the id
-    dalHleCall(ctx, base, 0);
+    tox2HleCall(ctx, base, 0);
     CHECK(ctx->gpr[3] == 0);
     ctx->gpr[3] = 0xf;
-    dalHleCall(ctx, base, 1);
+    tox2HleCall(ctx, base, 1);
     CHECK(ctx->gpr[3] == 0);
-    CHECK(countContaining(lines, "dal: sysmodule: load 0x000f") == 1);
-    CHECK(countContaining(lines, "dal: sysmodule: load 0x0001") == 1);
-    CHECK(countContaining(lines, "dal: sysmodule: unload 0x000f") == 1);
-    CHECK(countContaining(lines, "dal: default hle") == 0);
-    CHECK(dal::formatCensus().find("cellSysmodule::cellSysmoduleLoadModule: 3 [impl]") != std::string::npos);
+    CHECK(countContaining(lines, "tox2: sysmodule: load 0x000f") == 1);
+    CHECK(countContaining(lines, "tox2: sysmodule: load 0x0001") == 1);
+    CHECK(countContaining(lines, "tox2: sysmodule: unload 0x000f") == 1);
+    CHECK(countContaining(lines, "tox2: default hle") == 0);
+    CHECK(tox2::formatCensus().find("cellSysmodule::cellSysmoduleLoadModule: 3 [impl]") != std::string::npos);
 
-    dal::resetSpuThreadGroups();
+    tox2::resetSpuThreadGroups();
     p.main.free(scratch);
-    dal::resetSyncObjects();
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::resetSyncObjects();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 // In-memory command buffer: words are keyed by IO offset, unlisted offsets are unmapped.
-class FakeSink : public dal::RsxSink {
+class FakeSink : public tox2::RsxSink {
 public:
     bool readIo(std::uint32_t io, std::uint32_t& word) override {
         const auto it = words.find(io);
@@ -1925,40 +1925,40 @@ public:
 using Writes = std::vector<std::pair<std::uint32_t, std::uint32_t>>;
 
 void testParamSfo() {
-    dal::ParamSfo sfo;
+    tox2::ParamSfo sfo;
     sfo.ints["PARENTAL_LEVEL"] = 5;
     sfo.ints["RESOLUTION"] = 0x1d;
     sfo.strings["CATEGORY"] = "DG";
-    sfo.strings["TITLE_ID"] = "BLJM61048";
+    sfo.strings["TITLE_ID"] = "BLJS10188";
     sfo.strings["TITLE"] = "Sample title";
-    const std::vector<std::uint8_t> bytes = dal::serializeParamSfo(sfo);
+    const std::vector<std::uint8_t> bytes = tox2::serializeParamSfo(sfo);
     CHECK(bytes.size() > 20 && bytes[0] == 0 && bytes[1] == 'P' && bytes[2] == 'S' && bytes[3] == 'F');
-    const auto parsed = dal::parseParamSfo(bytes);
+    const auto parsed = tox2::parseParamSfo(bytes);
     CHECK(parsed && parsed->ints == sfo.ints && parsed->strings == sfo.strings);
     CHECK(parsed && parsed->ints.find("SOUND_FORMAT") == parsed->ints.end());  // missing key
 
     std::vector<std::uint8_t> bad = bytes;
     bad[1] = 'X';
-    CHECK(!dal::parseParamSfo(bad));
-    CHECK(!dal::parseParamSfo(std::span<const std::uint8_t>(bytes.data(), 10)));
-    CHECK(!dal::parseParamSfo(std::span<const std::uint8_t>(bytes.data(), bytes.size() - 8)));
+    CHECK(!tox2::parseParamSfo(bad));
+    CHECK(!tox2::parseParamSfo(std::span<const std::uint8_t>(bytes.data(), 10)));
+    CHECK(!tox2::parseParamSfo(std::span<const std::uint8_t>(bytes.data(), bytes.size() - 8)));
 
     // A raw-format (0x0004) string that fills its length without a terminator.
     const std::vector<std::uint8_t> raw = {0, 'P', 'S', 'F', 1, 1, 0,   0, 36, 0, 0,   0,   40,  0,  0,
                                            0, 1,   0,   0,   0, 0, 0,   4, 0,  4, 0,   0,   0,   4,  0,
                                            0, 0,   0,   0,   0, 0, 'K', 0, 0,  0, 'a', 'b', 'c', 'd'};
-    const auto raw_parsed = dal::parseParamSfo(raw);
+    const auto raw_parsed = tox2::parseParamSfo(raw);
     CHECK(raw_parsed && raw_parsed->strings.at("K") == "abcd");
 }
 
 void testCellGame() {
     namespace stdfs = std::filesystem;
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetCellGame();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetCellGame();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -1966,35 +1966,35 @@ void testCellGame() {
     const std::uint32_t name = scratch, size = scratch + 0x100, info = scratch + 0x200, usrdir = scratch + 0x300,
                         init = scratch + 0x400;
 
-    const stdfs::path root = stdfs::temp_directory_path() / ("dal_game_test_" + std::to_string(GetCurrentProcessId()));
+    const stdfs::path root = stdfs::temp_directory_path() / ("tox2_game_test_" + std::to_string(GetCurrentProcessId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
     const stdfs::path game = root / "game";
     stdfs::create_directories(game / "PS3_GAME" / "USRDIR");
-    dal::ParamSfo disc;
+    tox2::ParamSfo disc;
     disc.strings["CATEGORY"] = "DG";
-    disc.strings["TITLE_ID"] = "BLJM61048";
+    disc.strings["TITLE_ID"] = "BLJS10188";
     {
-        const auto bytes = dal::serializeParamSfo(disc);
+        const auto bytes = tox2::serializeParamSfo(disc);
         std::ofstream(game / "PS3_GAME" / "PARAM.SFO", std::ios::binary)
                 .write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     }
-    dal::configureVfs(game, root / "hdd");
+    tox2::configureVfs(game, root / "hdd");
 
     enum Import : std::uint32_t { Create, Permit, ErrorDialog, DataCheck, ImportCount };
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x42a2e133, "cellGame", "cellGameCreateGameData"},
             {0x00800010, 0x70acec67, "cellGame", "cellGameContentPermit"},
             {0x00800020, 0xb0a1f8c6, "cellGame", "cellGameContentErrorDialog"},
             {0x00800030, 0xdb9819f3, "cellGame", "cellGameDataCheck"},
     };
-    dal::installImports(imports, ImportCount);
-    auto ctx = std::make_unique<DalPpuContext>();
+    tox2::installImports(imports, ImportCount);
+    auto ctx = std::make_unique<Tox2PpuContext>();
     auto call = [&](Import which, std::uint64_t a, std::uint64_t b, std::uint64_t c) {
         ctx->gpr[3] = a;
         ctx->gpr[4] = b;
         ctx->gpr[5] = c;
-        dalHleCall(ctx.get(), base, which);
+        tox2HleCall(ctx.get(), base, which);
         return static_cast<std::uint32_t>(ctx->gpr[3]);
     };
     auto put = [&](std::uint32_t addr, std::string_view text) {
@@ -2007,8 +2007,8 @@ void testCellGame() {
 
     // Disc: the content directory is the disc itself.
     CHECK(call(DataCheck, 1, 0, size) == 0);
-    CHECK(dalRead32(base, size) == 40 * 1024 * 1024 - 256);
-    CHECK(static_cast<std::int32_t>(dalRead32(base, size + 4)) == -1 && dalRead32(base, size + 8) == 0);
+    CHECK(tox2Read32(base, size) == 40 * 1024 * 1024 - 256);
+    CHECK(static_cast<std::int32_t>(tox2Read32(base, size + 4)) == -1 && tox2Read32(base, size + 8) == 0);
     CHECK(call(Permit, info, usrdir, 0) == 0);
     CHECK(get(info) == "/dev_bdvd/PS3_GAME" && get(usrdir) == "/dev_bdvd/PS3_GAME/USRDIR");
     CHECK(call(Permit, info, usrdir, 0) == kFailure);  // no outstanding check
@@ -2025,7 +2025,7 @@ void testCellGame() {
     // Game data that does not exist yet: check, create, permit moves it into place.
     put(name, "TESTDATA");
     CHECK(call(DataCheck, 3, name, size) == 2);
-    CHECK(dalRead32(base, size + 4) == 0);
+    CHECK(tox2Read32(base, size + 4) == 0);
     put(init + 0, "My title");
     put(init + 128, "TESTID001");
     put(init + 140, "01.00");
@@ -2038,13 +2038,13 @@ void testCellGame() {
     CHECK(get(info) == "/dev_hdd0/game/TESTDATA" && get(usrdir) == "/dev_hdd0/game/TESTDATA/USRDIR");
     CHECK(stdfs::is_directory(hdd_game / "TESTDATA" / "USRDIR"));
     CHECK(!stdfs::exists(hdd_game / temp_dir.substr(15)));
-    const auto written = dal::readParamSfoFile(hdd_game / "TESTDATA" / "PARAM.SFO");
+    const auto written = tox2::readParamSfoFile(hdd_game / "TESTDATA" / "PARAM.SFO");
     CHECK(written && written->strings.at("CATEGORY") == "GD" && written->strings.at("TITLE") == "My title" &&
           written->strings.at("TITLE_ID") == "TESTID001" && written->strings.at("VERSION") == "01.00");
 
     // The data now exists: no creation, a category mismatch is reported as broken.
     CHECK(call(DataCheck, 3, name, size) == 0);
-    CHECK(static_cast<std::int32_t>(dalRead32(base, size + 4)) == -1);
+    CHECK(static_cast<std::int32_t>(tox2Read32(base, size + 4)) == -1);
     CHECK(call(Create, init, info, usrdir) == kExist);
     CHECK(call(Permit, info, usrdir, 0) == 0);
     CHECK(get(usrdir) == "/dev_hdd0/game/TESTDATA/USRDIR");
@@ -2067,20 +2067,20 @@ void testCellGame() {
     CHECK(call(ErrorDialog, 2, 1024, name) == 0);
     CHECK(call(ErrorDialog, 7, 0, 0) == kParam);
 
-    dal::resetCellGame();
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::resetCellGame();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
     stdfs::remove_all(root, ec);
 }
 
 void testCellFs() {
     namespace stdfs = std::filesystem;
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -2089,16 +2089,16 @@ void testCellFs() {
                         arg = scratch + 0x3200;
 
     const stdfs::path root =
-            stdfs::temp_directory_path() / ("dal_cellfs_test_" + std::to_string(GetCurrentProcessId()));
+            stdfs::temp_directory_path() / ("tox2_cellfs_test_" + std::to_string(GetCurrentProcessId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
     const stdfs::path game = root / "game";
     stdfs::create_directories(game / "sub");
     std::ofstream(game / "b.txt", std::ios::binary) << "0123456789";
-    dal::configureVfs(game, root / "hdd");
+    tox2::configureVfs(game, root / "hdd");
 
     enum Import : std::uint32_t { Read, Close, Open, Stat, Unlink, Write, SdataOpen, Mkdir, Fstat, ImportCount };
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x0d5b4a14, "sys_fs", "cellFsReadWithOffset"},
             {0x00800010, 0x2cb51f0d, "sys_fs", "cellFsClose"},
             {0x00800020, 0x718bf5f8, "sys_fs", "cellFsOpen"},
@@ -2109,8 +2109,8 @@ void testCellFs() {
             {0x00800070, 0xba901fe6, "sys_fs", "cellFsMkdir"},
             {0x00800080, 0xef3efa34, "sys_fs", "cellFsFstat"},
     };
-    dal::installImports(imports, ImportCount);
-    auto ctx = std::make_unique<DalPpuContext>();
+    tox2::installImports(imports, ImportCount);
+    auto ctx = std::make_unique<Tox2PpuContext>();
     auto call = [&](Import which, std::uint64_t a = 0, std::uint64_t b = 0, std::uint64_t c = 0, std::uint64_t d = 0,
                     std::uint64_t e = 0) {
         ctx->gpr[3] = a;
@@ -2118,7 +2118,7 @@ void testCellFs() {
         ctx->gpr[5] = c;
         ctx->gpr[6] = d;
         ctx->gpr[7] = e;
-        dalHleCall(ctx.get(), base, which);
+        tox2HleCall(ctx.get(), base, which);
         return ctx->gpr[3];
     };
     auto put = [&](std::uint32_t addr, std::string_view text) {
@@ -2133,106 +2133,107 @@ void testCellFs() {
     // Open, positional read, close. The file position is not moved by ReadWithOffset.
     put(path_a, "/dev_bdvd/b.txt");
     CHECK(call(Open, path_a, 0, out, 0, 0) == 0);
-    const std::uint32_t fd = dalRead32(base, out);
+    const std::uint32_t fd = tox2Read32(base, out);
     CHECK(fd == 3);
-    CHECK(call(Open, path_a, 0, 0, 0, 0) == err(dal::kCellEfault));
-    CHECK(call(Read, fd, 6, buf, 3, out) == 0 && dalRead64(base, out) == 3);
+    CHECK(call(Open, path_a, 0, 0, 0, 0) == err(tox2::kCellEfault));
+    CHECK(call(Read, fd, 6, buf, 3, out) == 0 && tox2Read64(base, out) == 3);
     CHECK(std::memcmp(base + buf, "678", 3) == 0);
-    CHECK(call(Read, fd, 8, buf, 100, out) == 0 && dalRead64(base, out) == 2);  // short at the end
-    CHECK(call(Read, fd, 50, buf, 4, out) == 0 && dalRead64(base, out) == 0);   // past the end
-    CHECK(call(Read, fd, 0, buf, 2, 0) == 0);                                   // nread is optional
-    CHECK(call(Read, fd, 0, 0, 2, out) == err(dal::kCellEfault) && dalRead64(base, out) == 0);
+    CHECK(call(Read, fd, 8, buf, 100, out) == 0 && tox2Read64(base, out) == 2);  // short at the end
+    CHECK(call(Read, fd, 50, buf, 4, out) == 0 && tox2Read64(base, out) == 0);   // past the end
+    CHECK(call(Read, fd, 0, buf, 2, 0) == 0);                                    // nread is optional
+    CHECK(call(Read, fd, 0, 0, 2, out) == err(tox2::kCellEfault) && tox2Read64(base, out) == 0);
     // sys_fs_read continues from the start: the position never moved.
     CHECK(syscall(802, fd, buf, 4, out) == 0 && std::memcmp(base + buf, "0123", 4) == 0);
     CHECK(call(Read, fd, 0, buf, 1, out) == 0 && syscall(802, fd, buf + 8, 2, out) == 0);
     CHECK(std::memcmp(base + buf + 8, "45", 2) == 0);
-    CHECK(call(Read, 99, 0, buf, 1, out) == err(dal::kCellEbadf) && dalRead64(base, out) == 0);
-    CHECK(call(Read, 0, 0, buf, 1, out) == err(dal::kCellEbadf));
-    CHECK(call(Write, fd, 0, buf, 1, out) == err(dal::kCellEbadf));  // opened read-only
+    CHECK(call(Read, 99, 0, buf, 1, out) == err(tox2::kCellEbadf) && tox2Read64(base, out) == 0);
+    CHECK(call(Read, 0, 0, buf, 1, out) == err(tox2::kCellEbadf));
+    CHECK(call(Write, fd, 0, buf, 1, out) == err(tox2::kCellEbadf));  // opened read-only
 
     // Stat of a file and of a directory, fstat of the open file.
-    CHECK(call(Stat, path_a, sb) == 0 && dalRead32(base, sb) == 0100444 && dalRead64(base, sb + 36) == 10);
-    CHECK(call(Stat, path_a, 0) == err(dal::kCellEfault));
+    CHECK(call(Stat, path_a, sb) == 0 && tox2Read32(base, sb) == 0100444 && tox2Read64(base, sb + 36) == 10);
+    CHECK(call(Stat, path_a, 0) == err(tox2::kCellEfault));
     put(path_a, "/dev_bdvd/sub");
-    CHECK(call(Stat, path_a, sb) == 0 && dalRead32(base, sb) == 040555);
+    CHECK(call(Stat, path_a, sb) == 0 && tox2Read32(base, sb) == 040555);
     put(path_a, "/dev_bdvd/none");
-    CHECK(call(Stat, path_a, sb) == err(dal::kCellEnoent));
-    CHECK(call(Fstat, fd, sb) == 0 && dalRead32(base, sb) == 0100444 && dalRead64(base, sb + 36) == 10);
-    CHECK(call(Fstat, 99, sb) == err(dal::kCellEbadf));
+    CHECK(call(Stat, path_a, sb) == err(tox2::kCellEnoent));
+    CHECK(call(Fstat, fd, sb) == 0 && tox2Read32(base, sb) == 0100444 && tox2Read64(base, sb + 36) == 10);
+    CHECK(call(Fstat, 99, sb) == err(tox2::kCellEbadf));
     CHECK(call(Close, fd) == 0);
-    CHECK(call(Close, fd) == err(dal::kCellEbadf));
+    CHECK(call(Close, fd) == err(tox2::kCellEbadf));
 
     // Mkdir, positional write and Unlink under the hdd directory.
     put(path_a, "/dev_hdd0/tmp/d");
     CHECK(call(Mkdir, path_a, 0777) == 0);
-    CHECK(call(Mkdir, path_a, 0777) == err(dal::kCellEexist));
+    CHECK(call(Mkdir, path_a, 0777) == err(tox2::kCellEexist));
     CHECK(stdfs::is_directory(root / "hdd" / "dev_hdd0" / "tmp" / "d"));
     put(path_a, "/dev_hdd0/tmp/d/f.bin");
     CHECK(call(Open, path_a, 0102, out, 0, 0) == 0);  // RDWR | CREAT
-    const std::uint32_t wfd = dalRead32(base, out);
+    const std::uint32_t wfd = tox2Read32(base, out);
     put(buf, "abcdef");
-    CHECK(call(Write, wfd, 0, buf, 6, out) == 0 && dalRead64(base, out) == 6);
+    CHECK(call(Write, wfd, 0, buf, 6, out) == 0 && tox2Read64(base, out) == 6);
     put(buf + 0x10, "XY");
-    CHECK(call(Write, wfd, 2, buf + 0x10, 2, out) == 0 && dalRead64(base, out) == 2);
-    CHECK(call(Write, wfd, 0, 0, 2, out) == err(dal::kCellEfault) && dalRead64(base, out) == 0);
+    CHECK(call(Write, wfd, 2, buf + 0x10, 2, out) == 0 && tox2Read64(base, out) == 2);
+    CHECK(call(Write, wfd, 0, 0, 2, out) == err(tox2::kCellEfault) && tox2Read64(base, out) == 0);
     // The file position stayed at 0, so a plain write lands at the start.
     put(buf + 0x20, "Z");
     CHECK(syscall(803, wfd, buf + 0x20, 1, out) == 0);
-    CHECK(call(Fstat, wfd, sb) == 0 && dalRead64(base, sb + 36) == 6);
+    CHECK(call(Fstat, wfd, sb) == 0 && tox2Read64(base, sb + 36) == 6);
     CHECK(call(Close, wfd) == 0);
     CHECK(hostRead(root / "hdd" / "dev_hdd0" / "tmp" / "d" / "f.bin") == "ZbXYef");
     CHECK(call(Unlink, path_a) == 0);
-    CHECK(call(Unlink, path_a) == err(dal::kCellEnoent));
+    CHECK(call(Unlink, path_a) == err(tox2::kCellEnoent));
     CHECK(!stdfs::exists(root / "hdd" / "dev_hdd0" / "tmp" / "d" / "f.bin"));
     put(path_a, "/dev_bdvd/b.txt");
-    CHECK(call(Unlink, path_a) == err(dal::kCellErofs));
-    CHECK(call(Write, 3, 0, buf, 1, out) == err(dal::kCellEbadf));
+    CHECK(call(Unlink, path_a) == err(tox2::kCellErofs));
+    CHECK(call(Write, 3, 0, buf, 1, out) == err(tox2::kCellEbadf));
 
     // cellFsSdataOpen: argument validation, then ENOENT with nothing written to *fd.
-    dalWrite32(base, out, 0xDEADBEEF);
-    CHECK(call(SdataOpen, path_a, 1, out) == err(dal::kCellEinval));
-    CHECK(call(SdataOpen, path_a, 0, 0) == err(dal::kCellEfault));
-    CHECK(call(SdataOpen, 0, 0, out) == err(dal::kCellEfault));
-    CHECK(call(SdataOpen, path_a, 0, out) == err(dal::kCellEnoent));
-    CHECK(call(SdataOpen, path_a, 0, out) == err(dal::kCellEnoent));
-    CHECK(dalRead32(base, out) == 0xDEADBEEF);
+    tox2Write32(base, out, 0xDEADBEEF);
+    CHECK(call(SdataOpen, path_a, 1, out) == err(tox2::kCellEinval));
+    CHECK(call(SdataOpen, path_a, 0, 0) == err(tox2::kCellEfault));
+    CHECK(call(SdataOpen, 0, 0, out) == err(tox2::kCellEfault));
+    CHECK(call(SdataOpen, path_a, 0, out) == err(tox2::kCellEnoent));
+    CHECK(call(SdataOpen, path_a, 0, out) == err(tox2::kCellEnoent));
+    CHECK(tox2Read32(base, out) == 0xDEADBEEF);
     int sdata_lines = 0;
     for (const std::string& line : lines) {
         sdata_lines += line.find("sdata open not supported: /dev_bdvd/b.txt") != std::string::npos;
     }
     CHECK(sdata_lines == 1);  // logged once per path
     // A plain open through the sdata argument (0x180, 0x10) takes the same route.
-    dalWrite32(base, arg, 0x180);
-    dalWrite32(base, arg + 4, 0x10);
-    CHECK(call(Open, path_a, 0, out, arg, 8) == err(dal::kCellEnoent));
-    CHECK(dalRead32(base, out) == 0xDEADBEEF);
+    tox2Write32(base, arg, 0x180);
+    tox2Write32(base, arg + 4, 0x10);
+    CHECK(call(Open, path_a, 0, out, arg, 8) == err(tox2::kCellEnoent));
+    CHECK(tox2Read32(base, out) == 0xDEADBEEF);
 
     // With a cache directory the decrypted copy at the same relative path is served read-only.
     stdfs::create_directories(root / "cache");
     std::ofstream(root / "cache" / "b.txt", std::ios::binary) << "decrypted!";
-    dal::configureSdataCache(root / "cache");
+    tox2::configureSdataCache(root / "cache");
     CHECK(call(SdataOpen, path_a, 0, out) == 0);
-    const std::uint32_t sfd = dalRead32(base, out);
+    const std::uint32_t sfd = tox2Read32(base, out);
     CHECK(sfd != 0xDEADBEEF);
-    CHECK(call(Fstat, sfd, sb) == 0 && dalRead64(base, sb + 36) == 10 && dalRead32(base, sb) == 0100444);
-    CHECK(call(Read, sfd, 2, buf, 4, out) == 0 && dalRead64(base, out) == 4 && std::memcmp(base + buf, "cryp", 4) == 0);
-    CHECK(call(Write, sfd, 0, buf, 1, out) == err(dal::kCellEbadf));
+    CHECK(call(Fstat, sfd, sb) == 0 && tox2Read64(base, sb + 36) == 10 && tox2Read32(base, sb) == 0100444);
+    CHECK(call(Read, sfd, 2, buf, 4, out) == 0 && tox2Read64(base, out) == 4 &&
+          std::memcmp(base + buf, "cryp", 4) == 0);
+    CHECK(call(Write, sfd, 0, buf, 1, out) == err(tox2::kCellEbadf));
     CHECK(call(Close, sfd) == 0);
     CHECK(call(Open, path_a, 0, out, arg, 8) == 0);  // the sdata marker takes the same route
-    CHECK(call(Close, dalRead32(base, out)) == 0);
+    CHECK(call(Close, tox2Read32(base, out)) == 0);
     put(path_a, "/dev_bdvd/sub/nothing.sdat");
-    dalWrite32(base, out, 0xDEADBEEF);
-    CHECK(call(SdataOpen, path_a, 0, out) == err(dal::kCellEnoent) && dalRead32(base, out) == 0xDEADBEEF);
+    tox2Write32(base, out, 0xDEADBEEF);
+    CHECK(call(SdataOpen, path_a, 0, out) == err(tox2::kCellEnoent) && tox2Read32(base, out) == 0xDEADBEEF);
     put(path_a, "/dev_hdd0/tmp/x.sdat");  // only the game directory is mapped
-    CHECK(call(SdataOpen, path_a, 0, out) == err(dal::kCellEnoent));
-    dal::configureSdataCache(std::nullopt);
+    CHECK(call(SdataOpen, path_a, 0, out) == err(tox2::kCellEnoent));
+    tox2::configureSdataCache(std::nullopt);
 
     p.main.free(scratch);
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
     stdfs::remove_all(root, ec);
-    dal::configureVfs({}, std::nullopt);
+    tox2::configureVfs({}, std::nullopt);
 }
 
 // Parsing, composition and installation of the VFS configuration file, and file overrides through
@@ -2240,12 +2241,12 @@ void testCellFs() {
 void testVfsConfig() {
     namespace stdfs = std::filesystem;
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 
     const stdfs::path root =
-            stdfs::temp_directory_path() / ("dal_vfs_config_test_" + std::to_string(GetCurrentProcessId()));
+            stdfs::temp_directory_path() / ("tox2_vfs_config_test_" + std::to_string(GetCurrentProcessId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
     auto hostFile = [](const stdfs::path& path, std::string_view data) {
@@ -2260,7 +2261,7 @@ void testVfsConfig() {
     hostFile(root / "cache" / "PS3_GAME" / "USRDIR" / "Exi.sdat", "from-cache");
 
     // A full file: relative host paths resolve against the base directory.
-    const auto full = dal::parseVfsConfig(R"({
+    const auto full = tox2::parseVfsConfig(R"({
     "version": 1,
     "game_dir": "game",
     "hdd_dir": "hdd",
@@ -2271,22 +2272,22 @@ void testVfsConfig() {
               "/dev_hdd0/tmp/w.bin": {"host": "plain/w.bin", "read_only": false},
               "/dev_bdvd/other.txt": {"host": "plain/other.txt"}}
   })",
-                                          cfg);
+                                           cfg);
     CHECK(full.has_value());
     if (full) {
         CHECK(full->warnings.empty());
         CHECK(full->mounts.size() == 6);
-        auto find = [&](std::string_view name) -> const dal::VfsMount* {
-            for (const dal::VfsMount& m : full->mounts) {
+        auto find = [&](std::string_view name) -> const tox2::VfsMount* {
+            for (const tox2::VfsMount& m : full->mounts) {
                 if (m.name == name) return &m;
             }
             return nullptr;
         };
-        const dal::VfsMount* bdvd = find("dev_bdvd");
-        const dal::VfsMount* app = find("app_home");
-        const dal::VfsMount* hdd0 = find("dev_hdd0");
-        const dal::VfsMount* usb = find("dev_usb000");
-        const dal::VfsMount* hdd2 = find("dev_hdd2");
+        const tox2::VfsMount* bdvd = find("dev_bdvd");
+        const tox2::VfsMount* app = find("app_home");
+        const tox2::VfsMount* hdd0 = find("dev_hdd0");
+        const tox2::VfsMount* usb = find("dev_usb000");
+        const tox2::VfsMount* hdd2 = find("dev_hdd2");
         CHECK(bdvd && bdvd->read_only && bdvd->host == cfg / "game");
         CHECK(app && app->read_only && app->host == cfg / "game" / "PS3_GAME" / "USRDIR");
         CHECK(hdd0 && !hdd0->read_only && hdd0->host == cfg / "hdd" / "dev_hdd0");
@@ -2294,7 +2295,7 @@ void testVfsConfig() {
         CHECK(hdd2 && hdd2->read_only && !hdd2->block_size);
         CHECK(full->sdata_cache == root / "cache");
         CHECK(full->files.size() == 3);
-        for (const dal::VfsFileOverride& f : full->files) {
+        for (const tox2::VfsFileOverride& f : full->files) {
             if (f.guest == "/dev_bdvd/PS3_GAME/USRDIR/Exi.sdat") {
                 CHECK(f.read_only && f.host == cfg / "plain" / "Exi.bin");
             } else if (f.guest == "/dev_hdd0/tmp/w.bin") {
@@ -2304,19 +2305,19 @@ void testVfsConfig() {
     }
 
     // Unknown keys warn and do not fail.
-    const auto unknown = dal::parseVfsConfig(R"({"version": 1, "colour": 1,
+    const auto unknown = tox2::parseVfsConfig(R"({"version": 1, "colour": 1,
       "mounts": {"/dev_usb000": {"host": "usb", "mode": "x"}},
       "files": {"/dev_bdvd/a": {"host": "a", "extra": 1}}})",
-                                             cfg);
+                                              cfg);
     CHECK(unknown.has_value() && unknown->warnings.size() == 3);
     if (unknown) {
         CHECK(unknown->warnings[0].find("colour") != std::string::npos);
     }
-    CHECK(dal::parseVfsConfig(R"({"version": 1})", cfg).has_value());
+    CHECK(tox2::parseVfsConfig(R"({"version": 1})", cfg).has_value());
 
     // Errors, each with a message that names the problem.
     auto expectError = [&](std::string_view text, std::string_view needle) {
-        const auto parsed = dal::parseVfsConfig(text, cfg);
+        const auto parsed = tox2::parseVfsConfig(text, cfg);
         CHECK(!parsed.has_value());
         if (parsed) {
             std::printf("  expected an error containing \"%.*s\"\n", static_cast<int>(needle.size()), needle.data());
@@ -2354,29 +2355,29 @@ void testVfsConfig() {
     expectError(R"({"version": 1, "sdata_cache": 4})", "path string");
 
     // Composition: command-line options win over the file, which wins over the defaults.
-    const auto parsed_base = dal::parseVfsConfig(R"({"version": 1, "game_dir": "game", "hdd_dir": "hdd",
+    const auto parsed_base = tox2::parseVfsConfig(R"({"version": 1, "game_dir": "game", "hdd_dir": "hdd",
       "sdata_cache": "../cache", "mounts": {"/dev_hdd2": {"host": "hdd2"}}})",
-                                                 cfg);
+                                                  cfg);
     CHECK(parsed_base.has_value());
-    const dal::VfsConfigFile* file = parsed_base ? &*parsed_base : nullptr;
-    auto hostOf = [](const dal::VfsLayout& layout, std::string_view name) {
-        for (const dal::VfsMount& m : layout.mounts) {
+    const tox2::VfsConfigFile* file = parsed_base ? &*parsed_base : nullptr;
+    auto hostOf = [](const tox2::VfsLayout& layout, std::string_view name) {
+        for (const tox2::VfsMount& m : layout.mounts) {
             if (m.name == name) return m.host;
         }
         return stdfs::path();
     };
-    const auto from_file = dal::composeVfsLayout(file, {});
+    const auto from_file = tox2::composeVfsLayout(file, {});
     CHECK(from_file.has_value());
     if (from_file) {
         CHECK(hostOf(*from_file, "dev_bdvd") == cfg / "game");
         CHECK(hostOf(*from_file, "dev_hdd1") == cfg / "hdd" / "dev_hdd1");
         CHECK(from_file->sdata_cache == root / "cache");
     }
-    dal::VfsCliOptions cli;
+    tox2::VfsCliOptions cli;
     cli.game_dir = cfg / "plain";
     cli.hdd_dir = root / "cli_hdd";
     cli.sdata_cache = root / "cli_cache";
-    const auto merged = dal::composeVfsLayout(file, cli);
+    const auto merged = tox2::composeVfsLayout(file, cli);
     CHECK(merged.has_value());
     if (merged) {
         CHECK(merged->mounts.size() == 5);  // the options replaced four mounts, the extra one stays
@@ -2387,23 +2388,23 @@ void testVfsConfig() {
         CHECK(merged->sdata_cache == cli.sdata_cache);
     }
     // Without a file the options alone give the default layout.
-    dal::VfsCliOptions game_only;
+    tox2::VfsCliOptions game_only;
     game_only.game_dir = cfg / "game";
-    const auto only_cli = dal::composeVfsLayout(nullptr, game_only);
+    const auto only_cli = tox2::composeVfsLayout(nullptr, game_only);
     CHECK(only_cli.has_value() && only_cli->mounts.size() == 2 && !only_cli->sdata_cache);
-    CHECK(dal::composeVfsLayout(nullptr, {}).has_value());  // no mounts at all is valid here
+    CHECK(tox2::composeVfsLayout(nullptr, {}).has_value());  // no mounts at all is valid here
     // A game directory without PS3_GAME/USRDIR still composes: the derived /app_home may be absent.
     CHECK(!stdfs::exists(cfg / "plain" / "PS3_GAME"));
-    dal::VfsCliOptions bare_game;
+    tox2::VfsCliOptions bare_game;
     bare_game.game_dir = cfg / "plain";
-    CHECK(dal::composeVfsLayout(nullptr, bare_game).has_value());
+    CHECK(tox2::composeVfsLayout(nullptr, bare_game).has_value());
 
     // Host checks: a read-only mount and an override file must exist; writable mounts may not overlap.
     auto composeError = [&](std::string_view text, std::string_view needle) {
-        const auto parsed = dal::parseVfsConfig(text, cfg);
+        const auto parsed = tox2::parseVfsConfig(text, cfg);
         CHECK(parsed.has_value());
         if (!parsed) return;
-        const auto composed = dal::composeVfsLayout(&*parsed, {});
+        const auto composed = tox2::composeVfsLayout(&*parsed, {});
         CHECK(!composed.has_value());
         CHECK(!composed && composed.error().find(needle) != std::string::npos);
     };
@@ -2418,23 +2419,23 @@ void testVfsConfig() {
     composeError(R"({"version": 1, "mounts": {"/dev_hdd0": {"host": "plain"}, "/dev_bdvd": {"host": "plain"}}})",
                  "overlap");
     // Two read-only mounts may share a directory.
-    const auto shared = dal::parseVfsConfig(
+    const auto shared = tox2::parseVfsConfig(
             R"({"version": 1, "mounts": {"/dev_bdvd": {"host": "game"}, "/app_home": {"host": "game/PS3_GAME/USRDIR"}}})",
             cfg);
-    CHECK(shared && dal::composeVfsLayout(&*shared, {}).has_value());
+    CHECK(shared && tox2::composeVfsLayout(&*shared, {}).has_value());
 
     // loadVfsConfig reads a file and resolves against its directory; errors name the file.
     hostFile(cfg / "vfs.json", R"({"version": 1, "game_dir": "game"})");
-    const auto loaded = dal::loadVfsConfig(cfg / "vfs.json");
+    const auto loaded = tox2::loadVfsConfig(cfg / "vfs.json");
     CHECK(loaded && loaded->mounts.size() == 2 && loaded->mounts[0].host == cfg / "game");
-    const auto no_file = dal::loadVfsConfig(cfg / "none.json");
+    const auto no_file = tox2::loadVfsConfig(cfg / "none.json");
     CHECK(!no_file && no_file.error().find("none.json") != std::string::npos);
     hostFile(cfg / "bad.json", R"({"version": 9})");
-    const auto bad_file = dal::loadVfsConfig(cfg / "bad.json");
+    const auto bad_file = tox2::loadVfsConfig(cfg / "bad.json");
     CHECK(!bad_file && bad_file.error().find("bad.json") != std::string::npos);
 
     // Install a file's layout and use it through the guest-facing calls.
-    dal::Process& p = dal::process();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -2442,7 +2443,7 @@ void testVfsConfig() {
     const std::uint32_t path_a = scratch, buf = scratch + 0x2000, out = scratch + 0x3000, sb = scratch + 0x3100,
                         arg = scratch + 0x3200;
     enum Import : std::uint32_t { Read, Close, Open, Stat, Write, SdataOpen, Fstat, ImportCount };
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x0d5b4a14, "sys_fs", "cellFsReadWithOffset"},
             {0x00800010, 0x2cb51f0d, "sys_fs", "cellFsClose"},
             {0x00800020, 0x718bf5f8, "sys_fs", "cellFsOpen"},
@@ -2451,8 +2452,8 @@ void testVfsConfig() {
             {0x00800050, 0xb1840b53, "sys_fs", "cellFsSdataOpen"},
             {0x00800060, 0xef3efa34, "sys_fs", "cellFsFstat"},
     };
-    dal::installImports(imports, ImportCount);
-    auto ctx = std::make_unique<DalPpuContext>();
+    tox2::installImports(imports, ImportCount);
+    auto ctx = std::make_unique<Tox2PpuContext>();
     auto call = [&](Import which, std::uint64_t a = 0, std::uint64_t b = 0, std::uint64_t c = 0, std::uint64_t d = 0,
                     std::uint64_t e = 0) {
         ctx->gpr[3] = a;
@@ -2460,7 +2461,7 @@ void testVfsConfig() {
         ctx->gpr[5] = c;
         ctx->gpr[6] = d;
         ctx->gpr[7] = e;
-        dalHleCall(ctx.get(), base, which);
+        tox2HleCall(ctx.get(), base, which);
         return ctx->gpr[3];
     };
     auto put = [&](std::uint32_t addr, std::string_view text) {
@@ -2470,7 +2471,7 @@ void testVfsConfig() {
     // Reads up to 64 bytes from the start of the open file `fd`.
     auto readAll = [&](std::uint32_t fd) {
         CHECK(call(Read, fd, 0, buf, 64, out + 0x40) == 0);  // `out` keeps the fd
-        return std::string(reinterpret_cast<const char*>(base + buf), dalRead64(base, out + 0x40));
+        return std::string(reinterpret_cast<const char*>(base + buf), tox2Read64(base, out + 0x40));
     };
 
     hostFile(cfg / "layout.json", R"({
@@ -2480,55 +2481,55 @@ void testVfsConfig() {
               "/dev_bdvd/b.txt": "plain/other.txt",
               "/dev_hdd0/tmp/w.bin": {"host": "plain/w.bin", "read_only": false}}
   })");
-    const auto layout_file = dal::loadVfsConfig(cfg / "layout.json");
+    const auto layout_file = tox2::loadVfsConfig(cfg / "layout.json");
     CHECK(layout_file.has_value());
-    const auto layout = layout_file ? dal::composeVfsLayout(&*layout_file, {})
-                                    : std::expected<dal::VfsLayout, std::string>(std::unexpected("no file"));
+    const auto layout = layout_file ? tox2::composeVfsLayout(&*layout_file, {})
+                                    : std::expected<tox2::VfsLayout, std::string>(std::unexpected("no file"));
     CHECK(layout.has_value());
     if (layout) {
-        dal::configureVfs(*layout);
+        tox2::configureVfs(*layout);
         CHECK(stdfs::is_directory(cfg / "hdd" / "dev_hdd0" / "game") && stdfs::is_directory(cfg / "usb"));
 
         // The sdata open serves the override, not the cache copy at the same path.
-        dalWrite32(base, out, 0xDEADBEEF);
+        tox2Write32(base, out, 0xDEADBEEF);
         put(path_a, "/dev_bdvd/PS3_GAME/USRDIR/Exi.sdat");
         CHECK(call(SdataOpen, path_a, 0, out) == 0);
-        const std::uint32_t sfd = dalRead32(base, out);
+        const std::uint32_t sfd = tox2Read32(base, out);
         CHECK(readAll(sfd) == "plain-bytes");
-        CHECK(call(Fstat, sfd, sb) == 0 && dalRead64(base, sb + 36) == 11 && dalRead32(base, sb) == 0100444);
+        CHECK(call(Fstat, sfd, sb) == 0 && tox2Read64(base, sb + 36) == 11 && tox2Read32(base, sb) == 0100444);
         CHECK(call(Close, sfd) == 0);
         // So does a plain open of the same path and the sdata marker of cellFsOpen.
-        CHECK(call(Open, path_a, 0, out, 0, 0) == 0 && readAll(dalRead32(base, out)) == "plain-bytes");
-        CHECK(call(Close, dalRead32(base, out)) == 0);
-        dalWrite32(base, arg, 0x180);
-        dalWrite32(base, arg + 4, 0x10);
-        CHECK(call(Open, path_a, 0, out, arg, 8) == 0 && readAll(dalRead32(base, out)) == "plain-bytes");
-        CHECK(call(Close, dalRead32(base, out)) == 0);
-        CHECK(call(Stat, path_a, sb) == 0 && dalRead64(base, sb + 36) == 11);
+        CHECK(call(Open, path_a, 0, out, 0, 0) == 0 && readAll(tox2Read32(base, out)) == "plain-bytes");
+        CHECK(call(Close, tox2Read32(base, out)) == 0);
+        tox2Write32(base, arg, 0x180);
+        tox2Write32(base, arg + 4, 0x10);
+        CHECK(call(Open, path_a, 0, out, arg, 8) == 0 && readAll(tox2Read32(base, out)) == "plain-bytes");
+        CHECK(call(Close, tox2Read32(base, out)) == 0);
+        CHECK(call(Stat, path_a, sb) == 0 && tox2Read64(base, sb + 36) == 11);
         // A spelling that normalises to the same guest path matches too.
         put(path_a, "/dev_bdvd/PS3_GAME//USRDIR/./Exi.sdat");
-        CHECK(call(SdataOpen, path_a, 0, out) == 0 && readAll(dalRead32(base, out)) == "plain-bytes");
-        CHECK(call(Close, dalRead32(base, out)) == 0);
+        CHECK(call(SdataOpen, path_a, 0, out) == 0 && readAll(tox2Read32(base, out)) == "plain-bytes");
+        CHECK(call(Close, tox2Read32(base, out)) == 0);
         // /app_home is another guest path: no override there, so the cache copy is served.
         put(path_a, "/app_home/Exi.sdat");
-        CHECK(call(SdataOpen, path_a, 0, out) == 0 && readAll(dalRead32(base, out)) == "from-cache");
-        CHECK(call(Close, dalRead32(base, out)) == 0);
+        CHECK(call(SdataOpen, path_a, 0, out) == 0 && readAll(tox2Read32(base, out)) == "from-cache");
+        CHECK(call(Close, tox2Read32(base, out)) == 0);
 
         // An override on a path the game directory also has wins over it, read-only.
         put(path_a, "/dev_bdvd/b.txt");
         CHECK(call(Open, path_a, 0, out, 0, 0) == 0);
-        const std::uint32_t over_fd = dalRead32(base, out);
+        const std::uint32_t over_fd = tox2Read32(base, out);
         CHECK(readAll(over_fd) == "other");
-        CHECK(call(Write, over_fd, 0, buf, 1, out) == err(dal::kCellEbadf));
+        CHECK(call(Write, over_fd, 0, buf, 1, out) == err(tox2::kCellEbadf));
         CHECK(call(Close, over_fd) == 0);
-        CHECK(call(Open, path_a, 1, out, 0, 0) == err(dal::kCellEperm));  // write-only on a read-only file
+        CHECK(call(Open, path_a, 1, out, 0, 0) == err(tox2::kCellEperm));  // write-only on a read-only file
 
         // A writable override is created and written at the host path it names.
         put(path_a, "/dev_hdd0/tmp/w.bin");
         CHECK(call(Open, path_a, 0102, out, 0, 0) == 0);  // RDWR | CREAT
-        const std::uint32_t w_fd = dalRead32(base, out);
+        const std::uint32_t w_fd = tox2Read32(base, out);
         put(buf, "written");
-        CHECK(call(Write, w_fd, 0, buf, 7, out) == 0 && dalRead64(base, out) == 7);
+        CHECK(call(Write, w_fd, 0, buf, 7, out) == 0 && tox2Read64(base, out) == 7);
         CHECK(call(Close, w_fd) == 0);
         {
             std::ifstream in(cfg / "plain" / "w.bin", std::ios::binary);
@@ -2539,31 +2540,31 @@ void testVfsConfig() {
         // Mounts from the file: an extra device with its block size; overrides report their mount's.
         hostFile(cfg / "usb" / "f.bin", "usb");
         put(path_a, "/dev_usb000/f.bin");
-        CHECK(call(Stat, path_a, sb) == 0 && dalRead64(base, sb + 44) == 1024);
+        CHECK(call(Stat, path_a, sb) == 0 && tox2Read64(base, sb + 44) == 1024);
         put(path_a, "/dev_bdvd/b.txt");
-        CHECK(call(Stat, path_a, sb) == 0 && dalRead64(base, sb + 44) == 2048);
-        const dal::VfsResolution marked = dal::resolveVfs("/dev_bdvd/b.txt/");
+        CHECK(call(Stat, path_a, sb) == 0 && tox2Read64(base, sb + 44) == 2048);
+        const tox2::VfsResolution marked = tox2::resolveVfs("/dev_bdvd/b.txt/");
         CHECK(marked.file_override && marked.dir_only);
-        CHECK(!dal::resolveVfs("/dev_usb000/f.bin").file_override);
-        CHECK(dal::resolveVfs("/dev_usb001/x").status == dal::VfsStatus::NotMounted);
-        const std::vector<std::string> names = dal::vfsMountNames();
+        CHECK(!tox2::resolveVfs("/dev_usb000/f.bin").file_override);
+        CHECK(tox2::resolveVfs("/dev_usb001/x").status == tox2::VfsStatus::NotMounted);
+        const std::vector<std::string> names = tox2::vfsMountNames();
         CHECK(std::ranges::find(names, "dev_usb000") != names.end() && names.size() == 5);
 
         // Dropping the overrides brings back the cache copy for the same path.
-        dal::VfsLayout without_files = *layout;
+        tox2::VfsLayout without_files = *layout;
         without_files.files.clear();
-        dal::configureVfs(std::move(without_files));
+        tox2::configureVfs(std::move(without_files));
         put(path_a, "/dev_bdvd/PS3_GAME/USRDIR/Exi.sdat");
-        CHECK(call(SdataOpen, path_a, 0, out) == 0 && readAll(dalRead32(base, out)) == "from-cache");
-        CHECK(call(Close, dalRead32(base, out)) == 0);
+        CHECK(call(SdataOpen, path_a, 0, out) == 0 && readAll(tox2Read32(base, out)) == "from-cache");
+        CHECK(call(Close, tox2Read32(base, out)) == 0);
     }
 
     p.main.free(scratch);
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
     stdfs::remove_all(root, ec);
-    dal::configureVfs({}, std::nullopt);
+    tox2::configureVfs({}, std::nullopt);
 }
 
 struct TrophyCallbackCall {
@@ -2574,7 +2575,7 @@ struct TrophyCallbackCall {
 std::vector<TrophyCallbackCall> g_trophy_callbacks;
 std::uint64_t g_trophy_callback_result = 0;
 
-DAL_PPU_FUNC(trophyStatusCallback) {
+TOX2_PPU_FUNC(trophyStatusCallback) {
     (void)base;
     g_trophy_callbacks.push_back({static_cast<std::uint32_t>(ctx->gpr[3]), static_cast<std::uint32_t>(ctx->gpr[4]),
                                   static_cast<std::int32_t>(ctx->gpr[5]), static_cast<std::int32_t>(ctx->gpr[6]),
@@ -2585,13 +2586,13 @@ DAL_PPU_FUNC(trophyStatusCallback) {
 void testSceNpAndTrophy() {
     namespace stdfs = std::filesystem;
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetHostFunctions();
-    dal::resetSceNp();
-    dal::resetSceNpTrophy();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetHostFunctions();
+    tox2::resetSceNp();
+    tox2::resetSceNpTrophy();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -2623,7 +2624,7 @@ void testSceNpAndTrophy() {
     trp.insert(trp.end(), config.begin(), config.end());
 
     const stdfs::path root =
-            stdfs::temp_directory_path() / ("dal_trophy_test_" + std::to_string(GetCurrentProcessId()));
+            stdfs::temp_directory_path() / ("tox2_trophy_test_" + std::to_string(GetCurrentProcessId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
     const stdfs::path game = root / "game";
@@ -2631,7 +2632,7 @@ void testSceNpAndTrophy() {
     std::ofstream(game / "PS3_GAME" / "TROPDIR" / "NPWR00001_00" / "TROPHY.TRP", std::ios::binary)
             .write(reinterpret_cast<const char*>(trp.data()), static_cast<std::streamsize>(trp.size()));
     std::ofstream(game / "drm.bin", std::ios::binary) << "data";
-    dal::configureVfs(game, root / "hdd");
+    tox2::configureVfs(game, root / "hdd");
 
     enum Import : std::uint32_t {
         Register,
@@ -2649,7 +2650,7 @@ void testSceNpAndTrophy() {
         NpDrm,
         ImportCount
     };
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x1197b52c, "sceNpTrophy", "sceNpTrophyRegisterContext"},
             {0x00800010, 0x1c25470d, "sceNpTrophy", "sceNpTrophyCreateHandle"},
             {0x00800020, 0x370136fe, "sceNpTrophy", "sceNpTrophyGetRequiredDiskSpace"},
@@ -2664,8 +2665,8 @@ void testSceNpAndTrophy() {
             {0x008000b0, 0x4885aa18, "sceNp", "sceNpTerm"},
             {0x008000c0, 0xad218faf, "sceNp", "sceNpDrmIsAvailable"},
     };
-    dal::installImports(imports, ImportCount);
-    auto ctx = std::make_unique<DalPpuContext>();
+    tox2::installImports(imports, ImportCount);
+    auto ctx = std::make_unique<Tox2PpuContext>();
     ctx->gpr[1] = 0x500000;
     CHECK(p.memory.commit(0x4f0000, 0x10000));
     auto call = [&](Import which, std::uint64_t a = 0, std::uint64_t b = 0, std::uint64_t c = 0, std::uint64_t d = 0,
@@ -2675,7 +2676,7 @@ void testSceNpAndTrophy() {
         ctx->gpr[5] = c;
         ctx->gpr[6] = d;
         ctx->gpr[7] = e;
-        dalHleCall(ctx.get(), base, which);
+        tox2HleCall(ctx.get(), base, which);
         return static_cast<std::uint32_t>(ctx->gpr[3]);
     };
     constexpr std::uint32_t kNotInit = 0x80022902, kNotSupported = 0x80022903, kInvalidArg = 0x80022906,
@@ -2695,7 +2696,7 @@ void testSceNpAndTrophy() {
     std::memcpy(base + path_addr, "/dev_bdvd/drm.bin", 18);
     CHECK(call(NpDrm, 0, path_addr) == 0);
     std::memcpy(base + path_addr, "/dev_bdvd/none.bin", 19);
-    CHECK(call(NpDrm, 0, path_addr) == dal::kCellEnoent);
+    CHECK(call(NpDrm, 0, path_addr) == tox2::kCellEnoent);
 
     // Init and the tables.
     CHECK(call(CreateHandle, out) == kNotInit);
@@ -2703,34 +2704,34 @@ void testSceNpAndTrophy() {
     CHECK(call(Init, 0, 0, 0xffffffff, 0) == 0);
     CHECK(call(Init, 0, 0, 0xffffffff, 0) == kAlreadyInit);
     CHECK(call(CreateHandle, 0) == kInvalidArg);
-    CHECK(call(CreateHandle, out) == 0 && dalRead32(base, out) == 1);
-    CHECK(call(CreateHandle, out) == 0 && dalRead32(base, out) == 2);
+    CHECK(call(CreateHandle, out) == 0 && tox2Read32(base, out) == 1);
+    CHECK(call(CreateHandle, out) == 0 && tox2Read32(base, out) == 2);
     CHECK(call(DestroyHandle, 2) == 0 && call(DestroyHandle, 2) == 0x80022911);
     CHECK(call(DestroyHandle, 9) == kInvalidArg);
 
     std::memcpy(base + comm_id, "NPWR00001\0", 10);
     base[comm_id + 10] = 0;
-    dalWrite32(base, comm_sign, 0xB9DDE13B);
-    dalWrite16(base, comm_sign + 4, 0x100);
+    tox2Write32(base, comm_sign, 0xB9DDE13B);
+    tox2Write16(base, comm_sign + 4, 0x100);
     CHECK(call(CreateContext, out, comm_id, 0) == kInvalidArg);
     CHECK(call(CreateContext, out, comm_id, comm_sign, 2) == kNotSupported);
     base[comm_sign + 8] = 1;
     CHECK(call(CreateContext, out, comm_id, comm_sign) == kBadCommId);
     base[comm_sign + 8] = 0;
-    CHECK(call(CreateContext, out, comm_id, comm_sign) == 0 && dalRead32(base, out) == 1);
+    CHECK(call(CreateContext, out, comm_id, comm_sign) == 0 && tox2Read32(base, out) == 1);
 
     // Required space is the pack minus its header and entry table; bad ids are rejected.
     CHECK(call(DiskSpace, 1, 1, 0) == kInvalidArg);
     CHECK(call(DiskSpace, 0, 0, out) == kInvalidArg);
     CHECK(call(DiskSpace, 1, 3, out) == 0x80022911);
-    CHECK(call(DiskSpace, 1, 1, out) == 0 && dalRead64(base, out) == config.size());
+    CHECK(call(DiskSpace, 1, 1, out) == 0 && tox2Read64(base, out) == config.size());
 
     // Unlocking needs a registered context; read-only state without an install is empty.
     CHECK(call(Unlock, 1, 1, 1, 0) == kNotRegistered);
     CHECK(call(UnlockState, 1, 1, flags, out) == kNotRegistered);
 
     // Registration: the install question, then the progress events in order.
-    const std::uint32_t cb = dal::registerHostFunction("trophyStatusCallback", trophyStatusCallback);
+    const std::uint32_t cb = tox2::registerHostFunction("trophyStatusCallback", trophyStatusCallback);
     g_trophy_callbacks.clear();
     g_trophy_callback_result = static_cast<std::uint64_t>(-1);  // refuse the install
     CHECK(call(Register, 1, 1, 0, 0, 0) == kInvalidArg);
@@ -2766,21 +2767,21 @@ void testSceNpAndTrophy() {
     CHECK(stdfs::exists(trophy_dir / "TROPCONF.SFM"));
 
     // Installed: no disk space needed, and the next registration starts from the installed status.
-    CHECK(call(DiskSpace, 1, 1, out) == 0 && dalRead64(base, out) == 0);
+    CHECK(call(DiskSpace, 1, 1, out) == 0 && tox2Read64(base, out) == 0);
     g_trophy_callbacks.clear();
     CHECK(call(Register, 1, 1, cb, 0, 0) == 0 && g_trophy_callbacks[0].status == 3);
 
     // Unlock state and the platinum link.
-    CHECK(call(UnlockState, 1, 1, flags, out) == 0 && dalRead32(base, out) == 4 && dalRead32(base, flags) == 0);
-    dalWrite32(base, out, 0x55555555);
+    CHECK(call(UnlockState, 1, 1, flags, out) == 0 && tox2Read32(base, out) == 4 && tox2Read32(base, flags) == 0);
+    tox2Write32(base, out, 0x55555555);
     CHECK(call(Unlock, 1, 1, 4, out) == kInvalidId);
     CHECK(call(Unlock, 1, 1, 0xffffffff, out) == kInvalidId);
     CHECK(call(Unlock, 1, 1, 0, out) == kPlatinum);
-    CHECK(call(Unlock, 1, 1, 1, out) == 0 && dalRead32(base, out) == 0xffffffff);
+    CHECK(call(Unlock, 1, 1, 1, out) == 0 && tox2Read32(base, out) == 0xffffffff);
     CHECK(call(Unlock, 1, 1, 1, out) == kAlready);
-    CHECK(call(Unlock, 1, 1, 2, out) == 0 && dalRead32(base, out) == 0xffffffff);
-    CHECK(call(Unlock, 1, 1, 3, out) == 0 && dalRead32(base, out) == 0);  // completes the platinum
-    CHECK(call(UnlockState, 1, 1, flags, out) == 0 && dalRead32(base, flags) == 0xf);
+    CHECK(call(Unlock, 1, 1, 2, out) == 0 && tox2Read32(base, out) == 0xffffffff);
+    CHECK(call(Unlock, 1, 1, 3, out) == 0 && tox2Read32(base, out) == 0);  // completes the platinum
+    CHECK(call(UnlockState, 1, 1, flags, out) == 0 && tox2Read32(base, flags) == 0xf);
     CHECK(stdfs::exists(trophy_dir / "UNLOCKED.TXT"));
 
     // The unlock state survives a restart (Term, Init, new context, register).
@@ -2790,15 +2791,15 @@ void testSceNpAndTrophy() {
     CHECK(call(UnlockState, 1, 1, flags, out) == kUnknownContext);
     CHECK(call(CreateHandle, out) == 0 && call(CreateContext, out, comm_id, comm_sign) == 0);
     CHECK(call(Register, 1, 1, cb, 0, 0) == 0);
-    CHECK(call(UnlockState, 1, 1, flags, out) == 0 && dalRead32(base, flags) == 0xf);
+    CHECK(call(UnlockState, 1, 1, flags, out) == 0 && tox2Read32(base, flags) == 0xf);
     CHECK(call(DestroyContext, 1) == 0 && call(DestroyContext, 1) == kUnknownContext);
 
-    dal::resetSceNpTrophy();
-    dal::resetSceNp();
-    dal::resetHostFunctions();
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::resetSceNpTrophy();
+    tox2::resetSceNp();
+    tox2::resetHostFunctions();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
     stdfs::remove_all(root, ec);
 }
 
@@ -2809,46 +2810,46 @@ struct SysutilCallbackCall {
 std::vector<SysutilCallbackCall> g_sysutil_callbacks;
 std::function<void()> g_sysutil_callback_hook;
 
-DAL_PPU_FUNC(sysutilCallback) {
+TOX2_PPU_FUNC(sysutilCallback) {
     (void)base;
     g_sysutil_callbacks.push_back({ctx->gpr[3], ctx->gpr[4], static_cast<std::uint32_t>(ctx->gpr[5])});
     if (g_sysutil_callback_hook) g_sysutil_callback_hook();
 }
 
 void testCellSysutil() {
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetHostFunctions();
-    dal::resetCellSysutil();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetHostFunctions();
+    tox2::resetCellSysutil();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
     CHECK(scratch != 0);
 
     enum Import : std::uint32_t { Register, Unregister, Check, EnableBgm, BgmStatus, ImportCount };
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x9d98afa0, "cellSysutil", "cellSysutilRegisterCallback"},
             {0x00800010, 0x02ff3c1b, "cellSysutil", "cellSysutilUnregisterCallback"},
             {0x00800020, 0x189a74da, "cellSysutil", "cellSysutilCheckCallback"},
             {0x00800030, 0x220894e3, "cellSysutil", "cellSysutilEnableBgmPlayback"},
             {0x00800040, 0xa11552f6, "cellSysutil", "cellSysutilGetBgmPlaybackStatus"},
     };
-    dal::installImports(imports, ImportCount);
-    auto ctx = std::make_unique<DalPpuContext>();
+    tox2::installImports(imports, ImportCount);
+    auto ctx = std::make_unique<Tox2PpuContext>();
     ctx->gpr[1] = 0x500000;
     CHECK(p.memory.commit(0x4f0000, 0x10000));
     auto call = [&](Import which, std::uint64_t a = 0, std::uint64_t b = 0, std::uint64_t c = 0) {
         ctx->gpr[3] = a;
         ctx->gpr[4] = b;
         ctx->gpr[5] = c;
-        dalHleCall(ctx.get(), base, which);
+        tox2HleCall(ctx.get(), base, which);
         return static_cast<std::uint32_t>(ctx->gpr[3]);
     };
     constexpr std::uint32_t kErrorValue = 0x8002b102, kErrorBusy = 0x8002b105, kBgmErrorParam = 0x8002b101;
 
-    const std::uint32_t cb = dal::registerHostFunction("sysutilCallback", sysutilCallback);
+    const std::uint32_t cb = tox2::registerHostFunction("sysutilCallback", sysutilCallback);
     g_sysutil_callbacks.clear();
     g_sysutil_callback_hook = nullptr;
 
@@ -2858,13 +2859,13 @@ void testCellSysutil() {
     CHECK(call(Unregister, 0xffffffff) == kErrorValue);
 
     // No registered callback: nothing is queued and a check does nothing.
-    CHECK(dal::queueSysutilEvent(dal::kSysutilRequestExitGame, 1) == 0);
+    CHECK(tox2::queueSysutilEvent(tox2::kSysutilRequestExitGame, 1) == 0);
     CHECK(call(Check) == 0 && g_sysutil_callbacks.empty());
 
     // An event is delivered by the next check, once, with (status, param, userdata).
     CHECK(call(Register, 0, cb, 0x1234) == 0);
     CHECK(call(Register, 2, cb, 0x5678) == 0);
-    CHECK(dal::queueSysutilEvent(dal::kSysutilRequestExitGame, 7) == 2);
+    CHECK(tox2::queueSysutilEvent(tox2::kSysutilRequestExitGame, 7) == 2);
     CHECK(g_sysutil_callbacks.empty());
     CHECK(call(Check) == 0);
     CHECK(g_sysutil_callbacks.size() == 2);
@@ -2879,7 +2880,7 @@ void testCellSysutil() {
     // An unregistered slot gets nothing; an event keeps the registrations of its enqueue time.
     g_sysutil_callbacks.clear();
     CHECK(call(Unregister, 2) == 0);
-    CHECK(dal::queueSysutilEvent(dal::kSysutilBgmPlaybackPlay, 0) == 1);
+    CHECK(tox2::queueSysutilEvent(tox2::kSysutilBgmPlaybackPlay, 0) == 1);
     CHECK(call(Register, 3, cb, 9) == 0);
     CHECK(call(Check) == 0 && g_sysutil_callbacks.size() == 1 && g_sysutil_callbacks[0].userdata == 0x1234);
     CHECK(call(Unregister, 3) == 0);
@@ -2888,12 +2889,12 @@ void testCellSysutil() {
     // callback waits for the next check.
     g_sysutil_callbacks.clear();
     int ran = 0;
-    g_sysutil_callback_hook = [&] { dal::queueSysutilCall([&](DalPpuContext*, std::uint8_t*) { ran += 10; }); };
-    dal::queueSysutilCall([&](DalPpuContext* c, std::uint8_t*) {
+    g_sysutil_callback_hook = [&] { tox2::queueSysutilCall([&](Tox2PpuContext*, std::uint8_t*) { ran += 10; }); };
+    tox2::queueSysutilCall([&](Tox2PpuContext* c, std::uint8_t*) {
         CHECK(c == ctx.get());
         ran++;
     });
-    CHECK(dal::queueSysutilEvent(dal::kSysutilSystemMenuOpen, 0) == 1);
+    CHECK(tox2::queueSysutilEvent(tox2::kSysutilSystemMenuOpen, 0) == 1);
     CHECK(call(Check) == 0 && ran == 1 && g_sysutil_callbacks.size() == 1);
     g_sysutil_callback_hook = nullptr;
     CHECK(call(Check) == 0 && ran == 11 && g_sysutil_callbacks.size() == 1);
@@ -2902,11 +2903,11 @@ void testCellSysutil() {
     CHECK(ctx->gpr[1] == 0x500000);
 
     // DRAWING_BEGIN/END pair up.
-    CHECK(dal::queueSysutilEvent(dal::kSysutilDrawingEnd, 0) == -1);
-    CHECK(dal::queueSysutilEvent(dal::kSysutilDrawingBegin, 0) == 1);
-    CHECK(dal::queueSysutilEvent(dal::kSysutilDrawingBegin, 0) == static_cast<std::int32_t>(kErrorBusy));
-    CHECK(dal::queueSysutilEvent(dal::kSysutilDrawingEnd, 0) == 1);
-    CHECK(dal::queueSysutilEvent(dal::kSysutilDrawingEnd, 0) == -1);
+    CHECK(tox2::queueSysutilEvent(tox2::kSysutilDrawingEnd, 0) == -1);
+    CHECK(tox2::queueSysutilEvent(tox2::kSysutilDrawingBegin, 0) == 1);
+    CHECK(tox2::queueSysutilEvent(tox2::kSysutilDrawingBegin, 0) == static_cast<std::int32_t>(kErrorBusy));
+    CHECK(tox2::queueSysutilEvent(tox2::kSysutilDrawingEnd, 0) == 1);
+    CHECK(tox2::queueSysutilEvent(tox2::kSysutilDrawingEnd, 0) == -1);
     CHECK(call(Check) == 0);
 
     // BGM status: stopped and disabled until enabled.
@@ -2921,41 +2922,41 @@ void testCellSysutil() {
     CHECK(call(EnableBgm) == 0);
     CHECK(call(BgmStatus, status) == 0 && base[status] == 1 && base[status + 1] == 0);
 
-    dal::resetCellSysutil();
+    tox2::resetCellSysutil();
     g_sysutil_callbacks.clear();
-    dal::resetHostFunctions();
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::resetHostFunctions();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 void testVideoAndAudioOut() {
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetCellSysutil();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetCellSysutil();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
     CHECK(scratch != 0);
 
     enum Import : std::uint32_t { GetState, Availability, Configure, AudioState, ImportCount };
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x887572d5, "cellSysutil", "cellVideoOutGetState"},
             {0x00800010, 0xa322db75, "cellSysutil", "cellVideoOutGetResolutionAvailability"},
             {0x00800020, 0x0bae8772, "cellSysutil", "cellVideoOutConfigure"},
             {0x00800030, 0xf4e3caa0, "cellSysutil", "cellAudioOutGetState"},
     };
-    dal::installImports(imports, ImportCount);
-    auto ctx = std::make_unique<DalPpuContext>();
+    tox2::installImports(imports, ImportCount);
+    auto ctx = std::make_unique<Tox2PpuContext>();
     ctx->gpr[1] = 0x500000;
     auto call = [&](Import which, std::uint64_t a = 0, std::uint64_t b = 0, std::uint64_t c = 0, std::uint64_t d = 0) {
         ctx->gpr[3] = a;
         ctx->gpr[4] = b;
         ctx->gpr[5] = c;
         ctx->gpr[6] = d;
-        dalHleCall(ctx.get(), base, which);
+        tox2HleCall(ctx.get(), base, which);
         return static_cast<std::uint32_t>(ctx->gpr[3]);
     };
     constexpr std::uint32_t kIllegalParameter = 0x8002b222, kOutOfRange = 0x8002b223, kDeviceNotFound = 0x8002b224,
@@ -2963,10 +2964,10 @@ void testVideoAndAudioOut() {
                             kAudioIllegal = 0x8002b242, kAudioRange = 0x8002b243;
 
     // RESOLUTION 0x1d: 480, 720, 1080 and 480 16:9.
-    dal::ParamSfo sfo;
+    tox2::ParamSfo sfo;
     sfo.ints["RESOLUTION"] = 0x1d;
     sfo.ints["SOUND_FORMAT"] = 0x1;
-    dal::setGameParamSfo(sfo);
+    tox2::setGameParamSfo(sfo);
     CHECK(call(Availability, 0, 2, 0, 0) == 1);  // 720
     CHECK(call(Availability, 0, 1, 0, 0) == 1);  // 1080
     CHECK(call(Availability, 0, 4, 0, 0) == 1);  // 480
@@ -2988,12 +2989,12 @@ void testVideoAndAudioOut() {
     CHECK(std::memcmp(base + state, expected_default, 16) == 0 && base[state + 16] == 0xaa);
 
     // Without 720p the default falls back to 480.
-    dal::ParamSfo sd;
+    tox2::ParamSfo sd;
     sd.ints["RESOLUTION"] = 0x1;
-    dal::setGameParamSfo(sd);
+    tox2::setGameParamSfo(sd);
     CHECK(call(GetState, 0, 0, state) == 0 && base[state + 8] == 4 && base[state + 11] == 1);
     CHECK(call(Availability, 0, 2, 0, 0) == 0 && call(Availability, 0, 4, 0, 0) == 1);
-    dal::setGameParamSfo(sfo);
+    tox2::setGameParamSfo(sfo);
 
     // Configure validates, then GetState reports the stored mode.
     const std::uint32_t config = scratch + 0x100;
@@ -3002,7 +3003,7 @@ void testVideoAndAudioOut() {
         base[config] = res;
         base[config + 1] = format;
         base[config + 2] = aspect;
-        dalWrite32(base, config + 12, pitch);
+        tox2Write32(base, config + 12, pitch);
     };
     CHECK(call(Configure, 0, 0, 0, 0) == kIllegalParameter);
     setConfig(2, 0, 0, 0);
@@ -3029,35 +3030,35 @@ void testVideoAndAudioOut() {
     CHECK(call(AudioState, 0, 0, state) == 0);
     const std::uint8_t expected_audio[20] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 4, 0, 0, 0, 0, 1};
     CHECK(std::memcmp(base + state, expected_audio, 20) == 0 && base[state + 20] == 0xaa);
-    CHECK(call(AudioState, 1, 0, state) == 0 && base[state] == 0x10 && dalRead32(base, state + 16) == 0xd00c1680);
+    CHECK(call(AudioState, 1, 0, state) == 0 && base[state] == 0x10 && tox2Read32(base, state + 16) == 0xd00c1680);
 
-    dal::setGameParamSfo({});
-    dal::resetCellSysutil();
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setGameParamSfo({});
+    tox2::resetCellSysutil();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 std::vector<std::pair<std::int64_t, std::uint32_t>> g_dialog_results;
 std::vector<std::uint64_t> g_dialog_sysutil_events;
 
-DAL_PPU_FUNC(msgDialogCallback) {
+TOX2_PPU_FUNC(msgDialogCallback) {
     (void)base;
     g_dialog_results.emplace_back(static_cast<std::int32_t>(ctx->gpr[3]), static_cast<std::uint32_t>(ctx->gpr[4]));
 }
 
-DAL_PPU_FUNC(msgDialogSysutilCallback) {
+TOX2_PPU_FUNC(msgDialogSysutilCallback) {
     (void)base;
     g_dialog_sysutil_events.push_back(ctx->gpr[3]);
 }
 
 // A scripted pad for the cellPad tests: the state a host backend would report.
-struct ScriptedPad final : public dal::PadProvider {
-    dal::PadPortState state = dal::neutralPadState();
+struct ScriptedPad final : public tox2::PadProvider {
+    tox2::PadPortState state = tox2::neutralPadState();
     std::uint32_t vibration_port = 99;
     int small_motor = -1, large_motor = -1;
 
-    dal::PadPortState poll(std::uint32_t port) override { return port == 0 ? state : dal::PadPortState{}; }
+    tox2::PadPortState poll(std::uint32_t port) override { return port == 0 ? state : tox2::PadPortState{}; }
     void setVibration(std::uint32_t port, std::uint8_t small, std::uint8_t large) override {
         vibration_port = port;
         small_motor = small;
@@ -3066,11 +3067,11 @@ struct ScriptedPad final : public dal::PadProvider {
 };
 
 void testCellPad() {
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetCellPad();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetCellPad();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -3078,7 +3079,7 @@ void testCellPad() {
     const std::uint32_t info = scratch, data = scratch + 0x200, act = scratch + 0x400;
 
     enum Import : std::uint32_t { Init, End, SetPortSetting, GetData, GetInfo2, SetActDirect, ImportCount };
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x1cf98800, "sys_io", "cellPadInit"},
             {0x00800010, 0x4d9b75d5, "sys_io", "cellPadEnd"},
             {0x00800020, 0x578e3c98, "sys_io", "cellPadSetPortSetting"},
@@ -3086,18 +3087,18 @@ void testCellPad() {
             {0x00800040, 0xa703a51d, "sys_io", "cellPadGetInfo2"},
             {0x00800050, 0xf65544ee, "sys_io", "cellPadSetActDirect"},
     };
-    dal::installImports(imports, ImportCount);
-    auto ctx = std::make_unique<DalPpuContext>();
+    tox2::installImports(imports, ImportCount);
+    auto ctx = std::make_unique<Tox2PpuContext>();
     auto call = [&](Import which, std::uint64_t a = 0, std::uint64_t b = 0) {
         ctx->gpr[3] = a;
         ctx->gpr[4] = b;
-        dalHleCall(ctx.get(), base, which);
+        tox2HleCall(ctx.get(), base, which);
         return static_cast<std::uint32_t>(ctx->gpr[3]);
     };
     constexpr std::uint32_t kInvalid = 0x80121102, kAlready = 0x80121103, kUninit = 0x80121104, kNoDevice = 0x80121107,
                             kUnsupported = 0x80121108;
-    const auto len = [&] { return static_cast<std::int32_t>(dalRead32(base, data)); };
-    const auto word = [&](std::uint32_t i) { return dalRead16(base, data + 4 + 2 * i); };
+    const auto len = [&] { return static_cast<std::int32_t>(tox2Read32(base, data)); };
+    const auto word = [&](std::uint32_t i) { return tox2Read16(base, data + 4 + 2 * i); };
     const auto fill = [&](std::uint32_t addr, std::uint32_t size) { std::memset(base + addr, 0xAA, size); };
 
     // Everything before Init.
@@ -3116,7 +3117,7 @@ void testCellPad() {
     CHECK(call(End) == 0 && call(End) == kUninit);
 
     // No pad connected: zeroed info, NO_DEVICE everywhere, the data block untouched.
-    CHECK(dal::setPadBackend("none") && !dal::setPadBackend("keyboard"));
+    CHECK(tox2::setPadBackend("none") && !tox2::setPadBackend("keyboard"));
     CHECK(call(Init, 7) == 0);
     fill(info, 0x100);
     CHECK(call(GetInfo2, 0) == kInvalid);
@@ -3136,19 +3137,19 @@ void testCellPad() {
     CHECK(call(End) == 0);
 
     // Neutral pad: GetInfo2 layout in big-endian words.
-    CHECK(dal::setPadBackend("neutral"));
+    CHECK(tox2::setPadBackend("neutral"));
     CHECK(call(Init, 4) == 0);
     fill(info, 0x100);
     CHECK(call(GetInfo2, info) == 0);
-    CHECK(dalRead32(base, info + 0) == 4 && dalRead32(base, info + 4) == 1 && dalRead32(base, info + 8) == 0);
-    CHECK(dalRead32(base, info + 12) == 3);  // connected + assign changed, reported once
-    CHECK(dalRead32(base, info + 16) == 0 && dalRead32(base, info + 36) == 0);
-    CHECK(dalRead32(base, info + 40) == 0);  // port_setting
-    CHECK(dalRead32(base, info + 68) == dal::kPadCapabilityStandard && dalRead32(base, info + 96) == 0);
-    CHECK(dalRead32(base, info + 72) == 0);                    // port 1: nothing connected
-    CHECK(dalRead32(base, info + 12 + 4 * 4) == 0);            // port 4 is beyond max_connect 4
+    CHECK(tox2Read32(base, info + 0) == 4 && tox2Read32(base, info + 4) == 1 && tox2Read32(base, info + 8) == 0);
+    CHECK(tox2Read32(base, info + 12) == 3);  // connected + assign changed, reported once
+    CHECK(tox2Read32(base, info + 16) == 0 && tox2Read32(base, info + 36) == 0);
+    CHECK(tox2Read32(base, info + 40) == 0);  // port_setting
+    CHECK(tox2Read32(base, info + 68) == tox2::kPadCapabilityStandard && tox2Read32(base, info + 96) == 0);
+    CHECK(tox2Read32(base, info + 72) == 0);                   // port 1: nothing connected
+    CHECK(tox2Read32(base, info + 12 + 4 * 4) == 0);           // port 4 is beyond max_connect 4
     CHECK(base[info + 123] == 0 && base[info + 124] == 0xAA);  // exactly 124 bytes written
-    CHECK(call(GetInfo2, info) == 0 && dalRead32(base, info + 12) == 1 && dalRead32(base, info + 4) == 1);
+    CHECK(call(GetInfo2, info) == 0 && tox2Read32(base, info + 12) == 1 && tox2Read32(base, info + 4) == 1);
 
     // The first GetData reports everything, later ones report no change.
     fill(data, 0x100);
@@ -3162,26 +3163,26 @@ void testCellPad() {
 
     // Port setting keeps only the two defined bits.
     CHECK(call(SetPortSetting, 0, 0xff) == 0);
-    CHECK(call(GetInfo2, info) == 0 && dalRead32(base, info + 40) == 6);
+    CHECK(call(GetInfo2, info) == 0 && tox2Read32(base, info + 40) == 6);
     CHECK(call(SetPortSetting, 0, 2) == 0);
-    CHECK(call(GetInfo2, info) == 0 && dalRead32(base, info + 40) == 2);
+    CHECK(call(GetInfo2, info) == 0 && tox2Read32(base, info + 40) == 2);
 
     // A host backend plugs in; pressure data appears only when asked for.
     auto host = std::make_unique<ScriptedPad>();
     ScriptedPad* pad = host.get();
-    dal::setPadProvider(std::move(host));
+    tox2::setPadProvider(std::move(host));
     CHECK(call(End) == 0 && call(Init, 4) == 0);
-    CHECK(call(GetInfo2, info) == 0 && dalRead32(base, info + 12) == 3 && dalRead32(base, info + 40) == 0);
+    CHECK(call(GetInfo2, info) == 0 && tox2Read32(base, info + 12) == 3 && tox2Read32(base, info + 40) == 0);
     CHECK(call(SetPortSetting, 0, 2) == 0);
     fill(data, 0x100);
-    pad->state.button[dal::kPadButtonDigital2] = 0x40;  // cross
-    pad->state.button[dal::kPadButtonPressureFirst + 9] = 0xff;
+    pad->state.button[tox2::kPadButtonDigital2] = 0x40;  // cross
+    pad->state.button[tox2::kPadButtonPressureFirst + 9] = 0xff;
     CHECK(call(GetData, 0, data) == 0 && len() == 20 && word(1) == 0x7a);
     CHECK(word(3) == 0x40 && word(17) == 0xff && word(20) == 0xAAAA);  // sensors not copied
     CHECK(call(GetData, 0, data) == 0 && len() == 0);
-    pad->state.button[dal::kPadButtonDigital1] = 0x10;  // d-pad up
+    pad->state.button[tox2::kPadButtonDigital1] = 0x10;  // d-pad up
     CHECK(call(GetData, 0, data) == 0 && len() == 20 && word(2) == 0x10);
-    pad->state.button[dal::kPadButtonSensorFirst] = 600;  // ignored while sensors are off
+    pad->state.button[tox2::kPadButtonSensorFirst] = 600;  // ignored while sensors are off
     CHECK(call(GetData, 0, data) == 0 && len() == 0);
     CHECK(call(SetPortSetting, 0, 6) == 0);
     CHECK(call(GetData, 0, data) == 0 && len() == 24 && word(1) == 0x7c && word(20) == 600 && word(21) == 399);
@@ -3192,11 +3193,11 @@ void testCellPad() {
     CHECK(call(SetPortSetting, 0, 0) == 0);
     pad->state.connected = false;
     CHECK(call(GetData, 0, data) == kNoDevice);
-    CHECK(call(GetInfo2, info) == 0 && dalRead32(base, info + 12) == 2 && dalRead32(base, info + 4) == 0 &&
-          dalRead32(base, info + 68) == 0);
-    CHECK(call(GetInfo2, info) == 0 && dalRead32(base, info + 12) == 0);
+    CHECK(call(GetInfo2, info) == 0 && tox2Read32(base, info + 12) == 2 && tox2Read32(base, info + 4) == 0 &&
+          tox2Read32(base, info + 68) == 0);
+    CHECK(call(GetInfo2, info) == 0 && tox2Read32(base, info + 12) == 0);
     pad->state.connected = true;
-    CHECK(call(GetInfo2, info) == 0 && dalRead32(base, info + 12) == 3);
+    CHECK(call(GetInfo2, info) == 0 && tox2Read32(base, info + 12) == 3);
     CHECK(call(GetData, 0, data) == 0 && len() == 8);  // a replugged pad reports everything again
 
     // SetActDirect: validation order, capability check, motor routing.
@@ -3210,72 +3211,72 @@ void testCellPad() {
     CHECK(call(SetActDirect, 5, act) == kNoDevice && call(SetActDirect, 1, act) == kNoDevice);
     CHECK(call(SetActDirect, 0, act) == 0 && pad->vibration_port == 0 && pad->small_motor == 1 &&
           pad->large_motor == 200);
-    pad->state.device_capability = dal::kPadCapabilityStandard & ~0x10u;
+    pad->state.device_capability = tox2::kPadCapabilityStandard & ~0x10u;
     CHECK(call(SetActDirect, 0, act) == kUnsupported);
 
-    dal::resetCellPad();
+    tox2::resetCellPad();
     p.main.free(scratch);
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
-bool samePadState(const dal::PadPortState& a, const dal::PadPortState& b) {
+bool samePadState(const tox2::PadPortState& a, const tox2::PadPortState& b) {
     return a.connected == b.connected && a.device_capability == b.device_capability && a.device_type == b.device_type &&
            a.button == b.button;
 }
 
 void testPadButtons() {
-    using dal::PadButton;
-    CHECK(samePadState(dal::padStateFromButtons(0), dal::neutralPadState()));
+    using tox2::PadButton;
+    CHECK(samePadState(tox2::padStateFromButtons(0), tox2::neutralPadState()));
 
-    const dal::PadPortState cross = dal::padStateFromButtons(dal::padButtonBit(PadButton::Cross));
-    CHECK(cross.button[dal::kPadButtonDigital1] == 0 && cross.button[dal::kPadButtonDigital2] == 0x40);
+    const tox2::PadPortState cross = tox2::padStateFromButtons(tox2::padButtonBit(PadButton::Cross));
+    CHECK(cross.button[tox2::kPadButtonDigital1] == 0 && cross.button[tox2::kPadButtonDigital2] == 0x40);
     CHECK(cross.button[14] == 0xFF && cross.connected);
 
-    const dal::PadPortState up_start =
-            dal::padStateFromButtons(dal::padButtonBit(PadButton::Up) | dal::padButtonBit(PadButton::Start));
-    CHECK(up_start.button[dal::kPadButtonDigital1] == 0x18 && up_start.button[dal::kPadButtonDigital2] == 0);
+    const tox2::PadPortState up_start =
+            tox2::padStateFromButtons(tox2::padButtonBit(PadButton::Up) | tox2::padButtonBit(PadButton::Start));
+    CHECK(up_start.button[tox2::kPadButtonDigital1] == 0x18 && up_start.button[tox2::kPadButtonDigital2] == 0);
     CHECK(up_start.button[10] == 0xFF);
     // Start has no pressure word: Up's is the only one set.
     std::size_t pressure_set = 0;
-    for (std::size_t i = dal::kPadButtonPressureFirst; i < dal::kPadButtonSensorFirst; i++) {
+    for (std::size_t i = tox2::kPadButtonPressureFirst; i < tox2::kPadButtonSensorFirst; i++) {
         pressure_set += up_start.button[i] != 0;
     }
     CHECK(pressure_set == 1);
 
     // Every button on its own: one digital bit, its pressure word (if any), nothing else changed.
     constexpr std::size_t kPressureWords[16] = {0, 0, 0, 0, 10, 8, 11, 9, 18, 19, 16, 17, 12, 13, 14, 15};
-    const dal::PadPortState neutral = dal::neutralPadState();
+    const tox2::PadPortState neutral = tox2::neutralPadState();
     bool layout_ok = true;
     for (std::size_t i = 0; i < 16; i++) {
         const auto button = static_cast<PadButton>(i);
-        CHECK(dal::padPressureWord(button) == kPressureWords[i]);
-        dal::PadPortState expected = neutral;
-        expected.button[i < 8 ? dal::kPadButtonDigital1 : dal::kPadButtonDigital2] =
+        CHECK(tox2::padPressureWord(button) == kPressureWords[i]);
+        tox2::PadPortState expected = neutral;
+        expected.button[i < 8 ? tox2::kPadButtonDigital1 : tox2::kPadButtonDigital2] =
                 static_cast<std::uint16_t>(1u << (i % 8));
         if (kPressureWords[i] != 0) expected.button[kPressureWords[i]] = 0xFF;
-        layout_ok = layout_ok && samePadState(dal::padStateFromButtons(dal::padButtonBit(button)), expected);
+        layout_ok = layout_ok && samePadState(tox2::padStateFromButtons(tox2::padButtonBit(button)), expected);
     }
     CHECK(layout_ok);
-    CHECK(dal::padPressureWord(PadButton::Count) == 0);
+    CHECK(tox2::padPressureWord(PadButton::Count) == 0);
 
     // Names round-trip for all 16 buttons; anything else is rejected.
     bool names_ok = true;
     for (std::size_t i = 0; i < 16; i++) {
         const auto button = static_cast<PadButton>(i);
-        const std::string_view name = dal::padButtonName(button);
-        names_ok = names_ok && !name.empty() && dal::padButtonFromName(name) == button;
+        const std::string_view name = tox2::padButtonName(button);
+        names_ok = names_ok && !name.empty() && tox2::padButtonFromName(name) == button;
     }
     CHECK(names_ok);
-    CHECK(dal::padButtonName(PadButton::Cross) == "cross" && dal::padButtonName(PadButton::L3) == "l3");
-    CHECK(dal::padButtonName(PadButton::Count).empty());
-    CHECK(!dal::padButtonFromName("crosss") && !dal::padButtonFromName("") && !dal::padButtonFromName("Cross"));
-    CHECK(!dal::padButtonFromName("ps") && !dal::padButtonFromName("count"));
+    CHECK(tox2::padButtonName(PadButton::Cross) == "cross" && tox2::padButtonName(PadButton::L3) == "l3");
+    CHECK(tox2::padButtonName(PadButton::Count).empty());
+    CHECK(!tox2::padButtonFromName("crosss") && !tox2::padButtonFromName("") && !tox2::padButtonFromName("Cross"));
+    CHECK(!tox2::padButtonFromName("ps") && !tox2::padButtonFromName("count"));
 }
 
 void testKeyboardPadScanCodes() {
-    using dal::PadButton;
+    using tox2::PadButton;
     struct Key {
         std::uint32_t scan_code;
         PadButton button;
@@ -3286,32 +3287,32 @@ void testKeyboardPadScanCodes() {
             {0x11, PadButton::L1},    {0x12, PadButton::L2},     {0x13, PadButton::R1},     {0x16, PadButton::R2},
             {0x02, PadButton::L3},    {0x04, PadButton::R3},     {0x2F, PadButton::Start},  {0x2E, PadButton::Select},
     };
-    dal::PadButtons covered = 0;
+    tox2::PadButtons covered = 0;
     for (const Key& key : kKeys) {
-        CHECK(dal::padButtonForScanCode(key.scan_code) == key.button);
-        covered |= dal::padButtonBit(key.button);
+        CHECK(tox2::padButtonForScanCode(key.scan_code) == key.button);
+        covered |= tox2::padButtonBit(key.button);
     }
     CHECK(covered == 0xFFFF);
 
     // No other scan code maps, so each button has exactly one key.
     std::size_t mapped = 0;
-    for (std::uint32_t code = 0; code < 0x10000; code++) mapped += dal::padButtonForScanCode(code).has_value();
+    for (std::uint32_t code = 0; code < 0x10000; code++) mapped += tox2::padButtonForScanCode(code).has_value();
     CHECK(mapped == 16);
-    CHECK(!dal::padButtonForScanCode(0x48));  // numpad 8: same code as Up without the extended bit
-    CHECK(!dal::padButtonForScanCode(0x50) && !dal::padButtonForScanCode(0x4B) && !dal::padButtonForScanCode(0x4D));
-    CHECK(!dal::padButtonForScanCode(0));
+    CHECK(!tox2::padButtonForScanCode(0x48));  // numpad 8: same code as Up without the extended bit
+    CHECK(!tox2::padButtonForScanCode(0x50) && !tox2::padButtonForScanCode(0x4B) && !tox2::padButtonForScanCode(0x4D));
+    CHECK(!tox2::padButtonForScanCode(0));
 }
 
 void testKeyboardPadState() {
-    using State = dal::KeyboardPadState;
+    using State = tox2::KeyboardPadState;
     using std::chrono::milliseconds;
-    using dal::PadButton;
-    constexpr dal::PadButtons kCross = dal::padButtonBit(PadButton::Cross);
-    constexpr dal::PadButtons kStart = dal::padButtonBit(PadButton::Start);
-    constexpr dal::PadButtons kUp = dal::padButtonBit(PadButton::Up);
-    constexpr dal::PadButtons kDown = dal::padButtonBit(PadButton::Down);
-    constexpr dal::PadButtons kLeft = dal::padButtonBit(PadButton::Left);
-    constexpr dal::PadButtons kRight = dal::padButtonBit(PadButton::Right);
+    using tox2::PadButton;
+    constexpr tox2::PadButtons kCross = tox2::padButtonBit(PadButton::Cross);
+    constexpr tox2::PadButtons kStart = tox2::padButtonBit(PadButton::Start);
+    constexpr tox2::PadButtons kUp = tox2::padButtonBit(PadButton::Up);
+    constexpr tox2::PadButtons kDown = tox2::padButtonBit(PadButton::Down);
+    constexpr tox2::PadButtons kLeft = tox2::padButtonBit(PadButton::Left);
+    constexpr tox2::PadButtons kRight = tox2::padButtonBit(PadButton::Right);
     constexpr std::uint32_t kZ = 0x2C;
     const State::Clock::time_point t0 = State::Clock::time_point{} + std::chrono::seconds(100);
 
@@ -3351,34 +3352,34 @@ void testKeyboardPadState() {
     // Opposite d-pad directions held together cancel; the other axis is unaffected.
     const State::Clock::time_point t3 = t2 + std::chrono::seconds(10);
     State dpad;
-    dpad.setButtons(dal::InputSource::Keyboard, kUp, true, t3);
+    dpad.setButtons(tox2::InputSource::Keyboard, kUp, true, t3);
     CHECK(dpad.reported(t3 + std::chrono::seconds(1)) == kUp);
-    dpad.setButtons(dal::InputSource::Script, kDown, true, t3);
+    dpad.setButtons(tox2::InputSource::Script, kDown, true, t3);
     CHECK(dpad.held() == (kUp | kDown));
     CHECK(dpad.reported(t3 + std::chrono::seconds(1)) == 0);
-    dpad.setButtons(dal::InputSource::Keyboard, kLeft | kRight | kCross, true, t3);
+    dpad.setButtons(tox2::InputSource::Keyboard, kLeft | kRight | kCross, true, t3);
     CHECK(dpad.reported(t3 + std::chrono::seconds(1)) == kCross);
-    dpad.setButtons(dal::InputSource::Script, kDown, false, t3 + std::chrono::seconds(1));
+    dpad.setButtons(tox2::InputSource::Script, kDown, false, t3 + std::chrono::seconds(1));
     CHECK(dpad.reported(t3 + std::chrono::seconds(2)) == (kUp | kCross));
 
     // releaseAll drops one source at once and leaves the other alone.
     const State::Clock::time_point t4 = t3 + std::chrono::seconds(10);
     State sources;
-    sources.setButtons(dal::InputSource::Keyboard, kCross, true, t4);
-    sources.setButtons(dal::InputSource::Script, kStart, true, t4);
+    sources.setButtons(tox2::InputSource::Keyboard, kCross, true, t4);
+    sources.setButtons(tox2::InputSource::Script, kStart, true, t4);
     CHECK(sources.held() == (kCross | kStart));
-    sources.releaseAll(dal::InputSource::Keyboard);
+    sources.releaseAll(tox2::InputSource::Keyboard);
     CHECK(sources.held() == kStart);
     CHECK(sources.reported(t4 + milliseconds(5)) == kStart);  // Cross is not kept for 60 ms
-    sources.releaseAll(dal::InputSource::Keyboard);           // nothing left to release
+    sources.releaseAll(tox2::InputSource::Keyboard);          // nothing left to release
     CHECK(sources.held() == kStart);
     // A script tap keeps its minimum visible time; a button held by two sources stays until both let go.
-    sources.setButtons(dal::InputSource::Script, kStart, false, t4 + milliseconds(10));
+    sources.setButtons(tox2::InputSource::Script, kStart, false, t4 + milliseconds(10));
     CHECK(sources.held() == 0 && sources.reported(t4 + milliseconds(50)) == kStart);
     CHECK(sources.reported(t4 + milliseconds(70)) == 0);
-    sources.setButtons(dal::InputSource::Keyboard, kCross, true, t4 + std::chrono::seconds(1));
-    sources.setButtons(dal::InputSource::Script, kCross, true, t4 + std::chrono::seconds(1));
-    sources.setButtons(dal::InputSource::Script, kCross, false, t4 + std::chrono::seconds(2));
+    sources.setButtons(tox2::InputSource::Keyboard, kCross, true, t4 + std::chrono::seconds(1));
+    sources.setButtons(tox2::InputSource::Script, kCross, true, t4 + std::chrono::seconds(1));
+    sources.setButtons(tox2::InputSource::Script, kCross, false, t4 + std::chrono::seconds(2));
     CHECK(sources.held() == kCross);
 
     // The tail of a released key never swallows a newly pressed opposite key.
@@ -3398,45 +3399,45 @@ void testKeyboardPadState() {
     // releaseAll of one source keeps the tail of a tap made by the other.
     const State::Clock::time_point t6 = t5 + std::chrono::seconds(10);
     State tails;
-    tails.setButtons(dal::InputSource::Script, kStart, true, t6);
-    tails.setButtons(dal::InputSource::Script, kStart, false, t6 + milliseconds(10));
-    tails.setButtons(dal::InputSource::Keyboard, kStart, true, t6 + milliseconds(20));
-    tails.releaseAll(dal::InputSource::Keyboard);
+    tails.setButtons(tox2::InputSource::Script, kStart, true, t6);
+    tails.setButtons(tox2::InputSource::Script, kStart, false, t6 + milliseconds(10));
+    tails.setButtons(tox2::InputSource::Keyboard, kStart, true, t6 + milliseconds(20));
+    tails.releaseAll(tox2::InputSource::Keyboard);
     CHECK(tails.held() == 0 && tails.reported(t6 + milliseconds(30)) == kStart);
     CHECK(tails.reported(t6 + milliseconds(70)) == 0);
 }
 
 void testKeyboardPadProvider() {
-    using State = dal::KeyboardPadState;
-    using dal::PadButton;
+    using State = tox2::KeyboardPadState;
+    using tox2::PadButton;
     constexpr std::uint32_t kZ = 0x2C;
 
     // The provider reads the state through the injected clock.
     auto state = std::make_shared<State>();
     State::Clock::time_point now = State::Clock::time_point{} + std::chrono::seconds(50);
-    std::unique_ptr<dal::PadProvider> provider = dal::makeKeyboardPadProvider(state, [&] { return now; });
-    CHECK(samePadState(provider->poll(0), dal::neutralPadState()));
+    std::unique_ptr<tox2::PadProvider> provider = tox2::makeKeyboardPadProvider(state, [&] { return now; });
+    CHECK(samePadState(provider->poll(0), tox2::neutralPadState()));
     CHECK(provider->poll(0).connected && !provider->poll(1).connected && !provider->poll(6).connected);
     CHECK(state->keyEvent(kZ, true, false, now));
-    CHECK(samePadState(provider->poll(0), dal::padStateFromButtons(dal::padButtonBit(PadButton::Cross))));
+    CHECK(samePadState(provider->poll(0), tox2::padStateFromButtons(tox2::padButtonBit(PadButton::Cross))));
     CHECK(!provider->poll(1).connected);
     now += std::chrono::seconds(2);
     CHECK(state->keyEvent(kZ, false, false, now));
     now += std::chrono::seconds(1);
-    CHECK(samePadState(provider->poll(0), dal::neutralPadState()));
+    CHECK(samePadState(provider->poll(0), tox2::neutralPadState()));
 
     // The default clock is the real one: a key held now shows up.
     auto live_state = std::make_shared<State>();
-    std::unique_ptr<dal::PadProvider> live = dal::makeKeyboardPadProvider(live_state);
+    std::unique_ptr<tox2::PadProvider> live = tox2::makeKeyboardPadProvider(live_state);
     live_state->keyEvent(kZ, true, false, State::Clock::now());
-    CHECK(live->poll(0).button[dal::kPadButtonDigital2] == 0x40);
+    CHECK(live->poll(0).button[tox2::kPadButtonDigital2] == 0x40);
 
     // Through the cellPad handlers, as a game polls it.
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetCellPad();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetCellPad();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -3444,7 +3445,7 @@ void testKeyboardPadProvider() {
     const std::uint32_t data = scratch;
 
     enum Import : std::uint32_t { Init, End, SetPortSetting, GetData, GetInfo2, SetActDirect, ImportCount };
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x1cf98800, "sys_io", "cellPadInit"},
             {0x00800010, 0x4d9b75d5, "sys_io", "cellPadEnd"},
             {0x00800020, 0x578e3c98, "sys_io", "cellPadSetPortSetting"},
@@ -3452,20 +3453,20 @@ void testKeyboardPadProvider() {
             {0x00800040, 0xa703a51d, "sys_io", "cellPadGetInfo2"},
             {0x00800050, 0xf65544ee, "sys_io", "cellPadSetActDirect"},
     };
-    dal::installImports(imports, ImportCount);
-    auto ctx = std::make_unique<DalPpuContext>();
+    tox2::installImports(imports, ImportCount);
+    auto ctx = std::make_unique<Tox2PpuContext>();
     auto call = [&](Import which, std::uint64_t a = 0, std::uint64_t b = 0) {
         ctx->gpr[3] = a;
         ctx->gpr[4] = b;
-        dalHleCall(ctx.get(), base, which);
+        tox2HleCall(ctx.get(), base, which);
         return static_cast<std::uint32_t>(ctx->gpr[3]);
     };
-    const auto len = [&] { return static_cast<std::int32_t>(dalRead32(base, data)); };
-    const auto word = [&](std::uint32_t i) { return dalRead16(base, data + 4 + 2 * i); };
+    const auto len = [&] { return static_cast<std::int32_t>(tox2Read32(base, data)); };
+    const auto word = [&](std::uint32_t i) { return tox2Read16(base, data + 4 + 2 * i); };
 
     auto pad_state = std::make_shared<State>();
     State::Clock::time_point pad_now = State::Clock::time_point{} + std::chrono::seconds(10);
-    dal::setPadProvider(dal::makeKeyboardPadProvider(pad_state, [&] { return pad_now; }));
+    tox2::setPadProvider(tox2::makeKeyboardPadProvider(pad_state, [&] { return pad_now; }));
     CHECK(call(Init, 4) == 0);
     CHECK(call(GetData, 0, data) == 0 && len() == 8 && word(2) == 0 && word(3) == 0);
     CHECK(word(4) == 0x80 && word(7) == 0x80);
@@ -3486,20 +3487,20 @@ void testKeyboardPadProvider() {
     CHECK(call(GetData, 0, data) == 0 && len() == 20 && word(3) == 0 && word(2) == 0x10);
     CHECK(word(10) == 0xFF && word(14) == 0);
 
-    dal::resetCellPad();
+    tox2::resetCellPad();
     p.main.free(scratch);
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 void testKeyboardPadThreads() {
-    using State = dal::KeyboardPadState;
+    using State = tox2::KeyboardPadState;
     constexpr std::uint32_t kZ = 0x2C;
     constexpr int kToggles = 10000;
 
     auto state = std::make_shared<State>();
-    std::unique_ptr<dal::PadProvider> provider = dal::makeKeyboardPadProvider(state);
+    std::unique_ptr<tox2::PadProvider> provider = tox2::makeKeyboardPadProvider(state);
     std::atomic<bool> done{false};
     std::atomic<bool> started{false};
     // Two downs then an up: repeated downs of a held key are ignored, and the last toggle is a down.
@@ -3515,82 +3516,82 @@ void testKeyboardPadThreads() {
     });
     std::uint64_t polls = 0;
     while (!done.load()) {
-        const dal::PadPortState polled = provider->poll(0);
+        const tox2::PadPortState polled = provider->poll(0);
         CHECK(polled.connected);
         polls++;
         started.store(true);
     }
     writer.join();
-    const dal::PadButtons expected = last_down ? dal::padButtonBit(dal::PadButton::Cross) : 0;
+    const tox2::PadButtons expected = last_down ? tox2::padButtonBit(tox2::PadButton::Cross) : 0;
     CHECK(last_down);
     CHECK(state->held() == expected);
-    CHECK(provider->poll(0).button[dal::kPadButtonDigital2] == 0x40);
+    CHECK(provider->poll(0).button[tox2::kPadButtonDigital2] == 0x40);
     CHECK(polls > 0);
 }
 
 void testPadStateFromInput() {
-    using dal::PadButton;
-    constexpr dal::PadButtons kL2 = dal::padButtonBit(PadButton::L2);
-    constexpr dal::PadButtons kR2 = dal::padButtonBit(PadButton::R2);
-    constexpr dal::PadButtons kCross = dal::padButtonBit(PadButton::Cross);
+    using tox2::PadButton;
+    constexpr tox2::PadButtons kL2 = tox2::padButtonBit(PadButton::L2);
+    constexpr tox2::PadButtons kR2 = tox2::padButtonBit(PadButton::R2);
+    constexpr tox2::PadButtons kCross = tox2::padButtonBit(PadButton::Cross);
 
     // An idle pad is the neutral state word for word, so GetData keeps reporting no change.
-    CHECK(samePadState(dal::padStateFromInput(0, {}, 0), dal::neutralPadState()));
-    CHECK(samePadState(dal::padStateFromInput(kCross, {}, 0), dal::padStateFromButtons(kCross)));
+    CHECK(samePadState(tox2::padStateFromInput(0, {}, 0), tox2::neutralPadState()));
+    CHECK(samePadState(tox2::padStateFromInput(kCross, {}, 0), tox2::padStateFromButtons(kCross)));
 
     // Words 4..7 are right x, right y, left x, left y (hle.h); nothing else changes.
-    dal::PadAnalog sticks;
+    tox2::PadAnalog sticks;
     sticks.left_x = 0x11;
     sticks.left_y = 0x22;
     sticks.right_x = 0x33;
     sticks.right_y = 0x44;
-    dal::PadPortState expected = dal::neutralPadState();
+    tox2::PadPortState expected = tox2::neutralPadState();
     expected.button[4] = 0x33;
     expected.button[5] = 0x44;
     expected.button[6] = 0x11;
     expected.button[7] = 0x22;
-    CHECK(samePadState(dal::padStateFromInput(0, sticks, 0), expected));
+    CHECK(samePadState(tox2::padStateFromInput(0, sticks, 0), expected));
     // Trigger values alone do nothing without the button.
-    dal::PadAnalog triggers;
+    tox2::PadAnalog triggers;
     triggers.l2 = 0x40;
     triggers.r2 = 0x90;
-    CHECK(samePadState(dal::padStateFromInput(0, triggers, kL2 | kR2), dal::neutralPadState()));
+    CHECK(samePadState(tox2::padStateFromInput(0, triggers, kL2 | kR2), tox2::neutralPadState()));
 
     // The L2/R2 pressure words (18, 19) take the analog value only for buttons in the mask.
-    const std::size_t l2_word = dal::padPressureWord(PadButton::L2);
-    const std::size_t r2_word = dal::padPressureWord(PadButton::R2);
+    const std::size_t l2_word = tox2::padPressureWord(PadButton::L2);
+    const std::size_t r2_word = tox2::padPressureWord(PadButton::R2);
     CHECK(l2_word == 18 && r2_word == 19);
-    dal::PadPortState both = dal::padStateFromInput(kL2 | kR2 | kCross, triggers, kL2 | kR2);
+    tox2::PadPortState both = tox2::padStateFromInput(kL2 | kR2 | kCross, triggers, kL2 | kR2);
     CHECK(both.button[l2_word] == 0x40 && both.button[r2_word] == 0x90 && both.button[14] == 0xFF);
-    dal::PadPortState one = dal::padStateFromInput(kL2 | kR2, triggers, kL2);
+    tox2::PadPortState one = tox2::padStateFromInput(kL2 | kR2, triggers, kL2);
     CHECK(one.button[l2_word] == 0x40 && one.button[r2_word] == 0xFF);
-    dal::PadPortState none = dal::padStateFromInput(kL2 | kR2, triggers, 0);
+    tox2::PadPortState none = tox2::padStateFromInput(kL2 | kR2, triggers, 0);
     CHECK(none.button[l2_word] == 0xFF && none.button[r2_word] == 0xFF);
-    CHECK(one.button[dal::kPadButtonDigital2] == 0x03);
+    CHECK(one.button[tox2::kPadButtonDigital2] == 0x03);
 }
 
 void testGamepadSourceState() {
-    using State = dal::KeyboardPadState;
+    using State = tox2::KeyboardPadState;
     using std::chrono::milliseconds;
-    using dal::PadButton;
-    constexpr dal::PadButtons kCross = dal::padButtonBit(PadButton::Cross);
-    constexpr dal::PadButtons kStart = dal::padButtonBit(PadButton::Start);
-    constexpr dal::PadButtons kUp = dal::padButtonBit(PadButton::Up);
-    constexpr dal::PadButtons kDown = dal::padButtonBit(PadButton::Down);
+    using tox2::PadButton;
+    constexpr tox2::PadButtons kCross = tox2::padButtonBit(PadButton::Cross);
+    constexpr tox2::PadButtons kStart = tox2::padButtonBit(PadButton::Start);
+    constexpr tox2::PadButtons kUp = tox2::padButtonBit(PadButton::Up);
+    constexpr tox2::PadButtons kDown = tox2::padButtonBit(PadButton::Down);
     const State::Clock::time_point t0 = State::Clock::time_point{} + std::chrono::seconds(100);
 
     // setHeld stamps only newly set bits: Cross keeps the time of its first report.
     State state;
-    state.setHeld(dal::InputSource::Gamepad, kCross, t0);
-    CHECK(state.held(dal::InputSource::Gamepad) == kCross && state.held(dal::InputSource::Keyboard) == 0 &&
+    state.setHeld(tox2::InputSource::Gamepad, kCross, t0);
+    CHECK(state.held(tox2::InputSource::Gamepad) == kCross && state.held(tox2::InputSource::Keyboard) == 0 &&
           state.held() == kCross);
     const State::Clock::time_point t1 = t0 + std::chrono::seconds(1);
-    state.setHeld(dal::InputSource::Gamepad, kCross | kStart, t1);
-    state.setHeld(dal::InputSource::Gamepad, kStart, t1 + milliseconds(10));
+    state.setHeld(tox2::InputSource::Gamepad, kCross | kStart, t1);
+    state.setHeld(tox2::InputSource::Gamepad, kStart, t1 + milliseconds(10));
     CHECK(state.held() == kStart);
     CHECK(state.reported(t1 + milliseconds(30)) == kStart);  // Cross was pressed 1 s ago: no tail left
     // A released bit keeps its tail from the press time, then goes.
-    state.setHeld(dal::InputSource::Gamepad, 0, t1 + milliseconds(20));
+    state.setHeld(tox2::InputSource::Gamepad, 0, t1 + milliseconds(20));
     CHECK(state.held() == 0);
     CHECK(state.reported(t1 + milliseconds(30)) == kStart);
     CHECK(state.reported(t1 + milliseconds(59)) == kStart);
@@ -3598,37 +3599,37 @@ void testGamepadSourceState() {
 
     // A tap shorter than one poll is still seen, and a held bit is not re-stamped by the next report.
     const State::Clock::time_point t2 = t1 + std::chrono::seconds(10);
-    state.setHeld(dal::InputSource::Gamepad, kCross, t2);
-    state.setHeld(dal::InputSource::Gamepad, kCross, t2 + milliseconds(50));
-    state.setHeld(dal::InputSource::Gamepad, 0, t2 + milliseconds(55));
+    state.setHeld(tox2::InputSource::Gamepad, kCross, t2);
+    state.setHeld(tox2::InputSource::Gamepad, kCross, t2 + milliseconds(50));
+    state.setHeld(tox2::InputSource::Gamepad, 0, t2 + milliseconds(55));
     CHECK(state.reported(t2 + milliseconds(59)) == kCross);
     CHECK(state.reported(t2 + milliseconds(61)) == 0);
 
     // The d-pad rule applies to the gamepad source: Up on the pad with Down on the keyboard cancel.
     const State::Clock::time_point t3 = t2 + std::chrono::seconds(10);
     State dpad;
-    dpad.setHeld(dal::InputSource::Gamepad, kUp, t3);
+    dpad.setHeld(tox2::InputSource::Gamepad, kUp, t3);
     CHECK(dpad.reported(t3 + std::chrono::seconds(1)) == kUp);
-    dpad.setButtons(dal::InputSource::Keyboard, kDown, true, t3);
+    dpad.setButtons(tox2::InputSource::Keyboard, kDown, true, t3);
     CHECK(dpad.held() == (kUp | kDown));
     CHECK(dpad.reported(t3 + std::chrono::seconds(1)) == 0);
-    dpad.setHeld(dal::InputSource::Gamepad, 0, t3 + std::chrono::seconds(2));
+    dpad.setHeld(tox2::InputSource::Gamepad, 0, t3 + std::chrono::seconds(2));
     CHECK(dpad.reported(t3 + std::chrono::seconds(3)) == kDown);
 
     // releaseAll(Gamepad) drops the gamepad's buttons at once and leaves the keyboard alone.
     const State::Clock::time_point t4 = t3 + std::chrono::seconds(10);
     State released;
-    released.setHeld(dal::InputSource::Gamepad, kCross, t4);
-    released.setButtons(dal::InputSource::Keyboard, kStart, true, t4);
-    released.releaseAll(dal::InputSource::Gamepad);
+    released.setHeld(tox2::InputSource::Gamepad, kCross, t4);
+    released.setButtons(tox2::InputSource::Keyboard, kStart, true, t4);
+    released.releaseAll(tox2::InputSource::Gamepad);
     CHECK(released.held() == kStart && released.reported(t4 + milliseconds(5)) == kStart);
 
     // Analog snapshot, connection flag and vibration start neutral and round-trip exactly.
     State values;
-    CHECK(values.analog() == dal::PadAnalog{} && !values.gamepadConnected());
+    CHECK(values.analog() == tox2::PadAnalog{} && !values.gamepadConnected());
     const std::pair<std::uint8_t, std::uint8_t> no_vibration{0, 0};
     CHECK(values.vibration() == no_vibration);
-    dal::PadAnalog analog;
+    tox2::PadAnalog analog;
     analog.left_x = 1;
     analog.left_y = 2;
     analog.right_x = 3;
@@ -3638,7 +3639,7 @@ void testGamepadSourceState() {
     values.setAnalog(analog);
     CHECK(values.analog() == analog);
     values.setAnalog({});
-    CHECK(values.analog() == dal::PadAnalog{});
+    CHECK(values.analog() == tox2::PadAnalog{});
     values.setGamepadConnected(true);
     CHECK(values.gamepadConnected());
     values.setGamepadConnected(false);
@@ -3649,50 +3650,50 @@ void testGamepadSourceState() {
 }
 
 void testGamepadPadProvider() {
-    using State = dal::KeyboardPadState;
+    using State = tox2::KeyboardPadState;
     using std::chrono::milliseconds;
-    using dal::PadButton;
-    constexpr dal::PadButtons kL2 = dal::padButtonBit(PadButton::L2);
-    const std::size_t l2_word = dal::padPressureWord(PadButton::L2);
-    const std::size_t r2_word = dal::padPressureWord(PadButton::R2);
+    using tox2::PadButton;
+    constexpr tox2::PadButtons kL2 = tox2::padButtonBit(PadButton::L2);
+    const std::size_t l2_word = tox2::padPressureWord(PadButton::L2);
+    const std::size_t r2_word = tox2::padPressureWord(PadButton::R2);
 
     auto state = std::make_shared<State>();
     State::Clock::time_point now = State::Clock::time_point{} + std::chrono::seconds(50);
-    std::unique_ptr<dal::PadProvider> provider = dal::makeKeyboardPadProvider(state, [&] { return now; });
-    CHECK(samePadState(provider->poll(0), dal::neutralPadState()));
+    std::unique_ptr<tox2::PadProvider> provider = tox2::makeKeyboardPadProvider(state, [&] { return now; });
+    CHECK(samePadState(provider->poll(0), tox2::neutralPadState()));
 
     // A trigger alone reports its analog value; sticks come from the snapshot.
-    dal::PadAnalog analog;
+    tox2::PadAnalog analog;
     analog.l2 = 0x55;
     analog.right_x = 0x10;
     analog.left_y = 0xF0;
-    state->setHeld(dal::InputSource::Gamepad, kL2, now);
+    state->setHeld(tox2::InputSource::Gamepad, kL2, now);
     state->setAnalog(analog);
-    dal::PadPortState polled = provider->poll(0);
-    CHECK(polled.button[dal::kPadButtonDigital2] == 0x01);
+    tox2::PadPortState polled = provider->poll(0);
+    CHECK(polled.button[tox2::kPadButtonDigital2] == 0x01);
     CHECK(polled.button[l2_word] == 0x55 && polled.button[r2_word] == 0);
     CHECK(polled.button[4] == 0x10 && polled.button[5] == 0x80 && polled.button[6] == 0x80 && polled.button[7] == 0xF0);
 
     // The keyboard or the script holding L2 as well makes it fully pressed, even with a half trigger.
-    state->setButtons(dal::InputSource::Keyboard, kL2, true, now);
+    state->setButtons(tox2::InputSource::Keyboard, kL2, true, now);
     CHECK(provider->poll(0).button[l2_word] == 0xFF);
-    state->setButtons(dal::InputSource::Keyboard, kL2, false, now);
+    state->setButtons(tox2::InputSource::Keyboard, kL2, false, now);
     CHECK(provider->poll(0).button[l2_word] == 0x55);
-    state->setButtons(dal::InputSource::Script, kL2, true, now);
+    state->setButtons(tox2::InputSource::Script, kL2, true, now);
     CHECK(provider->poll(0).button[l2_word] == 0xFF);
-    state->setButtons(dal::InputSource::Script, kL2, false, now);
+    state->setButtons(tox2::InputSource::Script, kL2, false, now);
 
     // A trigger released within the minimum visible time keeps the bit, now fully pressed.
     now += std::chrono::seconds(1);
-    state->setHeld(dal::InputSource::Gamepad, 0, now);
-    state->setHeld(dal::InputSource::Gamepad, kL2, now);
-    state->setHeld(dal::InputSource::Gamepad, 0, now + milliseconds(10));
+    state->setHeld(tox2::InputSource::Gamepad, 0, now);
+    state->setHeld(tox2::InputSource::Gamepad, kL2, now);
+    state->setHeld(tox2::InputSource::Gamepad, 0, now + milliseconds(10));
     state->setAnalog({});
     now += milliseconds(20);
     polled = provider->poll(0);
-    CHECK(polled.button[dal::kPadButtonDigital2] == 0x01 && polled.button[l2_word] == 0xFF);
+    CHECK(polled.button[tox2::kPadButtonDigital2] == 0x01 && polled.button[l2_word] == 0xFF);
     now += milliseconds(100);
-    CHECK(samePadState(provider->poll(0), dal::neutralPadState()));
+    CHECK(samePadState(provider->poll(0), tox2::neutralPadState()));
 
     // Vibration reaches the shared state for port 0 only.
     const std::pair<std::uint8_t, std::uint8_t> motors{3, 4};
@@ -3702,11 +3703,11 @@ void testGamepadPadProvider() {
 
     // always_connected = false: port 0 follows the gamepad connection and is a plain empty port otherwise.
     auto pad_only = std::make_shared<State>();
-    std::unique_ptr<dal::PadProvider> gamepad_provider =
-            dal::makeKeyboardPadProvider(pad_only, [&] { return now; }, {.always_connected = false});
+    std::unique_ptr<tox2::PadProvider> gamepad_provider =
+            tox2::makeKeyboardPadProvider(pad_only, [&] { return now; }, {.always_connected = false});
     CHECK(!gamepad_provider->poll(0).connected);
     pad_only->setGamepadConnected(true);
-    CHECK(samePadState(gamepad_provider->poll(0), dal::neutralPadState()));
+    CHECK(samePadState(gamepad_provider->poll(0), tox2::neutralPadState()));
     CHECK(!gamepad_provider->poll(1).connected);
     pad_only->setGamepadConnected(false);
     CHECK(!gamepad_provider->poll(0).connected);
@@ -3714,16 +3715,16 @@ void testGamepadPadProvider() {
 }
 
 void testGamepadCellPad() {
-    using State = dal::KeyboardPadState;
-    using dal::PadButton;
-    constexpr dal::PadButtons kCross = dal::padButtonBit(PadButton::Cross);
-    constexpr dal::PadButtons kL2 = dal::padButtonBit(PadButton::L2);
+    using State = tox2::KeyboardPadState;
+    using tox2::PadButton;
+    constexpr tox2::PadButtons kCross = tox2::padButtonBit(PadButton::Cross);
+    constexpr tox2::PadButtons kL2 = tox2::padButtonBit(PadButton::L2);
 
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetCellPad();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetCellPad();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -3731,7 +3732,7 @@ void testGamepadCellPad() {
     const std::uint32_t info = scratch, data = scratch + 0x200, act = scratch + 0x400;
 
     enum Import : std::uint32_t { Init, End, SetPortSetting, GetData, GetInfo2, SetActDirect, ImportCount };
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x1cf98800, "sys_io", "cellPadInit"},
             {0x00800010, 0x4d9b75d5, "sys_io", "cellPadEnd"},
             {0x00800020, 0x578e3c98, "sys_io", "cellPadSetPortSetting"},
@@ -3739,26 +3740,26 @@ void testGamepadCellPad() {
             {0x00800040, 0xa703a51d, "sys_io", "cellPadGetInfo2"},
             {0x00800050, 0xf65544ee, "sys_io", "cellPadSetActDirect"},
     };
-    dal::installImports(imports, ImportCount);
-    auto ctx = std::make_unique<DalPpuContext>();
+    tox2::installImports(imports, ImportCount);
+    auto ctx = std::make_unique<Tox2PpuContext>();
     auto call = [&](Import which, std::uint64_t a = 0, std::uint64_t b = 0) {
         ctx->gpr[3] = a;
         ctx->gpr[4] = b;
-        dalHleCall(ctx.get(), base, which);
+        tox2HleCall(ctx.get(), base, which);
         return static_cast<std::uint32_t>(ctx->gpr[3]);
     };
     constexpr std::uint32_t kNoDevice = 0x80121107;
-    const auto len = [&] { return static_cast<std::int32_t>(dalRead32(base, data)); };
-    const auto word = [&](std::uint32_t i) { return dalRead16(base, data + 4 + 2 * i); };
+    const auto len = [&] { return static_cast<std::int32_t>(tox2Read32(base, data)); };
+    const auto word = [&](std::uint32_t i) { return tox2Read16(base, data + 4 + 2 * i); };
 
     auto state = std::make_shared<State>();
     State::Clock::time_point now = State::Clock::time_point{} + std::chrono::seconds(10);
-    dal::setPadProvider(dal::makeKeyboardPadProvider(state, [&] { return now; }, {.always_connected = false}));
+    tox2::setPadProvider(tox2::makeKeyboardPadProvider(state, [&] { return now; }, {.always_connected = false}));
     CHECK(call(Init, 4) == 0);
     CHECK(call(SetPortSetting, 0, 2) == 0);
 
     // No gamepad yet: nothing connected, and the game is told nothing.
-    CHECK(call(GetInfo2, info) == 0 && dalRead32(base, info + 4) == 0 && dalRead32(base, info + 12) == 0);
+    CHECK(call(GetInfo2, info) == 0 && tox2Read32(base, info + 4) == 0 && tox2Read32(base, info + 12) == 0);
     CHECK(call(GetData, 0, data) == kNoDevice);
     std::memset(base + act, 0, 8);
     base[act] = 1;
@@ -3767,28 +3768,28 @@ void testGamepadCellPad() {
 
     // Plugging in shows the assign-changed flag once; the first report then carries everything.
     state->setGamepadConnected(true);
-    CHECK(call(GetInfo2, info) == 0 && dalRead32(base, info + 4) == 1 && dalRead32(base, info + 12) == 3);
-    CHECK(call(GetInfo2, info) == 0 && dalRead32(base, info + 12) == 1);
+    CHECK(call(GetInfo2, info) == 0 && tox2Read32(base, info + 4) == 1 && tox2Read32(base, info + 12) == 3);
+    CHECK(call(GetInfo2, info) == 0 && tox2Read32(base, info + 12) == 1);
     CHECK(call(GetData, 0, data) == 0 && len() == 20 && word(2) == 0 && word(3) == 0);
     CHECK(word(4) == 0x80 && word(7) == 0x80);
 
     // An idle gamepad source (empty mask, default analog) reports no change, however often it is set.
-    state->setHeld(dal::InputSource::Gamepad, 0, now);
+    state->setHeld(tox2::InputSource::Gamepad, 0, now);
     state->setAnalog({});
     CHECK(call(GetData, 0, data) == 0 && len() == 0);
     now += std::chrono::seconds(1);
-    state->setHeld(dal::InputSource::Gamepad, 0, now);
+    state->setHeld(tox2::InputSource::Gamepad, 0, now);
     CHECK(call(GetData, 0, data) == 0 && len() == 0);
 
     // A trigger pull and a stick move are reported with their analog values.
-    dal::PadAnalog analog;
+    tox2::PadAnalog analog;
     analog.l2 = 0x77;
     analog.left_x = 0xC0;
-    state->setHeld(dal::InputSource::Gamepad, kL2 | kCross, now);
+    state->setHeld(tox2::InputSource::Gamepad, kL2 | kCross, now);
     state->setAnalog(analog);
     CHECK(call(GetData, 0, data) == 0 && len() == 20);
     CHECK(word(3) == 0x41 && word(6) == 0xC0 && word(18) == 0x77 && word(14) == 0xFF);
-    state->setHeld(dal::InputSource::Gamepad, 0, now);
+    state->setHeld(tox2::InputSource::Gamepad, 0, now);
     state->setAnalog({});
     now += std::chrono::seconds(1);
     CHECK(call(GetData, 0, data) == 0 && len() == 20 && word(3) == 0 && word(6) == 0x80);
@@ -3800,25 +3801,25 @@ void testGamepadCellPad() {
 
     // Unplugging shows the flag once as well.
     state->setGamepadConnected(false);
-    CHECK(call(GetInfo2, info) == 0 && dalRead32(base, info + 4) == 0 && dalRead32(base, info + 12) == 2);
-    CHECK(call(GetInfo2, info) == 0 && dalRead32(base, info + 12) == 0);
+    CHECK(call(GetInfo2, info) == 0 && tox2Read32(base, info + 4) == 0 && tox2Read32(base, info + 12) == 2);
+    CHECK(call(GetInfo2, info) == 0 && tox2Read32(base, info + 12) == 0);
     CHECK(call(GetData, 0, data) == kNoDevice);
 
-    dal::resetCellPad();
+    tox2::resetCellPad();
     p.main.free(scratch);
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 struct ScriptEventSpec {
     int at_ms;
-    dal::PadButtons buttons;
+    tox2::PadButtons buttons;
     bool down;
 };
 
 bool scriptEventsAre(const std::string& text, std::initializer_list<ScriptEventSpec> expected) {
-    const auto parsed = dal::parsePadScript(text);
+    const auto parsed = tox2::parsePadScript(text);
     if (!parsed) {
         std::fprintf(stderr, "parse failed: %s\n", parsed.error().c_str());
         return false;
@@ -3826,24 +3827,24 @@ bool scriptEventsAre(const std::string& text, std::initializer_list<ScriptEventS
     if (parsed->size() != expected.size()) return false;
     std::size_t i = 0;
     for (const ScriptEventSpec& want : expected) {
-        const dal::PadScriptEvent& got = (*parsed)[i++];
+        const tox2::PadScriptEvent& got = (*parsed)[i++];
         if (got.at.count() != want.at_ms || got.buttons != want.buttons || got.down != want.down) return false;
     }
     return true;
 }
 
 std::string scriptError(const std::string& text) {
-    const auto parsed = dal::parsePadScript(text);
+    const auto parsed = tox2::parsePadScript(text);
     return parsed ? std::string{} : parsed.error();
 }
 
 void testPadScriptParse() {
-    using dal::PadButton;
-    constexpr dal::PadButtons kStart = dal::padButtonBit(PadButton::Start);
-    constexpr dal::PadButtons kCross = dal::padButtonBit(PadButton::Cross);
-    constexpr dal::PadButtons kR1 = dal::padButtonBit(PadButton::R1);
-    constexpr int kHold = static_cast<int>(dal::kPadScriptTapHold.count());
-    CHECK(dal::kPadScriptTapHold > dal::KeyboardPadState::kMinPressVisible);
+    using tox2::PadButton;
+    constexpr tox2::PadButtons kStart = tox2::padButtonBit(PadButton::Start);
+    constexpr tox2::PadButtons kCross = tox2::padButtonBit(PadButton::Cross);
+    constexpr tox2::PadButtons kR1 = tox2::padButtonBit(PadButton::R1);
+    constexpr int kHold = static_cast<int>(tox2::kPadScriptTapHold.count());
+    CHECK(tox2::kPadScriptTapHold > tox2::KeyboardPadState::kMinPressVisible);
 
     // Comments, blank lines, tabs, CRLF and a missing final newline.
     CHECK(scriptEventsAre("", {}));
@@ -3920,78 +3921,78 @@ void testPadScriptErrors() {
     CHECK(scriptError("1 tap start every 2 until 5 extra").starts_with("line 1: unexpected \"extra\""));
     CHECK(scriptError("1 tap start every 0.2 until 999999").starts_with("line 1: more than"));
 
-    const auto missing = dal::loadPadScript(std::filesystem::path("no_such_dir") / "no_such_script.txt");
+    const auto missing = tox2::loadPadScript(std::filesystem::path("no_such_dir") / "no_such_script.txt");
     CHECK(!missing && missing.error().starts_with("cannot open"));
 
     const std::filesystem::path file =
             std::filesystem::temp_directory_path() /
-            std::format("dal_pad_script_test_{}.txt",
+            std::format("tox2_pad_script_test_{}.txt",
                         std::chrono::steady_clock::now().time_since_epoch().count());  // unique under ctest -j
     {
         std::ofstream out(file, std::ios::binary);
         out << "# test\n2 tap start\n";
     }
-    const auto loaded = dal::loadPadScript(file);
+    const auto loaded = tox2::loadPadScript(file);
     CHECK(loaded && loaded->size() == 2 && (*loaded)[0].at.count() == 2000);
     {
         std::ofstream out(file, std::ios::binary);
         out << "1 press start\n2 press bogus\n";
     }
-    const auto bad = dal::loadPadScript(file);
+    const auto bad = tox2::loadPadScript(file);
     CHECK(!bad && bad.error() == "line 2: unknown button \"bogus\"");
     std::error_code ignored;
     std::filesystem::remove(file, ignored);
 }
 
 void testPadScriptPlay() {
-    using dal::PadButton;
+    using tox2::PadButton;
     using std::chrono::milliseconds;
-    constexpr dal::PadButtons kStart = dal::padButtonBit(PadButton::Start);
-    constexpr dal::PadButtons kCross = dal::padButtonBit(PadButton::Cross);
-    constexpr dal::PadButtons kR1 = dal::padButtonBit(PadButton::R1);
+    constexpr tox2::PadButtons kStart = tox2::padButtonBit(PadButton::Start);
+    constexpr tox2::PadButtons kCross = tox2::padButtonBit(PadButton::Cross);
+    constexpr tox2::PadButtons kR1 = tox2::padButtonBit(PadButton::R1);
 
-    const auto parsed = dal::parsePadScript("1 press start\n2 press cross+r1\n3 release start\n4 release cross+r1\n");
+    const auto parsed = tox2::parsePadScript("1 press start\n2 press cross+r1\n3 release start\n4 release cross+r1\n");
     CHECK(parsed && parsed->size() == 4);
     if (!parsed || parsed->size() != 4) return;
 
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::setGuestThreadIdProvider(nullptr);
-    dal::KeyboardPadState state;
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::setGuestThreadIdProvider(nullptr);
+    tox2::KeyboardPadState state;
     std::vector<std::int64_t> waits;
-    std::vector<dal::PadButtons> held_before_wait;
-    dal::playPadScript(*parsed, state, [&](milliseconds at) {
+    std::vector<tox2::PadButtons> held_before_wait;
+    tox2::playPadScript(*parsed, state, [&](milliseconds at) {
         waits.push_back(at.count());
         held_before_wait.push_back(state.held());
     });
-    dal::setLogSink({});
+    tox2::setLogSink({});
 
     // wait_until runs before each event, so it sees the state left by the previous one.
     CHECK((waits == std::vector<std::int64_t>{1000, 2000, 3000, 4000}));
-    CHECK((held_before_wait == std::vector<dal::PadButtons>{0, kStart, kStart | kCross | kR1, kCross | kR1}));
+    CHECK((held_before_wait == std::vector<tox2::PadButtons>{0, kStart, kStart | kCross | kR1, kCross | kR1}));
     CHECK(state.held() == 0);
 
     CHECK(lines.size() == 4);
     if (lines.size() == 4) {
-        CHECK(lines[0] == "[host] dal: pad: script 1.000 s: press start");
-        CHECK(lines[1] == "[host] dal: pad: script 2.000 s: press r1+cross");
-        CHECK(lines[2] == "[host] dal: pad: script 3.000 s: release start");
-        CHECK(lines[3] == "[host] dal: pad: script 4.000 s: release r1+cross");
+        CHECK(lines[0] == "[host] tox2: pad: script 1.000 s: press start");
+        CHECK(lines[1] == "[host] tox2: pad: script 2.000 s: press r1+cross");
+        CHECK(lines[2] == "[host] tox2: pad: script 3.000 s: release start");
+        CHECK(lines[3] == "[host] tox2: pad: script 4.000 s: release r1+cross");
     }
 
     // Script buttons are held in their own source: a keyboard focus loss does not drop them.
-    dal::KeyboardPadState mixed;
-    const auto now = dal::KeyboardPadState::Clock::now();
-    mixed.setButtons(dal::InputSource::Script, kStart, true, now);
+    tox2::KeyboardPadState mixed;
+    const auto now = tox2::KeyboardPadState::Clock::now();
+    mixed.setButtons(tox2::InputSource::Script, kStart, true, now);
     mixed.keyEvent(0x2C, true, false, now);
-    mixed.releaseAll(dal::InputSource::Keyboard);
+    mixed.releaseAll(tox2::InputSource::Keyboard);
     CHECK(mixed.held() == kStart);
 
     // The detached player thread applies the events on its own clock and keeps the state alive.
-    auto shared = std::make_shared<dal::KeyboardPadState>();
-    dal::startPadScript({}, shared);  // nothing to play: no thread, no change
+    auto shared = std::make_shared<tox2::KeyboardPadState>();
+    tox2::startPadScript({}, shared);  // nothing to play: no thread, no change
     CHECK(shared->held() == 0);
-    dal::startPadScript({{milliseconds(0), kCross, true}, {milliseconds(20), kStart, true}}, shared);
+    tox2::startPadScript({{milliseconds(0), kCross, true}, {milliseconds(20), kStart, true}}, shared);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (shared->held() != (kCross | kStart) && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(milliseconds(1));
@@ -4001,20 +4002,20 @@ void testPadScriptPlay() {
 
 void testCellMsgDialog() {
     std::vector<std::string> log_lines;
-    dal::setLogSink([&](std::string_view line) { log_lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetHostFunctions();
-    dal::resetCellSysutil();
-    dal::resetCellMsgDialog();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([&](std::string_view line) { log_lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetHostFunctions();
+    tox2::resetCellSysutil();
+    tox2::resetCellMsgDialog();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
     CHECK(scratch != 0);
 
     enum Import : std::uint32_t { Open2, Close, BarReset, BarInc, Register, Check, ImportCount };
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x7603d3db, "cellSysutil", "cellMsgDialogOpen2"},
             {0x00800010, 0x20543730, "cellSysutil", "cellMsgDialogClose"},
             {0x00800020, 0x7bc2c8a8, "cellSysutil", "cellMsgDialogProgressBarReset"},
@@ -4022,8 +4023,8 @@ void testCellMsgDialog() {
             {0x00800040, 0x9d98afa0, "cellSysutil", "cellSysutilRegisterCallback"},
             {0x00800050, 0x189a74da, "cellSysutil", "cellSysutilCheckCallback"},
     };
-    dal::installImports(imports, ImportCount);
-    auto ctx = std::make_unique<DalPpuContext>();
+    tox2::installImports(imports, ImportCount);
+    auto ctx = std::make_unique<Tox2PpuContext>();
     ctx->gpr[1] = 0x500000;
     CHECK(p.memory.commit(0x4f0000, 0x10000));
     auto call = [&](Import which, std::uint64_t a = 0, std::uint64_t b = 0, std::uint64_t c = 0, std::uint64_t d = 0) {
@@ -4031,7 +4032,7 @@ void testCellMsgDialog() {
         ctx->gpr[4] = b;
         ctx->gpr[5] = c;
         ctx->gpr[6] = d;
-        dalHleCall(ctx.get(), base, which);
+        tox2HleCall(ctx.get(), base, which);
         return static_cast<std::uint32_t>(ctx->gpr[3]);
     };
     constexpr std::uint32_t kErrorParam = 0x8002b301, kErrorNotOpened = 0x8002b302, kErrorBusy = 0x8002b105;
@@ -4045,11 +4046,11 @@ void testCellMsgDialog() {
         return false;
     };
 
-    const std::uint32_t dialog_cb = dal::registerHostFunction("msgDialogCallback", msgDialogCallback);
-    const std::uint32_t sysutil_cb = dal::registerHostFunction("msgDialogSysutilCallback", msgDialogSysutilCallback);
+    const std::uint32_t dialog_cb = tox2::registerHostFunction("msgDialogCallback", msgDialogCallback);
+    const std::uint32_t sysutil_cb = tox2::registerHostFunction("msgDialogSysutilCallback", msgDialogSysutilCallback);
     g_dialog_results.clear();
     g_dialog_sysutil_events.clear();
-    dal::setDialogAnswerDelay(std::chrono::milliseconds(0));
+    tox2::setDialogAnswerDelay(std::chrono::milliseconds(0));
     CHECK(call(Register, 0, sysutil_cb, 0) == 0);
 
     // Nothing is open.
@@ -4078,10 +4079,10 @@ void testCellMsgDialog() {
     CHECK(logged("open type 0x20") && logged("\xe3\x82\xbb\xe3\x83\xbc\xe3\x83\x96"));
     CHECK(call(Open2, kOk, text, 0, 0) == kErrorBusy);
     CHECK(call(Check) == 0);
-    CHECK(g_dialog_sysutil_events.size() == 1 && g_dialog_sysutil_events[0] == dal::kSysutilDrawingBegin);
+    CHECK(g_dialog_sysutil_events.size() == 1 && g_dialog_sysutil_events[0] == tox2::kSysutilDrawingBegin);
     CHECK(g_dialog_results.empty());
     CHECK(call(Check) == 0);
-    CHECK(g_dialog_sysutil_events.size() == 2 && g_dialog_sysutil_events[1] == dal::kSysutilDrawingEnd);
+    CHECK(g_dialog_sysutil_events.size() == 2 && g_dialog_sysutil_events[1] == tox2::kSysutilDrawingEnd);
     CHECK(g_dialog_results.size() == 1 && g_dialog_results[0].first == 1 && g_dialog_results[0].second == 0x77);
     CHECK(ctx->gpr[1] == 0x500000);
     CHECK(call(Close) == kErrorNotOpened);
@@ -4091,12 +4092,12 @@ void testCellMsgDialog() {
     CHECK(call(Open2, kYesNo | (1u << 8), text, dialog_cb, 1) == 0);
     CHECK(call(Check) == 0 && call(Check) == 0);
     CHECK(g_dialog_results.size() == 1 && g_dialog_results[0].first == 1);
-    CHECK(!dal::setDialogAnswer("maybe"));
-    CHECK(dal::setDialogAnswer("no"));
+    CHECK(!tox2::setDialogAnswer("maybe"));
+    CHECK(tox2::setDialogAnswer("no"));
     CHECK(call(Open2, kYesNo, text, dialog_cb, 2) == 0);
     CHECK(call(Check) == 0 && call(Check) == 0);
     CHECK(g_dialog_results.size() == 2 && g_dialog_results[1].first == 2 && g_dialog_results[1].second == 2);
-    CHECK(dal::setDialogAnswer("ok"));
+    CHECK(tox2::setDialogAnswer("ok"));
 
     // A dialog without buttons waits for cellMsgDialogClose; Close(0) ends it with button NONE (-1).
     // Type 0x85 has no progress bar; 0x1000 has one.
@@ -4128,16 +4129,16 @@ void testCellMsgDialog() {
     ctx->fpr[1].f64 = 0.0;
     CHECK(call(Close) == 0);
     CHECK(call(Check) == 0 && call(Check) == 0);
-    CHECK(dal::queueSysutilEvent(dal::kSysutilDrawingEnd, 0) == -1);
+    CHECK(tox2::queueSysutilEvent(tox2::kSysutilDrawingEnd, 0) == -1);
 
-    dal::resetCellMsgDialog();
-    dal::resetCellSysutil();
+    tox2::resetCellMsgDialog();
+    tox2::resetCellSysutil();
     g_dialog_results.clear();
     g_dialog_sysutil_events.clear();
-    dal::resetHostFunctions();
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::resetHostFunctions();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 // Script and observations shared by the save data callbacks below.
@@ -4165,70 +4166,70 @@ struct SaveScript {
 };
 SaveScript g_save;
 
-DAL_PPU_FUNC(saveStatCallback) {
+TOX2_PPU_FUNC(saveStatCallback) {
     const auto result = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto get = static_cast<std::uint32_t>(ctx->gpr[4]);
     const auto set = static_cast<std::uint32_t>(ctx->gpr[5]);
     g_save.stat_calls++;
-    g_save.stat_hdd_free = static_cast<std::int32_t>(dalRead32(base, get));
-    g_save.stat_is_new = dalRead32(base, get + 4);
+    g_save.stat_hdd_free = static_cast<std::int32_t>(tox2Read32(base, get));
+    g_save.stat_is_new = tox2Read32(base, get + 4);
     g_save.stat_dir = reinterpret_cast<const char*>(base + get + 32);
     g_save.stat_title = reinterpret_cast<const char*>(base + get + 64);
-    g_save.stat_size_kb = static_cast<std::int32_t>(dalRead32(base, get + 1620));
-    g_save.stat_file_num = dalRead32(base, get + 1628);
-    g_save.stat_file_list_num = dalRead32(base, get + 1632);
-    dalWrite32(base, result, static_cast<std::uint32_t>(g_save.stat_result));
-    dalWrite32(base, set, g_save.set_param);
-    dalWrite32(base, set + 4, g_save.recreate);
+    g_save.stat_size_kb = static_cast<std::int32_t>(tox2Read32(base, get + 1620));
+    g_save.stat_file_num = tox2Read32(base, get + 1628);
+    g_save.stat_file_list_num = tox2Read32(base, get + 1632);
+    tox2Write32(base, result, static_cast<std::uint32_t>(g_save.stat_result));
+    tox2Write32(base, set, g_save.set_param);
+    tox2Write32(base, set + 4, g_save.recreate);
 }
 
-DAL_PPU_FUNC(saveFileCallback) {
+TOX2_PPU_FUNC(saveFileCallback) {
     const auto result = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto get = static_cast<std::uint32_t>(ctx->gpr[4]);
     const auto set = static_cast<std::uint32_t>(ctx->gpr[5]);
-    g_save.file_exc.push_back(dalRead32(base, get));
+    g_save.file_exc.push_back(tox2Read32(base, get));
     if (g_save.next_op >= g_save.file_ops.size()) {
-        dalWrite32(base, result, static_cast<std::uint32_t>(g_save.file_final));
+        tox2Write32(base, result, static_cast<std::uint32_t>(g_save.file_final));
         return;
     }
     const SaveFileOp& op = g_save.file_ops[g_save.next_op++];
-    dalWrite32(base, set, op.operation);
-    dalWrite32(base, set + 8, op.type);
+    tox2Write32(base, set, op.operation);
+    tox2Write32(base, set + 8, op.type);
     // The file name goes into a spare area of the callback scratch block (after the structures).
     const std::uint32_t name_addr = result + 0x900;
     std::memcpy(base + name_addr, op.name.c_str(), op.name.size() + 1);
-    dalWrite32(base, set + 28, op.name.empty() ? 0 : name_addr);
-    dalWrite32(base, set + 32, op.offset);
-    dalWrite32(base, set + 36, op.size);
-    dalWrite32(base, set + 40, op.buf_size);
-    dalWrite32(base, set + 44, op.buf);
-    dalWrite32(base, result, 0);
+    tox2Write32(base, set + 28, op.name.empty() ? 0 : name_addr);
+    tox2Write32(base, set + 32, op.offset);
+    tox2Write32(base, set + 36, op.size);
+    tox2Write32(base, set + 40, op.buf_size);
+    tox2Write32(base, set + 44, op.buf);
+    tox2Write32(base, result, 0);
 }
 
-DAL_PPU_FUNC(saveListCallback) {
+TOX2_PPU_FUNC(saveListCallback) {
     const auto result = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto get = static_cast<std::uint32_t>(ctx->gpr[4]);
     const auto set = static_cast<std::uint32_t>(ctx->gpr[5]);
     g_save.list_calls++;
-    g_save.list_dir_num = dalRead32(base, get);
-    g_save.list_dir_list_num = dalRead32(base, get + 4);
-    dalWrite32(base, result, static_cast<std::uint32_t>(g_save.list_result));
-    dalWrite32(base, set, g_save.focus);
-    dalWrite32(base, set + 4, g_save.focus_dir);
-    dalWrite32(base, set + 8, g_save.fixed_num);
-    dalWrite32(base, set + 12, g_save.fixed_list);
-    dalWrite32(base, set + 16, g_save.new_data);
+    g_save.list_dir_num = tox2Read32(base, get);
+    g_save.list_dir_list_num = tox2Read32(base, get + 4);
+    tox2Write32(base, result, static_cast<std::uint32_t>(g_save.list_result));
+    tox2Write32(base, set, g_save.focus);
+    tox2Write32(base, set + 4, g_save.focus_dir);
+    tox2Write32(base, set + 8, g_save.fixed_num);
+    tox2Write32(base, set + 12, g_save.fixed_list);
+    tox2Write32(base, set + 16, g_save.new_data);
 }
 
 void testCellSaveData() {
     namespace stdfs = std::filesystem;
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetHostFunctions();
-    dal::resetCellSaveData();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetHostFunctions();
+    tox2::resetCellSaveData();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -4239,29 +4240,29 @@ void testCellSaveData() {
                         fixed_list = scratch + 0x7400, focus_dir = scratch + 0x7500;
 
     const stdfs::path root =
-            stdfs::temp_directory_path() / ("dal_savedata_test_" + std::to_string(GetCurrentProcessId()));
+            stdfs::temp_directory_path() / ("tox2_savedata_test_" + std::to_string(GetCurrentProcessId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
     stdfs::create_directories(root / "game", ec);
-    dal::configureVfs(root / "game", root / "hdd");
+    tox2::configureVfs(root / "game", root / "hdd");
     const stdfs::path saves = root / "hdd" / "dev_hdd0" / "home" / "00000001" / "savedata";
 
     enum Import : std::uint32_t { AutoLoad, AutoSave, ListLoad, ListSave, Delete, ImportCount };
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0xfbd5c856, "cellSysutil", "cellSaveDataAutoLoad2"},
             {0x00800010, 0x8b7ed64b, "cellSysutil", "cellSaveDataAutoSave2"},
             {0x00800020, 0x1dfbfdd6, "cellSysutil", "cellSaveDataListLoad2"},
             {0x00800030, 0x2de0d663, "cellSysutil", "cellSaveDataListSave2"},
             {0x00800040, 0xedadd797, "cellSysutil", "cellSaveDataDelete2"},
     };
-    dal::installImports(imports, ImportCount);
-    auto ctx = std::make_unique<DalPpuContext>();
+    tox2::installImports(imports, ImportCount);
+    auto ctx = std::make_unique<Tox2PpuContext>();
     ctx->gpr[1] = 0x500000;
     CHECK(p.memory.commit(0x4f0000, 0x10000));
     auto call = [&](Import which, std::initializer_list<std::uint64_t> args) {
         int reg = 3;
         for (const std::uint64_t arg : args) ctx->gpr[reg++] = arg;
-        dalHleCall(ctx.get(), base, which);
+        tox2HleCall(ctx.get(), base, which);
         return static_cast<std::uint32_t>(ctx->gpr[3]);
     };
     auto put = [&](std::uint32_t addr, std::string_view text) {
@@ -4279,16 +4280,16 @@ void testCellSaveData() {
         return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     };
 
-    const std::uint32_t stat_cb = dal::registerHostFunction("saveStatCallback", saveStatCallback);
-    const std::uint32_t file_cb = dal::registerHostFunction("saveFileCallback", saveFileCallback);
-    const std::uint32_t list_cb = dal::registerHostFunction("saveListCallback", saveListCallback);
+    const std::uint32_t stat_cb = tox2::registerHostFunction("saveStatCallback", saveStatCallback);
+    const std::uint32_t file_cb = tox2::registerHostFunction("saveFileCallback", saveFileCallback);
+    const std::uint32_t list_cb = tox2::registerHostFunction("saveListCallback", saveListCallback);
     constexpr std::uint32_t kErrCbResult = 0x8002b401, kErrParam = 0x8002b404, kErrFailure = 0x8002b407;
 
     // setBuf: dirListMax 4, fileListMax 8, bufSize 0x2000, buf.
-    dalWrite32(base, set_buf, 4);
-    dalWrite32(base, set_buf + 4, 8);
-    dalWrite32(base, set_buf + 32, 0x2000);
-    dalWrite32(base, set_buf + 36, buf);
+    tox2Write32(base, set_buf, 4);
+    tox2Write32(base, set_buf + 4, 8);
+    tox2Write32(base, set_buf + 32, 0x2000);
+    tox2Write32(base, set_buf + 36, buf);
     put(dir_addr, "SAVE0001");
     auto autoLoad = [&](std::uint32_t err_dialog = 0) {
         return call(AutoLoad, {0, dir_addr, err_dialog, set_buf, stat_cb, file_cb, 0, 0x1234});
@@ -4350,7 +4351,7 @@ void testCellSaveData() {
           text(saves / "SAVE0001" / "ICON0.PNG") == "PNG!");
     CHECK(!stdfs::exists(saves / ".working_SAVE0001") && !stdfs::exists(saves / ".backup_SAVE0001"));
     {
-        const auto sfo = dal::readParamSfoFile(saves / "SAVE0001" / "PARAM.SFO");
+        const auto sfo = tox2::readParamSfoFile(saves / "SAVE0001" / "PARAM.SFO");
         CHECK(sfo.has_value());
         if (sfo) {
             CHECK(sfo->strings.at("CATEGORY") == "SD" && sfo->strings.at("TITLE") == "My title" &&
@@ -4372,8 +4373,8 @@ void testCellSaveData() {
     CHECK(std::memcmp(base + data + 0x400, "hello", 6) == 0);
     CHECK(g_save.file_exc.size() == 2 && g_save.file_exc[1] == 5);
     // Sorted by name: B.DAT (normal), DATA.BIN (secure), ICON0.PNG (icon).
-    CHECK(dalRead32(base, buf + 0) == 1 && dalRead32(base, buf + 56) == 0 && dalRead32(base, buf + 112) == 2);
-    CHECK(dalRead64(base, buf + 8) == 3 && dalRead64(base, buf + 64) == 5);
+    CHECK(tox2Read32(base, buf + 0) == 1 && tox2Read32(base, buf + 56) == 0 && tox2Read32(base, buf + 112) == 2);
+    CHECK(tox2Read64(base, buf + 8) == 3 && tox2Read64(base, buf + 64) == 5);
     CHECK(std::strcmp(reinterpret_cast<const char*>(base + buf + 40), "B.DAT") == 0);
     CHECK(std::strcmp(reinterpret_cast<const char*>(base + buf + 96), "DATA.BIN") == 0);
     CHECK(text(saves / "SAVE0001" / "DATA.BIN") == "hello");  // a load commits nothing
@@ -4405,7 +4406,7 @@ void testCellSaveData() {
     CHECK(autoSave() == 0);
     CHECK(text(saves / "SAVE0001" / "DATA.BIN") == "hEYlo" && !stdfs::exists(saves / "SAVE0001" / "B.DAT"));
     {
-        const auto sfo = dal::readParamSfoFile(saves / "SAVE0001" / "PARAM.SFO");
+        const auto sfo = tox2::readParamSfoFile(saves / "SAVE0001" / "PARAM.SFO");
         CHECK(sfo && !sfo->ints.contains("*B.DAT") && sfo->ints.at("*DATA.BIN") == 1);
     }
     g_save = SaveScript{};
@@ -4425,18 +4426,18 @@ void testCellSaveData() {
     CHECK(autoSave() == 0);
     CHECK(!stdfs::exists(saves / "SAVE0001" / "DATA.BIN") && text(saves / "SAVE0001" / "NEW.DAT") == "xyz");
     {
-        const auto sfo = dal::readParamSfoFile(saves / "SAVE0001" / "PARAM.SFO");
+        const auto sfo = tox2::readParamSfoFile(saves / "SAVE0001" / "PARAM.SFO");
         CHECK(sfo && !sfo->ints.contains("*DATA.BIN") && sfo->ints.contains("*NEW.DAT"));
     }
 
     // List operations: ListSave2 creates the game's new-data slot; ListLoad2 picks by focus.
     put(prefix, "SAVE");
-    dalWrite32(base, set_list, 0);
-    dalWrite32(base, set_list + 4, 1);
-    dalWrite32(base, set_list + 8, prefix);
+    tox2Write32(base, set_list, 0);
+    tox2Write32(base, set_list + 4, 1);
+    tox2Write32(base, set_list + 8, prefix);
     put(new_dir, "SAVE0002");
-    dalWrite32(base, new_data, 0);
-    dalWrite32(base, new_data + 4, new_dir);
+    tox2Write32(base, new_data, 0);
+    tox2Write32(base, new_data + 4, new_dir);
     g_save = SaveScript{};
     g_save.focus = 5;  // NEWDATA
     g_save.new_data = new_data;
@@ -4484,11 +4485,11 @@ void testCellSaveData() {
     CHECK(ctx->gpr[1] == 0x500000);
 
     stdfs::remove_all(root, ec);
-    dal::resetCellSaveData();
-    dal::resetHostFunctions();
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::resetCellSaveData();
+    tox2::resetHostFunctions();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 // Guest allocation callbacks of the cellPngDec test: a bump allocator over a guest block.
@@ -4500,7 +4501,7 @@ struct PngTestHeap {
 };
 PngTestHeap g_png_heap;
 
-DAL_PPU_FUNC(pngTestMalloc) {
+TOX2_PPU_FUNC(pngTestMalloc) {
     (void)base;
     const auto size = static_cast<std::uint32_t>(ctx->gpr[3]);
     g_png_heap.malloc_calls++;
@@ -4513,7 +4514,7 @@ DAL_PPU_FUNC(pngTestMalloc) {
     ctx->gpr[3] = addr;
 }
 
-DAL_PPU_FUNC(pngTestFree) {
+TOX2_PPU_FUNC(pngTestFree) {
     (void)base;
     g_png_heap.freed.push_back(static_cast<std::uint32_t>(ctx->gpr[3]));
     ctx->gpr[3] = 0;
@@ -4531,17 +4532,17 @@ struct PngTestFeed {
 };
 PngTestFeed g_png_feed;
 
-DAL_PPU_FUNC(pngTestStream) {
+TOX2_PPU_FUNC(pngTestStream) {
     const auto info = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto param = static_cast<std::uint32_t>(ctx->gpr[4]);
     g_png_feed.arg_seen = static_cast<std::uint32_t>(ctx->gpr[5]);
-    g_png_feed.last_decoded = dalRead32(base, info);
+    g_png_feed.last_decoded = tox2Read32(base, info);
     g_png_feed.calls++;
     const std::size_t count = std::min(g_png_feed.piece, g_png_feed.rest.size() - g_png_feed.pos);
     std::memcpy(base + g_png_feed.staging, g_png_feed.rest.data() + g_png_feed.pos, count);
     g_png_feed.pos += count;
-    dalWrite32(base, param, g_png_feed.staging);
-    dalWrite32(base, param + 4, static_cast<std::uint32_t>(count));
+    tox2Write32(base, param, g_png_feed.staging);
+    tox2Write32(base, param + 4, static_cast<std::uint32_t>(count));
     ctx->gpr[3] = 0;
 }
 
@@ -4662,12 +4663,12 @@ void insertChunk(std::vector<std::uint8_t>& png, std::size_t at, const char* typ
 void testCellPngDec() {
     namespace stdfs = std::filesystem;
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetHostFunctions();
-    dal::resetCellPngDec();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetHostFunctions();
+    tox2::resetCellPngDec();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x100000, 0x10000);
@@ -4679,13 +4680,13 @@ void testCellPngDec() {
     g_png_feed.staging = staging;
 
     const stdfs::path root =
-            stdfs::temp_directory_path() / ("dal_pngdec_test_" + std::to_string(GetCurrentProcessId()));
+            stdfs::temp_directory_path() / ("tox2_pngdec_test_" + std::to_string(GetCurrentProcessId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
     stdfs::create_directories(root / "game", ec);
     stdfs::create_directories(root / "dump", ec);
-    dal::configureVfs(root / "game", std::nullopt);
-    dal::setPngDumpDirectory(root / "dump");
+    tox2::configureVfs(root / "game", std::nullopt);
+    tox2::setPngDumpDirectory(root / "dump");
 
     enum Import : std::uint32_t {
         Create,
@@ -4697,7 +4698,7 @@ void testCellPngDec() {
         Destroy,
         ImportCount
     };
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x157d30c5, "cellPngDec", "cellPngDecCreate"},
             {0x00800010, 0x0c515302, "cellPngDec", "cellPngDecExtOpen"},
             {0x00800020, 0x8b33f863, "cellPngDec", "cellPngDecExtReadHeader"},
@@ -4706,14 +4707,14 @@ void testCellPngDec() {
             {0x00800050, 0x5b3d1ff1, "cellPngDec", "cellPngDecClose"},
             {0x00800060, 0x820dae1a, "cellPngDec", "cellPngDecDestroy"},
     };
-    dal::installImports(imports, ImportCount);
-    auto ctx = std::make_unique<DalPpuContext>();
+    tox2::installImports(imports, ImportCount);
+    auto ctx = std::make_unique<Tox2PpuContext>();
     ctx->gpr[1] = 0x500000;
     CHECK(p.memory.commit(0x4f0000, 0x10000));
     auto call = [&](Import which, std::initializer_list<std::uint64_t> args) {
         int reg = 3;
         for (const std::uint64_t arg : args) ctx->gpr[reg++] = arg;
-        dalHleCall(ctx.get(), base, which);
+        tox2HleCall(ctx.get(), base, which);
         return static_cast<std::uint32_t>(ctx->gpr[3]);
     };
 
@@ -4728,40 +4729,40 @@ void testCellPngDec() {
                         in_param = params + 0xe0, out_param = params + 0x110, ext_in = params + 0x140,
                         ext_out = params + 0x150, ctrl_param = params + 0x160, out_info = params + 0x170,
                         file_name = params + 0x200;
-    const std::uint32_t malloc_opd = dal::registerHostFunction("pngTestMalloc", pngTestMalloc);
-    const std::uint32_t free_opd = dal::registerHostFunction("pngTestFree", pngTestFree);
-    const std::uint32_t stream_opd = dal::registerHostFunction("pngTestStream", pngTestStream);
+    const std::uint32_t malloc_opd = tox2::registerHostFunction("pngTestMalloc", pngTestMalloc);
+    const std::uint32_t free_opd = tox2::registerHostFunction("pngTestFree", pngTestFree);
+    const std::uint32_t stream_opd = tox2::registerHostFunction("pngTestStream", pngTestStream);
 
     // Create: the handle block comes from the guest allocator; the codec version is reported.
-    dalWrite32(base, thread_in + 12, malloc_opd);
-    dalWrite32(base, thread_in + 16, 0x1111);
-    dalWrite32(base, thread_in + 20, free_opd);
-    dalWrite32(base, thread_in + 24, 0x2222);
+    tox2Write32(base, thread_in + 12, malloc_opd);
+    tox2Write32(base, thread_in + 16, 0x1111);
+    tox2Write32(base, thread_in + 20, free_opd);
+    tox2Write32(base, thread_in + 24, 0x2222);
     CHECK(call(Create, {0, thread_in, thread_out}) == kErrArg);
     CHECK(call(Create, {handle_pp, thread_in, thread_out}) == kOk);
-    const std::uint32_t handle = dalRead32(base, handle_pp);
+    const std::uint32_t handle = tox2Read32(base, handle_pp);
     CHECK(handle >= heap && handle < heap + 0x10000);
-    CHECK(dalRead32(base, thread_out) == 0x00420000);
+    CHECK(tox2Read32(base, thread_out) == 0x00420000);
     CHECK(g_png_heap.malloc_calls == 1);
-    dalWrite32(base, thread_in + 12, 0);
+    tox2Write32(base, thread_in + 12, 0);
     CHECK(call(Create, {handle_pp, thread_in, thread_out}) == kErrArg);
-    dalWrite32(base, thread_in + 12, malloc_opd);
+    tox2Write32(base, thread_in + 12, malloc_opd);
 
     auto putSource = [&](const std::vector<std::uint8_t>& bytes) {
         std::memcpy(base + src_buf, bytes.data(), bytes.size());
-        dalWrite32(base, src, 1);  // CELL_PNGDEC_BUFFER
-        dalWrite32(base, src + 20, src_buf);
-        dalWrite32(base, src + 24, static_cast<std::uint32_t>(bytes.size()));
+        tox2Write32(base, src, 1);  // CELL_PNGDEC_BUFFER
+        tox2Write32(base, src + 20, src_buf);
+        tox2Write32(base, src + 24, static_cast<std::uint32_t>(bytes.size()));
     };
     auto setParam = [&](std::uint32_t mode, std::uint32_t space, std::uint32_t depth, std::uint32_t alpha_select = 0,
                         std::uint32_t alpha = 0) {
-        dalWrite32(base, in_param, 0);
-        dalWrite32(base, in_param + 4, mode);
-        dalWrite32(base, in_param + 8, space);
-        dalWrite32(base, in_param + 12, depth);
-        dalWrite32(base, in_param + 16, 1);
-        dalWrite32(base, in_param + 20, alpha_select);
-        dalWrite32(base, in_param + 24, alpha);
+        tox2Write32(base, in_param, 0);
+        tox2Write32(base, in_param + 4, mode);
+        tox2Write32(base, in_param + 8, space);
+        tox2Write32(base, in_param + 12, depth);
+        tox2Write32(base, in_param + 16, 1);
+        tox2Write32(base, in_param + 20, alpha_select);
+        tox2Write32(base, in_param + 24, alpha);
     };
     auto bytesAt = [&](std::uint32_t addr, std::size_t count) {
         return std::vector<std::uint8_t>(base + addr, base + addr + count);
@@ -4770,9 +4771,9 @@ void testCellPngDec() {
     // Opens `bytes` as a buffer source and reads its header; returns the stream, 0 on failure.
     auto openAndRead = [&](const std::vector<std::uint8_t>& bytes) -> std::uint32_t {
         putSource(bytes);
-        dalWrite32(base, stream_pp, 0);
+        tox2Write32(base, stream_pp, 0);
         if (call(ExtOpen, {handle, stream_pp, src, open_info, 0, 0}) != kOk) return 0;
-        const std::uint32_t stream = dalRead32(base, stream_pp);
+        const std::uint32_t stream = tox2Read32(base, stream_pp);
         if (call(ExtReadHeader, {handle, stream, info, 0}) != kOk) return 0;
         return stream;
     };
@@ -4783,7 +4784,7 @@ void testCellPngDec() {
     // DecodeData into a 0xEE-filled buffer.
     auto decode = [&](std::uint32_t stream, std::uint64_t bytes_per_line, std::size_t out_size) {
         std::memset(base + out_buf, 0xEE, out_size);
-        dalWrite64(base, ctrl_param, bytes_per_line);
+        tox2Write64(base, ctrl_param, bytes_per_line);
         Decoded decoded{call(ExtDecodeData, {handle, stream, out_buf, ctrl_param, out_info, 0, 0}), {}};
         decoded.out = bytesAt(out_buf, out_size);
         return decoded;
@@ -4807,19 +4808,19 @@ void testCellPngDec() {
     {
         putSource(rgba_png.file);
         CHECK(call(ExtOpen, {handle, stream_pp, src, open_info, 0, 0}) == kOk);
-        const std::uint32_t stream = dalRead32(base, stream_pp);
-        CHECK(dalRead32(base, open_info) != 0);
+        const std::uint32_t stream = tox2Read32(base, stream_pp);
+        CHECK(tox2Read32(base, open_info) != 0);
         CHECK(stream != 0 && stream != handle);
         setParam(0, kSpaceRgba, 8);
         CHECK(call(ExtSetParameter, {handle, stream, in_param, out_param, 0, 0}) == kErrSeq);
-        dalWrite64(base, ctrl_param, 12);
+        tox2Write64(base, ctrl_param, 12);
         CHECK(call(ExtDecodeData, {handle, stream, out_buf, ctrl_param, out_info, 0, 0}) == kErrSeq);
         CHECK(call(ExtReadHeader, {handle, stream, info, ext_info}) == kOk);
-        CHECK(dalRead32(base, info) == 3 && dalRead32(base, info + 4) == 2);
-        CHECK(dalRead32(base, info + 8) == 4 && dalRead32(base, info + 12) == kSpaceRgba);
-        CHECK(dalRead32(base, info + 16) == 8 && dalRead32(base, info + 20) == 0);
-        CHECK(dalRead32(base, info + 24) == 0);
-        CHECK(dalRead64(base, ext_info) == 0);
+        CHECK(tox2Read32(base, info) == 3 && tox2Read32(base, info + 4) == 2);
+        CHECK(tox2Read32(base, info + 8) == 4 && tox2Read32(base, info + 12) == kSpaceRgba);
+        CHECK(tox2Read32(base, info + 16) == 8 && tox2Read32(base, info + 20) == 0);
+        CHECK(tox2Read32(base, info + 24) == 0);
+        CHECK(tox2Read64(base, ext_info) == 0);
         CHECK(call(ExtReadHeader, {0, stream, info, 0}) == kErrArg);
         CHECK(call(ExtReadHeader, {handle, stream + 1, info, 0}) == kErrArg);
         CHECK(call(ExtReadHeader, {handle, stream, 0, 0}) == kErrArg);
@@ -4833,23 +4834,23 @@ void testCellPngDec() {
         CHECK(stream != 0);
         setParam(0, kSpaceRgba, 8);
         CHECK(call(ExtSetParameter, {handle, stream, in_param, out_param, 0, 0}) == kOk);
-        CHECK(dalRead64(base, out_param) == 12);
-        CHECK(dalRead32(base, out_param + 8) == 3 && dalRead32(base, out_param + 12) == 2);
-        CHECK(dalRead32(base, out_param + 16) == 4 && dalRead32(base, out_param + 20) == 8);
-        CHECK(dalRead32(base, out_param + 24) == 0 && dalRead32(base, out_param + 28) == kSpaceRgba);
-        CHECK(dalRead32(base, out_param + 32) == 0);
+        CHECK(tox2Read64(base, out_param) == 12);
+        CHECK(tox2Read32(base, out_param + 8) == 3 && tox2Read32(base, out_param + 12) == 2);
+        CHECK(tox2Read32(base, out_param + 16) == 4 && tox2Read32(base, out_param + 20) == 8);
+        CHECK(tox2Read32(base, out_param + 24) == 0 && tox2Read32(base, out_param + 28) == kSpaceRgba);
+        CHECK(tox2Read32(base, out_param + 32) == 0);
         const Decoded decoded = decode(stream, 17, 29);
         CHECK(decoded.result == kOk);
         std::vector<std::uint8_t> expected(29, 0xEE);
         std::copy(rgba.begin(), rgba.begin() + 12, expected.begin());
         std::copy(rgba.begin() + 12, rgba.end(), expected.begin() + 17);
         CHECK(decoded.out == expected);
-        CHECK(dalRead32(base, out_info) == (1u << 15) && dalRead32(base, out_info + 4) == 0);
-        CHECK(dalRead32(base, out_info + 8) == 0 && dalRead32(base, out_info + 12) == 0);
+        CHECK(tox2Read32(base, out_info) == (1u << 15) && tox2Read32(base, out_info + 4) == 0);
+        CHECK(tox2Read32(base, out_info + 8) == 0 && tox2Read32(base, out_info + 12) == 0);
         // A row pitch below outputWidthByte is refused and leaves the status at STOP.
         const Decoded refused = decode(stream, 11, 29);
         CHECK(refused.result == kErrArg);
-        CHECK(dalRead32(base, out_info + 12) == 1);
+        CHECK(tox2Read32(base, out_info + 12) == 1);
         closeStream(stream);
     }
 
@@ -4861,13 +4862,13 @@ void testCellPngDec() {
         const std::vector<std::uint8_t> argb = {4,  1,  2,  3,  8,  5,  6,  7,  12, 9,  10, 11,
                                                 16, 13, 14, 15, 20, 17, 18, 19, 24, 21, 22, 23};
         CHECK(top.out == argb);
-        CHECK(dalRead32(base, out_param + 28) == kSpaceArgb);
+        CHECK(tox2Read32(base, out_param + 28) == kSpaceArgb);
         const Decoded flipped = setAndDecode(stream, 1, kSpaceArgb, 8, 0, 0, 12, 24);
         CHECK(flipped.result == kOk);
         std::vector<std::uint8_t> argb_flipped(argb.begin() + 12, argb.end());
         argb_flipped.insert(argb_flipped.end(), argb.begin(), argb.begin() + 12);
         CHECK(flipped.out == argb_flipped);
-        CHECK(dalRead32(base, out_param + 24) == 1);
+        CHECK(tox2Read32(base, out_param + 24) == 1);
         closeStream(stream);
     }
 
@@ -4878,7 +4879,7 @@ void testCellPngDec() {
         CHECK(rgb.result == kOk);
         const std::vector<std::uint8_t> expected = {1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15, 17, 18, 19, 21, 22, 23};
         CHECK(rgb.out == expected);
-        CHECK(dalRead32(base, out_param + 16) == 3);
+        CHECK(tox2Read32(base, out_param + 16) == 3);
         setParam(0, kSpaceGa, 8);
         CHECK(call(ExtSetParameter, {handle, stream, in_param, out_param, 0, 0}) == kErrArg);
         closeStream(stream);
@@ -4891,9 +4892,9 @@ void testCellPngDec() {
         const PngTestImage image = encodePng(4, 2, indices, PNG_COLOR_TYPE_PALETTE, 8, 0, pal);
         const std::uint32_t stream = openAndRead(image.file);
         CHECK(stream != 0);
-        CHECK(dalRead32(base, info + 8) == 1 && dalRead32(base, info + 12) == kSpacePal);
-        CHECK(dalRead32(base, info + 16) == 8);
-        CHECK((dalRead32(base, info + 24) & (1u << 3)) != 0);  // PLTE
+        CHECK(tox2Read32(base, info + 8) == 1 && tox2Read32(base, info + 12) == kSpacePal);
+        CHECK(tox2Read32(base, info + 16) == 8);
+        CHECK((tox2Read32(base, info + 24) & (1u << 3)) != 0);  // PLTE
         const Decoded decoded = setAndDecode(stream, 0, kSpaceRgba, 8, 0, 0, 16, 32);
         CHECK(decoded.result == kOk);
         const std::uint8_t red[] = {255, 0, 0, 255}, green[] = {0, 255, 0, 128}, blue[] = {0, 0, 255, 255};
@@ -4915,7 +4916,7 @@ void testCellPngDec() {
         const Decoded raw = setAndDecode(stream, 0, kSpacePal, 8, 0, 0, 4, 8);
         CHECK(raw.result == kOk);
         CHECK(raw.out == indices);
-        CHECK(dalRead64(base, out_param) == 4);
+        CHECK(tox2Read64(base, out_param) == 4);
         closeStream(stream);
     }
 
@@ -4927,7 +4928,7 @@ void testCellPngDec() {
         const PngTestImage image = encodePng(5, 2, indices, PNG_COLOR_TYPE_PALETTE, 2, 0, pal);
         const std::uint32_t stream = openAndRead(image.file);
         CHECK(stream != 0);
-        CHECK(dalRead32(base, info + 16) == 2);
+        CHECK(tox2Read32(base, info + 16) == 2);
         const Decoded decoded = setAndDecode(stream, 0, kSpaceRgba, 8, 0, 0, 20, 40);
         CHECK(decoded.result == kOk);
         const std::uint8_t levels[] = {10, 90, 170, 250};
@@ -4944,7 +4945,7 @@ void testCellPngDec() {
         const std::vector<std::uint8_t> rgb = {10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120};
         const PngTestImage image = encodePng(2, 2, rgb, PNG_COLOR_TYPE_RGB, 8);
         const std::uint32_t stream = openAndRead(image.file);
-        CHECK(dalRead32(base, info + 8) == 3 && dalRead32(base, info + 12) == kSpaceRgb);
+        CHECK(tox2Read32(base, info + 8) == 3 && tox2Read32(base, info + 12) == kSpaceRgb);
         const Decoded opaque = setAndDecode(stream, 0, kSpaceRgba, 8, 0, 0, 8, 16);
         CHECK(opaque.result == kOk);
         CHECK(opaque.out ==
@@ -4962,13 +4963,13 @@ void testCellPngDec() {
                                                   0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
         const PngTestImage image = encodePng(2, 1, rgba16, PNG_COLOR_TYPE_RGB_ALPHA, 16);
         const std::uint32_t stream = openAndRead(image.file);
-        CHECK(dalRead32(base, info + 16) == 16);
+        CHECK(tox2Read32(base, info + 16) == 16);
         const Decoded eight = setAndDecode(stream, 0, kSpaceRgba, 8, 0, 0, 8, 8);
         CHECK(eight.result == kOk);
         CHECK(eight.out == (std::vector<std::uint8_t>{0x12, 0x56, 0x9a, 0xde, 0x01, 0x03, 0x05, 0x07}));
         const Decoded sixteen = setAndDecode(stream, 0, kSpaceRgba, 16, 0, 0, 16, 16);
         CHECK(sixteen.result == kOk && sixteen.out == rgba16);
-        CHECK(dalRead64(base, out_param) == 16 && dalRead32(base, out_param + 20) == 16);
+        CHECK(tox2Read64(base, out_param) == 16 && tox2Read32(base, out_param + 20) == 16);
         const Decoded argb16 = setAndDecode(stream, 0, kSpaceArgb, 16, 0, 0, 16, 16);
         CHECK(argb16.out[0] == 0xde && argb16.out[1] == 0xf0 && argb16.out[2] == 0x12 && argb16.out[3] == 0x34 &&
               argb16.out[6] == 0x9a && argb16.out[7] == 0xbc);
@@ -4981,7 +4982,7 @@ void testCellPngDec() {
         for (unsigned i = 0; i < 5 * 5 * 4; i++) grid.push_back(static_cast<std::uint8_t>(i * 7 + 3));
         const PngTestImage image = encodePng(5, 5, grid, PNG_COLOR_TYPE_RGB_ALPHA, 8, 1);
         const std::uint32_t stream = openAndRead(image.file);
-        CHECK(stream != 0 && dalRead32(base, info + 20) == 1);
+        CHECK(stream != 0 && tox2Read32(base, info + 20) == 1);
         const Decoded decoded = setAndDecode(stream, 0, kSpaceRgba, 8, 0, 0, 20, 100);
         CHECK(decoded.result == kOk && decoded.out == grid);
         closeStream(stream);
@@ -4996,11 +4997,11 @@ void testCellPngDec() {
         insertChunk(image.file, 33, "gAMA", {0, 1, 0x86, 0xa0});
         const std::uint32_t stream = openAndRead(image.file);
         CHECK(stream != 0);
-        CHECK(dalRead32(base, info + 24) == 1u);  // gAMA only
+        CHECK(tox2Read32(base, info + 24) == 1u);  // gAMA only
         const Decoded decoded = setAndDecode(stream, 0, kSpaceRgba, 8, 0, 0, 12, 24);
         CHECK(decoded.result == kOk);
-        CHECK(dalRead32(base, out_info) == ((1u << 0) | (1u << 9) | (1u << 15)));
-        CHECK(dalRead32(base, out_info + 4) == 1 && dalRead32(base, out_info + 8) == 1);
+        CHECK(tox2Read32(base, out_info) == ((1u << 0) | (1u << 9) | (1u << 15)));
+        CHECK(tox2Read32(base, out_info + 4) == 1 && tox2Read32(base, out_info + 8) == 1);
         closeStream(stream);
     }
 
@@ -5013,14 +5014,14 @@ void testCellPngDec() {
         putSource(rgba_png.file);
         CHECK(call(ExtOpen, {0, stream_pp, src, open_info, 0, 0}) == kErrArg);
         CHECK(call(ExtOpen, {handle, 0, src, open_info, 0, 0}) == kErrArg);
-        dalWrite32(base, src, 7);
+        tox2Write32(base, src, 7);
         CHECK(call(ExtOpen, {handle, stream_pp, src, open_info, 0, 0}) == kErrArg);
         // A valid signature followed by junk opens, but there is no IHDR to report.
         std::vector<std::uint8_t> junk = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
         junk.insert(junk.end(), 56, 0x42);
         putSource(junk);
         CHECK(call(ExtOpen, {handle, stream_pp, src, open_info, 0, 0}) == kOk);
-        const std::uint32_t junk_stream = dalRead32(base, stream_pp);
+        const std::uint32_t junk_stream = tox2Read32(base, stream_pp);
         CHECK(call(ExtReadHeader, {handle, junk_stream, info, 0}) == kErrHeader);
         closeStream(junk_stream);
         // A truncated image opens (the signature is fine) and fails when decoded.
@@ -5028,11 +5029,11 @@ void testCellPngDec() {
         broken.resize(40);
         putSource(broken);
         CHECK(call(ExtOpen, {handle, stream_pp, src, open_info, 0, 0}) == kOk);
-        const std::uint32_t stream = dalRead32(base, stream_pp);
+        const std::uint32_t stream = tox2Read32(base, stream_pp);
         CHECK(call(ExtReadHeader, {handle, stream, info, 0}) == kOk);
         const Decoded decoded = setAndDecode(stream, 0, kSpaceRgba, 8, 0, 0, 12, 24);
         CHECK(decoded.result == kErrFormat);
-        CHECK(dalRead32(base, out_info + 12) == 1);
+        CHECK(tox2Read32(base, out_info + 12) == 1);
         closeStream(stream);
     }
 
@@ -5040,23 +5041,23 @@ void testCellPngDec() {
     {
         const std::uint32_t stream = openAndRead(rgba_png.file);
         setParam(0, kSpaceRgba, 8);
-        dalWrite32(base, ext_in, 0);
-        dalWrite32(base, ext_in + 4, 1);
-        dalWrite32(base, ext_in + 8, 0);
+        tox2Write32(base, ext_in, 0);
+        tox2Write32(base, ext_in + 4, 1);
+        tox2Write32(base, ext_in + 8, 0);
         CHECK(call(ExtSetParameter, {handle, stream, in_param, out_param, ext_in, ext_out}) == kErrArg);
-        dalWrite32(base, ext_in, 1);
+        tox2Write32(base, ext_in, 1);
         CHECK(call(ExtSetParameter, {handle, stream, in_param, out_param, ext_in, ext_out}) == kOk);
-        CHECK(dalRead64(base, ext_out) == 12 && dalRead32(base, ext_out + 8) == 1);
-        dalWrite32(base, ext_in + 4, 0);
+        CHECK(tox2Read64(base, ext_out) == 12 && tox2Read32(base, ext_out + 8) == 1);
+        tox2Write32(base, ext_in + 4, 0);
         CHECK(call(ExtSetParameter, {handle, stream, in_param, out_param, ext_in, ext_out}) == kOk);
-        CHECK(dalRead32(base, ext_out + 8) == 2);
-        dalWrite32(base, ext_in + 4, 9);
+        CHECK(tox2Read32(base, ext_out + 8) == 2);
+        tox2Write32(base, ext_in + 4, 9);
         CHECK(call(ExtSetParameter, {handle, stream, in_param, out_param, ext_in, ext_out}) == kOk);
-        CHECK(dalRead32(base, ext_out + 8) == 2);
+        CHECK(tox2Read32(base, ext_out + 8) == 2);
         // Partial output through cbCtrlDisp is not implemented: refused, not silently ignored.
-        dalWrite32(base, ext_in + 4, 1);
+        tox2Write32(base, ext_in + 4, 1);
         CHECK(call(ExtSetParameter, {handle, stream, in_param, out_param, ext_in, ext_out}) == kOk);
-        dalWrite64(base, ctrl_param, 12);
+        tox2Write64(base, ctrl_param, 12);
         CHECK(call(ExtDecodeData, {handle, stream, out_buf, ctrl_param, out_info, cb_strm, 0}) == kErrArg);
         // Invalid output parameters.
         setParam(2, kSpaceRgba, 8);
@@ -5076,34 +5077,34 @@ void testCellPngDec() {
             out.write(reinterpret_cast<const char*>(padded.data()), static_cast<std::streamsize>(padded.size()));
         }
         std::memcpy(base + file_name, name.c_str(), name.size() + 1);
-        dalWrite32(base, src, 0);  // CELL_PNGDEC_FILE
-        dalWrite32(base, src + 4, file_name);
-        dalWrite64(base, src + 8, 5);
-        dalWrite32(base, src + 16, 0);
+        tox2Write32(base, src, 0);  // CELL_PNGDEC_FILE
+        tox2Write32(base, src + 4, file_name);
+        tox2Write64(base, src + 8, 5);
+        tox2Write32(base, src + 16, 0);
         CHECK(call(ExtOpen, {handle, stream_pp, src, open_info, 0, 0}) == kOk);
-        const std::uint32_t stream = dalRead32(base, stream_pp);
+        const std::uint32_t stream = tox2Read32(base, stream_pp);
         CHECK(call(ExtReadHeader, {handle, stream, info, 0}) == kOk);
         const Decoded decoded = setAndDecode(stream, 0, kSpaceRgba, 8, 0, 0, 12, 24);
         CHECK(decoded.result == kOk && decoded.out == rgba);
         closeStream(stream);
 
         // The size limits what is read: a file size short of the image cannot decode.
-        dalWrite32(base, src + 16, 40);
+        tox2Write32(base, src + 16, 40);
         CHECK(call(ExtOpen, {handle, stream_pp, src, open_info, 0, 0}) == kOk);
-        const std::uint32_t cut = dalRead32(base, stream_pp);
+        const std::uint32_t cut = tox2Read32(base, stream_pp);
         CHECK(call(ExtReadHeader, {handle, cut, info, 0}) == kOk);
         CHECK(setAndDecode(cut, 0, kSpaceRgba, 8, 0, 0, 12, 24).result == kErrFormat);
         closeStream(cut);
 
-        dalWrite64(base, src + 8, 0);
-        dalWrite32(base, src + 16, 0);
+        tox2Write64(base, src + 8, 0);
+        tox2Write32(base, src + 16, 0);
         CHECK(call(ExtOpen, {handle, stream_pp, src, open_info, 0, 0}) == kErrHeader);  // junk first
         const std::string missing = "/dev_bdvd/missing.png";
         std::memcpy(base + file_name, missing.c_str(), missing.size() + 1);
         CHECK(call(ExtOpen, {handle, stream_pp, src, open_info, 0, 0}) == kErrOpenFile);
         // Partial decoding is for buffers only.
-        dalWrite32(base, cb_strm, stream_opd);
-        dalWrite32(base, cb_strm + 4, 0x3333);
+        tox2Write32(base, cb_strm, stream_opd);
+        tox2Write32(base, cb_strm + 4, 0x3333);
         CHECK(call(ExtOpen, {handle, stream_pp, src, open_info, cb_strm, 0}) == kErrFormat);
     }
 
@@ -5115,10 +5116,10 @@ void testCellPngDec() {
         g_png_feed.staging = staging;
         g_png_feed.rest.assign(rgba_png.file.begin() + head, rgba_png.file.end());
         putSource(first);
-        dalWrite32(base, cb_strm, stream_opd);
-        dalWrite32(base, cb_strm + 4, 0x3333);
+        tox2Write32(base, cb_strm, stream_opd);
+        tox2Write32(base, cb_strm + 4, 0x3333);
         CHECK(call(ExtOpen, {handle, stream_pp, src, open_info, cb_strm, 0}) == kOk);
-        const std::uint32_t stream = dalRead32(base, stream_pp);
+        const std::uint32_t stream = tox2Read32(base, stream_pp);
         CHECK(call(ExtReadHeader, {handle, stream, info, 0}) == kOk);
         CHECK(g_png_feed.calls == 0);  // the header was already there
         const std::size_t frees_before = g_png_heap.freed.size();
@@ -5136,7 +5137,7 @@ void testCellPngDec() {
         g_png_feed.rest.assign(rgba_png.file.begin() + head, rgba_png.file.begin() + head + 20);
         putSource(first);
         CHECK(call(ExtOpen, {handle, stream_pp, src, open_info, cb_strm, 0}) == kOk);
-        const std::uint32_t dry = dalRead32(base, stream_pp);
+        const std::uint32_t dry = tox2Read32(base, stream_pp);
         CHECK(call(ExtReadHeader, {handle, dry, info, 0}) == kOk);
         CHECK(setAndDecode(dry, 0, kSpaceRgba, 8, 0, 0, 12, 24).result == kErrFormat);
         closeStream(dry);
@@ -5167,16 +5168,16 @@ void testCellPngDec() {
 
     stdfs::remove_all(root, ec);
     p.main.free(scratch);
-    dal::resetCellPngDec();
-    dal::resetHostFunctions();
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::resetCellPngDec();
+    tox2::resetHostFunctions();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 void testFifoParser() {
-    using dal::FifoParser;
-    using dal::FifoStatus;
+    using tox2::FifoParser;
+    using tox2::FifoStatus;
     constexpr std::uint32_t kBase = 0x1000;
 
     // Increment method: registers advance by 4 per argument. 0x4feac and 0x80064 are the headers
@@ -5388,15 +5389,15 @@ void testFifoParser() {
     }
 }
 
-std::vector<std::pair<dal::RsxInterrupt, std::uint32_t>> g_interrupts;
-void recordInterrupt(dal::RsxInterrupt kind, std::uint32_t arg) { g_interrupts.emplace_back(kind, arg); }
+std::vector<std::pair<tox2::RsxInterrupt, std::uint32_t>> g_interrupts;
+void recordInterrupt(tox2::RsxInterrupt kind, std::uint32_t arg) { g_interrupts.emplace_back(kind, arg); }
 
-dal::RsxCensus fakeRsxCensus() {
+tox2::RsxCensus fakeRsxCensus() {
     return {120, 3, {{0x1d6c, 5, "NV4097_SET_SEMAPHORE_OFFSET"}, {0x1808, 9, ""}, {0x1800, 5, ""}}};
 }
 
-dal::RsxCensus fakeRsxCensusWithHandlerCalls() {
-    dal::RsxCensus census = fakeRsxCensus();
+tox2::RsxCensus fakeRsxCensusWithHandlerCalls() {
+    tox2::RsxCensus census = fakeRsxCensus();
     census.vblank_handler_runs = 600;
     census.user_handler_runs = 2;
     return census;
@@ -5406,22 +5407,22 @@ dal::RsxCensus fakeRsxCensusWithHandlerCalls() {
 std::uint32_t fpStoredWord(std::uint32_t decoded) { return std::rotl(decoded, 16); }
 
 void testRsxArgCensus() {
-    CHECK(dal::rsxMethodName(0x1A04 + 2 * 0x20) == "NV4097_SET_TEXTURE_FORMAT[2]");
-    CHECK(dal::rsxMethodName(0x0208) == "NV4097_SET_SURFACE_FORMAT");
-    CHECK(dal::rsxMethodName(0x0004) == "0x0004");
-    CHECK(dal::rsxDecodeArgument(0x0208, 8 | (2u << 5) | (2u << 8) | (10u << 16) | (9u << 24)) ==
+    CHECK(tox2::rsxMethodName(0x1A04 + 2 * 0x20) == "NV4097_SET_TEXTURE_FORMAT[2]");
+    CHECK(tox2::rsxMethodName(0x0208) == "NV4097_SET_SURFACE_FORMAT");
+    CHECK(tox2::rsxMethodName(0x0004) == "0x0004");
+    CHECK(tox2::rsxDecodeArgument(0x0208, 8 | (2u << 5) | (2u << 8) | (10u << 16) | (9u << 24)) ==
           "color=A8R8G8B8 depth=Z24S8 type=swizzle aa=center_1 size=1024x512");
-    CHECK(dal::rsxDecodeArgument(0x1A04 + 0x20, 2 | (2u << 4) | (0xA5u << 8) | (1u << 16)) ==
+    CHECK(tox2::rsxDecodeArgument(0x1A04 + 0x20, 2 | (2u << 4) | (0xA5u << 8) | (1u << 16)) ==
           "location=main cubemap=0 border=0 dim=2D format=A8R8G8B8_LN_NR mipmaps=1");
-    CHECK(dal::rsxTextureFormatName(0x86 | 0x40) == "DXT1_SZ_UN");
-    CHECK(dal::rsxDecodeArgument(0x1814, 5 | (3u << 24)) == "first=5 count=4");
-    CHECK(dal::rsxDecodeArgument(0x1808, 5) == "TRIANGLES");
-    CHECK(dal::rsxDecodeArgument(0x08E4, 0x1000 | 2) == "location=main offset=0x1000");
-    CHECK(dal::rsxDecodeArgument(0x1740, 2 | (3u << 4) | (12u << 8)) == "type=f size=3 stride=12 frequency=0");
-    CHECK(dal::rsxDecodeArgument(0x1680, 0x80000040) == "location=main offset=0x40");
-    CHECK(dal::rsxDecodeArgument(0x0324, (1u << 16) | 1u) == "R-B-");
-    CHECK(dal::rsxFpOpcodeName(0x42) == "IFE" && dal::rsxFpOpcodeName(0x30) == "OP_0x30");
-    CHECK(dal::rsxVpVecOpcodeName(7) == "DP4" && dal::rsxVpScaOpcodeName(2) == "RCP");
+    CHECK(tox2::rsxTextureFormatName(0x86 | 0x40) == "DXT1_SZ_UN");
+    CHECK(tox2::rsxDecodeArgument(0x1814, 5 | (3u << 24)) == "first=5 count=4");
+    CHECK(tox2::rsxDecodeArgument(0x1808, 5) == "TRIANGLES");
+    CHECK(tox2::rsxDecodeArgument(0x08E4, 0x1000 | 2) == "location=main offset=0x1000");
+    CHECK(tox2::rsxDecodeArgument(0x1740, 2 | (3u << 4) | (12u << 8)) == "type=f size=3 stride=12 frequency=0");
+    CHECK(tox2::rsxDecodeArgument(0x1680, 0x80000040) == "location=main offset=0x40");
+    CHECK(tox2::rsxDecodeArgument(0x0324, (1u << 16) | 1u) == "R-B-");
+    CHECK(tox2::rsxFpOpcodeName(0x42) == "IFE" && tox2::rsxFpOpcodeName(0x30) == "OP_0x30");
+    CHECK(tox2::rsxVpVecOpcodeName(7) == "DP4" && tox2::rsxVpScaOpcodeName(2) == "RCP");
 
     // Fragment program: MOV, then MUL with an inline constant and the end flag.
     const std::vector<std::uint32_t> fp = {
@@ -5443,42 +5444,42 @@ void testRsxArgCensus() {
         word = fp[index];
         return true;
     };
-    const dal::RsxFpScan scan = dal::scanFragmentProgram(fpReader);
+    const tox2::RsxFpScan scan = tox2::scanFragmentProgram(fpReader);
     CHECK(scan.terminated && scan.instructions == 2 && scan.constant_words == 1 && scan.words.size() == 12);
     CHECK((scan.opcodes == std::map<std::uint32_t, std::uint32_t>{{1, 1}, {2, 1}}));
     // The opcode's high bit lives in the second source word.
     const std::vector<std::uint32_t> hi = {fpStoredWord((2u << 24) | 1u), 0, fpStoredWord(0x80000000u), 0};
-    const dal::RsxFpScan hi_scan = dal::scanFragmentProgram([&](std::uint32_t index, std::uint32_t& word) {
+    const tox2::RsxFpScan hi_scan = tox2::scanFragmentProgram([&](std::uint32_t index, std::uint32_t& word) {
         if (index >= hi.size()) return false;
         word = hi[index];
         return true;
     });
     CHECK(hi_scan.terminated && hi_scan.opcodes.count(0x42) == 1);
     // A program that runs off readable memory is not reported as terminated.
-    const dal::RsxFpScan cut = dal::scanFragmentProgram([&](std::uint32_t index, std::uint32_t& word) {
+    const tox2::RsxFpScan cut = tox2::scanFragmentProgram([&](std::uint32_t index, std::uint32_t& word) {
         if (index >= 8) return false;
         word = fp[index];
         return true;
     });
     CHECK(!cut.terminated && cut.instructions == 2);
 
-    std::vector<std::uint32_t> ucode(dal::kRsxVpInstructionCount * 4, 0);
+    std::vector<std::uint32_t> ucode(tox2::kRsxVpInstructionCount * 4, 0);
     ucode[3 * 4 + 1] = (1u << 22) | (2u << 27);  // MOV / RCP
     ucode[4 * 4 + 3] = 1;                        // end
-    const dal::RsxVpScan vp = dal::scanVertexProgram(ucode.data(), 3);
+    const tox2::RsxVpScan vp = tox2::scanVertexProgram(ucode.data(), 3);
     CHECK(vp.terminated && vp.instructions == 2);
     CHECK((vp.vec_opcodes == std::map<std::uint32_t, std::uint32_t>{{0, 1}, {1, 1}}));
     CHECK((vp.sca_opcodes == std::map<std::uint32_t, std::uint32_t>{{0, 1}, {2, 1}}));
-    CHECK(!dal::scanVertexProgram(std::vector<std::uint32_t>(dal::kRsxVpInstructionCount * 4, 0).data(), 540)
+    CHECK(!tox2::scanVertexProgram(std::vector<std::uint32_t>(tox2::kRsxVpInstructionCount * 4, 0).data(), 540)
                    .terminated);
 
     // Collector: feed the register writes of one draw.
     namespace stdfs = std::filesystem;
     const stdfs::path root =
-            stdfs::temp_directory_path() / ("dal_rsx_census_test_" + std::to_string(GetCurrentProcessId()));
+            stdfs::temp_directory_path() / ("tox2_rsx_census_test_" + std::to_string(GetCurrentProcessId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
-    dal::RsxArgCensus census(
+    tox2::RsxArgCensus census(
             root / "census.json", root / "dump",
             [&](std::uint32_t location, std::uint32_t offset, std::uint32_t& word) {
                 return location == 1 && offset >= 0x2000 && offset % 4 == 0 && fpReader((offset - 0x2000) / 4, word);
@@ -5518,7 +5519,7 @@ void testRsxArgCensus() {
 }
 
 void testRsxRegisters() {
-    auto regs = std::make_unique<dal::RsxRegisters>();
+    auto regs = std::make_unique<tox2::RsxRegisters>();
     regs->reset();
 
     // Plain writes land in the register file; the offset is masked to the register window.
@@ -5528,43 +5529,43 @@ void testRsxRegisters() {
     CHECK(regs->reg(0x0A6C) == 0x201);
 
     // Eight program words at load slot 3 fill instructions 3 and 4 and move the load pointer by two.
-    regs->apply(dal::kMethodNv4097SetTransformProgramLoad, 3);
+    regs->apply(tox2::kMethodNv4097SetTransformProgramLoad, 3);
     CHECK(regs->vp_load == 3);
-    for (std::uint32_t i = 0; i < 8; i++) regs->apply(dal::kMethodNv4097SetTransformProgram + i * 4, 0x100 + i);
+    for (std::uint32_t i = 0; i < 8; i++) regs->apply(tox2::kMethodNv4097SetTransformProgram + i * 4, 0x100 + i);
     for (std::uint32_t i = 0; i < 8; i++) CHECK(regs->vp_ucode[12 + i] == 0x100 + i);
     CHECK(regs->vp_ucode[11] == 0 && regs->vp_ucode[20] == 0);
-    CHECK(regs->vp_load == 5 && regs->reg(dal::kMethodNv4097SetTransformProgramLoad) == 5);
+    CHECK(regs->vp_load == 5 && regs->reg(tox2::kMethodNv4097SetTransformProgramLoad) == 5);
     // A block that starts mid-instruction (word 2 onwards) completes it, then starts the next one.
-    regs->apply(dal::kMethodNv4097SetTransformProgramLoad, 0);
-    regs->apply(dal::kMethodNv4097SetTransformProgram + 2 * 4, 0x20);
-    regs->apply(dal::kMethodNv4097SetTransformProgram + 3 * 4, 0x30);
+    regs->apply(tox2::kMethodNv4097SetTransformProgramLoad, 0);
+    regs->apply(tox2::kMethodNv4097SetTransformProgram + 2 * 4, 0x20);
+    regs->apply(tox2::kMethodNv4097SetTransformProgram + 3 * 4, 0x30);
     CHECK(regs->vp_ucode[2] == 0x20 && regs->vp_ucode[3] == 0x30 && regs->vp_load == 1);
     // Writes past the last instruction are dropped.
-    regs->apply(dal::kMethodNv4097SetTransformProgramLoad, dal::kRsxVpInstructionCount);
-    regs->apply(dal::kMethodNv4097SetTransformProgram, 0xDEAD);
-    CHECK(regs->vp_load == dal::kRsxVpInstructionCount);
-    regs->apply(dal::kMethodNv4097SetTransformProgramLoad, dal::kRsxVpInstructionCount - 1);
-    for (std::uint32_t i = 0; i < 8; i++) regs->apply(dal::kMethodNv4097SetTransformProgram + i * 4, 0x500 + i);
-    CHECK(regs->vp_ucode[(dal::kRsxVpInstructionCount - 1) * 4 + 3] == 0x503 && regs->vp_ucode[0] == 0);
-    CHECK(regs->vp_load == dal::kRsxVpInstructionCount);
+    regs->apply(tox2::kMethodNv4097SetTransformProgramLoad, tox2::kRsxVpInstructionCount);
+    regs->apply(tox2::kMethodNv4097SetTransformProgram, 0xDEAD);
+    CHECK(regs->vp_load == tox2::kRsxVpInstructionCount);
+    regs->apply(tox2::kMethodNv4097SetTransformProgramLoad, tox2::kRsxVpInstructionCount - 1);
+    for (std::uint32_t i = 0; i < 8; i++) regs->apply(tox2::kMethodNv4097SetTransformProgram + i * 4, 0x500 + i);
+    CHECK(regs->vp_ucode[(tox2::kRsxVpInstructionCount - 1) * 4 + 3] == 0x503 && regs->vp_ucode[0] == 0);
+    CHECK(regs->vp_load == tox2::kRsxVpInstructionCount);
     // Further writes at the end of the store neither land nor move the pointer.
-    for (std::uint32_t i = 0; i < 4; i++) regs->apply(dal::kMethodNv4097SetTransformProgram + i * 4, 0x600 + i);
-    CHECK(regs->vp_load == dal::kRsxVpInstructionCount && regs->vp_ucode[0] == 0);
-    CHECK(regs->reg(dal::kMethodNv4097SetTransformProgramLoad) == dal::kRsxVpInstructionCount);
-    regs->apply(dal::kMethodNv4097SetTransformProgramStart, 7);
+    for (std::uint32_t i = 0; i < 4; i++) regs->apply(tox2::kMethodNv4097SetTransformProgram + i * 4, 0x600 + i);
+    CHECK(regs->vp_load == tox2::kRsxVpInstructionCount && regs->vp_ucode[0] == 0);
+    CHECK(regs->reg(tox2::kMethodNv4097SetTransformProgramLoad) == tox2::kRsxVpInstructionCount);
+    regs->apply(tox2::kMethodNv4097SetTransformProgramStart, 7);
     CHECK(regs->vp_start == 7);
 
     // Constants are addressed from the load slot and the load slot itself stays put.
-    regs->apply(dal::kMethodNv4097SetTransformConstantLoad, 3);
+    regs->apply(tox2::kMethodNv4097SetTransformConstantLoad, 3);
     CHECK(regs->constant_load == 3);
-    for (std::uint32_t i = 0; i < 8; i++) regs->apply(dal::kMethodNv4097SetTransformConstant + i * 4, 0x200 + i);
+    for (std::uint32_t i = 0; i < 8; i++) regs->apply(tox2::kMethodNv4097SetTransformConstant + i * 4, 0x200 + i);
     for (std::uint32_t i = 0; i < 8; i++) CHECK(regs->vp_constants[12 + i] == 0x200 + i);
     CHECK(regs->vp_constants[11] == 0 && regs->vp_constants[20] == 0);
-    CHECK(regs->constant_load == 3 && regs->reg(dal::kMethodNv4097SetTransformConstantLoad) == 3);
+    CHECK(regs->constant_load == 3 && regs->reg(tox2::kMethodNv4097SetTransformConstantLoad) == 3);
     // The last slot is 467; slot 468 and beyond are dropped.
-    regs->apply(dal::kMethodNv4097SetTransformConstantLoad, dal::kRsxVpConstantCount - 1);
-    for (std::uint32_t i = 0; i < 8; i++) regs->apply(dal::kMethodNv4097SetTransformConstant + i * 4, 0x300 + i);
-    CHECK(regs->vp_constants[(dal::kRsxVpConstantCount - 1) * 4 + 3] == 0x303 && regs->vp_constants[0] == 0);
+    regs->apply(tox2::kMethodNv4097SetTransformConstantLoad, tox2::kRsxVpConstantCount - 1);
+    for (std::uint32_t i = 0; i < 8; i++) regs->apply(tox2::kMethodNv4097SetTransformConstant + i * 4, 0x300 + i);
+    CHECK(regs->vp_constants[(tox2::kRsxVpConstantCount - 1) * 4 + 3] == 0x303 && regs->vp_constants[0] == 0);
 
     // Reset restores the defaults and clears both stores.
     regs->reset();
@@ -5591,10 +5592,10 @@ void testRsxRegisters() {
     // contextReset (RPCS3 `rsx_state::reset`, run on every flip): assigned registers go back, including
     // the explicit zeros; registers it does not assign, the vertex program store, the constants and the
     // load pointers stay.
-    regs->apply(dal::kMethodNv4097SetTransformProgramLoad, 4);
-    regs->apply(dal::kMethodNv4097SetTransformProgramStart, 5);
-    regs->apply(dal::kMethodNv4097SetTransformConstantLoad, 6);
-    regs->apply(dal::kMethodNv4097SetTransformConstant, 0x88);
+    regs->apply(tox2::kMethodNv4097SetTransformProgramLoad, 4);
+    regs->apply(tox2::kMethodNv4097SetTransformProgramStart, 5);
+    regs->apply(tox2::kMethodNv4097SetTransformConstantLoad, 6);
+    regs->apply(tox2::kMethodNv4097SetTransformConstant, 0x88);
     regs->vp_ucode[0] = 0x77;
     regs->apply(0x0200, 0x05000500);         // SURFACE_CLIP_HORIZONTAL: reset writes an explicit zero
     regs->apply(0x1738, 9);                  // VERTEX_DATA_BASE_OFFSET: explicit zero
@@ -5611,29 +5612,29 @@ void testRsxRegisters() {
     CHECK(regs->reg(0x1A04) == 0x1234 && regs->reg(0x08E4) == 0x2002);
     CHECK(regs->vp_ucode[0] == 0x77 && regs->vp_constants[24] == 0x88);
     CHECK(regs->vp_load == 4 && regs->vp_start == 5 && regs->constant_load == 6);
-    CHECK(regs->reg(dal::kMethodNv4097SetTransformProgramLoad) == 4 && regs->reg(0x0A00) == 0x10000000);
+    CHECK(regs->reg(tox2::kMethodNv4097SetTransformProgramLoad) == 4 && regs->reg(0x0A00) == 0x10000000);
 
     // The command types compose into the variant and start out zeroed.
-    dal::RsxCommand command = dal::RsxDraw{};
-    CHECK(std::holds_alternative<dal::RsxDraw>(command));
-    command = dal::RsxFlip{};
-    CHECK(std::get<dal::RsxFlip>(command).flip_index == 0);
-    command = dal::RsxClear{};
-    CHECK(std::get<dal::RsxClear>(command).surfaces.color.pitch == 0);
-    CHECK(static_cast<int>(dal::RsxPrimitive::Points) == 1 && static_cast<int>(dal::RsxPrimitive::Polygon) == 10);
+    tox2::RsxCommand command = tox2::RsxDraw{};
+    CHECK(std::holds_alternative<tox2::RsxDraw>(command));
+    command = tox2::RsxFlip{};
+    CHECK(std::get<tox2::RsxFlip>(command).flip_index == 0);
+    command = tox2::RsxClear{};
+    CHECK(std::get<tox2::RsxClear>(command).surfaces.color.pitch == 0);
+    CHECK(static_cast<int>(tox2::RsxPrimitive::Points) == 1 && static_cast<int>(tox2::RsxPrimitive::Polygon) == 10);
 }
 
 std::uint64_t unimplementedCount(const std::string& name) {
-    for (const auto& [key, count] : dal::rsxUnimplementedSnapshot()) {
+    for (const auto& [key, count] : tox2::rsxUnimplementedSnapshot()) {
         if (key == name) return count;
     }
     return 0;
 }
 
 void testRsxDecode() {
-    auto regs = std::make_unique<dal::RsxRegisters>();
+    auto regs = std::make_unique<tox2::RsxRegisters>();
     regs->reset();
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
 
     // Surface: A8R8G8B8 1280x720 pitch 0x1400 with Z24S8 on the first target in local memory.
     regs->apply(0x0200, 1280u << 16);
@@ -5644,35 +5645,35 @@ void testRsxDecode() {
     regs->apply(0x0214, 0x900000);
     regs->apply(0x022C, 0x1400);
     regs->apply(0x0220, 1);
-    const dal::RsxSurfaceState surface = dal::decodeSurfaceState(*regs);
-    CHECK(surface.has_color && surface.color.format == dal::RsxColorFormat::A8R8G8B8);
+    const tox2::RsxSurfaceState surface = tox2::decodeSurfaceState(*regs);
+    CHECK(surface.has_color && surface.color.format == tox2::RsxColorFormat::A8R8G8B8);
     CHECK(surface.color.width == 1280 && surface.color.height == 720 && surface.color.pitch == 0x1400);
     CHECK(surface.color.offset == 0x100000 && surface.color.location == 0);
-    CHECK(surface.depth_format == dal::RsxDepthFormat::Z24S8 && surface.depth.offset == 0x900000);
+    CHECK(surface.depth_format == tox2::RsxDepthFormat::Z24S8 && surface.depth.offset == 0x900000);
     CHECK(surface.depth.pitch == 0x1400 && surface.depth.width == 1280 && surface.depth.height == 720);
     CHECK(surface.clip_x == 0 && surface.clip_y == 0 && surface.clip_w == 1280 && surface.clip_h == 720);
-    CHECK(dal::rsxUnimplementedSnapshot().empty());
+    CHECK(tox2::rsxUnimplementedSnapshot().empty());
 
     // Target B, main memory, an unsupported color format and no depth.
     regs->apply(0x0218, 0x2000);
     regs->apply(0x021C, 0x800);
-    regs->apply(0x018C, dal::kRsxContextDmaMain);
+    regs->apply(0x018C, tox2::kRsxContextDmaMain);
     regs->apply(0x0220, 2);
     regs->apply(0x0208, 3u | (1u << 8));
-    const dal::RsxSurfaceState other = dal::decodeSurfaceState(*regs);
+    const tox2::RsxSurfaceState other = tox2::decodeSurfaceState(*regs);
     CHECK(other.has_color && other.color.offset == 0x2000 && other.color.pitch == 0x800 && other.color.location == 1);
-    CHECK(other.color.format == dal::RsxColorFormat::Unsupported && other.depth_format == dal::RsxDepthFormat::None);
+    CHECK(other.color.format == tox2::RsxColorFormat::Unsupported && other.depth_format == tox2::RsxDepthFormat::None);
     CHECK(unimplementedCount("surface format R5G6B5") == 1);
     regs->apply(0x0220, 0);
-    CHECK(!dal::decodeSurfaceState(*regs).has_color);
+    CHECK(!tox2::decodeSurfaceState(*regs).has_color);
     regs->apply(0x0220, 0x13);
-    CHECK(dal::decodeSurfaceState(*regs).has_color && unimplementedCount("state multiple render targets 0x13") == 1);
+    CHECK(tox2::decodeSurfaceState(*regs).has_color && unimplementedCount("state multiple render targets 0x13") == 1);
     regs->apply(0x0208, 8u | (5u << 5) | (1u << 8));
-    CHECK(dal::decodeSurfaceState(*regs).depth_format == dal::RsxDepthFormat::Unsupported);
+    CHECK(tox2::decodeSurfaceState(*regs).depth_format == tox2::RsxDepthFormat::Unsupported);
     CHECK(unimplementedCount("depth format ?0x5") == 1);
 
     // Vertex arrays: slots 0, 2, 3 and 8 are float3, float3, ubyte4 and float2 with stride 36 in main memory.
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
     const auto format = [](std::uint32_t type, std::uint32_t size) { return type | (size << 4) | (36u << 8); };
     regs->apply(0x1740, format(2, 3));
     regs->apply(0x1740 + 2 * 4, format(2, 3));
@@ -5682,7 +5683,7 @@ void testRsxDecode() {
     regs->apply(0x1680 + 2 * 4, 0x8000100C);
     regs->apply(0x1680 + 3 * 4, 0x80001018);
     regs->apply(0x1680 + 8 * 4, 0x8000101C);
-    const std::vector<dal::RsxVertexAttrib> attribs = dal::decodeVertexAttribs(*regs);
+    const std::vector<tox2::RsxVertexAttrib> attribs = tox2::decodeVertexAttribs(*regs);
     CHECK(attribs.size() == 4);
     if (attribs.size() == 4) {
         const std::uint8_t slots[] = {0, 2, 3, 8}, types[] = {2, 2, 4, 2}, sizes[] = {3, 3, 4, 2};
@@ -5693,16 +5694,16 @@ void testRsxDecode() {
             CHECK(attribs[i].data_offset == 0);
         }
     }
-    CHECK(dal::rsxUnimplementedSnapshot().empty());
+    CHECK(tox2::rsxUnimplementedSnapshot().empty());
     regs->apply(0x1740 + 5 * 4, 6u | (1u << 4));  // CMP32
-    CHECK(dal::decodeVertexAttribs(*regs).size() == 5 && unimplementedCount("vertex type cmp") == 1);
+    CHECK(tox2::decodeVertexAttribs(*regs).size() == 5 && unimplementedCount("vertex type cmp") == 1);
     regs->apply(0x1740 + 5 * 4, 2);
 
     // Default attributes: slot 2 of SET_VERTEX_DATA4F_M.
     const float constants[] = {1.0f, 2.5f, -3.0f, 4.0f};
     for (std::uint32_t i = 0; i < 4; i++)
         regs->apply(0x1C00 + 2 * 16 + i * 4, std::bit_cast<std::uint32_t>(constants[i]));
-    const auto defaults = dal::decodeDefaultAttribs(*regs);
+    const auto defaults = tox2::decodeDefaultAttribs(*regs);
     CHECK(defaults[8] == 1.0f && defaults[9] == 2.5f && defaults[10] == -3.0f && defaults[11] == 4.0f);
     CHECK(defaults[0] == 0.0f && defaults[12] == 0.0f);
     CHECK((regs->vertex_default_written & (1u << 2)) != 0 && (regs->vertex_default_written & (1u << 5)) == 0);
@@ -5713,7 +5714,7 @@ void testRsxDecode() {
     regs->apply(0x1880 + 5 * 8 + 4, std::bit_cast<std::uint32_t>(8.0f));
     regs->apply(0x1E40 + 7 * 4, std::bit_cast<std::uint32_t>(9.0f));
     for (std::uint32_t i = 0; i < 4; i++) regs->apply(0x1C00 + 9 * 16 + i * 4, 0);
-    const auto more = dal::decodeDefaultAttribs(*regs);
+    const auto more = tox2::decodeDefaultAttribs(*regs);
     CHECK(more[20] == 7.0f && more[21] == 8.0f && more[22] == 0.0f && more[23] == 1.0f);
     CHECK(more[28] == 9.0f && more[29] == 0.0f && more[30] == 0.0f && more[31] == 1.0f);
     CHECK(more[36] == 0.0f && more[39] == 0.0f);
@@ -5721,7 +5722,7 @@ void testRsxDecode() {
     CHECK((regs->vertex_default_written & (1u << 6)) == 0);
     // The written mask survives a context reset (it lives in RPCS3's init-only register_vertex_info) and
     // reset() clears it.
-    auto scratch = std::make_unique<dal::RsxRegisters>();
+    auto scratch = std::make_unique<tox2::RsxRegisters>();
     scratch->reset();
     scratch->apply(0x1C00, 0);
     scratch->contextReset();
@@ -5730,51 +5731,51 @@ void testRsxDecode() {
     CHECK(scratch->vertex_default_written == 0);
 
     // Texture unit 0: A8R8G8B8 linear, normalized, one mip, 1024x512 in main memory, wrap and linear filters.
-    dal::rsxUnimplementedReset();
-    CHECK(!dal::rsxTextureEnabled(*regs, 0));
+    tox2::rsxUnimplementedReset();
+    CHECK(!tox2::rsxTextureEnabled(*regs, 0));
     regs->apply(0x1A0C, 0x80060000);
-    CHECK(dal::rsxTextureEnabled(*regs, 0) && !dal::rsxTextureEnabled(*regs, 1));
+    CHECK(tox2::rsxTextureEnabled(*regs, 0) && !tox2::rsxTextureEnabled(*regs, 1));
     regs->apply(0x1A00, 0x40000);
     regs->apply(0x1A04, 2u | (2u << 4) | ((0x85u | 0x20u) << 8) | (1u << 16));
     regs->apply(0x1A14, 0x02022000);
     regs->apply(0x1A18, (1024u << 16) | 512u);
     regs->apply(0x1840, 0x1000);
-    const dal::RsxTextureDesc texture = dal::decodeTexture(*regs, 0);
+    const tox2::RsxTextureDesc texture = tox2::decodeTexture(*regs, 0);
     CHECK(texture.unit == 0 && texture.format == 0xA5 && texture.mips == 1 && texture.dimension == 2);
     CHECK(texture.linear_layout && texture.normalized && !texture.cubemap);
     CHECK(texture.location == 1 && texture.offset == 0x40000 && texture.pitch == 0x1000);
     CHECK(texture.width == 1024 && texture.height == 512 && texture.rt_alias == -1);
-    CHECK(dal::rsxTextureWrapS(texture.address) == 1 && dal::rsxTextureWrapT(texture.address) == 1);
-    CHECK(dal::rsxTextureMinFilter(texture.filter) == 2 && dal::rsxTextureMagFilter(texture.filter) == 2);
+    CHECK(tox2::rsxTextureWrapS(texture.address) == 1 && tox2::rsxTextureWrapT(texture.address) == 1);
+    CHECK(tox2::rsxTextureMinFilter(texture.filter) == 2 && tox2::rsxTextureMagFilter(texture.filter) == 2);
     CHECK(texture.remap == 0xAAE4);
-    CHECK(dal::rsxUnimplementedSnapshot().empty());
+    CHECK(tox2::rsxUnimplementedSnapshot().empty());
     // The 20-bit pitch field, a compressed format and unnormalized coordinates.
     regs->apply(0x1840 + 4, 0x12345);
-    CHECK(dal::decodeTexture(*regs, 1).pitch == 0x12345);
+    CHECK(tox2::decodeTexture(*regs, 1).pitch == 0x12345);
     regs->apply(0x1A04 + 0x20, 1u | (2u << 4) | (0x86u << 8) | (1u << 16));
-    CHECK(!dal::decodeTexture(*regs, 1).linear_layout);
+    CHECK(!tox2::decodeTexture(*regs, 1).linear_layout);
     CHECK(unimplementedCount("texture format DXT1_SZ_NR") == 0);  // block-compressed formats are sampled
     regs->apply(0x1A04 + 0x20, 1u | (2u << 4) | (0x84u << 8) | (1u << 16));
-    dal::rsxUnimplementedReset();
-    const dal::RsxTextureDesc r5g6b5 = dal::decodeTexture(*regs, 1);
+    tox2::rsxUnimplementedReset();
+    const tox2::RsxTextureDesc r5g6b5 = tox2::decodeTexture(*regs, 1);
     CHECK(r5g6b5.format == 0x84);
     CHECK(unimplementedCount("texture format R5G6B5_SZ_NR") == 1);
 
     // Block-compressed sizes: 4x4 blocks of 8 (DXT1) or 16 (DXT23, DXT45) bytes, partial blocks rounded up.
-    CHECK(dal::rsxTextureBlockBytes(0x86) == 8 && dal::rsxTextureBlockBytes(0x87 | 0x20) == 16);
-    CHECK(dal::rsxTextureBlockBytes(0x88 | 0x40) == 16 && dal::rsxTextureBlockBytes(0x85) == 0);
-    CHECK(dal::rsxCompressedRowBytes(0x86, 16) == 32 && dal::rsxCompressedRowBytes(0x88, 17) == 80);
-    CHECK(dal::rsxCompressedSize(0x86, 16, 8) == 64 && dal::rsxCompressedSize(0x88, 17, 5) == 160);
-    CHECK(dal::rsxCompressedSize(0x87, 1, 1) == 16 && dal::rsxCompressedSize(0x85, 16, 16) == 0);
-    CHECK(dal::rsxTextureFormatSampleable(0x85 | 0x20) && dal::rsxTextureFormatSampleable(0x88));
-    CHECK(!dal::rsxTextureFormatSampleable(0x84));
+    CHECK(tox2::rsxTextureBlockBytes(0x86) == 8 && tox2::rsxTextureBlockBytes(0x87 | 0x20) == 16);
+    CHECK(tox2::rsxTextureBlockBytes(0x88 | 0x40) == 16 && tox2::rsxTextureBlockBytes(0x85) == 0);
+    CHECK(tox2::rsxCompressedRowBytes(0x86, 16) == 32 && tox2::rsxCompressedRowBytes(0x88, 17) == 80);
+    CHECK(tox2::rsxCompressedSize(0x86, 16, 8) == 64 && tox2::rsxCompressedSize(0x88, 17, 5) == 160);
+    CHECK(tox2::rsxCompressedSize(0x87, 1, 1) == 16 && tox2::rsxCompressedSize(0x85, 16, 16) == 0);
+    CHECK(tox2::rsxTextureFormatSampleable(0x85 | 0x20) && tox2::rsxTextureFormatSampleable(0x88));
+    CHECK(!tox2::rsxTextureFormatSampleable(0x84));
     regs->apply(0x1A04, 1u | (2u << 4) | ((0x85u | 0x20u | 0x40u) << 8) | (1u << 16));
-    CHECK(!dal::decodeTexture(*regs, 0).normalized);
+    CHECK(!tox2::decodeTexture(*regs, 0).normalized);
     CHECK(unimplementedCount("texture format A8R8G8B8_LN_UN") == 0);  // the renderer scales the coordinates
 
     // Fixed-function state: blend SRC_ALPHA / ONE_MINUS_SRC_ALPHA with ADD for color and MAX for alpha,
     // alpha test NOTEQUAL 0, back-face culling with counter-clockwise front faces.
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
     regs->apply(0x0310, 1);
     regs->apply(0x0314, 0x302u | (0x302u << 16));
     regs->apply(0x0318, 0x303u | (0x303u << 16));
@@ -5787,7 +5788,7 @@ void testRsxDecode() {
     regs->apply(0x0A30 + 4, std::bit_cast<std::uint32_t>(-360.0f));
     regs->apply(0x08C0, 1280u << 16);
     regs->apply(0x08C4, (720u << 16) | 16u);
-    const dal::RsxRasterState raster = dal::decodeRasterState(*regs);
+    const tox2::RsxRasterState raster = tox2::decodeRasterState(*regs);
     CHECK(raster.blend && raster.alpha_test && !raster.depth_test && raster.depth_write && raster.cull);
     CHECK(raster.blend_sfactor_rgb == 0x302 && raster.blend_sfactor_a == 0x302);
     CHECK(raster.blend_dfactor_rgb == 0x303 && raster.blend_dfactor_a == 0x303);
@@ -5799,12 +5800,12 @@ void testRsxDecode() {
     CHECK(raster.viewport_scale[0] == 2048.0f && raster.viewport_scale[2] == 0.5f);
     CHECK(raster.scissor_x == 0 && raster.scissor_w == 1280 && raster.scissor_y == 16 && raster.scissor_h == 720);
     CHECK(raster.window_origin == 1 && raster.pixel_center == 0);
-    CHECK(dal::rsxUnimplementedSnapshot().empty());
+    CHECK(tox2::rsxUnimplementedSnapshot().empty());
     regs->apply(0x030C, 0x12345680);
-    CHECK(dal::decodeRasterState(*regs).alpha_ref == 0x80);
+    CHECK(tox2::decodeRasterState(*regs).alpha_ref == 0x80);
     regs->apply(0x0320, 0xF005u | (0x800Bu << 16));
     regs->apply(0x0328, 1);
-    const dal::RsxRasterState signed_equation = dal::decodeRasterState(*regs);
+    const tox2::RsxRasterState signed_equation = tox2::decodeRasterState(*regs);
     CHECK(signed_equation.blend_eq_rgb == 0xF005 && signed_equation.blend_eq_a == 0x800B);
     CHECK(unimplementedCount("blend equation REVERSE_SUBTRACT_SIGNED") == 1);
     CHECK(unimplementedCount("state stencil test") == 1);
@@ -5812,64 +5813,66 @@ void testRsxDecode() {
     // Index array, draw range, primitive and clear.
     regs->apply(0x181C, 0x1000);
     regs->apply(0x1820, 1u | (1u << 4));
-    const dal::RsxIndexArray index = dal::decodeIndexArray(*regs);
-    CHECK(index.location == 1 && index.offset == 0x1000 && index.type == dal::kRsxIndexTypeU16);
-    const dal::RsxDrawRange range = dal::decodeDrawRange(0x03000010);
+    const tox2::RsxIndexArray index = tox2::decodeIndexArray(*regs);
+    CHECK(index.location == 1 && index.offset == 0x1000 && index.type == tox2::kRsxIndexTypeU16);
+    const tox2::RsxDrawRange range = tox2::decodeDrawRange(0x03000010);
     CHECK(range.first == 0x10 && range.count == 4);
-    CHECK(dal::decodeDrawRange(0xFF000000).count == 256);
-    dal::RsxPrimitive primitive = dal::RsxPrimitive::Points;
-    CHECK(dal::decodePrimitive(5, primitive) && primitive == dal::RsxPrimitive::Triangles);
-    CHECK(dal::decodePrimitive(10, primitive) && primitive == dal::RsxPrimitive::Polygon);
-    CHECK(!dal::decodePrimitive(0, primitive) && primitive == dal::RsxPrimitive::Polygon);
+    CHECK(tox2::decodeDrawRange(0xFF000000).count == 256);
+    tox2::RsxPrimitive primitive = tox2::RsxPrimitive::Points;
+    CHECK(tox2::decodePrimitive(5, primitive) && primitive == tox2::RsxPrimitive::Triangles);
+    CHECK(tox2::decodePrimitive(10, primitive) && primitive == tox2::RsxPrimitive::Polygon);
+    CHECK(!tox2::decodePrimitive(0, primitive) && primitive == tox2::RsxPrimitive::Polygon);
     CHECK(unimplementedCount("primitive ?0xb") == 0);
-    CHECK(!dal::decodePrimitive(11, primitive) && unimplementedCount("primitive ?0xb") == 1);
+    CHECK(!tox2::decodePrimitive(11, primitive) && unimplementedCount("primitive ?0xb") == 1);
 
     regs->apply(0x1D90, 0xFF102030);
     regs->apply(0x1D8C, 0xFFFFFF00);
-    const dal::RsxClear clear = dal::decodeClear(*regs, 0xF3);
+    const tox2::RsxClear clear = tox2::decodeClear(*regs, 0xF3);
     CHECK(clear.mask == 0xF3 && clear.color_argb == 0xFF102030 && clear.depth_stencil == 0xFFFFFF00);
     CHECK(clear.scissor[0] == 0 && clear.scissor[1] == 16 && clear.scissor[2] == 1280 && clear.scissor[3] == 720);
     CHECK(clear.surfaces.clip_w == 1280);
 
     // Written methods with render semantics that the builder ignores.
-    CHECK(std::string_view(dal::rsxIgnoredMethodName(0x1940)) == "NV4097_SET_VERTEX_DATA4UB_M");
-    CHECK(dal::rsxIgnoredMethodName(0x197C) != nullptr && dal::rsxIgnoredMethodName(0x1900) != nullptr);
-    CHECK(dal::rsxIgnoredMethodName(0x1500) == nullptr);  // the float forms are decoded into the defaults
-    CHECK(dal::rsxIgnoredMethodName(0x1C00) == nullptr && dal::rsxIgnoredMethodName(0x1814) == nullptr);
-    CHECK(dal::rsxIgnoredMethodName(0x1818) != nullptr && dal::rsxIgnoredMethodName(0xC40C) != nullptr);
+    CHECK(std::string_view(tox2::rsxIgnoredMethodName(0x1940)) == "NV4097_SET_VERTEX_DATA4UB_M");
+    CHECK(tox2::rsxIgnoredMethodName(0x197C) != nullptr && tox2::rsxIgnoredMethodName(0x1900) != nullptr);
+    CHECK(tox2::rsxIgnoredMethodName(0x1500) == nullptr);  // the float forms are decoded into the defaults
+    CHECK(tox2::rsxIgnoredMethodName(0x1C00) == nullptr && tox2::rsxIgnoredMethodName(0x1814) == nullptr);
+    CHECK(tox2::rsxIgnoredMethodName(0x1818) != nullptr && tox2::rsxIgnoredMethodName(0xC40C) != nullptr);
 
     // The census prints the section once something was noted, most frequent first.
-    dal::rsxUnimplementedReset();
-    dal::setRsxUnimplementedProvider(
-            [] { return dal::RsxUnimplementedCensus{dal::rsxUnimplementedSnapshot(), dal::rsxUnimplementedDropped()}; },
-            &dal::rsxUnimplementedReset);
-    CHECK(dal::formatCensus().find("rsx unimplemented") == std::string::npos);
-    dal::rsxNoteUnimplemented("texture format", "DXT1");
-    dal::rsxNoteUnimplemented("fp opcode", "DDX");
-    dal::rsxNoteUnimplemented("texture format", "DXT1");
-    const std::string census = dal::formatCensus();
+    tox2::rsxUnimplementedReset();
+    tox2::setRsxUnimplementedProvider(
+            [] {
+                return tox2::RsxUnimplementedCensus{tox2::rsxUnimplementedSnapshot(), tox2::rsxUnimplementedDropped()};
+            },
+            &tox2::rsxUnimplementedReset);
+    CHECK(tox2::formatCensus().find("rsx unimplemented") == std::string::npos);
+    tox2::rsxNoteUnimplemented("texture format", "DXT1");
+    tox2::rsxNoteUnimplemented("fp opcode", "DDX");
+    tox2::rsxNoteUnimplemented("texture format", "DXT1");
+    const std::string census = tox2::formatCensus();
     const std::size_t header =
             census.find("census: rsx unimplemented 2 kinds\n  texture format DXT1: 2\n  fp opcode DDX: 1");
     CHECK(header != std::string::npos);
 
     // Past the cap of distinct kinds, new kinds are only summed and the header counts real kinds.
-    dal::rsxUnimplementedReset();
-    for (int i = 0; i < 1030; i++) dal::rsxNoteUnimplemented("state", std::to_string(i));
-    CHECK(dal::rsxUnimplementedSnapshot().size() == 1024 && dal::rsxUnimplementedDropped() == 6);
-    const std::string capped = dal::formatCensus();
+    tox2::rsxUnimplementedReset();
+    for (int i = 0; i < 1030; i++) tox2::rsxNoteUnimplemented("state", std::to_string(i));
+    CHECK(tox2::rsxUnimplementedSnapshot().size() == 1024 && tox2::rsxUnimplementedDropped() == 6);
+    const std::string capped = tox2::formatCensus();
     CHECK(capped.find("census: rsx unimplemented 1024 kinds\n") != std::string::npos);
     CHECK(capped.find("\n  other kinds (limit reached): 6") != std::string::npos);
 
     // resetCensus() clears the counts through the provider and forgets it.
-    dal::resetCensus();
-    CHECK(dal::rsxUnimplementedSnapshot().empty() && dal::rsxUnimplementedDropped() == 0);
-    dal::rsxNoteUnimplemented("state", "after reset");
-    CHECK(dal::formatCensus().find("rsx unimplemented") == std::string::npos);
-    dal::rsxUnimplementedReset();
+    tox2::resetCensus();
+    CHECK(tox2::rsxUnimplementedSnapshot().empty() && tox2::rsxUnimplementedDropped() == 0);
+    tox2::rsxNoteUnimplemented("state", "after reset");
+    CHECK(tox2::formatCensus().find("rsx unimplemented") == std::string::npos);
+    tox2::rsxUnimplementedReset();
 }
 
 // RSX-visible memory backed by two byte arrays: reads outside them fail.
-class FakeRsxMemory final : public dal::RsxMemoryView {
+class FakeRsxMemory final : public tox2::RsxMemoryView {
 public:
     FakeRsxMemory() : local(0x10000), main(0x10000) {}
     bool read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override {
@@ -5886,11 +5889,11 @@ public:
 };
 
 void testRsxFrameBuilder() {
-    auto regs = std::make_unique<dal::RsxRegisters>();
+    auto regs = std::make_unique<tox2::RsxRegisters>();
     regs->reset();
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
     FakeRsxMemory memory;
-    dal::RsxFrameBuilder builder(memory);
+    tox2::RsxFrameBuilder builder(memory);
     const auto write = [&](std::uint32_t method, std::uint32_t value) {
         regs->apply(method, value);
         builder.onWrite(*regs, method, value);
@@ -5912,9 +5915,9 @@ void testRsxFrameBuilder() {
     write(0x1D90, 0xFF102030);
     write(0x1D8C, 0xFFFFFF00);
     write(0x1D94, 0xF3);
-    std::vector<dal::RsxCommand> commands = builder.takeCommands();
-    CHECK(commands.size() == 1 && std::holds_alternative<dal::RsxClear>(commands[0]));
-    const dal::RsxClear& clear = std::get<dal::RsxClear>(commands[0]);
+    std::vector<tox2::RsxCommand> commands = builder.takeCommands();
+    CHECK(commands.size() == 1 && std::holds_alternative<tox2::RsxClear>(commands[0]));
+    const tox2::RsxClear& clear = std::get<tox2::RsxClear>(commands[0]);
     CHECK(clear.mask == 0xF3 && clear.color_argb == 0xFF102030 && clear.depth_stencil == 0xFFFFFF00);
     CHECK(clear.scissor[0] == 0 && clear.scissor[1] == 0 && clear.scissor[2] == 1280 && clear.scissor[3] == 720);
     CHECK(builder.knownSurfaces().size() == 1 && builder.knownSurfaces()[0].offset == 0x100000);
@@ -5933,8 +5936,8 @@ void testRsxFrameBuilder() {
     write(0x1D94, 0x10);
     commands = builder.takeCommands();
     CHECK(commands.size() == 2);
-    CHECK(std::get<dal::RsxClear>(commands[0]).mask == 0xF1);
-    const dal::RsxClear& clipped = std::get<dal::RsxClear>(commands[1]);
+    CHECK(std::get<tox2::RsxClear>(commands[0]).mask == 0xF1);
+    const tox2::RsxClear& clipped = std::get<tox2::RsxClear>(commands[1]);
     CHECK(clipped.mask == 0x10 && clipped.scissor[0] == 1000 && clipped.scissor[2] == 280);
     CHECK(clipped.scissor[1] == 700 && clipped.scissor[3] == 20);
     write(0x08C0, 1280u << 16);
@@ -5963,10 +5966,10 @@ void testRsxFrameBuilder() {
     write(0x1824, 3u << 24);
     write(0x1808, 0);
     commands = builder.takeCommands();
-    CHECK(commands.size() == 1 && std::holds_alternative<dal::RsxDraw>(commands[0]));
-    const dal::RsxDraw& indexed = std::get<dal::RsxDraw>(commands[0]);
-    CHECK(indexed.indexed && indexed.index_type == dal::kRsxIndexTypeU16 &&
-          indexed.primitive == dal::RsxPrimitive::Triangles);
+    CHECK(commands.size() == 1 && std::holds_alternative<tox2::RsxDraw>(commands[0]));
+    const tox2::RsxDraw& indexed = std::get<tox2::RsxDraw>(commands[0]);
+    CHECK(indexed.indexed && indexed.index_type == tox2::kRsxIndexTypeU16 &&
+          indexed.primitive == tox2::RsxPrimitive::Triangles);
     CHECK(indexed.first == 0 && indexed.count == 4 && indexed.min_index == 1);
     CHECK((indexed.index_data == std::vector<std::uint8_t>{0, 1, 0, 2, 0, 3, 0, 2}));
     CHECK(indexed.attribs.size() == 1 && indexed.attribs[0].slot == 0 && indexed.attribs[0].location == 1);
@@ -5976,7 +5979,7 @@ void testRsxFrameBuilder() {
     CHECK(indexed.fp_ucode.size() == 4);
     CHECK(indexed.fp_ucode[0] == 0x00010000 && indexed.fp_hash != 0 && indexed.fp_constants.empty());
     CHECK(indexed.fp_control == 0x40 && indexed.texcoord_control == 2);
-    CHECK(indexed.vp_constants.size() == dal::kRsxVpConstantCount * 4);
+    CHECK(indexed.vp_constants.size() == tox2::kRsxVpConstantCount * 4);
     CHECK(unimplementedCount("state unterminated vertex program") == 1);
     CHECK(indexed.attribs[0].has_data);
 
@@ -5990,7 +5993,7 @@ void testRsxFrameBuilder() {
     write(0x1808, 0);
     commands = builder.takeCommands();
     CHECK(commands.size() == 1);
-    const dal::RsxDraw& rebased = std::get<dal::RsxDraw>(commands[0]);
+    const tox2::RsxDraw& rebased = std::get<tox2::RsxDraw>(commands[0]);
     CHECK(rebased.min_index == 1 && rebased.vertex_data.size() == 36 && rebased.vertex_data[0] == (1 + 2) * 12);
     CHECK(rebased.attribs.size() == 2 && rebased.attribs[0].has_data && !rebased.attribs[1].has_data);
     write(0x173C, 0);
@@ -6004,8 +6007,8 @@ void testRsxFrameBuilder() {
     write(0x1808, 0);
     commands = builder.takeCommands();
     CHECK(commands.size() == 1);
-    const dal::RsxDraw& array = std::get<dal::RsxDraw>(commands[0]);
-    CHECK(!array.indexed && array.primitive == dal::RsxPrimitive::TriangleStrip);
+    const tox2::RsxDraw& array = std::get<tox2::RsxDraw>(commands[0]);
+    CHECK(!array.indexed && array.primitive == tox2::RsxPrimitive::TriangleStrip);
     CHECK(array.first == 2 && array.count == 4 && array.min_index == 2 && array.index_data.empty());
     CHECK(array.vertex_data.size() == 3 * 12 + 12 && array.vertex_data[0] == 0x10 + 24);
     CHECK(unimplementedCount("state multiple ranges") == 0);
@@ -6019,7 +6022,7 @@ void testRsxFrameBuilder() {
     write(0x1808, 5);
     write(0x1808, 0);
     commands = builder.takeCommands();
-    CHECK(commands.size() == 1 && std::get<dal::RsxDraw>(commands[0]).count == 1);
+    CHECK(commands.size() == 1 && std::get<tox2::RsxDraw>(commands[0]).count == 1);
     CHECK(unimplementedCount("state multiple ranges") == 1);
     write(0x1824, 0);
     write(0x1808, 5);
@@ -6052,7 +6055,7 @@ void testRsxFrameBuilder() {
     write(0x1808, 0);
     commands = builder.takeCommands();
     CHECK(commands.size() == 1);
-    const dal::RsxDraw& textured = std::get<dal::RsxDraw>(commands[0]);
+    const tox2::RsxDraw& textured = std::get<tox2::RsxDraw>(commands[0]);
     CHECK(textured.textures.size() == 3);
     CHECK(textured.textures[0].unit == 0 && textured.textures[0].rt_alias == 0 && textured.textures[0].data_size == 0);
     CHECK(textured.textures[1].unit == 1 && textured.textures[1].rt_alias == -1 &&
@@ -6085,7 +6088,7 @@ void testRsxFrameBuilder() {
     write(0x1808, 0);
     commands = builder.takeCommands();
     CHECK(commands.size() == 1);
-    const dal::RsxDraw& compressed = std::get<dal::RsxDraw>(commands[0]);
+    const tox2::RsxDraw& compressed = std::get<tox2::RsxDraw>(commands[0]);
     CHECK(compressed.textures.size() == 3);
     CHECK(compressed.textures[0].unit == 3 && compressed.textures[0].data_size == 64 &&
           compressed.textures[0].pitch == 32);
@@ -6112,10 +6115,10 @@ void testRsxFrameBuilder() {
         write(0x1808, 5);
         write(0x1814, 2u << 24);
         write(0x1808, 0);
-        return std::get<dal::RsxDraw>(builder.takeCommands().at(0));
+        return std::get<tox2::RsxDraw>(builder.takeCommands().at(0));
     };
-    const dal::RsxDraw first_program = fragmentProgram(0x3F800000);
-    const dal::RsxDraw second_program = fragmentProgram(0x40000000);
+    const tox2::RsxDraw first_program = fragmentProgram(0x3F800000);
+    const tox2::RsxDraw second_program = fragmentProgram(0x40000000);
     CHECK(first_program.fp_ucode.size() == 12 && first_program.fp_constants.size() == 4);
     CHECK(first_program.fp_constants[0] == 0x3F800000 && first_program.fp_ucode[4] == 0 &&
           first_program.fp_ucode[8] == 0x00010000);
@@ -6123,7 +6126,7 @@ void testRsxFrameBuilder() {
 
     // Flips carry the display buffer; ignored methods are counted.
     write(0x1818, 0x12345678);
-    dal::RsxDisplayBuffer display;
+    tox2::RsxDisplayBuffer display;
     display.offset = 0x400000;
     display.pitch = 0x1400;
     display.width = 1280;
@@ -6131,9 +6134,10 @@ void testRsxFrameBuilder() {
     builder.onFlip(*regs, 1, display);
     builder.onFlip(*regs, 2, display);
     commands = builder.takeCommands();
-    CHECK(commands.size() == 2 && std::get<dal::RsxFlip>(commands[0]).flip_index == 0);
-    CHECK(std::get<dal::RsxFlip>(commands[1]).flip_index == 1 && std::get<dal::RsxFlip>(commands[1]).buffer == 2);
-    CHECK(std::get<dal::RsxFlip>(commands[1]).offset == 0x400000 && std::get<dal::RsxFlip>(commands[1]).height == 720);
+    CHECK(commands.size() == 2 && std::get<tox2::RsxFlip>(commands[0]).flip_index == 0);
+    CHECK(std::get<tox2::RsxFlip>(commands[1]).flip_index == 1 && std::get<tox2::RsxFlip>(commands[1]).buffer == 2);
+    CHECK(std::get<tox2::RsxFlip>(commands[1]).offset == 0x400000 &&
+          std::get<tox2::RsxFlip>(commands[1]).height == 720);
     CHECK(unimplementedCount("method NV4097_INLINE_ARRAY") == 1);
 
     // Unreadable vertex memory drops the draw and counts it.
@@ -6142,34 +6146,34 @@ void testRsxFrameBuilder() {
     write(0x1814, 2u << 24);
     write(0x1808, 0);
     CHECK(builder.takeCommands().empty() && unimplementedCount("state unreadable vertex memory") == 1);
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
 }
 
-bool sameSurface(const dal::RsxSurface& a, const dal::RsxSurface& b) {
+bool sameSurface(const tox2::RsxSurface& a, const tox2::RsxSurface& b) {
     return a.location == b.location && a.offset == b.offset && a.pitch == b.pitch && a.width == b.width &&
            a.height == b.height && a.format == b.format;
 }
 
-bool sameSurfaceState(const dal::RsxSurfaceState& a, const dal::RsxSurfaceState& b) {
+bool sameSurfaceState(const tox2::RsxSurfaceState& a, const tox2::RsxSurfaceState& b) {
     return sameSurface(a.color, b.color) && a.has_color == b.has_color && sameSurface(a.depth, b.depth) &&
            a.depth_format == b.depth_format && a.clip_x == b.clip_x && a.clip_y == b.clip_y && a.clip_w == b.clip_w &&
            a.clip_h == b.clip_h;
 }
 
-bool sameCommand(const dal::RsxCommand& left, const dal::RsxCommand& right) {
+bool sameCommand(const tox2::RsxCommand& left, const tox2::RsxCommand& right) {
     if (left.index() != right.index()) return false;
-    if (const auto* a = std::get_if<dal::RsxClear>(&left)) {
-        const auto& b = std::get<dal::RsxClear>(right);
+    if (const auto* a = std::get_if<tox2::RsxClear>(&left)) {
+        const auto& b = std::get<tox2::RsxClear>(right);
         return sameSurfaceState(a->surfaces, b.surfaces) && a->mask == b.mask && a->color_argb == b.color_argb &&
                a->depth_stencil == b.depth_stencil && std::equal(a->scissor, a->scissor + 4, b.scissor);
     }
-    if (const auto* a = std::get_if<dal::RsxFlip>(&left)) {
-        const auto& b = std::get<dal::RsxFlip>(right);
+    if (const auto* a = std::get_if<tox2::RsxFlip>(&left)) {
+        const auto& b = std::get<tox2::RsxFlip>(right);
         return a->buffer == b.buffer && a->offset == b.offset && a->pitch == b.pitch && a->width == b.width &&
                a->height == b.height && a->flip_index == b.flip_index;
     }
-    const auto& a = std::get<dal::RsxDraw>(left);
-    const auto& b = std::get<dal::RsxDraw>(right);
+    const auto& a = std::get<tox2::RsxDraw>(left);
+    const auto& b = std::get<tox2::RsxDraw>(right);
     if (!sameSurfaceState(a.surfaces, b.surfaces) || a.primitive != b.primitive || a.indexed != b.indexed ||
         a.index_type != b.index_type || a.first != b.first || a.count != b.count || a.min_index != b.min_index ||
         a.attribs.size() != b.attribs.size() || a.textures.size() != b.textures.size() ||
@@ -6202,24 +6206,24 @@ bool sameCommand(const dal::RsxCommand& left, const dal::RsxCommand& right) {
 }
 
 void testRsxCapture() {
-    dal::rsxUnimplementedReset();
-    auto regs = std::make_unique<dal::RsxRegisters>();
+    tox2::rsxUnimplementedReset();
+    auto regs = std::make_unique<tox2::RsxRegisters>();
     regs->reset();
-    const auto initial = std::make_unique<dal::RsxRegisters>(*regs);
+    const auto initial = std::make_unique<tox2::RsxRegisters>(*regs);
     FakeRsxMemory memory;
-    dal::RsxRecordingMemoryView recording(memory);
-    dal::RsxFrameBuilder builder(recording);
-    dal::RsxCaptureWriter writer(7, *regs, builder.knownSurfaces());
+    tox2::RsxRecordingMemoryView recording(memory);
+    tox2::RsxFrameBuilder builder(recording);
+    tox2::RsxCaptureWriter writer(7, *regs, builder.knownSurfaces());
     builder.setFlipIndex(7);  // the capture header says this frame ends with flip 7
     recording.setWriter(&writer);
-    std::vector<dal::RsxCommand> live;
+    std::vector<tox2::RsxCommand> live;
     const auto write = [&](std::uint32_t method, std::uint32_t value) {
         regs->apply(method, value);
         builder.onWrite(*regs, method, value);
         writer.onWrite(method, value);
     };
     const auto collect = [&]() {
-        for (dal::RsxCommand& command : builder.takeCommands()) live.push_back(std::move(command));
+        for (tox2::RsxCommand& command : builder.takeCommands()) live.push_back(std::move(command));
     };
 
     // A frame with a clear, an indexed draw, a draw sampling the cleared surface and a draw with a
@@ -6272,15 +6276,15 @@ void testRsxCapture() {
     write(0x1814, 2u << 24);
     write(0x1808, 0);
     collect();
-    CHECK(live.size() == 3 && std::holds_alternative<dal::RsxClear>(live[0]) &&
-          std::holds_alternative<dal::RsxDraw>(live[1]));
-    CHECK(std::get<dal::RsxDraw>(live[2]).textures.size() == 2 &&
-          std::get<dal::RsxDraw>(live[2]).textures[0].rt_alias == 0);
-    CHECK(!std::get<dal::RsxDraw>(live[2]).texture_data.empty());
+    CHECK(live.size() == 3 && std::holds_alternative<tox2::RsxClear>(live[0]) &&
+          std::holds_alternative<tox2::RsxDraw>(live[1]));
+    CHECK(std::get<tox2::RsxDraw>(live[2]).textures.size() == 2 &&
+          std::get<tox2::RsxDraw>(live[2]).textures[0].rt_alias == 0);
+    CHECK(!std::get<tox2::RsxDraw>(live[2]).texture_data.empty());
 
     // The flip, as the consumer runs it: the builder and the writer see it, the context registers are
     // reset, and only then does the flip method write itself land.
-    dal::RsxDisplayBuffer display;
+    tox2::RsxDisplayBuffer display;
     display.offset = 0x400000;
     display.pitch = 0x1400;
     display.width = 1280;
@@ -6288,7 +6292,7 @@ void testRsxCapture() {
     builder.onFlip(*regs, 1, display);
     writer.onFlip(1);
     regs->contextReset();
-    write(dal::kMethodGcmFlipCommand, 1);
+    write(tox2::kMethodGcmFlipCommand, 1);
 
     // The reset zeroed the surface offset and clip. A clear that rewrites the clip and pitch but not the
     // offset must therefore land on offset 0, in the live run and in the replay.
@@ -6299,37 +6303,37 @@ void testRsxCapture() {
     write(0x0220, 1);
     write(0x1D94, 0xF3);
     collect();
-    CHECK(live.size() == 5 && std::holds_alternative<dal::RsxFlip>(live[3]) &&
-          std::holds_alternative<dal::RsxClear>(live[4]));
-    CHECK(std::get<dal::RsxClear>(live[4]).surfaces.color.offset == 0);
-    CHECK(std::get<dal::RsxClear>(live[0]).surfaces.color.offset == 0x100000);
+    CHECK(live.size() == 5 && std::holds_alternative<tox2::RsxFlip>(live[3]) &&
+          std::holds_alternative<tox2::RsxClear>(live[4]));
+    CHECK(std::get<tox2::RsxClear>(live[4]).surfaces.color.offset == 0);
+    CHECK(std::get<tox2::RsxClear>(live[0]).surfaces.color.offset == 0x100000);
 
-    std::array<dal::RsxDisplayBuffer, dal::kRsxDisplayBufferCount> displays{};
+    std::array<tox2::RsxDisplayBuffer, tox2::kRsxDisplayBufferCount> displays{};
     displays[1] = display;
     recording.setWriter(nullptr);
     const std::uint64_t live_writes = writer.writeCount();
     const std::uint64_t live_ranges = writer.rangeCount();
-    const dal::RsxCaptureFile capture_file = writer.finish(displays, 2);
+    const tox2::RsxCaptureFile capture_file = writer.finish(displays, 2);
     const std::vector<std::uint8_t> file = capture_file.flatten();
     CHECK(capture_file.size() == file.size() && capture_file.tail.size() == 8);
 
-    dal::RsxCaptureReader reader;
+    tox2::RsxCaptureReader reader;
     std::string error;
     CHECK(reader.parse(file, error));
     CHECK(reader.flipIndex() == 7 && reader.displayCount() == 2 && reader.display()[1].offset == 0x400000);
     CHECK(reader.writeCount() == live_writes && reader.rangeCount() == live_ranges && live_ranges > 0);
     CHECK(reader.surfaces().empty());
     CHECK(reader.startRegisters().regs == initial->regs && reader.startRegisters().vp_ucode == initial->vp_ucode);
-    const auto replayCommands = [](const dal::RsxCaptureReader& capture) {
-        dal::ReplayRsxMemoryView view;
-        dal::RsxFrameBuilder replay_builder(view);
-        dal::replayCapture(capture, view, replay_builder);
+    const auto replayCommands = [](const tox2::RsxCaptureReader& capture) {
+        tox2::ReplayRsxMemoryView view;
+        tox2::RsxFrameBuilder replay_builder(view);
+        tox2::replayCapture(capture, view, replay_builder);
         return std::pair{replay_builder.takeCommands(),
-                         std::vector<dal::RsxSurface>(replay_builder.knownSurfaces().begin(),
-                                                      replay_builder.knownSurfaces().end())};
+                         std::vector<tox2::RsxSurface>(replay_builder.knownSurfaces().begin(),
+                                                       replay_builder.knownSurfaces().end())};
     };
     const auto [replayed, replay_surfaces] = replayCommands(reader);
-    CHECK(replayed.size() == live.size() && std::get<dal::RsxFlip>(live[3]).flip_index == 7);
+    CHECK(replayed.size() == live.size() && std::get<tox2::RsxFlip>(live[3]).flip_index == 7);
     bool same = replayed.size() == live.size();
     for (std::size_t i = 0; same && i < live.size(); i++) same = sameCommand(live[i], replayed[i]);
     CHECK(same);
@@ -6339,12 +6343,12 @@ void testRsxCapture() {
 
     // The file survives a trip through the disk.
     const std::filesystem::path dir =
-            std::filesystem::temp_directory_path() / ("dal_rsx_capture_test_" + std::to_string(GetCurrentProcessId()));
-    const std::filesystem::path path = dir / "nested" / "frame.dalcap";
-    CHECK(dal::writeCaptureFile(path, capture_file, error));
-    dal::RsxCaptureReader from_disk;
+            std::filesystem::temp_directory_path() / ("tox2_rsx_capture_test_" + std::to_string(GetCurrentProcessId()));
+    const std::filesystem::path path = dir / "nested" / "frame.tox2cap";
+    CHECK(tox2::writeCaptureFile(path, capture_file, error));
+    tox2::RsxCaptureReader from_disk;
     CHECK(from_disk.load(path, error) && from_disk.events().size() == reader.events().size());
-    CHECK(!from_disk.load(dir / "missing.dalcap", error) && !error.empty());
+    CHECK(!from_disk.load(dir / "missing.tox2cap", error) && !error.empty());
     std::error_code remove_ec;
     std::filesystem::remove_all(dir, remove_ec);
 
@@ -6356,9 +6360,9 @@ void testRsxCapture() {
     regs->constant_load = 6;
     regs->apply(0x1C00 + 2 * 16, 0x3F800000);  // default attribute slot 2 written
     regs->vertex_default_written |= 1u << 9;   // slot 9 written with zeros: only the v2 mask can say so
-    const dal::RsxSurface known{1, 0x2000, 0x800, 64, 32, dal::RsxColorFormat::A8R8G8B8};
-    dal::RsxCaptureWriter second(11, *regs, std::span<const dal::RsxSurface>(&known, 1));
-    dal::RsxCaptureReader second_reader;
+    const tox2::RsxSurface known{1, 0x2000, 0x800, 64, 32, tox2::RsxColorFormat::A8R8G8B8};
+    tox2::RsxCaptureWriter second(11, *regs, std::span<const tox2::RsxSurface>(&known, 1));
+    tox2::RsxCaptureReader second_reader;
     const std::vector<std::uint8_t> second_file = second.finish({}, 0).flatten();
     CHECK(second_reader.parse(second_file, error));
     CHECK(second_file[8] == 2);
@@ -6377,7 +6381,7 @@ void testRsxCapture() {
     // (slot 2 is nonzero; slot 9, written with zeros, cannot be told apart).
     constexpr std::size_t kRegsChunkOffset = 20;  // header, then the REGS chunk: tag, size, data
     constexpr std::size_t kRegsBytesV1 =
-            (0x4000 + dal::kRsxVpInstructionCount * 4 + dal::kRsxVpConstantCount * 4 + 3) * 4;
+            (0x4000 + tox2::kRsxVpInstructionCount * 4 + tox2::kRsxVpConstantCount * 4 + 3) * 4;
     std::vector<std::uint8_t> v1_file = second_file;
     v1_file[8] = 1;
     v1_file.erase(v1_file.begin() + kRegsChunkOffset + 8 + kRegsBytesV1,
@@ -6386,7 +6390,7 @@ void testRsxCapture() {
     v1_file[kRegsChunkOffset + 5] = static_cast<std::uint8_t>(kRegsBytesV1 >> 8);
     v1_file[kRegsChunkOffset + 6] = static_cast<std::uint8_t>(kRegsBytesV1 >> 16);
     v1_file[kRegsChunkOffset + 7] = static_cast<std::uint8_t>(kRegsBytesV1 >> 24);
-    dal::RsxCaptureReader v1_reader;
+    tox2::RsxCaptureReader v1_reader;
     CHECK(v1_reader.parse(v1_file, error));
     CHECK(v1_reader.startRegisters().vertex_default_written == (1u << 2));
     CHECK(v1_reader.startRegisters().regs == regs->regs && v1_reader.flipIndex() == 11);
@@ -6421,7 +6425,7 @@ void testRsxCapture() {
     CHECK(reader.parse(file, error));
 
     // The replay view serves only what was recorded, across page borders, and counts the rest.
-    dal::ReplayRsxMemoryView view;
+    tox2::ReplayRsxMemoryView view;
     const std::uint8_t recorded[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     view.add(0, 4092, recorded);
     std::uint8_t out[9] = {};
@@ -6432,33 +6436,33 @@ void testRsxCapture() {
     CHECK(!view.read(1, 4092, std::span<std::uint8_t>(out, 8)));
     CHECK(!view.read(0, 0xFFFFFFFCu, std::span<std::uint8_t>(out, 8)));
     CHECK(unimplementedCount("capture missing range") == 3);
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
 }
 
 // The in-memory captures of rsx_synthetic.h replay into the commands they describe.
 void testRsxSyntheticCaptures() {
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
     const auto replay = [](const std::vector<std::uint8_t>& file) {
-        dal::RsxCaptureReader reader;
+        tox2::RsxCaptureReader reader;
         std::string error;
         CHECK(reader.parse(file, error));
-        dal::ReplayRsxMemoryView view;
-        dal::RsxFrameBuilder builder(view);
-        dal::replayCapture(reader, view, builder);
+        tox2::ReplayRsxMemoryView view;
+        tox2::RsxFrameBuilder builder(view);
+        tox2::replayCapture(reader, view, builder);
         return builder.takeCommands();
     };
 
-    std::vector<dal::RsxCommand> commands = replay(dal::rsx_synthetic::makeClearCapture(0xFF405060));
-    CHECK(commands.size() == 2 && std::holds_alternative<dal::RsxClear>(commands[0]));
-    CHECK(std::get<dal::RsxClear>(commands[0]).color_argb == 0xFF405060 &&
-          std::get<dal::RsxClear>(commands[0]).mask == 0xF3);
-    CHECK(std::get<dal::RsxClear>(commands[0]).surfaces.color.width == dal::rsx_synthetic::kSurfaceSize);
-    CHECK(std::holds_alternative<dal::RsxFlip>(commands[1]) && std::get<dal::RsxFlip>(commands[1]).buffer == 0);
+    std::vector<tox2::RsxCommand> commands = replay(tox2::rsx_synthetic::makeClearCapture(0xFF405060));
+    CHECK(commands.size() == 2 && std::holds_alternative<tox2::RsxClear>(commands[0]));
+    CHECK(std::get<tox2::RsxClear>(commands[0]).color_argb == 0xFF405060 &&
+          std::get<tox2::RsxClear>(commands[0]).mask == 0xF3);
+    CHECK(std::get<tox2::RsxClear>(commands[0]).surfaces.color.width == tox2::rsx_synthetic::kSurfaceSize);
+    CHECK(std::holds_alternative<tox2::RsxFlip>(commands[1]) && std::get<tox2::RsxFlip>(commands[1]).buffer == 0);
 
-    commands = replay(dal::rsx_synthetic::makeQuadCapture());
-    CHECK(commands.size() == 3 && std::holds_alternative<dal::RsxDraw>(commands[1]));
-    const dal::RsxDraw& quad = std::get<dal::RsxDraw>(commands[1]);
-    CHECK(quad.primitive == dal::RsxPrimitive::TriangleStrip && quad.count == 4 && quad.attribs.size() == 2);
+    commands = replay(tox2::rsx_synthetic::makeQuadCapture());
+    CHECK(commands.size() == 3 && std::holds_alternative<tox2::RsxDraw>(commands[1]));
+    const tox2::RsxDraw& quad = std::get<tox2::RsxDraw>(commands[1]);
+    CHECK(quad.primitive == tox2::RsxPrimitive::TriangleStrip && quad.count == 4 && quad.attribs.size() == 2);
     CHECK(quad.attribs[0].slot == 0 && quad.attribs[0].type == 2 && quad.attribs[1].slot == 3 &&
           quad.attribs[1].type == 4);
     CHECK(quad.vertex_data.size() == 4 * 12 + 4 * 4 && quad.textures.empty());
@@ -6467,215 +6471,215 @@ void testRsxSyntheticCaptures() {
     // -0.5f, big-endian, is the first position component.
     CHECK(quad.vertex_data[0] == 0xBF && quad.vertex_data[1] == 0x00 && quad.vertex_data[2] == 0x00);
 
-    commands = replay(dal::rsx_synthetic::makeTexturedQuadCapture());
-    CHECK(commands.size() == 3 && std::holds_alternative<dal::RsxDraw>(commands[1]));
-    const dal::RsxDraw& textured = std::get<dal::RsxDraw>(commands[1]);
+    commands = replay(tox2::rsx_synthetic::makeTexturedQuadCapture());
+    CHECK(commands.size() == 3 && std::holds_alternative<tox2::RsxDraw>(commands[1]));
+    const tox2::RsxDraw& textured = std::get<tox2::RsxDraw>(commands[1]);
     CHECK(textured.textures.size() == 1 && textured.textures[0].rt_alias == -1 && textured.textures[0].width == 2);
     CHECK(textured.textures[0].data_size == 16 && textured.texture_data.size() == 16);
     CHECK(textured.texture_data[0] == 0xFF && textured.texture_data[1] == 0xFF && textured.texture_data[2] == 0x00);
     CHECK(unimplementedCount("capture missing range") == 0);
-    dal::rsxUnimplementedReset();
+    tox2::rsxUnimplementedReset();
 }
 
 void testRsxConsumer() {
-    using dal::FifoStatus;
-    using Interrupts = std::vector<std::pair<dal::RsxInterrupt, std::uint32_t>>;
+    using tox2::FifoStatus;
+    using Interrupts = std::vector<std::pair<tox2::RsxInterrupt, std::uint32_t>>;
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetRsxState();
-    dal::setRsxInterruptHook(nullptr);
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetRsxState();
+    tox2::setRsxInterruptHook(nullptr);
     g_interrupts.clear();
-    dal::Process& p = dal::process();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
     const std::uint32_t area = p.user1m.allocate(0x400000, 0x100000);
     CHECK(scratch != 0 && area != 0);
-    CHECK(dal::gcmInitBody(base, scratch, 0x10000, 0x100000, area, 0x200000) == 0);
+    CHECK(tox2::gcmInitBody(base, scratch, 0x10000, 0x100000, area, 0x200000) == 0);
 
     constexpr std::uint32_t kControl = 0x10100040, kLabels = 0x10300000, kDevice = 0x10000000;
     constexpr std::uint32_t kStart = 0x1000;
-    dal::RsxConsumer consumer(base);
+    tox2::RsxConsumer consumer(base);
     consumer.enableFrameBuilder();
     std::uint32_t at = kStart;
     const auto emit = [&](std::uint32_t method, std::initializer_list<std::uint32_t> args) {
-        dalWrite32(base, area + at, method | (static_cast<std::uint32_t>(args.size()) << 18));
+        tox2Write32(base, area + at, method | (static_cast<std::uint32_t>(args.size()) << 18));
         at += 4;
         for (const std::uint32_t arg : args) {
-            dalWrite32(base, area + at, arg);
+            tox2Write32(base, area + at, arg);
             at += 4;
         }
     };
     const auto run = [&] {
-        dalWrite32(base, kControl, at);
+        tox2Write32(base, kControl, at);
         return consumer.pump(100);
     };
-    const auto label = [&](std::uint32_t offset) { return dalRead32(base, kLabels + offset); };
+    const auto label = [&](std::uint32_t offset) { return tox2Read32(base, kLabels + offset); };
 
     // Back-end release swaps the red and blue bytes, texture-read release stores the value as is;
     // an unaligned offset is ignored.
-    emit(dal::kMethodNv4097SetSemaphoreOffset, {0x20});
-    emit(dal::kMethodNv4097BackEndWriteSemaphoreRelease, {0x11223344});
+    emit(tox2::kMethodNv4097SetSemaphoreOffset, {0x20});
+    emit(tox2::kMethodNv4097BackEndWriteSemaphoreRelease, {0x11223344});
     CHECK(run() == FifoStatus::Idle);
     CHECK(label(0x20) == 0x11443322);
-    CHECK(dalRead32(base, kControl + 4) == at);  // get follows put
-    emit(dal::kMethodNv4097SetSemaphoreOffset, {0x40});
-    emit(dal::kMethodNv4097TextureReadSemaphoreRelease, {0xAABBCCDD});
-    emit(dal::kMethodNv4097SetSemaphoreOffset, {0x14});
-    emit(dal::kMethodNv4097TextureReadSemaphoreRelease, {0x99});
+    CHECK(tox2Read32(base, kControl + 4) == at);  // get follows put
+    emit(tox2::kMethodNv4097SetSemaphoreOffset, {0x40});
+    emit(tox2::kMethodNv4097TextureReadSemaphoreRelease, {0xAABBCCDD});
+    emit(tox2::kMethodNv4097SetSemaphoreOffset, {0x14});
+    emit(tox2::kMethodNv4097TextureReadSemaphoreRelease, {0x99});
     CHECK(run() == FifoStatus::Idle);
     CHECK(label(0x40) == 0xAABBCCDD && label(0x14) == 0x1337BABE);
     CHECK(countContaining(lines, "unaligned offset 0x14") == 1);
     CHECK(!consumer.hasWork(at) && consumer.hasWork(at + 4));
 
     // The reference value goes to the control register.
-    emit(dal::kMethodNv406eSetReference, {0x1234});
-    CHECK(run() == FifoStatus::Idle && dalRead32(base, kControl + 8) == 0x1234);
+    emit(tox2::kMethodNv406eSetReference, {0x1234});
+    CHECK(run() == FifoStatus::Idle && tox2Read32(base, kControl + 8) == 0x1234);
 
     // An acquire that is not satisfied keeps get at its header; it completes once the label matches.
     const std::uint32_t acquire_at = at;
-    emit(dal::kMethodNv406eSemaphoreOffset, {0x80, 0x5555});
+    emit(tox2::kMethodNv406eSemaphoreOffset, {0x80, 0x5555});
     CHECK(run() == FifoStatus::Waiting);
-    CHECK(dalRead32(base, kControl + 4) == acquire_at && consumer.hasWork(at));
+    CHECK(tox2Read32(base, kControl + 4) == acquire_at && consumer.hasWork(at));
     CHECK(run() == FifoStatus::Waiting);
-    dalWrite32(base, kLabels + 0x80, 0x5555);
-    CHECK(run() == FifoStatus::Idle && dalRead32(base, kControl + 4) == at);
+    tox2Write32(base, kLabels + 0x80, 0x5555);
+    CHECK(run() == FifoStatus::Idle && tox2Read32(base, kControl + 4) == at);
 
     // NV406E release writes through the semaphore DMA; a zero into the device ready word becomes 1.
-    emit(dal::kMethodNv406eSemaphoreOffset, {0x84});
-    emit(dal::kMethodNv406eSemaphoreRelease, {0x777});
-    dalWrite32(base, kDevice + 0x30, 5);
-    emit(dal::kMethodNv406eSetContextDmaSemaphore, {0x56616661});
-    emit(dal::kMethodNv406eSemaphoreOffset, {0x30});
-    emit(dal::kMethodNv406eSemaphoreRelease, {0});
+    emit(tox2::kMethodNv406eSemaphoreOffset, {0x84});
+    emit(tox2::kMethodNv406eSemaphoreRelease, {0x777});
+    tox2Write32(base, kDevice + 0x30, 5);
+    emit(tox2::kMethodNv406eSetContextDmaSemaphore, {0x56616661});
+    emit(tox2::kMethodNv406eSemaphoreOffset, {0x30});
+    emit(tox2::kMethodNv406eSemaphoreRelease, {0});
     CHECK(run() == FifoStatus::Idle);
-    CHECK(label(0x84) == 0x777 && dalRead32(base, kDevice + 0x30) == 1);
+    CHECK(label(0x84) == 0x777 && tox2Read32(base, kDevice + 0x30) == 1);
 
     // Reports carry an increasing timer in nanoseconds and a zero value.
-    emit(dal::kMethodNv4097GetReport, {0x00000010});
+    emit(tox2::kMethodNv4097GetReport, {0x00000010});
     CHECK(run() == FifoStatus::Idle);
     const std::uint32_t report = kLabels + 0x1400;
-    const std::uint64_t first = dalRead64(base, report + 0x10);
-    CHECK(first != 0 && dalRead32(base, report + 0x18) == 0 && dalRead32(base, report + 0x1c) == 0);
-    CHECK(dalRead64(base, report + 0x20) == 0xFFFFFFFFFFFFFFFF);
-    emit(dal::kMethodNv4097GetReport, {0x00000020});
-    CHECK(run() == FifoStatus::Idle && dalRead64(base, report + 0x20) > first);
+    const std::uint64_t first = tox2Read64(base, report + 0x10);
+    CHECK(first != 0 && tox2Read32(base, report + 0x18) == 0 && tox2Read32(base, report + 0x1c) == 0);
+    CHECK(tox2Read64(base, report + 0x20) == 0xFFFFFFFFFFFFFFFF);
+    emit(tox2::kMethodNv4097GetReport, {0x00000020});
+    CHECK(run() == FifoStatus::Idle && tox2Read64(base, report + 0x20) > first);
 
     // A flip completes where its command executes, with vsync too: it clears the flip label, notifies the
     // hook, and the writes behind it are consumed before the next VBlank.
-    dal::RsxState& state = dal::rsxState();
+    tox2::RsxState& state = tox2::rsxState();
     state.requested_vsync = true;
-    state.flip_status = dal::kRsxFlipStatusWaiting;
-    dalWrite32(base, kLabels + 0x10, 0x1111);
-    dal::setRsxInterruptHook(&recordInterrupt);
-    emit(dal::kMethodGcmFlipCommand, {1});
-    emit(dal::kMethodNv4097SetSemaphoreOffset, {0x50});
-    emit(dal::kMethodNv4097TextureReadSemaphoreRelease, {0x55667788});
+    state.flip_status = tox2::kRsxFlipStatusWaiting;
+    tox2Write32(base, kLabels + 0x10, 0x1111);
+    tox2::setRsxInterruptHook(&recordInterrupt);
+    emit(tox2::kMethodGcmFlipCommand, {1});
+    emit(tox2::kMethodNv4097SetSemaphoreOffset, {0x50});
+    emit(tox2::kMethodNv4097TextureReadSemaphoreRelease, {0x55667788});
     CHECK(run() == FifoStatus::Idle && consumer.census().flips == 1);
     CHECK(state.vblank_count == 0 && label(0x50) == 0x55667788);
-    CHECK(state.flip_status == dal::kRsxFlipStatusDone && label(0x10) == 0);
-    CHECK(dalRead32(base, kControl + 4) == at);  // get follows put
-    CHECK((g_interrupts == Interrupts{{dal::RsxInterrupt::Flip, 1}}));
-    CHECK(countContaining(lines, "dal: rsx: first flip") == 1);
+    CHECK(state.flip_status == tox2::kRsxFlipStatusDone && label(0x10) == 0);
+    CHECK(tox2Read32(base, kControl + 4) == at);  // get follows put
+    CHECK((g_interrupts == Interrupts{{tox2::RsxInterrupt::Flip, 1}}));
+    CHECK(countContaining(lines, "tox2: rsx: first flip") == 1);
     // The frame builder ends the frame at the command, once.
-    std::vector<dal::RsxCommand> built = consumer.takeCommands();
-    CHECK(built.size() == 1 && std::holds_alternative<dal::RsxFlip>(built[0]));
-    CHECK(std::get<dal::RsxFlip>(built[0]).buffer == 1 && std::get<dal::RsxFlip>(built[0]).flip_index == 0);
+    std::vector<tox2::RsxCommand> built = consumer.takeCommands();
+    CHECK(built.size() == 1 && std::holds_alternative<tox2::RsxFlip>(built[0]));
+    CHECK(std::get<tox2::RsxFlip>(built[0]).buffer == 1 && std::get<tox2::RsxFlip>(built[0]).flip_index == 0);
     CHECK(run() == FifoStatus::Idle && consumer.takeCommands().empty());
     // A VBlank neither completes nor repeats a flip.
     consumer.vblankTick();
     CHECK(state.vblank_count == 1 && consumer.census().flips == 1);
     CHECK(consumer.pump(100) == FifoStatus::Idle && consumer.takeCommands().empty());
-    CHECK((g_interrupts == Interrupts{{dal::RsxInterrupt::Flip, 1}, {dal::RsxInterrupt::VBlank, 1}}));
+    CHECK((g_interrupts == Interrupts{{tox2::RsxInterrupt::Flip, 1}, {tox2::RsxInterrupt::VBlank, 1}}));
     // Two flips in a row (hsync) complete in one run as well.
     state.requested_vsync = false;
-    emit(dal::kMethodGcmFlipCommand, {2});
-    emit(dal::kMethodGcmFlipCommand, {2});
+    emit(tox2::kMethodGcmFlipCommand, {2});
+    emit(tox2::kMethodGcmFlipCommand, {2});
     CHECK(run() == FifoStatus::Idle && consumer.census().flips == 3);
     built = consumer.takeCommands();
-    CHECK(built.size() == 2 && std::get<dal::RsxFlip>(built[0]).buffer == 2 &&
-          std::get<dal::RsxFlip>(built[0]).flip_index == 1);
-    CHECK(std::get<dal::RsxFlip>(built[1]).flip_index == 2);
+    CHECK(built.size() == 2 && std::get<tox2::RsxFlip>(built[0]).buffer == 2 &&
+          std::get<tox2::RsxFlip>(built[0]).flip_index == 1);
+    CHECK(std::get<tox2::RsxFlip>(built[1]).flip_index == 2);
 
     // User commands reach the hook; without one they are only logged.
     g_interrupts.clear();
-    emit(dal::kMethodGcmSetUserCommand, {7});
-    emit(dal::kMethodGcmSetUserCommand + 4, {9});
+    emit(tox2::kMethodGcmSetUserCommand, {7});
+    emit(tox2::kMethodGcmSetUserCommand + 4, {9});
     CHECK(run() == FifoStatus::Idle);
-    CHECK((g_interrupts == Interrupts{{dal::RsxInterrupt::User, 7}, {dal::RsxInterrupt::User, 9}}));
-    dal::setRsxInterruptHook(nullptr);
-    emit(dal::kMethodGcmSetUserCommand, {3});
+    CHECK((g_interrupts == Interrupts{{tox2::RsxInterrupt::User, 7}, {tox2::RsxInterrupt::User, 9}}));
+    tox2::setRsxInterruptHook(nullptr);
+    emit(tox2::kMethodGcmSetUserCommand, {3});
     CHECK(run() == FifoStatus::Idle);
     CHECK(countContaining(lines, "pending user command cause 3") == 1);
 
     // NV308A inline blit: the color words land at offset + (x + i) * 4 + pitch * y, big-endian, in local
     // memory or through the IO map. The pitch is the high half of NV3062_SET_PITCH.
-    CHECK(dal::rsxInlineBlitOffset(0x01882180, 0x1000, 4, 0, 0) == 0x01882190);
-    CHECK(dal::rsxInlineBlitOffset(0x01882180, 0x1000, 4, 2, 3) == 0x01882190 + 12 + 0x2000);
-    CHECK(dal::rsxInlineBlitOffset(0xFFFFFFFC, 0xFFFF, 0xFFFF, 0xFFFF, 0) > 0xFFFFFFFFull);  // no wrap
+    CHECK(tox2::rsxInlineBlitOffset(0x01882180, 0x1000, 4, 0, 0) == 0x01882190);
+    CHECK(tox2::rsxInlineBlitOffset(0x01882180, 0x1000, 4, 2, 3) == 0x01882190 + 12 + 0x2000);
+    CHECK(tox2::rsxInlineBlitOffset(0xFFFFFFFC, 0xFFFF, 0xFFFF, 0xFFFF, 0) > 0xFFFFFFFFull);  // no wrap
     {
-        dal::rsxUnimplementedReset();
+        tox2::rsxUnimplementedReset();
         constexpr std::uint32_t kLocalOffset = 0x1000, kIoOffset = 0x8000;
         const std::uint32_t local_ea = 0xC0000000 + kLocalOffset;
         const std::uint32_t io_ea = area + kIoOffset;
         for (std::uint32_t i = 0; i < 8; i++) {
-            dalWrite32(base, local_ea + i * 4, 0xAAAAAAAA);
-            dalWrite32(base, io_ea + i * 4, 0xAAAAAAAA);
+            tox2Write32(base, local_ea + i * 4, 0xAAAAAAAA);
+            tox2Write32(base, io_ea + i * 4, 0xAAAAAAAA);
         }
         const auto blit = [&](std::uint32_t dma, std::uint32_t format, std::uint32_t offset, std::uint32_t point,
                               std::uint32_t width, std::initializer_list<std::uint32_t> words) {
-            emit(dal::kMethodNv3062SetColorFormat, {format, 0x10001000});  // format, pitch
-            if (dma != 0) emit(dal::kMethodNv3062SetContextDmaImageDestin, {dma});
-            emit(dal::kMethodNv3062SetOffsetDestin, {offset});
-            emit(dal::kMethodNv308aPoint, {point, width | (1u << 16), width | (1u << 16)});
-            emit(dal::kMethodNv308aColor, words);
+            emit(tox2::kMethodNv3062SetColorFormat, {format, 0x10001000});  // format, pitch
+            if (dma != 0) emit(tox2::kMethodNv3062SetContextDmaImageDestin, {dma});
+            emit(tox2::kMethodNv3062SetOffsetDestin, {offset});
+            emit(tox2::kMethodNv308aPoint, {point, width | (1u << 16), width | (1u << 16)});
+            emit(tox2::kMethodNv308aColor, words);
             CHECK(run() == FifoStatus::Idle);
         };
         // Point x = 4 (as in the game), 4 words, Y32; the destination DMA stays at its post-flip default (local).
         blit(0, 11, kLocalOffset - 16, 0x00000004, 4, {0x00000000, 0x3F80, 0x01020304, 0x0A0B0C0D});
-        CHECK(dalRead32(base, local_ea) == 0 && dalRead32(base, local_ea + 4) == 0x3F80);
-        CHECK(dalRead32(base, local_ea + 8) == 0x01020304 && dalRead32(base, local_ea + 12) == 0x0A0B0C0D);
+        CHECK(tox2Read32(base, local_ea) == 0 && tox2Read32(base, local_ea + 4) == 0x3F80);
+        CHECK(tox2Read32(base, local_ea + 8) == 0x01020304 && tox2Read32(base, local_ea + 12) == 0x0A0B0C0D);
         CHECK(base[local_ea + 8] == 0x01 && base[local_ea + 11] == 0x04);  // big-endian in guest memory
-        CHECK(dalRead32(base, local_ea + 16) == 0xAAAAAAAA);
+        CHECK(tox2Read32(base, local_ea + 16) == 0xAAAAAAAA);
         // A8R8G8B8 through the IO map, second row: y = 1 adds one pitch (0x1000).
-        blit(dal::kRsxContextDmaMain, 10, kIoOffset - 0x1000, 0x00010000, 2, {0x11111111, 0x22222222});
-        CHECK(dalRead32(base, io_ea) == 0x11111111 && dalRead32(base, io_ea + 4) == 0x22222222);
-        CHECK(dalRead32(base, io_ea + 8) == 0xAAAAAAAA);
+        blit(tox2::kRsxContextDmaMain, 10, kIoOffset - 0x1000, 0x00010000, 2, {0x11111111, 0x22222222});
+        CHECK(tox2Read32(base, io_ea) == 0x11111111 && tox2Read32(base, io_ea + 4) == 0x22222222);
+        CHECK(tox2Read32(base, io_ea + 8) == 0xAAAAAAAA);
         // Words beyond the width are dropped.
-        blit(dal::kRsxContextDmaLocal, 11, kLocalOffset + 32, 0, 1, {7, 8, 9});
-        CHECK(dalRead32(base, local_ea + 32) == 7 && dalRead32(base, local_ea + 36) != 8);
+        blit(tox2::kRsxContextDmaLocal, 11, kLocalOffset + 32, 0, 1, {7, 8, 9});
+        CHECK(tox2Read32(base, local_ea + 32) == 7 && tox2Read32(base, local_ea + 36) != 8);
         CHECK(unimplementedCount("method NV308A_COLOR destination out of range") == 0);
         // Formats that need a conversion write nothing and are counted.
-        dalWrite32(base, local_ea + 64, 0xAAAAAAAA);
-        blit(dal::kRsxContextDmaLocal, 4, kLocalOffset + 64, 0, 1, {0x55555555});
-        CHECK(dalRead32(base, local_ea + 64) == 0xAAAAAAAA && unimplementedCount("method NV308A_COLOR format 4") == 1);
+        tox2Write32(base, local_ea + 64, 0xAAAAAAAA);
+        blit(tox2::kRsxContextDmaLocal, 4, kLocalOffset + 64, 0, 1, {0x55555555});
+        CHECK(tox2Read32(base, local_ea + 64) == 0xAAAAAAAA && unimplementedCount("method NV308A_COLOR format 4") == 1);
         // Out-of-range destinations are skipped and reported once.
-        blit(dal::kRsxContextDmaLocal, 11, 0x0F900000, 0, 2, {1, 2});
-        blit(dal::kRsxContextDmaLocal, 11, 0xFFFFFFF0, 0x00FF0000, 1, {3});
-        blit(dal::kRsxContextDmaMain, 11, 0x3F000000, 0, 1, {4});
+        blit(tox2::kRsxContextDmaLocal, 11, 0x0F900000, 0, 2, {1, 2});
+        blit(tox2::kRsxContextDmaLocal, 11, 0xFFFFFFF0, 0x00FF0000, 1, {3});
+        blit(tox2::kRsxContextDmaMain, 11, 0x3F000000, 0, 1, {4});
         blit(0x12345678, 11, 0, 0, 1, {5});
-        blit(dal::kRsxContextDmaLocal, 11, kLocalOffset + 2, 0, 1, {6});  // unaligned
+        blit(tox2::kRsxContextDmaLocal, 11, kLocalOffset + 2, 0, 1, {6});  // unaligned
         CHECK(unimplementedCount("method NV308A_COLOR destination out of range") == 6);
         CHECK(countContaining(lines, "NV308A inline blit") == 1 && !consumer.faulted());
-        dal::rsxUnimplementedReset();
+        tox2::rsxUnimplementedReset();
     }
 
     // The census counts completed writes by register: a flip counts once.
-    const dal::RsxCensus census = consumer.census();
+    const tox2::RsxCensus census = consumer.census();
     const auto countOf = [&](std::uint32_t method) -> std::uint64_t {
         for (const auto& m : census.methods) {
             if (m.method == method) return m.count;
         }
         return 0;
     };
-    CHECK(countOf(dal::kMethodGcmFlipCommand) == 3 && countOf(dal::kMethodGcmSetUserCommand) == 2);
-    CHECK(countOf(dal::kMethodNv4097SetSemaphoreOffset) == 4 && countOf(dal::kMethodNv4097GetReport) == 2);
+    CHECK(countOf(tox2::kMethodGcmFlipCommand) == 3 && countOf(tox2::kMethodGcmSetUserCommand) == 2);
+    CHECK(countOf(tox2::kMethodNv4097SetSemaphoreOffset) == 4 && countOf(tox2::kMethodNv4097GetReport) == 2);
     CHECK(countOf(0x1234) == 0 && census.headers > 10);
 
     // A jump into unmapped IO space faults once; after that nothing is consumed.
-    dalWrite32(base, area + at, 0x20000000 | 0x0F000000);
+    tox2Write32(base, area + at, 0x20000000 | 0x0F000000);
     at += 4;
     CHECK(run() == FifoStatus::Fault && consumer.faulted());
     CHECK(countContaining(lines, "command fifo fault") == 1);
@@ -6688,8 +6692,8 @@ void testRsxConsumer() {
     {
         state.display[1] = {0x400000, 0x1400, 1280, 720};
         state.display_count = 2;
-        dalWrite32(base, kControl + 4, at);
-        dal::RsxConsumer capturing(base);
+        tox2Write32(base, kControl + 4, at);
+        tox2::RsxConsumer capturing(base);
         capturing.enableCapture({2});
         emit(0x0200, {1280u << 16});
         emit(0x0204, {720u << 16});
@@ -6704,7 +6708,7 @@ void testRsxConsumer() {
         emit(0x1D90, {0xFF102030});
         emit(0x1D8C, {0xFFFFFF00});
         emit(0x1D94, {0xF3});
-        emit(dal::kMethodGcmFlipCommand, {1});
+        emit(tox2::kMethodGcmFlipCommand, {1});
         // Frame 2 leaves the surface offset unset, which the context reset made 0. Its draw reads three
         // vertices of three floats from main memory at IO offset 0x80000.
         for (std::uint32_t i = 0; i < 36; i++) base[area + 0x80000 + i] = static_cast<std::uint8_t>(i + 1);
@@ -6714,86 +6718,86 @@ void testRsxConsumer() {
         emit(0x020C, {0x1400});
         emit(0x0220, {1});
         emit(0x1D94, {0xF3});
-        emit(dal::kMethodNv4097SetVertexDataArrayFormat, {2u | (3u << 4) | (12u << 8)});
-        emit(dal::kMethodNv4097SetVertexDataArrayOffset, {0x80080000});
-        emit(dal::kMethodNv4097SetBeginEnd, {5});
-        emit(dal::kMethodNv4097DrawArrays, {2u << 24});
-        emit(dal::kMethodNv4097SetBeginEnd, {0});
+        emit(tox2::kMethodNv4097SetVertexDataArrayFormat, {2u | (3u << 4) | (12u << 8)});
+        emit(tox2::kMethodNv4097SetVertexDataArrayOffset, {0x80080000});
+        emit(tox2::kMethodNv4097SetBeginEnd, {5});
+        emit(tox2::kMethodNv4097DrawArrays, {2u << 24});
+        emit(tox2::kMethodNv4097SetBeginEnd, {0});
         const std::uint32_t after_draw = at;
-        emit(dal::kMethodGcmFlipCommand, {2});
-        dalWrite32(base, kControl, at);
+        emit(tox2::kMethodGcmFlipCommand, {2});
+        tox2Write32(base, kControl, at);
 
         // The pump stops right after the draw end (a command of its own here, so get is published past it);
         // the draw is built when the commands are taken, and the rest of the frame follows on the next pump.
         CHECK(capturing.pump(200) == FifoStatus::Budget && capturing.stopAfterWrite());
-        CHECK(dalRead32(base, kControl + 4) == after_draw);
-        std::vector<dal::RsxCommand> live = capturing.takeCommands();
+        CHECK(tox2Read32(base, kControl + 4) == after_draw);
+        std::vector<tox2::RsxCommand> live = capturing.takeCommands();
         CHECK(!capturing.stopAfterWrite());
         CHECK(capturing.pump(200) == FifoStatus::Idle);
-        for (dal::RsxCommand& command : capturing.takeCommands()) live.push_back(std::move(command));
-        CHECK(live.size() == 5 && std::holds_alternative<dal::RsxClear>(live[2]) &&
-              std::holds_alternative<dal::RsxDraw>(live[3]) && std::holds_alternative<dal::RsxFlip>(live[4]));
-        CHECK(std::get<dal::RsxClear>(live[0]).surfaces.color.offset == 0x100000);
-        CHECK(std::get<dal::RsxClear>(live[2]).surfaces.color.offset == 0);
-        CHECK(std::get<dal::RsxFlip>(live[4]).flip_index == 1);
-        const dal::RsxDraw& draw = std::get<dal::RsxDraw>(live[3]);
+        for (tox2::RsxCommand& command : capturing.takeCommands()) live.push_back(std::move(command));
+        CHECK(live.size() == 5 && std::holds_alternative<tox2::RsxClear>(live[2]) &&
+              std::holds_alternative<tox2::RsxDraw>(live[3]) && std::holds_alternative<tox2::RsxFlip>(live[4]));
+        CHECK(std::get<tox2::RsxClear>(live[0]).surfaces.color.offset == 0x100000);
+        CHECK(std::get<tox2::RsxClear>(live[2]).surfaces.color.offset == 0);
+        CHECK(std::get<tox2::RsxFlip>(live[4]).flip_index == 1);
+        const tox2::RsxDraw& draw = std::get<tox2::RsxDraw>(live[3]);
         CHECK(draw.count == 3 && draw.vertex_data.size() == 36 && draw.vertex_data[0] == 1 &&
               draw.vertex_data[35] == 36);
 
-        std::vector<dal::RsxConsumer::FinishedCapture> captures = capturing.takeCaptures();
+        std::vector<tox2::RsxConsumer::FinishedCapture> captures = capturing.takeCaptures();
         CHECK(captures.size() == 1 && captures[0].frame == 2);
-        dal::RsxCaptureReader reader;
+        tox2::RsxCaptureReader reader;
         std::string error;
         CHECK(reader.parse(captures[0].file.flatten(), error));
         CHECK(reader.flipIndex() == 1);
         CHECK(reader.startRegisters().reg(0x0210) == 0 && reader.startRegisters().reg(0x0200) == 0);
-        CHECK(reader.startRegisters().reg(dal::kMethodGcmFlipCommand) == 1);  // the flip write itself landed
+        CHECK(reader.startRegisters().reg(tox2::kMethodGcmFlipCommand) == 1);  // the flip write itself landed
         CHECK(reader.surfaces().size() == 1 && reader.surfaces()[0].offset == 0x100000 &&
               reader.surfaces()[0].width == 1280);
         CHECK(reader.displayCount() == 2 && reader.display()[1].offset == 0x400000);
         CHECK(captures[0].writes == reader.writeCount() && captures[0].writes == 11);
 
         // The draw's memory reads were recorded ahead of its draw-end write, so the replay builds it too.
-        dal::ReplayRsxMemoryView view;
-        dal::RsxFrameBuilder replay_builder(view);
-        dal::replayCapture(reader, view, replay_builder);
-        const std::vector<dal::RsxCommand> replayed = replay_builder.takeCommands();
+        tox2::ReplayRsxMemoryView view;
+        tox2::RsxFrameBuilder replay_builder(view);
+        tox2::replayCapture(reader, view, replay_builder);
+        const std::vector<tox2::RsxCommand> replayed = replay_builder.takeCommands();
         CHECK(replayed.size() == 3 && sameCommand(live[2], replayed[0]) && sameCommand(live[3], replayed[1]) &&
               sameCommand(live[4], replayed[2]));
         CHECK(capturing.takeCaptures().empty());
     }
 
     // The census section is printed only while a provider is registered.
-    CHECK(dal::formatCensus().find("census: rsx") == std::string::npos);
-    dal::setRsxCensusProvider(&fakeRsxCensus);
-    const std::string text = dal::formatCensus();
+    CHECK(tox2::formatCensus().find("census: rsx") == std::string::npos);
+    tox2::setRsxCensusProvider(&fakeRsxCensus);
+    const std::string text = tox2::formatCensus();
     CHECK(text.find("census: rsx 120 headers, 3 distinct methods, 3 flips\n"
                     "  method 0x1808: 9\n"
                     "  method 0x1800: 5\n"
                     "  method 0x1d6c NV4097_SET_SEMAPHORE_OFFSET: 5\n") != std::string::npos);
     CHECK(text.find("interrupt handler calls") == std::string::npos);
-    dal::setRsxCensusProvider(&fakeRsxCensusWithHandlerCalls);
-    CHECK(dal::formatCensus().find("census: rsx 120 headers, 3 distinct methods, 3 flips\n"
-                                   "  interrupt handler calls: vblank 600, flip 0, user 2\n"
-                                   "  method 0x1808: 9\n") != std::string::npos);
+    tox2::setRsxCensusProvider(&fakeRsxCensusWithHandlerCalls);
+    CHECK(tox2::formatCensus().find("census: rsx 120 headers, 3 distinct methods, 3 flips\n"
+                                    "  interrupt handler calls: vblank 600, flip 0, user 2\n"
+                                    "  method 0x1808: 9\n") != std::string::npos);
 
-    dal::setRsxInterruptHook(nullptr);
-    dal::resetRsxState();
+    tox2::setRsxInterruptHook(nullptr);
+    tox2::resetRsxState();
     p.user1m.free(area);
     p.main.free(scratch);
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 void testCellGcmSys() {
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetRsxState();
-    dal::resetHostFunctions();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetRsxState();
+    tox2::resetHostFunctions();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -6832,7 +6836,7 @@ void testCellGcmSys() {
         UnbindTile,
         ImportCount
     };
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x055bd74d, "cellGcmSys", "cellGcmGetTiledPitchSize"},
             {0x00800010, 0x15bae46b, "cellGcmSys", "_cellGcmInitBody"},
             {0x00800020, 0x21ac3697, "cellGcmSys", "cellGcmAddressToOffset"},
@@ -6860,70 +6864,70 @@ void testCellGcmSys() {
             {0x00800180, 0xd8f88e1a, "cellGcmSys", "_cellGcmSetFlipCommandWithWaitLabel"},
             {0x00800190, 0xd9b7653e, "cellGcmSys", "cellGcmUnbindTile"},
     };
-    dal::installImports(imports, ImportCount);
+    tox2::installImports(imports, ImportCount);
     auto a = makeCaller(0x01000000);
-    std::lock_guard<dal::GuestLock> guard(dal::guestLock());
-    DalPpuContext* ctx = &a->context();
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+    Tox2PpuContext* ctx = &a->context();
     ctx->gpr[1] = stack;
     const auto call = [&](std::uint32_t index, std::initializer_list<std::uint64_t> args) {
         int reg = 3;
         for (const std::uint64_t value : args) ctx->gpr[reg++] = value;
-        dalHleCall(ctx, base, index);
+        tox2HleCall(ctx, base, index);
         return static_cast<std::uint32_t>(ctx->gpr[3]);
     };
     const auto offsetOf = [&](std::uint32_t address, std::uint32_t& offset) {
-        dalWrite32(base, out, 0xdeadbeef);
+        tox2Write32(base, out, 0xdeadbeef);
         const std::uint32_t result = call(AddressToOffset, {address, out});
-        offset = dalRead32(base, out);
+        offset = tox2Read32(base, out);
         return result;
     };
 
     // Before initialisation the configuration is zero and nothing is mappable.
     std::memset(base + config, 0xaa, 0x20);
     call(GetConfig, {config});
-    CHECK(dalRead32(base, config) == 0 && dalRead32(base, config + 8) == 0 && dalRead32(base, config + 0x14) == 0);
+    CHECK(tox2Read32(base, config) == 0 && tox2Read32(base, config + 8) == 0 && tox2Read32(base, config + 0x14) == 0);
     std::uint32_t offset = 0;
     CHECK(offsetOf(0xc0000000, offset) == kFailure && offset == 0xdeadbeef);
     CHECK(call(TiledPitch, {0x1400}) == 0x1400);
 
     // Handlers are ignored and the zcull request is refused before initialisation.
     call(SetFlipHandler, {0x1234});
-    CHECK(dal::rsxState().flip_handler == 0);
+    CHECK(tox2::rsxState().flip_handler == 0);
     CHECK(call(BindZcull, {0, 0x1000, 0x500, 0x300, 0, 2, 0, 0}) == kInval);
 
     // A failing init releases what it committed and can be retried.
-    CHECK(dal::gcmInitBody(base, out, 0x10000, io_size, io_ea + 0x1000, local_size) == kFailure);
-    CHECK(!dal::rsxState().initialized && !p.memory.isCommitted(dal::kRsxDeviceAddr, 4));
-    CHECK(dal::gcmInitBody(base, out, 0x10000, io_size, 0x2f000000, local_size) == kFailure);  // uncommitted
+    CHECK(tox2::gcmInitBody(base, out, 0x10000, io_size, io_ea + 0x1000, local_size) == kFailure);
+    CHECK(!tox2::rsxState().initialized && !p.memory.isCommitted(tox2::kRsxDeviceAddr, 4));
+    CHECK(tox2::gcmInitBody(base, out, 0x10000, io_size, 0x2f000000, local_size) == kFailure);  // uncommitted
 
-    CHECK(dal::gcmInitBody(base, out, 0x10000, io_size, io_ea, local_size) == 0);
-    CHECK(dal::gcmInitBody(base, out, 0x10000, io_size, io_ea, local_size) == kFailure);  // second init
-    const dal::RsxState& state = dal::rsxState();
+    CHECK(tox2::gcmInitBody(base, out, 0x10000, io_size, io_ea, local_size) == 0);
+    CHECK(tox2::gcmInitBody(base, out, 0x10000, io_size, io_ea, local_size) == kFailure);  // second init
+    const tox2::RsxState& state = tox2::rsxState();
     const std::uint32_t callback = state.wrap_callback;
     CHECK(callback != 0);
-    CHECK(dalRead32(base, out) == 0x10000000);
-    CHECK(dalRead32(base, 0x10000000) == io_ea + 0x1000);
-    CHECK(dalRead32(base, 0x10000004) == io_ea + 0x8000 - 4);
-    CHECK(dalRead32(base, 0x10000008) == io_ea + 0x1000);
-    CHECK(dalRead32(base, 0x1000000c) == callback);
-    CHECK(dalRead32(base, 0x10000030) == 1);
-    CHECK(dalRead32(base, 0x10100040) == 0x1000 && dalRead32(base, 0x10100044) == 0x1000);
-    CHECK(dalRead32(base, 0x10100048) == 0xffffffff);
-    CHECK(dalRead32(base, 0x10200008) == local_size && dalRead32(base, 0x10200010) == 500000000);
-    CHECK(dalRead32(base, 0x1020002c) == 0x1000 && dalRead32(base, 0x10200034) == 0x1400);
-    CHECK(dalRead32(base, 0x10300000) == 0x1337c0d3 && dalRead32(base, 0x1030000c) == 0x1337f001);
-    CHECK(dalRead32(base, 0x10300ffc) == 0x1337f001);
-    CHECK(dalRead64(base, 0x10301000) == ~std::uint64_t{0} && dalRead64(base, 0x10301008) == 0);
-    CHECK(dalRead64(base, 0x10301400) == ~std::uint64_t{0} && dalRead32(base, 0x10301408) == 0);
-    CHECK(dalRead32(base, 0x1030140c) == 0xffffffff);
+    CHECK(tox2Read32(base, out) == 0x10000000);
+    CHECK(tox2Read32(base, 0x10000000) == io_ea + 0x1000);
+    CHECK(tox2Read32(base, 0x10000004) == io_ea + 0x8000 - 4);
+    CHECK(tox2Read32(base, 0x10000008) == io_ea + 0x1000);
+    CHECK(tox2Read32(base, 0x1000000c) == callback);
+    CHECK(tox2Read32(base, 0x10000030) == 1);
+    CHECK(tox2Read32(base, 0x10100040) == 0x1000 && tox2Read32(base, 0x10100044) == 0x1000);
+    CHECK(tox2Read32(base, 0x10100048) == 0xffffffff);
+    CHECK(tox2Read32(base, 0x10200008) == local_size && tox2Read32(base, 0x10200010) == 500000000);
+    CHECK(tox2Read32(base, 0x1020002c) == 0x1000 && tox2Read32(base, 0x10200034) == 0x1400);
+    CHECK(tox2Read32(base, 0x10300000) == 0x1337c0d3 && tox2Read32(base, 0x1030000c) == 0x1337f001);
+    CHECK(tox2Read32(base, 0x10300ffc) == 0x1337f001);
+    CHECK(tox2Read64(base, 0x10301000) == ~std::uint64_t{0} && tox2Read64(base, 0x10301008) == 0);
+    CHECK(tox2Read64(base, 0x10301400) == ~std::uint64_t{0} && tox2Read32(base, 0x10301408) == 0);
+    CHECK(tox2Read32(base, 0x1030140c) == 0xffffffff);
     CHECK(p.memory.isCommitted(0xc0000000, local_size) && !p.memory.isCommitted(0xc0000000 + local_size, 0x1000));
 
     std::memset(base + config, 0xaa, 0x20);
     call(GetConfig, {config});
-    CHECK(dalRead32(base, config + 0x00) == 0xc0000000 && dalRead32(base, config + 0x04) == io_ea);
-    CHECK(dalRead32(base, config + 0x08) == local_size && dalRead32(base, config + 0x0c) == io_size);
-    CHECK(dalRead32(base, config + 0x10) == 650000000 && dalRead32(base, config + 0x14) == 500000000);
-    CHECK(dalRead8(base, config + 0x18) == 0xaa);
+    CHECK(tox2Read32(base, config + 0x00) == 0xc0000000 && tox2Read32(base, config + 0x04) == io_ea);
+    CHECK(tox2Read32(base, config + 0x08) == local_size && tox2Read32(base, config + 0x0c) == io_size);
+    CHECK(tox2Read32(base, config + 0x10) == 650000000 && tox2Read32(base, config + 0x14) == 500000000);
+    CHECK(tox2Read8(base, config + 0x18) == 0xaa);
 
     CHECK(call(ControlRegister, {}) == 0x10100040);
     CHECK(call(CommandWords, {}) == 0x400 && call(SegmentWords, {}) == 0x100);
@@ -6944,23 +6948,23 @@ void testCellGcmSys() {
     // The IO area mapped at init: io page 0. cellGcmMapMainMemory takes the first free pages.
     CHECK(offsetOf(io_ea + 8, offset) == 0 && offset == 8);
     const std::uint32_t ea1 = io_ea + 0x100000, ea2 = io_ea + 0x200000;
-    dalWrite32(base, out, 0);
-    CHECK(call(MapMain, {ea1, 0x100000, out}) == 0 && dalRead32(base, out) == 0x100000);
-    CHECK(call(MapMain, {ea2, 0x200000, out}) == 0 && dalRead32(base, out) == 0x200000);
+    tox2Write32(base, out, 0);
+    CHECK(call(MapMain, {ea1, 0x100000, out}) == 0 && tox2Read32(base, out) == 0x100000);
+    CHECK(call(MapMain, {ea2, 0x200000, out}) == 0 && tox2Read32(base, out) == 0x200000);
     CHECK(offsetOf(ea1 + 0x1234, offset) == 0 && offset == 0x101234);
     CHECK(offsetOf(ea2 + 0x1fffff, offset) == 0 && offset == 0x3fffff);
     std::uint32_t ea = 0;
-    CHECK(dal::rsxIoToEa(0x101234, ea) && ea == ea1 + 0x1234);
-    CHECK(!dal::rsxIoToEa(0x400000, ea) && !dal::rsxIoToEa(0x10000000, ea));
+    CHECK(tox2::rsxIoToEa(0x101234, ea) && ea == ea1 + 0x1234);
+    CHECK(!tox2::rsxIoToEa(0x400000, ea) && !tox2::rsxIoToEa(0x10000000, ea));
 
     // Rejected mappings write nothing.
-    dalWrite32(base, out, 0xdeadbeef);
+    tox2Write32(base, out, 0xdeadbeef);
     CHECK(call(MapMain, {ea1, 0, out}) == kFailure);
     CHECK(call(MapMain, {ea1 + 0x1000, 0x100000, out}) == kFailure);
     CHECK(call(MapMain, {ea1, 0x180000, out}) == kFailure);
     CHECK(call(MapMain, {0x2f000000, 0x100000, out}) == kInval);  // not committed guest memory
     CHECK(call(MapMain, {ea1, 0x10000000, out}) == kNoIoPageTable);
-    CHECK(dalRead32(base, out) == 0xdeadbeef);
+    CHECK(tox2Read32(base, out) == 0xdeadbeef);
 
     // Local memory, unmapped addresses and the end of the local range.
     CHECK(offsetOf(0xc0000000, offset) == 0 && offset == 0);
@@ -6977,42 +6981,42 @@ void testCellGcmSys() {
     CHECK(call(UnmapEa, {ea2}) == kFailure);
     CHECK(call(UnmapEa, {0xc0000000}) == kFailure);
     CHECK(call(UnmapEa, {ea1}) == 0);
-    CHECK(call(MapMain, {ea2 + 0x100000, 0x100000, out}) == 0 && dalRead32(base, out) == 0x100000);
+    CHECK(call(MapMain, {ea2 + 0x100000, 0x100000, out}) == 0 && tox2Read32(base, out) == 0x100000);
     CHECK(offsetOf(ea2 + 0x100000, offset) == 0 && offset == 0x100000);
 
     // The wrap callback flushes put, jumps to the next fragment and wraps around after the last.
-    const std::uint32_t context = dal::kRsxDeviceAddr;
-    const auto wrap = [&] { return dal::callGuestFunction(ctx, base, callback, {context, 0}); };
-    dalWrite32(base, context + 8, io_ea + 0x1010);
-    dalWrite32(base, 0x10100044, 0x1000);
+    const std::uint32_t context = tox2::kRsxDeviceAddr;
+    const auto wrap = [&] { return tox2::callGuestFunction(ctx, base, callback, {context, 0}); };
+    tox2Write32(base, context + 8, io_ea + 0x1010);
+    tox2Write32(base, 0x10100044, 0x1000);
     CHECK(wrap() == 0);
-    CHECK(dalRead32(base, 0x10100040) == 0x1010);
-    CHECK(dalRead32(base, io_ea + 0x1010) == (0x20000000 | 0x8000));
-    CHECK(dalRead32(base, context) == io_ea + 0x8000 && dalRead32(base, context + 8) == io_ea + 0x8000);
-    CHECK(dalRead32(base, context + 4) == io_ea + 0x10000 - 4);
+    CHECK(tox2Read32(base, 0x10100040) == 0x1010);
+    CHECK(tox2Read32(base, io_ea + 0x1010) == (0x20000000 | 0x8000));
+    CHECK(tox2Read32(base, context) == io_ea + 0x8000 && tox2Read32(base, context + 8) == io_ea + 0x8000);
+    CHECK(tox2Read32(base, context + 4) == io_ea + 0x10000 - 4);
     CHECK(ctx->gpr[1] == stack);
 
-    dalWrite32(base, 0x10100044, 0x9000);  // the consumer is past the new fragment
-    dalWrite32(base, context + 8, io_ea + 0x8040);
+    tox2Write32(base, 0x10100044, 0x9000);  // the consumer is past the new fragment
+    tox2Write32(base, context + 8, io_ea + 0x8040);
     CHECK(wrap() == 0);
-    CHECK(dalRead32(base, 0x10100040) == 0x8040);
-    CHECK(dalRead32(base, io_ea + 0x8040) == (0x20000000 | 0x1000));
-    CHECK(dalRead32(base, context) == io_ea + 0x1000 && dalRead32(base, context + 8) == io_ea + 0x1000);
-    CHECK(dalRead32(base, context + 4) == io_ea + 0x8000 - 4);
+    CHECK(tox2Read32(base, 0x10100040) == 0x8040);
+    CHECK(tox2Read32(base, io_ea + 0x8040) == (0x20000000 | 0x1000));
+    CHECK(tox2Read32(base, context) == io_ea + 0x1000 && tox2Read32(base, context + 8) == io_ea + 0x1000);
+    CHECK(tox2Read32(base, context + 4) == io_ea + 0x8000 - 4);
 
     // With get inside the new fragment the callback waits until the consumer moves it.
-    dalWrite32(base, 0x10100044, 0x8010);
-    dalWrite32(base, context + 8, io_ea + 0x1020);
+    tox2Write32(base, 0x10100044, 0x8010);
+    tox2Write32(base, context + 8, io_ea + 0x1020);
     std::thread consumer([] {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        std::lock_guard<dal::GuestLock> lock(dal::guestLock());
-        dalWrite32(dal::process().memory.base(), 0x10100044, 0x1020);
-        dal::rsxGetAdvanced().notify_all();
+        std::lock_guard<tox2::GuestLock> lock(tox2::guestLock());
+        tox2Write32(tox2::process().memory.base(), 0x10100044, 0x1020);
+        tox2::rsxGetAdvanced().notify_all();
     });
     const auto started = std::chrono::steady_clock::now();
     CHECK(wrap() == 0);
     CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(80));
-    CHECK(dalRead32(base, context) == io_ea + 0x8000);
+    CHECK(tox2Read32(base, context) == io_ea + 0x8000);
     consumer.join();
 
     // Display buffers, flip mode and status, handlers.
@@ -7025,9 +7029,9 @@ void testCellGcmSys() {
     CHECK(!state.requested_vsync);
     call(SetFlipMode, {2});
     CHECK(state.requested_vsync);
-    CHECK(state.flip_status == dal::kRsxFlipStatusDone);
+    CHECK(state.flip_status == tox2::kRsxFlipStatusDone);
     call(ResetFlipStatus, {});
-    CHECK(state.flip_status == dal::kRsxFlipStatusWaiting);
+    CHECK(state.flip_status == tox2::kRsxFlipStatusWaiting);
     call(GetLastFlipTime, {});
     CHECK(ctx->gpr[3] == state.last_flip_time);
     call(SetFlipHandler, {0x1111});
@@ -7037,21 +7041,21 @@ void testCellGcmSys() {
 
     // Old-API flip commands: header = method | count << 18 at `current`, no put update.
     const std::uint32_t cmd = io_ea + 0x2000;
-    dalWrite32(base, context + 8, cmd);
-    dalWrite32(base, 0x10100040, 0x4444);
+    tox2Write32(base, context + 8, cmd);
+    tox2Write32(base, 0x10100040, 0x4444);
     CHECK(call(SetFlipCommand, {context, 3}) == context);  // void: r3 is not written
-    CHECK(dalRead32(base, cmd) == 0x4feac && dalRead32(base, cmd + 4) == 3);
-    CHECK(dalRead32(base, context + 8) == cmd + 8 && dalRead32(base, 0x10100040) == 0x4444);
-    dalWrite32(base, cmd + 8, 0xdeadbeef);
+    CHECK(tox2Read32(base, cmd) == 0x4feac && tox2Read32(base, cmd + 4) == 3);
+    CHECK(tox2Read32(base, context + 8) == cmd + 8 && tox2Read32(base, 0x10100040) == 0x4444);
+    tox2Write32(base, cmd + 8, 0xdeadbeef);
     call(SetFlipCommand, {context, 8});
-    CHECK(dalRead32(base, cmd + 8) == 0xdeadbeef && dalRead32(base, context + 8) == cmd + 8);
+    CHECK(tox2Read32(base, cmd + 8) == 0xdeadbeef && tox2Read32(base, context + 8) == cmd + 8);
     call(FlipWithLabel, {context, 2, 5, 0x77});
-    CHECK(dalRead32(base, cmd + 8) == 0x80064 && dalRead32(base, cmd + 12) == 0x50 &&
-          dalRead32(base, cmd + 16) == 0x77);
-    CHECK(dalRead32(base, cmd + 20) == 0x4feac && dalRead32(base, cmd + 24) == 2);
-    CHECK(dalRead32(base, context + 8) == cmd + 28);
+    CHECK(tox2Read32(base, cmd + 8) == 0x80064 && tox2Read32(base, cmd + 12) == 0x50 &&
+          tox2Read32(base, cmd + 16) == 0x77);
+    CHECK(tox2Read32(base, cmd + 20) == 0x4feac && tox2Read32(base, cmd + 24) == 2);
+    CHECK(tox2Read32(base, context + 8) == cmd + 28);
     call(FlipWithLabel, {context, 9, 1, 2});  // the label wait is written, the flip is refused
-    CHECK(dalRead32(base, cmd + 28) == 0x80064 && dalRead32(base, context + 8) == cmd + 40);
+    CHECK(tox2Read32(base, cmd + 28) == 0x80064 && tox2Read32(base, context + 8) == cmd + 40);
     CHECK(countContaining(lines, "display buffer id 8 is out of range") == 1);
     CHECK(countContaining(lines, "display buffer id 9 is out of range") == 1);
 
@@ -7078,14 +7082,14 @@ void testCellGcmSys() {
     // Zcull: the last four arguments (zCullFormat, sFunc, sRef, sMask) come from the stack.
     const auto bindZcull = [&](std::uint32_t index, std::uint32_t offset, std::uint32_t width, std::uint32_t height,
                                std::uint32_t cull_start) {
-        dalWrite64(base, stack + 0x70, 1);
-        dalWrite64(base, stack + 0x78, 3);
-        dalWrite64(base, stack + 0x80, 0x41);
-        dalWrite64(base, stack + 0x88, 0xff);
+        tox2Write64(base, stack + 0x70, 1);
+        tox2Write64(base, stack + 0x78, 3);
+        tox2Write64(base, stack + 0x80, 0x41);
+        tox2Write64(base, stack + 0x88, 0xff);
         return call(BindZcull, {index, offset, width, height, cull_start, 2, 0, 0});
     };
     CHECK(bindZcull(0, 0x100000, 0x500, 0x300, 0x1000) == 0);
-    const dal::RsxZcull& zcull = state.zculls[0];
+    const tox2::RsxZcull& zcull = state.zculls[0];
     CHECK(zcull.bound && zcull.offset == 0x100000 && zcull.width == 0x500 && zcull.height == 0x300);
     CHECK(zcull.cull_start == 0x1000 && zcull.z_format == 2 && zcull.aa_format == 0 && zcull.zcull_dir == 0);
     CHECK(zcull.zcull_format == 1 && zcull.s_func == 3 && zcull.s_ref == 0x41 && zcull.s_mask == 0xff);
@@ -7098,28 +7102,28 @@ void testCellGcmSys() {
     CHECK(call(UnbindZcull, {0}) == 0 && !zcull.bound);
     CHECK(call(UnbindZcull, {8}) == kInvalidValue);
 
-    CHECK(countContaining(lines, "dal: default hle") == 0);
-    CHECK(dal::formatCensus().find("cellGcmSys::cellGcmMapMainMemory: 8 [impl]") != std::string::npos);
+    CHECK(countContaining(lines, "tox2: default hle") == 0);
+    CHECK(tox2::formatCensus().find("cellGcmSys::cellGcmMapMainMemory: 8 [impl]") != std::string::npos);
 
-    dal::resetRsxState();
-    CHECK(!p.memory.isCommitted(0xc0000000, 4) && !dal::rsxState().initialized);
-    dal::resetHostFunctions();
+    tox2::resetRsxState();
+    CHECK(!p.memory.isCommitted(0xc0000000, 4) && !tox2::rsxState().initialized);
+    tox2::resetHostFunctions();
     p.user1m.free(area);
     p.main.free(scratch);
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 void testSpurs() {
     std::vector<std::string> lines;
-    dal::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetSyncObjects();
-    dal::resetSpuThreadGroups();
-    dal::resetSpurs();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetSyncObjects();
+    tox2::resetSpuThreadGroups();
+    tox2::resetSpurs();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -7129,20 +7133,20 @@ void testSpurs() {
     const std::uint32_t spup = scratch + 0x8180;
     constexpr std::uint32_t kErrNull = 0x80410711, kErrAlign = 0x80410710, kErrInval = 0x80410702;
 
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x95180230, "cellSpurs", "_cellSpursAttributeInitialize"},
             {0x00800010, 0x30aa96c4, "cellSpurs", "cellSpursInitializeWithAttribute2"},
             {0x00800020, 0x39c173fb, "cellSpurs", "cellSpursGetSpuThreadGroupId"},
             {0x00800030, 0xca4c4600, "cellSpurs", "cellSpursFinalize"},
     };
-    dal::installImports(imports, 4);
+    tox2::installImports(imports, 4);
     auto a = makeCaller(0x01000000);
-    std::lock_guard<dal::GuestLock> guard(dal::guestLock());
-    DalPpuContext* ctx = &a->context();
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+    Tox2PpuContext* ctx = &a->context();
     const auto call = [&](std::uint32_t index, std::initializer_list<std::uint64_t> args) {
         int reg = 3;
         for (const std::uint64_t value : args) ctx->gpr[reg++] = value;
-        dalHleCall(ctx, base, index);
+        tox2HleCall(ctx, base, index);
         return static_cast<std::uint32_t>(ctx->gpr[3]);
     };
 
@@ -7150,18 +7154,18 @@ void testSpurs() {
     std::memset(base + attr, 0xaa, 512);
     CHECK(call(0, {0, 1, 0x330000, 5, 100, 1000, 1}) == kErrNull);
     CHECK(call(0, {attr + 4, 1, 0x330000, 5, 100, 1000, 1}) == kErrAlign);
-    CHECK(dalRead8(base, attr) == 0xaa);  // a rejected call writes nothing
+    CHECK(tox2Read8(base, attr) == 0xaa);  // a rejected call writes nothing
     CHECK(call(0, {attr, 1, 0x330000, 5, 100, 1000, 1}) == 0);
-    CHECK(dalRead32(base, attr + 0x00) == 1);
-    CHECK(dalRead32(base, attr + 0x04) == 0x330000);
-    CHECK(dalRead32(base, attr + 0x08) == 5);
-    CHECK(dalRead32(base, attr + 0x0c) == 100);
-    CHECK(dalRead32(base, attr + 0x10) == 1000);
-    CHECK(dalRead8(base, attr + 0x14) == 1);
-    CHECK(dalRead32(base, attr + 0x24) == 0 && dalRead32(base, attr + 0x28) == 0);
-    CHECK(dalRead8(base, attr + 0x1ff) == 0);
+    CHECK(tox2Read32(base, attr + 0x00) == 1);
+    CHECK(tox2Read32(base, attr + 0x04) == 0x330000);
+    CHECK(tox2Read32(base, attr + 0x08) == 5);
+    CHECK(tox2Read32(base, attr + 0x0c) == 100);
+    CHECK(tox2Read32(base, attr + 0x10) == 1000);
+    CHECK(tox2Read8(base, attr + 0x14) == 1);
+    CHECK(tox2Read32(base, attr + 0x24) == 0 && tox2Read32(base, attr + 0x28) == 0);
+    CHECK(tox2Read8(base, attr + 0x1ff) == 0);
     CHECK(call(0, {attr, 2, 0x330000, 6, 3, 4, 0}) == 0);
-    CHECK(dalRead8(base, attr + 0x14) == 0);
+    CHECK(tox2Read8(base, attr + 0x14) == 0);
 
     // cellSpursInitializeWithAttribute2: argument checks first.
     CHECK(call(1, {spurs, 0}) == kErrNull);
@@ -7169,80 +7173,80 @@ void testSpurs() {
     CHECK(call(1, {0, attr}) == kErrNull);
     CHECK(call(1, {spurs + 0x80 + 8, attr}) == kErrAlign);
     CHECK(call(1, {spurs + 0x10, attr}) == kErrAlign);
-    dalWrite32(base, attr, 3);
+    tox2Write32(base, attr, 3);
     CHECK(call(1, {spurs, attr}) == kErrInval);  // revision > 2
-    dalWrite32(base, attr, 2);
-    dalWrite32(base, attr + 0x24, 16);
+    tox2Write32(base, attr, 2);
+    tox2Write32(base, attr + 0x24, 16);
     CHECK(call(1, {spurs, attr}) == kErrInval);  // prefix longer than 15 bytes
-    dalWrite32(base, attr + 0x24, 3);
+    tox2Write32(base, attr + 0x24, 3);
     std::memcpy(base + attr + 0x15, "abc", 3);
-    dalWrite8(base, attr + 0x14, 1);  // exitIfNoWork
+    tox2Write8(base, attr + 0x14, 1);  // exitIfNoWork
     std::memset(base + spurs, 0x55, 0x2000);
     CHECK(call(1, {spurs, attr}) == 0);
 
-    CHECK(dalRead32(base, spurs + 0xda0) == 2);         // revision
-    CHECK(dalRead32(base, spurs + 0xda4) == 0x330000);  // sdkVersion
-    CHECK(dalRead32(base, spurs + 0xd80) == 5);         // exit-if-no-work | second version
-    CHECK(dalRead32(base, spurs + 0xd84) == 3);         // spuPriority
-    CHECK(dalRead32(base, spurs + 0xd88) == 4);         // ppuPriority
-    CHECK(dalRead8(base, spurs + 0x76) == 6);           // nSpus
-    CHECK(dalRead8(base, spurs + 0x74) == 0xc0);        // 32 workloads | exit if no work
-    CHECK(dalRead8(base, spurs + 0xd9b) == 3);          // prefixSize
+    CHECK(tox2Read32(base, spurs + 0xda0) == 2);         // revision
+    CHECK(tox2Read32(base, spurs + 0xda4) == 0x330000);  // sdkVersion
+    CHECK(tox2Read32(base, spurs + 0xd80) == 5);         // exit-if-no-work | second version
+    CHECK(tox2Read32(base, spurs + 0xd84) == 3);         // spuPriority
+    CHECK(tox2Read32(base, spurs + 0xd88) == 4);         // ppuPriority
+    CHECK(tox2Read8(base, spurs + 0x76) == 6);           // nSpus
+    CHECK(tox2Read8(base, spurs + 0x74) == 0xc0);        // 32 workloads | exit if no work
+    CHECK(tox2Read8(base, spurs + 0xd9b) == 3);          // prefixSize
     CHECK(std::memcmp(base + spurs + 0xd8c, "abc", 3) == 0);
-    CHECK(dalRead64(base, spurs + 0xd20) == 0xffffffffull);
-    CHECK(dalRead8(base, spurs + 0x1fff) == 0 && dalRead8(base, spurs + 0x500) == 0);  // zeroed
-    const std::uint32_t group = dalRead32(base, spurs + 0xd30);
+    CHECK(tox2Read64(base, spurs + 0xd20) == 0xffffffffull);
+    CHECK(tox2Read8(base, spurs + 0x1fff) == 0 && tox2Read8(base, spurs + 0x500) == 0);  // zeroed
+    const std::uint32_t group = tox2Read32(base, spurs + 0xd30);
     CHECK(group == 0x04000100);
-    CHECK(dal::spuThreadGroupExists(group));
-    CHECK(countContaining(lines, "dal: spurs: initialized") == 1);
+    CHECK(tox2::spuThreadGroupExists(group));
+    CHECK(countContaining(lines, "tox2: spurs: initialized") == 1);
 
     // cellSpursGetSpuThreadGroupId writes the id.
-    dalWrite32(base, out, 0);
+    tox2Write32(base, out, 0);
     CHECK(call(2, {spurs, 0}) == kErrNull);
     CHECK(call(2, {0, out}) == kErrNull);
     CHECK(call(2, {spurs + 8, out}) == kErrAlign);
     CHECK(call(2, {spurs, out}) == 0);
-    CHECK(dalRead32(base, out) == group);
+    CHECK(tox2Read32(base, out) == group);
 
     // sc 251 accepts the SPURS group id and rejects ids that were never handed out.
-    dalWrite32(base, queue_attr, 1);
-    dalWrite32(base, queue_attr + 4, 2);
+    tox2Write32(base, queue_attr, 1);
+    tox2Write32(base, queue_attr + 4, 2);
     CHECK(syscallAs(*a, 128, queue_id_out, queue_attr, 0, 2) == 0);
-    const std::uint32_t queue = dalRead32(base, queue_id_out);
+    const std::uint32_t queue = tox2Read32(base, queue_id_out);
     CHECK(syscallAs(*a, 251, group, queue, 1, spup) == 0);
-    CHECK(syscallAs(*a, 251, group + 0x100, queue, 1, spup) == err(dal::kCellEsrch));
+    CHECK(syscallAs(*a, 251, group + 0x100, queue, 1, spup) == err(tox2::kCellEsrch));
 
     // A second instance gets the next id; finalize releases only its own group.
     const std::uint32_t spurs2 = scratch + 0x2000;
     CHECK(call(1, {spurs2, attr}) == 0);
-    CHECK(dalRead32(base, spurs2 + 0xd30) == group + 0x100);
+    CHECK(tox2Read32(base, spurs2 + 0xd30) == group + 0x100);
     CHECK(call(3, {0}) == kErrNull);
     CHECK(call(3, {spurs2 + 8}) == kErrAlign);
     CHECK(call(3, {spurs2}) == 0);
-    CHECK(!dal::spuThreadGroupExists(group + 0x100));
-    CHECK(dal::spuThreadGroupExists(group));
+    CHECK(!tox2::spuThreadGroupExists(group + 0x100));
+    CHECK(tox2::spuThreadGroupExists(group));
     CHECK(call(3, {spurs}) == 0);
-    CHECK(!dal::spuThreadGroupExists(group));
-    CHECK(syscallAs(*a, 251, group, queue, 1, spup) == err(dal::kCellEsrch));
+    CHECK(!tox2::spuThreadGroupExists(group));
+    CHECK(syscallAs(*a, 251, group, queue, 1, spup) == err(tox2::kCellEsrch));
 
-    const std::string census = dal::formatCensus();
+    const std::string census = tox2::formatCensus();
     CHECK(census.find("cellSpurs::cellSpursInitializeWithAttribute2: ") != std::string::npos);
-    CHECK(countContaining(lines, "dal: default hle") == 0);
+    CHECK(countContaining(lines, "tox2: default hle") == 0);
 
-    dal::resetSpurs();
-    dal::resetSpuThreadGroups();
+    tox2::resetSpurs();
+    tox2::resetSpuThreadGroups();
     p.main.free(scratch);
-    dal::resetSyncObjects();
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::resetSyncObjects();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 void testLwmutex() {
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetSyncObjects();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -7250,48 +7254,48 @@ void testLwmutex() {
     const std::uint32_t lw = scratch, lw2 = scratch + 0x20, attr = scratch + 0x40;
 
     constexpr const char* kModule = "sysPrxForUser";
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x2f85c0ef, kModule, "sys_lwmutex_create"},
             {0x00800010, 0xc3476d0c, kModule, "sys_lwmutex_destroy"},
             {0x00800020, 0x1573dc3f, kModule, "sys_lwmutex_lock"},
             {0x00800030, 0xaeb78725, kModule, "sys_lwmutex_trylock"},
             {0x00800040, 0x1bc200f4, kModule, "sys_lwmutex_unlock"},
     };
-    dal::installImports(imports, 5);
+    tox2::installImports(imports, 5);
     enum { kCreate, kDestroy, kLock, kTryLock, kUnlock };
-    auto call = [&](dal::GuestThread& caller, std::uint32_t index, std::uint64_t r3, std::uint64_t r4 = 0) {
-        DalPpuContext* ctx = &caller.context();
+    auto call = [&](tox2::GuestThread& caller, std::uint32_t index, std::uint64_t r3, std::uint64_t r4 = 0) {
+        Tox2PpuContext* ctx = &caller.context();
         ctx->gpr[3] = r3;
         ctx->gpr[4] = r4;
-        dalHleCall(ctx, base, index);
+        tox2HleCall(ctx, base, index);
         return ctx->gpr[3];
     };
     auto a = makeCaller(0x01000000);
     auto b = makeCaller(0x01000001);
 
-    dalWrite32(base, attr, 2);
-    dalWrite32(base, attr + 4, 0x10);
+    tox2Write32(base, attr, 2);
+    tox2Write32(base, attr + 4, 0x10);
     CHECK(call(*a, kCreate, lw, attr) == 0);
-    CHECK(dalRead32(base, lw) == dal::kLwmutexFree);
-    CHECK(dalRead32(base, lw + 8) == 0x12);
-    CHECK(dalRead32(base, lw + 16) == 0x95000000);
+    CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree);
+    CHECK(tox2Read32(base, lw + 8) == 0x12);
+    CHECK(tox2Read32(base, lw + 16) == 0x95000000);
 
     CHECK(call(*a, kLock, lw, 0) == 0);
-    CHECK(dalRead32(base, lw) == 0x01000000);
+    CHECK(tox2Read32(base, lw) == 0x01000000);
     CHECK(call(*a, kLock, lw, 0) == 0);  // recursive
-    CHECK(dalRead32(base, lw + 12) == 1);
+    CHECK(tox2Read32(base, lw + 12) == 1);
     CHECK(call(*a, kTryLock, lw) == 0);
-    CHECK(dalRead32(base, lw + 12) == 2);
-    CHECK(call(*b, kTryLock, lw) == err(dal::kCellEbusy));
-    CHECK(call(*b, kUnlock, lw) == err(dal::kCellEperm));
-    CHECK(call(*a, kDestroy, lw) == err(dal::kCellEbusy));
-    CHECK(call(*b, kDestroy, lw) == err(dal::kCellEbusy));
+    CHECK(tox2Read32(base, lw + 12) == 2);
+    CHECK(call(*b, kTryLock, lw) == err(tox2::kCellEbusy));
+    CHECK(call(*b, kUnlock, lw) == err(tox2::kCellEperm));
+    CHECK(call(*a, kDestroy, lw) == err(tox2::kCellEbusy));
+    CHECK(call(*b, kDestroy, lw) == err(tox2::kCellEbusy));
     CHECK(call(*a, kUnlock, lw) == 0);
     CHECK(call(*a, kUnlock, lw) == 0);
-    CHECK(dalRead32(base, lw + 12) == 0);
-    CHECK(dalRead32(base, lw) == 0x01000000);
+    CHECK(tox2Read32(base, lw + 12) == 0);
+    CHECK(tox2Read32(base, lw) == 0x01000000);
     CHECK(call(*a, kUnlock, lw) == 0);
-    CHECK(dalRead32(base, lw) == dal::kLwmutexFree);
+    CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree);
 
     // Contention: the second thread blocks until the owner unlocks, and the waiter count shows in
     // the guest struct meanwhile.
@@ -7299,71 +7303,71 @@ void testLwmutex() {
     std::atomic<bool> b_ready{false};
     std::uint64_t b_result = ~0ull;
     {
-        std::lock_guard<dal::GuestLock> guard(dal::guestLock());
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
         std::thread worker([&] {
-            std::lock_guard<dal::GuestLock> worker_guard(dal::guestLock());
+            std::lock_guard<tox2::GuestLock> worker_guard(tox2::guestLock());
             b_ready = true;
             b_result = call(*b, kLock, lw, 0);
         });
-        dal::guestLock().unlock();
+        tox2::guestLock().unlock();
         while (!b_ready) std::this_thread::yield();
-        dal::guestLock().lock();
-        CHECK(dalRead32(base, lw + 4) == 1);
+        tox2::guestLock().lock();
+        CHECK(tox2Read32(base, lw + 4) == 1);
         CHECK(call(*a, kUnlock, lw) == 0);
-        dal::guestLock().unlock();
+        tox2::guestLock().unlock();
         worker.join();
-        dal::guestLock().lock();
+        tox2::guestLock().lock();
     }
     CHECK(b_result == 0);
-    CHECK(dalRead32(base, lw) == 0x01000001);
-    CHECK(dalRead32(base, lw + 4) == 0);
+    CHECK(tox2Read32(base, lw) == 0x01000001);
+    CHECK(tox2Read32(base, lw + 4) == 0);
     CHECK(call(*b, kUnlock, lw) == 0);
 
     // A timed lock on a held lwmutex gives up with ETIMEDOUT.
     CHECK(call(*a, kLock, lw, 0) == 0);
     {
-        std::lock_guard<dal::GuestLock> guard(dal::guestLock());
-        CHECK(call(*b, kLock, lw, 1000) == err(dal::kCellEtimedout));
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        CHECK(call(*b, kLock, lw, 1000) == err(tox2::kCellEtimedout));
     }
     CHECK(call(*a, kUnlock, lw) == 0);
 
     // Non-recursive: relock is EDEADLK; a destroyed lwmutex is dead.
-    dalWrite32(base, attr, 1);
-    dalWrite32(base, attr + 4, 0x20);
+    tox2Write32(base, attr, 1);
+    tox2Write32(base, attr + 4, 0x20);
     CHECK(call(*a, kCreate, lw2, attr) == 0);
     CHECK(call(*a, kLock, lw2, 0) == 0);
-    CHECK(call(*a, kLock, lw2, 0) == err(dal::kCellEdeadlk));
+    CHECK(call(*a, kLock, lw2, 0) == err(tox2::kCellEdeadlk));
     CHECK(call(*a, kUnlock, lw2) == 0);
     CHECK(call(*a, kDestroy, lw2) == 0);
-    CHECK(dalRead32(base, lw2) == dal::kLwmutexDead);
-    CHECK(call(*a, kLock, lw2, 0) == err(dal::kCellEinval));
-    CHECK(call(*a, kTryLock, lw2) == err(dal::kCellEinval));
+    CHECK(tox2Read32(base, lw2) == tox2::kLwmutexDead);
+    CHECK(call(*a, kLock, lw2, 0) == err(tox2::kCellEinval));
+    CHECK(call(*a, kTryLock, lw2) == err(tox2::kCellEinval));
 
-    dalWrite32(base, attr + 4, 0x30);
-    CHECK(call(*a, kCreate, lw2, attr) == err(dal::kCellEinval));
-    dalWrite32(base, attr, 3);
-    dalWrite32(base, attr + 4, 0x10);
-    CHECK(call(*a, kCreate, lw2, attr) == err(dal::kCellEinval));
+    tox2Write32(base, attr + 4, 0x30);
+    CHECK(call(*a, kCreate, lw2, attr) == err(tox2::kCellEinval));
+    tox2Write32(base, attr, 3);
+    tox2Write32(base, attr + 4, 0x10);
+    CHECK(call(*a, kCreate, lw2, attr) == err(tox2::kCellEinval));
 
     // The process-internal objects take the first ids of their kinds.
-    dal::resetSyncObjects();
-    dal::createProcessSyncObjects(base);
-    const dal::ProcessSyncObjects& objects = dal::processSyncObjects();
-    CHECK(dalRead32(base, objects.atexit_lwmutex + 16) == 0x95000000);
-    CHECK(dalRead32(base, objects.prx_lwmutex + 16) == 0x95000100);
+    tox2::resetSyncObjects();
+    tox2::createProcessSyncObjects(base);
+    const tox2::ProcessSyncObjects& objects = tox2::processSyncObjects();
+    CHECK(tox2Read32(base, objects.atexit_lwmutex + 16) == 0x95000000);
+    CHECK(tox2Read32(base, objects.prx_lwmutex + 16) == 0x95000100);
     CHECK(objects.once_mutex == 0x85000000 && objects.exit_mutex == 0x85000100);
 
     p.main.free(scratch);
-    dal::resetSyncObjects();
-    dal::setLogSink({});
-    dal::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::setLogSink({});
+    tox2::resetCensus();
 }
 
 // What the entry function of the guest threads below saw; written under the guest lock.
 std::uint64_t g_entry_arg, g_entry_r2, g_entry_r4, g_entry_r13;
 std::uint32_t g_entry_runs, g_once_runs;
 
-DAL_PPU_FUNC(ppuThreadEntry) {
+TOX2_PPU_FUNC(ppuThreadEntry) {
     g_entry_runs++;
     g_entry_arg = ctx->gpr[3];
     g_entry_r2 = ctx->gpr[2];
@@ -7371,24 +7375,24 @@ DAL_PPU_FUNC(ppuThreadEntry) {
     g_entry_r13 = ctx->gpr[13];
     if (ctx->gpr[3] == 5) {
         ctx->gpr[3] = 0x77;
-        dalHleCall(ctx, base, 3);  // sys_ppu_thread_exit: does not return
+        tox2HleCall(ctx, base, 3);  // sys_ppu_thread_exit: does not return
         return;
     }
     ctx->gpr[3] += 100;  // a C return ends the thread with r3 as the value
 }
 
-DAL_PPU_FUNC(ppuOnceInit) {
+TOX2_PPU_FUNC(ppuOnceInit) {
     (void)ctx;
     (void)base;
     g_once_runs++;
 }
 
 void testPpuThreads() {
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetSyncObjects();
-    dal::resetPpuThreadState();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::resetPpuThreadState();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -7397,26 +7401,26 @@ void testPpuThreads() {
     const std::uint32_t once_ctrl = scratch + 0x30, name = scratch + 0x40, join_out = scratch + 0x80;
     const std::uint32_t tls_image = scratch + 0x100;
 
-    const DalFuncMapping mappings[] = {{0x10200, ppuThreadEntry}, {0x10210, ppuOnceInit}};
-    dalRegisterFuncs(mappings, 2);
-    dalWrite32(base, opd_entry, 0x10200);
-    dalWrite32(base, opd_entry + 4, 0x1234);
-    dalWrite32(base, opd_init, 0x10210);
-    dalWrite32(base, opd_init + 4, 0x4321);
+    const Tox2FuncMapping mappings[] = {{0x10200, ppuThreadEntry}, {0x10210, ppuOnceInit}};
+    tox2RegisterFuncs(mappings, 2);
+    tox2Write32(base, opd_entry, 0x10200);
+    tox2Write32(base, opd_entry + 4, 0x1234);
+    tox2Write32(base, opd_init, 0x10210);
+    tox2Write32(base, opd_init + 4, 0x4321);
 
     constexpr const char* kModule = "sysPrxForUser";
-    const DalImportInfo imports[] = {
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x24a1ea07, kModule, "sys_ppu_thread_create"},
             {0x00800010, 0x350d454e, kModule, "sys_ppu_thread_get_id"},
             {0x00800020, 0xa3e3be68, kModule, "sys_ppu_thread_once"},
             {0x00800030, 0xaff080a4, kModule, "sys_ppu_thread_exit"},
     };
-    dal::installImports(imports, 4);
+    tox2::installImports(imports, 4);
     enum { kCreate, kGetId, kOnce };
-    auto call = [&](dal::GuestThread& caller, std::uint32_t index, std::uint64_t r3 = 0, std::uint64_t r4 = 0,
+    auto call = [&](tox2::GuestThread& caller, std::uint32_t index, std::uint64_t r3 = 0, std::uint64_t r4 = 0,
                     std::uint64_t r5 = 0, std::uint64_t r6 = 0, std::uint64_t r7 = 0, std::uint64_t r8 = 0,
                     std::uint64_t r9 = 0) {
-        DalPpuContext* ctx = &caller.context();
+        Tox2PpuContext* ctx = &caller.context();
         ctx->gpr[3] = r3;
         ctx->gpr[4] = r4;
         ctx->gpr[5] = r5;
@@ -7424,30 +7428,30 @@ void testPpuThreads() {
         ctx->gpr[7] = r7;
         ctx->gpr[8] = r8;
         ctx->gpr[9] = r9;
-        dalHleCall(ctx, base, index);
+        tox2HleCall(ctx, base, index);
         return ctx->gpr[3];
     };
 
     // The guest lock is held throughout: blocking calls release it while they wait.
-    std::lock_guard<dal::GuestLock> guard(dal::guestLock());
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
     auto caller = makeCaller(0x0e000000);
 
-    dalWrite32(base, tls_image, 0xCAFEF00D);
-    auto boot_ctx = std::make_unique<DalPpuContext>();
-    CHECK(dal::initializeTls(boot_ctx.get(), base, 0x01000000, tls_image, 4, 0x20) != 0);
-    const std::uint32_t probe = dal::allocateTls();
-    dal::freeTls(probe);
+    tox2Write32(base, tls_image, 0xCAFEF00D);
+    auto boot_ctx = std::make_unique<Tox2PpuContext>();
+    CHECK(tox2::initializeTls(boot_ctx.get(), base, 0x01000000, tls_image, 4, 0x20) != 0);
+    const std::uint32_t probe = tox2::allocateTls();
+    tox2::freeTls(probe);
     CHECK(probe != 0);
 
     // Creation errors give the TLS block back.
-    CHECK(call(*caller, kCreate, id_out, 0, 1, 500, 0x10000, 1, 0) == err(dal::kCellEfault));
-    CHECK(call(*caller, kCreate, id_out, opd_entry, 1, 3072, 0x10000, 1, 0) == err(dal::kCellEinval));
+    CHECK(call(*caller, kCreate, id_out, 0, 1, 500, 0x10000, 1, 0) == err(tox2::kCellEfault));
+    CHECK(call(*caller, kCreate, id_out, opd_entry, 1, 3072, 0x10000, 1, 0) == err(tox2::kCellEinval));
     CHECK(call(*caller, kCreate, id_out, opd_entry, 1, static_cast<std::uint64_t>(-1), 0x10000, 1, 0) ==
-          err(dal::kCellEinval));
-    CHECK(call(*caller, kCreate, id_out, opd_entry, 1, 500, 0x10000, 3, 0) == err(dal::kCellEperm));
-    CHECK(call(*caller, kCreate, 0, opd_entry, 1, 500, 0x10000, 1, 0) == err(dal::kCellEnomem));
-    const std::uint32_t probe2 = dal::allocateTls();
-    dal::freeTls(probe2);
+          err(tox2::kCellEinval));
+    CHECK(call(*caller, kCreate, id_out, opd_entry, 1, 500, 0x10000, 3, 0) == err(tox2::kCellEperm));
+    CHECK(call(*caller, kCreate, 0, opd_entry, 1, 500, 0x10000, 1, 0) == err(tox2::kCellEnomem));
+    const std::uint32_t probe2 = tox2::allocateTls();
+    tox2::freeTls(probe2);
     CHECK(probe2 == probe);
     CHECK(g_entry_runs == 0);
 
@@ -7455,8 +7459,8 @@ void testPpuThreads() {
     const char long_name[] = "a-thread-name-that-is-far-longer-than-27-characters";
     std::memcpy(base + name, long_name, sizeof(long_name));
     CHECK(call(*caller, kCreate, id_out, opd_entry, 7, 500, 0x10000, 1, name) == 0);
-    const auto id = static_cast<std::uint32_t>(dalRead64(base, id_out));
-    dal::GuestThread* thread = dal::findThread(id);
+    const auto id = static_cast<std::uint32_t>(tox2Read64(base, id_out));
+    tox2::GuestThread* thread = tox2::findThread(id);
     CHECK(thread != nullptr && thread->id() == id);
     if (thread != nullptr) {
         CHECK(thread->name() == std::string(long_name, 27));
@@ -7466,79 +7470,79 @@ void testPpuThreads() {
         CHECK(std::memcmp(base + thread->stackAddr(), "STACKGRD", 8) == 0);
     }
     CHECK(syscallAs(*caller, 44, id, join_out) == 0);
-    CHECK(dalRead64(base, join_out) == 107);
+    CHECK(tox2Read64(base, join_out) == 107);
     CHECK(g_entry_runs == 1 && g_entry_arg == 7 && g_entry_r4 == 0 && g_entry_r2 == 0x1234);
     CHECK(g_entry_r13 == probe);
-    CHECK(syscallAs(*caller, 44, id, join_out) == err(dal::kCellEsrch));  // already joined
-    CHECK(syscallAs(*caller, 48, id, join_out) == err(dal::kCellEsrch));
+    CHECK(syscallAs(*caller, 44, id, join_out) == err(tox2::kCellEsrch));  // already joined
+    CHECK(syscallAs(*caller, 48, id, join_out) == err(tox2::kCellEsrch));
 
     // Leaving through sys_ppu_thread_exit returns the TLS block and reports the exit value.
     CHECK(call(*caller, kCreate, id_out, opd_entry, 5, 500, 0x4000, 1, 0) == 0);
-    const auto id2 = static_cast<std::uint32_t>(dalRead64(base, id_out));
+    const auto id2 = static_cast<std::uint32_t>(tox2Read64(base, id_out));
     CHECK(id2 == id + 1);
     CHECK(syscallAs(*caller, 44, id2, join_out) == 0);
-    CHECK(dalRead64(base, join_out) == 0x77);
-    const std::uint32_t probe3 = dal::allocateTls();
-    dal::freeTls(probe3);
+    CHECK(tox2Read64(base, join_out) == 0x77);
+    const std::uint32_t probe3 = tox2::allocateTls();
+    tox2::freeTls(probe3);
     CHECK(probe3 == probe);
-    CHECK(syscallAs(*caller, 44, id2, 0) == err(dal::kCellEsrch));
+    CHECK(syscallAs(*caller, 44, id2, 0) == err(tox2::kCellEsrch));
 
     // A detached thread cannot be joined; a missing result pointer is reported after the join.
     CHECK(call(*caller, kCreate, id_out, opd_entry, 1, 500, 0x4000, 0, 0) == 0);
-    const auto id3 = static_cast<std::uint32_t>(dalRead64(base, id_out));
-    CHECK(syscallAs(*caller, 44, id3, join_out) == err(dal::kCellEinval));
+    const auto id3 = static_cast<std::uint32_t>(tox2Read64(base, id_out));
+    CHECK(syscallAs(*caller, 44, id3, join_out) == err(tox2::kCellEinval));
     CHECK(call(*caller, kCreate, id_out, opd_entry, 2, 500, 0x4000, 1, 0) == 0);
-    const auto id4 = static_cast<std::uint32_t>(dalRead64(base, id_out));
-    CHECK(syscallAs(*caller, 44, id4, 0) == err(dal::kCellEfault));
-    while (dal::findThread(id3)->state() != dal::ThreadState::Exited) {
+    const auto id4 = static_cast<std::uint32_t>(tox2Read64(base, id_out));
+    CHECK(syscallAs(*caller, 44, id4, 0) == err(tox2::kCellEfault));
+    while (tox2::findThread(id3)->state() != tox2::ThreadState::Exited) {
         syscallAs(*caller, 141, 1000);  // sleeping releases the guest lock
     }
-    CHECK(syscallAs(*caller, 47, id3, 100) == err(dal::kCellEsrch));  // detached and gone
+    CHECK(syscallAs(*caller, 47, id3, 100) == err(tox2::kCellEsrch));  // detached and gone
     CHECK(g_entry_runs == 4);
 
     // The interrupt flag creates the thread without starting it.
     CHECK(call(*caller, kCreate, id_out, opd_entry, 1, 500, 0x4000, 2, 0) == 0);
-    const auto id5 = static_cast<std::uint32_t>(dalRead64(base, id_out));
-    CHECK(dal::findThread(id5) != nullptr && dal::findThread(id5)->state() == dal::ThreadState::Created);
+    const auto id5 = static_cast<std::uint32_t>(tox2Read64(base, id_out));
+    CHECK(tox2::findThread(id5) != nullptr && tox2::findThread(id5)->state() == tox2::ThreadState::Created);
     CHECK(g_entry_runs == 4);
 
     // join: self and unknown ids.
-    CHECK(syscallAs(*caller, 44, 0x0e000000, join_out) == err(dal::kCellEdeadlk));
-    CHECK(syscallAs(*caller, 44, 0x0e0000f0, join_out) == err(dal::kCellEsrch));
+    CHECK(syscallAs(*caller, 44, 0x0e000000, join_out) == err(tox2::kCellEdeadlk));
+    CHECK(syscallAs(*caller, 44, 0x0e0000f0, join_out) == err(tox2::kCellEsrch));
 
     // Priority is stored; the caller is not registered, so it is found through its context.
     CHECK(syscallAs(*caller, 47, 0x0e000000, 1234) == 0);
     CHECK(syscallAs(*caller, 48, 0x0e000000, join_out) == 0);
-    CHECK(dalRead32(base, join_out) == 1234);
-    CHECK(syscallAs(*caller, 47, 0x0e000000, 3072) == err(dal::kCellEinval));
-    CHECK(syscallAs(*caller, 47, 0x0e000000, static_cast<std::uint64_t>(-1)) == err(dal::kCellEinval));
-    CHECK(syscallAs(*caller, 47, 0x0e0000f0, 100) == err(dal::kCellEsrch));
-    CHECK(syscallAs(*caller, 48, 0x0e0000f0, join_out) == err(dal::kCellEsrch));
+    CHECK(tox2Read32(base, join_out) == 1234);
+    CHECK(syscallAs(*caller, 47, 0x0e000000, 3072) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*caller, 47, 0x0e000000, static_cast<std::uint64_t>(-1)) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*caller, 47, 0x0e0000f0, 100) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*caller, 48, 0x0e0000f0, join_out) == err(tox2::kCellEsrch));
     CHECK(syscallAs(*caller, 47, id5, 77) == 0);
-    CHECK(dal::findThread(id5)->priority() == 77);
+    CHECK(tox2::findThread(id5)->priority() == 77);
 
     // yield: CELL_CANCEL when no other thread waits for the lock.
     CHECK(syscallAs(*caller, 43) == 1);
 
     // sys_ppu_thread_get_id writes the id of the calling thread as a BE u64.
-    dalWrite64(base, id_out, ~0ull);
+    tox2Write64(base, id_out, ~0ull);
     CHECK(call(*caller, kGetId, id_out) == 0);
-    CHECK(dalRead64(base, id_out) == 0x0e000000);
+    CHECK(tox2Read64(base, id_out) == 0x0e000000);
 
     // sys_ppu_thread_once runs the initialiser once and leaves the mutex unlocked.
-    dalWrite32(base, once_ctrl, dal::kOnceInit);
+    tox2Write32(base, once_ctrl, tox2::kOnceInit);
     call(*caller, kOnce, once_ctrl, opd_init);
     call(*caller, kOnce, once_ctrl, opd_init);
-    CHECK(g_once_runs == 1 && dalRead32(base, once_ctrl) == dal::kDoneInit);
-    CHECK(dal::mutexTryLock(&caller->context(), dal::processSyncObjects().once_mutex) == 0);
-    CHECK(dal::mutexUnlock(&caller->context(), dal::processSyncObjects().once_mutex) == 0);
+    CHECK(g_once_runs == 1 && tox2Read32(base, once_ctrl) == tox2::kDoneInit);
+    CHECK(tox2::mutexTryLock(&caller->context(), tox2::processSyncObjects().once_mutex) == 0);
+    CHECK(tox2::mutexUnlock(&caller->context(), tox2::processSyncObjects().once_mutex) == 0);
 
     p.main.free(scratch);
-    dalRegisterFuncs(nullptr, 0);
-    dal::resetSyncObjects();
-    dal::resetPpuThreadState();
-    dal::setLogSink({});
-    dal::resetCensus();
+    tox2RegisterFuncs(nullptr, 0);
+    tox2::resetSyncObjects();
+    tox2::resetPpuThreadState();
+    tox2::setLogSink({});
+    tox2::resetCensus();
 }
 
 // Inputs and results of the priority creation test; written under the guest lock.
@@ -7553,17 +7557,17 @@ struct PrioScenario {
 PrioScenario g_prio;
 std::condition_variable_any g_prio_cv;
 
-DAL_PPU_FUNC(prioChildEntry) {
+TOX2_PPU_FUNC(prioChildEntry) {
     (void)ctx;
-    dalWrite32(base, g_prio.word_addr, 1);
+    tox2Write32(base, g_prio.word_addr, 1);
 }
 
-DAL_PPU_FUNC(prioCreatorEntry) {
+TOX2_PPU_FUNC(prioCreatorEntry) {
     if (g_prio.set_priority_to >= 0) {
         ctx->gpr[11] = 47;  // sys_ppu_thread_set_priority(self, prio)
-        ctx->gpr[3] = static_cast<dal::GuestThread*>(ctx->runtime)->id();
+        ctx->gpr[3] = static_cast<tox2::GuestThread*>(ctx->runtime)->id();
         ctx->gpr[4] = static_cast<std::uint64_t>(g_prio.set_priority_to);
-        dalSyscall(ctx, base, 0x10000);
+        tox2Syscall(ctx, base, 0x10000);
     }
     ctx->gpr[3] = g_prio.id_out;
     ctx->gpr[4] = g_prio.opd_child;
@@ -7572,20 +7576,20 @@ DAL_PPU_FUNC(prioCreatorEntry) {
     ctx->gpr[7] = 0x4000;
     ctx->gpr[8] = g_prio.flags;
     ctx->gpr[9] = 0;
-    dalHleCall(ctx, base, 0);  // sys_ppu_thread_create, no blocking call after it
+    tox2HleCall(ctx, base, 0);  // sys_ppu_thread_create, no blocking call after it
     g_prio.create_result = static_cast<std::uint32_t>(ctx->gpr[3]);
-    g_prio.seen_after_create = dalRead32(base, g_prio.word_addr);
+    g_prio.seen_after_create = tox2Read32(base, g_prio.word_addr);
     g_prio.done = true;
     g_prio_cv.notify_all();
     ctx->gpr[3] = 0;
 }
 
 void testPpuThreadCreatePriority() {
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetSyncObjects();
-    dal::resetPpuThreadState();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::resetPpuThreadState();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
@@ -7593,26 +7597,26 @@ void testPpuThreadCreatePriority() {
     const std::uint32_t opd_child = scratch + 0x10, opd_creator = scratch + 0x20;
     const std::uint32_t tls_image = scratch + 0x100;
 
-    const DalFuncMapping mappings[] = {{0x10300, prioChildEntry}, {0x10310, prioCreatorEntry}};
-    dalRegisterFuncs(mappings, 2);
-    dalWrite32(base, opd_child, 0x10300);
-    dalWrite32(base, opd_child + 4, 0x1111);
-    dalWrite32(base, opd_creator, 0x10310);
-    dalWrite32(base, opd_creator + 4, 0x2222);
-    const DalImportInfo imports[] = {
+    const Tox2FuncMapping mappings[] = {{0x10300, prioChildEntry}, {0x10310, prioCreatorEntry}};
+    tox2RegisterFuncs(mappings, 2);
+    tox2Write32(base, opd_child, 0x10300);
+    tox2Write32(base, opd_child + 4, 0x1111);
+    tox2Write32(base, opd_creator, 0x10310);
+    tox2Write32(base, opd_creator + 4, 0x2222);
+    const Tox2ImportInfo imports[] = {
             {0x00800000, 0x24a1ea07, "sysPrxForUser", "sys_ppu_thread_create"},
     };
-    dal::installImports(imports, 1);
+    tox2::installImports(imports, 1);
 
-    std::lock_guard<dal::GuestLock> guard(dal::guestLock());
-    dalWrite32(base, tls_image, 0xCAFEF00D);
-    auto boot_ctx = std::make_unique<DalPpuContext>();
-    CHECK(dal::initializeTls(boot_ctx.get(), base, 0x01000000, tls_image, 4, 0x20) != 0);
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+    tox2Write32(base, tls_image, 0xCAFEF00D);
+    auto boot_ctx = std::make_unique<Tox2PpuContext>();
+    CHECK(tox2::initializeTls(boot_ctx.get(), base, 0x01000000, tls_image, 4, 0x20) != 0);
 
     struct Outcome {
         std::uint32_t seen_after_create;
         std::uint32_t seen_at_end;
-        dal::ThreadState child_state;
+        tox2::ThreadState child_state;
         bool ok;
     };
     // Runs a guest creator thread at `creator_prio`; it creates a thread with `child_prio` and
@@ -7626,26 +7630,27 @@ void testPpuThreadCreatePriority() {
         g_prio.set_priority_to = set_priority_to;
         g_prio.child_prio = child_prio;
         g_prio.flags = flags;
-        dalWrite32(base, g_prio.word_addr, 0);
+        tox2Write32(base, g_prio.word_addr, 0);
 
-        dal::GuestThreadParams params;
+        tox2::GuestThreadParams params;
         params.entry_opd = opd_creator;
         params.priority = creator_prio;
         params.stack_size = 0x10000;
-        params.tls_r13 = dal::allocateTls();
+        params.tls_r13 = tox2::allocateTls();
         params.name = "creator";
-        const std::uint32_t creator_id = dal::createGuestThread(params);
-        Outcome out{0, 0, dal::ThreadState::Created, false};
+        const std::uint32_t creator_id = tox2::createGuestThread(params);
+        Outcome out{0, 0, tox2::ThreadState::Created, false};
         if (creator_id == 0) return out;
-        out.ok = dal::blockingWait(g_prio_cv, [] { return g_prio.done; }, "test wait", std::chrono::seconds(5));
+        out.ok = tox2::blockingWait(g_prio_cv, [] { return g_prio.done; }, "test wait", std::chrono::seconds(5));
         out.seen_after_create = g_prio.seen_after_create;
-        const dal::GuestThread* child = dal::findThread(creator_id + 1);
-        for (int i = 0; child != nullptr && flags == 0 && i < 2500 && child->state() != dal::ThreadState::Exited; i++) {
+        const tox2::GuestThread* child = tox2::findThread(creator_id + 1);
+        for (int i = 0; child != nullptr && flags == 0 && i < 2500 && child->state() != tox2::ThreadState::Exited;
+             i++) {
             std::condition_variable_any pause;
-            dal::blockingWait(pause, [] { return false; }, "test pause", std::chrono::milliseconds(2));
+            tox2::blockingWait(pause, [] { return false; }, "test pause", std::chrono::milliseconds(2));
         }
         if (child != nullptr) out.child_state = child->state();
-        out.seen_at_end = dalRead32(base, g_prio.word_addr);
+        out.seen_at_end = tox2Read32(base, g_prio.word_addr);
         return out;
     };
 
@@ -7653,7 +7658,7 @@ void testPpuThreadCreatePriority() {
     Outcome first = run(1005, -1, 90, 0);
     CHECK(first.ok && g_prio.create_result == 0);
     CHECK(first.seen_after_create == 1 && first.seen_at_end == 1);
-    CHECK(first.child_state == dal::ThreadState::Exited);
+    CHECK(first.child_state == tox2::ThreadState::Exited);
 
     // Equal and higher numbers: the creator keeps the lock; the thread runs after it returned.
     Outcome equal = run(1005, -1, 1005, 0);
@@ -7670,16 +7675,16 @@ void testPpuThreadCreatePriority() {
     CHECK(raised.ok && raised.seen_after_create == 0 && raised.seen_at_end == 1);
 
     // An interrupt thread is created but not started, whatever its priority.
-    Outcome interrupt = run(1005, -1, 90, dal::kCreateInterrupt);
+    Outcome interrupt = run(1005, -1, 90, tox2::kCreateInterrupt);
     CHECK(interrupt.ok && interrupt.seen_after_create == 0 && interrupt.seen_at_end == 0);
-    CHECK(interrupt.child_state == dal::ThreadState::Created);
+    CHECK(interrupt.child_state == tox2::ThreadState::Created);
 
     p.main.free(scratch);
-    dalRegisterFuncs(nullptr, 0);
-    dal::resetSyncObjects();
-    dal::resetPpuThreadState();
-    dal::setLogSink({});
-    dal::resetCensus();
+    tox2RegisterFuncs(nullptr, 0);
+    tox2::resetSyncObjects();
+    tox2::resetPpuThreadState();
+    tox2::setLogSink({});
+    tox2::resetCensus();
 }
 
 struct HandlerCall {
@@ -7690,20 +7695,20 @@ struct HandlerCall {
 std::vector<HandlerCall> g_handler_calls;  // written under the guest lock
 std::condition_variable_any g_handler_cv;
 
-void recordHandlerCall(char tag, DalPpuContext* ctx) {
-    const dal::GuestThread* thread = dal::currentThread();
+void recordHandlerCall(char tag, Tox2PpuContext* ctx) {
+    const tox2::GuestThread* thread = tox2::currentThread();
     g_handler_calls.push_back({tag, ctx->gpr[3],
                                thread != nullptr && thread->service() && thread->name() == "_gcm_intr_thread" &&
                                        ctx->gpr[13] == thread->tlsR13() && ctx->gpr[13] != 0});
     g_handler_cv.notify_all();
 }
 
-DAL_PPU_FUNC(gcmVblankHandler) {
+TOX2_PPU_FUNC(gcmVblankHandler) {
     (void)base;
     recordHandlerCall('v', ctx);
 }
 
-DAL_PPU_FUNC(gcmUserHandler) {
+TOX2_PPU_FUNC(gcmUserHandler) {
     (void)base;
     recordHandlerCall('u', ctx);
 }
@@ -7711,58 +7716,58 @@ DAL_PPU_FUNC(gcmUserHandler) {
 // Waits with the guest lock released until `done` holds; false after five seconds.
 template <class Pred>
 bool waitUntil(Pred done) {
-    return dal::blockingWait(g_handler_cv, done, "test wait", std::chrono::seconds(5));
+    return tox2::blockingWait(g_handler_cv, done, "test wait", std::chrono::seconds(5));
 }
 
 // Lets other guest threads run for a moment.
 void pauseUnlocked() {
     std::condition_variable_any cv;
-    dal::blockingWait(cv, [] { return false; }, "test pause", std::chrono::milliseconds(2));
+    tox2::blockingWait(cv, [] { return false; }, "test pause", std::chrono::milliseconds(2));
 }
 
 void testGcmInterruptThread() {
-    dal::setLogSink([](std::string_view) {});
-    dal::resetCensus();
-    dal::resetLogOnce();
-    dal::resetSyncObjects();
-    dal::resetRsxState();
-    dal::Process& p = dal::process();
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::resetSyncObjects();
+    tox2::resetRsxState();
+    tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
     std::uint8_t* base = p.memory.base();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
     CHECK(scratch != 0);
     const std::uint32_t opd_vblank = scratch, opd_user = scratch + 0x10, tls_image = scratch + 0x100;
-    const DalFuncMapping mappings[] = {{0x10400, gcmVblankHandler}, {0x10410, gcmUserHandler}};
-    dalRegisterFuncs(mappings, 2);
-    dalWrite32(base, opd_vblank, 0x10400);
-    dalWrite32(base, opd_vblank + 4, 0x5555);
-    dalWrite32(base, opd_user, 0x10410);
-    dalWrite32(base, opd_user + 4, 0x6666);
+    const Tox2FuncMapping mappings[] = {{0x10400, gcmVblankHandler}, {0x10410, gcmUserHandler}};
+    tox2RegisterFuncs(mappings, 2);
+    tox2Write32(base, opd_vblank, 0x10400);
+    tox2Write32(base, opd_vblank + 4, 0x5555);
+    tox2Write32(base, opd_user, 0x10410);
+    tox2Write32(base, opd_user + 4, 0x6666);
     g_handler_calls.clear();
 
-    std::lock_guard<dal::GuestLock> guard(dal::guestLock());
-    auto boot_ctx = std::make_unique<DalPpuContext>();
-    dalWrite32(base, tls_image, 0xCAFEF00D);
-    CHECK(dal::initializeTls(boot_ctx.get(), base, 0x01000000, tls_image, 4, 0x20) != 0);
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+    auto boot_ctx = std::make_unique<Tox2PpuContext>();
+    tox2Write32(base, tls_image, 0xCAFEF00D);
+    CHECK(tox2::initializeTls(boot_ctx.get(), base, 0x01000000, tls_image, 4, 0x20) != 0);
 
-    dal::RsxState& state = dal::rsxState();
+    tox2::RsxState& state = tox2::rsxState();
     state.vblank_handler = opd_vblank;
     state.user_handler = opd_user;  // the flip handler stays unset, like the game's
 
-    const std::uint32_t id = dal::startGcmInterruptThread();
-    CHECK(id != 0 && dal::startGcmInterruptThread() == id);
-    const dal::GuestThread* thread = dal::findThread(id);
+    const std::uint32_t id = tox2::startGcmInterruptThread();
+    CHECK(id != 0 && tox2::startGcmInterruptThread() == id);
+    const tox2::GuestThread* thread = tox2::findThread(id);
     CHECK(thread != nullptr && thread->service() && thread->name() == "_gcm_intr_thread");
     CHECK(thread != nullptr && thread->priority() == 1 && thread->stackSize() == 0x4000);
 
     // The thread cannot run while this test holds the guest lock, so everything below queues up:
     // user commands and flips are all delivered in order, vblanks coalesce, a missing handler drops.
-    dal::postGcmInterrupt(dal::RsxInterrupt::User, 7);
-    dal::postGcmInterrupt(dal::RsxInterrupt::VBlank, 1);
-    dal::postGcmInterrupt(dal::RsxInterrupt::VBlank, 1);
-    dal::postGcmInterrupt(dal::RsxInterrupt::Flip, 1);  // no flip handler
-    dal::postGcmInterrupt(dal::RsxInterrupt::User, 8);
-    dal::postGcmInterrupt(dal::RsxInterrupt::VBlank, 1);
+    tox2::postGcmInterrupt(tox2::RsxInterrupt::User, 7);
+    tox2::postGcmInterrupt(tox2::RsxInterrupt::VBlank, 1);
+    tox2::postGcmInterrupt(tox2::RsxInterrupt::VBlank, 1);
+    tox2::postGcmInterrupt(tox2::RsxInterrupt::Flip, 1);  // no flip handler
+    tox2::postGcmInterrupt(tox2::RsxInterrupt::User, 8);
+    tox2::postGcmInterrupt(tox2::RsxInterrupt::VBlank, 1);
     CHECK(waitUntil([] { return g_handler_calls.size() >= 3; }));
     CHECK(g_handler_calls.size() == 3);
     if (g_handler_calls.size() == 3) {
@@ -7773,54 +7778,54 @@ void testGcmInterruptThread() {
     }
 
     // Once the queue is empty a new tick is accepted again, and the thread idles as a service thread.
-    dal::postGcmInterrupt(dal::RsxInterrupt::VBlank, 1);
+    tox2::postGcmInterrupt(tox2::RsxInterrupt::VBlank, 1);
     CHECK(waitUntil([] { return g_handler_calls.size() >= 4; }));
-    for (int i = 0; i < 2500 && thread->state() != dal::ThreadState::Blocked; i++) pauseUnlocked();
-    CHECK(thread->state() == dal::ThreadState::Blocked);
-    const dal::GcmInterruptCounts counts = dal::gcmInterruptCounts();
+    for (int i = 0; i < 2500 && thread->state() != tox2::ThreadState::Blocked; i++) pauseUnlocked();
+    CHECK(thread->state() == tox2::ThreadState::Blocked);
+    const tox2::GcmInterruptCounts counts = tox2::gcmInterruptCounts();
     CHECK(counts.vblank == 2 && counts.flip == 0 && counts.user == 2);
-    CHECK(dal::formatCensus().find("_gcm_intr_thread: blocked in gcm interrupt wait [service]") != std::string::npos);
+    CHECK(tox2::formatCensus().find("_gcm_intr_thread: blocked in gcm interrupt wait [service]") != std::string::npos);
 
-    dal::stopGcmInterruptThread();
-    CHECK(thread->state() == dal::ThreadState::Exited);
-    CHECK(dal::gcmInterruptCounts().vblank == 0);
+    tox2::stopGcmInterruptThread();
+    CHECK(thread->state() == tox2::ThreadState::Exited);
+    CHECK(tox2::gcmInterruptCounts().vblank == 0);
 
-    dalRegisterFuncs(nullptr, 0);
-    dal::resetHostFunctions();
-    dal::resetRsxState();
-    dal::resetSyncObjects();
+    tox2RegisterFuncs(nullptr, 0);
+    tox2::resetHostFunctions();
+    tox2::resetRsxState();
+    tox2::resetSyncObjects();
     p.main.free(scratch);
-    dal::setLogSink({});
-    dal::resetCensus();
-    dal::resetLogOnce();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
 }
 
 void testJudgeThreads() {
-    using dal::ThreadHealth;
-    using dal::ThreadState;
-    using dal::ThreadVerdict;
+    using tox2::ThreadHealth;
+    using tox2::ThreadState;
+    using tox2::ThreadVerdict;
     const auto stalled = [](bool service) { return ThreadHealth{ThreadState::Blocked, true, 0, service}; };
     const ThreadHealth running{ThreadState::Running, false, 0, false};
     const ThreadHealth exited{ThreadState::Exited, false, 0, false};
     std::size_t count = 0;
 
     // Blocked for under two seconds is not a stall.
-    CHECK(dal::judgeThreads({ThreadHealth{ThreadState::Blocked, true, 9000, false}}, 10000) == ThreadVerdict::Ok);
-    CHECK(dal::judgeThreads({stalled(false)}, 10000, &count) == ThreadVerdict::Stall && count == 1);
+    CHECK(tox2::judgeThreads({ThreadHealth{ThreadState::Blocked, true, 9000, false}}, 10000) == ThreadVerdict::Ok);
+    CHECK(tox2::judgeThreads({stalled(false)}, 10000, &count) == ThreadVerdict::Stall && count == 1);
     // A timed wait never counts.
-    CHECK(dal::judgeThreads({ThreadHealth{ThreadState::Blocked, false, 0, false}}, 10000) == ThreadVerdict::Ok);
+    CHECK(tox2::judgeThreads({ThreadHealth{ThreadState::Blocked, false, 0, false}}, 10000) == ThreadVerdict::Ok);
     // A service thread, however it waits, neither keeps the process alive nor hides a stall.
     const ThreadHealth running_service{ThreadState::Running, false, 0, true};
-    CHECK(dal::judgeThreads({stalled(false), running_service}, 10000) == ThreadVerdict::Stall);
-    CHECK(dal::judgeThreads({stalled(false), stalled(true)}, 10000, &count) == ThreadVerdict::Stall && count == 1);
-    CHECK(dal::judgeThreads({stalled(false), running}, 10000) == ThreadVerdict::Ok);
-    CHECK(dal::judgeThreads({exited, stalled(true)}, 10000) == ThreadVerdict::NoThreads);
-    CHECK(dal::judgeThreads({}, 10000) == ThreadVerdict::NoThreads);
+    CHECK(tox2::judgeThreads({stalled(false), running_service}, 10000) == ThreadVerdict::Stall);
+    CHECK(tox2::judgeThreads({stalled(false), stalled(true)}, 10000, &count) == ThreadVerdict::Stall && count == 1);
+    CHECK(tox2::judgeThreads({stalled(false), running}, 10000) == ThreadVerdict::Ok);
+    CHECK(tox2::judgeThreads({exited, stalled(true)}, 10000) == ThreadVerdict::NoThreads);
+    CHECK(tox2::judgeThreads({}, 10000) == ThreadVerdict::NoThreads);
 }
 
 // Waiters get the lock in the order they queued, whatever the host scheduler does.
 void testGuestLockFifo() {
-    dal::GuestLock lock;
+    tox2::GuestLock lock;
     std::vector<int> order;  // guarded by `lock`
 
     lock.lock();
@@ -7847,15 +7852,15 @@ void testGuestLockFifo() {
 }
 
 void testTimebase() {
-    auto ctx = std::make_unique<DalPpuContext>();
+    auto ctx = std::make_unique<Tox2PpuContext>();
     LARGE_INTEGER frequency, t0, t1;
     QueryPerformanceFrequency(&frequency);
 
-    const std::uint64_t first = dalMftb(ctx.get());
+    const std::uint64_t first = tox2Mftb(ctx.get());
     QueryPerformanceCounter(&t0);
-    const std::uint64_t tb0 = dalMftb(ctx.get());
+    const std::uint64_t tb0 = tox2Mftb(ctx.get());
     Sleep(100);
-    const std::uint64_t tb1 = dalMftb(ctx.get());
+    const std::uint64_t tb1 = tox2Mftb(ctx.get());
     QueryPerformanceCounter(&t1);
 
     CHECK(tb0 >= first);
@@ -7866,19 +7871,19 @@ void testTimebase() {
     const bool rate_ok = rate > 79800000.0 * 0.95 && rate < 79800000.0 * 1.05;
     CHECK(rate_ok);
     if (!rate_ok) std::fprintf(stderr, "timebase rate %.0f Hz\n", rate);
-    CHECK(dal::kTimebaseFrequency == 79800000);
+    CHECK(tox2::kTimebaseFrequency == 79800000);
 
-    const std::uint64_t us0 = dal::systemTimeUs();
+    const std::uint64_t us0 = tox2::systemTimeUs();
     Sleep(20);
-    CHECK(dal::systemTimeUs() >= us0 + 15000);
+    CHECK(tox2::systemTimeUs() >= us0 + 15000);
 }
 
 void testTimerResolution() {
-    const dal::TimerResolution resolution;
+    const tox2::TimerResolution resolution;
     CHECK(resolution.active());
     CHECK(resolution.periodMs() >= 1);
     // Reported in whole microseconds; an unreadable period only skips the check.
-    const auto period_us = dal::currentTimerPeriodUs();
+    const auto period_us = tox2::currentTimerPeriodUs();
     if (period_us) {
         CHECK(*period_us <= 1000 * resolution.periodMs());
     }
@@ -7897,49 +7902,49 @@ void testTimerResolution() {
 }
 
 void testReservationAndDcbz() {
-    std::unique_ptr<dal::GuestMemory> memory(newMemory());
+    std::unique_ptr<tox2::GuestMemory> memory(newMemory());
     std::uint8_t* base = memory->base();
     CHECK(memory->commit(0x20000, 0x1000));
-    auto ctx = std::make_unique<DalPpuContext>();
+    auto ctx = std::make_unique<Tox2PpuContext>();
 
-    dalWrite32(base, 0x20010, 5);
-    CHECK(dalLwarx(ctx.get(), base, 0x20010) == 5);
-    CHECK(dalStwcx(ctx.get(), base, 0x20010, 6));
-    CHECK(dalRead32(base, 0x20010) == 6);
-    CHECK(!dalStwcx(ctx.get(), base, 0x20010, 7));  // the reservation is gone
-    CHECK(dalRead32(base, 0x20010) == 6);
+    tox2Write32(base, 0x20010, 5);
+    CHECK(tox2Lwarx(ctx.get(), base, 0x20010) == 5);
+    CHECK(tox2Stwcx(ctx.get(), base, 0x20010, 6));
+    CHECK(tox2Read32(base, 0x20010) == 6);
+    CHECK(!tox2Stwcx(ctx.get(), base, 0x20010, 7));  // the reservation is gone
+    CHECK(tox2Read32(base, 0x20010) == 6);
 
-    dalLwarx(ctx.get(), base, 0x20010);
-    dalWrite32(base, 0x20010, 9);  // another thread changed the value
-    CHECK(!dalStwcx(ctx.get(), base, 0x20010, 7));
-    CHECK(dalRead32(base, 0x20010) == 9);
+    tox2Lwarx(ctx.get(), base, 0x20010);
+    tox2Write32(base, 0x20010, 9);  // another thread changed the value
+    CHECK(!tox2Stwcx(ctx.get(), base, 0x20010, 7));
+    CHECK(tox2Read32(base, 0x20010) == 9);
 
-    dalLwarx(ctx.get(), base, 0x20010);
-    CHECK(!dalStwcx(ctx.get(), base, 0x20014, 7));  // different address
-    CHECK(!dalStwcx(ctx.get(), base, 0x20010, 7));  // the failure also cleared it
+    tox2Lwarx(ctx.get(), base, 0x20010);
+    CHECK(!tox2Stwcx(ctx.get(), base, 0x20014, 7));  // different address
+    CHECK(!tox2Stwcx(ctx.get(), base, 0x20010, 7));  // the failure also cleared it
 
-    dalWrite64(base, 0x20020, 0x1122334455667788ull);
-    CHECK(dalLdarx(ctx.get(), base, 0x20020) == 0x1122334455667788ull);
-    CHECK(dalStdcx(ctx.get(), base, 0x20020, 3));
-    CHECK(dalRead64(base, 0x20020) == 3);
-    CHECK(!dalStdcx(ctx.get(), base, 0x20020, 4));
+    tox2Write64(base, 0x20020, 0x1122334455667788ull);
+    CHECK(tox2Ldarx(ctx.get(), base, 0x20020) == 0x1122334455667788ull);
+    CHECK(tox2Stdcx(ctx.get(), base, 0x20020, 3));
+    CHECK(tox2Read64(base, 0x20020) == 3);
+    CHECK(!tox2Stdcx(ctx.get(), base, 0x20020, 4));
 
     std::memset(base + 0x20000, 0xAB, 0x300);
-    dalDcbz(ctx.get(), base, 0x20085);  // any address inside the line
+    tox2Dcbz(ctx.get(), base, 0x20085);  // any address inside the line
     CHECK(base[0x2007f] == 0xAB);
     CHECK(base[0x20100] == 0xAB);
     bool line_zero = true;
     for (int i = 0x80; i < 0x100; i++) line_zero = line_zero && base[0x20000 + i] == 0;
     CHECK(line_zero);
 
-    dalSync(ctx.get(), kDalSyncHeavy);
+    tox2Sync(ctx.get(), kTox2SyncHeavy);
     ctx->fpscr = 0;
-    dalMtfsf(ctx.get(), 0x80, 0xF0000000u);
-    CHECK(dalMffs(ctx.get()) == 0xF0000000u);
-    dalMtfsb(ctx.get(), 31, 1);
-    CHECK(dalMffs(ctx.get()) == 0xF0000001u);
-    dalMtfsb(ctx.get(), 0, 0);
-    CHECK(dalMffs(ctx.get()) == 0x70000001u);
+    tox2Mtfsf(ctx.get(), 0x80, 0xF0000000u);
+    CHECK(tox2Mffs(ctx.get()) == 0xF0000000u);
+    tox2Mtfsb(ctx.get(), 31, 1);
+    CHECK(tox2Mffs(ctx.get()) == 0xF0000001u);
+    tox2Mtfsb(ctx.get(), 0, 0);
+    CHECK(tox2Mffs(ctx.get()) == 0x70000001u);
 }
 
 struct ChildResult {
@@ -8002,7 +8007,7 @@ void testFaultChild() {
     const ChildResult r = runChild(L"--fault-child");
     echoChild("fault child", r);
     CHECK(r.exit_code == 3);
-    CHECK(contains(r, "dal: stop: fatal guest fault: write to guest address 0x00200000"));
+    CHECK(contains(r, "tox2: stop: fatal guest fault: write to guest address 0x00200000"));
     CHECK(contains(r,
                    "r0  0000000000000000  r1  0000000000000000  r2  0000000000000000  "
                    "r3  00000000deadbeef"));
@@ -8015,14 +8020,14 @@ void testOverflowChild() {
     const ChildResult r = runChild(L"--overflow-child");
     echoChild("overflow child", r);
     CHECK(r.exit_code == 3);
-    CHECK(contains(r, "dal: stop: fatal guest fault: host stack overflow"));
+    CHECK(contains(r, "tox2: stop: fatal guest fault: host stack overflow"));
 }
 
 void testStopChild() {
     const ChildResult r = runChild(L"--stop-child");
     echoChild("stop child", r);
     CHECK(r.exit_code == 5);
-    CHECK(contains(r, "dal: stop: watchdog 5 s"));
+    CHECK(contains(r, "tox2: stop: watchdog 5 s"));
     CHECK(!contains(r, "registers:"));
     CHECK(contains(r, "census: test printer ran"));
 }
@@ -8031,7 +8036,7 @@ void testStrictDispatchChild() {
     const ChildResult r = runChild(L"--strict-dispatch-child");
     echoChild("strict dispatch child", r);
     CHECK(r.exit_code == 3);
-    CHECK(contains(r, "dal: stop: fatal unknown target: target 0x00010204 from 0x00010300"));
+    CHECK(contains(r, "tox2: stop: fatal unknown target: target 0x00010204 from 0x00010300"));
     CHECK(contains(r, "census: unknown targets 1 distinct"));
 }
 
@@ -8040,126 +8045,126 @@ void testUnsortedTableChild() {
     echoChild("unsorted table child", r);
     CHECK(r.exit_code == 3);
     CHECK(contains(r,
-                   "dal: stop: fatal internal error: function table: 0x00010200 follows "
+                   "tox2: stop: fatal internal error: function table: 0x00010200 follows "
                    "0x00010210 (unsorted or duplicate)"));
 }
 
 void testGuestStackWalk() {
-    std::unique_ptr<dal::GuestMemory> memory(newMemory());
-    dal::RegionAllocator stack(*memory, dal::kStackRegion);
+    std::unique_ptr<tox2::GuestMemory> memory(newMemory());
+    tox2::RegionAllocator stack(*memory, tox2::kStackRegion);
     const std::uint32_t lo = stack.allocate(0x1000, 0x1000);
     std::uint8_t* base = memory->base();
 
-    const DalFuncMapping mappings[] = {{0x10200, testFuncA}, {0x10210, testFuncB}, {0x10300, testFuncA}};
-    dalRegisterFuncs(mappings, 3);
-    CHECK(dal::findOwningFunction(0x10200) == 0x10200);
-    CHECK(dal::findOwningFunction(0x1020c) == 0x10200);
-    CHECK(dal::findOwningFunction(0x10214) == 0x10210);
-    CHECK(dal::findOwningFunction(0x101fc) == 0);
-    CHECK(dal::findOwningFunction(0x10304) == 0);  // past the last entry's slot
+    const Tox2FuncMapping mappings[] = {{0x10200, testFuncA}, {0x10210, testFuncB}, {0x10300, testFuncA}};
+    tox2RegisterFuncs(mappings, 3);
+    CHECK(tox2::findOwningFunction(0x10200) == 0x10200);
+    CHECK(tox2::findOwningFunction(0x1020c) == 0x10200);
+    CHECK(tox2::findOwningFunction(0x10214) == 0x10210);
+    CHECK(tox2::findOwningFunction(0x101fc) == 0);
+    CHECK(tox2::findOwningFunction(0x10304) == 0);  // past the last entry's slot
 
     // Chain sp0 -> sp1 -> sp2 -> 0. The LR for the frame at spN is saved at (back chain + 16).
     const std::uint32_t sp0 = lo + 0x100, sp1 = lo + 0x200, sp2 = lo + 0x300;
-    dalWrite64(base, sp0, sp1);
-    dalWrite64(base, sp1, sp2);
-    dalWrite64(base, sp1 + 16, 0x10214);  // return into the middle of fn 0x10210
-    dalWrite64(base, sp2, 0);
-    dalWrite64(base, sp2 + 16, 0x10208);
+    tox2Write64(base, sp0, sp1);
+    tox2Write64(base, sp1, sp2);
+    tox2Write64(base, sp1 + 16, 0x10214);  // return into the middle of fn 0x10210
+    tox2Write64(base, sp2, 0);
+    tox2Write64(base, sp2 + 16, 0x10208);
 
-    DalPpuContext ctx{};
+    Tox2PpuContext ctx{};
     ctx.gpr[1] = sp0;
-    dal::GuestFrame frames[dal::kMaxGuestFrames];
-    std::size_t n = dal::walkGuestStack(ctx, base, frames, dal::kMaxGuestFrames);
+    tox2::GuestFrame frames[tox2::kMaxGuestFrames];
+    std::size_t n = tox2::walkGuestStack(ctx, base, frames, tox2::kMaxGuestFrames);
     CHECK(n == 2);
     if (n == 2) {
         CHECK(frames[0].lr == 0x10214 && frames[0].function == 0x10210);
         CHECK(frames[1].lr == 0x10208 && frames[1].function == 0x10200);
     }
 
-    CHECK(dal::walkGuestStack(ctx, base, frames, 1) == 1);
+    CHECK(tox2::walkGuestStack(ctx, base, frames, 1) == 1);
 
     // A cycle, a link that does not ascend, a link outside the stack region, a link into an
     // uncommitted page and a misaligned link all end the walk without touching bad memory.
-    dalWrite64(base, sp2, sp0);
-    CHECK(dal::walkGuestStack(ctx, base, frames, dal::kMaxGuestFrames) == 2);
+    tox2Write64(base, sp2, sp0);
+    CHECK(tox2::walkGuestStack(ctx, base, frames, tox2::kMaxGuestFrames) == 2);
     // The first frame is still good; only the link behind it is bad.
-    dalWrite64(base, sp1, 0x00010000);
-    CHECK(dal::walkGuestStack(ctx, base, frames, dal::kMaxGuestFrames) == 1);
-    dalWrite64(base, sp1, lo + 0x1000);  // the guard page above the allocation
-    CHECK(dal::walkGuestStack(ctx, base, frames, dal::kMaxGuestFrames) == 1);
-    dalWrite64(base, sp1, sp1 + 4);
-    CHECK(dal::walkGuestStack(ctx, base, frames, dal::kMaxGuestFrames) == 1);
-    dalWrite64(base, sp0, 0x00010000);
-    CHECK(dal::walkGuestStack(ctx, base, frames, dal::kMaxGuestFrames) == 0);
+    tox2Write64(base, sp1, 0x00010000);
+    CHECK(tox2::walkGuestStack(ctx, base, frames, tox2::kMaxGuestFrames) == 1);
+    tox2Write64(base, sp1, lo + 0x1000);  // the guard page above the allocation
+    CHECK(tox2::walkGuestStack(ctx, base, frames, tox2::kMaxGuestFrames) == 1);
+    tox2Write64(base, sp1, sp1 + 4);
+    CHECK(tox2::walkGuestStack(ctx, base, frames, tox2::kMaxGuestFrames) == 1);
+    tox2Write64(base, sp0, 0x00010000);
+    CHECK(tox2::walkGuestStack(ctx, base, frames, tox2::kMaxGuestFrames) == 0);
     ctx.gpr[1] = 0;
-    CHECK(dal::walkGuestStack(ctx, base, frames, dal::kMaxGuestFrames) == 0);
+    CHECK(tox2::walkGuestStack(ctx, base, frames, tox2::kMaxGuestFrames) == 0);
     ctx.gpr[1] = 0x1'0000'0000ull + sp0;
-    CHECK(dal::walkGuestStack(ctx, base, frames, dal::kMaxGuestFrames) == 0);
+    CHECK(tox2::walkGuestStack(ctx, base, frames, tox2::kMaxGuestFrames) == 0);
 }
 
 // Children: each ends the process through the stop path under test.
 
 int strictDispatchChild() {
-    dal::installProcessSettings();
-    dal::installCensus();
-    dal::process().strict = true;
-    const DalFuncMapping mappings[] = {{0x10200, testFuncA}};
-    dalRegisterFuncs(mappings, 1);
-    auto ctx = std::make_unique<DalPpuContext>();
+    tox2::installProcessSettings();
+    tox2::installCensus();
+    tox2::process().strict = true;
+    const Tox2FuncMapping mappings[] = {{0x10200, testFuncA}};
+    tox2RegisterFuncs(mappings, 1);
+    auto ctx = std::make_unique<Tox2PpuContext>();
     ctx->jump_target = 0x10204;
     ctx->jump_site = 0x10300;
-    dalDispatch(ctx.get(), nullptr);
+    tox2Dispatch(ctx.get(), nullptr);
     return 99;
 }
 
 int unsortedTableChild() {
-    dal::installProcessSettings();
-    const DalFuncMapping mappings[] = {{0x10210, testFuncA}, {0x10200, testFuncB}};
-    dalRegisterFuncs(mappings, 2);
+    tox2::installProcessSettings();
+    const Tox2FuncMapping mappings[] = {{0x10210, testFuncA}, {0x10200, testFuncB}};
+    tox2RegisterFuncs(mappings, 2);
     return 99;
 }
 
 void childCensus() { std::fprintf(stderr, "census: test printer ran\n"); }
 
-DalPpuContext g_child_ctx;
+Tox2PpuContext g_child_ctx;
 
 int faultChild() {
-    dal::installProcessSettings();
-    dal::installFaultHandler();
-    dal::process().memory.reserve();
-    dal::setCensusPrinter(&childCensus);
+    tox2::installProcessSettings();
+    tox2::installFaultHandler();
+    tox2::process().memory.reserve();
+    tox2::setCensusPrinter(&childCensus);
     g_child_ctx.gpr[3] = 0xdeadbeefull;
     g_child_ctx.trace_pos = 3;
     g_child_ctx.trace[0] = 0x00010000;
     g_child_ctx.trace[1] = 0x00010100;
     g_child_ctx.trace[2] = 0x00010200;
-    dal::setFatalContext(&g_child_ctx);
+    tox2::setFatalContext(&g_child_ctx);
 
     // The page was never committed.
-    *reinterpret_cast<volatile std::uint8_t*>(dal::process().memory.base() + 0x00200000) = 1;
+    *reinterpret_cast<volatile std::uint8_t*>(tox2::process().memory.base() + 0x00200000) = 1;
     return 99;
 }
 
 // The volatile limit keeps the compiler from proving the recursion infinite and removing it.
 volatile int g_recursion_limit = 0x7FFFFFFF;
 
-DAL_NOINLINE int recurse(int depth) {
+TOX2_NOINLINE int recurse(int depth) {
     volatile char pad[512];
     pad[0] = static_cast<char>(depth);
     return depth < g_recursion_limit ? recurse(depth + 1) + pad[0] : 0;
 }
 
 int overflowChild() {
-    dal::installProcessSettings();
-    dal::installFaultHandler();
-    dal::process().memory.reserve();
+    tox2::installProcessSettings();
+    tox2::installFaultHandler();
+    tox2::process().memory.reserve();
     return recurse(0);
 }
 
 int stopChild() {
-    dal::installProcessSettings();
-    dal::setCensusPrinter(&childCensus);
-    dal::stopProcess(dal::ExitCode::Watchdog, "dal: stop: watchdog 5 s");
+    tox2::installProcessSettings();
+    tox2::setCensusPrinter(&childCensus);
+    tox2::stopProcess(tox2::ExitCode::Watchdog, "tox2: stop: watchdog 5 s");
 }
 
 }  // namespace
@@ -8174,7 +8179,7 @@ int main(int argc, char** argv) {
         if (mode == "--unsorted-table-child") return unsortedTableChild();
     }
 
-    dal::installProcessSettings();
+    tox2::installProcessSettings();
     testLogLevelsAndPrefix();
     testLogVisibleLevel();
     testLogOnce();

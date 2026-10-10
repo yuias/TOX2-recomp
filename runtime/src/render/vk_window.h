@@ -15,7 +15,7 @@
 
 #include "render/vk_context.h"
 
-namespace dal {
+namespace tox2 {
 
 struct PixelRect {
     std::int32_t x = 0;
@@ -125,4 +125,4 @@ private:
     std::chrono::steady_clock::time_point report_start_{};
 };
 
-}  // namespace dal
+}  // namespace tox2

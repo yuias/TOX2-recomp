@@ -19,7 +19,7 @@ extern "C" {
 #include "core/fatal.h"
 #include "core/log.h"
 
-namespace dal {
+namespace tox2 {
 
 namespace {
 
@@ -150,11 +150,11 @@ std::expected<FfmpegApi, std::string> loadFrom(const std::filesystem::path& dir)
 
     FfmpegApi api;
     std::vector<std::string> missing_symbols;
-#define DAL_FFMPEG_RESOLVE(library, name)                                                                             \
+#define TOX2_FFMPEG_RESOLVE(library, name)                                                                            \
     api.name = reinterpret_cast<decltype(api.name)>(reinterpret_cast<void*>(GetProcAddress(modules.library, #name))); \
     if (api.name == nullptr) missing_symbols.emplace_back(#name);
-    DAL_FFMPEG_FUNCTIONS(DAL_FFMPEG_RESOLVE)
-#undef DAL_FFMPEG_RESOLVE
+    TOX2_FFMPEG_FUNCTIONS(TOX2_FFMPEG_RESOLVE)
+#undef TOX2_FFMPEG_RESOLVE
     if (!missing_symbols.empty()) {
         return std::unexpected(std::format("missing functions: {}", joinNames(missing_symbols)));
     }
@@ -213,4 +213,4 @@ const std::expected<FfmpegApi, std::string>& defaultFfmpeg() {
     return result;
 }
 
-}  // namespace dal
+}  // namespace tox2

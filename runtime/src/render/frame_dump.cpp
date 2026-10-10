@@ -22,7 +22,7 @@
 // frames and the plain callbacks below. Buffers are created by the callers and passed as raw
 // pointers; the error text lives in a fixed array of PngJob. The error callback never returns.
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 struct PngJob {
@@ -313,7 +313,7 @@ void FrameDumper::run() {
             written_.fetch_add(1, std::memory_order_relaxed);
         } else {
             failed_.fetch_add(1, std::memory_order_relaxed);
-            logOnce(LogLevel::Warn, "render-dump-failed", "dal: render: cannot write {}: {}",
+            logOnce(LogLevel::Warn, "render-dump-failed", "tox2: render: cannot write {}: {}",
                     frame.path.generic_string(), error);
         }
 
@@ -324,4 +324,4 @@ void FrameDumper::run() {
     }
 }
 
-}  // namespace dal
+}  // namespace tox2

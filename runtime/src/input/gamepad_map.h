@@ -12,7 +12,7 @@
 #include "input/gamepad_backend.h"
 #include "input/pad_buttons.h"
 
-namespace dal {
+namespace tox2 {
 
 // XInput's XINPUT_GAMEPAD_LEFT/RIGHT_THUMB_DEADZONE (7849 and 8689 of 32767) and
 // XINPUT_GAMEPAD_TRIGGER_THRESHOLD (30 of 255), the usual values for Xbox-family pads.
@@ -54,4 +54,4 @@ MappedPad mergeMappedPads(std::span<const MappedPad> pads);
 // on a DualShock 3 -> high_frequency 1.0 when non-zero, else 0.
 GamepadRumble rumbleFromCellPad(std::uint8_t small_motor, std::uint8_t large_motor);
 
-}  // namespace dal
+}  // namespace tox2

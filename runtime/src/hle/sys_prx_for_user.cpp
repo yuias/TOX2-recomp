@@ -12,13 +12,13 @@
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/threads.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_ppu_thread.h"
 #include "lv2/sys_sync.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr char kModule[] = "sysPrxForUser";
@@ -31,24 +31,24 @@ std::set<std::uint32_t> g_heaps;
 
 // sys_initialize_tls(thread_id, tls_vaddr, tls_filesz, tls_memsz): a no-op when r13 is already
 // set, which is the case for the main thread after boot; the game calls it again itself.
-void sysInitializeTls(DalPpuContext* ctx, std::uint8_t* base) {
+void sysInitializeTls(Tox2PpuContext* ctx, std::uint8_t* base) {
     initializeTls(ctx, base, static_cast<std::uint32_t>(ctx->gpr[3]), static_cast<std::uint32_t>(ctx->gpr[4]),
                   static_cast<std::uint32_t>(ctx->gpr[5]), static_cast<std::uint32_t>(ctx->gpr[6]));
 }
 
-void sysTimeGetSystemTime(DalPpuContext* ctx, std::uint8_t* base) {
+void sysTimeGetSystemTime(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     ctx->gpr[3] = systemTimeUs();
 }
 
-void hleProcessExit(DalPpuContext* ctx, std::uint8_t* base) {
+void hleProcessExit(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const auto status = static_cast<std::int32_t>(ctx->gpr[3]);
-    stopProcess(ExitCode::ProcessExit, std::format("dal: stop: process exit status {}", status));
+    stopProcess(ExitCode::ProcessExit, std::format("tox2: stop: process exit status {}", status));
 }
 
 // _sys_heap_create_heap(name, ...) returns the heap id, 0 when all ids are taken.
-void sysHeapCreateHeap(DalPpuContext* ctx, std::uint8_t* base) {
+void sysHeapCreateHeap(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     for (std::uint32_t id = 1; id <= kMaxHeapId; id++) {
         if (g_heaps.insert(id).second) {
@@ -59,58 +59,58 @@ void sysHeapCreateHeap(DalPpuContext* ctx, std::uint8_t* base) {
     ctx->gpr[3] = 0;
 }
 
-void sysHeapDeleteHeap(DalPpuContext* ctx, std::uint8_t* base) {
+void sysHeapDeleteHeap(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     g_heaps.erase(static_cast<std::uint32_t>(ctx->gpr[3]));
     ctx->gpr[3] = kCellOk;
 }
 
 // _sys_heap_malloc(heap, size): a 64 KiB-aligned block of the main region, 0 on failure.
-void sysHeapMalloc(DalPpuContext* ctx, std::uint8_t* base) {
+void sysHeapMalloc(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     ctx->gpr[3] = process().main.allocate(static_cast<std::uint32_t>(ctx->gpr[4]), kHeapAlign);
 }
 
 // _sys_heap_memalign(heap, align, size)
-void sysHeapMemalign(DalPpuContext* ctx, std::uint8_t* base) {
+void sysHeapMemalign(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const std::uint32_t align = std::max(static_cast<std::uint32_t>(ctx->gpr[4]), kHeapAlign);
     ctx->gpr[3] = process().main.allocate(static_cast<std::uint32_t>(ctx->gpr[5]), align);
 }
 
 // _sys_heap_free(heap, addr): an address that is not a block start is ignored.
-void sysHeapFree(DalPpuContext* ctx, std::uint8_t* base) {
+void sysHeapFree(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     process().main.free(static_cast<std::uint32_t>(ctx->gpr[4]));
     ctx->gpr[3] = kCellOk;
 }
 
 // sys_lwmutex_create(sys_lwmutex_t* lwmutex, sys_lwmutex_attribute_t* attr)
-void sysLwmutexCreate(DalPpuContext* ctx, std::uint8_t* base) {
+void sysLwmutexCreate(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(
             ctx, lwmutexCreate(base, static_cast<std::uint32_t>(ctx->gpr[3]), static_cast<std::uint32_t>(ctx->gpr[4])));
 }
 
-void sysLwmutexDestroy(DalPpuContext* ctx, std::uint8_t* base) {
+void sysLwmutexDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, lwmutexDestroy(ctx, base, static_cast<std::uint32_t>(ctx->gpr[3])));
 }
 
 // sys_lwmutex_lock(sys_lwmutex_t* lwmutex, u64 timeout)
-void sysLwmutexLock(DalPpuContext* ctx, std::uint8_t* base) {
+void sysLwmutexLock(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, lwmutexLock(ctx, base, static_cast<std::uint32_t>(ctx->gpr[3]), ctx->gpr[4]));
 }
 
-void sysLwmutexTryLock(DalPpuContext* ctx, std::uint8_t* base) {
+void sysLwmutexTryLock(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, lwmutexTryLock(ctx, base, static_cast<std::uint32_t>(ctx->gpr[3])));
 }
 
-void sysLwmutexUnlock(DalPpuContext* ctx, std::uint8_t* base) {
+void sysLwmutexUnlock(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, lwmutexUnlock(ctx, base, static_cast<std::uint32_t>(ctx->gpr[3])));
 }
 
 // sys_ppu_thread_create(u64* thread_id, u32 entry, u64 arg, s32 prio, u32 stacksize, u64 flags,
 // const char* name)
-void sysPpuThreadCreate(DalPpuContext* ctx, std::uint8_t* base) {
+void sysPpuThreadCreate(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, ppuThreadCreate(base, static_cast<std::uint32_t>(ctx->gpr[3]),
                                        static_cast<std::uint32_t>(ctx->gpr[4]), ctx->gpr[5],
                                        static_cast<std::int32_t>(ctx->gpr[6]), static_cast<std::uint32_t>(ctx->gpr[7]),
@@ -118,24 +118,24 @@ void sysPpuThreadCreate(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // sys_ppu_thread_get_id(u64* thread_id)
-void sysPpuThreadGetId(DalPpuContext* ctx, std::uint8_t* base) {
-    dalWrite64(base, static_cast<std::uint32_t>(ctx->gpr[3]), callerThreadId(ctx));
+void sysPpuThreadGetId(Tox2PpuContext* ctx, std::uint8_t* base) {
+    tox2Write64(base, static_cast<std::uint32_t>(ctx->gpr[3]), callerThreadId(ctx));
     setResultCode(ctx, kCellOk);
 }
 
 // sys_ppu_thread_once(s32* once_ctrl, void (*init)()): runs `init` once under the `_lv2ppu` mutex.
 // RPCS3 asserts on a failing lock; there is no way to continue sensibly, so this stops the process.
-void sysPpuThreadOnce(DalPpuContext* ctx, std::uint8_t* base) {
+void sysPpuThreadOnce(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto once_ctrl = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto init = static_cast<std::uint32_t>(ctx->gpr[4]);
     const std::uint32_t mutex = processSyncObjects().once_mutex;
     if (mutex == 0 || mutexLock(ctx, mutex, 0) != kCellOk) {
         fatal(FatalKind::Internal, "sys_ppu_thread_once: cannot lock the _lv2ppu mutex");
     }
-    if (dalRead32(base, once_ctrl) == kOnceInit) {
+    if (tox2Read32(base, once_ctrl) == kOnceInit) {
         // Runs on the calling thread's context; the init function may block or yield.
         callGuestOpd(ctx, base, init);
-        dalWrite32(base, once_ctrl, kDoneInit);
+        tox2Write32(base, once_ctrl, kDoneInit);
     }
     if (mutexUnlock(ctx, mutex) != kCellOk) {
         fatal(FatalKind::Internal, "sys_ppu_thread_once: cannot unlock the _lv2ppu mutex");
@@ -145,7 +145,7 @@ void sysPpuThreadOnce(DalPpuContext* ctx, std::uint8_t* base) {
 // sys_ppu_thread_exit(u64 value): RPCS3 runs the functions registered with
 // sys_ppu_thread_register_atexit under the atexit lwmutex; this game does not import the
 // registration functions, so the list is always empty and only the TLS block is released.
-void sysPpuThreadExit(DalPpuContext* ctx, std::uint8_t* base) {
+void sysPpuThreadExit(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     freeTls(static_cast<std::uint32_t>(ctx->gpr[13]));
     exitCurrentThread(ctx->gpr[3]);
@@ -153,7 +153,7 @@ void sysPpuThreadExit(DalPpuContext* ctx, std::uint8_t* base) {
 
 // Registration and notification functions with no effect here: nothing ever runs the registered
 // callbacks, because the process ends through sys_process_exit without an exit-spawn.
-void returnOk(DalPpuContext* ctx, std::uint8_t* base) {
+void returnOk(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     ctx->gpr[3] = kCellOk;
 }
@@ -188,4 +188,4 @@ constexpr HleEntry kHandlers[] = {
 
 std::span<const HleEntry> sysPrxForUserHandlers() { return kHandlers; }
 
-}  // namespace dal
+}  // namespace tox2

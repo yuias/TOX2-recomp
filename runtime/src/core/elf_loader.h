@@ -5,7 +5,7 @@
 #include <filesystem>
 #include <string>
 
-namespace dal {
+namespace tox2 {
 
 struct LoadedExecutable {
     std::uint32_t entry_opd = 0, entry_func = 0, entry_toc = 0;
@@ -22,4 +22,4 @@ struct LoadedExecutable {
 // before any guest memory is touched where possible.
 std::expected<LoadedExecutable, std::string> loadExecutable(const std::filesystem::path& elf);
 
-}  // namespace dal
+}  // namespace tox2

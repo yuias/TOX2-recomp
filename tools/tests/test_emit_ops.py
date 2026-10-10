@@ -41,11 +41,11 @@ class IntAluTest(unittest.TestCase):
 
     def test_record_form_calls_the_cr0_helper(self):
         lines, _ = body(asm.encode("and", rA=3, rS=4, rB=5, Rc=1))
-        self.assertIn("dalRecord(ctx, t0);", lines)
+        self.assertIn("tox2Record(ctx, t0);", lines)
 
     def test_andi_always_records(self):
         lines, _ = body(asm.encode("andi.", rA=3, rS=4, UIMM=1))
-        self.assertIn("dalRecord(ctx, t0);", lines)
+        self.assertIn("tox2Record(ctx, t0);", lines)
 
     def test_ori_does_not_record(self):
         lines, _ = body(asm.encode("ori", rA=3, rS=4, UIMM=1))
@@ -57,27 +57,27 @@ class IntAluTest(unittest.TestCase):
                              ("neg", {"rD": 3, "rA": 4})):
             plain, _ = body(asm.encode(name, **fields))
             with_oe, _ = body(asm.encode(name, OE=1, **fields))
-            self.assertFalse(any("dalSetOv" in line for line in plain), name)
-            self.assertTrue(any("dalSetOv" in line for line in with_oe), name)
+            self.assertFalse(any("tox2SetOv" in line for line in plain), name)
+            self.assertTrue(any("tox2SetOv" in line for line in with_oe), name)
 
     def test_compare_width_follows_l(self):
         word = asm.encode("cmp", crfD=2, L=0, rA=4, rB=5)
         self.assertEqual(body(word)[0],
-                         ["dalCmpS(ctx, 2, (int32_t)ctx->gpr[4], (int32_t)ctx->gpr[5]);"])
+                         ["tox2CmpS(ctx, 2, (int32_t)ctx->gpr[4], (int32_t)ctx->gpr[5]);"])
         word = asm.encode("cmpl", crfD=2, L=1, rA=4, rB=5)
         self.assertEqual(body(word)[0],
-                         ["dalCmpU(ctx, 2, (uint64_t)ctx->gpr[4], (uint64_t)ctx->gpr[5]);"])
+                         ["tox2CmpU(ctx, 2, (uint64_t)ctx->gpr[4], (uint64_t)ctx->gpr[5]);"])
         word = asm.encode("cmpi", crfD=0, L=0, rA=4, SIMM=-1)
-        self.assertEqual(body(word)[0], ["dalCmpS(ctx, 0, (int32_t)ctx->gpr[4], -1);"])
+        self.assertEqual(body(word)[0], ["tox2CmpS(ctx, 0, (int32_t)ctx->gpr[4], -1);"])
         word = asm.encode("cmpli", crfD=0, L=1, rA=4, UIMM=0xFFFF)
         self.assertEqual(body(word)[0],
-                         ["dalCmpU(ctx, 0, (uint64_t)ctx->gpr[4], 0x000000000000ffffull);"])
+                         ["tox2CmpU(ctx, 0, (uint64_t)ctx->gpr[4], 0x000000000000ffffull);"])
 
     def test_count_leading_zeros_uses_the_guarded_helpers(self):
         self.assertEqual(body(asm.encode("cntlzw", rA=3, rS=4))[0],
-                         ["ctx->gpr[3] = dalCntlzw(ctx->gpr[4]);"])
+                         ["ctx->gpr[3] = tox2Cntlzw(ctx->gpr[4]);"])
         self.assertEqual(body(asm.encode("cntlzd", rA=3, rS=4))[0],
-                         ["ctx->gpr[3] = dalCntlzd(ctx->gpr[4]);"])
+                         ["ctx->gpr[3] = tox2Cntlzd(ctx->gpr[4]);"])
 
 
 class IntRotateTest(unittest.TestCase):
@@ -89,10 +89,10 @@ class IntRotateTest(unittest.TestCase):
     def test_rlwinm_masks_in_the_high_half(self):
         # slwi 8: mask(32, 55)
         self.assertEqual(body(asm.encode("rlwinm", rA=3, rS=4, SH=8, MB=0, ME=23))[0],
-                         ["ctx->gpr[3] = dalRotl32Dup(ctx->gpr[4], 8) & 0x00000000ffffff00ull;"])
+                         ["ctx->gpr[3] = tox2Rotl32Dup(ctx->gpr[4], 8) & 0x00000000ffffff00ull;"])
         # MB > ME: the wrapping mask keeps the duplicated high word.
         self.assertEqual(body(asm.encode("rlwinm", rA=3, rS=4, SH=0, MB=28, ME=3))[0],
-                         ["ctx->gpr[3] = dalRotl32Dup(ctx->gpr[4], 0) & 0xfffffffff000000full;"])
+                         ["ctx->gpr[3] = tox2Rotl32Dup(ctx->gpr[4], 0) & 0xfffffffff000000full;"])
 
     def test_rld_forms_drop_a_full_mask_and_a_zero_rotate(self):
         self.assertEqual(body(asm.encode("rldicl", rA=3, rS=4, SH64=0, MB64=0))[0],
@@ -100,32 +100,32 @@ class IntRotateTest(unittest.TestCase):
         self.assertEqual(body(asm.encode("rldicl", rA=3, rS=4, SH64=0, MB64=32))[0],
                          ["ctx->gpr[3] = ctx->gpr[4] & 0x00000000ffffffffull;"])
         self.assertEqual(body(asm.encode("rldicr", rA=3, rS=4, SH64=8, MB64=55))[0],
-                         ["ctx->gpr[3] = dalRotl64(ctx->gpr[4], 8) & 0xffffffffffffff00ull;"])
+                         ["ctx->gpr[3] = tox2Rotl64(ctx->gpr[4], 8) & 0xffffffffffffff00ull;"])
 
     def test_rldimi_keeps_the_unmasked_bits_of_ra(self):
         self.assertEqual(body(asm.encode("rldimi", rA=3, rS=4, SH64=16, MB64=32))[0],
                          ["ctx->gpr[3] = (ctx->gpr[3] & ~0x00000000ffff0000ull) | "
-                          "(dalRotl64(ctx->gpr[4], 16) & 0x00000000ffff0000ull);"])
+                          "(tox2Rotl64(ctx->gpr[4], 16) & 0x00000000ffff0000ull);"])
 
     def test_record_form_records_the_64_bit_result(self):
         lines, _ = body(asm.encode("rlwinm", rA=3, rS=4, SH=0, MB=28, ME=3, Rc=1))
-        self.assertEqual(lines[-3:], ["uint64_t t0 = dalRotl32Dup(ctx->gpr[4], 0) & "
+        self.assertEqual(lines[-3:], ["uint64_t t0 = tox2Rotl32Dup(ctx->gpr[4], 0) & "
                                       "0xfffffffff000000full;",
-                                      "ctx->gpr[3] = t0;", "dalRecord(ctx, t0);"])
+                                      "ctx->gpr[3] = t0;", "tox2Record(ctx, t0);"])
 
     def test_algebraic_shifts_go_through_the_carry_helpers(self):
         self.assertEqual(body(asm.encode("srawi", rA=3, rS=4, SH=5))[0],
-                         ["ctx->gpr[3] = dalSraw(ctx, ctx->gpr[4], 5);"])
+                         ["ctx->gpr[3] = tox2Sraw(ctx, ctx->gpr[4], 5);"])
         self.assertEqual(body(asm.encode("sradi", rA=3, rS=4, SH64=63))[0],
-                         ["ctx->gpr[3] = dalSrad(ctx, ctx->gpr[4], 63);"])
+                         ["ctx->gpr[3] = tox2Srad(ctx, ctx->gpr[4], 63);"])
         self.assertEqual(body(asm.encode("sraw", rA=3, rS=4, rB=5))[0],
-                         ["ctx->gpr[3] = dalSraw(ctx, ctx->gpr[4], ctx->gpr[5]);"])
+                         ["ctx->gpr[3] = tox2Sraw(ctx, ctx->gpr[4], ctx->gpr[5]);"])
         self.assertEqual(body(asm.encode("srad", rA=3, rS=4, rB=5))[0],
-                         ["ctx->gpr[3] = dalSrad(ctx, ctx->gpr[4], ctx->gpr[5]);"])
+                         ["ctx->gpr[3] = tox2Srad(ctx, ctx->gpr[4], ctx->gpr[5]);"])
 
     def test_plain_shifts_do_not_touch_the_carry(self):
-        for name, helper in (("slw", "dalSlw"), ("srw", "dalSrw"), ("sld", "dalSld"),
-                             ("srd", "dalSrd")):
+        for name, helper in (("slw", "tox2Slw"), ("srw", "tox2Srw"), ("sld", "tox2Sld"),
+                             ("srd", "tox2Srd")):
             self.assertEqual(body(asm.encode(name, rA=3, rS=4, rB=5))[0],
                              ["ctx->gpr[3] = %s(ctx->gpr[4], ctx->gpr[5]);" % helper])
 
@@ -138,37 +138,37 @@ class IntCarryMuldivTest(unittest.TestCase):
 
     def test_addic_takes_the_carry_from_the_64_bit_add(self):
         self.assertEqual(body(asm.encode("addic", rD=3, rA=4, SIMM=-1))[0],
-                         ["ctx->gpr[3] = dalAddCarry(ctx, ctx->gpr[4], 0xffffffffffffffffull, 0);"])
+                         ["ctx->gpr[3] = tox2AddCarry(ctx, ctx->gpr[4], 0xffffffffffffffffull, 0);"])
 
     def test_addic_dot_records_and_addic_does_not(self):
         lines, _ = body(asm.encode("addic.", rD=3, rA=4, SIMM=1))
-        self.assertEqual(lines[-1], "dalRecord(ctx, t0);")
+        self.assertEqual(lines[-1], "tox2Record(ctx, t0);")
         lines, _ = body(asm.encode("addic", rD=3, rA=4, SIMM=1))
-        self.assertFalse(any("dalRecord" in line for line in lines))
+        self.assertFalse(any("tox2Record" in line for line in lines))
 
     def test_subtract_forms_invert_the_minuend(self):
         self.assertEqual(body(asm.encode("subfc", rD=3, rA=4, rB=5))[0],
-                         ["ctx->gpr[3] = dalAddCarry(ctx, ~ctx->gpr[4], ctx->gpr[5], 1);"])
+                         ["ctx->gpr[3] = tox2AddCarry(ctx, ~ctx->gpr[4], ctx->gpr[5], 1);"])
         self.assertEqual(body(asm.encode("subfe", rD=3, rA=4, rB=5))[0],
-                         ["ctx->gpr[3] = dalAddCarry(ctx, ~ctx->gpr[4], ctx->gpr[5], "
+                         ["ctx->gpr[3] = tox2AddCarry(ctx, ~ctx->gpr[4], ctx->gpr[5], "
                           "ctx->xer_ca);"])
         self.assertEqual(body(asm.encode("subfic", rD=3, rA=4, SIMM=7))[0],
-                         ["ctx->gpr[3] = dalAddCarry(ctx, ~ctx->gpr[4], 0x0000000000000007ull, "
+                         ["ctx->gpr[3] = tox2AddCarry(ctx, ~ctx->gpr[4], 0x0000000000000007ull, "
                           "1);"])
 
     def test_extended_forms_read_ca_and_use_constant_operands(self):
         self.assertEqual(body(asm.encode("addze", rD=3, rA=4))[0],
-                         ["ctx->gpr[3] = dalAddCarry(ctx, ctx->gpr[4], 0x0000000000000000ull, "
+                         ["ctx->gpr[3] = tox2AddCarry(ctx, ctx->gpr[4], 0x0000000000000000ull, "
                           "ctx->xer_ca);"])
         self.assertEqual(body(asm.encode("addme", rD=3, rA=4))[0],
-                         ["ctx->gpr[3] = dalAddCarry(ctx, ctx->gpr[4], 0xffffffffffffffffull, "
+                         ["ctx->gpr[3] = tox2AddCarry(ctx, ctx->gpr[4], 0xffffffffffffffffull, "
                           "ctx->xer_ca);"])
 
     def test_oe_forms_copy_the_operands_before_writing_rd(self):
         lines, _ = body(asm.encode("addc", rD=3, rA=4, rB=5, OE=1))
         self.assertEqual(lines, ["uint64_t t0 = ctx->gpr[4];", "uint64_t t1 = ctx->gpr[5];",
-                                 "uint64_t t2 = dalAddCarry(ctx, t0, t1, 0);",
-                                 "ctx->gpr[3] = t2;", "dalSetOv(ctx, dalAddOverflows(t0, t1, t2));"])
+                                 "uint64_t t2 = tox2AddCarry(ctx, t0, t1, 0);",
+                                 "ctx->gpr[3] = t2;", "tox2SetOv(ctx, tox2AddOverflows(t0, t1, t2));"])
 
     def test_oe_forms_set_overflow_and_plain_forms_do_not(self):
         for name in ("addc", "adde", "addze", "addme", "subfc", "subfe", "subfze", "subfme",
@@ -178,8 +178,8 @@ class IntCarryMuldivTest(unittest.TestCase):
                 fields["rB"] = 5
             plain, _ = body(asm.encode(name, **fields))
             with_oe, _ = body(asm.encode(name, OE=1, **fields))
-            self.assertFalse(any("dalSetOv" in line for line in plain), name)
-            self.assertTrue(any("dalSetOv" in line for line in with_oe), name)
+            self.assertFalse(any("tox2SetOv" in line for line in plain), name)
+            self.assertTrue(any("tox2SetOv" in line for line in with_oe), name)
 
     def test_high_multiplies_have_no_oe_form(self):
         for name in ("mulhw", "mulhwu", "mulhd", "mulhdu"):
@@ -187,15 +187,15 @@ class IntCarryMuldivTest(unittest.TestCase):
                 asm.encode(name, rD=3, rA=4, rB=5, OE=1)
 
     def test_divisions_go_through_the_guarded_helpers(self):
-        for name, helper in (("divw", "dalDivw"), ("divwu", "dalDivwu"), ("divd", "dalDivd"),
-                             ("divdu", "dalDivdu")):
+        for name, helper in (("divw", "tox2Divw"), ("divwu", "tox2Divwu"), ("divd", "tox2Divd"),
+                             ("divdu", "tox2Divdu")):
             self.assertEqual(body(asm.encode(name, rD=3, rA=4, rB=5))[0],
                              ["ctx->gpr[3] = %s(ctx->gpr[4], ctx->gpr[5]);" % helper])
 
     def test_record_form_records_the_full_result(self):
         lines, _ = body(asm.encode("mulhwu", rD=3, rA=4, rB=5, Rc=1))
-        self.assertEqual(lines, ["uint64_t t0 = dalMulhwu(ctx->gpr[4], ctx->gpr[5]);",
-                                 "ctx->gpr[3] = t0;", "dalRecord(ctx, t0);"])
+        self.assertEqual(lines, ["uint64_t t0 = tox2Mulhwu(ctx->gpr[4], ctx->gpr[5]);",
+                                 "ctx->gpr[3] = t0;", "tox2Record(ctx, t0);"])
 
     def test_mulli_multiplies_unsigned(self):
         self.assertEqual(body(asm.encode("mulli", rD=3, rA=4, SIMM=-3))[0],
@@ -210,25 +210,25 @@ class MemTest(unittest.TestCase):
 
     def test_load_uses_the_truncated_ea(self):
         self.assertEqual(body(asm.encode("lwz", rD=3, rA=4, D=8))[0],
-                         ["ctx->gpr[3] = dalRead32(base, "
+                         ["ctx->gpr[3] = tox2Read32(base, "
                           "(uint32_t)(ctx->gpr[4] + 0x0000000000000008ull));"])
 
     def test_ra0_is_a_literal_address(self):
         self.assertEqual(body(asm.encode("lwz", rD=3, rA=0, D=0x100))[0],
-                         ["ctx->gpr[3] = dalRead32(base, 0x00000100u);"])
+                         ["ctx->gpr[3] = tox2Read32(base, 0x00000100u);"])
         self.assertEqual(body(asm.encode("stb", rS=3, rA=0, D=-8))[0],
-                         ["dalWrite8(base, 0xfffffff8u, (uint8_t)ctx->gpr[3]);"])
+                         ["tox2Write8(base, 0xfffffff8u, (uint8_t)ctx->gpr[3]);"])
         self.assertEqual(body(asm.encode("lwzx", rD=3, rA=0, rB=5))[0],
-                         ["ctx->gpr[3] = dalRead32(base, (uint32_t)ctx->gpr[5]);"])
+                         ["ctx->gpr[3] = tox2Read32(base, (uint32_t)ctx->gpr[5]);"])
 
     def test_update_form_writes_the_untruncated_sum_after_the_access(self):
         self.assertEqual(body(asm.encode("lwzu", rD=3, rA=4, D=8))[0],
                          ["uint64_t t0 = (ctx->gpr[4] + 0x0000000000000008ull);",
-                          "ctx->gpr[3] = dalRead32(base, (uint32_t)t0);",
+                          "ctx->gpr[3] = tox2Read32(base, (uint32_t)t0);",
                           "ctx->gpr[4] = t0;"])
         self.assertEqual(body(asm.encode("stdux", rS=3, rA=4, rB=5))[0],
                          ["uint64_t t0 = (ctx->gpr[4] + ctx->gpr[5]);",
-                          "dalWrite64(base, (uint32_t)t0, (uint64_t)ctx->gpr[3]);",
+                          "tox2Write64(base, (uint32_t)t0, (uint64_t)ctx->gpr[3]);",
                           "ctx->gpr[4] = t0;"])
 
     def test_update_form_with_ra0_is_unhandled(self):
@@ -238,29 +238,29 @@ class MemTest(unittest.TestCase):
                              ("lfdu", {"frD": 1, "rA": 0, "D": 8}),
                              ("stfsux", {"frS": 1, "rA": 0, "rB": 5})):
             lines, stats = body(asm.encode(name, **fields))
-            self.assertEqual(lines[0].startswith("DAL_UNHANDLED"), True, name)
+            self.assertEqual(lines[0].startswith("TOX2_UNHANDLED"), True, name)
             self.assertEqual(dict(stats.unhandled), {"%s:ra0" % name: 1})
 
     def test_algebraic_loads_sign_extend(self):
         self.assertEqual(body(asm.encode("lha", rD=3, rA=4, D=0))[0],
-                         ["ctx->gpr[3] = (uint64_t)(int64_t)(int16_t)dalRead16(base, "
+                         ["ctx->gpr[3] = (uint64_t)(int64_t)(int16_t)tox2Read16(base, "
                           "(uint32_t)(ctx->gpr[4] + 0x0000000000000000ull));"])
-        self.assertIn("(int32_t)dalRead32", body(asm.encode("lwa", rD=3, rA=4, DS=4))[0][0])
+        self.assertIn("(int32_t)tox2Read32", body(asm.encode("lwa", rD=3, rA=4, DS=4))[0][0])
 
     def test_float_accesses_use_the_conversion_helpers(self):
-        self.assertIn("ctx->fpr[1].f64 = dalReadF32(", body(asm.encode("lfs", frD=1, rA=4))[0][0])
-        self.assertIn("dalWriteF32(base, ", body(asm.encode("stfs", frS=1, rA=4))[0][0])
-        self.assertIn("ctx->fpr[1].u64 = dalRead64(", body(asm.encode("lfd", frD=1, rA=4))[0][0])
-        self.assertIn("dalWrite64(base, ", body(asm.encode("stfd", frS=1, rA=4))[0][0])
+        self.assertIn("ctx->fpr[1].f64 = tox2ReadF32(", body(asm.encode("lfs", frD=1, rA=4))[0][0])
+        self.assertIn("tox2WriteF32(base, ", body(asm.encode("stfs", frS=1, rA=4))[0][0])
+        self.assertIn("ctx->fpr[1].u64 = tox2Read64(", body(asm.encode("lfd", frD=1, rA=4))[0][0])
+        self.assertIn("tox2Write64(base, ", body(asm.encode("stfd", frS=1, rA=4))[0][0])
 
     def test_stfiwx_stores_the_low_word_of_the_bits(self):
         self.assertEqual(body(asm.encode("stfiwx", frS=1, rA=4, rB=5))[0],
-                         ["dalWrite32(base, (uint32_t)(ctx->gpr[4] + ctx->gpr[5]), "
+                         ["tox2Write32(base, (uint32_t)(ctx->gpr[4] + ctx->gpr[5]), "
                           "(uint32_t)ctx->fpr[1].u64);"])
 
     def test_byte_reversed_forms_swap_the_memory_value(self):
-        self.assertIn("__builtin_bswap32(dalRead32(", body(asm.encode("lwbrx", rD=3, rA=4, rB=5))[0][0])
-        self.assertIn("__builtin_bswap16(dalRead16(", body(asm.encode("lhbrx", rD=3, rA=4, rB=5))[0][0])
+        self.assertIn("__builtin_bswap32(tox2Read32(", body(asm.encode("lwbrx", rD=3, rA=4, rB=5))[0][0])
+        self.assertIn("__builtin_bswap16(tox2Read16(", body(asm.encode("lhbrx", rD=3, rA=4, rB=5))[0][0])
         self.assertIn("__builtin_bswap64((uint64_t)ctx->gpr[3])",
                       body(asm.encode("stdbrx", rS=3, rA=4, rB=5))[0][0])
 
@@ -268,15 +268,15 @@ class MemTest(unittest.TestCase):
         lines, _ = body(asm.encode("lmw", rD=29, rA=4, D=-4))
         self.assertEqual(lines, [
             "uint64_t t0 = (ctx->gpr[4] + 0xfffffffffffffffcull);",
-            "ctx->gpr[29] = dalRead32(base, (uint32_t)t0);",
-            "ctx->gpr[30] = dalRead32(base, (uint32_t)(t0 + 4));",
-            "ctx->gpr[31] = dalRead32(base, (uint32_t)(t0 + 8));"])
+            "ctx->gpr[29] = tox2Read32(base, (uint32_t)t0);",
+            "ctx->gpr[30] = tox2Read32(base, (uint32_t)(t0 + 4));",
+            "ctx->gpr[31] = tox2Read32(base, (uint32_t)(t0 + 8));"])
 
     def test_string_instructions_take_the_count_from_nb_or_xer(self):
         self.assertEqual(body(asm.encode("lswi", rD=5, rA=4, NB=0))[0],
-                         ["dalLoadString(ctx, base, (uint32_t)ctx->gpr[4], 5, 32u);"])
+                         ["tox2LoadString(ctx, base, (uint32_t)ctx->gpr[4], 5, 32u);"])
         self.assertEqual(body(asm.encode("stswx", rS=5, rA=4, rB=6))[0],
-                         ["dalStoreString(ctx, base, (uint32_t)(ctx->gpr[4] + ctx->gpr[6]), 5, "
+                         ["tox2StoreString(ctx, base, (uint32_t)(ctx->gpr[4] + ctx->gpr[6]), 5, "
                           "ctx->xer_count & 0x7f);"])
 
 
@@ -290,8 +290,8 @@ class SysTest(unittest.TestCase):
         self.assertEqual(body(asm.mflr(3))[0], ["ctx->gpr[3] = ctx->lr;"])
         self.assertEqual(body(asm.mtctr(3))[0], ["ctx->ctr = ctx->gpr[3];"])
         self.assertEqual(body(asm.encode("mfspr", rD=3, SPR=1))[0],
-                         ["ctx->gpr[3] = dalMfxer(ctx);"])
-        self.assertEqual(body(asm.encode("mtspr", SPR=1, rS=3))[0], ["dalMtxer(ctx, ctx->gpr[3]);"])
+                         ["ctx->gpr[3] = tox2Mfxer(ctx);"])
+        self.assertEqual(body(asm.encode("mtspr", SPR=1, rS=3))[0], ["tox2Mtxer(ctx, ctx->gpr[3]);"])
         self.assertEqual(body(asm.encode("mtspr", SPR=256, rS=3))[0],
                          ["ctx->vrsave = (uint32_t)ctx->gpr[3];"])
 
@@ -299,16 +299,16 @@ class SysTest(unittest.TestCase):
         for name, fields, key in (("mfspr", {"rD": 3, "SPR": 1013}, "mfspr:spr=1013"),
                                   ("mtspr", {"SPR": 18, "rS": 3}, "mtspr:spr=18")):
             lines, stats = body(asm.encode(name, **fields))
-            self.assertTrue(lines[0].startswith("DAL_UNHANDLED"), name)
+            self.assertTrue(lines[0].startswith("TOX2_UNHANDLED"), name)
             self.assertEqual(dict(stats.unhandled), {key: 1})
 
     def test_mftb_calls_the_time_base_hook(self):
         self.assertEqual(body(asm.encode("mftb", rD=3, TBR=268))[0],
-                         ["ctx->gpr[3] = dalMftb(ctx);"])
+                         ["ctx->gpr[3] = tox2Mftb(ctx);"])
         self.assertEqual(body(asm.encode("mftb", rD=3, TBR=269))[0],
-                         ["ctx->gpr[3] = dalMftb(ctx) >> 32;"])
+                         ["ctx->gpr[3] = tox2Mftb(ctx) >> 32;"])
         lines, stats = body(asm.encode("mftb", rD=3, TBR=300))
-        self.assertTrue(lines[0].startswith("DAL_UNHANDLED"))
+        self.assertTrue(lines[0].startswith("TOX2_UNHANDLED"))
         self.assertEqual(dict(stats.unhandled), {"mftb:tbr=300": 1})
 
     def test_cache_hints_emit_no_statement(self):
@@ -319,38 +319,38 @@ class SysTest(unittest.TestCase):
 
     def test_dcbz_calls_the_runtime_line_clear(self):
         self.assertEqual(body(asm.encode("dcbz", rA=4, rB=5))[0],
-                         ["dalDcbz(ctx, base, (uint32_t)(ctx->gpr[4] + ctx->gpr[5]));"])
+                         ["tox2Dcbz(ctx, base, (uint32_t)(ctx->gpr[4] + ctx->gpr[5]));"])
         self.assertEqual(body(asm.encode("dcbz", rA=0, rB=5))[0],
-                         ["dalDcbz(ctx, base, (uint32_t)ctx->gpr[5]);"])
+                         ["tox2Dcbz(ctx, base, (uint32_t)ctx->gpr[5]);"])
 
     def test_barriers_pass_their_kind(self):
-        self.assertEqual(body(asm.encode("sync", L_sync=0))[0], ["dalSync(ctx, kDalSyncHeavy);"])
-        self.assertEqual(body(asm.encode("sync", L_sync=1))[0], ["dalSync(ctx, kDalSyncLight);"])
-        self.assertEqual(body(asm.encode("eieio"))[0], ["dalSync(ctx, kDalSyncEieio);"])
-        self.assertEqual(body(asm.encode("isync"))[0], ["dalSync(ctx, kDalSyncIsync);"])
+        self.assertEqual(body(asm.encode("sync", L_sync=0))[0], ["tox2Sync(ctx, kTox2SyncHeavy);"])
+        self.assertEqual(body(asm.encode("sync", L_sync=1))[0], ["tox2Sync(ctx, kTox2SyncLight);"])
+        self.assertEqual(body(asm.encode("eieio"))[0], ["tox2Sync(ctx, kTox2SyncEieio);"])
+        self.assertEqual(body(asm.encode("isync"))[0], ["tox2Sync(ctx, kTox2SyncIsync);"])
 
     def test_reservations_go_through_the_runtime(self):
         self.assertEqual(body(asm.encode("lwarx", rD=5, rA=0, rB=4))[0],
-                         ["ctx->gpr[5] = dalLwarx(ctx, base, (uint32_t)ctx->gpr[4]);"])
+                         ["ctx->gpr[5] = tox2Lwarx(ctx, base, (uint32_t)ctx->gpr[4]);"])
         self.assertEqual(body(asm.encode("ldarx", rD=5, rA=3, rB=4))[0],
-                         ["ctx->gpr[5] = dalLdarx(ctx, base, (uint32_t)(ctx->gpr[3] + ctx->gpr[4]));"])
+                         ["ctx->gpr[5] = tox2Ldarx(ctx, base, (uint32_t)(ctx->gpr[3] + ctx->gpr[4]));"])
         self.assertEqual(body(asm.encode("stwcx.", rS=6, rA=0, rB=4))[0],
-                         ["bool t0 = dalStwcx(ctx, base, (uint32_t)ctx->gpr[4], "
+                         ["bool t0 = tox2Stwcx(ctx, base, (uint32_t)ctx->gpr[4], "
                           "(uint32_t)ctx->gpr[6]);",
-                          "dalSetCr0Conditional(ctx, t0);"])
-        self.assertIn("dalStdcx(ctx, base, ", body(asm.encode("stdcx.", rS=6, rA=0, rB=4))[0][0])
+                          "tox2SetCr0Conditional(ctx, t0);"])
+        self.assertIn("tox2Stdcx(ctx, base, ", body(asm.encode("stdcx.", rS=6, rA=0, rB=4))[0][0])
 
     def test_condition_register_moves(self):
-        self.assertEqual(body(asm.encode("mfcr", rD=3))[0], ["ctx->gpr[3] = dalMfcr(ctx);"])
+        self.assertEqual(body(asm.encode("mfcr", rD=3))[0], ["ctx->gpr[3] = tox2Mfcr(ctx);"])
         self.assertEqual(body(asm.encode("mtcrf", CRM=0xFF, rS=3))[0],
-                         ["dalMtcrf(ctx, 0xffu, (uint32_t)ctx->gpr[3]);"])
+                         ["tox2Mtcrf(ctx, 0xffu, (uint32_t)ctx->gpr[3]);"])
         self.assertEqual(body(asm.encode("mtcrf", CRM=0, rS=3))[0], [])
         self.assertEqual(body(asm.encode("mfocrf", rD=3, FXM=0x20))[0],
-                         ["ctx->gpr[3] = (uint64_t)dalGetCrField(ctx, 2) << 20;"])
+                         ["ctx->gpr[3] = (uint64_t)tox2GetCrField(ctx, 2) << 20;"])
         self.assertEqual(body(asm.encode("mtocrf", CRM=0x01, rS=3))[0],
-                         ["dalSetCrField(ctx, 7, (uint32_t)(ctx->gpr[3] >> 0) & 15u);"])
+                         ["tox2SetCrField(ctx, 7, (uint32_t)(ctx->gpr[3] >> 0) & 15u);"])
         self.assertEqual(body(asm.encode("mcrf", crfD=2, crfS=5))[0],
-                         ["dalSetCrField(ctx, 2, dalGetCrField(ctx, 5));"])
+                         ["tox2SetCrField(ctx, 2, tox2GetCrField(ctx, 5));"])
 
     def test_cr_logical_ops_are_byte_operations(self):
         self.assertEqual(body(asm.encode("cror", crbD=2, crbA=1, crbB=2))[0],
@@ -401,8 +401,8 @@ class FpTest(unittest.TestCase):
                          ["ctx->fpr[4].u64 = ctx->fpr[1].u64;"])
 
     def test_integer_conversions_go_through_the_saturating_helpers(self):
-        for name, helper in (("fctiw", "dalFctiw"), ("fctiwz", "dalFctiwz"),
-                             ("fctid", "dalFctid"), ("fctidz", "dalFctidz")):
+        for name, helper in (("fctiw", "tox2Fctiw"), ("fctiwz", "tox2Fctiwz"),
+                             ("fctid", "tox2Fctid"), ("fctidz", "tox2Fctidz")):
             self.assertEqual(body(asm.encode(name, frD=4, frB=1))[0],
                              ["ctx->fpr[4].u64 = %s(ctx->fpr[1].f64);" % helper], name)
         self.assertEqual(body(asm.encode("fcfid", frD=4, frB=1))[0],
@@ -411,24 +411,24 @@ class FpTest(unittest.TestCase):
     def test_compares_write_the_selected_field(self):
         for name in ("fcmpu", "fcmpo"):
             self.assertEqual(body(asm.encode(name, crfD=3, frA=1, frB=2))[0],
-                             ["dalFcmp(ctx, 3, ctx->fpr[1].f64, ctx->fpr[2].f64);"], name)
+                             ["tox2Fcmp(ctx, 3, ctx->fpr[1].f64, ctx->fpr[2].f64);"], name)
 
     def test_record_form_copies_fpscr_to_cr1(self):
         lines, _ = body(asm.encode("fadd", frD=4, frA=1, frB=2, Rc=1))
-        self.assertEqual(lines[-1], "dalRecordFp(ctx);")
+        self.assertEqual(lines[-1], "tox2RecordFp(ctx);")
         lines, _ = body(asm.encode("fadd", frD=4, frA=1, frB=2))
-        self.assertFalse(any("dalRecordFp" in line for line in lines))
+        self.assertFalse(any("tox2RecordFp" in line for line in lines))
 
     def test_fpscr_moves_call_the_runtime_hooks(self):
-        self.assertEqual(body(asm.encode("mffs", frD=1))[0], ["ctx->fpr[1].u64 = dalMffs(ctx);"])
+        self.assertEqual(body(asm.encode("mffs", frD=1))[0], ["ctx->fpr[1].u64 = tox2Mffs(ctx);"])
         self.assertEqual(body(asm.encode("mtfsf", FM=0xFF, frB=1))[0],
-                         ["dalMtfsf(ctx, 0xffu, ctx->fpr[1].u64);"])
+                         ["tox2Mtfsf(ctx, 0xffu, ctx->fpr[1].u64);"])
         self.assertEqual(body(asm.encode("mtfsfi", crfD=3, IMM_fp=9))[0],
-                         ["dalMtfsf(ctx, 0x10u, (uint64_t)9u << 16);"])
-        self.assertEqual(body(asm.encode("mtfsb0", crbD=5))[0], ["dalMtfsb(ctx, 5, 0);"])
-        self.assertEqual(body(asm.encode("mtfsb1", crbD=5))[0], ["dalMtfsb(ctx, 5, 1);"])
+                         ["tox2Mtfsf(ctx, 0x10u, (uint64_t)9u << 16);"])
+        self.assertEqual(body(asm.encode("mtfsb0", crbD=5))[0], ["tox2Mtfsb(ctx, 5, 0);"])
+        self.assertEqual(body(asm.encode("mtfsb1", crbD=5))[0], ["tox2Mtfsb(ctx, 5, 1);"])
         self.assertEqual(body(asm.encode("mcrfs", crfD=1, crfS=4))[0],
-                         ["dalSetCrField(ctx, 1, (uint32_t)(dalMffs(ctx) >> 12) & 15u);"])
+                         ["tox2SetCrField(ctx, 1, (uint32_t)(tox2Mffs(ctx) >> 12) & 15u);"])
 
 
 class VmxMemTest(unittest.TestCase):
@@ -439,23 +439,23 @@ class VmxMemTest(unittest.TestCase):
 
     def test_block_accesses_use_the_truncated_ea(self):
         self.assertEqual(body(asm.encode("lvx", vD=3, rA=4, rB=5))[0],
-                         ["ctx->vr[3] = dalReadVr(base, (uint32_t)(ctx->gpr[4] + ctx->gpr[5]));"])
+                         ["ctx->vr[3] = tox2ReadVr(base, (uint32_t)(ctx->gpr[4] + ctx->gpr[5]));"])
         self.assertEqual(body(asm.encode("stvx", vS=3, rA=0, rB=5))[0],
-                         ["dalWriteVr(base, (uint32_t)ctx->gpr[5], ctx->vr[3]);"])
+                         ["tox2WriteVr(base, (uint32_t)ctx->gpr[5], ctx->vr[3]);"])
 
     def test_element_loads_load_the_whole_block(self):
         for name in ("lvebx", "lvehx", "lvewx", "lvxl"):
             lines, _ = body(asm.encode(name, vD=3, rA=4, rB=5))
-            self.assertEqual(lines[0].split("(")[0], "ctx->vr[3] = dalReadVr", name)
+            self.assertEqual(lines[0].split("(")[0], "ctx->vr[3] = tox2ReadVr", name)
 
     def test_partial_accesses_call_their_helpers(self):
-        for name, helper in (("lvlx", "dalLvlx"), ("lvlxl", "dalLvlx"), ("lvrx", "dalLvrx"),
-                             ("lvrxl", "dalLvrx"), ("lvsl", "dalLvsl"), ("lvsr", "dalLvsr")):
+        for name, helper in (("lvlx", "tox2Lvlx"), ("lvlxl", "tox2Lvlx"), ("lvrx", "tox2Lvrx"),
+                             ("lvrxl", "tox2Lvrx"), ("lvsl", "tox2Lvsl"), ("lvsr", "tox2Lvsr")):
             lines, _ = body(asm.encode(name, vD=3, rA=4, rB=5))
             self.assertTrue(lines[0].startswith("ctx->vr[3] = %s(" % helper), name)
-        for name, helper in (("stvlx", "dalStvlx"), ("stvlxl", "dalStvlx"), ("stvrx", "dalStvrx"),
-                             ("stvrxl", "dalStvrx"), ("stvebx", "dalStvebx"),
-                             ("stvehx", "dalStvehx"), ("stvewx", "dalStvewx")):
+        for name, helper in (("stvlx", "tox2Stvlx"), ("stvlxl", "tox2Stvlx"), ("stvrx", "tox2Stvrx"),
+                             ("stvrxl", "tox2Stvrx"), ("stvebx", "tox2Stvebx"),
+                             ("stvehx", "tox2Stvehx"), ("stvewx", "tox2Stvewx")):
             lines, _ = body(asm.encode(name, vS=3, rA=4, rB=5))
             self.assertTrue(lines[0].startswith("%s(base, " % helper), name)
             self.assertTrue(lines[0].endswith(", ctx->vr[3]);"), name)
@@ -470,11 +470,11 @@ class VmxMemTest(unittest.TestCase):
 
     def test_vsel_takes_vb_where_vc_is_set(self):
         self.assertEqual(body(asm.encode("vsel", vD=4, vA=1, vB=2, vC=3))[0],
-                         ["ctx->vr[4] = dalVsel(ctx->vr[1], ctx->vr[2], ctx->vr[3]);"])
+                         ["ctx->vr[4] = tox2Vsel(ctx->vr[1], ctx->vr[2], ctx->vr[3]);"])
 
     def test_vscr_moves_go_through_the_helpers(self):
-        self.assertEqual(body(asm.encode("mfvscr", vD=3))[0], ["ctx->vr[3] = dalMfvscr(ctx);"])
-        self.assertEqual(body(asm.encode("mtvscr", vB=2))[0], ["dalMtvscr(ctx, ctx->vr[2]);"])
+        self.assertEqual(body(asm.encode("mfvscr", vD=3))[0], ["ctx->vr[3] = tox2Mfvscr(ctx);"])
+        self.assertEqual(body(asm.encode("mtvscr", vB=2))[0], ["tox2Mtvscr(ctx, ctx->vr[2]);"])
 
 
 class VmxPermTest(unittest.TestCase):
@@ -509,25 +509,25 @@ class VmxPermTest(unittest.TestCase):
         self.assertTrue(lines[0].endswith(", 8, 10, 12, 14, 0, 2, 4, 6);"))
 
     def test_saturating_packs_receive_the_context(self):
-        for name, helper in (("vpkshss", "dalVpkshss"), ("vpkshus", "dalVpkshus"),
-                             ("vpkuhus", "dalVpkuhus"), ("vpkswss", "dalVpkswss"),
-                             ("vpkswus", "dalVpkswus"), ("vpkuwus", "dalVpkuwus")):
+        for name, helper in (("vpkshss", "tox2Vpkshss"), ("vpkshus", "tox2Vpkshus"),
+                             ("vpkuhus", "tox2Vpkuhus"), ("vpkswss", "tox2Vpkswss"),
+                             ("vpkswus", "tox2Vpkswus"), ("vpkuwus", "tox2Vpkuwus")):
             self.assertEqual(body(asm.encode(name, vD=3, vA=1, vB=2))[0],
                              ["ctx->vr[3] = %s(ctx, ctx->vr[1], ctx->vr[2]);" % helper], name)
 
     def test_splat_immediates_are_sign_extended(self):
         self.assertEqual(body(asm.encode("vspltisw", vD=3, SIMM5=-1))[0],
-                         ["ctx->vr[3] = dalVspltisw(-1);"])
+                         ["ctx->vr[3] = tox2Vspltisw(-1);"])
         self.assertEqual(body(asm.encode("vspltisb", vD=3, SIMM5=15))[0],
-                         ["ctx->vr[3] = dalVspltisb(15);"])
+                         ["ctx->vr[3] = tox2Vspltisb(15);"])
 
     def test_shifts_and_permute_call_their_helpers(self):
-        for name, helper in (("vsl", "dalVsl"), ("vsr", "dalVsr"), ("vslo", "dalVslo"),
-                             ("vsro", "dalVsro")):
+        for name, helper in (("vsl", "tox2Vsl"), ("vsr", "tox2Vsr"), ("vslo", "tox2Vslo"),
+                             ("vsro", "tox2Vsro")):
             self.assertEqual(body(asm.encode(name, vD=3, vA=1, vB=2))[0],
                              ["ctx->vr[3] = %s(ctx->vr[1], ctx->vr[2]);" % helper], name)
         self.assertEqual(body(asm.encode("vperm", vD=3, vA=1, vB=2, vC=4))[0],
-                         ["ctx->vr[3] = dalVperm(ctx->vr[1], ctx->vr[2], ctx->vr[4]);"])
+                         ["ctx->vr[3] = tox2Vperm(ctx->vr[1], ctx->vr[2], ctx->vr[4]);"])
 
 
 class VmxIntTest(unittest.TestCase):
@@ -545,7 +545,7 @@ class VmxIntTest(unittest.TestCase):
     def test_saturating_forms_receive_the_context(self):
         for name in ("vaddubs", "vaddsws", "vsubshs", "vsubuws"):
             self.assertEqual(body(asm.encode(name, vD=3, vA=1, vB=2))[0],
-                             ["ctx->vr[3] = dal%s(ctx, ctx->vr[1], ctx->vr[2]);" % name.capitalize()],
+                             ["ctx->vr[3] = tox2%s(ctx, ctx->vr[1], ctx->vr[2]);" % name.capitalize()],
                              name)
 
     def test_min_max_and_compare_pick_the_signedness_view(self):
@@ -554,20 +554,20 @@ class VmxIntTest(unittest.TestCase):
         self.assertEqual(body(asm.encode("vminub", vD=3, vA=1, vB=2))[0],
                          ["ctx->vr[3].u8 = __builtin_elementwise_min(ctx->vr[1].u8, ctx->vr[2].u8);"])
         self.assertEqual(body(asm.encode("vcmpgtsb", vD=3, vA=1, vB=2))[0],
-                         ["ctx->vr[3].u8 = (DalU8x16)(ctx->vr[1].s8 > ctx->vr[2].s8);"])
+                         ["ctx->vr[3].u8 = (Tox2U8x16)(ctx->vr[1].s8 > ctx->vr[2].s8);"])
         self.assertEqual(body(asm.encode("vcmpequw", vD=3, vA=1, vB=2))[0],
-                         ["ctx->vr[3].u32 = (DalU32x4)(ctx->vr[1].u32 == ctx->vr[2].u32);"])
+                         ["ctx->vr[3].u32 = (Tox2U32x4)(ctx->vr[1].u32 == ctx->vr[2].u32);"])
 
     def test_only_the_record_form_updates_cr6(self):
         plain, _ = body(asm.encode("vcmpgtuh", vD=3, vA=1, vB=2))
         record, _ = body(asm.encode("vcmpgtuh", vD=3, vA=1, vB=2, Rc_vc=1))
-        self.assertFalse(any("dalSetCr6" in line for line in plain))
-        self.assertEqual(record[1:], ["dalSetCr6(ctx, ctx->vr[3]);"])
+        self.assertFalse(any("tox2SetCr6" in line for line in plain))
+        self.assertEqual(record[1:], ["tox2SetCr6(ctx, ctx->vr[3]);"])
 
     def test_carry_and_average_call_their_helpers(self):
         for name in ("vaddcuw", "vsubcuw", "vavgub", "vavgsw"):
             self.assertEqual(body(asm.encode(name, vD=3, vA=1, vB=2))[0],
-                             ["ctx->vr[3] = dal%s(ctx->vr[1], ctx->vr[2]);" % name.capitalize()], name)
+                             ["ctx->vr[3] = tox2%s(ctx->vr[1], ctx->vr[2]);" % name.capitalize()], name)
 
 
 class VmxMulTest(unittest.TestCase):
@@ -579,22 +579,22 @@ class VmxMulTest(unittest.TestCase):
     def test_two_source_forms_call_their_helper(self):
         for name in ("vslw", "vsraw", "vrlb", "vsrh", "vmuleub", "vmulosh"):
             self.assertEqual(body(asm.encode(name, vD=3, vA=1, vB=2))[0],
-                             ["ctx->vr[3] = dal%s(ctx->vr[1], ctx->vr[2]);" % name.capitalize()], name)
+                             ["ctx->vr[3] = tox2%s(ctx->vr[1], ctx->vr[2]);" % name.capitalize()], name)
 
     def test_three_source_forms_pass_vrc_last(self):
         for name in ("vmladduhm", "vmsumubm", "vmsummbm", "vmsumuhm", "vmsumshm"):
             self.assertEqual(body(asm.encode(name, vD=3, vA=1, vB=2, vC=4))[0],
-                             ["ctx->vr[3] = dal%s(ctx->vr[1], ctx->vr[2], ctx->vr[4]);"
+                             ["ctx->vr[3] = tox2%s(ctx->vr[1], ctx->vr[2], ctx->vr[4]);"
                               % name.capitalize()], name)
 
     def test_saturating_forms_receive_the_context(self):
         for name in ("vmhaddshs", "vmhraddshs", "vmsumuhs", "vmsumshs"):
             self.assertEqual(body(asm.encode(name, vD=3, vA=1, vB=2, vC=4))[0],
-                             ["ctx->vr[3] = dal%s(ctx, ctx->vr[1], ctx->vr[2], ctx->vr[4]);"
+                             ["ctx->vr[3] = tox2%s(ctx, ctx->vr[1], ctx->vr[2], ctx->vr[4]);"
                               % name.capitalize()], name)
         for name in ("vsum4ubs", "vsum4sbs", "vsum4shs", "vsum2sws", "vsumsws"):
             self.assertEqual(body(asm.encode(name, vD=3, vA=1, vB=2))[0],
-                             ["ctx->vr[3] = dal%s(ctx, ctx->vr[1], ctx->vr[2]);" % name.capitalize()],
+                             ["ctx->vr[3] = tox2%s(ctx, ctx->vr[1], ctx->vr[2]);" % name.capitalize()],
                              name)
 
     def test_modulo_forms_do_not_touch_sat(self):
@@ -612,47 +612,47 @@ class VmxFpTest(unittest.TestCase):
     def test_arithmetic_receives_the_context_for_non_java_mode(self):
         for name in ("vaddfp", "vsubfp", "vmaxfp", "vminfp"):
             self.assertEqual(body(asm.encode(name, vD=3, vA=1, vB=2))[0],
-                             ["ctx->vr[3] = dal%s(ctx, ctx->vr[1], ctx->vr[2]);" % name.capitalize()],
+                             ["ctx->vr[3] = tox2%s(ctx, ctx->vr[1], ctx->vr[2]);" % name.capitalize()],
                              name)
 
     def test_madd_family_passes_vrb_as_the_addend_between_vra_and_vrc(self):
         for name in ("vmaddfp", "vnmsubfp"):
             self.assertEqual(body(asm.encode(name, vD=3, vA=1, vB=2, vC=4))[0],
-                             ["ctx->vr[3] = dal%s(ctx, ctx->vr[1], ctx->vr[2], ctx->vr[4]);"
+                             ["ctx->vr[3] = tox2%s(ctx, ctx->vr[1], ctx->vr[2], ctx->vr[4]);"
                               % name.capitalize()], name)
 
     def test_one_source_forms(self):
         for name in ("vrefp", "vrsqrtefp", "vrfin", "vrfiz", "vrfip", "vrfim"):
             self.assertEqual(body(asm.encode(name, vD=3, vB=2))[0],
-                             ["ctx->vr[3] = dal%s(ctx, ctx->vr[2]);" % name.capitalize()], name)
+                             ["ctx->vr[3] = tox2%s(ctx, ctx->vr[2]);" % name.capitalize()], name)
         for name in ("vexptefp", "vlogefp"):
             self.assertEqual(body(asm.encode(name, vD=3, vB=2))[0],
-                             ["ctx->vr[3] = dal%s(ctx->vr[2]);" % name.capitalize()], name)
+                             ["ctx->vr[3] = tox2%s(ctx->vr[2]);" % name.capitalize()], name)
 
     def test_conversions_pass_the_scale_and_only_float_to_int_gets_the_context(self):
         self.assertEqual(body(asm.encode("vcfsx", vD=3, vB=2, UIMM5=5))[0],
-                         ["ctx->vr[3] = dalVcfsx(ctx->vr[2], 5);"])
+                         ["ctx->vr[3] = tox2Vcfsx(ctx->vr[2], 5);"])
         self.assertEqual(body(asm.encode("vcfux", vD=3, vB=2, UIMM5=31))[0],
-                         ["ctx->vr[3] = dalVcfux(ctx->vr[2], 31);"])
+                         ["ctx->vr[3] = tox2Vcfux(ctx->vr[2], 31);"])
         self.assertEqual(body(asm.encode("vctsxs", vD=3, vB=2, UIMM5=0))[0],
-                         ["ctx->vr[3] = dalVctsxs(ctx, ctx->vr[2], 0);"])
+                         ["ctx->vr[3] = tox2Vctsxs(ctx, ctx->vr[2], 0);"])
         self.assertEqual(body(asm.encode("vctuxs", vD=3, vB=2, UIMM5=7))[0],
-                         ["ctx->vr[3] = dalVctuxs(ctx, ctx->vr[2], 7);"])
+                         ["ctx->vr[3] = tox2Vctuxs(ctx, ctx->vr[2], 7);"])
 
     def test_compares_use_the_float_view(self):
         for name, sign in (("vcmpeqfp", "=="), ("vcmpgefp", ">="), ("vcmpgtfp", ">")):
             self.assertEqual(body(asm.encode(name, vD=3, vA=1, vB=2))[0],
-                             ["ctx->vr[3].u32 = (DalU32x4)(ctx->vr[1].f32 %s ctx->vr[2].f32);" % sign],
+                             ["ctx->vr[3].u32 = (Tox2U32x4)(ctx->vr[1].f32 %s ctx->vr[2].f32);" % sign],
                              name)
 
     def test_only_the_record_forms_update_cr6(self):
         for name in ("vcmpeqfp", "vcmpgefp", "vcmpgtfp", "vcmpbfp"):
             plain, _ = body(asm.encode(name, vD=3, vA=1, vB=2))
             record, _ = body(asm.encode(name, vD=3, vA=1, vB=2, Rc_vc=1))
-            self.assertFalse(any("dalSetCr6" in line for line in plain), name)
-            self.assertEqual(record[1:], ["dalSetCr6(ctx, ctx->vr[3]);"], name)
+            self.assertFalse(any("tox2SetCr6" in line for line in plain), name)
+            self.assertEqual(record[1:], ["tox2SetCr6(ctx, ctx->vr[3]);"], name)
         self.assertEqual(body(asm.encode("vcmpbfp", vD=3, vA=1, vB=2))[0],
-                         ["ctx->vr[3] = dalVcmpbfp(ctx->vr[1], ctx->vr[2]);"])
+                         ["ctx->vr[3] = tox2Vcmpbfp(ctx->vr[1], ctx->vr[2]);"])
 
 
 if __name__ == "__main__":

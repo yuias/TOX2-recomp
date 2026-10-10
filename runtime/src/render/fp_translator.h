@@ -9,7 +9,7 @@
 
 #include "render/vp_translator.h"
 
-namespace dal {
+namespace tox2 {
 
 // ---- Interface contract shared with the vertex translator and the renderer ----
 
@@ -79,4 +79,4 @@ constexpr std::uint32_t fpFixupWord(std::uint32_t stored) { return std::rotl(sto
 GlslResult translateFragmentProgram(std::span<const std::uint32_t> ucode, std::uint32_t control,
                                     std::uint32_t texcoord_control);
 
-}  // namespace dal
+}  // namespace tox2

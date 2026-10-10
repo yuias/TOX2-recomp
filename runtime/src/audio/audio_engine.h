@@ -16,7 +16,7 @@
 
 #include "audio/audio_output.h"
 
-namespace dal {
+namespace tox2 {
 
 // Periods the engine may produce beyond the first one when it wakes late. Zero: the game's mixer
 // writes exactly one block per notify and needs the guest lock to do it, so two periods produced
@@ -145,4 +145,4 @@ private:
     double last_mean_fill_ = 0.0;
 };
 
-}  // namespace dal
+}  // namespace tox2

@@ -5,7 +5,7 @@
 #include <charconv>
 #include <string>
 
-namespace dal {
+namespace tox2 {
 
 namespace {
 
@@ -152,4 +152,4 @@ std::string_view gamepadUseName(GamepadUse use) {
     return "unknown";
 }
 
-}  // namespace dal
+}  // namespace tox2

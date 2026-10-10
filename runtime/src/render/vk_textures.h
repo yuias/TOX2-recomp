@@ -14,7 +14,7 @@
 #include "render/vk_context.h"
 #include "rsx/rsx_frame.h"
 
-namespace dal {
+namespace tox2 {
 
 // Sampled images are B8G8R8A8 for render targets and A8R8G8B8 guest textures (after a 32-bit byte swap
 // of each texel on upload, guest bytes A, R, G, B become B, G, R, A), and BC1/BC2/BC3 for DXT1/DXT23/DXT45
@@ -122,4 +122,4 @@ private:
     std::map<SamplerSettings, VkSampler> samplers_;
 };
 
-}  // namespace dal
+}  // namespace tox2

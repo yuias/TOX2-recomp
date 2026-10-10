@@ -8,7 +8,7 @@ param(
     [string]$EbootElf,
     [string]$GeneratedDir,
     [string]$GameDir,
-    [string]$LlvmBin = $env:DAL_LLVM_BIN
+    [string]$LlvmBin = $env:TOX2_LLVM_BIN
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,13 +55,13 @@ try {
 
     $configureArgs = @('--preset', $Preset)
     if ($EbootElf) {
-        $configureArgs += "-DDAL_EBOOT_ELF=$((Resolve-Path -LiteralPath $EbootElf).Path)"
+        $configureArgs += "-DTOX2_EBOOT_ELF=$((Resolve-Path -LiteralPath $EbootElf).Path)"
     }
     if ($GeneratedDir) {
-        $configureArgs += "-DDAL_PPU_GENERATED_DIR=$GeneratedDir"
+        $configureArgs += "-DTOX2_PPU_GENERATED_DIR=$GeneratedDir"
     }
     if ($GameDir) {
-        $configureArgs += "-DDAL_GAME_DIR=$GameDir"
+        $configureArgs += "-DTOX2_GAME_DIR=$GameDir"
     }
     & cmake @configureArgs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

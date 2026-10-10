@@ -9,7 +9,7 @@
 #include "rsx/rsx_decode.h"
 #include "rsx/rsx_unimplemented.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr VkDeviceSize kCacheBudgetBytes = 256ull << 20;
@@ -368,4 +368,4 @@ void TextureCache::trim() {
     }
 }
 
-}  // namespace dal
+}  // namespace tox2

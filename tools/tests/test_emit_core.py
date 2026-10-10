@@ -66,7 +66,7 @@ class HelpersTest(unittest.TestCase):
         self.assertEqual(lwzx.ea64_x(), "(ctx->gpr[4] + ctx->gpr[5])")
         lwzx0 = Op(decode(asm.lwzx(3, 0, 5), BASE, strict=True))
         self.assertEqual(lwzx0.ea_x(), "(uint32_t)ctx->gpr[5]")
-        self.assertEqual(lwzx0.record("ctx->gpr[3]"), "dalRecord(ctx, ctx->gpr[3]);")
+        self.assertEqual(lwzx0.record("ctx->gpr[3]"), "tox2Record(ctx, ctx->gpr[3]);")
         self.assertEqual((lwzx0.gpr(7), lwzx0.fpr(1), lwzx0.vr(2)),
                          ("ctx->gpr[7]", "ctx->fpr[1]", "ctx->vr[2]"))
 
@@ -85,8 +85,8 @@ class HelpersTest(unittest.TestCase):
 class FunctionShapeTest(unittest.TestCase):
     def test_empty_body_function_with_a_return(self):
         text, stats = emit([asm.blr()])
-        self.assertEqual(text, "DAL_PPU_FUNC(fn_00010000) {\n"
-                               "    DAL_ENTER(0x00010000u);\n"
+        self.assertEqual(text, "TOX2_PPU_FUNC(fn_00010000) {\n"
+                               "    TOX2_ENTER(0x00010000u);\n"
                                "    return;\n"
                                "}\n")
         self.assertEqual((stats.functions, stats.instructions, stats.labels), (1, 1, 0))
@@ -122,8 +122,8 @@ class BranchTest(unittest.TestCase):
     def test_forward_goto_has_no_loop_hook(self):
         words = [asm.b(BASE, BASE + 8), asm.li(3, 1), asm.blr()]
         text, stats = emit(words)
-        self.assertEqual(text, "DAL_PPU_FUNC(fn_00010000) {\n"
-                               "    DAL_ENTER(0x00010000u);\n"
+        self.assertEqual(text, "TOX2_PPU_FUNC(fn_00010000) {\n"
+                               "    TOX2_ENTER(0x00010000u);\n"
                                "    goto L_00010008;\n"
                                "    ctx->gpr[3] = 1;\n"
                                "L_00010008:\n"
@@ -135,24 +135,24 @@ class BranchTest(unittest.TestCase):
         words = [asm.li(3, 1), asm.b(BASE + 4, BASE), asm.blr()]
         text, stats = emit(words)
         print("\n" + text)
-        self.assertEqual(text, "DAL_PPU_FUNC(fn_00010000) {\n"
-                               "    DAL_ENTER(0x00010000u);\n"
+        self.assertEqual(text, "TOX2_PPU_FUNC(fn_00010000) {\n"
+                               "    TOX2_ENTER(0x00010000u);\n"
                                "L_00010000:\n"
                                "    ctx->gpr[3] = 1;\n"
-                               "    { DAL_LOOP(0x00010004u); goto L_00010000; }\n"
+                               "    { TOX2_LOOP(0x00010004u); goto L_00010000; }\n"
                                "    return;\n"
                                "}\n")
         self.assertEqual((stats.labels, stats.loop_hooks), (1, 1))
 
     def test_branch_to_self_is_a_backward_branch(self):
         text, stats = emit([asm.b(BASE, BASE)])
-        self.assertIn("    { DAL_LOOP(0x00010000u); goto L_00010000; }\n", text)
+        self.assertIn("    { TOX2_LOOP(0x00010000u); goto L_00010000; }\n", text)
         self.assertEqual(stats.loop_hooks, 1)
 
     def test_branch_to_own_entry_labels_the_entry(self):
         words = [asm.li(3, 1), asm.b(BASE + 4, BASE), asm.blr()]
         text, _ = emit(words, env=make_env(names={BASE: "fn_00010000"}))
-        self.assertIn("DAL_ENTER(0x00010000u);\nL_00010000:\n", text)
+        self.assertIn("TOX2_ENTER(0x00010000u);\nL_00010000:\n", text)
         self.assertEqual(text.count("L_00010000:"), 1)
 
     def test_labels_only_where_targeted(self):
@@ -169,30 +169,30 @@ class BranchTest(unittest.TestCase):
 
     def test_absolute_branch_target(self):
         text, stats = emit([asm.b(BASE, OTHER, aa=True)])
-        self.assertIn("    DAL_TAIL(fn_00020000);\n", text)
+        self.assertIn("    TOX2_TAIL(fn_00020000);\n", text)
         self.assertEqual(stats.edges["tails_direct"], 1)
 
 
 class TailTest(unittest.TestCase):
     def test_tail_to_function(self):
         text, stats = emit([asm.b(BASE, OTHER)])
-        self.assertIn("    DAL_TAIL(fn_00020000);\n", text)
+        self.assertIn("    TOX2_TAIL(fn_00020000);\n", text)
         self.assertEqual(stats.edges["tails_direct"], 1)
 
     def test_tail_to_import(self):
         text, stats = emit([asm.b(BASE, STUB)])
-        self.assertIn("    DAL_TAIL(imp_00030000);\n", text)
+        self.assertIn("    TOX2_TAIL(imp_00030000);\n", text)
         self.assertEqual(stats.edges["tails_import"], 1)
 
     def test_tail_to_dynamic_target_is_recorded(self):
         text, stats = emit([asm.b(BASE, 0x40000)])
-        self.assertIn("    DAL_TAIL_DYN(0x00010000u, 0x00040000u);\n", text)
+        self.assertIn("    TOX2_TAIL_DYN(0x00010000u, 0x00040000u);\n", text)
         self.assertEqual(stats.edges["tails_dynamic"], 1)
         self.assertEqual(stats.dynamic_targets, [(BASE, 0x40000, "tail")])
 
     def test_bctr_is_a_dynamic_tail(self):
         text, stats = emit([asm.bctr()])
-        self.assertIn("    DAL_TAIL_DYN(0x00010000u, ctx->ctr);\n", text)
+        self.assertIn("    TOX2_TAIL_DYN(0x00010000u, ctx->ctr);\n", text)
         self.assertEqual(stats.edges["tails_dynamic"], 1)
         self.assertEqual(stats.dynamic_targets, [])
 
@@ -210,11 +210,11 @@ class CallTest(unittest.TestCase):
         text, stats = emit(words)
         body = lines_of(text)[2:-1]
         self.assertEqual(body, [
-            "DAL_CALL(fn_00020000, 0x00010004u);",
-            "DAL_CALL(imp_00030000, 0x00010008u);",
-            "DAL_CALL_DYN(0x00010008u, 0x00040000u, 0x0001000cu);",
-            "DAL_CALL_DYN(0x0001000cu, ctx->ctr, 0x00010010u);",
-            "DAL_CALL_DYN(0x00010010u, ctx->lr, 0x00010014u);",
+            "TOX2_CALL(fn_00020000, 0x00010004u);",
+            "TOX2_CALL(imp_00030000, 0x00010008u);",
+            "TOX2_CALL_DYN(0x00010008u, 0x00040000u, 0x0001000cu);",
+            "TOX2_CALL_DYN(0x0001000cu, ctx->ctr, 0x00010010u);",
+            "TOX2_CALL_DYN(0x00010010u, ctx->lr, 0x00010014u);",
             "return;"])
         self.assertEqual(stats.edges["calls_direct"], 1)
         self.assertEqual(stats.edges["calls_import"], 1)
@@ -224,13 +224,13 @@ class CallTest(unittest.TestCase):
 
     def test_call_to_own_entry_is_a_call_not_a_goto(self):
         text, stats = emit([asm.bl(BASE, BASE), asm.blr()], env=make_env(names={BASE: "fn_00010000"}))
-        self.assertIn("    DAL_CALL(fn_00010000, 0x00010004u);\n", text)
+        self.assertIn("    TOX2_CALL(fn_00010000, 0x00010004u);\n", text)
         self.assertNotRegex(text, r"(^|[ \n])L_")
         self.assertEqual(stats.labels, 0)
 
     def test_call_to_a_mid_function_address_is_dynamic(self):
         text, stats = emit([asm.bl(BASE, BASE + 8), asm.blr(), asm.blr()])
-        self.assertIn("    DAL_CALL_DYN(0x00010000u, 0x00010008u, 0x00010004u);\n", text)
+        self.assertIn("    TOX2_CALL_DYN(0x00010000u, 0x00010008u, 0x00010004u);\n", text)
         self.assertEqual(stats.dynamic_targets, [(BASE, BASE + 8, "call")])
 
     def test_get_pc_idiom_only_writes_lr(self):
@@ -256,7 +256,7 @@ class FallThroughTest(unittest.TestCase):
         env = make_env(names={OTHER: "fn_00020000", BASE + 4: "fn_00010004"})
         text, stats = emit([asm.bl(BASE, OTHER)], env=env)
         self.assertEqual(lines_of(text)[2:-1],
-                         ["DAL_CALL(fn_00020000, 0x00010004u);", "DAL_TAIL(fn_00010004);"])
+                         ["TOX2_CALL(fn_00020000, 0x00010004u);", "TOX2_TAIL(fn_00010004);"])
         self.assertEqual(stats.edges["fallthrough_tails"], 1)
         self.assertEqual(stats.edges["tails_direct"], 0)
 
@@ -264,7 +264,7 @@ class FallThroughTest(unittest.TestCase):
         _, stats = emit([asm.li(3, 1)], env=make_env(thunks={BASE + 4: "imp_00010004"}))
         self.assertEqual(stats.edges["fallthrough_tails"], 1)
         text, stats = emit([asm.li(3, 1)])
-        self.assertEqual(lines_of(text)[3], "DAL_TAIL_DYN(0x00010000u, 0x00010004u);")
+        self.assertEqual(lines_of(text)[3], "TOX2_TAIL_DYN(0x00010000u, 0x00010004u);")
         self.assertEqual(stats.dynamic_targets, [(BASE, BASE + 4, "fallthrough")])
         self.assertEqual(stats.edges["fallthrough_tails"], 1)
         self.assertEqual(stats.edges["tails_dynamic"], 0)
@@ -280,20 +280,20 @@ class FallThroughTest(unittest.TestCase):
         words = [asm.li(3, 1), asm.nop(), asm.blr()]
         text, stats = emit(words, addrs=[BASE, BASE + 8])
         self.assertEqual(lines_of(text)[2:-1],
-                         ["ctx->gpr[3] = 1;", "DAL_TAIL_DYN(0x00010000u, 0x00010004u);", "return;"])
+                         ["ctx->gpr[3] = 1;", "TOX2_TAIL_DYN(0x00010000u, 0x00010004u);", "return;"])
         self.assertEqual(stats.instructions, 2)
 
 
 class SyscallAndTrapTest(unittest.TestCase):
     def test_sc_falls_through(self):
         text, stats = emit([asm.sc(), asm.blr()])
-        self.assertEqual(lines_of(text)[2:-1], ["DAL_SYSCALL(0x00010000u);", "return;"])
+        self.assertEqual(lines_of(text)[2:-1], ["TOX2_SYSCALL(0x00010000u);", "return;"])
         self.assertEqual(stats.edges["syscalls"], 1)
 
     def test_unconditional_trap_has_no_fall_through_tail(self):
         for word in (asm.trap(), asm.tw(31, 3, 4), asm.twi(31, 3, 5)):
             text, stats = emit([word])
-            self.assertEqual(lines_of(text)[2:-1], ["DAL_TRAP(0x00010000u);"])
+            self.assertEqual(lines_of(text)[2:-1], ["TOX2_TRAP(0x00010000u);"])
             self.assertEqual(stats.edges["traps"], 1)
             self.assertEqual(stats.edges["fallthrough_tails"], 0)
 
@@ -320,7 +320,7 @@ class SyscallAndTrapTest(unittest.TestCase):
         ]
         for word, prefix in cases:
             text, stats = emit([word, asm.blr()])
-            self.assertEqual(lines_of(text)[2], prefix + "DAL_TRAP(0x00010000u);", hex(word))
+            self.assertEqual(lines_of(text)[2], prefix + "TOX2_TRAP(0x00010000u);", hex(word))
             self.assertEqual(stats.edges["traps"], 1)
             # A conditional trap falls through.
             self.assertEqual(lines_of(text)[3], "return;")
@@ -371,12 +371,12 @@ class ConditionalBranchTest(unittest.TestCase):
         words = [asm.li(3, 1), asm.bdnz(BASE + 4, BASE), asm.blr()]
         text, stats = emit(words)
         print("\n" + text)
-        self.assertEqual(text, "DAL_PPU_FUNC(fn_00010000) {\n"
-                               "    DAL_ENTER(0x00010000u);\n"
+        self.assertEqual(text, "TOX2_PPU_FUNC(fn_00010000) {\n"
+                               "    TOX2_ENTER(0x00010000u);\n"
                                "L_00010000:\n"
                                "    ctx->gpr[3] = 1;\n"
                                "    ctx->ctr -= 1;\n"
-                               "    if (ctx->ctr != 0) { DAL_LOOP(0x00010004u); goto L_00010000; }\n"
+                               "    if (ctx->ctr != 0) { TOX2_LOOP(0x00010004u); goto L_00010000; }\n"
                                "    return;\n"
                                "}\n")
         self.assertEqual((stats.labels, stats.loop_hooks), (1, 1))
@@ -388,16 +388,16 @@ class ConditionalBranchTest(unittest.TestCase):
 
     def test_conditional_branch_to_itself_is_a_loop(self):
         text, stats = emit([asm.bge(0, BASE, BASE), asm.blr()])
-        self.assertIn("    if (!ctx->cr[0]) { DAL_LOOP(0x00010000u); goto L_00010000; }\n", text)
+        self.assertIn("    if (!ctx->cr[0]) { TOX2_LOOP(0x00010000u); goto L_00010000; }\n", text)
         self.assertEqual(stats.loop_hooks, 1)
 
     def test_conditional_tails_by_target_kind(self):
         words = [asm.bgt(0, BASE, self.FN), asm.bgt(0, BASE + 4, self.IMP),
                  asm.bgt(0, BASE + 8, self.DYN), asm.blr()]
         body, stats = self.body(words[0], rest=words[1:])
-        self.assertEqual(body, ["if (ctx->cr[1]) DAL_TAIL(fn_00012000);",
-                                "if (ctx->cr[1]) DAL_TAIL(imp_00012100);",
-                                "if (ctx->cr[1]) DAL_TAIL_DYN(0x00010008u, 0x00012200u);",
+        self.assertEqual(body, ["if (ctx->cr[1]) TOX2_TAIL(fn_00012000);",
+                                "if (ctx->cr[1]) TOX2_TAIL(imp_00012100);",
+                                "if (ctx->cr[1]) TOX2_TAIL_DYN(0x00010008u, 0x00012200u);",
                                 "return;"])
         self.assertEqual((stats.edges["tails_direct"], stats.edges["tails_import"],
                           stats.edges["tails_dynamic"]), (1, 1, 1))
@@ -405,12 +405,12 @@ class ConditionalBranchTest(unittest.TestCase):
 
     def test_conditional_absolute_branch(self):
         body, _ = self.body(asm.bc(12, 2, BASE, self.ABS_FN, aa=True))
-        self.assertEqual(body[0], "if (ctx->cr[2]) DAL_TAIL(fn_00004000);")
+        self.assertEqual(body[0], "if (ctx->cr[2]) TOX2_TAIL(fn_00004000);")
 
     def test_conditional_branch_at_the_end_has_a_fall_through_tail(self):
         body, stats = self.body(asm.bgt(0, BASE, self.FN), rest=[])
-        self.assertEqual(body, ["if (ctx->cr[1]) DAL_TAIL(fn_00012000);",
-                        "DAL_TAIL_DYN(0x00010000u, 0x00010004u);"])
+        self.assertEqual(body, ["if (ctx->cr[1]) TOX2_TAIL(fn_00012000);",
+                        "TOX2_TAIL_DYN(0x00010000u, 0x00010004u);"])
         self.assertEqual(stats.edges["fallthrough_tails"], 1)
 
     def test_conditional_call_writes_lr_before_the_test(self):
@@ -419,12 +419,12 @@ class ConditionalBranchTest(unittest.TestCase):
         body, stats = self.body(words[0], rest=words[1:])
         self.assertEqual(body, [
             "ctx->lr = 0x00010004u;",
-            "if (ctx->cr[2]) DAL_CALL(fn_00012000, 0x00010004u);",
+            "if (ctx->cr[2]) TOX2_CALL(fn_00012000, 0x00010004u);",
             "ctx->ctr -= 1;",
             "ctx->lr = 0x00010008u;",
-            "if (ctx->ctr != 0) DAL_CALL(imp_00012100, 0x00010008u);",
+            "if (ctx->ctr != 0) TOX2_CALL(imp_00012100, 0x00010008u);",
             "ctx->lr = 0x0001000cu;",
-            "if (!ctx->cr[2]) DAL_CALL_DYN(0x00010008u, 0x00012200u, 0x0001000cu);",
+            "if (!ctx->cr[2]) TOX2_CALL_DYN(0x00010008u, 0x00012200u, 0x0001000cu);",
             "return;"])
         self.assertEqual((stats.edges["calls_direct"], stats.edges["calls_import"],
                           stats.edges["calls_dynamic_const"]), (1, 1, 1))
@@ -443,7 +443,7 @@ class ConditionalBranchTest(unittest.TestCase):
     def test_conditional_bclr_has_a_fall_through_tail_at_the_end(self):
         text, stats = emit([asm.bclr(12, 2)])
         self.assertEqual(lines_of(text)[2:-1], ["if (ctx->cr[2]) return;",
-                                                "DAL_TAIL_DYN(0x00010000u, 0x00010004u);"])
+                                                "TOX2_TAIL_DYN(0x00010000u, 0x00010004u);"])
         self.assertEqual(stats.edges["fallthrough_tails"], 1)
 
     def test_conditional_bclrl_reads_the_target_before_writing_lr(self):
@@ -452,21 +452,21 @@ class ConditionalBranchTest(unittest.TestCase):
                                 "uint32_t t0 = (uint32_t)ctx->lr;",
                                 "ctx->ctr -= 1;",
                                 "ctx->lr = 0x00010004u;",
-                                "if (ctx->ctr != 0) DAL_CALL_DYN(0x00010000u, t0, 0x00010004u);",
+                                "if (ctx->ctr != 0) TOX2_CALL_DYN(0x00010000u, t0, 0x00010004u);",
                                 "}",
                                 "return;"])
         self.assertEqual(stats.edges["calls_indirect"], 1)
 
     def test_conditional_bcctr(self):
         body, stats = self.body(asm.bcctr(12, 2))
-        self.assertEqual(body, ["if (ctx->cr[2]) DAL_TAIL_DYN(0x00010000u, ctx->ctr);", "return;"])
+        self.assertEqual(body, ["if (ctx->cr[2]) TOX2_TAIL_DYN(0x00010000u, ctx->ctr);", "return;"])
         self.assertEqual(stats.edges["tails_dynamic"], 1)
         self.assertEqual(sum(stats.unhandled.values()), 0)
 
     def test_conditional_bcctrl(self):
         body, stats = self.body(asm.bcctr(4, 2, lk=True))
         self.assertEqual(body, ["ctx->lr = 0x00010004u;",
-                                "if (!ctx->cr[2]) DAL_CALL_DYN(0x00010000u, ctx->ctr, 0x00010004u);",
+                                "if (!ctx->cr[2]) TOX2_CALL_DYN(0x00010000u, ctx->ctr, 0x00010004u);",
                                 "return;"])
         self.assertEqual(stats.edges["calls_indirect"], 1)
 
@@ -492,12 +492,12 @@ class SwitchTest(unittest.TestCase):
     def test_forward_switch(self):
         text, stats = self.switch_text([BASE + 12, BASE + 16])
         print("\n" + text)
-        self.assertEqual(text, "DAL_PPU_FUNC(fn_00010000) {\n"
-                               "    DAL_ENTER(0x00010000u);\n"
+        self.assertEqual(text, "TOX2_PPU_FUNC(fn_00010000) {\n"
+                               "    TOX2_ENTER(0x00010000u);\n"
                                "    switch ((uint32_t)ctx->ctr) {\n"
                                "        case 0x0001000cu: goto L_0001000c;\n"
                                "        case 0x00010010u: goto L_00010010;\n"
-                               "        default: DAL_TAIL_DYN(0x00010008u, ctx->ctr);\n"
+                               "        default: TOX2_TAIL_DYN(0x00010008u, ctx->ctr);\n"
                                "    }\n"
                                "L_0001000c:\n"
                                "L_00010010:\n"
@@ -517,24 +517,24 @@ class SwitchTest(unittest.TestCase):
     def test_backward_target_gets_one_loop_hook_before_the_switch(self):
         text, stats = self.switch_text([BASE, BASE + 12, BASE + 4, BASE + 12])
         lines = lines_of(text)
-        at = lines.index("DAL_LOOP(0x00010008u);")
+        at = lines.index("TOX2_LOOP(0x00010008u);")
         self.assertEqual(lines[at + 1], "switch ((uint32_t)ctx->ctr) {")
-        self.assertEqual(text.count("DAL_LOOP"), 1)
+        self.assertEqual(text.count("TOX2_LOOP"), 1)
         self.assertEqual(stats.loop_hooks, 1)
         self.assertIn("case 0x00010000u: goto L_00010000;", lines)
 
     def test_target_equal_to_the_site_is_backward(self):
         text, stats = self.switch_text([self.SITE])
-        self.assertIn("DAL_LOOP(0x00010008u);", lines_of(text))
+        self.assertIn("TOX2_LOOP(0x00010008u);", lines_of(text))
         self.assertEqual(stats.loop_hooks, 1)
 
     def test_non_intra_cases_use_the_tail_forms(self):
         text, stats = self.switch_text([BASE + 12, OTHER, STUB, 0x40000])
         lines = lines_of(text)
-        self.assertIn("case 0x00020000u: DAL_TAIL(fn_00020000);", lines)
-        self.assertIn("case 0x00030000u: DAL_TAIL(imp_00030000);", lines)
-        self.assertIn("case 0x00040000u: DAL_TAIL_DYN(0x00010008u, 0x00040000u);", lines)
-        self.assertNotIn("DAL_LOOP(0x00010008u);", lines)
+        self.assertIn("case 0x00020000u: TOX2_TAIL(fn_00020000);", lines)
+        self.assertIn("case 0x00030000u: TOX2_TAIL(imp_00030000);", lines)
+        self.assertIn("case 0x00040000u: TOX2_TAIL_DYN(0x00010008u, 0x00040000u);", lines)
+        self.assertNotIn("TOX2_LOOP(0x00010008u);", lines)
         self.assertEqual(stats.edges["switch_cases"], 4)
         self.assertEqual(stats.dynamic_targets, [(self.SITE, 0x40000, "tail")])
 
@@ -545,13 +545,13 @@ class SwitchTest(unittest.TestCase):
     def test_bcctr_that_is_not_a_switch_site_stays_a_dynamic_tail(self):
         text, _ = emit([asm.nop(), asm.nop(), asm.bctr(), asm.blr()],
                        env=make_env(switches={BASE + 100: (BASE,)}))
-        self.assertIn("    DAL_TAIL_DYN(0x00010008u, ctx->ctr);\n", text)
+        self.assertIn("    TOX2_TAIL_DYN(0x00010008u, ctx->ctr);\n", text)
         self.assertNotIn("switch", text)
 
     def test_bcctrl_at_a_switch_site_is_still_a_call(self):
         words = [asm.nop(), asm.nop(), asm.bctrl(), asm.blr()]
         text, _ = emit(words, env=make_env(switches={self.SITE: (BASE,)}))
-        self.assertIn("DAL_CALL_DYN(0x00010008u, ctx->ctr, 0x0001000cu);", text)
+        self.assertIn("TOX2_CALL_DYN(0x00010008u, ctx->ctr, 0x0001000cu);", text)
         self.assertNotIn("switch", text)
 
     def test_conditional_bcctr_at_a_switch_site_guards_the_switch(self):
@@ -560,7 +560,7 @@ class SwitchTest(unittest.TestCase):
         self.assertEqual(lines_of(text)[2:7],
                          ["if (ctx->cr[2]) {", "switch ((uint32_t)ctx->ctr) {",
                           "case 0x0001000cu: goto L_0001000c;",
-                          "default: DAL_TAIL_DYN(0x00010008u, ctx->ctr);", "}"])
+                          "default: TOX2_TAIL_DYN(0x00010008u, ctx->ctr);", "}"])
 
     def test_empty_target_set_falls_back_to_a_dynamic_tail(self):
         text, stats = self.switch_text([])
@@ -574,11 +574,11 @@ class UnhandledTest(unittest.TestCase):
         text, stats = emit(words)
         self.assertEqual(dict(stats.unhandled), {"mfspr": 2, "lwz": 1})
         self.assertEqual(stats.unhandled_sites, {"mfspr": [BASE, BASE + 4], "lwz": [BASE + 8]})
-        self.assertIn("    DAL_UNHANDLED(0x00010000u, 0x7c0802a6u);\n", text)
+        self.assertIn("    TOX2_UNHANDLED(0x00010000u, 0x7c0802a6u);\n", text)
 
     def test_invalid_word(self):
         text, stats = emit([0x00000000, asm.blr()])
-        self.assertIn("    DAL_UNHANDLED(0x00010000u, 0x00000000u);\n", text)
+        self.assertIn("    TOX2_UNHANDLED(0x00010000u, 0x00000000u);\n", text)
         self.assertEqual(dict(stats.unhandled), {"invalid": 1})
         self.assertEqual(stats.edges["fallthrough_tails"], 0)
 
@@ -609,7 +609,7 @@ class UnhandledTest(unittest.TestCase):
         for word in (asm.bcctr(0, 2), asm.bcctr(8, 2, lk=True), asm.bcctr(16, 0)):
             text, stats = emit([word, asm.blr()])
             self.assertEqual(dict(stats.unhandled), {"bcctr:ctr": 1})
-            self.assertIn("DAL_UNHANDLED(0x00010000u, ", text)
+            self.assertIn("TOX2_UNHANDLED(0x00010000u, ", text)
             self.assertEqual(stats.edges["tails_dynamic"] + stats.edges["calls_indirect"], 0)
 
 

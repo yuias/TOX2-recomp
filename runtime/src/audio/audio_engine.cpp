@@ -16,7 +16,7 @@
 #include "core/log.h"
 #include "core/sleeper.h"
 
-namespace dal {
+namespace tox2 {
 
 void BlockClock::setCorrectionPpm(double ppm) {
     ppm = std::clamp(ppm, -kClockMaxPpm, kClockMaxPpm);
@@ -99,7 +99,7 @@ public:
             std::thread([self = shared_from_this()] { self->run(); }).detach();
         } catch (const std::system_error& error) {
             running_ = false;
-            logWarn("dal: audio: cannot start the engine thread: {}; continuing without sound", error.what());
+            logWarn("tox2: audio: cannot start the engine thread: {}; continuing without sound", error.what());
         }
     }
 
@@ -147,7 +147,7 @@ private:
         std::string error;
         if (output && !output->open(error)) {
             failed_name = std::string(output->name());
-            logWarn("dal: audio: {}: {}; continuing without sound", failed_name,
+            logWarn("tox2: audio: {}: {}; continuing without sound", failed_name,
                     error.empty() ? "cannot open the output" : error);
             output.reset();
         }
@@ -155,7 +155,7 @@ private:
         std::string label(output->name());
         if (!failed_name.empty()) label += " (" + failed_name + " failed)";
         const std::string description = output->description();
-        logInfo("dal: audio: output {}{}", output->name(), description.empty() ? "" : " (" + description + ")");
+        logInfo("tox2: audio: output {}{}", output->name(), description.empty() ? "" : " (" + description + ")");
 
         std::shared_ptr<WavWriter> dump;
         bool finish_requested = false;
@@ -167,9 +167,9 @@ private:
             auto created = WavWriter::create(config_.dump, kAudioSampleRate, kAudioOutputChannels);
             if (created) {
                 dump = std::move(*created);
-                logInfo("dal: audio: dump {}", config_.dump.filename().string());
+                logInfo("tox2: audio: dump {}", config_.dump.filename().string());
             } else {
-                logWarn("dal: audio: dump {}: {}; continuing without a dump", config_.dump.filename().string(),
+                logWarn("tox2: audio: dump {}: {}; continuing without a dump", config_.dump.filename().string(),
                         created.error());
             }
         }
@@ -195,7 +195,7 @@ private:
     void emit(std::span<const float> block) {
         if (dump_ && !dump_->write(block) && !dump_finished_.load(std::memory_order_relaxed) && !dump_warned_) {
             dump_warned_ = true;
-            logWarn("dal: audio: writing the dump failed; the dump stops here");
+            logWarn("tox2: audio: writing the dump failed; the dump stops here");
         }
         output_->submit(block);
     }
@@ -224,7 +224,7 @@ private:
                 if (++updates % kClockLogEvery == 0) {
                     const AudioOutputStats output_stats = output_->stats();
                     logDebug(
-                            "dal: audio: clock {:+.1f} ppm, mean fill {:.0f} frames (target {}), dropped {}, underrun {} frames",
+                            "tox2: audio: clock {:+.1f} ppm, mean fill {:.0f} frames (target {}), dropped {}, underrun {} frames",
                             rate_.ppm(), rate_.lastMeanFill(), kFillTargetFrames, output_stats.blocks_dropped,
                             output_stats.underrun_frames);
                 }
@@ -331,4 +331,4 @@ bool stopAudioEngineForTest(AudioEngineStats* final_stats) {
     return stopped;
 }
 
-}  // namespace dal
+}  // namespace tox2

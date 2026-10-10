@@ -10,7 +10,7 @@
 #include "rsx/fifo_parser.h"
 #include "rsx/rsx_unimplemented.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 constexpr std::uint32_t fourcc(const char (&tag)[5]) {
@@ -28,7 +28,7 @@ constexpr std::uint32_t kTagMemr = fourcc("MEMR");
 constexpr std::uint32_t kTagFlip = fourcc("FLIP");
 constexpr std::uint32_t kTagEnd = fourcc("END ");
 
-constexpr char kMagic[8] = {'D', 'A', 'L', 'R', 'S', 'X', 'C', '1'};
+constexpr char kMagic[8] = {'T', 'X', '2', 'R', 'S', 'X', 'C', '1'};
 constexpr std::size_t kHeaderSize = 8 + 4 + 8;
 constexpr std::size_t kChunkHeaderSize = 8;
 constexpr std::size_t kSurfaceRecordSize = 6 * 4;
@@ -436,4 +436,4 @@ bool writeCaptureFile(const std::filesystem::path& path, const RsxCaptureFile& c
     return true;
 }
 
-}  // namespace dal
+}  // namespace tox2

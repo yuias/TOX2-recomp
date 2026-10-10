@@ -9,14 +9,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "dal/ppu.h"
-#include "dal/ppu_stub.h"
+#include "tox2/ppu.h"
+#include "tox2/ppu_stub.h"
 #include "ppu_semantics_cases.h"
 
 // Keep in sync with MEM_SIZE in tools/tests/ppu_semantics/__init__.py.
 enum { kSemanticsMemSize = 0x100000 };
 
-static bool selected(const DalSemanticsCase* c, int argc, char** argv) {
+static bool selected(const Tox2SemanticsCase* c, int argc, char** argv) {
     if (argc <= 1) return true;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], c->name) == 0) return true;
@@ -25,23 +25,23 @@ static bool selected(const DalSemanticsCase* c, int argc, char** argv) {
 }
 
 // Returns true if the case passed.
-static bool runCase(const DalSemanticsCase* c, uint8_t* mem) {
-    memset(mem, 0, (size_t)kSemanticsMemSize + kDalGuestGuardSize);
+static bool runCase(const Tox2SemanticsCase* c, uint8_t* mem) {
+    memset(mem, 0, (size_t)kSemanticsMemSize + kTox2GuestGuardSize);
 
-    DalPpuContext ctx = {};
-    ctx.preempt_budget = kDalPreemptBudget;
+    Tox2PpuContext ctx = {};
+    ctx.preempt_budget = kTox2PreemptBudget;
     ctx.vscr_nj = 1;
 
-    dalStubResetFuncs();
-    dalRegisterFuncs(c->mappings, c->mapping_count);
-    dalStubSetLabel(c->name);
+    tox2StubResetFuncs();
+    tox2RegisterFuncs(c->mappings, c->mapping_count);
+    tox2StubSetLabel(c->name);
 
     c->init(&ctx, mem);
     c->entry(&ctx, mem);
 
     char msg[256] = "";
     uint32_t mismatches = c->check(&ctx, mem, msg, sizeof msg);
-    dalStubSetLabel(nullptr);
+    tox2StubSetLabel(nullptr);
     if (mismatches == 0) return true;
 
     printf("FAIL %s: %s", c->name, msg);
@@ -51,15 +51,15 @@ static bool runCase(const DalSemanticsCase* c, uint8_t* mem) {
 }
 
 int main(int argc, char** argv) {
-    uint8_t* mem = calloc((size_t)kSemanticsMemSize + kDalGuestGuardSize, 1);
+    uint8_t* mem = calloc((size_t)kSemanticsMemSize + kTox2GuestGuardSize, 1);
     if (mem == nullptr) {
         fputs("ppu semantics: out of memory\n", stderr);
         return 2;
     }
 
     uint32_t passed = 0, failed = 0;
-    for (uint32_t i = 0; i < kDalSemanticsCaseCount; i++) {
-        const DalSemanticsCase* c = &kDalSemanticsCases[i];
+    for (uint32_t i = 0; i < kTox2SemanticsCaseCount; i++) {
+        const Tox2SemanticsCase* c = &kTox2SemanticsCases[i];
         if (!selected(c, argc, argv)) continue;
         if (runCase(c, mem)) {
             passed++;

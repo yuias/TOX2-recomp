@@ -1,6 +1,6 @@
 #pragma once
 
-// The VFS configuration file (dal_game --vfs-config) and its composition with the command-line
+// The VFS configuration file (tox2_game --vfs-config) and its composition with the command-line
 // options. Parsing is separate from installing the layout (configureVfs) so both are testable
 // without touching the global VFS state.
 
@@ -13,7 +13,7 @@
 
 #include "lv2/vfs.h"
 
-namespace dal {
+namespace tox2 {
 
 inline constexpr int kVfsConfigVersion = 1;
 
@@ -49,4 +49,4 @@ std::expected<VfsConfigFile, std::string> loadVfsConfig(const std::filesystem::p
 // writable mount may not share or contain another mount's host directory.
 std::expected<VfsLayout, std::string> composeVfsLayout(const VfsConfigFile* config, const VfsCliOptions& cli);
 
-}  // namespace dal
+}  // namespace tox2

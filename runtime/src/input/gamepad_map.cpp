@@ -4,7 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 
-namespace dal {
+namespace tox2 {
 
 namespace {
 
@@ -104,4 +104,4 @@ GamepadRumble rumbleFromCellPad(std::uint8_t small_motor, std::uint8_t large_mot
     return rumble;
 }
 
-}  // namespace dal
+}  // namespace tox2

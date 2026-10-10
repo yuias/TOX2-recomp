@@ -9,7 +9,7 @@
 #include <variant>
 #include <vector>
 
-namespace dal {
+namespace tox2 {
 
 enum class RsxColorFormat : std::uint8_t { A8R8G8B8, Unsupported };
 enum class RsxDepthFormat : std::uint8_t { None, Z24S8, Z16, Unsupported };
@@ -120,4 +120,4 @@ struct RsxFlip {
 
 using RsxCommand = std::variant<RsxClear, RsxDraw, RsxFlip>;
 
-}  // namespace dal
+}  // namespace tox2

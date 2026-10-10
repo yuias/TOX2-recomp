@@ -3,10 +3,10 @@ include_guard(GLOBAL)
 # spdlog is built as a static library rather than header-only: its sources then compile with the
 # project's default flags (no -Werror) and keep <windows.h> out of runtime translation units.
 # SPDLOG_USE_STD_FORMAT reuses the std::format the runtime already depends on instead of bundled fmt.
-function(dal_runtime_add_spdlog)
+function(tox2_runtime_add_spdlog)
   if(NOT EXISTS ${CMAKE_SOURCE_DIR}/externals/spdlog/CMakeLists.txt)
     message(FATAL_ERROR
-      "DAL: externals/spdlog is missing or empty. Run: git submodule update --init")
+      "TOX2: externals/spdlog is missing or empty. Run: git submodule update --init")
   endif()
   set(SPDLOG_USE_STD_FORMAT ON CACHE BOOL "" FORCE)
   set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
@@ -22,11 +22,11 @@ endfunction()
 # only sees installed copies; the cache variables below point it at the zlib target built here.
 # Nothing is installed and nothing is fetched or generated at configure time: pnglibconf.h comes
 # from libpng's prebuilt copy instead of the awk-driven generator.
-function(dal_runtime_add_libpng)
+function(tox2_runtime_add_libpng)
   if(NOT EXISTS ${CMAKE_SOURCE_DIR}/externals/zlib/CMakeLists.txt OR
      NOT EXISTS ${CMAKE_SOURCE_DIR}/externals/libpng/CMakeLists.txt)
     message(FATAL_ERROR
-      "DAL: externals/zlib or externals/libpng is missing or empty. Run: git submodule update --init")
+      "TOX2: externals/zlib or externals/libpng is missing or empty. Run: git submodule update --init")
   endif()
 
   set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
@@ -55,10 +55,10 @@ endfunction()
 # yyjson is built as a static library from its own CMake, so its C sources compile with the
 # project's default flags (no -Werror). Tests, docs and install rules stay off. SYSTEM keeps its
 # header out of the warnings of the translation units that include it.
-function(dal_runtime_add_yyjson)
+function(tox2_runtime_add_yyjson)
   if(NOT EXISTS ${CMAKE_SOURCE_DIR}/externals/yyjson/CMakeLists.txt)
     message(FATAL_ERROR
-      "DAL: externals/yyjson is missing or empty. Run: git submodule update --init")
+      "TOX2: externals/yyjson is missing or empty. Run: git submodule update --init")
   endif()
   set(YYJSON_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   set(YYJSON_BUILD_FUZZER OFF CACHE BOOL "" FORCE)
@@ -72,12 +72,12 @@ endfunction()
 
 # Runtime core: everything that does not reference generated symbols, so it builds and its tests
 # run without a generated tree. Call after enable_testing().
-function(dal_runtime_add_core)
-  dal_runtime_add_spdlog()
-  dal_runtime_add_libpng()
-  dal_runtime_add_yyjson()
+function(tox2_runtime_add_core)
+  tox2_runtime_add_spdlog()
+  tox2_runtime_add_libpng()
+  tox2_runtime_add_yyjson()
 
-  add_library(dal_runtime_core STATIC
+  add_library(tox2_runtime_core STATIC
     runtime/src/audio/audio_engine.cpp
     runtime/src/audio/audio_output.cpp
     runtime/src/audio/wav_file.cpp
@@ -143,35 +143,35 @@ function(dal_runtime_add_core)
     runtime/src/rsx/rsx_state.cpp
     runtime/src/rsx/rsx_thread.cpp
     runtime/src/rsx/rsx_unimplemented.cpp)
-  target_compile_options(dal_runtime_core PRIVATE -march=x86-64-v3 -Wall -Wextra)
-  target_include_directories(dal_runtime_core PUBLIC
+  target_compile_options(tox2_runtime_core PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_include_directories(tox2_runtime_core PUBLIC
     ${CMAKE_SOURCE_DIR}/runtime/src
     ${CMAKE_SOURCE_DIR}/runtime/include)
-  target_link_libraries(dal_runtime_core PUBLIC bcrypt)
+  target_link_libraries(tox2_runtime_core PUBLIC bcrypt)
   # timeBeginPeriod (core/timer_resolution.cpp).
-  target_link_libraries(dal_runtime_core PRIVATE winmm)
+  target_link_libraries(tox2_runtime_core PRIVATE winmm)
   # PRIVATE: spdlog types stay out of core/log.h, so consumers never compile against its headers.
-  target_link_libraries(dal_runtime_core PRIVATE spdlog::spdlog)
+  target_link_libraries(tox2_runtime_core PRIVATE spdlog::spdlog)
   # PRIVATE as well: the PNG codec stays inside cell_png_dec.cpp.
-  target_link_libraries(dal_runtime_core PRIVATE png_static)
+  target_link_libraries(tox2_runtime_core PRIVATE png_static)
   # PRIVATE as well: JSON types stay inside vfs_config.cpp and rsx_census.cpp.
-  target_link_libraries(dal_runtime_core PRIVATE yyjson)
+  target_link_libraries(tox2_runtime_core PRIVATE yyjson)
 
-  add_executable(dal_runtime_tests runtime/tests/runtime_core_test.cpp)
-  target_compile_options(dal_runtime_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  add_executable(tox2_runtime_tests runtime/tests/runtime_core_test.cpp)
+  target_compile_options(tox2_runtime_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
   # The tests build their PNG inputs with libpng's writer.
-  target_link_libraries(dal_runtime_tests PRIVATE dal_runtime_core png_static)
+  target_link_libraries(tox2_runtime_tests PRIVATE tox2_runtime_core png_static)
 
-  add_test(NAME runtime_core COMMAND dal_runtime_tests)
+  add_test(NAME runtime_core COMMAND tox2_runtime_tests)
   set_tests_properties(runtime_core PROPERTIES
     PASS_REGULAR_EXPRESSION "runtime core tests: [0-9]+ passed, 0 failed")
 
   # The movie pipeline's core needs no FFmpeg, so its tests link the core library only.
-  add_executable(dal_media_core_tests runtime/tests/media_core_test.cpp)
-  target_compile_options(dal_media_core_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
-  target_link_libraries(dal_media_core_tests PRIVATE dal_runtime_core)
+  add_executable(tox2_media_core_tests runtime/tests/media_core_test.cpp)
+  target_compile_options(tox2_media_core_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_link_libraries(tox2_media_core_tests PRIVATE tox2_runtime_core)
 
-  add_test(NAME media_core COMMAND dal_media_core_tests)
+  add_test(NAME media_core COMMAND tox2_media_core_tests)
   set_tests_properties(media_core PROPERTIES
     PASS_REGULAR_EXPRESSION "media core tests: [0-9]+ passed, 0 failed")
 endfunction()

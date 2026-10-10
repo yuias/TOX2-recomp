@@ -16,11 +16,11 @@
 
 #include "core/guest_memory.h"
 #include "core/threads.h"
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
 
-namespace dal {
+namespace tox2 {
 namespace {
 
 // sys_event_flag_attribute_t / sys_event_queue_attribute_t field offsets (RPCS3 `sys_event_flag.h`,
@@ -140,7 +140,7 @@ std::uint32_t queueSend(EventQueue& queue, const Event& event) {
     return kCellOk;
 }
 
-std::uint32_t arg32(const DalPpuContext* ctx, int reg) { return static_cast<std::uint32_t>(ctx->gpr[reg]); }
+std::uint32_t arg32(const Tox2PpuContext* ctx, int reg) { return static_cast<std::uint32_t>(ctx->gpr[reg]); }
 
 }  // namespace
 
@@ -166,15 +166,15 @@ void resetEventObjects() {
 }
 
 // 82 sys_event_flag_create(u32* id, sys_event_flag_attribute_t* attr, u64 init)
-void sysEventFlagCreate(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventFlagCreate(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t id_addr = arg32(ctx, 3);
     const std::uint32_t attr = arg32(ctx, 4);
     if (id_addr == 0 || attr == 0) {
         setResultCode(ctx, kCellEfault);
         return;
     }
-    const std::uint32_t protocol = dalRead32(base, attr + kFlagAttrProtocol);
-    const std::uint32_t type = dalRead32(base, attr + kFlagAttrType);
+    const std::uint32_t protocol = tox2Read32(base, attr + kFlagAttrProtocol);
+    const std::uint32_t type = tox2Read32(base, attr + kFlagAttrType);
     if ((protocol != kSyncFifo && protocol != kSyncPriority) || (type != kWaiterSingle && type != kWaiterMultiple)) {
         setResultCode(ctx, kCellEinval);
         return;
@@ -183,12 +183,12 @@ void sysEventFlagCreate(DalPpuContext* ctx, std::uint8_t* base) {
     flag->protocol = protocol;
     flag->type = type;
     flag->pattern = ctx->gpr[5];
-    dalWrite32(base, id_addr, g_flags.add(std::move(flag)));
+    tox2Write32(base, id_addr, g_flags.add(std::move(flag)));
     setResultCode(ctx, kCellOk);
 }
 
 // 83 sys_event_flag_destroy(u32 id)
-void sysEventFlagDestroy(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventFlagDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const std::uint32_t id = arg32(ctx, 3);
     const auto flag = g_flags.find(id);
@@ -204,7 +204,7 @@ void sysEventFlagDestroy(DalPpuContext* ctx, std::uint8_t* base) {
 
 // 85 sys_event_flag_wait(u32 id, u64 bitptn, u32 mode, u64* result, u64 timeout). `*result` is
 // written on every return, 0 when the call fails before looking at the pattern.
-void sysEventFlagWait(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventFlagWait(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t id = arg32(ctx, 3);
     const std::uint64_t bitptn = ctx->gpr[4];
     const std::uint32_t mode = arg32(ctx, 5);
@@ -243,12 +243,12 @@ void sysEventFlagWait(DalPpuContext* ctx, std::uint8_t* base) {
         code = waiter.code;
         result = waiter.result;
     }();
-    if (result_addr != 0) dalWrite64(base, result_addr, result);
+    if (result_addr != 0) tox2Write64(base, result_addr, result);
     setResultCode(ctx, code);
 }
 
 // 87 sys_event_flag_set(u32 id, u64 bitptn)
-void sysEventFlagSet(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventFlagSet(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const auto flag = g_flags.find(arg32(ctx, 3));
     if (flag == nullptr) {
@@ -279,7 +279,7 @@ void sysEventFlagSet(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // 118 sys_event_flag_clear(u32 id, u64 bitptn): keeps the bits that are set in `bitptn`.
-void sysEventFlagClear(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventFlagClear(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const auto flag = g_flags.find(arg32(ctx, 3));
     if (flag == nullptr) {
@@ -292,9 +292,9 @@ void sysEventFlagClear(DalPpuContext* ctx, std::uint8_t* base) {
 
 // 132 sys_event_flag_cancel(u32 id, u32* num): every waiter returns ECANCELED with the current
 // pattern; `*num` is the number of waiters.
-void sysEventFlagCancel(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventFlagCancel(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t num_addr = arg32(ctx, 4);
-    if (num_addr != 0) dalWrite32(base, num_addr, 0);
+    if (num_addr != 0) tox2Write32(base, num_addr, 0);
     const auto flag = g_flags.find(arg32(ctx, 3));
     if (flag == nullptr) {
         setResultCode(ctx, kCellEsrch);
@@ -308,16 +308,16 @@ void sysEventFlagCancel(DalPpuContext* ctx, std::uint8_t* base) {
     }
     flag->waiters.clear();
     if (count != 0) flag->cv.notify_all();
-    if (num_addr != 0) dalWrite32(base, num_addr, count);
+    if (num_addr != 0) tox2Write32(base, num_addr, count);
     setResultCode(ctx, kCellOk);
 }
 
 // 139 sys_event_flag_get(u32 id, u64* flags)
-void sysEventFlagGet(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventFlagGet(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t flags_addr = arg32(ctx, 4);
     const auto flag = g_flags.find(arg32(ctx, 3));
     if (flag == nullptr) {
-        if (flags_addr != 0) dalWrite64(base, flags_addr, 0);
+        if (flags_addr != 0) tox2Write64(base, flags_addr, 0);
         setResultCode(ctx, kCellEsrch);
         return;
     }
@@ -325,14 +325,14 @@ void sysEventFlagGet(DalPpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, kCellEfault);
         return;
     }
-    dalWrite64(base, flags_addr, flag->pattern);
+    tox2Write64(base, flags_addr, flag->pattern);
     setResultCode(ctx, kCellOk);
 }
 
 // 128 sys_event_queue_create(u32* id, sys_event_queue_attribute_t* attr, u64 ipc_key, s32 size):
 // a non-zero key is "create new": a live queue that already holds it makes the call fail with
 // EEXIST, without writing `*id`.
-void sysEventQueueCreate(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventQueueCreate(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t id_addr = arg32(ctx, 3);
     const std::uint32_t attr = arg32(ctx, 4);
     const auto size = static_cast<std::int32_t>(ctx->gpr[6]);
@@ -344,8 +344,8 @@ void sysEventQueueCreate(DalPpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, kCellEfault);
         return;
     }
-    const std::uint32_t protocol = dalRead32(base, attr + kQueueAttrProtocol);
-    const std::uint32_t type = dalRead32(base, attr + kQueueAttrType);
+    const std::uint32_t protocol = tox2Read32(base, attr + kQueueAttrProtocol);
+    const std::uint32_t type = tox2Read32(base, attr + kQueueAttrType);
     if ((protocol != kSyncFifo && protocol != kSyncPriority) || (type != kPpuQueue && type != kSpuQueue)) {
         setResultCode(ctx, kCellEinval);
         return;
@@ -362,13 +362,13 @@ void sysEventQueueCreate(DalPpuContext* ctx, std::uint8_t* base) {
     queue->ipc_key = ipc_key;
     const std::uint32_t id = g_queues.add(std::move(queue));
     if (ipc_key != 0) g_queue_keys.emplace(ipc_key, id);
-    dalWrite32(base, id_addr, id);
+    tox2Write32(base, id_addr, id);
     setResultCode(ctx, kCellOk);
 }
 
 // 129 sys_event_queue_destroy(u32 id, s32 mode): without the force mode a queue with receivers
 // is busy; with it the receivers return ECANCELED.
-void sysEventQueueDestroy(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventQueueDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const std::uint32_t id = arg32(ctx, 3);
     const std::uint32_t mode = arg32(ctx, 4);
@@ -400,7 +400,7 @@ void sysEventQueueDestroy(DalPpuContext* ctx, std::uint8_t* base) {
 
 // 130 sys_event_queue_receive(u32 id, sys_event_t* unused, u64 timeout): the event comes back in
 // r4..r7 (source, data1..3); the pointer argument is never written.
-void sysEventQueueReceive(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventQueueReceive(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const auto queue = g_queues.find(arg32(ctx, 3));
     if (queue == nullptr) {
@@ -438,7 +438,7 @@ void sysEventQueueReceive(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // 133 sys_event_queue_drain(u32 id)
-void sysEventQueueDrain(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventQueueDrain(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const auto queue = g_queues.find(arg32(ctx, 3));
     if (queue == nullptr) {
@@ -450,7 +450,7 @@ void sysEventQueueDrain(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // 134 sys_event_port_create(u32* id, s32 port_type, u64 name)
-void sysEventPortCreate(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventPortCreate(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t id_addr = arg32(ctx, 3);
     const std::uint32_t type = arg32(ctx, 4);
     if (type != kPortLocal && type != kPortIpc) {
@@ -464,12 +464,12 @@ void sysEventPortCreate(DalPpuContext* ctx, std::uint8_t* base) {
     auto port = std::make_shared<EventPort>();
     port->type = type;
     port->name = ctx->gpr[5];
-    dalWrite32(base, id_addr, g_ports.add(std::move(port)));
+    tox2Write32(base, id_addr, g_ports.add(std::move(port)));
     setResultCode(ctx, kCellOk);
 }
 
 // 135 sys_event_port_destroy(u32 id)
-void sysEventPortDestroy(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventPortDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const std::uint32_t id = arg32(ctx, 3);
     const auto port = g_ports.find(id);
@@ -484,7 +484,7 @@ void sysEventPortDestroy(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // 136 sys_event_port_connect_local(u32 port_id, u32 queue_id)
-void sysEventPortConnectLocal(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventPortConnectLocal(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const auto port = g_ports.find(arg32(ctx, 3));
     const auto queue = g_queues.find(arg32(ctx, 4));
@@ -501,7 +501,7 @@ void sysEventPortConnectLocal(DalPpuContext* ctx, std::uint8_t* base) {
 }
 
 // 137 sys_event_port_disconnect(u32 port_id)
-void sysEventPortDisconnect(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventPortDisconnect(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const auto port = g_ports.find(arg32(ctx, 3));
     if (port == nullptr) {
@@ -516,7 +516,7 @@ void sysEventPortDisconnect(DalPpuContext* ctx, std::uint8_t* base) {
 
 // 138 sys_event_port_send(u32 port_id, u64 data1, u64 data2, u64 data3): never blocks. An unnamed
 // port reports (process id << 32) | port id as the event source.
-void sysEventPortSend(DalPpuContext* ctx, std::uint8_t* base) {
+void sysEventPortSend(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const std::uint32_t id = arg32(ctx, 3);
     const auto port = g_ports.find(id);
@@ -536,4 +536,4 @@ void sysEventPortSend(DalPpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, queueSend(*port->queue, event));
 }
 
-}  // namespace dal
+}  // namespace tox2

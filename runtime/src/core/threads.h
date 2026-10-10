@@ -11,12 +11,12 @@
 #include <string>
 #include <vector>
 
-#include "dal/ppu_context.h"
+#include "tox2/ppu_context.h"
 
-namespace dal {
+namespace tox2 {
 
 // The one lock all guest code runs under. A thread takes it when it starts and gives it up only
-// inside dalYield, blockingWait and exitCurrentThread, so guest threads never run in parallel.
+// inside tox2Yield, blockingWait and exitCurrentThread, so guest threads never run in parallel.
 // Waiters are served in arrival order. Deferred: lv2 priority scheduling; runnable threads get the
 // lock in FIFO order and set/get_priority only store and return the value. The one exception is the
 // creation rule of sys_ppu_thread_create (startGuestThreadFirst): a new thread with a numerically
@@ -68,7 +68,7 @@ public:
     std::uint32_t id() const { return id_; }
     const std::string& name() const { return name_; }
     // Fully set up by prepareGuestThread; the host thread runs it as it is.
-    DalPpuContext& context() { return context_; }
+    Tox2PpuContext& context() { return context_; }
     std::int32_t priority() const { return priority_; }
     void setPriority(std::int32_t priority) { priority_ = priority; }
 
@@ -108,7 +108,7 @@ private:
     std::atomic<bool> indefinite_wait_{false};
     std::atomic<std::int64_t> blocked_since_ms_{0};
     std::condition_variable_any joiners_;
-    DalPpuContext context_{};
+    Tox2PpuContext context_{};
 };
 
 // The guest thread running on the calling host thread; nullptr on host threads.
@@ -188,4 +188,4 @@ ThreadVerdict judgeThreads(const std::vector<ThreadHealth>& threads, std::int64_
 // of live threads, and ends the process through stopProcess.
 [[noreturn]] void runSupervisor(std::uint32_t seconds);
 
-}  // namespace dal
+}  // namespace tox2

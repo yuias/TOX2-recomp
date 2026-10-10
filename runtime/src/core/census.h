@@ -5,9 +5,9 @@
 #include <utility>
 #include <vector>
 
-namespace dal {
+namespace tox2 {
 
-// PS3 timebase frequency; dalMftb and sys_time_get_timebase_frequency report it.
+// PS3 timebase frequency; tox2Mftb and sys_time_get_timebase_frequency report it.
 inline constexpr std::uint64_t kTimebaseFrequency = 79800000;
 
 // Microseconds since the runtime started (a monotonic host clock).
@@ -17,10 +17,10 @@ std::uint64_t systemTimeUs();
 // census keeps its own mutex as well so that the supervisor can print without holding it.
 
 // Counts one syscall. `name` may be null (printed as "?"). `implemented` is false for calls that
-// went through the default handler. The first call of each number logs "dal: first sc N name".
+// went through the default handler. The first call of each number logs "tox2: first sc N name".
 void censusSyscall(std::uint32_t number, const char* name, bool implemented);
 
-// Counts one HLE import call; the first call logs "dal: first hle module::name".
+// Counts one HLE import call; the first call logs "tox2: first hle module::name".
 void censusHle(const char* module, const char* name, bool implemented);
 
 // Attaches a note to an import that was already counted; the census line becomes
@@ -116,4 +116,4 @@ void installCensus();
 // Forgets all counters. Intended for tests.
 void resetCensus();
 
-}  // namespace dal
+}  // namespace tox2
