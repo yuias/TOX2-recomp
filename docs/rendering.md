@@ -1,5 +1,14 @@
 # RSX and rendering
 
+Everything on this page is inherited from the project this one was derived from, and it was
+written against that game. For *Tales of Xillia 2* the fake RSX has run only until the game's
+start-up stops at a guest trap (see [Status](status.md)): in the three headless runs the game
+initialised GCM, produced 186 FIFO headers and issued no flip, so no frame was built, drawn or
+displayed. The frame builder, the renderer, the shader translators and the capture and replay
+tools have not been exercised with this game's commands. The statements below about what the
+game does (frame rate, flips, vblank waits) describe the inherited behaviour and are unverified
+for this game.
+
 ## Fake RSX
 
 `cellGcmSys` initialization creates the RSX state and starts two things that stand in for the
@@ -28,7 +37,7 @@ rendered and skipped.
 
 ## Rendering
 
-The renderer is on when `dal_game` shows its window (the default) and off with `--no-window`.
+The renderer is on when `tox2_game` shows its window (the default) and off with `--no-window`.
 `--render vulkan` (implied by the window and by `--dump-frames`) creates it on the RSX thread when that thread starts; the RSX thread then hands each
 frame's commands to it outside the guest lock, so rendering does not hold up guest threads. The
 code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the renderer).
@@ -53,7 +62,7 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   Cull mode, depth state, viewport, scissor, topology and blend constants are dynamic state;
   pipelines are cached by what is baked into them.
 - **Readback** is gated. Copying the display buffer back to the host costs 8 MiB per flip at 1080p,
-  so a live run does it only for flips that are dumped (`--dump-frames`). `dal_rsxreplay` always
+  so a live run does it only for flips that are dumped (`--dump-frames`). `tox2_rsxreplay` always
   reads the last flip back.
 - **Shader translation** (`vp_translator.cpp`, `fp_translator.cpp`). Vertex and fragment programs
   are translated from RSX microcode to GLSL 4.50 and compiled with shaderc (the SDK's static
@@ -80,22 +89,22 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
 
 `--rsx-capture N[,M...]` records the RSX inputs of the given frames: the numbers are 1-based flip
 numbers, and each capture is written when its frame's flip completes, to
-`generated/rsx/captures/frame_<N>.dalcap` (relative to the working directory). A capture holds the
+`generated/rsx/captures/frame_<N>.tox2cap` (relative to the working directory). A capture holds the
 register writes from the previous flip to this one, the guest bytes the frame builder read while
 handling them, and the register and surface state the frame started from. It needs no renderer
 and no window. Captures are derived from the game, so they are git-ignored with the rest of
 `generated/`.
 
-`dal_rsxreplay` replays a capture through the frame builder and the renderer without the game:
+`tox2_rsxreplay` replays a capture through the frame builder and the renderer without the game:
 
 ```sh
-dal_rsxreplay CAPTURE [--out DIR] [--compare PNG [--max-diff N] [--max-mean X] [--max-differing P]]
+tox2_rsxreplay CAPTURE [--out DIR] [--compare PNG [--max-diff N] [--max-mean X] [--max-differing P]]
                       [--no-validation] [--shader-cache DIR]
 ```
 
 | Option | Meaning |
 | --- | --- |
-| `CAPTURE` | A `.dalcap` file. |
+| `CAPTURE` | A `.tox2cap` file. |
 | `--out DIR` | Write the displayed frame of the last flip as `DIR/<capture name>.png`. |
 | `--compare PNG` | Compare that frame with a reference image. The sizes must match. |
 | `--max-diff N` | With `--compare`: fail when the largest per-channel difference exceeds `N`. |
@@ -113,14 +122,18 @@ threshold is exceeded, a file cannot be read or written, there is no frame to di
 validation layer reported an error, and 2 for a usage error. Without a usable Vulkan device it
 still prints the command list and counts every draw as skipped.
 
-The CTest entry `rsx_replay` runs `dal_rsxreplay` on `generated/rsx/captures/title.dalcap` with
-the options pinned in `cmake/rsx_replay.cmake`: a SHA-256 for the reference image
-`generated/rsx/reference/title.png` and the thresholds (largest difference 8, at most 0.5 percent
-of the pixels differing). Both files are game-derived and git-ignored, so the test is registered
-only when the capture exists and the reference exists and matches the pinned hash; configuration
-prints the reason otherwise. It passes when the summary line is printed and the validation layer
-reports no error. To make a capture, run `dal_game` with `--rsx-capture` on the frame you want
-and copy the file to `generated/rsx/captures/title.dalcap`.
+The CTest entry `rsx_replay` runs `tox2_rsxreplay` on `generated/rsx/captures/title.tox2cap` with
+the options pinned in `cmake/rsx_replay.cmake`. The capture name `title` comes from the earlier game
+and has no meaning for this one. The file is game-derived and git-ignored, so the test is registered
+only when the capture exists; configuration prints the reason otherwise. The pin file also holds the
+slot for the SHA-256 of a reference image (`generated/rsx/reference/title.png`) and the thresholds
+(largest difference 8, at most 0.5 percent of the pixels differing). The SHA-256 is empty, because
+the earlier game's reference image does not apply here, so the test only replays the capture and
+passes when the summary line is printed and the validation layer reports no error. With a SHA-256
+set, the reference image must exist and match it, and the thresholds apply. To make a capture, run
+`tox2_game` with `--rsx-capture` on the frame you want and copy the file to
+`generated/rsx/captures/title.tox2cap`. This game has not reached a flip yet, so no capture of it
+exists.
 
 Three further renderer tests are registered: `render_core` (renders synthetic command lists, and
 skips itself when there is no Vulkan device), and `vp_translator` and `fp_translator` (need no

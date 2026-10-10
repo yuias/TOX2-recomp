@@ -11,11 +11,12 @@ Guest paths map to host directories (`runtime/src/lv2/vfs.cpp`, following RPCS3'
 The table is the layout the command-line options produce. A VFS configuration file can change it
 (other host directories, more devices, single-file overrides).
 
-When neither an option nor the configuration file sets them, `dal_game` uses defaults relative to
+When neither an option nor the configuration file sets them, `tox2_game` uses defaults relative to
 its own build directory (`build/<preset>`, the parent of the `bin` directory that holds the
 executable): `/dev_hdd0` and `/dev_hdd1` go to `build/<preset>/hdd`, and the sdata cache is
-`build/<preset>/sdata_cache` if that directory exists, which is where the build writes it. The log
-reports each default it applies (`dal: vfs: ... (default)`).
+`build/<preset>/sdata_cache` if that directory exists. The sdata cache is inherited from the earlier
+game: this game has no `.sdat` files and nothing in the repository creates the directory. The log
+reports each default it applies (`tox2: vfs: ... (default)`).
 
 `..` components may not leave a device, and a guest cannot create entries directly under
 `/dev_hdd0` or `/dev_hdd0/game`. The directories that the console's system software keeps on hdd0
@@ -23,6 +24,28 @@ reports each default it applies (`dal: vfs: ... (default)`).
 `/dev_hdd0` is mounted writable (`--hdd-dir` does). Host names are matched by the host file system, which is case-insensitive on
 Windows. The `sys_fs_*` system calls and the `cellFs*` imports share one object table. The
 virtual root lists the mounted devices.
+
+## Paths without a device
+
+A guest path that starts with something other than a mounted device resolves to nothing, and the
+`sys_fs` and `cellFs` calls fail with `CELL_ENOTMOUNTED` (`0x8001003a`); a missing file on a mounted
+device fails with `CELL_ENOENT`. The first occurrence of each operation, path and result is logged
+as `tox2: fs: <operation> "<path>" ok` or, at warning level, `... failed 0x<code>`. This game's
+first file system calls show it: it stats `/TLFILE.TLDAT`, `/FILEHEADER.TOFHDB` and `/ICON0.PNG`
+without any directory prefix, and each stat fails with `0x8001003a`. These paths are probably built
+from a directory name that `cellGameBootCheck` should have returned (see [Status](status.md)); that
+function has only a default handler. The game then creates game data under
+`/dev_hdd0/game/_GDATA_<number>/USRDIR`, where `cellFsOpen` creates an empty `TLFILE.TLDAT`.
+
+## Large files
+
+The file calls use 64-bit offsets: `sys_fs_lseek`, `cellFsReadWithOffset` and
+`cellFsWriteWithOffset` move the host file pointer with `SetFilePointerEx`, and an offset beyond
+the largest signed 64-bit value is treated as past any file. So an offset above 2 GiB is supported
+by the code. It has not been tried: `TLFILE.TLDAT` is about 3 GB, but no run has opened the real
+file (the game's open of `/TLFILE.TLDAT` failed, and its next open was the empty copy described
+above). The plain `cellFsRead`, `cellFsLseek` and `cellFsWrite` imports of this game also have no
+HLE wrapper yet, although the underlying system calls 802, 803 and 818 exist.
 
 ## VFS configuration file
 

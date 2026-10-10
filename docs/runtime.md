@@ -6,32 +6,50 @@ Log lines go to stderr, and to `--log FILE` when given, one line each. The logge
 over spdlog (the `externals/spdlog` submodule, built as a static library with `std::format`
 instead of the bundled fmt); spdlog types do not appear in the runtime's own headers. A line is
 prefixed with `[host]` or with `[t XXXXXXXX]`, the id of the guest thread that wrote it, followed
-by `warn: ` or `error: ` for those levels. Output from the guest itself (`sys_tty_write`) goes to
-stdout, unprefixed.
+by `warn: ` or `error: ` for those levels. The runtime's own messages then start with `tox2: ` and a
+topic (`tox2: fs: ...`, `tox2: game: ...`, `tox2: pad: ...`); the census lines and the register dump
+of a fatal stop have no such prefix. Output from the guest itself (`sys_tty_write`) goes to stdout,
+unprefixed (the game's own assertion text appears there).
+
+A run starts with the load log, for example (TOX2 values):
+
+```
+[host] tox2: sfo: TITLE_ID BLJS10188 RESOLUTION 0x15 SOUND_FORMAT 0x107
+[host] tox2: load: phdr 0 type 0x1 flags 0x00400005 vaddr 0x00010000 filesz 0x103a828 memsz 0x103a828 ...
+[host] tox2: dispatch: 29369 entries, span 0x00010200..0x00c9098c
+[host] tox2: hle: 173 imports, 107 with handlers
+[host] tox2: loaded EBOOT.elf: entry 0x00010240 toc 0x010b6330 opd 0x0105ddb8 ... image end 0x011d0000
+[host] tox2: sha256 a1d8a56ce1d6300bff704a43218f1b8b87c80c1e1342929a266e58af4e5891e9
+[host] tox2: boot: stack 0xd0001000..0xd0011000 entry 0x00010240 toc 0x010b6330 r1 0xd0010f40 ...
+```
 
 ## Census
 
 On every stop the runtime prints what the game did, sorted by count and then by name:
 
 ```
-census: syscalls 18 calls, 14 distinct, 2 default-handled
-  sc 141 sys_timer_usleep: 1 [impl]
-  sc 169 sys_spu_initialize: 1 [default]
-census: hle 118 calls, 21 distinct, 10 default-handled
-  sysPrxForUser::sys_lwmutex_lock: 29 [impl]
-  cellSysmodule::cellSysmoduleLoadModule: 15 [default]
+census: syscalls 34225 calls, 11 distinct, 1 default-handled
+  sc 43 sys_ppu_thread_yield: 34066 [impl]
+  sc 45 ?: 2 [default]
+  sc 169 sys_spu_initialize: 1 [impl]
+census: hle 81299 calls, 71 distinct, 26 default-handled
+  sysPrxForUser::sys_lwmutex_lock: 38638 [impl]
+  cellSpurs::cellSpursCreateTask2: 25 [default] ptr r3,r4,r5,r6,r7,r8,r9
+  cellGame::cellGameBootCheck: 1 [default] ptr r3,r4,r5,r6,r8
 census: unknown targets 0 distinct
-census: rsx 383050 headers, 264 distinct methods, 836 flips, rendered 2761 draws, skipped 0
-  interrupt handler calls: vblank 1492, flip 0, user 836
-  method 0x324: 7912
-  method 0xfeac GCM_FLIP_COMMAND: 836
+census: rsx 186 headers, 170 distinct methods, 0 flips
+  method 0x1efc: 21
 census: rsx unimplemented 1 kinds
-  state zpass report constant: 1673
-census: threads 5 created, 5 live
-  0x01000000 main_thread: running
-  0x01000001 _SPU_printf_server: blocked in sys_event_queue_receive
-  0x01000005 _gcm_intr_thread: blocked in gcm interrupt wait [service]
+  state zpass report constant: 1
+census: threads 8 created, 6 live
+  0x01000000 main_thread: blocked in sys_timer_usleep
+  0x01000002 _gcm_intr_thread: blocked in gcm interrupt wait [service]
+  0x01000007 CThread: running
 ```
+
+This is an excerpt of the census of a headless run of this game (see [Status](status.md)); the
+counts differ a little from run to run. Syscall 45 prints `?` because the runtime's table has no
+entry for it (it is `sys_ppu_thread_detach` in `config/lv2_syscalls.json`).
 
 `[impl]` marks a call that an implemented handler served and `[default]` one that the default
 handler took (see below). An unknown target is printed as `0x<target> from 0x<site>: count`. A default-handled import is
@@ -39,18 +57,20 @@ followed by `ptr r3,r5,...`, the argument registers that held a pointer to commi
 (an out-pointer candidate, see [Default handlers](#default-handlers)). The `rsx` section is described under [Fake RSX](rendering.md#fake-rsx);
 the `, rendered ... draws, skipped ...` part appears when the renderer runs, and the
 `rsx unimplemented` section under [Rendering](rendering.md#rendering).
-After a run that played movies, a `census: sail <n> movies` section repeats the per-movie
-summary lines (see [Movies](movies.md#log-lines-and-census)). After a run in which the game
+After a run that played movies through cellSail, a `census: sail <n> movies` section repeats the
+per-movie summary lines (see [Movies](movies.md#log-lines-and-census)); this game imports no
+cellSail, so the section does not appear. After a run in which the game
 initialised `cellAudio`, a `census: audio` section gives the audio engine, mixer input and
 `cellAtrac` counters (see [Audio](audio.md#census)).
 Thread states are `running`, `blocked in <what>` or `exited`. The first call of each syscall and
-each import also logs `dal: first sc <number> <name>` or `dal: first hle <module>::<name>` while
-the game runs; these lines are the progress markers that `game_boot` checks.
+each import also logs `tox2: first sc <number> <name>` or `tox2: first hle <module>::<name>` while
+the game runs; these lines are the progress markers that `game_boot` checks (see
+[Tests](tests.md#the-game_boot-test)).
 
 ## Memory map
 
 The guest space is one reservation of 4 GiB plus a guard area, big-endian, accessed only through
-the `dalRead*` and `dalWrite*` helpers. Pages are committed on demand by the allocators below. An
+the `tox2Read*` and `tox2Write*` helpers. Pages are committed on demand by the allocators below. An
 access to an uncommitted page raises a fault that the runtime turns into a fatal stop with the
 guest address and the access kind.
 
@@ -68,15 +88,16 @@ functions, the function descriptors that the HLE layer hands to guest code (for 
 the runtime itself provides). Guest code can call or start a thread on such a descriptor, and the
 dispatcher resolves the key to the host handler.
 
-The primary stack size from the executable's process parameters is clamped as RPCS3 does (the
-game's 0x8000 becomes 0x10000). The argument block (`argv`, `envp`, strings) sits at the top of
+The primary stack size from the executable's process parameters is clamped as RPCS3 does, between
+0x10000 and 0x100000 bytes; this game asks for 0x10000, so the stack is `0xd0001000..0xd0011000`. The argument block (`argv`, `envp`, strings) sits at the top of
 the stack. `sys_memory_get_user_memory_size` reports a 0xD500000 container. The timebase runs at
 79.8 MHz, scaled from the host performance counter.
 
 ## Dispatch
 
-`dalRegisterFuncs` builds a flat table indexed by guest address from the generated function
-mappings, so a computed jump or an indirect call costs one lookup. A target that is not in the
+`tox2RegisterFuncs` builds a flat table indexed by guest address from the generated function
+mappings, so a computed jump or an indirect call costs one lookup. For this game the table has
+29,369 entries over the span `0x00010200..0x00c9098c` (`tox2: dispatch:` in the load log). A target that is not in the
 table is an unknown target: the first occurrence of each (target, call site) pair is logged with
 the call trace and counted in the census. With `--strict` it is a fatal stop. Without it the
 dispatch returns, which acts like a callee that returned immediately, so the run goes on and the
@@ -86,7 +107,7 @@ census lists every such target.
 
 Each guest thread is a host thread (16 MiB host stack) with its own context. All guest code runs
 under one global guest lock, a FIFO ticket lock, so guest threads never run in parallel. A thread
-gives up the lock only in `dalYield` (called from loop hooks, when another thread is waiting), in
+gives up the lock only in `tox2Yield` (called from loop hooks, when another thread is waiting), in
 a blocking wait and when it exits. Blocking system calls (mutex, condition variable, event flag,
 event queue, sleep, join) wait on host condition variables with the guest lock, and record what
 they wait for for the census and for stall detection.
@@ -99,22 +120,26 @@ before the creator continues. `startGuestThreadFirst` starts the host thread, wa
 queued for the guest lock (at most 5 ms), and yields the lock to it. The new thread then runs until
 it blocks, exits, yields or uses up its preemption budget; the creator's budget is reset afterwards.
 A thread with an equal or higher number, an interrupt thread, and the threads the runtime itself
-creates are started as before. The game depends on it: its audio mixer thread (priority 90) is created
-by the main thread (1005) and has to store its notify queue key before main registers it with
-`cellAudio`. The rule is logged at debug level, and a new thread that did not queue within 5 ms
-logs `dal: thread: ... not queued within 5 ms; creator continues` at info level. There is no other
+creates are started as before. The earlier game depended on this rule: its audio mixer thread was
+created by a main thread of lower precedence and had to store its notify queue key before main
+registered it with `cellAudio`. Whether this game needs it has not been checked (its main thread
+has priority 1001; the priorities of its worker threads were not recorded). The rule is logged at
+debug level, and a new thread that did not queue within 5 ms
+logs `tox2: thread: ... not queued within 5 ms; creator continues` at info level. There is no other
 priority behaviour: no priority-ordered hand-off, no wake order by priority, no preemption, and no
 rescheduling when a priority changes.
 
-`dal_game` holds a 1 ms system timer resolution for the whole run (`timeBeginPeriod`,
+`tox2_game` holds a 1 ms system timer resolution for the whole run (`timeBeginPeriod`,
 `runtime/src/core/timer_resolution.*`). Timed waits (`sys_timer_usleep`, lock and queue time-outs)
 are host condition variable waits, and Windows rounds them to its timer tick (15.6 ms by default),
-so a 1 ms guest sleep would take 15 ms. The game's decode loops poll with 1 ms sleeps. The request
-ends with the process; a refusal is logged as a warning and the default tick stays.
+so a 1 ms guest sleep would take 15 ms. The earlier game's decode loops polled with 1 ms sleeps;
+this game's worker threads also sleep with `sys_timer_usleep` (24 calls before the stop). The
+request ends with the process; a refusal is logged as a warning and the default tick stays.
 
 The RSX thread and the audio engine are host threads that take the same guest lock. The RSX thread
 therefore pumps the command buffer in slices of 128 words and leaves the lock once a hold has lasted
-300 us, so that the game's mixer can run between the slices (see [Audio](audio.md#guest-lock)). It
+300 us, so that the game's mixer can run between the slices (see [Audio](audio.md#guest-lock); this
+game stops before it starts a mixer, so the figures come from the earlier game). It
 also leaves the lock after each draw end and copies the draw's guest bytes without it; the game only
 reuses that memory after a later label, report or flip, which the RSX thread writes after the copy.
 
@@ -123,7 +148,8 @@ thread the game needs is the GCM interrupt thread described under [Fake RSX](ren
 
 A service thread is a guest thread that the runtime starts on the game's behalf and that waits
 for work from the host (the GCM interrupt thread, and `_libsail-control`, which delivers the
-cellSail notify events and allocator calls; see [Movies](movies.md)). The census marks it `[service]`, and the
+cellSail notify events and allocator calls; see [Movies](movies.md). The latter is never started for
+this game, which does not import cellSail). The census marks it `[service]`, and the
 stall detector and the check for "no guest threads left" ignore it, so a game whose own threads
 are all blocked still ends with a stall stop.
 
@@ -133,7 +159,11 @@ stall and the absence of live guest threads.
 ## Implemented system calls
 
 Everything else goes to the default handler. Behaviour follows the RPCS3 handler of the same
-name; struct layouts and error codes are restated from its headers.
+name; struct layouts and error codes are restated from its headers. The table lists what the
+runtime implements; this game's executable uses 24 system call numbers that are not in it
+(among them the semaphores 90, 92 and 93, the SPU thread group calls 170 to 178 and the vm and
+memory container calls), and only some of those were reached before the stop (number 45,
+`sys_ppu_thread_detach`, is the one that the census shows as default-handled).
 
 | Group | Calls |
 | --- | --- |
@@ -144,49 +174,73 @@ name; struct layouts and error codes are restated from its headers.
 | Mutex and condition variable | `sys_mutex_create`, `_destroy`, `_lock`, `_trylock`, `_unlock` (100-104); `sys_cond_create`, `_destroy`, `_wait`, `_signal`, `_signal_all` (105-109) |
 | Event flag | `sys_event_flag_create` (82), `_destroy` (83), `_wait` (85), `_set` (87), `_clear` (118), `_cancel` (132), `_get` (139) |
 | Event queue and port | `sys_event_queue_create` (128), `_destroy` (129), `_receive` (130), `_drain` (133); `sys_event_port_create` (134), `_destroy` (135), `_connect_local` (136), `_disconnect` (137), `_send` (138). A queue created with a non-zero IPC key can be found by that key (the host looks it up and sends to it; the `cellAudio` notify uses this); a second live queue with the same key fails with `CELL_EEXIST`, key 0 makes a local queue, and destroying the queue forgets the key. IPC ports (`sys_event_port_connect_ipc`) are not supported. |
-| SPU | `sys_spu_initialize` (169), `sys_spu_thread_write_ls` (181), `_read_ls` (182), `_write_spu_mb` (190), `_connect_event` (191), `_disconnect_event` (192), `sys_spu_thread_group_connect_event_all_threads` (251), `_disconnect_event_all_threads` (252). Only the bookkeeping is kept; no SPU code runs. |
+| SPU | `sys_spu_initialize` (169) and `sys_spu_thread_group_connect_event_all_threads` (251) on a thread group id that the runtime handed out. Both only keep bookkeeping; no SPU code runs. The table names `sys_spu_thread_write_ls` (181), `_read_ls` (182), `_write_spu_mb` (190), `_connect_event` (191), `_disconnect_event` (192) and `sys_spu_thread_group_disconnect_event_all_threads` (252) but has no handler for them, so they are default-handled. |
 | File system | `sys_fs_open` (801), `_read` (802), `_write` (803), `_close` (804), `_opendir` (805), `_readdir` (806), `_closedir` (807), `_stat` (808), `_fstat` (809), `_mkdir` (811), `_unlink` (814), `_lseek` (818); see [Virtual file system](virtual-file-system.md#virtual-file-system) |
 | Thread | `_sys_ppu_thread_exit` (41), `sys_ppu_thread_yield` (43), `sys_ppu_thread_join` (44), `sys_ppu_thread_set_priority` (47), `sys_ppu_thread_get_priority` (48); the creation rule of `sys_ppu_thread_create` is under [Threads](#threads) |
 
 ## Implemented imports
 
-Imports are matched to handlers by module and FNID. All 166 of the executable's imports have a
-handler (the log says `dal: hle: 166 imports, 166 with handlers`); the default handler below still
-serves any import without one. Behaviour follows the RPCS3 function of the same name
-(`Emu/Cell/Modules/`); each handler file lists its deviations in its header comment. `cellAudio` and
-`cellAtrac` were implemented from a written description of RPCS3's behaviour, not from its code (see
-[Audio](audio.md#clean-room)).
+Imports are matched to handlers by module and FNID. The executable of this game has 173 imports from
+17 modules, and 107 of them have a handler (the load log says `tox2: hle: 173 imports, 107 with
+handlers`). The other 66 are served by the [default handler](#default-handlers). Behaviour follows
+the RPCS3 function of the same name (`Emu/Cell/Modules/`); each handler file lists its deviations in
+its header comment. `cellAudio` and `cellAtrac` were implemented from a written description of
+RPCS3's behaviour, not from its code (see [Audio](audio.md#clean-room)).
 
-| Module | Imports |
-| --- | --- |
-| `sysPrxForUser` (all 23 imports) | `sys_initialize_tls` (per-thread TLS blocks laid out as RPCS3 does), `sys_ppu_thread_create`, `_get_id`, `_once`, `_exit`; `sys_lwmutex_create`, `_destroy`, `_lock`, `_trylock`, `_unlock`; `_sys_heap_create_heap`, `_malloc`, `_memalign`, `_free`, `_delete_heap`; `sys_time_get_system_time`, `sys_process_exit`; `_sys_process_atexitspawn`, `_sys_process_at_Exitspawn`, `sys_prx_exitspawn_with_level`, `sys_prx_register_library`, `_sys_spu_printf_initialize`, `_sys_spu_printf_finalize` (the last six return `CELL_OK` and do nothing else) |
-| `cellSysmodule` | `cellSysmoduleLoadModule`, `cellSysmoduleUnloadModule`: every module id succeeds, because the HLE functions are always available |
-| `cellSpurs` | `cellSpursInitializeWithAttribute2` and its attribute helper, `cellSpursGetSpuThreadGroupId`, `cellSpursFinalize`: a SPURS instance can be created and queried, but no SPU thread, workload or helper thread exists |
-| `cellGcmSys` | 26 imports: initialization (`_cellGcmInitBody`), configuration, IO mapping (`cellGcmMapMainMemory`, `cellGcmAddressToOffset`, `cellGcmUnmapEaIoAddress`), display buffers, flip mode and flip status, the vblank, flip and user handlers, tiles and zcull, the control register and the default command buffer callback; see [Fake RSX](rendering.md#fake-rsx) |
-| `cellSysutil` | the callback pump (`cellSysutilRegisterCallback`, `_UnregisterCallback`, `_CheckCallback`), BGM playback status, `cellVideoOutConfigure`, `_GetState`, `_GetResolutionAvailability`, `cellAudioOutGetState`, the message dialog (`cellMsgDialogOpen2`, `_Close`, progress bar reset and increment) and save data (`cellSaveDataAutoLoad2`, `AutoSave2`, `ListLoad2`, `ListSave2`, `Delete2`) |
-| `cellGame` | `cellGameDataCheck`, `cellGameCreateGameData`, `cellGameContentPermit`, `cellGameContentErrorDialog` |
-| `sys_fs` | `cellFsOpen`, `cellFsSdataOpen`, `cellFsReadWithOffset`, `cellFsWriteWithOffset`, `cellFsClose`, `cellFsFstat`, `cellFsStat`, `cellFsMkdir`, `cellFsUnlink` |
-| `sys_io` | `cellPadInit`, `cellPadEnd`, `cellPadSetPortSetting`, `cellPadGetData`, `cellPadGetInfo2`, `cellPadSetActDirect` |
-| `cellPngDec` | `cellPngDecCreate`, `cellPngDecDestroy`, `cellPngDecExtOpen`, `cellPngDecExtReadHeader`, `cellPngDecExtSetParameter`, `cellPngDecExtDecodeData`, `cellPngDecClose`; see [PNG decoding](#png-decoding) |
-| `cellSail` | the 27 imports the game uses: the memory allocator, player initialise, boot, open, start and finalize, descriptors and their stream database, and the graphics and sound adapters (format, `GetFrame`, `UpdateAvSync`); see [Movies](movies.md) |
-| `cellPamf` | `cellPamfReaderGetNumberOfSpecificStreams` on the descriptor's stream database |
-| `cellAudio` | all 11 imports the game uses: `Init`, `Quit`, `PortOpen`, `PortStart`, `PortStop`, `PortClose`, `GetPortConfig`, `GetPortBlockTag`, `GetPortTimestamp`, `SetNotifyEventQueue`, `RemoveNotifyEventQueue`; the ports and the 8-block ring live in guest memory and a host clock drives the game's mixer; see [Audio](audio.md) |
-| `cellAtrac` | all 15 imports the game uses: `SetDataAndGetMemSize`, `CreateDecoder`, `DeleteDecoder`, `Decode`, the stream calls (`GetStreamDataInfo`, `AddStreamData`, `GetRemainFrame`), the loop and info calls and the second-buffer calls; ATRAC3plus is decoded through FFmpeg; see [Audio](audio.md#cellatrac) |
-| `sceNp`, `sceNpTrophy` | `sceNpInit`, `sceNpTerm`, `sceNpDrmIsAvailable`; the 10 trophy imports (`sceNpTrophyInit` to `sceNpTrophyUnlockTrophy`) |
+The first table lists, for this game's imports, what is bound to a handler and what is not. All
+handlers were written for the earlier game; that they bind here only means that the module and
+FNID match, not that the behaviour suits this game.
+
+| Module | Bound / imported | Handled | Without a handler |
+| --- | --- | --- | --- |
+| `sysPrxForUser` | 18 / 20 | `sys_initialize_tls` (per-thread TLS blocks laid out as RPCS3 does), `sys_ppu_thread_create`, `_get_id`, `_once`, `_exit`; `sys_lwmutex_create`, `_destroy`, `_lock`, `_trylock`, `_unlock`; `sys_time_get_system_time`, `sys_process_exit`; `_sys_process_atexitspawn`, `_sys_process_at_Exitspawn`, `sys_prx_exitspawn_with_level`, `sys_prx_register_library`, `_sys_spu_printf_initialize`, `_sys_spu_printf_finalize` (the last six return `CELL_OK` and do nothing else) | `sys_spu_image_import`, `sys_spu_image_close` |
+| `cellSysmodule` | 2 / 2 | `cellSysmoduleLoadModule`, `cellSysmoduleUnloadModule`: every module id succeeds, because the HLE functions are always available | |
+| `cellSpurs` | 2 / 30 | `_cellSpursAttributeInitialize` (it fills the attribute structure) and `cellSpursFinalize` | the other 28: attribute setters, `cellSpursInitializeWithAttribute`, tasksets and tasks (versions 1 and 2), queues, lock-free queues, event flags, `cellSpursTaskGetContextSaveAreaSize`, join and push calls |
+| `cellGcmSys` | 24 / 26 | initialization (`_cellGcmInitBody`), configuration, IO mapping (`cellGcmMapMainMemory`, `cellGcmAddressToOffset`, `cellGcmUnmapEaIoAddress`), display buffers, flip mode, the vblank and flip handlers, tiles and zcull, the control register, the flip commands and the default command buffer sizes; see [Fake RSX](rendering.md#fake-rsx) | `cellGcmGetFlipStatus`, `cellGcmGetLabelAddress` |
+| `cellSysutil` | 14 / 23 | the callback pump (`cellSysutilRegisterCallback`, `_CheckCallback`), BGM playback status and enabling, `cellVideoOutConfigure`, `_GetState`, `cellAudioOutGetState`, the message dialog (`cellMsgDialogOpen2`, `_Close`, `ProgressBarInc`) and save data (`cellSaveDataListLoad2`, `ListSave2`, `AutoSave2`, `Delete2`) | `cellVideoOutGetResolution`, `cellAudioOutConfigure`, `cellAudioOutGetConfiguration`, `cellAudioOutGetSoundAvailability`, `cellSysutilDisableBgmPlayback`, `cellMsgDialogOpenErrorCode`, `cellSaveDataListAutoLoad`, `cellSaveDataFixedLoad2`, `cellSaveDataFixedSave2` |
+| `cellGame` | 4 / 5 | `cellGameDataCheck`, `cellGameCreateGameData`, `cellGameContentPermit`, `cellGameContentErrorDialog` | `cellGameBootCheck` |
+| `sys_fs` | 4 / 7 | `cellFsOpen`, `cellFsClose`, `cellFsStat`, `cellFsFstat` | `cellFsRead`, `cellFsLseek`, `cellFsWrite` |
+| `sys_io` | 6 / 6 | `cellPadInit`, `cellPadEnd`, `cellPadSetPortSetting`, `cellPadGetData`, `cellPadGetInfo2`, `cellPadSetActDirect` | |
+| `cellAudio` | 9 / 10 | `Init`, `Quit`, `PortOpen`, `PortStart`, `PortStop`, `PortClose`, `GetPortConfig`, `SetNotifyEventQueue`, `RemoveNotifyEventQueue`; the ports and the 8-block ring live in guest memory and a host clock drives the game's mixer; see [Audio](audio.md) | `cellAudioSetPortLevel` |
+| `cellAtrac` | 12 / 15 | `SetDataAndGetMemSize`, `DeleteDecoder`, `Decode`, the stream calls (`GetStreamDataInfo`, `AddStreamData`), the loop and info calls, `GetMaxSample`, `GetChannel` and the second-buffer calls; ATRAC3plus is decoded through FFmpeg; see [Audio](audio.md#cellatrac) | `cellAtracCreateDecoderExt`, `cellAtracGetInternalErrorInfo`, `cellAtracGetVacantSize` |
+| `sceNp` | 3 / 5 | `sceNpInit`, `sceNpTerm`, `sceNpDrmIsAvailable` | `sceNpManagerGetStatus`, `sceNpManagerGetContentRatingFlag` |
+| `sceNpTrophy` | 9 / 10 | `sceNpTrophyInit`, `_Term`, `CreateContext`, `DestroyContext`, `CreateHandle`, `DestroyHandle`, `RegisterContext`, `GetRequiredDiskSpace`, `UnlockTrophy` | `sceNpTrophyAbortHandle` |
+| `cellRtc` | 0 / 4 | | `cellRtcGetCurrentTick`, `cellRtcConvertUtcToLocalTime`, `cellRtcSetTick`, `cellRtcGetDayOfWeek` |
+| `cellSysutilAvconfExt` | 0 / 1 | | `cellVideoOutSetGamma` |
+| `cellScreenShotUtility` | 0 / 4 | | all four |
+| `sceNpCommerce2` | 0 / 2 | | both |
+| `cellNetCtl` | 0 / 3 | | all three |
+
+Handlers that exist but that no import of this game binds, because the game does not import the
+function or the module:
+
+- `cellSpurs`: `cellSpursInitializeWithAttribute2` and `cellSpursGetSpuThreadGroupId`. They create a
+  SPURS instance and query it, but no SPU thread, workload or helper thread exists. This game
+  initialises SPURS through the version 1 call `cellSpursInitializeWithAttribute`, which is
+  default-handled.
+- `sysPrxForUser`: the `_sys_heap_*` functions (create, delete, malloc, memalign, free).
+- `cellSysutil`: `cellSysutilUnregisterCallback`, `cellVideoOutGetResolutionAvailability`,
+  `cellMsgDialogProgressBarReset`, `cellSaveDataAutoLoad2`; `sceNpTrophyGetTrophyUnlockState`;
+  `cellAtracCreateDecoder`, `cellAtracGetRemainFrame`, `cellAtracGetSoundInfo`;
+  `cellAudioGetPortBlockTag`, `cellAudioGetPortTimestamp`.
+- `cellPngDec` (7 functions, see [PNG decoding](#png-decoding)), `cellSail` (27 functions) and
+  `cellPamf` (1 function): the game imports none of these modules, so the code is built and never
+  runs for it (see [Movies](movies.md)).
 
 Video and audio out report what the game's `PARAM.SFO` allows (the `RESOLUTION` and
 `SOUND_FORMAT` attributes); a missing or unreadable file keeps the defaults.
 
 ## Headless policy
 
-RPCS3 opens dialogs and waits for the user in several of these modules. `dal_game` has no user
+RPCS3 opens dialogs and waits for the user in several of these modules. `tox2_game` has no user
 interface, so each module follows a documented policy that never blocks on a person:
 
 - **Message dialogs** (`cellMsgDialogOpen2`): the type and the text are logged. A dialog with
   buttons answers itself after 200 ms: OK for an OK dialog, and the `--dialog-answer` value
   (default yes) for a Yes/No dialog. A dialog without buttons stays open until
-  `cellMsgDialogClose`. The answer is delivered through the cellSysutil callback queue, so the
-  guest sees it from `cellSysutilCheckCallback`, as on the console.
+  `cellMsgDialogClose`. This game opens a dialog without buttons and with a progress bar (a game
+  data installation message) just before its trap. The answer is delivered through the cellSysutil
+  callback queue, so the guest sees it from `cellSysutilCheckCallback`, as on the console.
 - **Save data**: a save lives in `/dev_hdd0/home/00000001/savedata/<dir name>/`. Error dialogs
   are logged and their error code is returned, without a dialog object. A save list is never
   shown; the entry is the one the game's list callback highlights, with RPCS3's fallbacks, and
@@ -214,7 +268,7 @@ the changes to the game. `--pad` picks the provider: `none` (no pad), `neutral` 
 port 0 that never changes), `keyboard`, `gamepad` or `keyboard+gamepad`. The last three are set up in
 `runtime/src/game_main.cpp` with `setPadProvider`, because they need the window and the script or
 gamepad thread; `setPadBackend` accepts only `none` and `neutral`. The option defaults are in
-[`dal_game` options](runtime-options.md#window-input-and-sound) and the key table in the
+[`tox2_game` options](runtime-options.md#window-input-and-sound) and the key table in the
 [README](../README.md#keyboard); the script format is [below](#pad-script). Gamepads (mapping,
 selection, Steam, the GameInput runtime, log lines and tools) are described in [Input](input.md).
 
@@ -258,7 +312,9 @@ nothing joins them, because the process ends with `std::_Exit`.
   source when the process loses the foreground window. `Alt` combinations still reach the
   default window procedure, so `Alt+F4` closes the window.
 - The press mode that the game sets with `cellPadSetPortSetting` decides whether `cellPad` copies
-  the pressure words to the game; the game under test turns it on (`dal: pad: port 0 setting 0x2`).
+  the pressure words to the game; this game sets 0x6 (press and sensor on) on ports 0 to 6
+  (`tox2: pad: port 0 setting 0x6 (press on, sensor on)`), after `cellPadInit` with a maximum of 7
+  pads.
 
 ### Pad script
 
@@ -285,10 +341,9 @@ are parsed. `#` starts a comment, blank lines are ignored, tokens are separated 
   a few milliseconds. The player thread sleeps until each event, applies it to the `Script` source
   and logs it.
 
-Example (`tools/pad_scripts/leave_title.txt`, which the `game_input` test uses):
+No pad script ships with the repository. A script that taps Circle every 2 s from 4 s to 30 s:
 
 ```
-# Skip whatever screen is showing every 2 s, from 4 s to 30 s.
 4 tap circle every 2 until 30
 ```
 
@@ -302,50 +357,34 @@ A script that holds a direction while it taps a button:
 
 ### Log lines
 
-All pad lines start with `dal: pad:`; the script lines carry the `[host]` prefix. The lines of
+All pad lines start with `tox2: pad:`; the script lines carry the `[host]` prefix. The lines of
 gamepads (`gameinput`, `steam`, `device`, `gamepad`, `probe`) are in [Input](input.md#log-lines).
 
 | Line | Level | Source |
 | --- | --- | --- |
-| `dal: pad: init max_connect N` | info | `cellPadInit` |
-| `dal: pad: port N connected` or `disconnected` | info | the first change of a port to that state |
-| `dal: pad: port N setting 0xS (press on\|off, sensor on\|off)` | info | `cellPadSetPortSetting`, once per port and value |
-| `dal: pad: <pad>` followed by ` (window)` and ` (script <file name>, <n> events)` as they apply | info | start-up with `--pad keyboard`, `gamepad` or `keyboard+gamepad` (`<pad>` is the value) |
-| `dal: pad: script <s>.<ms> s: press\|release <buttons>` | info | the player thread, one line per event |
-| `dal: pad: key 0x<scan code> down\|up -> <button>` | debug | a mapped key, window thread; unmapped keys and repeats are not logged |
+| `tox2: pad: init max_connect N` | info | `cellPadInit` |
+| `tox2: pad: port N connected` or `disconnected` | info | the first change of a port to that state |
+| `tox2: pad: port N setting 0xS (press on\|off, sensor on\|off)` | info | `cellPadSetPortSetting`, once per port and value |
+| `tox2: pad: <pad>` followed by ` (window)` and ` (script <file name>, <n> events)` as they apply | info | start-up with `--pad keyboard`, `gamepad` or `keyboard+gamepad` (`<pad>` is the value) |
+| `tox2: pad: script <s>.<ms> s: press\|release <buttons>` | info | the player thread, one line per event |
+| `tox2: pad: key 0x<scan code> down\|up -> <button>` | debug | a mapped key, window thread; unmapped keys and repeats are not logged |
 
 ### Scripted runs and tests
 
-Pressing buttons can make the game write save or system data under `--hdd-dir`, so a scripted run
-uses its own directory and deletes it first (`rm -rf build/release/game_hdd_input`), never the
-directory of a normal run or of `game_boot`.
-
-The `game_input` test (`cmake/PpuCodegen.cmake`, pins in `cmake/game_input.cmake`) is registered
-under the same conditions as `game_boot` with the `.sdat` cache: `DAL_EBOOT_ELF` and `DAL_GAME_DIR`
-must be set, and the build must have the `.sdat` keys. The setup test `game_input_hdd_clean` deletes
-`build/<preset>/game_hdd_input`, and `game_input` (fixture `game_input_hdd`) then runs
-`dal_game --no-window --pad-script tools/pad_scripts/leave_title.txt --hdd-dir build/<preset>/game_hdd_input
---seconds 40` with a time limit of 100 s. It passes when the log contains the main-thread line
-
-```
-[t 01000000] dal: fs: sdata-open "/dev_bdvd/PS3_GAME/USRDIR/Script/Event.sdat" ok
-```
-
-which the game writes about 20 s into a headless run after Circle has skipped the notice screen
-and the movies and confirmed NEW GAME. Without input the game is still in the intro movies at that
-time. The run stops at 40 s, before `world.pam` (83 s, not skippable with Circle) ends. The pad
-code itself is covered by `runtime_core` (`testPadButtons`, `testKeyboardPadScanCodes`,
-`testKeyboardPadState`, `testKeyboardPadProvider`, `testKeyboardPadThreads`, `testPadScriptParse`,
-`testPadScriptErrors`, `testPadScriptPlay`), the gamepad source of the state by `runtime_core`
-(`testPadStateFromInput`, `testGamepadSourceState`, `testGamepadPadProvider`, `testGamepadCellPad`),
-the rest of the gamepad code by `input_core` and `input_gameinput` (see [Tests](tests.md)), and the
-key message conversion by `render_core` (`testKeyMessages`).
-
-Scripts live in `tools/pad_scripts/`.
+Pressing buttons can make a game write save or system data under `--hdd-dir`, so a scripted run
+should use its own directory and delete it first, never the directory of a normal run or of
+`game_boot`. This repository has no test that runs the game with a pad script. The pad code itself
+is covered by `runtime_core` (`testPadButtons`, `testKeyboardPadScanCodes`, `testKeyboardPadState`,
+`testKeyboardPadProvider`, `testKeyboardPadThreads`, `testPadScriptParse`, `testPadScriptErrors`,
+`testPadScriptPlay`), the gamepad source of the state by `runtime_core` (`testPadStateFromInput`,
+`testGamepadSourceState`, `testGamepadPadProvider`, `testGamepadCellPad`), the rest of the gamepad
+code by `input_core` and `input_gameinput` (see [Tests](tests.md)), and the key message conversion
+by `render_core` (`testKeyMessages`).
 
 ## PNG decoding
 
-`cellPngDec` decodes with libpng's classic API (`externals/libpng` at v1.6.59, built as a static
+This game does not import `cellPngDec`, so none of this runs for it; the description is of the
+inherited code. `cellPngDec` decodes with libpng's classic API (`externals/libpng` at v1.6.59, built as a static
 library together with zlib v1.3.2 from `externals/zlib`; nothing is installed or downloaded).
 libpng reports errors by `longjmp`, so every call that can fail runs in a function that owns the
 `setjmp` and has no locals with destructors. The handle and stream objects are allocated through
@@ -356,19 +395,25 @@ from the stored format (palette, tRNS and sub-8-bit samples expand, 16-bit sampl
 high byte for 8-bit output, Adam7 images are de-interlaced); rows are written
 `outputBytesPerLine` apart, top to bottom or bottom to top. Not implemented: RGB to grayscale, partial output through `cbCtrlDisp`, the
 `cellPngDecGet*` chunk accessors. Each stream's source, header and output format are logged with
-the `dal: pngdec:` prefix.
+the `tox2: pngdec:` prefix.
 
 ## Default handlers
 
 A system call without a handler, and an import without one, return 0 (`CELL_OK`) in `r3` and
 change nothing else. The first call of each distinct syscall is logged as
-`dal: default sc <number> <name>(r3..r6)`, and the first 8 calls of each import as
-`dal: default hle <module>::<name>(r3..r8)` (none with `--quiet-hle`); later calls are only
+`tox2: default sc <number> <name>(r3..r6)`, and the first 8 calls of each import as
+`tox2: default hle <module>::<name>(r3..r8)` (none with `--quiet-hle`); later calls are only
 counted. Returning success is a probe, not an implementation: guest code that depends on an
 output parameter reads whatever was in memory, so a default-handled call can lead to a later
 fault. The census shows which calls were default-handled, which is the work list for the next
-handlers. For each default-handled import the runtime also logs the argument registers that look
-like out-pointers (a nonzero 32-bit value that addresses committed memory outside the code), as
-`dal: default hle <module>::<name>: possible out-pointer r<N>=<address>`, and the census repeats the
-register list as `ptr r<N>,...`. These are hints for writing the handler, not facts: a register
-left over from an earlier call can look like a pointer too.
+handlers. On the first call of each default-handled import the runtime also logs the argument
+registers that look like out-pointers (a nonzero 32-bit value that addresses committed memory
+outside the code), as `tox2: default hle <module>::<name>: possible out-pointer r<N>=<address>
+(<region>)`, and the census repeats the register list as `ptr r<N>,...`. These are hints for writing
+the handler, not facts: a register left over from an earlier call can look like a pointer too.
+
+In this game's runs the default handlers served 26 imports and one system call before the stop.
+The most likely to matter for the stop is `cellGameBootCheck`: the game passes it five pointers
+(`r3`, `r4`, `r5`, `r6` and `r8`, of which `r3` is on the stack) and then stats files without a
+directory prefix, which is what an empty directory-name out-parameter would produce. That link is a
+hypothesis; it has not been tested by giving the call a handler.
