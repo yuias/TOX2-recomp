@@ -77,6 +77,7 @@ public:
     std::uint32_t tlsR13() const { return tls_r13_; }
     std::uint32_t entryOpd() const { return entry_opd_; }
     bool joinable() const { return joinable_; }
+    void detach() { joinable_ = false; }  // under the guest lock
     bool service() const { return service_; }
     std::uint64_t exitValue() const { return exit_value_; }
     void setExitValue(std::uint64_t value) { exit_value_ = value; }

@@ -43,6 +43,7 @@
 #include "input/pad_script.h"
 #include "png.h"
 #include "lv2/cell_error.h"
+#include "lv2/sys_memory.h"
 #include "lv2/sys_ppu_thread.h"
 #include "lv2/sys_spu.h"
 #include "lv2/syscalls.h"
@@ -643,7 +644,7 @@ void testSyscalls() {
     tox2::resetLogOnce();
 
     const auto table = tox2::syscallTable();
-    CHECK(table.size() == 61);  // the 53 census numbers plus the implemented 22, 41, 43 and 103
+    CHECK(table.size() == 91);  // every number the game issues plus the rest of the families that are implemented
     bool sorted = true;
     for (std::size_t i = 1; i < table.size(); i++) sorted = sorted && table[i - 1].number < table[i].number;
     CHECK(sorted);
@@ -651,7 +652,13 @@ void testSyscalls() {
     CHECK(usleep_entry != nullptr && std::string_view(usleep_entry->name) == "sys_timer_usleep");
     CHECK(usleep_entry != nullptr && usleep_entry->handler != nullptr);
     const tox2::SyscallEntry* unnamed = tox2::findSyscall(988);
-    CHECK(unnamed != nullptr && unnamed->name == nullptr);
+    CHECK(unnamed != nullptr && unnamed->name == nullptr && unnamed->handler != nullptr);
+    const tox2::SyscallEntry* detach_entry = tox2::findSyscall(45);
+    CHECK(detach_entry != nullptr && std::string_view(detach_entry->name) == "sys_ppu_thread_detach");
+    CHECK(detach_entry != nullptr && detach_entry->handler != nullptr);
+    const tox2::SyscallEntry* container_entry = tox2::findSyscall(343);
+    CHECK(container_entry != nullptr && std::string_view(container_entry->name) == "sys_memory_container_get_size");
+    CHECK(container_entry != nullptr && container_entry->handler != nullptr);
     CHECK(tox2::findSyscall(999) == nullptr);
 
     auto ctx = std::make_unique<Tox2PpuContext>();
@@ -987,6 +994,102 @@ void testStartupSyscalls() {
     }
 
     p.main.free(scratch);
+    tox2::setLogSink({});
+    tox2::resetCensus();
+}
+
+void testMemoryContainers() {
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetMemoryContainers();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t cid_out = scratch, info = scratch + 0x10, addr_out = scratch + 0x20;
+    constexpr std::uint32_t kInvalidId = 0xFFFFFFFF;
+    const std::uint32_t used0 = p.user_memory_used;
+
+    // The size is rounded down to 1 MiB and charged to the default container.
+    CHECK(syscall(324, cid_out, 0x5600000 + 0x1234) == 0);
+    const std::uint32_t cid = tox2Read32(base, cid_out);
+    CHECK(cid == 0x3F000000);
+    CHECK(p.user_memory_used == used0 + 0x5600000);
+    CHECK(syscall(352, info) == 0);
+    CHECK(tox2Read32(base, info + 4) == p.user_memory_total - used0 - 0x5600000);
+    CHECK(syscall(343, info, cid) == 0);
+    CHECK(tox2Read32(base, info) == 0x5600000 && tox2Read32(base, info + 4) == 0x5600000);
+
+    // Unknown ids, among them 0, which the game passed when no id had been written.
+    CHECK(syscall(343, info, 0) == err(tox2::kCellEsrch));
+    CHECK(syscall(343, info, kInvalidId) == err(tox2::kCellEsrch));
+    CHECK(syscall(343, 0, cid) == err(tox2::kCellEfault));
+
+    // Create errors leave the bookkeeping alone.
+    const std::uint32_t used = p.user_memory_used;
+    CHECK(syscall(324, cid_out, 0xFFFFF) == err(tox2::kCellEnomem));  // rounds down to zero
+    CHECK(syscall(324, cid_out, 0x100000000ull) == err(tox2::kCellEnomem));
+    CHECK(syscall(324, cid_out, p.user_memory_total - used + 0x100000) == err(tox2::kCellEnomem));
+    CHECK(syscall(324, 0, 0x100000) == err(tox2::kCellEfault));
+    CHECK(p.user_memory_used == used);
+
+    // Allocation from the container is charged to it, not to the default container a second time.
+    CHECK(syscall(350, 0x200000, cid, 0x400, addr_out) == 0);
+    const std::uint32_t a = tox2Read32(base, addr_out);
+    CHECK(a >= tox2::kUser1mRegion.begin && a < tox2::kUser1mRegion.end && a % 0x100000 == 0);
+    CHECK(syscall(350, 0x30000, cid, 0x200, addr_out) == 0);
+    const std::uint32_t b = tox2Read32(base, addr_out);
+    CHECK(b >= tox2::kUser64kRegion.begin && b < tox2::kUser64kRegion.end && b % 0x10000 == 0);
+    tox2Write32(base, b, 0xdeadbeef);  // committed and writable
+    CHECK(p.user_memory_used == used);
+    CHECK(syscall(343, info, cid) == 0);
+    CHECK(tox2Read32(base, info + 4) == 0x5600000 - 0x200000 - 0x30000);
+
+    // Allocation errors: the checks of sys_memory_allocate first, then the container.
+    CHECK(syscall(350, 0, cid, 0x400, addr_out) == err(tox2::kCellEalign));
+    CHECK(syscall(350, 0x100000, cid, 0x123, addr_out) == err(tox2::kCellEinval));
+    CHECK(syscall(350, 0x10000, cid, 0x400, addr_out) == err(tox2::kCellEalign));
+    CHECK(syscall(350, 0x100000, 0, 0x400, addr_out) == err(tox2::kCellEsrch));
+    CHECK(syscall(350, 0x100000, kInvalidId, 0x400, addr_out) == err(tox2::kCellEsrch));
+    CHECK(syscall(350, 0x5600000, cid, 0x400, addr_out) == err(tox2::kCellEnomem));  // only the rest is free
+    CHECK(syscall(350, 0x100000, cid, 0x400, 0) == err(tox2::kCellEfault));
+    CHECK(syscall(343, info, cid) == 0);
+    CHECK(tox2Read32(base, info + 4) == 0x5600000 - 0x200000 - 0x30000);
+
+    // A container with memory in use cannot be destroyed; freeing a block credits the container.
+    CHECK(syscall(325, cid) == err(tox2::kCellEbusy));
+    CHECK(syscall(349, a) == 0);
+    CHECK(syscall(343, info, cid) == 0);
+    CHECK(tox2Read32(base, info + 4) == 0x5600000 - 0x30000);
+    CHECK(syscall(349, b) == 0);
+    CHECK(syscall(349, b) == err(tox2::kCellEinval));
+    CHECK(syscall(343, info, cid) == 0);
+    CHECK(tox2Read32(base, info + 4) == 0x5600000);
+    CHECK(p.user_memory_used == used);
+
+    // Destroy gives the memory back to the default container; 341 and 342 are the older numbers.
+    CHECK(syscall(342, cid) == 0);
+    CHECK(p.user_memory_used == used0);
+    CHECK(syscall(343, info, cid) == err(tox2::kCellEsrch));
+    CHECK(syscall(325, cid) == err(tox2::kCellEsrch));
+    CHECK(syscall(341, cid_out, 0x100000) == 0);
+    CHECK(tox2Read32(base, cid_out) == cid + 1);  // ids are not reused
+    CHECK(syscall(325, tox2Read32(base, cid_out)) == 0);
+
+    // At most 16 containers exist at a time.
+    std::uint32_t ids[16];
+    for (std::uint32_t& id : ids) {
+        CHECK(syscall(324, cid_out, 0x100000) == 0);
+        id = tox2Read32(base, cid_out);
+    }
+    CHECK(syscall(324, cid_out, 0x100000) == err(tox2::kCellEagain));
+    CHECK(p.user_memory_used == used0 + 16 * 0x100000);
+    for (const std::uint32_t id : ids) CHECK(syscall(325, id) == 0);
+    CHECK(p.user_memory_used == used0);
+
+    p.main.free(scratch);
+    tox2::resetMemoryContainers();
     tox2::setLogSink({});
     tox2::resetCensus();
 }
@@ -1475,6 +1578,94 @@ void testMutexAndCond() {
     }
     CHECK(b_result == 0);
     CHECK(syscallAs(*b, 104, contended) == 0);  // held by the waiter after the wait
+
+    p.main.free(scratch);
+    tox2::resetSyncObjects();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+}
+
+void testSemaphores() {
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t id_out = scratch, attr = scratch + 0x40, value_out = scratch + 0x80;
+
+    auto a = makeCaller(0x01000000);
+    auto b = makeCaller(0x01000001);
+    tox2Write32(base, attr, 1);          // SYS_SYNC_FIFO
+    tox2Write32(base, attr + 4, 0x200);  // not shared between processes
+
+    // Create checks its arguments.
+    CHECK(syscallAs(*a, 90, 0, attr, 0, 1) == err(tox2::kCellEfault));
+    CHECK(syscallAs(*a, 90, id_out, 0, 0, 1) == err(tox2::kCellEfault));
+    CHECK(syscallAs(*a, 90, id_out, attr, 0, 0) == err(tox2::kCellEinval));  // the maximum must be positive
+    CHECK(syscallAs(*a, 90, id_out, attr, 2, 1) == err(tox2::kCellEinval));  // initial above the maximum
+    CHECK(syscallAs(*a, 90, id_out, attr, static_cast<std::uint64_t>(-1), 1) == err(tox2::kCellEinval));
+    tox2Write32(base, attr, 3);  // priority inheritance is a mutex protocol
+    CHECK(syscallAs(*a, 90, id_out, attr, 0, 1) == err(tox2::kCellEinval));
+    tox2Write32(base, attr, 2);
+    CHECK(syscallAs(*a, 90, id_out, attr, 1, 2) == 0);
+    const std::uint32_t sem = tox2Read32(base, id_out);
+    CHECK(sem == 0x96000000);
+
+    // Counting: trywait takes one; a post that would pass the maximum fails and changes nothing.
+    CHECK(syscallAs(*a, 114, sem, value_out) == 0 && tox2Read32(base, value_out) == 1);
+    CHECK(syscallAs(*a, 93, sem) == 0);
+    CHECK(syscallAs(*a, 93, sem) == err(tox2::kCellEbusy));
+    CHECK(syscallAs(*a, 94, sem, 2) == 0);
+    CHECK(syscallAs(*a, 94, sem, 1) == err(tox2::kCellEbusy));
+    CHECK(syscallAs(*a, 94, sem, static_cast<std::uint64_t>(-1)) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 114, sem, value_out) == 0 && tox2Read32(base, value_out) == 2);
+    CHECK(syscallAs(*a, 114, sem, 0) == err(tox2::kCellEfault));
+    {
+        // A wait gives the guest lock up, so the caller holds it as a guest thread does.
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        CHECK(syscallAs(*a, 92, sem, 0) == 0);
+        CHECK(syscallAs(*a, 92, sem, 1000) == 0);
+        CHECK(syscallAs(*a, 92, sem, 1000) == err(tox2::kCellEtimedout));
+    }
+    CHECK(syscallAs(*a, 114, sem, value_out) == 0 && tox2Read32(base, value_out) == 0);
+
+    // Unknown ids.
+    CHECK(syscallAs(*a, 92, 0x96000fff, 1) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 93, 0x96000fff) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 94, 0x96000fff, 1) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 91, 0x96000fff) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 114, 0x96000fff, value_out) == err(tox2::kCellEsrch));
+
+    // A second host thread blocks in sys_semaphore_wait. The worker holds the guest lock from the
+    // flag write until its blocking wait releases it, so seeing the flag while holding the lock
+    // means the worker is waiting: the semaphore cannot be destroyed, and a post wakes the worker.
+    std::atomic<bool> b_ready{false};
+    std::uint64_t b_result = ~0ull;
+    {
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        std::thread worker([&] {
+            std::lock_guard<tox2::GuestLock> worker_guard(tox2::guestLock());
+            b_ready = true;
+            b_result = syscallAs(*b, 92, sem, 0);
+        });
+        tox2::guestLock().unlock();
+        while (!b_ready) std::this_thread::yield();
+        tox2::guestLock().lock();
+        CHECK(syscallAs(*a, 91, sem) == err(tox2::kCellEbusy));
+        CHECK(syscallAs(*a, 94, sem, 1) == 0);
+        tox2::guestLock().unlock();
+        worker.join();
+        tox2::guestLock().lock();
+    }
+    CHECK(b_result == 0);
+    CHECK(syscallAs(*a, 114, sem, value_out) == 0 && tox2Read32(base, value_out) == 0);  // the worker took it
+
+    CHECK(syscallAs(*a, 91, sem) == 0);
+    CHECK(syscallAs(*a, 91, sem) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 93, sem) == err(tox2::kCellEsrch));
 
     p.main.free(scratch);
     tox2::resetSyncObjects();
@@ -7716,6 +7907,31 @@ void testPpuThreads() {
     CHECK(syscallAs(*caller, 47, id5, 77) == 0);
     CHECK(tox2::findThread(id5)->priority() == 77);
 
+    // detach: a joinable thread that has not run yet becomes unjoinable, a second detach is
+    // refused, and the thread is gone for lv2 once it has exited.
+    CHECK(call(*caller, kCreate, id_out, opd_entry, 1, 500, 0x4000, 1, 0) == 0);
+    const auto id6 = static_cast<std::uint32_t>(tox2Read64(base, id_out));
+    CHECK(syscallAs(*caller, 45, id6) == 0);
+    CHECK(syscallAs(*caller, 45, id6) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*caller, 44, id6, join_out) == err(tox2::kCellEinval));
+    while (tox2::findThread(id6)->state() != tox2::ThreadState::Exited) {
+        syscallAs(*caller, 141, 1000);
+    }
+    CHECK(syscallAs(*caller, 45, id6) == err(tox2::kCellEsrch));
+
+    // A thread that exited without being joined is dropped by the detach.
+    CHECK(call(*caller, kCreate, id_out, opd_entry, 1, 500, 0x4000, 1, 0) == 0);
+    const auto id7 = static_cast<std::uint32_t>(tox2Read64(base, id_out));
+    while (tox2::findThread(id7)->state() != tox2::ThreadState::Exited) {
+        syscallAs(*caller, 141, 1000);
+    }
+    CHECK(syscallAs(*caller, 45, id7) == 0);
+    CHECK(syscallAs(*caller, 44, id7, join_out) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*caller, 45, id7) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*caller, 45, 0x0e0000f0) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*caller, 45, 0x0e000000) == err(tox2::kCellEinval));  // the caller is not joinable
+    CHECK(syscallAs(*caller, 45, id5) == err(tox2::kCellEinval));         // created without the joinable flag
+
     // yield: CELL_CANCEL when no other thread waits for the lock.
     CHECK(syscallAs(*caller, 43) == 1);
 
@@ -8395,6 +8611,8 @@ int main(int argc, char** argv) {
     testHleOutPointerHints();
     testHostFunctionsAndCallGuestFunction();
     testStartupSyscalls();
+    testMemoryContainers();
+    testSemaphores();
     testFileSystem();
     testSysPrxForUser();
     testMutexAndCond();

@@ -25,6 +25,11 @@ void sysTimeGetTimebaseFrequency(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysMemoryAllocate(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysMemoryFree(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysMemoryGetUserMemorySize(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysMemoryContainerCreate(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysMemoryContainerDestroy(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysMemoryContainerGetSize(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysMemoryAllocateFromContainer(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysExitNotification(Tox2PpuContext* ctx, std::uint8_t* base);
 
 // Handlers defined in sys_mutex_cond.cpp.
 void sysMutexCreate(Tox2PpuContext* ctx, std::uint8_t* base);
@@ -37,6 +42,14 @@ void sysCondDestroy(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysCondWait(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysCondSignal(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysCondSignalAll(Tox2PpuContext* ctx, std::uint8_t* base);
+
+// Handlers defined in sys_semaphore.cpp.
+void sysSemaphoreCreate(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSemaphoreDestroy(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSemaphoreWait(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSemaphoreTryWait(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSemaphorePost(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSemaphoreGetValue(Tox2PpuContext* ctx, std::uint8_t* base);
 
 // Handlers defined in sys_event.cpp.
 void sysEventFlagCreate(Tox2PpuContext* ctx, std::uint8_t* base);
@@ -60,6 +73,7 @@ void sysEventPortSend(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysPpuThreadExit(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysPpuThreadYield(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysPpuThreadJoin(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysPpuThreadDetach(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysPpuThreadSetPriority(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysPpuThreadGetPriority(Tox2PpuContext* ctx, std::uint8_t* base);
 
@@ -83,20 +97,26 @@ void sysSpuThreadGroupConnectEventAllThreads(Tox2PpuContext* ctx, std::uint8_t* 
 
 namespace {
 
-// The numbers the game's code issues (found by scanning the generated code for the r11 value in
-// front of each syscall site) plus the implemented ones. Names come from config/lv2_syscalls.json,
-// which mirrors RPCS3 `Emu/Cell/lv2/lv2.cpp`; 988 has none. Keep sorted by number.
+// The numbers the game's code issues (the census of `tools/ps3tool.py probe`: the r11 value in front
+// of each syscall site) plus the implemented ones. Names come from config/lv2_syscalls.json, which
+// mirrors RPCS3 `Emu/Cell/lv2/lv2.cpp`; 988 has none. Keep sorted by number.
 constexpr SyscallEntry kSyscalls[] = {
         {22, "_sys_process_exit", sysProcessExit},
         {41, "_sys_ppu_thread_exit", sysPpuThreadExit},
         {43, "sys_ppu_thread_yield", sysPpuThreadYield},
         {44, "sys_ppu_thread_join", sysPpuThreadJoin},
+        {45, "sys_ppu_thread_detach", sysPpuThreadDetach},
         {47, "sys_ppu_thread_set_priority", sysPpuThreadSetPriority},
         {48, "sys_ppu_thread_get_priority", sysPpuThreadGetPriority},
         {82, "sys_event_flag_create", sysEventFlagCreate},
         {83, "sys_event_flag_destroy", sysEventFlagDestroy},
         {85, "sys_event_flag_wait", sysEventFlagWait},
         {87, "sys_event_flag_set", sysEventFlagSet},
+        {90, "sys_semaphore_create", sysSemaphoreCreate},
+        {91, "sys_semaphore_destroy", sysSemaphoreDestroy},
+        {92, "sys_semaphore_wait", sysSemaphoreWait},
+        {93, "sys_semaphore_trywait", sysSemaphoreTryWait},
+        {94, "sys_semaphore_post", sysSemaphorePost},
         {100, "sys_mutex_create", sysMutexCreate},
         {101, "sys_mutex_destroy", sysMutexDestroy},
         {102, "sys_mutex_lock", sysMutexLock},
@@ -107,6 +127,7 @@ constexpr SyscallEntry kSyscalls[] = {
         {107, "sys_cond_wait", sysCondWait},
         {108, "sys_cond_signal", sysCondSignal},
         {109, "sys_cond_signal_all", sysCondSignalAll},
+        {114, "sys_semaphore_get_value", sysSemaphoreGetValue},
         {118, "sys_event_flag_clear", sysEventFlagClear},
         {128, "sys_event_queue_create", sysEventQueueCreate},
         {129, "sys_event_queue_destroy", sysEventQueueDestroy},
@@ -123,15 +144,30 @@ constexpr SyscallEntry kSyscalls[] = {
         {142, "sys_timer_sleep", sysTimerSleep},
         {147, "sys_time_get_timebase_frequency", sysTimeGetTimebaseFrequency},
         {169, "sys_spu_initialize", sysSpuInitialize},
+        {170, "sys_spu_thread_group_create", nullptr},
+        {171, "sys_spu_thread_group_destroy", nullptr},
+        {172, "sys_spu_thread_initialize", nullptr},
+        {173, "sys_spu_thread_group_start", nullptr},
+        {178, "sys_spu_thread_group_join", nullptr},
         {181, "sys_spu_thread_write_ls", nullptr},
         {182, "sys_spu_thread_read_ls", nullptr},
         {190, "sys_spu_thread_write_spu_mb", nullptr},
         {191, "sys_spu_thread_connect_event", nullptr},
         {192, "sys_spu_thread_disconnect_event", nullptr},
+        {193, "sys_spu_thread_bind_queue", nullptr},
+        {194, "sys_spu_thread_unbind_queue", nullptr},
         {251, "sys_spu_thread_group_connect_event_all_threads", sysSpuThreadGroupConnectEventAllThreads},
         {252, "sys_spu_thread_group_disconnect_event_all_threads", nullptr},
+        {300, "sys_vm_memory_map", nullptr},
+        {301, "sys_vm_unmap", nullptr},
+        {324, "sys_memory_container_create", sysMemoryContainerCreate},
+        {325, "sys_memory_container_destroy", sysMemoryContainerDestroy},
+        {341, "sys_memory_container_create", sysMemoryContainerCreate},
+        {342, "sys_memory_container_destroy", sysMemoryContainerDestroy},
+        {343, "sys_memory_container_get_size", sysMemoryContainerGetSize},
         {348, "sys_memory_allocate", sysMemoryAllocate},
         {349, "sys_memory_free", sysMemoryFree},
+        {350, "sys_memory_allocate_from_container", sysMemoryAllocateFromContainer},
         {352, "sys_memory_get_user_memory_size", sysMemoryGetUserMemorySize},
         {402, "sys_tty_read", sysTtyRead},
         {403, "sys_tty_write", sysTtyWrite},
@@ -144,10 +180,18 @@ constexpr SyscallEntry kSyscalls[] = {
         {807, "sys_fs_closedir", sysFsClosedir},
         {808, "sys_fs_stat", sysFsStat},
         {809, "sys_fs_fstat", sysFsFstat},
+        {810, "sys_fs_link", nullptr},
         {811, "sys_fs_mkdir", sysFsMkdir},
+        {812, "sys_fs_rename", nullptr},
+        {813, "sys_fs_rmdir", nullptr},
         {814, "sys_fs_unlink", sysFsUnlink},
+        {815, "sys_fs_utime", nullptr},
         {818, "sys_fs_lseek", sysFsLseek},
-        {988, nullptr, nullptr},
+        {820, "sys_fs_fsync", nullptr},
+        {831, "sys_fs_truncate", nullptr},
+        {832, "sys_fs_ftruncate", nullptr},
+        {834, "sys_fs_chmod", nullptr},
+        {988, nullptr, sysExitNotification},
 };
 
 static_assert(std::ranges::is_sorted(kSyscalls, {}, &SyscallEntry::number), "syscall table must be sorted by number");

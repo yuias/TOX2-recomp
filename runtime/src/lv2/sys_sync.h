@@ -42,6 +42,7 @@ private:
 inline constexpr std::uint32_t kMutexIdBase = 0x85000000;
 inline constexpr std::uint32_t kCondIdBase = 0x86000000;
 inline constexpr std::uint32_t kLwmutexIdBase = 0x95000000;
+inline constexpr std::uint32_t kSemaphoreIdBase = 0x96000000;
 inline constexpr std::uint32_t kSyncIdStep = 0x100;
 
 // Layout of the guest `sys_lwmutex_t` (RPCS3 `lv2/sys_lwmutex.h`), as byte offsets.
@@ -117,7 +118,10 @@ std::uint32_t sendEventToQueue(std::uint32_t id, std::uint64_t source, std::uint
 // Forgets every event flag, event queue and event port (sys_event.cpp).
 void resetEventObjects();
 
-// Forgets every mutex, condition variable, lwmutex and event object. Intended for tests.
+// Forgets every semaphore (sys_semaphore.cpp).
+void resetSemaphoreObjects();
+
+// Forgets every mutex, condition variable, lwmutex, semaphore and event object. Intended for tests.
 void resetSyncObjects();
 
 }  // namespace tox2

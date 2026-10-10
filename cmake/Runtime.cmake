@@ -126,6 +126,7 @@ function(tox2_runtime_add_core)
     runtime/src/lv2/sys_misc.cpp
     runtime/src/lv2/sys_mutex_cond.cpp
     runtime/src/lv2/sys_ppu_thread.cpp
+    runtime/src/lv2/sys_semaphore.cpp
     runtime/src/lv2/sys_spu.cpp
     runtime/src/lv2/syscalls.cpp
     runtime/src/lv2/vfs.cpp

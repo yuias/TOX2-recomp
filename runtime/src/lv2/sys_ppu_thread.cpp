@@ -159,6 +159,28 @@ void sysPpuThreadJoin(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, kCellOk);
 }
 
+// 45 sys_ppu_thread_detach(u32 thread_id): a thread that exited without being joined is dropped, as
+// in RPCS3 (findLiveThread no longer finds it).
+void sysPpuThreadDetach(Tox2PpuContext* ctx, std::uint8_t* base) {
+    (void)base;
+    const auto id = static_cast<std::uint32_t>(ctx->gpr[3]);
+    GuestThread* thread = findLiveThread(ctx, id);
+    if (thread == nullptr) {
+        setResultCode(ctx, kCellEsrch);
+        return;
+    }
+    if (!thread->joinable()) {
+        setResultCode(ctx, kCellEinval);
+        return;
+    }
+    if (g_join_states.contains(id)) {
+        setResultCode(ctx, kCellEbusy);
+        return;
+    }
+    thread->detach();
+    setResultCode(ctx, kCellOk);
+}
+
 // 47 sys_ppu_thread_set_priority(u32 thread_id, s32 prio): stored only (no priority scheduling).
 // ppuThreadCreate compares the stored value of the creator with the priority of a new thread.
 void sysPpuThreadSetPriority(Tox2PpuContext* ctx, std::uint8_t* base) {
