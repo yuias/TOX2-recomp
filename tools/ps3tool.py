@@ -14,6 +14,7 @@ COMMANDS = {
     "recover": "recover",
     "emit": "emit",
     "nidgen": "nidgen",
+    "spu-extract": "spu_images",
 }
 
 
