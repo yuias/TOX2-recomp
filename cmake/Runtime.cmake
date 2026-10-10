@@ -114,6 +114,7 @@ function(tox2_runtime_add_core)
     runtime/src/hle/sce_np.cpp
     runtime/src/hle/sce_np_trophy.cpp
     runtime/src/hle/sys_prx_for_user.cpp
+    runtime/src/hle/sys_prx_for_user_libc.cpp
     runtime/src/input/gamepad_hub.cpp
     runtime/src/input/gamepad_map.cpp
     runtime/src/input/gamepad_probe.cpp

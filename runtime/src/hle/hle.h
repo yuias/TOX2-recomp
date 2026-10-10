@@ -30,6 +30,9 @@ struct HleEntry {
 // Handlers of the sysPrxForUser module.
 std::span<const HleEntry> sysPrxForUserHandlers();
 
+// String, memory and printf-family functions of the sysPrxForUser module, and the abort hook.
+std::span<const HleEntry> sysPrxForUserLibcHandlers();
+
 // Handlers of the cellSysmodule module.
 std::span<const HleEntry> cellSysmoduleHandlers();
 

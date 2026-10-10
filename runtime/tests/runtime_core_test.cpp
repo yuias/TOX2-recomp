@@ -1622,7 +1622,7 @@ void testSysPrxForUser() {
     CHECK(t0 != 0 && call(6) >= t0);
     CHECK(call(7, 0x55) == 0);
     CHECK(call(8, 0x55) == 0);
-    CHECK(tox2::sysPrxForUserHandlers().size() == 27);
+    CHECK(tox2::sysPrxForUserHandlers().size() == 33);
 
     tox2::setLogSink({});
     tox2::resetCensus();
@@ -8065,6 +8065,440 @@ void testGuestPrintf() {
     p.main.free(scratch);
 }
 
+void testSysPrxForUserLibc() {
+    std::vector<std::string> lines;
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t a = scratch, b = scratch + 0x100, c = scratch + 0x200, fmt = scratch + 0x300,
+                        va = scratch + 0x400, stack = scratch + 0x1000;
+
+    constexpr const char* kModule = "sysPrxForUser";
+    const Tox2ImportInfo imports[] = {
+            {0x00800000, 0x2d36462b, kModule, "_sys_strlen"},    {0x00800010, 0x99c88692, kModule, "_sys_strcpy"},
+            {0x00800020, 0x052d29a6, kModule, "_sys_strcat"},    {0x00800030, 0xd3039d4d, kModule, "_sys_strncpy"},
+            {0x00800040, 0x996f7cf8, kModule, "_sys_strncat"},   {0x00800050, 0x04e83d2c, kModule, "_sys_strncmp"},
+            {0x00800060, 0xfb5db080, kModule, "_sys_memcmp"},    {0x00800070, 0x68b9b011, kModule, "_sys_memset"},
+            {0x00800080, 0x6bf66ea7, kModule, "_sys_memcpy"},    {0x00800090, 0x9f04f7af, kModule, "_sys_printf"},
+            {0x008000a0, 0xfa7f693d, kModule, "_sys_vprintf"},   {0x008000b0, 0x06574237, kModule, "_sys_snprintf"},
+            {0x008000c0, 0x0618936b, kModule, "_sys_vsnprintf"},
+    };
+    tox2::installImports(imports, 13);
+    enum {
+        kStrlen,
+        kStrcpy,
+        kStrcat,
+        kStrncpy,
+        kStrncat,
+        kStrncmp,
+        kMemcmp,
+        kMemset,
+        kMemcpy,
+        kPrintf,
+        kVprintf,
+        kSnprintf,
+        kVsnprintf
+    };
+    auto ctx = std::make_unique<Tox2PpuContext>();
+    ctx->gpr[1] = stack;
+    auto call = [&](std::uint32_t index, std::uint64_t r3 = 0, std::uint64_t r4 = 0, std::uint64_t r5 = 0,
+                    std::uint64_t r6 = 0, std::uint64_t r7 = 0, std::uint64_t r8 = 0) {
+        ctx->gpr[3] = r3;
+        ctx->gpr[4] = r4;
+        ctx->gpr[5] = r5;
+        ctx->gpr[6] = r6;
+        ctx->gpr[7] = r7;
+        ctx->gpr[8] = r8;
+        tox2HleCall(ctx.get(), base, index);
+        return ctx->gpr[3];
+    };
+    auto put = [&](std::uint32_t address, std::string_view text) {
+        for (std::size_t i = 0; i < text.size(); i++) tox2Write8(base, address + i, static_cast<std::uint8_t>(text[i]));
+        tox2Write8(base, address + text.size(), 0);
+    };
+    auto get = [&](std::uint32_t address) { return tox2::readGuestString(base, address, 0x100); };
+    auto fill = [&](std::uint32_t address, std::uint8_t value, std::uint32_t count) {
+        for (std::uint32_t i = 0; i < count; i++) tox2Write8(base, address + i, value);
+    };
+
+    // strlen, strcpy, strcat: the result of the last two is the destination.
+    put(a, "hello");
+    CHECK(call(kStrlen, a) == 5);
+    CHECK(call(kStrlen, c) == 0);
+    fill(b, 0xaa, 32);
+    CHECK(call(kStrcpy, b, a) == b && get(b) == "hello" && tox2Read8(base, b + 6) == 0xaa);
+    put(c, " world");
+    CHECK(call(kStrcat, b, c) == b && get(b) == "hello world");
+
+    // strncpy pads with NULs up to n and leaves the string unterminated when the source is longer.
+    fill(b, 0xaa, 32);
+    CHECK(call(kStrncpy, b, a, 8) == b);
+    CHECK(get(b) == "hello" && tox2Read8(base, b + 5) == 0 && tox2Read8(base, b + 7) == 0 &&
+          tox2Read8(base, b + 8) == 0xaa);
+    fill(b, 0xaa, 32);
+    call(kStrncpy, b, a, 3);
+    CHECK(tox2Read8(base, b + 2) == 'l' && tox2Read8(base, b + 3) == 0xaa);
+
+    // strncat appends at most n characters and then a NUL.
+    put(b, "ab");
+    put(c, "cdefgh");
+    CHECK(call(kStrncat, b, c, 3) == b && get(b) == "abcde" && tox2Read8(base, b + 5) == 0);
+    put(b, "ab");
+    call(kStrncat, b, c, 100);
+    CHECK(get(b) == "abcdefgh");
+
+    // strncmp stops at NUL and at n; memcmp does neither. The result is the unsigned byte difference.
+    put(a, "abc");
+    put(b, "abd");
+    CHECK(call(kStrncmp, a, b, 3) == err(static_cast<std::uint32_t>(-1)));
+    CHECK(call(kStrncmp, b, a, 3) == 1);
+    CHECK(call(kStrncmp, a, b, 2) == 0);
+    CHECK(call(kStrncmp, a, b, 0) == 0);
+    put(a, "ab");
+    tox2Write8(base, a + 3, 'x');
+    put(b, "ab");
+    tox2Write8(base, b + 3, 'y');
+    CHECK(call(kStrncmp, a, b, 4) == 0);
+    CHECK(call(kMemcmp, a, b, 4) == err(static_cast<std::uint32_t>(-1)));
+    tox2Write8(base, a, 0xff);
+    CHECK(call(kMemcmp, a, b, 1) == 0xff - 'a');
+    CHECK(call(kMemcmp, a, b, 0) == 0);
+
+    // memset stores the low byte; memcpy copes with overlap in both directions.
+    fill(a, 0, 16);
+    CHECK(call(kMemset, a, 0x1234, 4) == a);
+    CHECK(tox2Read8(base, a) == 0x34 && tox2Read8(base, a + 3) == 0x34 && tox2Read8(base, a + 4) == 0);
+    put(a, "0123456789");
+    CHECK(call(kMemcpy, a + 2, a, 6) == a + 2);
+    CHECK(get(a) == "0101234589");
+    put(a, "0123456789");
+    CHECK(call(kMemcpy, a, a + 2, 6) == a);
+    CHECK(get(a) == "2345676789");
+
+    // printf returns the length; its arguments start at slot 1.
+    put(fmt, "%s=%d\n");
+    put(c, "key");
+    CHECK(call(kPrintf, fmt, c, 42) == 7);
+    CHECK(countContaining(lines, "tox2: printf:") == 0);
+
+    // vprintf reads 8-byte slots at the pointer.
+    tox2Write64(base, va, c);
+    tox2Write64(base, va + 8, static_cast<std::uint64_t>(-1));
+    put(fmt, "%s:%d\n");
+    CHECK(call(kVprintf, fmt, va) == 7);
+
+    // snprintf returns the full length and cuts the output to size - 1 bytes plus a NUL. Its arguments
+    // start at slot 3.
+    put(fmt, "%s%s%u");
+    put(a, "ab");
+    put(b, "cd");
+    fill(c, 0xaa, 16);
+    CHECK(call(kSnprintf, c, 16, fmt, a, b, 123) == 7 && get(c) == "abcd123");
+    fill(c, 0xaa, 16);
+    CHECK(call(kSnprintf, c, 5, fmt, a, b, 123) == 7 && get(c) == "abcd" && tox2Read8(base, c + 5) == 0xaa);
+    CHECK(call(kSnprintf, c, 0, fmt, a, b, 123) == 7 && get(c) == "abcd");
+    CHECK(call(kSnprintf, c, 1, fmt, a, b, 123) == 7 && tox2Read8(base, c) == 0 && tox2Read8(base, c + 1) == 'b');
+
+    // vsnprintf takes its arguments from the va list.
+    put(fmt, "%s-%x");
+    put(c, "id");
+    tox2Write64(base, va, c);
+    tox2Write64(base, va + 8, 0xbeef);
+    fill(a, 0xaa, 16);
+    CHECK(call(kVsnprintf, a, 16, fmt, va) == 7 && get(a) == "id-beef");
+
+    // An unsupported conversion is logged once per format address; what came before it is printed.
+    put(fmt, "ab%n");
+    lines.clear();
+    CHECK(call(kPrintf, fmt) == 2);
+    CHECK(call(kPrintf, fmt) == 2);
+    CHECK(countContaining(lines, "tox2: printf:") == 1);
+
+    p.main.free(scratch);
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+}
+
+void testSpuImageImport() {
+    std::vector<std::string> lines;
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetLogOnce();
+    tox2::resetSpuImages();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t image = scratch, elf = scratch + 0x100;
+
+    // An SPU ELF32 with one PT_LOAD (0x40 bytes in the file, 0x60 in memory) and a PT_NOTE.
+    auto writeElf = [&](std::uint16_t machine, std::uint32_t load_type) {
+        for (std::uint32_t i = 0; i < 0x200; i++) tox2Write8(base, elf + i, 0);
+        tox2Write32(base, elf, 0x7F454C46);
+        tox2Write8(base, elf + 4, 1);
+        tox2Write8(base, elf + 5, 2);
+        tox2Write16(base, elf + 0x12, machine);
+        tox2Write32(base, elf + 0x18, 0x818);
+        tox2Write32(base, elf + 0x1C, 0x34);
+        tox2Write16(base, elf + 0x2A, 0x20);
+        tox2Write16(base, elf + 0x2C, 2);
+        tox2Write32(base, elf + 0x34, load_type);
+        tox2Write32(base, elf + 0x38, 0x100);
+        tox2Write32(base, elf + 0x3C, 0x800);
+        tox2Write32(base, elf + 0x44, 0x40);
+        tox2Write32(base, elf + 0x48, 0x60);
+        tox2Write32(base, elf + 0x54, 4);
+    };
+    writeElf(23, 1);
+
+    // Copy and fill segments, the struct words, and the record found by the segment array.
+    CHECK(tox2::spuImageImport(base, image, elf, 1) == 0);
+    const std::uint32_t segs = tox2Read32(base, image + 8);
+    CHECK(tox2Read32(base, image) == 0 && tox2Read32(base, image + 4) == 0x818 && segs != 0 &&
+          tox2Read32(base, image + 12) == 2);
+    CHECK(tox2Read32(base, segs) == 1 && tox2Read32(base, segs + 4) == 0x800 && tox2Read32(base, segs + 8) == 0x40 &&
+          tox2Read32(base, segs + 12) == elf + 0x100);
+    CHECK(tox2Read32(base, segs + 16) == 2 && tox2Read32(base, segs + 20) == 0x840 &&
+          tox2Read32(base, segs + 24) == 0x20 && tox2Read32(base, segs + 28) == 0);
+    const tox2::SpuImageRecord* record = tox2::findSpuImage(segs);
+    CHECK(record != nullptr);
+    if (record != nullptr) {
+        CHECK(record->source == elf && record->import_type == 1 && record->entry == 0x818 && record->segs == segs &&
+              record->nsegs == 2);
+    }
+    CHECK(tox2::findSpuImage(segs + 16) == nullptr && tox2::findSpuImage(0) == nullptr);
+    CHECK(countContaining(lines, "tox2: spu: image import 0x") == 1 && countContaining(lines, "2 segments") == 1);
+
+    // Close frees the array and forgets the record; the image struct still names it, so a second close
+    // finds nothing.
+    CHECK(tox2::spuImageClose(base, image) == 0);
+    CHECK(tox2::findSpuImage(segs) == nullptr);
+    CHECK(!p.memory.isCommitted(segs, 16));
+    CHECK(tox2::spuImageClose(base, image) == tox2::kCellEsrch);
+    CHECK(tox2::spuImageClose(base, 0) == tox2::kCellEfault);
+
+    // Argument errors; PROTECT is accepted and noted once.
+    CHECK(tox2::spuImageImport(base, image, elf, 2) == tox2::kCellEinval);
+    CHECK(tox2::spuImageImport(base, 0, elf, 1) == tox2::kCellEfault);
+    CHECK(tox2::spuImageImport(base, image, 0, 1) == tox2::kCellEfault);
+    lines.clear();
+    CHECK(tox2::spuImageImport(base, image, elf, 0) == 0);
+    CHECK(tox2::findSpuImage(tox2Read32(base, image + 8)) != nullptr);
+    CHECK(tox2::findSpuImage(tox2Read32(base, image + 8))->import_type == 0);
+    CHECK(tox2::spuImageClose(base, image) == 0);
+    CHECK(tox2::spuImageImport(base, image, elf, 0) == 0);
+    CHECK(tox2::spuImageClose(base, image) == 0);
+    CHECK(countContaining(lines, "SYS_SPU_IMAGE_PROTECT") == 1);
+
+    // Not an SPU ELF, or no PT_LOAD at all.
+    tox2Write32(base, elf, 0x7F454C47);
+    CHECK(tox2::spuImageImport(base, image, elf, 1) == tox2::kCellEnoexec);
+    writeElf(20, 1);
+    CHECK(tox2::spuImageImport(base, image, elf, 1) == tox2::kCellEnoexec);
+    writeElf(23, 4);
+    CHECK(tox2::spuImageImport(base, image, elf, 1) == tox2::kCellEnoexec);
+    CHECK(tox2::kCellEnoexec == 0x80010007);
+
+    // The import handler goes through the same code.
+    writeElf(23, 1);
+    const Tox2ImportInfo imports[] = {
+            {0x00800000, 0xebe5f72f, "sysPrxForUser", "sys_spu_image_import"},
+            {0x00800010, 0xe0da8efd, "sysPrxForUser", "sys_spu_image_close"},
+    };
+    tox2::installImports(imports, 2);
+    auto ctx = std::make_unique<Tox2PpuContext>();
+    ctx->gpr[3] = image;
+    ctx->gpr[4] = elf;
+    ctx->gpr[5] = 1;
+    tox2HleCall(ctx.get(), base, 0);
+    CHECK(ctx->gpr[3] == 0 && tox2Read32(base, image + 12) == 2);
+    ctx->gpr[3] = image;
+    tox2HleCall(ctx.get(), base, 1);
+    CHECK(ctx->gpr[3] == 0);
+    ctx->gpr[3] = image;
+    tox2HleCall(ctx.get(), base, 1);
+    CHECK(ctx->gpr[3] == err(tox2::kCellEsrch));
+
+    p.main.free(scratch);
+    tox2::resetSpuImages();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+}
+
+std::uint64_t g_printf_callback_group, g_printf_callback_runs;
+
+TOX2_PPU_FUNC(spuPrintfAttachCallback) {
+    (void)base;
+    g_printf_callback_runs++;
+    g_printf_callback_group = ctx->gpr[3];
+    ctx->gpr[3] = 0;
+}
+
+TOX2_PPU_FUNC(spuPrintfDetachCallback) {
+    (void)base;
+    g_printf_callback_runs++;
+    g_printf_callback_group = ctx->gpr[3];
+    ctx->gpr[3] = 0x80010002;
+}
+
+void testSpuPrintfCallbacks() {
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetHostFunctions();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const Tox2ImportInfo imports[] = {
+            {0x00800000, 0x45fe2fce, "sysPrxForUser", "_sys_spu_printf_initialize"},
+            {0x00800010, 0xdd3b27ac, "sysPrxForUser", "_sys_spu_printf_finalize"},
+            {0x00800020, 0xdd0c1e09, "sysPrxForUser", "_sys_spu_printf_attach_group"},
+            {0x00800030, 0x5fdfb2fe, "sysPrxForUser", "_sys_spu_printf_detach_group"},
+    };
+    tox2::installImports(imports, 4);
+    enum { kInitialize, kFinalize, kAttach, kDetach };
+    auto ctx = std::make_unique<Tox2PpuContext>();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    ctx->gpr[1] = scratch + 0x8000;
+    auto call = [&](std::uint32_t index, std::uint64_t r3 = 0, std::uint64_t r4 = 0, std::uint64_t r5 = 0,
+                    std::uint64_t r6 = 0) {
+        ctx->gpr[3] = r3;
+        ctx->gpr[4] = r4;
+        ctx->gpr[5] = r5;
+        ctx->gpr[6] = r6;
+        tox2HleCall(ctx.get(), base, index);
+        return ctx->gpr[3];
+    };
+
+    // No server registered yet: both calls report a wrong state. An earlier test may have left callbacks
+    // behind, so start from finalize.
+    CHECK(call(kFinalize) == 0);
+    CHECK(call(kAttach, 0x04000100) == err(tox2::kCellEstat));
+    CHECK(call(kDetach, 0x04000100) == err(tox2::kCellEstat));
+
+    const std::uint32_t attach = tox2::registerHostFunction("spuPrintfAttachCallback", spuPrintfAttachCallback);
+    const std::uint32_t detach = tox2::registerHostFunction("spuPrintfDetachCallback", spuPrintfDetachCallback);
+    CHECK(attach != 0 && detach != 0);
+    CHECK(call(kInitialize, attach, detach, 0x1234, 0x5678) == 0);
+
+    // The group id reaches the callback and the callback's result comes back.
+    g_printf_callback_runs = 0;
+    CHECK(call(kAttach, 0x04000100) == 0);
+    CHECK(g_printf_callback_runs == 1 && g_printf_callback_group == 0x04000100);
+    CHECK(call(kDetach, 0x04000200) == err(tox2::kCellEinval));
+    CHECK(g_printf_callback_runs == 2 && g_printf_callback_group == 0x04000200);
+
+    // Finalize forgets the callbacks.
+    CHECK(call(kFinalize) == 0);
+    CHECK(call(kAttach, 0x04000100) == err(tox2::kCellEstat));
+    CHECK(g_printf_callback_runs == 2);
+
+    // A server that registers no group callback is the same as none.
+    CHECK(call(kInitialize, 0, 0, 0, 0) == 0);
+    CHECK(call(kAttach, 0x04000100) == err(tox2::kCellEstat));
+    CHECK(call(kFinalize) == 0);
+
+    p.main.free(scratch);
+    tox2::resetHostFunctions();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+}
+
+void testPrxModuleId() {
+    std::vector<std::string> lines;
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const Tox2ImportInfo imports[] = {{0x00800000, 0xe0998dbf, "sysPrxForUser", "sys_prx_get_module_id_by_name"}};
+    tox2::installImports(imports, 1);
+    auto ctx = std::make_unique<Tox2PpuContext>();
+    auto lookup = [&](std::string_view name) {
+        for (std::size_t i = 0; i < name.size(); i++) {
+            tox2Write8(base, scratch + i, static_cast<std::uint8_t>(name[i]));
+        }
+        tox2Write8(base, scratch + name.size(), 0);
+        ctx->gpr[3] = scratch;
+        ctx->gpr[4] = 0;
+        ctx->gpr[5] = 0;
+        tox2HleCall(ctx.get(), base, 0);
+        return ctx->gpr[3];
+    };
+
+    // Every name is unknown; each is logged once.
+    lines.clear();
+    CHECK(lookup("cellLibprof") == err(0x8001112E));
+    CHECK(lookup("cellLibprof") == err(0x8001112E));
+    CHECK(lookup("cellSpurs") == err(0x8001112E));
+    CHECK(countContaining(lines, "tox2: prx: module \"cellLibprof\" is not available") == 1);
+    CHECK(countContaining(lines, "tox2: prx: module \"cellSpurs\" is not available") == 1);
+
+    p.main.free(scratch);
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+}
+
+void testProcessParamsfo() {
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const Tox2ImportInfo imports[] = {{0x00800000, 0xe75c40f2, "sysPrxForUser", "sys_process_get_paramsfo"}};
+    tox2::installImports(imports, 1);
+    auto ctx = std::make_unique<Tox2PpuContext>();
+    auto call = [&](std::uint32_t buffer) {
+        ctx->gpr[3] = buffer;
+        tox2HleCall(ctx.get(), base, 0);
+        return ctx->gpr[3];
+    };
+
+    const tox2::ParamSfo saved = tox2::gameParamSfo();
+    tox2::ParamSfo sfo;
+    sfo.strings["TITLE_ID"] = "BLJS10188";
+    tox2::setGameParamSfo(sfo);
+
+    // The 0x40-byte buffer is zeroed and holds the title id from byte 1; nothing past it is touched.
+    for (std::uint32_t i = 0; i < 0x50; i++) tox2Write8(base, scratch + i, 0xaa);
+    CHECK(call(scratch) == 0);
+    CHECK(tox2Read8(base, scratch) == 0);
+    CHECK(std::memcmp(base + scratch + 1, "BLJS10188", 9) == 0);
+    bool padded = true;
+    for (std::uint32_t i = 10; i < 0x40; i++) padded = padded && tox2Read8(base, scratch + i) == 0;
+    CHECK(padded);
+    CHECK(tox2Read8(base, scratch + 0x40) == 0xaa);
+    CHECK(call(0) == err(tox2::kCellEfault));
+
+    // A longer title id is cut to nine characters; a game without one leaves the id zero.
+    sfo.strings["TITLE_ID"] = "ABCDEFGHIJKL";
+    tox2::setGameParamSfo(sfo);
+    CHECK(call(scratch) == 0);
+    CHECK(std::memcmp(base + scratch + 1, "ABCDEFGHI", 9) == 0 && tox2Read8(base, scratch + 10) == 0);
+    sfo.strings.clear();
+    tox2::setGameParamSfo(sfo);
+    CHECK(call(scratch) == 0);
+    CHECK(tox2Read8(base, scratch + 1) == 0);
+
+    tox2::setGameParamSfo(saved);
+    p.main.free(scratch);
+    tox2::setLogSink({});
+    tox2::resetCensus();
+}
+
 // What the entry function of the guest threads below saw; written under the guest lock.
 std::uint64_t g_entry_arg, g_entry_r2, g_entry_r4, g_entry_r13;
 std::uint32_t g_entry_runs, g_once_runs;
@@ -8785,6 +9219,14 @@ void testOverlappingSpanChild() {
                    "span 0x00010200..0x00010214"));
 }
 
+void testAbortChild() {
+    const ChildResult r = runChild(L"--abort-child");
+    echoChild("abort child", r);
+    CHECK(r.exit_code == 3);
+    CHECK(contains(r, "The SPURS is aborted."));  // the console's text mode adds a CR to the line break
+    CHECK(contains(r, "tox2: stop: abort from 0x011d1234 (sysPrxForUser 0x9fb6228e)"));
+}
+
 void testGuestStackWalk() {
     std::unique_ptr<tox2::GuestMemory> memory(newMemory());
     tox2::RegionAllocator stack(*memory, tox2::kStackRegion);
@@ -8869,6 +9311,22 @@ int overlappingSpanChild() {
     return 99;
 }
 
+int abortChild() {
+    tox2::installProcessSettings();
+    tox2::process().memory.reserve();
+    std::uint8_t* base = tox2::process().memory.base();
+    const std::uint32_t text = tox2::process().main.allocate(0x1000, 0x1000);
+    const std::string_view message = "The SPURS is aborted.\n";
+    for (std::size_t i = 0; i < message.size(); i++) tox2Write8(base, text + i, static_cast<std::uint8_t>(message[i]));
+    const Tox2ImportInfo imports[] = {{0x00800000, 0x9fb6228e, "sysPrxForUser", "abort"}};
+    tox2::installImports(imports, 1);
+    auto ctx = std::make_unique<Tox2PpuContext>();
+    ctx->gpr[3] = text;
+    ctx->lr = 0x011d1234;
+    tox2HleCall(ctx.get(), base, 0);
+    return 99;
+}
+
 void childCensus() { std::fprintf(stderr, "census: test printer ran\n"); }
 
 Tox2PpuContext g_child_ctx;
@@ -8923,6 +9381,7 @@ int main(int argc, char** argv) {
         if (mode == "--strict-dispatch-child") return strictDispatchChild();
         if (mode == "--unsorted-table-child") return unsortedTableChild();
         if (mode == "--overlapping-span-child") return overlappingSpanChild();
+        if (mode == "--abort-child") return abortChild();
     }
 
     tox2::installProcessSettings();
@@ -8993,6 +9452,11 @@ int main(int argc, char** argv) {
     testLwmutex();
     testLwcond();
     testGuestPrintf();
+    testSysPrxForUserLibc();
+    testSpuImageImport();
+    testSpuPrintfCallbacks();
+    testPrxModuleId();
+    testProcessParamsfo();
     testPpuThreads();
     testPpuThreadCreatePriority();
     testGcmInterruptThread();
@@ -9008,6 +9472,7 @@ int main(int argc, char** argv) {
     testStrictDispatchChild();
     testUnsortedTableChild();
     testOverlappingSpanChild();
+    testAbortChild();
     std::printf("runtime core tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }

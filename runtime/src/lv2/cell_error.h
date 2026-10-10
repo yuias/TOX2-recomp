@@ -14,6 +14,7 @@ inline constexpr std::uint32_t kCellEnosys = 0x80010003;
 inline constexpr std::uint32_t kCellEnomem = 0x80010004;
 inline constexpr std::uint32_t kCellEsrch = 0x80010005;
 inline constexpr std::uint32_t kCellEnoent = 0x80010006;
+inline constexpr std::uint32_t kCellEnoexec = 0x80010007;
 inline constexpr std::uint32_t kCellEdeadlk = 0x80010008;
 inline constexpr std::uint32_t kCellEperm = 0x80010009;
 inline constexpr std::uint32_t kCellEbusy = 0x8001000A;
