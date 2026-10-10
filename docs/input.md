@@ -3,14 +3,21 @@
 The pad on port 0 of the game's `cellPad` comes from the keyboard, from a gamepad, from both
 together, or from a pad script. This page covers gamepads: what a player needs, how the code is
 organised, how pads are selected, the log lines, the diagnostic option `--pad-probe` and the tool
-`dal_padtool`. The keyboard, the pad script and the `PadProvider` seam are in
+`tox2_padtool`. The keyboard, the pad script and the `PadProvider` seam are in
 [Input](runtime.md#input) in the runtime internals, and the option defaults are in
-[`dal_game` options](runtime-options.md#window-input-and-sound).
+[`tox2_game` options](runtime-options.md#window-input-and-sound).
+
+*Tales of Xillia 2* imports six `cellPad` functions (`cellPadInit`, `cellPadEnd`,
+`cellPadSetPortSetting`, `cellPadGetData`, `cellPadGetInfo2` and `cellPadSetActDirect`), and the
+runtime has a handler for each. In the headless runs the game called `cellPadInit` but never read
+the pad before the stop (see [Status](status.md)), so no input has reached this game yet. The pad
+code was written for and checked against an earlier game; statements below about what a player or
+a test saw come from that game and from `tox2_padtool`, and have not been repeated with this one.
 
 ## Gamepads
 
 A run with the window reads every connected gamepad together with the keyboard. All pads and the
-keyboard drive port 0 at the same time; ports 1 to 6 stay empty, because the game is single-player.
+keyboard drive port 0 at the same time; ports 1 to 6 stay empty, because the runtime provides one pad.
 Runs with `--no-window` never load GameInput, so unattended runs and the tests do not depend on a
 pad or on the GameInput runtime.
 
@@ -18,18 +25,18 @@ pad or on the GameInput runtime.
 
 - **Verified:** an Xbox Wireless Controller over Bluetooth LE. GameInput lists it as
   `gamepad+controller` with rumble, and buttons, d-pad, both sticks, both triggers and vibration were
-  checked with it. Other Xbox-family pads should behave the same if GameInput reports them as
+  checked with it (with the earlier game and `tox2_padtool`). Other Xbox-family pads should behave the same if GameInput reports them as
   gamepads; they were not tried.
 - **Verified:** a DualShock 4 (second model, `054c:09cc`) over Bluetooth. GameInput lists it as
   `gamepad+controller` without rumble and maps it by position: Cross, Circle, Square and Triangle
   read as A, B, X and Y; Share and Options as View and Menu; L1/R1, L2/R2, L3/R3, the d-pad and both
   sticks as on the Xbox pad (full range on every axis). The PS button and the touch pad have no
-  gamepad button and are not read. In the game the pad is selected and the title menu works with it.
-  No vibration: GameInput reports no rumble for it.
+  gamepad button and are not read. The runtime selects the pad, and the earlier game's menu worked
+  with it. No vibration: GameInput reports no rumble for it.
 - **DualShock 4, first model (`054c:05c4`): not supported.** It was seen once over Bluetooth as a
   generic controller without the gamepad kind, so the game logs it as `not a gamepad` and ignores it.
 - While Steam runs with its PlayStation controller support on, Steam takes the DualShock 4 and no
-  input from it reaches the game or `dal_padtool`. Quit Steam or turn that setting off.
+  input from it reaches the game or `tox2_padtool`. Quit Steam or turn that setting off.
 - Other pads are used only if GameInput reports them with the gamepad kind. A device without it is
   logged as `not a gamepad` and ignored.
 
@@ -46,8 +53,7 @@ The mapping is positional and fixed; there is no remapping or configuration file
 | D-pad | D-pad |
 | Left stick click / right stick click | L3 / R3 |
 
-The game confirms with Circle, which is the B button. The guide button and the paddles are not
-used. Motion sensors, the touchpad and the light bar of other pads are not supported either; the
+The guide button and the paddles are not used. Motion sensors, the touchpad and the light bar of other pads are not supported either; the
 sensor words of the PS3 pad stay at rest.
 
 ### Sticks and triggers
@@ -68,12 +74,13 @@ sensor words of the PS3 pad stay at rest.
 The game's vibration requests (`cellPadSetActDirect`) are forwarded to every used pad that has
 rumble: the large motor sets the low-frequency motor in proportion, and the small motor, which is
 on or off on a PS3 pad, sets the high-frequency motor to full strength. Trigger motors are not used.
-`dal_padtool rumble` checks a pad's motors without the game. Whether and when the game asks for
-vibration was not checked in play.
+`tox2_padtool rumble` checks a pad's motors without the game. This game imports
+`cellPadSetActDirect`, but it made no call before the stop, so whether and when it asks for
+vibration is not known.
 
 ### Focus
 
-GameInput delivers readings to the foreground window only, and the game additionally checks that
+GameInput delivers readings to the foreground window only, and the runtime additionally checks that
 its own process owns the foreground window. While another window has the focus, the pad's buttons are
 released at once, the sticks and triggers go back to neutral and vibration stops; the keyboard's
 buttons are released separately when the window loses focus. Input resumes when the window is in
@@ -86,19 +93,19 @@ changes.
 ### The GameInput runtime and the `gameinput unavailable` warning
 
 Gamepads are read with Microsoft's GameInput (API version 3). The build links only the package's
-static loader, so `dal_game` starts on a machine without a GameInput runtime and the keyboard keeps
+static loader, so `tox2_game` starts on a machine without a GameInput runtime and the keyboard keeps
 working. The runtime itself must be installed once, from `GameInputRedist.msi` in the fetched
 package (the step is in the [README](../README.md#building)).
 
 If no usable runtime is found, the game logs one warning and runs without gamepads:
 
 ```
-dal: pad: gameinput unavailable: <reason>; gamepads disabled
+tox2: pad: gameinput unavailable: <reason>; gamepads disabled
 ```
 
 `<reason>` names the failing step and its error code and, for a missing runtime or one without
 API version 3, says to install `GameInputRedist.msi`. Installing the MSI is the fix. A copy of the
-redistributable DLL next to `dal_game.exe` is not used: it takes precedence over the installed
+redistributable DLL next to `tox2_game.exe` is not used: it takes precedence over the installed
 runtime and hides Xbox pads.
 
 With `--pad gamepad` (no keyboard) and no runtime, port 0 stays disconnected.
@@ -106,10 +113,10 @@ With `--pad gamepad` (no keyboard) and no runtime, port 0 stays disconnected.
 ### Steam
 
 Started from Steam as a non-Steam game, the Steam overlay hooks GameInput inside the process; the
-log shows `dal: pad: gameinput v3 from gameoverlayrenderer64.dll`. To set it up:
+log shows `tox2: pad: gameinput v3 from gameoverlayrenderer64.dll`. To set it up:
 
-1. In Steam, add `dal_game.exe` with Games > Add a Non-Steam Game.
-2. In the shortcut's properties set Target to `<repository>\build\release\bin\dal_game.exe` and Start
+1. In Steam, add `tox2_game.exe` with Games > Add a Non-Steam Game.
+2. In the shortcut's properties set Target to `<repository>\build\release\bin\tox2_game.exe` and Start
    In to `<repository>`, the repository root. The game resolves `generated/shader_cache` and relative
    option paths against the start directory.
 3. Put the options into Launch Options with full paths, for example `--game-dir "<game-dir>"`. Steam
@@ -118,12 +125,12 @@ log shows `dal: pad: gameinput v3 from gameoverlayrenderer64.dll`. To set it up:
 4. Leave "Enable the Steam Overlay while in-game" on.
 5. Under Properties > Controller, the per-game setting turns Steam Input on or off for this game.
 
-What was observed with an Xbox Wireless Controller:
+What was observed with an Xbox Wireless Controller, running the earlier game's build:
 
-- With Steam Input enabled and with it disabled, the game saw the same single physical pad and read
-  it directly. No separate virtual pad appeared, and the Steam environment variables were the same in
+- With Steam Input enabled and with it disabled, the process saw the same single physical pad and
+  read it directly. No separate virtual pad appeared, and the Steam environment variables were the same in
   both cases.
-- Whether Steam Input remaps the buttons the game reads (binding A to Y and pressing A) was not
+- Whether Steam Input remaps the buttons the pad provides (binding A to Y and pressing A) was not
   verified. Do not rely on Steam's controller configuration to remap.
 - The DualShock 4 was not tried through a Steam shortcut; see Supported pads for Steam running
   in the background.
@@ -138,14 +145,14 @@ taken from SDL's reading of Steam's device paths, not by a real Steam run.
 
 | Part | File | Library | Role |
 | --- | --- | --- | --- |
-| Backend interface | `runtime/src/input/gamepad_backend.h` | `dal_runtime_core` | `GamepadReading` (buttons, sticks -1 to 1 with +y up, triggers 0 to 1), `GamepadDeviceInfo`, `SteamContext`, and `GamepadBackend` (the device list with a generation counter, `read`, `setRumble`); no Windows or GameInput types |
-| GameInput backend | `runtime/src/input/gameinput_backend.*` | `dal_input_gameinput` | The only code that includes `GameInput.h` and `<windows.h>` for gamepads: loading, the device table, readings, rumble, the focus policy, `detectSteamContext` and `processOwnsForegroundWindow`; also `readRaw`, the generic controller layout used by `dal_padtool watch --raw` |
-| Mapping | `runtime/src/input/gamepad_map.*` | `dal_runtime_core` | Button table, dead zone, trigger threshold, merging of several pads, motor conversion |
-| Selection | `runtime/src/input/gamepad_select.*` | `dal_runtime_core` | Recognising Steam's virtual pad and the rule that picks the pads in use |
-| Hub | `runtime/src/input/gamepad_hub.*` | `dal_runtime_core` | The gamepad thread: devices, selection, readings, focus gate and rumble, written to the shared state |
-| Probe and formatters | `runtime/src/input/gamepad_probe.*` | `dal_runtime_core` | `--pad-probe`, and the text formats that the log and `dal_padtool` share |
-| Shared state | `runtime/src/input/keyboard_pad.*`, `pad_buttons.*` | `dal_runtime_core` | The `Gamepad` input source, the analog snapshot, the connection flag and the stored vibration |
-| Targets | `cmake/Input.cmake`, `cmake/gameinput.cmake`, `tools/fetch-gameinput.ps1` | | The package check, `dal_input_gameinput`, `dal_padtool`, the tests, and the pinned package |
+| Backend interface | `runtime/src/input/gamepad_backend.h` | `tox2_runtime_core` | `GamepadReading` (buttons, sticks -1 to 1 with +y up, triggers 0 to 1), `GamepadDeviceInfo`, `SteamContext`, and `GamepadBackend` (the device list with a generation counter, `read`, `setRumble`); no Windows or GameInput types |
+| GameInput backend | `runtime/src/input/gameinput_backend.*` | `tox2_input_gameinput` | The only code that includes `GameInput.h` and `<windows.h>` for gamepads: loading, the device table, readings, rumble, the focus policy, `detectSteamContext` and `processOwnsForegroundWindow`; also `readRaw`, the generic controller layout used by `tox2_padtool watch --raw` |
+| Mapping | `runtime/src/input/gamepad_map.*` | `tox2_runtime_core` | Button table, dead zone, trigger threshold, merging of several pads, motor conversion |
+| Selection | `runtime/src/input/gamepad_select.*` | `tox2_runtime_core` | Recognising Steam's virtual pad and the rule that picks the pads in use |
+| Hub | `runtime/src/input/gamepad_hub.*` | `tox2_runtime_core` | The gamepad thread: devices, selection, readings, focus gate and rumble, written to the shared state |
+| Probe and formatters | `runtime/src/input/gamepad_probe.*` | `tox2_runtime_core` | `--pad-probe`, and the text formats that the log and `tox2_padtool` share |
+| Shared state | `runtime/src/input/keyboard_pad.*`, `pad_buttons.*` | `tox2_runtime_core` | The `Gamepad` input source, the analog snapshot, the connection flag and the stored vibration |
+| Targets | `cmake/Input.cmake`, `cmake/gameinput.cmake`, `tools/fetch-gameinput.ps1` | | The package check, `tox2_input_gameinput`, `tox2_padtool`, the tests, and the pinned package |
 
 Mapping, selection, the hub and the probe are core code behind `GamepadBackend`, so `input_core`
 tests them with a fake backend and no GameInput.
@@ -158,7 +165,7 @@ tests them with a fake backend and no GameInput.
 missing or does not match the pin. The build uses the package's `GameInput.h` and `GameInput.lib`.
 
 - **Header.** The Windows SDK ships an older `GameInput.h` on the default include path.
-  `dal_input_gameinput` adds the package's directory as a `SYSTEM` include, which is searched first,
+  `tox2_input_gameinput` adds the package's directory as a `SYSTEM` include, which is searched first,
   and `gameinput_backend.cpp` asserts `GAMEINPUT_API_VERSION == 3`.
 - **Library.** The package's `GameInput.lib` is a static loader that resolves the runtime with
   `LoadLibrary` at the first call, so no executable has a GameInput DLL in its import table. The
@@ -220,27 +227,27 @@ instead of assuming a complete list, and `device +` lines can appear before the 
 Today only rules 1 and 4 apply on a real system: in the Steam runs, the overlay was loaded, no
 virtual pad was listed, and `SDL_GAMECONTROLLER_IGNORE_DEVICES` never named the Xbox pad, with Steam
 Input on or off. Two identical physical pads of which Steam handles only one are both dropped by
-rule 3; the game is single-player and this is accepted.
+rule 3; the runtime provides one pad and this is accepted.
 
 ## Log lines
 
-All gamepad lines start with `dal: pad:`. The start line of the pad itself is
-`dal: pad: <pad>[ (window)][ (script <file>, <n> events)]`, for example
-`dal: pad: keyboard+gamepad (window)`.
+All gamepad lines start with `tox2: pad:`. The start line of the pad itself is
+`tox2: pad: <pad>[ (window)][ (script <file>, <n> events)]`, for example
+`tox2: pad: keyboard+gamepad (window)`.
 
 | Line | Level | Source |
 | --- | --- | --- |
-| `dal: pad: gameinput v3 from <module>` | info | after the backend is created; the module is the file name that provides GameInput (`gameoverlayrenderer64.dll` under Steam's hook) |
-| `dal: pad: gameinput unavailable: <reason>; gamepads disabled` | warn | the backend could not be created; no hub and no probe |
-| `dal: pad: steam overlay loaded\|not loaded[; <NAME>=<value> ...]` | info | right after the backend is created; lists the Steam variables that are set (`SteamGameId`, `SteamOverlayGameId`, `SteamAppId`, `EnableConfiguratorSupport`, `SteamVirtualGamepadInfo`, `SDL_GAMECONTROLLER_IGNORE_DEVICES`, `SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD`); `SteamVirtualGamepadInfo` prints as `set` |
-| `dal: pad: device + <vid:pid> <kinds> rumble yes\|no "<name>"` | info | a device arrived; `<kinds>` is `gamepad`, `controller` or `gamepad+controller` |
-| `dal: pad: device <id> path <pnp path>` | debug | the device's path, with the arrival |
-| `dal: pad: device - <vid:pid>` | info | a device was removed |
-| `dal: pad: gamepad <vid:pid> <use>[ (steam slot <n>)]` | info | a device's use changed; `<use>` is `used`, `handled by steam`, `other process` or `not a gamepad` |
-| `dal: pad: gamepad input paused (background)` and `dal: pad: gamepad input resumed` | debug | the process lost or regained the foreground window |
-| `dal: pad: probe ...` | info | only with `--pad-probe` (below) |
+| `tox2: pad: gameinput v3 from <module>` | info | after the backend is created; the module is the file name that provides GameInput (`gameoverlayrenderer64.dll` under Steam's hook) |
+| `tox2: pad: gameinput unavailable: <reason>; gamepads disabled` | warn | the backend could not be created; no hub and no probe |
+| `tox2: pad: steam overlay loaded\|not loaded[; <NAME>=<value> ...]` | info | right after the backend is created; lists the Steam variables that are set (`SteamGameId`, `SteamOverlayGameId`, `SteamAppId`, `EnableConfiguratorSupport`, `SteamVirtualGamepadInfo`, `SDL_GAMECONTROLLER_IGNORE_DEVICES`, `SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD`); `SteamVirtualGamepadInfo` prints as `set` |
+| `tox2: pad: device + <vid:pid> <kinds> rumble yes\|no "<name>"` | info | a device arrived; `<kinds>` is `gamepad`, `controller` or `gamepad+controller` |
+| `tox2: pad: device <id> path <pnp path>` | debug | the device's path, with the arrival |
+| `tox2: pad: device - <vid:pid>` | info | a device was removed |
+| `tox2: pad: gamepad <vid:pid> <use>[ (steam slot <n>)]` | info | a device's use changed; `<use>` is `used`, `handled by steam`, `other process` or `not a gamepad` |
+| `tox2: pad: gamepad input paused (background)` and `tox2: pad: gamepad input resumed` | debug | the process lost or regained the foreground window |
+| `tox2: pad: probe ...` | info | only with `--pad-probe` (below) |
 
-`cellPad` itself logs `dal: pad: port 0 connected` and `disconnected`. With `--pad gamepad` they
+`cellPad` itself logs `tox2: pad: port 0 connected` and `disconnected`. With `--pad gamepad` they
 follow the pad being plugged in and out; otherwise port 0 is always connected, because the keyboard is
 part of the pad.
 
@@ -252,16 +259,16 @@ or `keyboard` it only logs. Next to the start lines it logs:
 
 | Line | Meaning |
 | --- | --- |
-| `dal: pad: probe <id> <vid:pid> buttons <names> lt <f> rt <f> ls (<x>,<y>) rs (<x>,<y>)` | A reading of any listed device, used by the game or not, whenever the text changes. `<names>` joins the pressed buttons with `+` or is `none`; sticks and triggers are rounded to steps of 0.05 so noise does not produce lines |
-| `dal: pad: probe <id> <vid:pid> no gamepad reading` | Once per device that has no gamepad reading, such as a generic controller |
-| `dal: pad: probe SteamVirtualGamepadInfo unset` (or `unreadable`, `empty`) | Whether the variable of that name is set, and if it names a readable file, one `dal: pad: probe SteamVirtualGamepadInfo: <line>` per line of its first 4 KiB |
+| `tox2: pad: probe <id> <vid:pid> buttons <names> lt <f> rt <f> ls (<x>,<y>) rs (<x>,<y>)` | A reading of any listed device, used by the game or not, whenever the text changes. `<names>` joins the pressed buttons with `+` or is `none`; sticks and triggers are rounded to steps of 0.05 so noise does not produce lines |
+| `tox2: pad: probe <id> <vid:pid> no gamepad reading` | Once per device that has no gamepad reading, such as a generic controller |
+| `tox2: pad: probe SteamVirtualGamepadInfo unset` (or `unreadable`, `empty`) | Whether the variable of that name is set, and if it names a readable file, one `tox2: pad: probe SteamVirtualGamepadInfo: <line>` per line of its first 4 KiB |
 
 Probe readings follow GameInput's foreground-only policy, so they can be neutral or stale while the
 window is in the background. Add `--log-level debug --log FILE` to keep the device paths in a file.
 
-## `dal_padtool`
+## `tox2_padtool`
 
-`build/release/bin/dal_padtool.exe` uses the same backend without the game. It asks GameInput for
+`build/release/bin/tox2_padtool.exe` uses the same backend without the game. It asks GameInput for
 background input, because its console window belongs to another process. That works for the Xbox pad
 but not for the DualShock 4, whose input arrives only while the console window is in the foreground. Output goes to stdout. Exit
 codes: 0 on success, 1 when GameInput is unavailable (the message names the reason, on stderr), 2 on

@@ -7,11 +7,12 @@ This repository contains no game data (see [Licence and legal notice](#licence-a
 No executables, keys, or decrypted binaries are included or accepted by version control; you
 supply your own `EBOOT.elf`, and all tool output is written to ignored directories.
 
-Current state: work in progress, and nothing runs yet. The tools and the runtime were taken over from
-an earlier recompilation project of another game and are being pointed at this one. The game cannot
-be played. In particular, the SPU code (8 embedded SPU images, SPURS and raw SPU thread groups), the
-`TLFILE.TLDAT` / `FILEHEADER.TOFHDB` data archive and the Bink movies are not handled. See
-[Status](docs/status.md).
+Current state: work in progress. The tools and the runtime were taken over from an earlier
+recompilation project of another game and are being pointed at this one. The executable is
+recovered, recompiled to C and linked, and `tox2_game` runs its start-up code for a few seconds
+before it stops at a guest trap; the game cannot be played. The SPU code (8 embedded SPU images,
+SPURS and raw SPU thread groups), the `TLFILE.TLDAT` / `FILEHEADER.TOFHDB` data archive and the
+Bink movies are not handled. See [Status](docs/status.md).
 
 ## Prerequisites
 
@@ -89,8 +90,10 @@ Every build parameter, the CMake variables and the test builds are described in
 build/release/bin/tox2_game.exe --game-dir <game-dir>
 ```
 
-Nothing runs yet, and how far a run gets has not been recorded. Closing the window ends the run. Game data and saves are written to `build/release/hdd`;
-`tools/build.ps1 -Clean` deletes them together with the rest of `build/release`.
+In the headless runs so far the game ended within a few seconds at a guest trap in its start-up
+code, and nothing was drawn; [Status](docs/status.md) has the details. Closing the window ends the run. Game data and
+saves are written to `build/release/hdd`; `tools/build.ps1 -Clean` deletes them together with the
+rest of `build/release`.
 
 Every option of `tox2_game` is described in [`tox2_game` options](docs/runtime-options.md).
 
