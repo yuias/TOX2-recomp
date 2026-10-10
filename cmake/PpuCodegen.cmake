@@ -73,13 +73,14 @@ function(tox2_ppu_add_generated_tree)
   # Pins how far the game gets; updated by whoever moves the milestone.
   include("${CMAKE_SOURCE_DIR}/cmake/game_boot.cmake")
 
-  if(TOX2_EBOOT_ELF STREQUAL "" OR TOX2_GAME_DIR STREQUAL "")
-    message(STATUS "TOX2: game_boot test not registered (TOX2_EBOOT_ELF or TOX2_GAME_DIR is empty)")
+  if(TOX2_EBOOT_ELF STREQUAL "" OR TOX2_GAME_DIR STREQUAL "" OR TOX2_PUP STREQUAL "")
+    message(STATUS "TOX2: game_boot test not registered (TOX2_EBOOT_ELF, TOX2_GAME_DIR or TOX2_PUP is empty)")
   else()
     separate_arguments(boot_args UNIX_COMMAND "${TOX2_GAME_BOOT_ARGS}")
 
     add_test(NAME game_boot
-      COMMAND tox2_game --game-dir "${TOX2_GAME_DIR}" --elf "${TOX2_EBOOT_ELF}" ${boot_args})
+      COMMAND tox2_game --game-dir "${TOX2_GAME_DIR}" --elf "${TOX2_EBOOT_ELF}"
+              --libsre "${TOX2_INPUTS_DIR}/libsre.reloc.elf" ${boot_args})
     set_tests_properties(game_boot PROPERTIES
       TIMEOUT 60
       # Only the milestone is asserted: while boot HLE is incomplete the run is expected to stop

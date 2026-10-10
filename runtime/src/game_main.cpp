@@ -23,6 +23,7 @@
 #include "audio/wav_file.h"
 #include "core/boot.h"
 #include "core/census.h"
+#include "core/dispatch.h"
 #include "core/elf_loader.h"
 #include "core/fatal.h"
 #include "core/guest_memory.h"
@@ -33,10 +34,13 @@
 #include "tox2/ppu_context.h"
 #include "hle/cell_audio_ports.h"
 #include "hle/hle.h"
+#include "hle/libsre.h"
 #include "input/gameinput_backend.h"
 #include "input/gamepad_hub.h"
 #include "input/keyboard_pad.h"
 #include "input/pad_script.h"
+#include "libsre_ppu_tables.h"
+#include "lv2/syscalls.h"
 #include "lv2/vfs.h"
 #include "lv2/vfs_config.h"
 #include "media/atrac_decoder.h"
@@ -52,6 +56,7 @@ namespace {
 struct Options {
     std::string game_dir;
     std::string elf;
+    std::string libsre;
     std::string hdd_dir;
     std::string sdata_cache;
     std::string vfs_config;
@@ -234,6 +239,7 @@ bool parseFrameList(std::string_view list, std::vector<std::uint32_t>& frames) {
 void printUsage() {
     std::fputs(
             "usage: tox2_game [--game-dir DIR] [--vfs-config FILE] (at least one) [--elf PATH]\n"
+            "                [--libsre PATH]\n"
             "                [--seconds N] [--strict] [--log FILE] [--hdd-dir DIR] [--sdata-cache DIR]\n"
             "                [--log-level trace|debug|info|warn|error]\n"
             "                [--quiet-hle] [--load-only] [--png-dump DIR]\n"
@@ -269,6 +275,8 @@ bool parseArgs(int argc, char** argv, Options& opt) {
             if (!value(opt.game_dir)) return false;
         } else if (arg == "--elf") {
             if (!value(opt.elf)) return false;
+        } else if (arg == "--libsre") {
+            if (!value(opt.libsre)) return false;
         } else if (arg == "--hdd-dir") {
             if (!value(opt.hdd_dir)) return false;
         } else if (arg == "--sdata-cache") {
@@ -643,9 +651,55 @@ int main(int argc, char** argv) {
         return static_cast<int>(tox2::ExitCode::LoadError);
     }
 
+    // libsre sits directly above the executable, before anything else allocates from the main region.
+    // By default it is the file the build wrote next to the executable.
+    const std::filesystem::path libsre_path =
+            opt.libsre.empty() ? elf_path.parent_path() / "libsre.reloc.elf" : std::filesystem::path(opt.libsre);
+    if (!std::filesystem::is_regular_file(libsre_path, ec)) {
+        tox2::logError(
+                "libsre: cannot open {} (build with -Pup to produce generated/inputs/libsre.reloc.elf, or pass --libsre)",
+                libsre_path.generic_string());
+        return static_cast<int>(tox2::ExitCode::LoadError);
+    }
+    const auto loaded_module = tox2::loadModule(libsre_path, tox2::libsre::kBase, exe.image_end);
+    if (!loaded_module) {
+        tox2::logError("libsre: load failed: {}", loaded_module.error());
+        return static_cast<int>(tox2::ExitCode::LoadError);
+    }
+    const tox2::LoadedModule& module = *loaded_module;
+    const std::string_view libsre_expected_sha256 = kTox2LibsrePpuExecutableSha256;
+    if (module.sha256 != libsre_expected_sha256) {
+        tox2::logError("libsre hash {} does not match the generated code ({})", module.sha256, libsre_expected_sha256);
+        return static_cast<int>(tox2::ExitCode::LoadError);
+    }
+    // The whole file is pinned by its hash; these checks catch an offset in the layout header that
+    // drifted from the image. A long list has one root cause, so only the first few are logged.
+    const std::vector<std::string> layout_errors = tox2::libsre::checkLibsreLayout(
+            process.memory.base(), std::span(kTox2LibsrePpuImports, kTox2LibsrePpuImportCount),
+            std::span(kTox2LibsrePpuExports, kTox2LibsrePpuExportCount));
+    constexpr std::size_t kMaxLayoutMessages = 5;
+    for (std::size_t i = 0; i < layout_errors.size() && i < kMaxLayoutMessages; ++i) {
+        tox2::logError("libsre: layout: {}", layout_errors[i]);
+    }
+    if (layout_errors.size() > kMaxLayoutMessages) {
+        tox2::logError("libsre: layout: {} more failed checks", layout_errors.size() - kMaxLayoutMessages);
+    }
+    bool libsre_ok = layout_errors.empty();
+    if (module.base != tox2::libsre::kBase || module.toc != tox2::libsre::kToc ||
+        module.image_end != tox2::libsre::kImageEnd) {
+        tox2::logError("libsre: module base {:#010x} toc {:#010x} image end {:#010x} differ from the layout header",
+                       module.base, module.toc, module.image_end);
+        libsre_ok = false;
+    }
+    if (!libsre_ok) return static_cast<int>(tox2::ExitCode::LoadError);
+
     tox2RegisterFuncs(kTox2PpuFuncMappings, kTox2PpuFuncMappingCount);
+    tox2::appendFuncs(kTox2LibsrePpuFuncMappings, kTox2LibsrePpuFuncMappingCount);
     tox2::setQuietHle(opt.quiet_hle);
-    tox2::installImports(kTox2PpuImports, kTox2PpuImportCount);
+    const tox2::GuestExports guest_exports[] = {{"libsre", kTox2LibsrePpuExports, kTox2LibsrePpuExportCount}};
+    tox2::installImports(kTox2PpuImports, kTox2PpuImportCount, guest_exports);
+    tox2::installModuleImports("libsre", kTox2LibsrePpuImports, kTox2LibsrePpuImportCount);
+    tox2::setProcessSdkVersion(exe.sdk_version);
 
     tox2::logInfo(
             "tox2: loaded {}: entry {:#010x} toc {:#010x} opd {:#010x} tls {:#010x}/{}/{:#x} sdk {:#010x} "
@@ -654,6 +708,11 @@ int main(int argc, char** argv) {
             exe.tls_memsz, exe.sdk_version, exe.primary_prio, exe.primary_stacksize, exe.malloc_pagesize, exe.ppc_seg,
             exe.image_end);
     tox2::logInfo("tox2: sha256 {}", exe.sha256);
+    tox2::logInfo("tox2: loaded {}: module {} {}.{} base {:#010x} toc {:#010x} image end {:#010x}",
+                  libsre_path.filename().string(), module.name, unsigned{module.version_major},
+                  unsigned{module.version_minor}, module.base, module.toc, module.image_end);
+    tox2::logInfo("tox2: libsre: sha256 {}", module.sha256);
+    tox2::logInfo("tox2: libsre: layout ok");
 
     if (opt.load_only) {
         return static_cast<int>(tox2::ExitCode::ProcessExit);
@@ -713,6 +772,6 @@ int main(int argc, char** argv) {
                  .detect_steam = tox2::detectSteamContext,
                  .probe = opt.pad_probe});
     }
-    tox2::bootMainThread(exe, "/dev_bdvd/PS3_GAME/USRDIR/EBOOT.BIN");
+    tox2::bootMainThread(exe, "/dev_bdvd/PS3_GAME/USRDIR/EBOOT.BIN", module.image_end - module.base);
     tox2::runSupervisor(opt.seconds);
 }
