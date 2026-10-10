@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "tox2/ppu_context.h"
 #include "lv2/syscalls.h"
@@ -226,10 +227,30 @@ std::span<const HleEntry> cellGcmSysHandlers();
 std::uint32_t gcmInitBody(std::uint8_t* base, std::uint32_t context_pp, std::uint32_t cmd_size, std::uint32_t io_size,
                           std::uint32_t io_address, std::uint32_t local_size);
 
-// Resolves every import to a handler by (module, fnid); imports without one get the default
-// handler. A name that differs between the registry and the import table is a warning. Replaces
-// any earlier installation. Call before any guest thread runs.
-void installImports(const Tox2ImportInfo* imports, uint32_t count);
+// Function exports of a module whose code runs recompiled. An import of the main executable with the
+// same (module, fnid) calls the export's descriptor instead of a handler.
+struct GuestExports {
+    const char* image;  // census tag and log name, e.g. "libsre"
+    const Tox2ExportInfo* exports;
+    std::uint32_t count;
+};
+
+// Main executable: (module, fnid) found in `guest` -> bound to that export; else a registered handler;
+// else the default handler. A name that differs between the registry and the import table is a
+// warning. Fatal when guestExportConflicts(guest) is not empty, or when an export's descriptor names
+// an address tox2Lookup does not know. Replaces any earlier installation, including the module
+// tables. Logs "tox2: hle: <n> imports, <h> with handlers", followed by ", <b> bound to <image>" for
+// each entry of `guest`. Call before any guest thread runs.
+void installImports(const Tox2ImportInfo* imports, uint32_t count, std::span<const GuestExports> guest = {});
+
+// A module's own import table, used by tox2HleCallImport. Handlers or the default handler only. A
+// second call with the same `image` replaces its table. Logs "tox2: hle: <image>: <n> imports, <h> with
+// handlers". `imports` must stay alive: tox2HleCallImport finds the table by the pointer it is given.
+void installModuleImports(const char* image, const Tox2ImportInfo* imports, uint32_t count);
+
+// "module::name (fnid 0x…)" for every (module, fnid) that is both exported by `guest` and registered
+// in a handler list, ordered by (module, fnid).
+std::vector<std::string> guestExportConflicts(std::span<const GuestExports> guest);
 
 // Silences the per-call log of the default handler (census counting stays on).
 void setQuietHle(bool quiet);

@@ -23,6 +23,10 @@ void censusSyscall(std::uint32_t number, const char* name, bool implemented);
 // Counts one HLE import call; the first call logs "tox2: first hle module::name".
 void censusHle(const char* module, const char* name, bool implemented);
 
+// Counts a call of an import that was bound to an export of a recompiled module (`image`, e.g.
+// "libsre"). Counts like censusHle; the census line ends in "[image]" instead of "[impl]".
+void censusHleBound(const char* module, const char* name, const char* image);
+
 // Attaches a note to an import that was already counted; the census line becomes
 // "  module::name: N [default] <note>". Ignored when the import has not been called yet.
 void censusHleNote(const char* module, const char* name, std::string note);

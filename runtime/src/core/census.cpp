@@ -20,6 +20,7 @@ struct CallStat {
     std::uint64_t count = 0;
     bool implemented = false;
     std::string note;
+    std::string image;  // set for imports bound to a recompiled module's export
 };
 
 struct CensusState {
@@ -49,6 +50,7 @@ struct Line {
     std::uint32_t number;
     bool implemented;
     std::string note = {};
+    std::string image = {};
 };
 
 void sortLines(std::vector<Line>& lines) {
@@ -97,7 +99,9 @@ void censusSyscall(std::uint32_t number, const char* name, bool implemented) {
     }
 }
 
-void censusHle(const char* module, const char* name, bool implemented) {
+namespace {
+
+void countHle(const char* module, const char* name, bool implemented, const char* image) {
     CensusState& s = state();
     std::string key = std::format("{}::{}", module != nullptr ? module : "?", name != nullptr ? name : "?");
     bool first = false;
@@ -107,6 +111,7 @@ void censusHle(const char* module, const char* name, bool implemented) {
         if (stat.count == 0) {
             stat.name = key;
             stat.implemented = implemented;
+            if (image != nullptr) stat.image = image;
             first = true;
         }
         stat.count++;
@@ -114,6 +119,14 @@ void censusHle(const char* module, const char* name, bool implemented) {
     if (first) {
         logInfo("tox2: first hle {}", key);
     }
+}
+
+}  // namespace
+
+void censusHle(const char* module, const char* name, bool implemented) { countHle(module, name, implemented, nullptr); }
+
+void censusHleBound(const char* module, const char* name, const char* image) {
+    countHle(module, name, true, image != nullptr ? image : "?");
 }
 
 void censusHleNote(const char* module, const char* name, std::string note) {
@@ -206,13 +219,14 @@ std::string formatCensus() {
         lines.clear();
         calls = 0;
         for (const auto& [key, stat] : s.hle) {
-            lines.push_back({stat.count, stat.name, 0, stat.implemented, stat.note});
+            lines.push_back({stat.count, stat.name, 0, stat.implemented, stat.note, stat.image});
             calls += stat.count;
         }
         sortLines(lines);
         out += "\n" + section("hle", calls, lines);
         for (const Line& line : lines) {
-            out += std::format("\n  {}: {} [{}]", line.name, line.count, line.implemented ? "impl" : "default");
+            out += std::format("\n  {}: {} [{}]", line.name, line.count,
+                               !line.image.empty() ? line.image : (line.implemented ? "impl" : "default"));
             if (!line.note.empty()) {
                 out += " " + line.note;
             }

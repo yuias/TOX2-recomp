@@ -820,6 +820,145 @@ void testHle() {
     tox2::resetLogOnce();
 }
 
+void testHleGuestExports() {
+    std::vector<std::string> lines;
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+    CHECK(tox2::process().memory.reserve());
+    CHECK(tox2::process().memory.commit(0x500000, 0x2000));
+    std::uint8_t* base = tox2::process().memory.base();
+
+    const Tox2FuncMapping mappings[] = {{0x10200, opdTarget}};
+    tox2RegisterFuncs(mappings, 1);
+    tox2Write32(base, 0x500000, 0x10200);
+    tox2Write32(base, 0x500004, 0xd0000);
+
+    const Tox2ExportInfo exports[] = {{0x500000, 0xaaaa0001, "cellTestSpurs"}};
+    const Tox2ImportInfo imports[] = {
+            {0x00800000, 0xaaaa0001, "cellTestSpurs", "cellTestBoundCall"},
+            {0x00800010, 0xbbbb0002, "cellTestSpurs", "cellTestOther"},
+    };
+    const tox2::GuestExports guest[] = {{"img", exports, 1}};
+    CHECK(tox2::guestExportConflicts(guest).empty());
+    tox2::installImports(imports, 2, guest);
+    CHECK(countContaining(lines, "tox2: hle: 2 imports, 0 with handlers, 1 bound to img") == 1);
+
+    auto ctx = std::make_unique<Tox2PpuContext>();
+    ctx->gpr[2] = 0x1111;
+    ctx->lr = 0x2222;
+    tox2HleCall(ctx.get(), base, 0);
+    CHECK(ctx->gpr[3] == 0xd0001);  // r2 held the descriptor's TOC
+    CHECK(ctx->gpr[4] == 0x2222);   // lr was left as the caller's
+    CHECK(ctx->lr == 0x7777);       // and nothing restored what the callee changed
+    CHECK(ctx->jump_site == 0x00800000);
+    CHECK(ctx->jump_target == 0x10200);
+    tox2HleCall(ctx.get(), base, 0);
+    CHECK(countContaining(lines, "tox2: first hle cellTestSpurs::cellTestBoundCall") == 1);
+    CHECK(countContaining(lines, "tox2: default hle cellTestSpurs::cellTestBoundCall") == 0);
+
+    ctx->gpr[3] = 0x55;
+    tox2HleCall(ctx.get(), base, 1);  // not exported by the guest: default handler
+    CHECK(ctx->gpr[3] == 0);
+    CHECK(countContaining(lines, "tox2: default hle cellTestSpurs::cellTestOther(0x55") == 1);
+
+    const std::string census = tox2::formatCensus();
+    CHECK(census.find("census: hle 3 calls, 2 distinct, 1 default-handled") != std::string::npos);
+    CHECK(census.find("  cellTestSpurs::cellTestBoundCall: 2 [img]\n") != std::string::npos);
+    CHECK(census.find("  cellTestSpurs::cellTestOther: 1 [default]\n") != std::string::npos);
+
+    // Installing again without the export set binds nothing.
+    tox2::installImports(imports, 2);
+    ctx->gpr[3] = 0x55;
+    tox2HleCall(ctx.get(), base, 0);
+    CHECK(ctx->gpr[3] == 0);
+    CHECK(countContaining(lines, "tox2: default hle cellTestSpurs::cellTestBoundCall(0x55") == 1);
+
+    tox2::process().memory.decommit(0x500000, 0x2000);
+    tox2RegisterFuncs(nullptr, 0);
+    tox2::installImports(nullptr, 0);
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+}
+
+void testModuleImports() {
+    std::vector<std::string> lines;
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+
+    constexpr const char* kModule = "sysPrxForUser";
+    const Tox2ImportInfo main_imports[] = {{0x00800000, 0x45fe2fce, kModule, "_sys_spu_printf_initialize"}};
+    // Index 0 of this table is a different import than index 0 of the main table. The third entry has no
+    // generated name; its handler's name is used instead.
+    const Tox2ImportInfo module_imports[] = {
+            {0x001e0000, 0x8461e528, kModule, "sys_time_get_system_time"},
+            {0x001e0020, 0x12345678, "cellTestLib", "cellTestUnknown"},
+            {0x001e0040, 0xdd3b27ac, kModule, nullptr},
+    };
+    const Tox2ImportInfo other_imports[] = {{0x001f0000, 0xdd3b27ac, kModule, "_sys_spu_printf_finalize"}};
+    tox2::installImports(main_imports, 1);
+    tox2::installModuleImports("img", module_imports, 3);
+    tox2::installModuleImports("other", other_imports, 1);
+    CHECK(countContaining(lines, "tox2: hle: img: 3 imports, 2 with handlers") == 1);
+    CHECK(countContaining(lines, "tox2: hle: other: 1 imports, 1 with handlers") == 1);
+
+    auto ctx = std::make_unique<Tox2PpuContext>();
+    ctx->gpr[3] = 0x55;
+    tox2HleCall(ctx.get(), nullptr, 0);
+    CHECK(ctx->gpr[3] == 0);  // returnOk
+    tox2HleCallImport(ctx.get(), nullptr, &module_imports[0]);
+    tox2HleCallImport(ctx.get(), nullptr, &other_imports[0]);
+    tox2HleCallImport(ctx.get(), nullptr, &module_imports[2]);
+
+    ctx->gpr[3] = 0x55;
+    tox2HleCallImport(ctx.get(), nullptr, &module_imports[1]);
+    CHECK(ctx->gpr[3] == 0);
+    CHECK(countContaining(lines, "tox2: default hle cellTestLib::cellTestUnknown(0x55") == 1);
+    CHECK(countContaining(lines, "tox2: first hle sysPrxForUser::_sys_spu_printf_finalize") == 1);
+
+    const std::string census = tox2::formatCensus();
+    CHECK(census.find("census: hle 5 calls, 4 distinct, 1 default-handled") != std::string::npos);
+    CHECK(census.find("  sysPrxForUser::_sys_spu_printf_initialize: 1 [impl]\n") != std::string::npos);
+    CHECK(census.find("  sysPrxForUser::sys_time_get_system_time: 1 [impl]\n") != std::string::npos);
+    CHECK(census.find("  sysPrxForUser::_sys_spu_printf_finalize: 2 [impl]\n") != std::string::npos);
+    CHECK(census.find("  cellTestLib::cellTestUnknown: 1 [default]\n") != std::string::npos);
+
+    // Installing the same image again installs the new, shorter table; only its log line is checked here.
+    lines.clear();
+    tox2::installModuleImports("img", module_imports, 1);
+    CHECK(countContaining(lines, "tox2: hle: img: 1 imports, 1 with handlers") == 1);
+
+    // Installing the main table again must still work after module tables were installed.
+    tox2::installImports(nullptr, 0);
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+}
+
+void testGuestExportConflicts() {
+    // sys_time_get_system_time and sys_lwmutex_create are registered handlers of sysPrxForUser.
+    const Tox2ExportInfo first[] = {
+            {0x1000, 0x8461e528, "sysPrxForUser"},
+            {0x1008, 0x8461e528, "cellOther"},      // same FNID, another module
+            {0x1010, 0x12345678, "sysPrxForUser"},  // no handler registered
+    };
+    const Tox2ExportInfo second[] = {
+            {0x2000, 0x2f85c0ef, "sysPrxForUser"},
+            {0x2008, 0x8461e528, "sysPrxForUser"},  // exported by both images: reported once
+    };
+    const tox2::GuestExports both[] = {{"a", first, 3}, {"b", second, 2}};
+    const std::vector<std::string> conflicts = tox2::guestExportConflicts(both);
+    CHECK(conflicts.size() == 2);
+    CHECK(conflicts.size() == 2 && conflicts[0] == "sysPrxForUser::sys_lwmutex_create (fnid 0x2f85c0ef)");
+    CHECK(conflicts.size() == 2 && conflicts[1] == "sysPrxForUser::sys_time_get_system_time (fnid 0x8461e528)");
+
+    const tox2::GuestExports disjoint[] = {{"a", first + 1, 2}};
+    CHECK(tox2::guestExportConflicts(disjoint).empty());
+    CHECK(tox2::guestExportConflicts({}).empty());
+}
+
 void testHleOutPointerHints() {
     std::vector<std::string> lines;
     tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
@@ -8570,6 +8709,9 @@ int main(int argc, char** argv) {
     testDisableFrameBuilder();
     testSyscalls();
     testHle();
+    testHleGuestExports();
+    testModuleImports();
+    testGuestExportConflicts();
     testHleOutPointerHints();
     testHostFunctionsAndCallGuestFunction();
     testStartupSyscalls();
