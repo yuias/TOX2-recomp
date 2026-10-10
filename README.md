@@ -10,11 +10,13 @@ the ignored `generated/inputs/`, and the keys they need are downloaded at config
 stored (see [Decrypting `EBOOT.elf` and `libsre.prx`](#decrypting-ebootelf-and-libsreprx)).
 
 Current state: work in progress. The tools and the runtime were taken over from an earlier
-recompilation project of another game and are being pointed at this one. The executable is
-recovered, recompiled to C and linked, and `tox2_game` runs its start-up code for a few seconds,
-issues a few flips and then loops on a SPURS call until the watchdog ends the run; the game cannot be played. The SPU code (8 embedded SPU images,
-SPURS and raw SPU thread groups), the `TLFILE.TLDAT` / `FILEHEADER.TOFHDB` data archive and the
-Bink movies are not handled. See [Status](docs/status.md).
+recompilation project of another game and are being pointed at this one. The executable and the
+firmware's SPURS module (`libsre`) are recovered, recompiled to C and linked. `tox2_game` runs the
+game's start-up code and the SPURS initialisation inside libsre, and stops with exit code 8 when
+SPURS starts its first SPU thread group, because no SPU code can run; the game cannot be played. The
+SPU code (8 embedded SPU images, the SPURS kernels in libsre, raw SPU thread groups), the
+`TLFILE.TLDAT` / `FILEHEADER.TOFHDB` data archive and the Bink movies are not handled. See
+[Status](docs/status.md).
 
 ## Prerequisites
 
@@ -33,9 +35,10 @@ Bink movies are not handled. See [Status](docs/status.md).
 
 ## Decrypting `EBOOT.elf` and `libsre.prx`
 
-The tools work on the decrypted PPU executable, not on `EBOOT.BIN`. The coming recompilation of
-the SPURS module needs the firmware's `libsre.prx` as well. `tox2_decrypt` produces both from files
-you own; RPCS3 is not needed.
+The tools work on the decrypted PPU executable, not on `EBOOT.BIN`. The game calls the SPURS code of
+the firmware's `libsre.prx`, which this project recompiles and loads next to the executable, so the
+build needs the PUP as well: `-Pup` is required. `tox2_decrypt` produces all inputs from files you own;
+RPCS3 is not needed.
 
 1. Dump your own disc or digital copy. The directory that contains `PS3_GAME` is the game
    directory (`<game-dir>` below).
@@ -51,14 +54,16 @@ you own; RPCS3 is not needed.
    pwsh -NoProfile -File tools/build.ps1 -Preset release -EbootBin <game-dir>/PS3_GAME/USRDIR/EBOOT.BIN -Pup <path>/PS3UPDAT.PUP
    ```
 
-   The outputs are `generated/inputs/EBOOT.elf` and `generated/inputs/libsre.prx`. Each is checked
-   against the size and SHA-256 in `config/target.json`; a file that does not match is refused and
-   nothing is written. The build log shows `matches the pin` for both.
+   The outputs are `generated/inputs/EBOOT.elf`, `generated/inputs/libsre.prx` and
+   `generated/inputs/libsre.reloc.elf` (`libsre.prx` placed at the guest address `0x011d0000` with its
+   relocations applied). Each is checked against the size and SHA-256 in `config/target.json`; a file
+   that does not match is refused and nothing is written. The build log shows `matches the pin` for
+   all three.
 
 The supported executable has the SHA-256
 `a1d8a56ce1d6300bff704a43218f1b8b87c80c1e1342929a266e58af4e5891e9`; `tox2_game` refuses any other.
-`libsre.prx` is needed only to build, by the coming SPURS recompilation; nothing uses it yet. Neither
-file may be shared. The key download, the offline alternative and the checks are described in
+`libsre.reloc.elf` is the input of the libsre recompilation, and `tox2_game` loads it at run time
+(see Running the game). None of the decrypted files may be shared. The key download, the offline alternative and the checks are described in
 [Building](docs/building.md#decrypting-the-inputs).
 
 ## Building
@@ -81,18 +86,20 @@ Run these from the repository root:
    msiexec /i generated\deps\gameinput\<version>\redist\GameInputRedist.msi
    ```
 
-3. Recompile the executable into C source under `generated/ppu`. The executable is large, so the
-   output is split into 256 chunks (the tool default is 16):
+3. Recompile the executable and libsre into C source under `generated/ppu`. The executable is large,
+   so its output is split into 256 chunks (the tool default is 16); libsre needs 4:
 
    ```powershell
    python tools/ps3tool.py emit generated/inputs/EBOOT.elf --chunks 256 --out generated/ppu
+   python tools/ps3tool.py emit generated/inputs/libsre.reloc.elf --db config/libsre_functions.json --symbol-prefix libsre --chunks 4 --out generated/ppu/libsre --max-unhandled 0
    ```
 
-   `emit` reads the committed function database `config/functions.json`. `recover` is needed only
-   to regenerate that file (see [Function recovery](docs/function-recovery.md)).
+   `emit` reads the committed function databases `config/functions.json` and
+   `config/libsre_functions.json`. `recover` is needed only to regenerate them (see
+   [Function recovery](docs/function-recovery.md)).
 
-4. Build. The cache of the release build already points at `generated/inputs/EBOOT.elf`, so
-   `-EbootElf` is not needed:
+4. Build. The cache of the release build already points at `generated/inputs/EBOOT.elf` and keeps the
+   `-EbootBin` and `-Pup` of the first build, so they are not needed again:
 
    ```powershell
    pwsh -NoProfile -File tools/build.ps1 -Preset release -GeneratedDir generated/ppu -GameDir <game-dir>
@@ -112,10 +119,16 @@ build/release/bin/tox2_game.exe --game-dir <game-dir> --elf generated/inputs/EBO
 ```
 
 `--elf` names the decrypted executable. Without it `tox2_game` looks for
-`<game-dir>/PS3_GAME/USRDIR/EBOOT.elf`; copying the produced file there works too.
+`<game-dir>/PS3_GAME/USRDIR/EBOOT.elf`; copying the produced file there works too. The relocated
+firmware module `libsre.reloc.elf` is loaded as well. It is looked up in the directory of the
+executable, so with `--elf generated/inputs/EBOOT.elf` it is the file the build wrote, and when you copy
+`EBOOT.elf` into `USRDIR` you copy `libsre.reloc.elf` next to it. `--libsre <path>` names it
+explicitly.
 
-In the headless runs so far the game ran its start-up code and then looped on a SPURS call
-(`cellSpursEventFlagWait`, which the runtime does not implement) until the watchdog, and nothing was drawn; [Status](docs/status.md) has the details. Closing the window ends the run. Game data and
+In the headless runs so far the game ran its start-up code, libsre built its SPURS instance, and the
+run stopped with exit code 8 when libsre started the SPU thread group of the SPURS kernel, because the
+runtime cannot run SPU code; nothing was drawn. [Status](docs/status.md) has the details. Closing the
+window ends the run. Game data and
 saves are written to `build/release/hdd`; `tools/build.ps1 -Clean` deletes them together with the
 rest of `build/release`.
 

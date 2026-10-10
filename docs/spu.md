@@ -1,8 +1,9 @@
 # SPU usage
 
 The runtime cannot run SPU code yet. This page records how the game uses the SPUs, measured from
-the executable and from headless runs, as the basis for choosing how to run that code. Addresses
-are guest addresses in the pinned `EBOOT.elf`.
+the executable, from libsre and from headless runs, as the basis for choosing how to run that code.
+Addresses are guest addresses in the pinned `EBOOT.elf`, or in the relocated `libsre.reloc.elf` where
+the text says so (libsre sits at `0x011d0000`).
 
 ## SPU images
 
@@ -29,7 +30,37 @@ image.
 The SPURS task images use MFC DMA channels 16 to 24, the atomic channel 27 (consistent with a
 statically linked `cellSpursQueue`/`EventFlag` library), the outbound mailboxes 28 and 30, and
 fixed LS locations that belong to the SPURS kernel and the taskset policy module: `0x80`-`0xf0`,
-`0x170`, `0x1c0`-`0x1e0`, `0x2fb0` and `0x2fd0`. That firmware code is not in the executable.
+`0x170`, `0x1c0`-`0x1e0`, `0x2fb0` and `0x2fd0`. That firmware code is not in the executable; it is
+in libsre (see [Where the SPURS code lives](#where-the-spurs-code-lives)).
+
+## Where the SPURS code lives
+
+The game's `cellSpurs` imports resolve to the firmware module `libsre.prx` (`cellSre_Library` 1.1,
+firmware 4.93). It contains the PPU side of SPURS, which the runtime now recompiles and runs, and the
+SPU programs that SPURS loads, which are embedded as data. The build relocates it to `0x011d0000`
+(see [Decrypting the inputs](building.md#decrypting-the-inputs)), and the addresses below are in
+that image. Each program is referenced by the PPU code: libsre imports the kernel with
+`sys_spu_image_import` and hands the others to the SPURS kernel as workload modules.
+
+| Address | Size | What | LS base / entry | Used by |
+| --- | --- | --- | --- | --- |
+| `0x011f0380` | ELF, one `0x780` byte segment | SPURS kernel, version 1 (`spurs_kernel_executable.elf`) | `0x100` / `0x818` | `cellSpursInitializeWithAttribute` when the attribute flag `0x4` is clear (this game) |
+| `0x011f0c00` | ELF, one `0x790` byte segment | SPURS kernel, version 2 (`spurs_kernel2_executable.elf`) | `0x100` / `0x848` | the same call with the flag set; not imported by this game |
+| `0x011f1480` | `0x2200` | system service module | `0xa00` | SPURS instance setup (its address and size are stored in the `CellSpurs` structure) |
+| `0x011f3680` | `0x1e40` | taskset policy module | `0xa00`..`0x2840` | `_cellSpursCreateTaskset`, which adds the taskset as a workload |
+| `0x011f5500` | `0x670` | taskset 2 exit handler | position independent | `cellSpursCreateTaskset2` |
+| `0x011f5b80` | `0x710` | exit code plugin | not recorded | `cellSpursCreateTaskset2` |
+| `0x011f6300`, `0x011fa180` | `0x3e30` each | job chain policy modules | `0xa00` | job chains; this game uses none |
+
+The two kernels are SPU ELF files (class 1, big-endian, machine 23); the other six blobs are raw and
+begin with four `ila $2` instructions. When it loads libsre the runtime checks the ELF headers of the
+kernels at these addresses and the first word of each raw blob (`tox2: libsre: layout ok`). The task images of the game depend on
+the kernel and the taskset policy module for the LS locations listed above, so the same SPU code has
+to run for them.
+
+The kernel of version 1 is the one that is imported: the thread group has five threads, each starts at
+the kernel entry `0x818` and receives its index in argument 1 (`index << 32`) and the `CellSpurs`
+address (`0x01127c80` for instance A) in argument 2.
 
 ## How the game sets them up
 
@@ -67,34 +98,49 @@ The game imports 30 `cellSpurs` functions, `sys_spu_image_import`/`sys_spu_image
 
 ## What the current run reaches
 
-The headless run (see [Status](status.md)) creates instance A, the LZMA taskset and the five engine
-tasksets with their 30 tasks, and then stops. It pushes no work to any queue and waits on no event
-flag or task, and the main thread is not blocked on an SPU result at the stop. The sound engine,
+The headless run (see [Status](status.md)) executes the game's calls up to
+`cellSpursInitializeWithAttribute` as recompiled code. libsre builds SPURS instance A: it creates 16
+semaphores for the workload slots and one for the private lock, imports the version 1 kernel from
+`0x011f0380`, creates the SPU thread group `SpursTLGraphicsCellSpursKernelGroup` with 5 threads,
+initialises the threads, creates the event queue, port and helper threads, and its handler thread
+starts the group. The runtime logs the group, its threads (each with `image 0x011f0380 entry 0x818`,
+one copy segment of `0x780` bytes to LS `0x100`, and the arguments), the event queue and the ports,
+then stops with exit code 8:
+
+```
+tox2: stop: spu: sys_spu_thread_group_start group 0x04000100 "SpursTLGraphicsCellSpursKernelGroup" (5 threads, image 0x011f0380 entry 0x818): SPU execution is not implemented
+```
+
+The game does not return from `cellSpursInitializeWithAttribute`, so it creates no taskset, task or
+queue, pushes no work and waits on nothing. The LZMA taskset, the engine tasksets, the sound engine,
 the spline tasks and instance B are not reached.
 
-The `cellSpurs` functions are default-handled: they return `CELL_OK` and write no out-parameters.
-When the game starts to push work and wait for results, the waits will return at once, so the first
-symptom is expected to be missing or wrong data rather than a hang. The first likely dependency is
-the LZMA path: fn `0x0080d370` parses a 0x18-byte header and, for one compression type, fn
-`0x0080d5b0` waits on the event flags after `LFQueue` pushes at `0x00c2e294`/`0x00c2e450`. Whether
-the game's archive data goes through this path has not been checked.
+Once SPU code runs, the game's first likely dependency is the LZMA path: fn `0x0080d370` parses a
+0x18-byte header and, for one compression type, fn `0x0080d5b0` waits on the event flags after
+`LFQueue` pushes at `0x00c2e294`/`0x00c2e450`. Whether the game's archive data goes through this path
+has not been checked. In the earlier runs, where the `cellSpurs` functions were default-handled and
+returned success at once, the first symptom was a worker thread that polled `cellSpursEventFlagWait`
+without end.
 
 ## Entry points to cover
 
 - SPURS task entry at LS `0x3070` in images 1, 4, 5, 6, 7 and 8.
 - SPURS task entry at LS `0x3090` in image 2.
 - Raw SPU thread entry at LS `0xd0` in image 3.
-- Not in the executable: the SPURS kernel and taskset policy module that the task images depend
-  on, and the firmware ATRAC3plus SPU decoder (not needed if `cellAtrac` is implemented on the
-  host).
+- SPURS kernel entry at LS `0x818` (version 1, in libsre at `0x011f0380`), the first code a run
+  would execute. The taskset policy module (libsre, `0x011f3680`) that the task images depend on is
+  loaded by the kernel.
+- Not in the executable or in libsre: the firmware ATRAC3plus SPU decoder (not needed if `cellAtrac`
+  is implemented on the host).
 
 ## Facts that bear on the method
 
-- The SPU code is a closed set of eight binaries with known entry points, as on the PPU side, which
-  suits static recompilation.
+- The SPU code is a closed set of eight binaries in the executable plus the kernel and policy modules
+  in libsre, all with known entry points, as on the PPU side, which suits static recompilation.
 - Static recompilation and an interpreter both need a model of MFC DMA and atomic reservations,
-  mailboxes and event queues, and a host implementation of the SPURS kernel and taskset interface
-  at the fixed LS locations above. The sound engine also needs a raw SPU thread group model.
+  mailboxes and event queues. The SPURS kernel and taskset interface at the fixed LS locations above
+  need no host implementation if the SPU code in libsre runs unchanged; replacing them with host code
+  is the alternative. The sound engine also needs a raw SPU thread group model.
 - Replacing single tasks with host code: Edge LZMA is a published Sony library with a known work
   element format, and LZMA is simple to implement on the host. The engine tasks would each need
   their element format and computation worked out. The sound engine core (85 KB) is not practical

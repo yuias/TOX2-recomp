@@ -2,7 +2,8 @@
 
 `tools/ps3tool.py` has nine subcommands. Each takes the path to the decrypted ELF (`<elf>`; the
 supported executable is the one pinned in `config/target.json`, see [Target pin](#target-pin)),
-except `nidgen`, which reads an RPCS3 checkout.
+except `nidgen`, which reads an RPCS3 checkout. `info`, `recover` and `emit` also accept the firmware
+module libsre as a relocated PRX (see [PRX input](#prx-input)).
 
 ```sh
 python tools/ps3tool.py info   <elf> [-o OUTPUT] [--target-config FILE] [--nids FILE] [--no-verify]
@@ -12,7 +13,7 @@ python tools/ps3tool.py ghidra-export <elf> [--ghidra-dir DIR] [--language ID] [
 python tools/ps3tool.py ghidra-diff   <elf> --ghidra JSON [--start ADDR] [--end ADDR] [--strict] [-o OUT] [--top N] [--examples K]
 python tools/ps3tool.py ghidra-summary <elf> --ghidra JSON [-o OUT]
 python tools/ps3tool.py recover <elf> [--ghidra-summary PATH | --no-ghidra] [--extra-seeds PATH] [--nids FILE] [--syscalls FILE] [-o OUT] [--report PATH] [--seeds-out PATH] [--prologue-seeds] [--max-rounds N]
-python tools/ps3tool.py emit <elf> [--db PATH] [--out DIR] [--chunks N] [--comments] [--report PATH] [--census] [--census-out PATH] [--max-unhandled N]
+python tools/ps3tool.py emit <elf> [--db PATH] [--out DIR] [--chunks N] [--comments] [--report PATH] [--census] [--census-out PATH] [--symbol-prefix NAME] [--max-unhandled N]
 python tools/ps3tool.py nidgen --rpcs3 DIR [--source-commit COMMIT] [--nids-out FILE] [--syscalls-out FILE]
 ```
 
@@ -39,6 +40,8 @@ python tools/ps3tool.py nidgen --rpcs3 DIR [--source-commit COMMIT] [--nids-out 
 - `ghidra-export` and `ghidra-diff` cross-check the decoder against Ghidra; see below.
 - `ghidra-summary` and `recover` find and delimit functions; see [Function recovery](function-recovery.md#function-recovery).
 - `emit` writes C source for the recovered functions; see [Emitting C](emitter.md#emitting-c).
+  `--symbol-prefix NAME` prefixes the file names and global symbols of the output; a PRX needs it and
+  the main executable refuses it (see [A PRX module](emitter.md#a-prx-module-libsre)).
 - `nidgen` builds the name tables from RPCS3 sources; see below.
 
 Run `python tools/ps3tool.py <command> --help` for the full option list.
@@ -57,6 +60,30 @@ current tools; the `disasm --stats` numbers are from the first measurement of th
   [Function recovery](function-recovery.md#report)).
 - `disasm --stats`: `.text` is `0x00010240..0x00c8f3d4`, 3,275,877 words, of which 9,687 (0.30%) do
   not decode. Strict decoding rejects 213 more (`fdiv` 127, `frsqrte` 58, `fsqrt` 24, `fsub` 4).
+
+## PRX input
+
+libsre (`libsre.prx`) is a PRX, a shared module without sections whose module info (name, version,
+TOC and the export and import tables) sits at the file offset in `p_paddr` of its first program header.
+The tools read it after `tox2_decrypt reloc` has placed it at `0x011d0000` and applied its
+relocations (`generated/inputs/libsre.reloc.elf`, see [Decrypting the inputs](building.md#decrypting-the-inputs)):
+
+- `info` takes imports and exports from the module info and prints `module:   cellSre_Library 1.1 toc
+  0x01209ab0`. The summary has a `module_info` object. A PRX has no entry function, so `entry` shows
+  `func=None` with the module TOC. The pin that it checks is `libsre_reloc_elf` for the relocated file
+  and `libsre_prx` for the unrelocated one. The default output file is still
+  `generated/analysis/eboot_info.json`, so pass `-o` for libsre.
+- `recover` and `emit` refuse an unrelocated PRX (`PRX with unapplied relocations; pass the file written
+  by tox2_decrypt reloc`). The text range is the code plus the 32 import thunks, and the function
+  descriptor scan steps by 4 bytes, because libsre's descriptors sit at offsets that are 4 modulo 8.
+  The default `config/extra_seeds.json` belongs to the executable and is not read for a PRX.
+  `recover` needs `--no-ghidra`, and `emit` needs `--symbol-prefix` and `--db config/libsre_functions.json`.
+- `probe`, `disasm` and the Ghidra commands were written for the executable and have not been run on libsre.
+
+What `info` reports for libsre: 3 program headers (the relocation header is kept with its type
+cleared), 2 import modules with 32 functions (31 have a name; sysPrxForUser FNID `0x9fb6228e` has
+none in `config/nids.json`) and 267 exports. `recover` and `emit` are described in
+[Function recovery](function-recovery.md#on-libsre) and [Emitting C](emitter.md#a-prx-module-libsre).
 
 ## Ghidra cross-check
 
@@ -144,5 +171,7 @@ status if the syscall table disagrees with its own comments.
 `EBOOT.bin` and the decrypted `EBOOT.elf` that the tools were written against. It never
 contains paths. `ps3tool.py info` compares the input with the `eboot_elf` entry so analysis
 results are only trusted for the expected build. The file also pins the size, SHA-256 and firmware
-version of `libsre.prx`, which `tox2_decrypt` checks (see
+version of `libsre.prx`, and the base address, size and SHA-256 of `libsre.reloc.elf` in the
+`libsre_reloc_elf` entry (the base `0x011d0000` is read by CMake for the build and has its second
+home in `runtime/src/hle/libsre.h`). `tox2_decrypt` checks these (see
 [Decrypting the inputs](building.md#decrypting-the-inputs)).

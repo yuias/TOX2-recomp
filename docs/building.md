@@ -20,11 +20,11 @@ then configures, builds, and optionally runs CTest.
 | `-Preset debug\|release` | The CMake preset (default `debug`). Build output goes to `build/<preset>/`, executables to `build/<preset>/bin/`. |
 | `-Clean` | Delete `build/<preset>/` before configuring. This also deletes the default hdd directory `build/<preset>/hdd` (game data and saves). |
 | `-Test` | Run CTest after the build. Which tests run depends on the other parameters; see [Tests](tests.md). |
-| `-GeneratedDir <dir>` | The directory written by `ps3tool.py emit --out <dir>`. Compiles it into `tox2_ppu_generated` and builds `tox2_game` and the link test. This game's executable is large, so it is emitted with `--chunks 256` and a full build compiles 256 generated C files; if the compiler runs out of memory, lower the parallelism with the `CMAKE_BUILD_PARALLEL_LEVEL` environment variable. Without it only the runtime libraries, tools and unit tests are built. If the directory has no `sources.cmake`, configuration fails and prints the `emit` command to run. CMake variable `TOX2_PPU_GENERATED_DIR`. |
+| `-GeneratedDir <dir>` | The directory written by `ps3tool.py emit --out <dir>`. Compiles it into `tox2_ppu_generated` and builds `tox2_game` and the link test. This game's executable is large, so it is emitted with `--chunks 256` and a full build compiles 256 generated C files; if the compiler runs out of memory, lower the parallelism with the `CMAKE_BUILD_PARALLEL_LEVEL` environment variable. Without it only the runtime libraries, tools and unit tests are built. The directory must hold the executable's `sources.cmake` and the libsre tree `<dir>/libsre/libsre_sources.cmake` (the second `emit` command in [Emitting C](emitter.md#a-prx-module-libsre)); if one is missing, configuration fails and prints the `emit` command to run. CMake variable `TOX2_PPU_GENERATED_DIR`. |
 | `-GameDir <dir>` | The game directory (the one that contains `PS3_GAME`). The `game_boot` test runs against it (it also needs `-EbootElf` or `-EbootBin`). CMake variable `TOX2_GAME_DIR`. |
 | `-EbootElf <path>` | The decrypted executable for the Python tests that read the real ELF and for the game tests. Not needed to build. When `-EbootBin` is given and this is not, it defaults to `generated/inputs/EBOOT.elf`, the file that `-EbootBin` produces. CMake variable `TOX2_EBOOT_ELF`. |
 | `-EbootBin <path>` | The disc's `PS3_GAME/USRDIR/EBOOT.BIN`. The build decrypts it into `generated/inputs/EBOOT.elf`; see [Decrypting the inputs](#decrypting-the-inputs). The file must exist. CMake variable `TOX2_EBOOT_BIN`. |
-| `-Pup <path>` | The firmware 4.93 `PS3UPDAT.PUP`. The build extracts `libsre.prx` from it into `generated/inputs/libsre.prx`. The file must exist. CMake variable `TOX2_PUP`. |
+| `-Pup <path>` | The firmware 4.93 `PS3UPDAT.PUP`. The build extracts `libsre.prx` from it into `generated/inputs/libsre.prx` and relocates it into `generated/inputs/libsre.reloc.elf`. It is required to play: `tox2_game` loads `libsre.reloc.elf`, the libsre emit step reads it, and `game_boot` is registered only with it. The file must exist. CMake variable `TOX2_PUP`. |
 | `-Rpcs3CryptoDir <dir>` | The `rpcs3/Crypto` directory of a local RPCS3 checkout, used for the keys instead of the download. The directory must exist. CMake variable `TOX2_RPCS3_CRYPTO_DIR`. |
 | `-LlvmBin <dir>` | Put this LLVM `bin` directory first on `PATH`. Defaults to the `TOX2_LLVM_BIN` environment variable. Use it when the clang bundled with Visual Studio is too old or clang is not on `PATH`. |
 
@@ -68,12 +68,15 @@ both presets, never into the game directory):
 | --- | --- | --- |
 | `generated/inputs/EBOOT.elf` | The decrypted `EBOOT.BIN` | `-EbootBin` is given |
 | `generated/inputs/libsre.prx` | `dev_flash/sys/external/libsre.sprx`, extracted from the PUP and decrypted | `-Pup` is given |
+| `generated/inputs/libsre.reloc.elf` | `libsre.prx` placed at the guest address `0x011d0000` with its relocations applied (`tox2_decrypt reloc`). `emit` and `recover` read it, and `tox2_game` loads it | `-Pup` is given |
 
 Decryption runs at build time, not at configure time, and again only when an input file or the tool
 has changed. The produced `EBOOT.elf` is the default of `TOX2_EBOOT_ELF`, so `emit`, the Python
 real-executable tests and `game_boot` use it. The usual order is: build once with the two files, run
-`ps3tool.py emit generated/inputs/EBOOT.elf --chunks 256 --out generated/ppu`, then build again with
-`-GeneratedDir generated/ppu -GameDir <game-dir>`; the cache keeps the earlier parameters.
+both emit commands (`ps3tool.py emit generated/inputs/EBOOT.elf --chunks 256 --out generated/ppu` and
+`ps3tool.py emit generated/inputs/libsre.reloc.elf --db config/libsre_functions.json --symbol-prefix libsre --chunks 4 --out generated/ppu/libsre --max-unhandled 0`),
+then build again with `-GeneratedDir generated/ppu -GameDir <game-dir>`; the cache keeps the earlier
+parameters.
 
 ### Keys
 
@@ -104,15 +107,19 @@ when one differs from the pin, and the output pins below catch a real problem.
   come from an earlier download. The tested file is 206197916 bytes with SHA-256
   `158471fd834f8ea8036136b6aab43cd86c7ba73d79ca30e0af3c0fe0001cf365`; the hash of the PUP itself is
   not enforced.
-- The output: its size and SHA-256 must match the `eboot_elf` or `libsre_prx` entry of
-  `config/target.json`. On a mismatch the tool prints both values and writes nothing, and an existing
+- For `libsre.reloc.elf`: the input `libsre.prx` must match the `libsre_prx` pin, and the base
+  address (`0x011d0000`, a multiple of 64 KiB) comes from the `libsre_reloc_elf` entry. Every
+  relocation record must apply to bytes that equal the value for the unrelocated, pre-linked file,
+  and an unknown relocation type is an error.
+- The output: its size and SHA-256 must match the `eboot_elf`, `libsre_prx` or `libsre_reloc_elf` entry
+  of `config/target.json`. On a mismatch the tool prints both values and writes nothing, and an existing
   output file stays as it was. A match is written as `<name>.part` and then renamed.
 
 NPDRM SELFs, debug SELFs and 32-bit (SPU) SELFs are refused with an error.
 
 ### The tool
 
-`tox2_decrypt` has three commands. The build runs `self` and `pup` with the pins read from
+`tox2_decrypt` has four commands. The build runs `self`, `pup` and `reloc` with the pins read from
 `config/target.json`; running `tox2_decrypt` without arguments prints the usage text and exits with 2.
 
 ```text
@@ -120,15 +127,21 @@ tox2_decrypt self --keys DIR --in EBOOT.BIN --out EBOOT.elf --expect-size N --ex
                   [--expect-input-sha256 HEX]
 tox2_decrypt pup  --keys DIR --in PS3UPDAT.PUP --path PATH --firmware VERSION --out libsre.prx
                   --expect-size N --expect-sha256 HEX
+tox2_decrypt reloc --in libsre.prx --base 0xADDR --out libsre.reloc.elf --expect-size N
+                  --expect-sha256 HEX [--expect-input-sha256 HEX]
 tox2_decrypt keys --keys DIR
 ```
 
 `--keys` is the directory with `key_vault.h` and `key_vault.cpp`. `pup` finds the file `PATH` (the
 build uses `dev_flash/sys/external/libsre.sprx`) in the `dev_flash_*` packages of the PUP. `keys`
-prints how many keys of each type were read, never the keys. A successful `self` or `pup` prints
+prints how many keys of each type were read, never the keys. `reloc` needs no keys: it reads the
+unrelocated `libsre.prx`, applies the relocations for the base `--base` (`0x`-prefixed hexadecimal, a
+multiple of `0x10000`; the build passes the pinned `0x011d0000`) and prints
+`relocated: <n> relocations (ADDR32 <a>, ADDR16_LO <b>, ADDR16_HI <c>, ADDR16_HA <d>), image <begin>..<end>`
+before the pin check. A successful `self`, `pup` or `reloc` prints
 `<name>: <size> bytes, sha256 <hex>: matches the pin`. Every error is one line that starts with
 `error: `, and no key bytes appear in any output. The exit code is 0 on success, 1 on a failure and 2
-on a usage error. The tests `decrypt_core`, `decrypt_eboot` and `decrypt_libsre` are listed in
+on a usage error. The tests `decrypt_core`, `decrypt_eboot`, `decrypt_libsre` and `decrypt_libsre_reloc` are listed in
 [Tests](tests.md).
 
 ## What gets built
@@ -142,7 +155,8 @@ the generated tables to the core. It checks the executable against the SHA-256 t
 code was emitted from.
 
 `tox2_decrypt` (with its library and the unit tests `tox2_decrypt_tests`) is always built. `tox2_inputs`,
-the target that writes `generated/inputs`, exists only with `-EbootBin` or `-Pup`.
+the target that writes `generated/inputs`, exists only with `-EbootBin` or `-Pup`. The generated code
+of the executable and of libsre are compiled together into `tox2_ppu_generated`.
 
 ## Test builds
 
@@ -158,15 +172,17 @@ Unit tests plus the Python tests that read the real executable:
 pwsh -NoProfile -File tools/build.ps1 -Preset release -EbootBin <game-dir>/PS3_GAME/USRDIR/EBOOT.BIN -Pup <path>/PS3UPDAT.PUP -Test
 ```
 
-This also runs `decrypt_eboot` and `decrypt_libsre`. With an `EBOOT.elf` that you already have,
+This also runs `decrypt_eboot`, `decrypt_libsre` and `decrypt_libsre_reloc`, and the Python tests that
+read the real `libsre.reloc.elf`. With an `EBOOT.elf` that you already have,
 `-EbootElf <path-to-EBOOT.elf>` replaces `-EbootBin` and `-Pup`.
 
 These tests expect the values of the pinned TOX2 executable (see [Tests](tests.md)).
 
-Generated code and the game run (`game_boot`):
+Generated code and the game run (`game_boot`, which needs `-Pup` because the run loads libsre; the
+earlier `-Pup` stays in the cache):
 
 ```powershell
-pwsh -NoProfile -File tools/build.ps1 -Preset release -GeneratedDir generated/ppu -EbootBin <game-dir>/PS3_GAME/USRDIR/EBOOT.BIN -GameDir <game-dir> -Test
+pwsh -NoProfile -File tools/build.ps1 -Preset release -GeneratedDir generated/ppu -EbootBin <game-dir>/PS3_GAME/USRDIR/EBOOT.BIN -Pup <path>/PS3UPDAT.PUP -GameDir <game-dir> -Test
 ```
 
 The full list of tests and the conditions under which each one is registered are in

@@ -23,23 +23,27 @@
 | `tools/tox2_audiotool/` | `tox2_audiotool`: WAV statistics, device list, tone and WAV playback, ATRAC3plus archive scan and decode; see [`tox2_audiotool`](audio.md#tox2_audiotool) |
 | `cmake/Audio.cmake` | Audio targets and tests (`audio_core`, `audio_wasapi`) |
 | `tools/build.ps1` | Windows build wrapper |
-| `tools/tox2_decrypt/` | `tox2_decrypt`: decrypts `EBOOT.BIN` and extracts `libsre.prx` from a firmware `PS3UPDAT.PUP`, with its synthetic unit tests; see [Decrypting the inputs](building.md#decrypting-the-inputs) |
-| `cmake/Decrypt.cmake`, `cmake/rpcs3_keys.cmake` | The `tox2_decrypt` targets, the `tox2_inputs` target that writes `generated/inputs` and the tests `decrypt_core`, `decrypt_eboot`, `decrypt_libsre`; and the pin of the two RPCS3 key files and their download |
+| `tools/tox2_decrypt/` | `tox2_decrypt`: decrypts `EBOOT.BIN`, extracts `libsre.prx` from a firmware `PS3UPDAT.PUP` and relocates it to `libsre.reloc.elf` (`prx_reloc.*`), with its synthetic unit tests; see [Decrypting the inputs](building.md#decrypting-the-inputs) |
+| `cmake/Decrypt.cmake`, `cmake/rpcs3_keys.cmake` | The `tox2_decrypt` targets, the `tox2_inputs` target that writes `generated/inputs` and the tests `decrypt_core`, `decrypt_eboot`, `decrypt_libsre`, `decrypt_libsre_reloc`; and the pin of the two RPCS3 key files and their download |
 | `tools/ps3tool.py` | Command-line entry point for the analysis tools |
-| `tools/ps3recomp/` | ELF/PRX parsing, PPU decoder and formatter, probe, Ghidra export, diff and summary, function recovery (seeds, partition, jump tables, coverage, syscall resolution), name table generator |
+| `tools/ps3recomp/` | ELF/PRX parsing (module info of a relocated PRX), PPU decoder and formatter, probe, Ghidra export, diff and summary, function recovery (seeds, partition, jump tables, coverage, syscall resolution), name table generator |
 | `tools/ghidra/` | Java `GhidraScript`s run by `ghidra-export` |
 | `tools/ps3recomp/emit*.py` | The `emit` command: function DB loader and census, per-instruction handlers by group, output writer and report |
 | `tools/tests/` | Unit tests |
 | `tools/tests/ppu_semantics/` | Semantics harness cases and the C generator; see [Semantics harness](emitter.md#semantics-harness) |
 | `runtime/include/tox2/` | Contract header and inline helpers for generated code |
-| `config/target.json` | Pinned size and hashes of the target executable (`EBOOT.BIN` and `EBOOT.elf`), and of the firmware `libsre.prx` with its firmware version |
+| `config/target.json` | Pinned size and hashes of the target executable (`EBOOT.BIN` and `EBOOT.elf`), of the firmware `libsre.prx` with its firmware version, and of `libsre.reloc.elf` with its base address |
 | `config/vfs.example.json` | Example VFS configuration for `tox2_game --vfs-config`, placeholder paths only; see [VFS configuration file](virtual-file-system.md#vfs-configuration-file) |
 | `config/nids.json`, `config/lv2_syscalls.json` | FNID and lv2 syscall name tables generated from RPCS3 sources |
 | `config/ghidra_summary.json`, `config/extra_seeds.json`, `config/functions.json` | Ghidra summary, extra function starts and the recovered function database. See [Function recovery](function-recovery.md#function-recovery) |
+| `config/libsre_functions.json` | The recovered function database of libsre, committed like `config/functions.json`; see [Function recovery](function-recovery.md#on-libsre) |
+| `runtime/src/hle/libsre.*` | The libsre layout header (the guest addresses of the relocated image, `kBase` and the others) and the check of a loaded image against it; see [libsre](runtime.md#libsre) |
+| `runtime/src/core/elf_loader.*`, `dispatch.*` | The executable and PRX loaders, and the dispatch tables with one span per loaded image |
 | `docs/` | Development documentation |
 | `LICENSE`, `THIRD_PARTY_NOTICES.md` | Licence of this project (0BSD) and notices of third-party components (FFmpeg, GameInput, the RPCS3 key files) |
 | `generated/` | Tool output, including `generated/ppu` from `emit` (git-ignored) |
-| `generated/inputs/` | The decrypted `EBOOT.elf` and `libsre.prx` written by the build with `-EbootBin` and `-Pup` (git-ignored) |
+| `generated/ppu/libsre/` | The C code of libsre from `emit --symbol-prefix libsre`, with every file and symbol prefixed `libsre` (git-ignored); see [A PRX module](emitter.md#a-prx-module-libsre) |
+| `generated/inputs/` | The decrypted `EBOOT.elf`, `libsre.prx` and `libsre.reloc.elf` (`libsre.prx` relocated to `0x011d0000`) written by the build with `-EbootBin` and `-Pup` (git-ignored) |
 | `generated/deps/rpcs3/` | The downloaded RPCS3 key files `key_vault.h` and `key_vault.cpp`, one directory per commit (git-ignored) |
 | `build/` | Build output (git-ignored) |
 | `game/` | Suggested place for your own `EBOOT.elf` (git-ignored) |

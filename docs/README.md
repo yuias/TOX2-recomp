@@ -16,7 +16,7 @@ parameter and describe how the project works:
 | [rendering.md](rendering.md) | Fake RSX, the Vulkan renderer, and capture and replay |
 | [movies.md](movies.md) | The Bink movies of this game (not handled), and the inherited cellSail HLE, PAMF demuxing and FFmpeg movie decoding (built, unused) |
 | [audio.md](audio.md) | `cellAudio` and `cellAtrac`, the audio engine and block clock, the WASAPI output, options, log lines and `tox2_audiotool` |
-| [spu.md](spu.md) | How the game uses the SPUs: the embedded SPU images, SPURS and SPU thread group setup, what a run reaches, entry points to cover |
+| [spu.md](spu.md) | How the game uses the SPUs: the embedded SPU images, where the SPURS code lives (libsre), SPURS and SPU thread group setup, what a run reaches, entry points to cover |
 | [input.md](input.md) | Gamepads: supported pads, mapping, the GameInput runtime, Steam, the gamepad thread, device selection, log lines, `--pad-probe` and `tox2_padtool` |
 | [tests.md](tests.md) | CTest targets, the `game_boot` test and the Python unit tests |
 | [layout.md](layout.md) | Repository layout |

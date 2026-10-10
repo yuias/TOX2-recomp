@@ -10,7 +10,9 @@ pwsh -NoProfile -File tools/build.ps1 -Preset release -GeneratedDir generated/pp
 ```
 
 The `--chunks` default is 16. This executable has about 3 million code words, so it is emitted
-with `--chunks 256`; see [Chunks and build time](#chunks-and-build-time).
+with `--chunks 256`; see [Chunks and build time](#chunks-and-build-time). The firmware module libsre
+is emitted as a second tree with its own symbol prefix; see [A PRX module (libsre)](#a-prx-module-libsre).
+A build with `-GeneratedDir` needs both trees.
 
 `emit` reads the function database (`--db`, default `config/functions.json`), checks that it
 matches the ELF's hash and code range, and emits every function of the database as one C
@@ -19,7 +21,7 @@ function named `fn_<address>`. Branches inside a function become labels `L_<addr
 `musttail` returns, and transfers to computed targets go through `tox2Dispatch`. Backward
 edges carry a hook (`TOX2_LOOP`) that counts a preemption budget. Import stubs become
 trampolines `imp_<address>` that call the runtime hook `tox2HleCall` with an index into the
-generated import table. The output is deterministic: two runs on the same inputs write
+generated import table (in a prefixed tree they call `tox2HleCallImport`, see below). The output is deterministic: two runs on the same inputs write
 byte-identical files, and a file is only rewritten when its content changes.
 
 ## Output
@@ -61,6 +63,52 @@ import trampolines (467 `switch` statements, 3,741 cases), and `--max-unhandled 
 These numbers come from running `emit --census` and `emit --chunks 256` on the committed
 database. The heaviest mnemonics are `addi` (12.1%), `lwz` (11.7%), `rldicl` (8.1%) and `bc` (8.0%).
 
+## A PRX module (libsre)
+
+`emit` also reads a relocated PRX, the file `generated/inputs/libsre.reloc.elf` that the build with
+`-Pup` writes. The module's code is emitted with `--symbol-prefix`, which every generated file name and
+global symbol then carries, so that two images can be linked into one program:
+
+```sh
+python tools/ps3tool.py emit generated/inputs/libsre.reloc.elf --db config/libsre_functions.json --symbol-prefix libsre --chunks 4 --out generated/ppu/libsre --max-unhandled 0
+```
+
+`--symbol-prefix NAME` (`[a-z][a-z0-9]*`) is required for a PRX and refused for the main executable
+(exit 2), so the executable is always the unprefixed image. An unrelocated PRX is refused (exit 3).
+The `--report` and `--census-out` defaults get the prefix too
+(`generated/analysis/libsre_emit_report.json`, `libsre_emit_census.json`). With the prefix `libsre`
+(Pascal form `Libsre`) the output differs from the executable's as follows:
+
+| Item | Executable | libsre |
+| --- | --- | --- |
+| Function, trampoline | `fn_<address>`, `imp_<address>` | `libsre_fn_<address>`, `libsre_imp_<address>` |
+| Files | `ppu_chunk_NNN.c`, `ppu_imports.c`, `ppu_tables.c`, `ppu_funcs.h`, `sources.cmake` | `libsre_ppu_chunk_NNN.c`, `libsre_ppu_imports.c`, `libsre_ppu_tables.c`, `libsre_ppu_funcs.h`, `libsre_ppu_tables.h`, `libsre_sources.cmake` |
+| Source list variable | `TOX2_PPU_GENERATED_SOURCES` | `TOX2_LIBSRE_PPU_GENERATED_SOURCES` |
+| Tables | `kTox2PpuFuncMappings`, `kTox2PpuImports`, `kTox2PpuExecutableSha256` and their counts | `kTox2LibsrePpuFuncMappings`, `kTox2LibsrePpuImports`, `kTox2LibsrePpuExecutableSha256`, their counts, and the export table `kTox2LibsrePpuExports` with `kTox2LibsrePpuExportCount` |
+| Trampoline body | `TOX2_HLE(i);` | `TOX2_HLE_IMPORT(kTox2LibsrePpuImports, i);` |
+
+The trampolines of a module call `tox2HleCallImport` with a pointer into that module's own import
+table, so a module needs no agreed numeric id and the executable's output stays byte-identical to what
+it was before libsre. `libsre_ppu_tables.h` declares the tables inside `extern "C"` for `game_main.cpp`.
+The export table has one row per function export of the module info, sorted by module and FNID:
+`{descriptor address, fnid, module}`. Exports that share a descriptor have separate rows. `emit` fails
+(exit 3) when an export's descriptor names a function that is not in the database. An empty table is
+written with one zero entry and a count of 0.
+
+The CMake function that adds the generated tree (`tox2_ppu_add_generated_tree`) includes the
+executable's `sources.cmake` and `<dir>/libsre/libsre_sources.cmake`, and stops with the emit command
+above when the second one is missing. `ppu_link` also registers and checks libsre's tables.
+
+For the committed database `config/libsre_functions.json` (352 functions, see
+[Function recovery](function-recovery.md#on-libsre)), the emit run gives:
+
+- 352 functions, 30,136 instructions, 32 import trampolines, 267 export rows and 384 function
+  mappings (the functions plus the trampolines). `--max-unhandled 0` exits with 0.
+- 4 chunks of 84 to 91 functions and 7,371 to 7,644 instructions each, 1.96 MB of C in total. The
+  heaviest function (`0x011d75dc`) has 851 instructions, and `emit` runs in under a second.
+- 2 `switch` statements with 14 cases, 177 system call sites, no traps, 481 direct calls, 450 calls
+  of import trampolines, 28 indirect calls and 15 direct tail calls.
+
 ## Chunks and build time
 
 The size of the C output follows the code size: with `--chunks 256` the 29,196 functions
@@ -85,9 +133,11 @@ all of them). `ppu_context.h` is the contract between generated code and a runti
   FPSCR, VSCR, reservation, call trace) and the vector and FPR types;
 - guest memory accessors for a flat big-endian 32-bit address space, where `base` must point
   at a reservation of 4 GiB plus a guard area;
-- the hooks the runtime implements: `tox2Dispatch`, `tox2HleCall`, `tox2Syscall`, `tox2Yield`,
-  `tox2Unhandled`, `tox2Trap`, the reservation and cache operations, `tox2Mftb` and the FPSCR
-  moves.
+- the hooks the runtime implements: `tox2Dispatch`, `tox2HleCall`, `tox2HleCallImport`,
+  `tox2Syscall`, `tox2Yield`, `tox2Unhandled`, `tox2Trap`, the reservation and cache operations,
+  `tox2Mftb` and the FPSCR moves;
+- `Tox2ExportInfo` (function descriptor address, FNID and module name of one export), which the
+  tables of a prefixed tree use.
 
 `TOX2_TAIL` expands to a `do { ... } while (0)` block around the `musttail` return. Without the
 block, a label directly in front of a tail call (the emitter writes `L_<address>:` before the
@@ -101,8 +151,8 @@ they follow.
 
 `runtime/src/ppu_stub_runtime.cpp` (library `tox2_ppu_stub`) implements the hooks only far
 enough to link and test generated code: dispatch works, and every hook that would need the
-system (HLE calls, unknown targets, unhandled words, traps) prints a message and exits with
-an error status. Syscalls only set `r3` to 0. `ppu_stub.h` holds test-only additions. The stub
+system (HLE calls including `tox2HleCallImport`, unknown targets, unhandled words, traps) prints a
+message and exits with an error status. Syscalls only set `r3` to 0. `ppu_stub.h` holds test-only additions. The stub
 is only for the link check, the header check and the semantics harness; the runtime that runs the
 game is described in [Runtime internals](runtime.md).
 
