@@ -5,6 +5,8 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
+from tests import ppc_asm as asm
+
 PT_LOAD = 1
 
 _SHT_STRTAB = 3
@@ -18,6 +20,7 @@ class FixtureSegment:
     memsz: int | None = None
     flags: int = 4
     align: int = 0x10
+    paddr: int | None = None      # default: same as vaddr
 
 
 @dataclass
@@ -105,7 +108,8 @@ def build_elf64_be(*, entry: int, segments: list[FixtureSegment],
     buf[0:ehsize] = ehdr
     for i, (seg, off) in enumerate(zip(segments, offsets)):
         memsz = seg.memsz if seg.memsz is not None else len(seg.data)
-        phdr = struct.pack(">IIQQQQQQ", seg.p_type, seg.flags, off, seg.vaddr, seg.vaddr,
+        paddr = seg.vaddr if seg.paddr is None else seg.paddr
+        phdr = struct.pack(">IIQQQQQQ", seg.p_type, seg.flags, off, seg.vaddr, paddr,
                            len(seg.data), memsz, seg.align)
         buf[ehsize + i * phentsize:ehsize + (i + 1) * phentsize] = phdr
     return bytes(buf)
@@ -186,6 +190,96 @@ def build_ps3_fixture(with_spu: bool = False) -> bytes:
             FixtureSection(".missing", 1, 0x90000, 0x40),
         ],
     )
+
+
+# Link-time layout of the PRX fixture (a miniature of libsre.prx): segment 0 holds code, two
+# import thunks, the library tables and the module info; segment 1 holds the import slots, the
+# function descriptors (4 mod 8, like libsre's) and the TOC. A relocated image adds `base` to
+# every address.
+PRX_SEG0 = 0
+PRX_SEG1 = 0x1000
+PRX_FUNCS = (0x00, 0x20, 0x40)           # the third one is reached through its descriptor only
+PRX_CODE_END = 0x60
+PRX_THUNKS = (0x60, 0x80)
+PRX_THUNKS_END = 0xA0
+PRX_LIBENT = (0xA0, 0xBC)
+PRX_LIBSTUB = (0xC8, 0xF4)
+PRX_MODULE_INFO = 0x110
+PRX_SLOTS = (0x1000, 0x1004)
+PRX_OPDS = (0x1014, 0x101C, 0x1024)
+PRX_TOC = 0x1040
+PRX_FNIDS = (0x11111111, 0x22222222)
+PRX_EXPORT_FNID = 0x33333333
+PRX_SEG0_SIZE = 0x1000
+PRX_SEG1_SIZE = 0x80
+PRX_NAME = "fixSre_Library"
+
+
+def build_prx_fixture(relocated: bool, base: int = 0x20000) -> bytes:
+    """A small pre-linked PRX shaped like libsre.prx.
+
+    `relocated=False` is the file as the linker wrote it: link addresses, segment 0's `p_memsz`
+    reaching into segment 1, and a SCE_PPURELA header. `relocated=True` is the output of
+    `tox2_decrypt reloc` for `base`: addresses moved, `p_memsz` trimmed, the header turned into
+    PT_NULL.
+    """
+    bias = base if relocated else 0
+    seg0 = bytearray(PRX_SEG0_SIZE)
+    seg1 = bytearray(PRX_SEG1_SIZE)
+    toc = PRX_TOC + bias
+    funcs = [PRX_FUNCS[0] + bias, PRX_FUNCS[1] + bias, PRX_FUNCS[2] + bias]
+
+    def put(buf: bytearray, offset: int, fmt: str, *values) -> None:
+        struct.pack_into(fmt, buf, offset, *values)
+
+    put(seg0, 0, ">%dI" % (PRX_CODE_END // 4), *[asm.nop()] * (PRX_CODE_END // 4))
+    # f0 calls f1; f2 has a descriptor but no caller.
+    put(seg0, 0x00, ">4I", asm.mflr(0), asm.bl(funcs[0] + 4, funcs[1]),
+        asm.encode("mtspr", SPR=8, rS=0), asm.blr())
+    put(seg0, 0x20, ">2I", asm.nop(), asm.blr())
+    put(seg0, 0x40, ">2I", asm.nop(), asm.blr())
+
+    # Import thunks: build the slot address, save r2, load the callee's descriptor, jump.
+    for thunk, slot in zip(PRX_THUNKS, PRX_SLOTS):
+        address = slot + bias
+        ha = ((address + 0x8000) >> 16) & 0xFFFF
+        lo = address & 0xFFFF
+        lo_signed = lo - 0x10000 if lo >= 0x8000 else lo
+        put(seg0, thunk, ">8I", asm.lis(11, ha),
+            asm.lwz(12, lo_signed, 11), asm.encode("std", rS=2, rA=1, DS=40),
+            asm.lwz(0, 0, 12), asm.lwz(2, 4, 12), asm.mtctr(0), asm.bctr(), asm.nop())
+
+    # Library tables: one export (function 0), one import module with two functions.
+    put(seg0, 0xA0, ">BBHHHHHBB2sIII", 0x1C, 0, 1, 0, 1, 0, 0, 0, 0, b"\0\0",
+        0xFC + bias, 0xC0 + bias, 0xC4 + bias)
+    put(seg0, 0xC0, ">I", PRX_EXPORT_FNID)
+    put(seg0, 0xC4, ">I", PRX_OPDS[0] + bias)
+    put(seg0, 0xC8, ">BBHHHHHBB2sIIIIIII", 0x2C, 0, 1, 0x0009, 2, 0, 0, 0, 0, b"\0\0",
+        0xF4 + bias, 0x108 + bias, PRX_SLOTS[0] + bias, 0, 0, 0, 0)
+    seg0[0xF4:0xFB] = b"fixImp\0"
+    seg0[0xFC:0x103] = b"fixExp\0"
+    put(seg0, 0x108, ">2I", *PRX_FNIDS)
+    put(seg0, PRX_MODULE_INFO, ">HBB28sIIIII", 0, 1, 1, PRX_NAME.encode("ascii"), toc,
+        PRX_LIBENT[0] + bias, PRX_LIBENT[1] + bias, PRX_LIBSTUB[0] + bias,
+        PRX_LIBSTUB[1] + bias)
+
+    for i, thunk in enumerate(PRX_THUNKS):
+        put(seg1, PRX_SLOTS[i] - PRX_SEG1, ">I", thunk + bias)
+    for opd, func in zip(PRX_OPDS, funcs):
+        put(seg1, opd - PRX_SEG1, ">II", func, toc)
+
+    rela = struct.pack(">QQq", 0, 1 | 1 << 32 | 1 << 40, 0)
+    segments = [
+        FixtureSegment(PT_LOAD, PRX_SEG0 + bias, bytes(seg0), flags=5, align=0x80,
+                       memsz=PRX_SEG0_SIZE if relocated else PRX_SEG0_SIZE + 0x100),
+        FixtureSegment(PT_LOAD, PRX_SEG1 + bias, bytes(seg1), flags=6, align=0x80,
+                       memsz=PRX_SEG1_SIZE + 0x40),
+        FixtureSegment(0 if relocated else 0x700000A4, 0, rela, flags=0, align=8),
+    ]
+    # Program header 0's p_paddr is the file offset of the module info.
+    seg0_offset = _layout_segments(segments, 64 + 56 * len(segments))[0]
+    segments[0].paddr = seg0_offset + PRX_MODULE_INFO
+    return build_elf64_be(entry=0, segments=segments, e_type=0xFFA4)
 
 
 def build_elf32_be(*, entry: int, segments: list[FixtureSegment],

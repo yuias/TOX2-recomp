@@ -95,7 +95,7 @@ def collect_seeds(elf: ElfFile) -> tuple[int | None, list[int]]:
     """TOC base and the sorted unique function addresses known from the entry and exports."""
     try:
         entry = cell.parse_entry(elf)
-        seeds = {entry.func}
+        seeds = set() if entry.func is None else {entry.func}
         prx = cell.parse_prx_param(elf)
         if prx is not None:
             for module in cell.parse_exports(elf, prx):

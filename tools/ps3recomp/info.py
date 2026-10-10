@@ -165,14 +165,41 @@ def _export_json(mod: cell.ExportModule) -> dict:
     return out
 
 
+def _range_json(rng: tuple[int, int]) -> dict:
+    return {"start": _hex(rng[0]), "end": _hex(rng[1])}
+
+
+def _module_info_json(elf: ElfFile, info: cell.ModuleInfo) -> dict:
+    return {
+        "addr": _hex(info.addr),
+        "name": info.name,
+        "version": "%d.%d" % (info.version_major, info.version_minor),
+        "attributes": _hex(info.attributes),
+        "toc": _hex(info.toc),
+        "exports": _range_json((info.exports_start, info.exports_end)),
+        "imports": _range_json((info.imports_start, info.imports_end)),
+        "text_range": _range_json(cell.find_text_range(elf)),
+        "code_range": _range_json(cell.find_code_range(elf)),
+    }
+
+
+def pin_key(elf: ElfFile) -> str:
+    """The target config entry that pins this input."""
+    if cell.is_prx(elf):
+        return "libsre_prx" if cell.has_unapplied_relocations(elf) else "libsre_reloc_elf"
+    return "eboot_elf"
+
+
 def build_summary(elf: ElfFile, path: str, size: int, sha256: str, pin: str,
                   nid_table: NidTable | None = None) -> dict:
     entry = cell.parse_entry(elf)
     prx = cell.parse_prx_param(elf)
-    imports = cell.parse_imports(elf, prx) if prx is not None else []
-    exports = cell.parse_exports(elf, prx) if prx is not None else []
+    module_info = cell.parse_module_info(elf)
+    tables = cell.library_tables(elf)
+    imports = cell.parse_imports(elf, tables) if tables is not None else []
+    exports = cell.parse_exports(elf, tables) if tables is not None else []
     opd = cell.parse_opd_section(elf)
-    return {
+    summary = {
         "schema": SCHEMA,
         "input": {"path": path, "size": size, "sha256": sha256, "pin": pin},
         "elf": {
@@ -201,6 +228,9 @@ def build_summary(elf: ElfFile, path: str, size: int, sha256: str, pin: str,
         "imports": [_import_json(m, nid_table) for m in imports],
         "exports": [_export_json(m) for m in exports],
     }
+    if module_info is not None:
+        summary["module_info"] = _module_info_json(elf, module_info)
+    return summary
 
 
 def load_config(path: Path) -> dict:
@@ -268,12 +298,13 @@ def _run(args: argparse.Namespace) -> int:
 
     pin = "skipped"
     if config is not None:
-        pinned = pinned_sha(config, "eboot_elf")
+        key = pin_key(elf)
+        pinned = pinned_sha(config, key)
         if pinned is None:
             pin = "unpinned"
-            print("note: no eboot_elf sha256 is pinned; size=%d sha256=%s\n"
-                  "      record them under eboot_elf in the target config to pin this input"
-                  % (len(data), sha256), file=sys.stderr)
+            print("note: no %s sha256 is pinned; size=%d sha256=%s\n"
+                  "      record them under %s in the target config to pin this input"
+                  % (key, len(data), sha256, key), file=sys.stderr)
         else:
             pin = "verified" if pinned == sha256 else "mismatch"
 
@@ -295,6 +326,9 @@ def _run(args: argparse.Namespace) -> int:
     print("sha256:   %s" % sha256)
     print("pin:      %s" % pin)
     print("entry:    func=%s toc=%s (%s)" % (entry["func"], entry["toc"], entry["kind"]))
+    if "module_info" in summary:
+        module = summary["module_info"]
+        print("module:   %s %s toc %s" % (module["name"], module["version"], module["toc"]))
     print("segments: %d" % len(summary["segments"]))
     print("sections: %d" % len(summary["sections"]))
     import_funcs = [(m["name"], f) for m in summary["imports"] for f in m["functions"]]
@@ -310,7 +344,7 @@ def _run(args: argparse.Namespace) -> int:
 
     if pin == "mismatch":
         raise CliError(EXIT_PIN_MISMATCH,
-                        "SHA-256 %s does not match the pinned eboot_elf value" % sha256)
+                        "SHA-256 %s does not match the pinned %s value" % (sha256, key))
     return EXIT_OK
 
 

@@ -5,19 +5,25 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-from .elf import SHT_NOBITS, ElfError, ElfFile, Segment
+from .elf import PT_LOAD, SHT_NOBITS, ElfError, ElfFile, Segment
 
 PT_TLS = 7
+PT_SCE_PPURELA = 0x700000A4
 PT_SCE_PROC_PARAM = 0x60000001
 PT_SCE_PRX_PARAM = 0x60000002
 
 SHF_EXECINSTR = 0x4
+
+PRX_TYPE = 0xFFA4
 
 PROC_PARAM_MAGIC =0x13BCC5F6
 PRX_PARAM_MAGIC = 0x1B434CEC
 
 IMPORT_ENTRY_SIZE = 0x2C
 EXPORT_ENTRY_SIZE = 0x1C
+MODULE_INFO_SIZE = 0x34
+# Import thunks are padded to this size, so the last one ends this far past its start.
+_THUNK_SIZE = 32
 
 _OPD = struct.Struct(">II")
 _PROC_PARAM = struct.Struct(">IIIIiIII")
@@ -25,14 +31,29 @@ _PRX_PARAM = struct.Struct(">IIIIIIIIHHI")
 _LIBSTUB = struct.Struct(">BBHHHHHBB2sIIIIIII")
 # Same leading 16 bytes as a libstub entry, then name / nids / addrs.
 _LIBENT = struct.Struct(">BBHHHHHBB2sIII")
+_MODULE_INFO = struct.Struct(">HBB28sIIIII")
 
 
 @dataclass(frozen=True)
 class EntryInfo:
     kind: str
     opd_addr: int | None
-    func: int
+    func: int | None
     toc: int | None
+
+
+@dataclass(frozen=True)
+class ModuleInfo:
+    addr: int
+    attributes: int
+    version_major: int
+    version_minor: int
+    name: str
+    toc: int
+    exports_start: int
+    exports_end: int
+    imports_start: int
+    imports_end: int
 
 
 @dataclass(frozen=True)
@@ -91,7 +112,68 @@ def _in_exec_segment(elf: ElfFile, va: int) -> bool:
     return any(s.p_vaddr <= va < s.p_vaddr + s.p_memsz for s in elf.exec_segments())
 
 
+def is_prx(elf: ElfFile) -> bool:
+    return elf.e_type == PRX_TYPE
+
+
+def has_unapplied_relocations(elf: ElfFile) -> bool:
+    """True while the file still carries its SCE_PPURELA header (it is not a relocated PRX)."""
+    return any(s.p_type == PT_SCE_PPURELA for s in elf.segments)
+
+
+def parse_module_info(elf: ElfFile) -> ModuleInfo | None:
+    """The module info of a PRX, or None for any other file.
+
+    Program header 0 is the code segment; its `p_paddr` holds the file offset of the module
+    info, which is how the loader finds it.
+    """
+    if not is_prx(elf):
+        return None
+    seg = elf.segments[0] if elf.segments else None
+    if seg is None or seg.p_type != PT_LOAD:
+        raise ElfError("PRX program header 0 is not a loadable segment")
+    addr = seg.p_vaddr + (seg.p_paddr - seg.p_offset)
+    if not seg.p_vaddr <= addr <= seg.p_vaddr + seg.p_filesz - MODULE_INFO_SIZE:
+        raise ElfError("PRX module info at 0x%x is outside the code segment" % addr)
+    (attributes, major, minor, name, toc, exports_start, exports_end, imports_start,
+     imports_end) = _MODULE_INFO.unpack(elf.read_va(addr, MODULE_INFO_SIZE))
+    name = name.split(b"\0", 1)[0].decode("ascii", errors="replace")
+    return ModuleInfo(addr, attributes, major, minor, name, toc, exports_start, exports_end,
+                      imports_start, imports_end)
+
+
+def library_tables(elf: ElfFile) -> dict | None:
+    """Export (`libent`) and import (`libstub`) table ranges of an executable or a PRX."""
+    info = parse_module_info(elf)
+    if info is None:
+        return parse_prx_param(elf)
+    return {"libent_start": info.exports_start, "libent_end": info.exports_end,
+            "libstub_start": info.imports_start, "libstub_end": info.imports_end}
+
+
+def _prx_ranges(elf: ElfFile) -> tuple[tuple[int, int], tuple[int, int]]:
+    """`(text, code)` of a PRX, which has no sections.
+
+    The import thunks sit directly after the module's code; text covers them, code does not.
+    """
+    parse_module_info(elf)
+    seg = elf.segments[0]
+    file_end = seg.p_vaddr + seg.p_filesz // 4 * 4
+    stubs = []
+    tables = library_tables(elf)
+    for module in parse_imports(elf, tables):
+        if not module.unknown_layout:
+            stubs.extend(f.slot_value for f in module.functions
+                         if seg.p_vaddr <= f.slot_value < file_end)
+    if not stubs:
+        return (seg.p_vaddr, file_end), (seg.p_vaddr, file_end)
+    return (seg.p_vaddr, max(stubs) + _THUNK_SIZE), (seg.p_vaddr, min(stubs))
+
+
 def parse_entry(elf: ElfFile) -> EntryInfo:
+    module_info = parse_module_info(elf)
+    if module_info is not None:
+        return EntryInfo("prx", None, None, module_info.toc)
     try:
         func, toc = _read_opd(elf, elf.e_entry)
     except ElfError:
@@ -122,7 +204,10 @@ def find_text_range(elf: ElfFile) -> tuple[int, int]:
     Picks the largest executable section backed by file data inside an executable
     segment (ties: lowest address). Sections are unnamed in RPCS3 output, so the name
     is never consulted. Without such a section the first executable segment is used.
+    A PRX has no sections; see `_prx_ranges`.
     """
+    if is_prx(elf):
+        return _prx_ranges(elf)[0]
     best: tuple[int, int] | None = None
     for start, end, _ in _code_sections(elf):
         if best is None or (end - start, -start) > (best[1] - best[0], -best[0]):
@@ -142,16 +227,19 @@ def find_code_range(elf: ElfFile) -> tuple[int, int]:
     The main code range (`find_text_range`) extended over the executable sections that
     directly adjoin it, such as the small initializer and finalizer sections. A gap
     below a section's alignment counts as adjoining. The import stub section is excluded.
+    For a PRX it is the module's code without its import thunks.
     """
+    if is_prx(elf):
+        return _prx_ranges(elf)[1]
     text = find_text_range(elf)
     sections = _code_sections(elf)
     first = next((sec for sec in sections if sec[:2] == text), None)
     if first is None:
         return text
     stubs: list[int] = []
-    prx = parse_prx_param(elf)
-    if prx is not None:
-        stubs = [f.slot_value for m in parse_imports(elf, prx) if not m.unknown_layout
+    tables = library_tables(elf)
+    if tables is not None:
+        stubs = [f.slot_value for m in parse_imports(elf, tables) if not m.unknown_layout
                  for f in m.functions]
     candidates = [sec for sec in sections
                   if not any(sec[0] <= addr < sec[1] for addr in stubs)]

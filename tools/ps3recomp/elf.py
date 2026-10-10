@@ -192,10 +192,18 @@ class ElfFile:
         return [s for s in self.loads() if s.p_flags & PF_X]
 
     def segment_for_va(self, va: int) -> Segment | None:
-        for s in self.loads():
-            if s.p_vaddr <= va < s.p_vaddr + s.p_memsz:
-                return s
-        return None
+        # A pre-linked PRX can have a segment whose `p_memsz` reaches into the next one; the
+        # segment whose file data holds the address owns it, then the later-starting one.
+        # This runs once per read, so it avoids building lists.
+        found = None
+        found_key = (False, 0)
+        for s in self.segments:
+            if s.p_type != PT_LOAD or not s.p_vaddr <= va < s.p_vaddr + s.p_memsz:
+                continue
+            key = (va < s.p_vaddr + s.p_filesz, s.p_vaddr)
+            if found is None or key > found_key:
+                found, found_key = s, key
+        return found
 
     def va_to_offset(self, va: int) -> int | None:
         s = self.segment_for_va(va)

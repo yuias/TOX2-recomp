@@ -141,6 +141,126 @@ class Ps3FixtureTest(unittest.TestCase):
         self.assertEqual(mods[0].functions, [])
 
 
+BASE = 0x20000
+
+
+class PrxFixtureTest(unittest.TestCase):
+    def setUp(self):
+        self.relocated = ElfFile.from_bytes(fx.build_prx_fixture(True, BASE))
+        self.unrelocated = ElfFile.from_bytes(fx.build_prx_fixture(False, BASE))
+
+    def test_type_and_unapplied_relocations(self):
+        self.assertTrue(cell.is_prx(self.relocated))
+        self.assertTrue(cell.is_prx(self.unrelocated))
+        self.assertFalse(cell.has_unapplied_relocations(self.relocated))
+        self.assertTrue(cell.has_unapplied_relocations(self.unrelocated))
+        ps3 = ElfFile.from_bytes(fx.build_ps3_fixture())
+        self.assertFalse(cell.is_prx(ps3))
+        self.assertFalse(cell.has_unapplied_relocations(ps3))
+
+    def test_module_info(self):
+        info = cell.parse_module_info(self.relocated)
+        self.assertEqual(info, cell.ModuleInfo(
+            BASE + fx.PRX_MODULE_INFO, 0, 1, 1, fx.PRX_NAME, BASE + fx.PRX_TOC,
+            BASE + fx.PRX_LIBENT[0], BASE + fx.PRX_LIBENT[1],
+            BASE + fx.PRX_LIBSTUB[0], BASE + fx.PRX_LIBSTUB[1]))
+
+    def test_module_info_of_the_unrelocated_file_uses_link_addresses(self):
+        info = cell.parse_module_info(self.unrelocated)
+        self.assertEqual((info.addr, info.toc), (fx.PRX_MODULE_INFO, fx.PRX_TOC))
+
+    def test_module_info_is_none_for_an_executable(self):
+        self.assertIsNone(cell.parse_module_info(ElfFile.from_bytes(fx.build_ps3_fixture())))
+
+    def test_module_info_outside_the_code_segment(self):
+        data = bytearray(fx.build_prx_fixture(True, BASE))
+        # Program header 0 starts at 64; its p_paddr is at +24.
+        struct.pack_into(">Q", data, 64 + 24, 1 << 20)
+        with self.assertRaises(ElfError):
+            cell.parse_module_info(ElfFile.from_bytes(bytes(data)))
+
+    def test_module_info_needs_a_load_segment_first(self):
+        data = bytearray(fx.build_prx_fixture(True, BASE))
+        struct.pack_into(">I", data, 64, 0)
+        with self.assertRaises(ElfError):
+            cell.parse_module_info(ElfFile.from_bytes(bytes(data)))
+
+    def test_library_tables_come_from_the_module_info(self):
+        self.assertEqual(cell.library_tables(self.relocated), {
+            "libent_start": BASE + fx.PRX_LIBENT[0], "libent_end": BASE + fx.PRX_LIBENT[1],
+            "libstub_start": BASE + fx.PRX_LIBSTUB[0], "libstub_end": BASE + fx.PRX_LIBSTUB[1]})
+
+    def test_library_tables_of_an_executable_are_its_prx_param(self):
+        elf = ElfFile.from_bytes(fx.build_ps3_fixture())
+        self.assertEqual(cell.library_tables(elf), cell.parse_prx_param(elf))
+        plain = ElfFile.from_bytes(build_elf64_be(entry=0, segments=[]))
+        self.assertIsNone(cell.library_tables(plain))
+
+    def test_imports(self):
+        mods = cell.parse_imports(self.relocated, cell.library_tables(self.relocated))
+        self.assertEqual([m.name for m in mods], ["fixImp"])
+        funcs = mods[0].functions
+        self.assertEqual([f.fnid for f in funcs], list(fx.PRX_FNIDS))
+        self.assertEqual([f.slot_addr for f in funcs], [BASE + s for s in fx.PRX_SLOTS])
+        self.assertEqual([f.slot_value for f in funcs], [BASE + t for t in fx.PRX_THUNKS])
+
+    def test_exports(self):
+        mods = cell.parse_exports(self.relocated, cell.library_tables(self.relocated))
+        self.assertEqual(len(mods), 1)
+        self.assertEqual(mods[0].name, "fixExp")
+        self.assertEqual(mods[0].functions, [cell.ExportFunc(
+            fx.PRX_EXPORT_FNID, BASE + fx.PRX_OPDS[0], BASE + fx.PRX_FUNCS[0],
+            BASE + fx.PRX_TOC)])
+
+    def test_entry_is_the_module_toc(self):
+        self.assertEqual(cell.parse_entry(self.relocated),
+                         cell.EntryInfo("prx", None, None, BASE + fx.PRX_TOC))
+
+    def test_text_and_code_ranges_exclude_and_include_the_thunks(self):
+        self.assertEqual(cell.find_text_range(self.relocated),
+                         (BASE, BASE + fx.PRX_THUNKS_END))
+        self.assertEqual(cell.find_code_range(self.relocated),
+                         (BASE, BASE + fx.PRX_CODE_END))
+
+    def test_ranges_without_imports_are_the_code_segment(self):
+        data = bytearray(fx.build_prx_fixture(True, BASE))
+        elf = ElfFile.from_bytes(bytes(data))
+        info = cell.parse_module_info(elf)
+        # imports_end sits 4 words into the module info after the name.
+        struct.pack_into(">I", data, elf.va_to_offset(info.addr) + 0x30, info.imports_start)
+        bare = ElfFile.from_bytes(bytes(data))
+        end = BASE + fx.PRX_SEG0_SIZE
+        self.assertEqual(cell.find_text_range(bare), (BASE, end))
+        self.assertEqual(cell.find_code_range(bare), (BASE, end))
+
+    def test_segment_for_va_prefers_the_segment_holding_the_file_data(self):
+        elf = self.unrelocated
+        # Segment 0's p_memsz reaches 0x100 bytes into segment 1.
+        self.assertEqual(elf.segment_for_va(fx.PRX_SEG1 - 4).index, 0)
+        self.assertEqual(elf.segment_for_va(fx.PRX_SEG1).index, 1)
+        self.assertEqual(elf.read_u32_va(fx.PRX_SLOTS[0]), fx.PRX_THUNKS[0])
+        self.assertEqual(elf.read_u32_va(fx.PRX_OPDS[0]), fx.PRX_FUNCS[0])
+        # Past segment 1's file data, its zero-filled tail still wins over the overlap.
+        self.assertEqual(elf.segment_for_va(fx.PRX_SEG1 + fx.PRX_SEG1_SIZE + 0x10).index, 1)
+        self.assertEqual(elf.read_u32_va(fx.PRX_SEG1 + fx.PRX_SEG1_SIZE + 0x10), 0)
+        # Beyond segment 1 only segment 0's memory size covers the address.
+        self.assertEqual(elf.segment_for_va(fx.PRX_SEG1 + 0xF0).index, 0)
+        self.assertIsNone(elf.segment_for_va(fx.PRX_SEG1 + 0x200))
+
+    def test_unrelocated_file_reads_through_its_overlap(self):
+        info = cell.parse_module_info(self.unrelocated)
+        tables = cell.library_tables(self.unrelocated)
+        mods = cell.parse_imports(self.unrelocated, tables)
+        self.assertEqual(info.name, fx.PRX_NAME)
+        self.assertEqual([f.slot_value for f in mods[0].functions], list(fx.PRX_THUNKS))
+        self.assertEqual(cell.find_code_range(self.unrelocated), (0, fx.PRX_CODE_END))
+
+    def test_thunks_have_the_libsre_shape(self):
+        words = struct.unpack(">8I", self.relocated.read_va(BASE + fx.PRX_THUNKS[0], 32))
+        self.assertEqual(words[2], 0xF8410028)          # std r2,40(r1)
+        self.assertEqual(words[6], 0x4E800420)          # bctr
+
+
 class FindTextRangeTest(unittest.TestCase):
     TEXT_VA = 0x10000
 

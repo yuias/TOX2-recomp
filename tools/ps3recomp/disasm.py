@@ -164,6 +164,8 @@ def _run(args: argparse.Namespace) -> int:
             start = cell.parse_entry(elf).func
         except ElfError as e:
             raise CliError(EXIT_NOT_PPU_ELF, "malformed PS3 structures: %s" % e)
+        if start is None:
+            raise CliError(EXIT_NOT_PPU_ELF, "this file has no entry function")
         count = args.count if args.count is not None else DEFAULT_ENTRY_COUNT
         end = start + 4 * count
         if args.count is None:

@@ -216,6 +216,72 @@ class PinTest(InfoTestBase):
         self.assertNotRegex(info.DEFAULT_CONFIG.read_text(encoding="utf-8"), r"[A-Za-z]:[\\/]")
 
 
+class PrxTest(InfoTestBase):
+    BASE = 0x20000
+
+    def use_prx(self, relocated: bool) -> None:
+        self.data = fx.build_prx_fixture(relocated, self.BASE)
+        self.elf_path.write_bytes(self.data)
+
+    def write_prx_config(self, key: str, sha: str) -> Path:
+        path = self.tmp / "target.json"
+        path.write_text(json.dumps({"eboot_bin": {"sha256": "0" * 64},
+                                    "eboot_elf": {"sha256": "1" * 64},
+                                    "libsre_prx": {"sha256": "2" * 64},
+                                    "libsre_reloc_elf": {"sha256": "3" * 64},
+                                    key: {"sha256": sha}}), encoding="utf-8")
+        return path
+
+    def test_summary_has_module_info_and_library_tables(self):
+        self.use_prx(True)
+        code, stdout, _ = self.run_info("--no-verify")
+        self.assertEqual(code, 0)
+        self.assertIn("module:   fixSre_Library 1.1 toc 0x%08x"
+                      % (self.BASE + fx.PRX_TOC), stdout)
+        self.assertIn("imports:  1 modules, 2 functions, 0 named", stdout)
+        self.assertIn("exports:  1 functions", stdout)
+        doc = self.load_output()
+        self.assertEqual(doc["entry"]["kind"], "prx")
+        self.assertIsNone(doc["entry"]["func"])
+        self.assertEqual(doc["module_info"], {
+            "addr": "0x%08x" % (self.BASE + fx.PRX_MODULE_INFO),
+            "name": fx.PRX_NAME, "version": "1.1", "attributes": "0x00000000",
+            "toc": "0x%08x" % (self.BASE + fx.PRX_TOC),
+            "exports": {"start": "0x%08x" % (self.BASE + fx.PRX_LIBENT[0]),
+                        "end": "0x%08x" % (self.BASE + fx.PRX_LIBENT[1])},
+            "imports": {"start": "0x%08x" % (self.BASE + fx.PRX_LIBSTUB[0]),
+                        "end": "0x%08x" % (self.BASE + fx.PRX_LIBSTUB[1])},
+            "text_range": {"start": "0x%08x" % self.BASE,
+                           "end": "0x%08x" % (self.BASE + fx.PRX_THUNKS_END)},
+            "code_range": {"start": "0x%08x" % self.BASE,
+                           "end": "0x%08x" % (self.BASE + fx.PRX_CODE_END)}})
+
+    def test_executable_summary_has_no_module_info(self):
+        self.run_info("--no-verify")
+        self.assertNotIn("module_info", self.load_output())
+
+    def test_relocated_prx_is_checked_against_libsre_reloc_elf(self):
+        self.use_prx(True)
+        config = self.write_prx_config("libsre_reloc_elf", _sha(self.data))
+        code, _, err = self.run_info("--target-config", str(config))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.load_output()["input"]["pin"], "verified")
+
+    def test_unrelocated_prx_is_checked_against_libsre_prx(self):
+        self.use_prx(False)
+        config = self.write_prx_config("libsre_prx", _sha(self.data))
+        code, _, err = self.run_info("--target-config", str(config))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.load_output()["input"]["pin"], "verified")
+
+    def test_mismatch_names_the_pin(self):
+        self.use_prx(True)
+        config = self.write_prx_config("libsre_prx", _sha(self.data))
+        code, _, err = self.run_info("--target-config", str(config))
+        self.assertEqual(code, 4)
+        self.assertIn("libsre_reloc_elf", err)
+
+
 class ImportNamesTest(InfoTestBase):
     def write_nids(self, modules) -> Path:
         path = self.tmp / "nids.json"
