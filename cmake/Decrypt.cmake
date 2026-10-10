@@ -5,14 +5,19 @@ include_guard(GLOBAL)
 function(tox2_decrypt_add)
   set(decrypt_options -march=x86-64-v3 -Wall -Wextra)
 
-  add_library(tox2_decrypt_lib STATIC tools/tox2_decrypt/crypto.cpp)
+  add_library(tox2_decrypt_lib STATIC
+    tools/tox2_decrypt/crypto.cpp
+    tools/tox2_decrypt/keys.cpp
+    tools/tox2_decrypt/sce.cpp)
   target_compile_options(tox2_decrypt_lib PRIVATE ${decrypt_options})
   target_include_directories(tox2_decrypt_lib PUBLIC tools/tox2_decrypt)
   target_link_libraries(tox2_decrypt_lib PUBLIC bcrypt zlibstatic)
 
   add_executable(tox2_decrypt_tests
     tools/tox2_decrypt/tests/test_main.cpp
-    tools/tox2_decrypt/tests/crypto_test.cpp)
+    tools/tox2_decrypt/tests/crypto_test.cpp
+    tools/tox2_decrypt/tests/keys_test.cpp
+    tools/tox2_decrypt/tests/sce_test.cpp)
   target_compile_options(tox2_decrypt_tests PRIVATE ${decrypt_options})
   target_link_libraries(tox2_decrypt_tests PRIVATE tox2_decrypt_lib)
 
