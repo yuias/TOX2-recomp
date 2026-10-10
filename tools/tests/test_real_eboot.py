@@ -318,7 +318,7 @@ class RealSeedsTest(unittest.TestCase):
     def test_anchor_counts(self):
         counts = self.census.counts
         # Counted over the code range, so .init and .fini contribute as well.
-        expected = {"opd": 14846, "opd_not_ghidra": 0, "bl_targets_in_text": 12757,
+        expected = {"opd": 26911, "opd_not_ghidra": 0, "bl_targets_in_text": 12757,
                     "bl_targets_not_ghidra": 1, "bl_targets_thunk": 173, "thunks": 173,
                     "union_ghidra_bl_opd": 29374}
         self.assertEqual({k: counts[k] for k in expected}, expected)
@@ -342,15 +342,24 @@ class RealSeedsTest(unittest.TestCase):
 class RealJumpTableTest(unittest.TestCase):
     # Not every site resolves: the others are reported per reason (all rel32 tables are
     # placed right after the branch).
-    EXPECTED_UNRESOLVED = {"bad_target": 73, "no_bound": 6, "no_table_base": 7,
-                           "table_unreadable": 54}
+    EXPECTED_UNRESOLVED = {"no_bound": 6, "no_table_base": 7}
 
     @classmethod
     def setUpClass(cls):
         elf = ElfFile.from_path(_ELF_PATH)
         cls.image = CodeImage.from_elf(elf, cell.find_code_range(elf))
+        cls.tocs = seeds.collect_tocs(elf, cls.image)
         cls.tables, cls.unresolved = jumptab.recover_jump_tables(
-            cls.image, jumptab.make_reader(elf), cell.parse_entry(elf).toc)
+            cls.image, jumptab.make_reader(elf), cls.tocs,
+            seeds.function_tocs(elf, cls.image, cls.tocs))
+
+    def test_toc_set_has_both_tocs_entry_first(self):
+        self.assertEqual(self.tocs, (0x010B6330, 0x010C62D0))
+
+    def test_switch_in_a_second_toc_function_resolves(self):
+        # fn 0x00819ef0 loads its table through the second TOC.
+        self.assertIn(0x0081A10C, self.tables)
+        self.assertNotIn(0x0081A10C, self.unresolved)
 
     def test_every_site_is_accounted_for(self):
         sites = {insn.addr for insn in self.image.insns
@@ -361,8 +370,8 @@ class RealJumpTableTest(unittest.TestCase):
         self.assertEqual(set(self.tables) & set(self.unresolved), set())
 
     def test_sites_resolve_with_expected_counts(self):
-        self.assertEqual(len(self.tables), 372)
-        self.assertEqual(sum(t.count for t in self.tables.values()), 7514)
+        self.assertEqual(len(self.tables), 499)
+        self.assertEqual(sum(t.count for t in self.tables.values()), 9919)
         reasons = {}
         for jump in self.unresolved.values():
             reasons[jump.reason] = reasons.get(jump.reason, 0) + 1
@@ -376,7 +385,7 @@ class RealJumpTableTest(unittest.TestCase):
 
     def test_entry_totals(self):
         targets = [t for table in self.tables.values() for t in table.targets]
-        self.assertEqual((len(targets), len(set(targets))), (7514, 3082))
+        self.assertEqual((len(targets), len(set(targets))), (9919, 3790))
 
     def test_targets_are_decodable_code_in_text(self):
         for table in self.tables.values():
@@ -450,9 +459,10 @@ class RealRecoverTest(unittest.TestCase):
 
     def test_jump_tables_are_resolved_or_listed(self):
         jt = self.report["jump_tables"]
-        self.assertEqual((jt["bcctr_sites"], jt["resolved"], jt["targets"]), (512, 372, 7514))
-        self.assertEqual(len(self.db["unresolved_indirect"]), 512 - 372)
-        self.assertEqual(len(self.db["jump_tables"]), 372)
+        self.assertEqual((jt["bcctr_sites"], jt["resolved"], jt["targets"]), (512, 499, 9919))
+        self.assertEqual(len(self.db["unresolved_indirect"]), 512 - 499)
+        self.assertEqual(len(self.db["jump_tables"]), 499)
+        self.assertEqual(jt["tocs"], ["0x010b6330", "0x010c62d0"])
 
     def test_database_is_sorted_and_ranges_are_disjoint(self):
         entries = [f["entry"] for f in self.db["functions"]]
@@ -479,10 +489,10 @@ class RealCoverageTest(unittest.TestCase):
         self.assertEqual(cov["owned_words"] + cov["uncovered"]["words"], cov["text_words"])
         by_class = cov["uncovered"]["by_class"]
         self.assertEqual(sum(v["words"] for v in by_class.values()), cov["uncovered"]["words"])
-        # Only runs made entirely of table words count here; the rest of the 7514 entries of the
-        # 372 recovered tables lie in runs classified as data or code, or in owned ranges.
+        # Only runs made entirely of table words count here; the rest of the 9919 entries of the
+        # 499 recovered tables lie in runs classified as data or code, or in owned ranges.
         self.assertEqual((by_class["jump_table"]["words"], by_class["jump_table"]["runs"]),
-                         (7054, 349))
+                         (9259, 466))
 
     def test_cell_truncated_ghidra_functions_are_extended(self):
         cell_info = self.ghidra["cell_truncated"]
@@ -554,7 +564,7 @@ class RealEmitCensusTest(unittest.TestCase):
 
     def test_census_totals(self):
         self.assertEqual(self.code, 0)
-        self.assertEqual((self.doc["words"], self.doc["distinct"]), (2994755, 188))
+        self.assertEqual((self.doc["words"], self.doc["distinct"]), (3012703, 188))
         self.assertEqual(self.doc["invalid_owned"], [])
 
     def test_every_counted_mnemonic_has_a_group(self):
@@ -565,7 +575,7 @@ class RealEmitCensusTest(unittest.TestCase):
 
     def test_stdout_header(self):
         self.assertEqual(self.stdout.splitlines()[0],
-                         "census: 2994755 words, 188 distinct mnemonics, 0 invalid owned")
+                         "census: 3012703 words, 188 distinct mnemonics, 0 invalid owned")
 
 
 _EMIT_CACHE = []
@@ -600,7 +610,7 @@ class RealEmitTest(unittest.TestCase):
     def test_counts(self):
         self.assertEqual(self.code, 0)
         self.assertEqual((self.report["functions"], self.report["import_trampolines"],
-                          self.report["edges"]["switches"]), (29196, 173, 349))
+                          self.report["edges"]["switches"]), (29196, 173, 467))
 
     def test_no_unhandled_words(self):
         # `--max-unhandled 0` makes a non-zero count exit 9, which test_counts also catches.

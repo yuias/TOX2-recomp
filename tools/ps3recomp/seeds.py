@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+from collections.abc import Collection
 from dataclasses import dataclass
 
 from . import cell
@@ -19,6 +20,9 @@ _THUNK_WORDS = THUNK_SIZE // 4
 
 _MFLR_R0 = 0x7C0802A6
 _NOP = 0x60000000
+# A non-entry TOC base is believed only when this many descriptors name it; stray words that
+# look like `{func, toc}` occur a handful of times, real OPD tables thousands.
+_MIN_TOC_DESCRIPTORS = 16
 # Flow kinds after which the next word cannot be reached by falling through.
 _BOUNDARY_KINDS = frozenset({"jump", "return", "indirect_jump", "trap"})
 
@@ -75,6 +79,9 @@ def check_thunk_slots(elf: ElfFile, thunks: dict[int, ImportThunk]) -> list[int]
     if rng is None:
         return []
     image = CodeImage.from_elf(elf, rng)
+    # The entry TOC is enough: thunks build the slot address with addi/oris and save r2 before
+    # loading the callee's, so no slot load goes through r2 and a TOC set would not change the
+    # verdict.
     toc = cell.parse_entry(elf).toc
     bad = []
     for addr in sorted(thunks):
@@ -97,8 +104,8 @@ def _thunk_loads_slot(image: CodeImage, addr: int, slot_addr: int, toc: int | No
     return False
 
 
-def find_opd_descriptors(elf: ElfFile, image: CodeImage, toc: int) -> list[tuple[int, int]]:
-    """Function descriptors `{func in image, toc}` in non-executable loaded file data."""
+def _scan_descriptors(elf: ElfFile, image: CodeImage) -> list[tuple[int, int, int]]:
+    """(location, func in image, toc word) for 8-aligned pairs in non-executable loaded data."""
     found = []
     for seg in elf.loads():
         if seg.p_flags & PF_X or seg.p_filesz < 8:
@@ -107,10 +114,49 @@ def find_opd_descriptors(elf: ElfFile, image: CodeImage, toc: int) -> list[tuple
         raw = elf.read_va(seg.p_vaddr, seg.p_filesz)
         for off in range(first, len(raw) - 7, 8):
             func, desc_toc = struct.unpack_from(">II", raw, off)
-            if desc_toc == toc and image.contains(func):
-                found.append((seg.p_vaddr + off, func))
+            if image.contains(func):
+                found.append((seg.p_vaddr + off, func, desc_toc))
     found.sort()
     return found
+
+
+def collect_tocs(elf: ElfFile, image: CodeImage) -> tuple[int, ...]:
+    """The TOC bases the executable's descriptors use: the entry TOC first, then the others.
+
+    The executable may carry no `.opd` section header, so the descriptor scan finds them. An
+    executable without an entry TOC has no set. A non-entry base must be aligned, lie in non-executable loaded memory and be named by at
+    least `_MIN_TOC_DESCRIPTORS` descriptors.
+    """
+    entry_toc = cell.parse_entry(elf).toc
+    if entry_toc is None:
+        return ()
+    counts: dict[int, int] = {}
+    for _, _, desc_toc in _scan_descriptors(elf, image):
+        counts[desc_toc] = counts.get(desc_toc, 0) + 1
+    data = [seg for seg in elf.loads() if not seg.p_flags & PF_X]
+    others = sorted(
+        t for t, n in counts.items()
+        if t != entry_toc and t % 8 == 0 and n >= _MIN_TOC_DESCRIPTORS
+        and any(seg.p_vaddr <= t < seg.p_vaddr + seg.p_memsz for seg in data))
+    return (entry_toc, *others)
+
+
+def find_opd_descriptors(elf: ElfFile, image: CodeImage, toc: int | Collection[int]
+                         ) -> list[tuple[int, int]]:
+    """Function descriptors `{func in image, toc}` in non-executable loaded file data.
+
+    `toc` is one TOC base or the executable's TOC set.
+    """
+    tocs = {toc} if isinstance(toc, int) else set(toc)
+    return [(loc, func) for loc, func, desc_toc in _scan_descriptors(elf, image)
+            if desc_toc in tocs]
+
+
+def function_tocs(elf: ElfFile, image: CodeImage, tocs: Collection[int]) -> list[tuple[int, int]]:
+    """(function start, TOC) for every descriptor naming one of `tocs`, sorted."""
+    wanted = set(tocs)
+    return sorted({(func, desc_toc) for _, func, desc_toc in _scan_descriptors(elf, image)
+                   if desc_toc in wanted})
 
 
 def scan_bl_sites(image: CodeImage) -> dict[int, list[int]]:
@@ -183,7 +229,8 @@ def prologue_candidates(image: CodeImage) -> list[int]:
 
 def collect_recovery_seeds(elf: ElfFile, image: CodeImage, summary: GhidraSummary | None,
                            thunks: dict[int, ImportThunk], *, jump_table_targets: set[int],
-                           extra: list[int], prologue: bool) -> SeedCensus:
+                           extra: list[int], prologue: bool,
+                           tocs: Collection[int] | None = None) -> SeedCensus:
     entry = cell.parse_entry(elf)
     prx = cell.parse_prx_param(elf)
 
@@ -194,7 +241,9 @@ def collect_recovery_seeds(elf: ElfFile, image: CodeImage, summary: GhidraSummar
                 if func.func is not None:
                     candidates.add((func.func, "export"))
 
-    opd = find_opd_descriptors(elf, image, entry.toc) if entry.toc is not None else []
+    if tocs is None:
+        tocs = collect_tocs(elf, image)
+    opd = find_opd_descriptors(elf, image, tocs)
     opd_funcs = {func for _, func in opd}
     candidates.update((func, "opd") for func in opd_funcs)
 

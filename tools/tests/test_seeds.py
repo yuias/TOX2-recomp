@@ -52,6 +52,32 @@ class OpdTest(unittest.TestCase):
         small = CodeImage.from_elf(elf, (TEXT, TEXT + 0x10))
         self.assertEqual(seeds.find_opd_descriptors(elf, small, TOC), [(DATA, TEXT)])
 
+    def test_toc_set_accepts_descriptors_of_every_toc(self):
+        elf = ElfFile.from_bytes(build_ps3_fixture())
+        image = CodeImage.from_elf(elf, (TEXT, TEXT + 0x20))
+        self.assertEqual(seeds.find_opd_descriptors(elf, image, {TOC + 8, TOC}),
+                         [(DATA, TEXT), (DATA + 8, TEXT + 0x18)])
+
+    def test_collect_tocs_entry_first_then_frequent_aligned_tocs(self):
+        toc2 = DATA + 0x2000
+        stray = DATA + 0x4004          # unaligned and rare
+        rare = DATA + 0x4008           # aligned but named by too few descriptors
+        pairs = [(TEXT, toc2)] * 20 + [(TEXT, stray)] * 20 + [(TEXT, rare)] * 3
+        data = b"".join(struct.pack(">II", f, t) for f, t in pairs)
+        elf = build_elf([asm.blr()] * 4, data)
+        image = CodeImage.from_elf(elf, (TEXT, TEXT + 0x10))
+        self.assertEqual(seeds.collect_tocs(elf, image), (TOC, toc2))
+
+    def test_collect_tocs_drops_candidates_outside_loaded_data(self):
+        # Frequent and aligned, but inside the code segment and past the end of the data segment.
+        in_text = TEXT + 0x20
+        past_data = DATA + 0x10000
+        pairs = [(TEXT, in_text)] * 20 + [(TEXT, past_data)] * 20
+        data = b"".join(struct.pack(">II", f, t) for f, t in pairs)
+        elf = build_elf([asm.blr()] * 4, data)
+        image = CodeImage.from_elf(elf, (TEXT, TEXT + 0x10))
+        self.assertEqual(seeds.collect_tocs(elf, image), (TOC,))
+
     def test_executable_segment_is_not_scanned(self):
         # A descriptor-looking pair inside the code segment must not count.
         elf = build_elf([TEXT, TOC, asm.blr(), asm.blr()], b"")

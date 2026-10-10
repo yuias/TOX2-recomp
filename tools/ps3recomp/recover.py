@@ -23,7 +23,7 @@ from .partition import PartitionResult, partition
 from .ppu_flow import CodeImage
 from .probe import resolve_syscall_number
 from .seeds import (ImportThunk, SeedCensus, check_thunk_slots, collect_recovery_seeds,
-                    find_import_thunks, prologue_candidates)
+                    collect_tocs, find_import_thunks, function_tocs, prologue_candidates)
 from .syscall_cfg import count_sites_outside_text, resolve_syscalls
 
 SCHEMA = 1
@@ -166,9 +166,10 @@ def _thunks_section(thunks: dict[int, ImportThunk], census: SeedCensus,
 
 def _jump_tables_section(tables: dict[int, JumpTable],
                          unresolved: dict[int, UnresolvedJump],
-                         owner: dict[int, int]) -> dict:
+                         owner: dict[int, int], tocs: tuple[int, ...]) -> dict:
     entries = [t for table in tables.values() for t in table.targets]
     return {
+        "tocs": _hex_list(tocs),
         "bcctr_sites": len(tables) + len(unresolved),
         "resolved": len(tables),
         "targets": len(entries),
@@ -332,18 +333,20 @@ def _run(args: argparse.Namespace) -> int:
         thunks = find_import_thunks(elf, nid_table)
         mismatches = _slot_mismatches(elf, thunks)
         image = CodeImage.from_elf(elf, code_range)
-        tables, unresolved = recover_jump_tables(image, make_reader(elf), entry.toc)
+        tocs = collect_tocs(elf, image)
+        tables, unresolved = recover_jump_tables(
+            image, make_reader(elf), tocs, function_tocs(elf, image, tocs))
         table_targets = {t for table in tables.values() for t in table.targets}
         census = collect_recovery_seeds(
             elf, image, summary, thunks, jump_table_targets=table_targets, extra=extra,
-            prologue=args.prologue_seeds)
+            prologue=args.prologue_seeds, tocs=tocs)
         result = partition(image, census.seeds, tables, thunks, max_rounds=args.max_rounds)
     except ElfError as e:
         raise CliError(EXIT_NOT_PPU_ELF, "malformed PS3 structures: %s" % e)
 
     owner = _owner_map(result)
     thunks_doc = _thunks_section(thunks, census, mismatches)
-    jt_doc = _jump_tables_section(tables, unresolved, owner)
+    jt_doc = _jump_tables_section(tables, unresolved, owner, tocs)
     part_doc = _partition_section(result, census, owner)
     report = {
         "seeds": _seeds_section(census),

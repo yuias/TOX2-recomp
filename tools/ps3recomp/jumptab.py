@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import bisect
 import struct
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from .elf import ElfError, ElfFile
@@ -11,7 +12,7 @@ from .ppu import Insn
 from .ppu_flow import CodeImage, eval_const, find_def, flow_of, walk_back, written_gprs
 
 UNRESOLVED_REASONS = ("no_mtctr", "ctr_from_load", "unknown_def", "no_table_base", "no_index",
-                      "no_bound", "bad_bound", "table_unreadable", "bad_target")
+                      "no_bound", "bad_bound", "table_unreadable", "bad_target", "ambiguous_toc")
 
 _MASK32 = 0xFFFFFFFF
 _SPR_CTR = 9
@@ -334,10 +335,58 @@ def _recover_site(image: CodeImage, branch: int, read_mem, toc, enter: _EntryBra
     return JumpTable(branch, table, kind, count, tuple(targets), in_text)
 
 
+def _owner_tocs(descriptors: Sequence[tuple[int, int]], starts: Sequence[int], branch: int
+                ) -> set[int]:
+    """TOCs of the descriptors at the nearest function start at or below `branch`."""
+    i = bisect.bisect_right(starts, branch)
+    if i == 0:
+        return set()
+    return {toc for func, toc in descriptors if func == starts[i - 1]}
+
+
+def _recover_site_any_toc(image: CodeImage, branch: int, read_mem, tocs: Sequence[int | None],
+                          enter: _EntryBranches, descriptors: Sequence[tuple[int, int]],
+                          starts: Sequence[int]) -> JumpTable:
+    """Try each TOC; disagreeing TOCs are settled by the owning function's descriptor."""
+    found: list[tuple[int | None, JumpTable]] = []
+    failures: list[_Unresolved] = []
+    for toc in tocs:
+        try:
+            found.append((toc, _recover_site(image, branch, read_mem, toc, enter)))
+        except _Unresolved as e:
+            failures.append(e)
+    if found:
+        # A dispatch that never touches r2 resolves identically under every TOC.
+        if all(table == found[0][1] for _, table in found):
+            return found[0][1]
+        owner = _owner_tocs(descriptors, starts, branch)
+        chosen = [table for toc, table in found if toc in owner]
+        if chosen and all(table == chosen[0] for table in chosen):
+            return chosen[0]
+        raise _Unresolved("ambiguous_toc", "TOCs %s give different tables"
+                          % ", ".join("0x%08x" % toc for toc, _ in found if toc is not None))
+    # The failure that got furthest is the one a correct TOC would also hit; ties go to the
+    # first (entry) TOC.
+    raise max(failures, key=lambda e: UNRESOLVED_REASONS.index(e.reason))
+
+
 def recover_jump_tables(image: CodeImage, read_mem: Callable[[int, int], bytes | None],
-                        toc: int | None
+                        toc: int | Sequence[int] | None,
+                        descriptors: Sequence[tuple[int, int]] = ()
                         ) -> tuple[dict[int, JumpTable], dict[int, UnresolvedJump]]:
-    """Resolve every `bcctr` (LK=0) in the image; each one lands in exactly one result dict."""
+    """Resolve every `bcctr` (LK=0) in the image; each one lands in exactly one result dict.
+
+    `toc` is one TOC base or the executable's TOC set, entry TOC first. `descriptors` are
+    (function start, TOC) pairs; they pick the table when the TOCs of the set disagree.
+    """
+    tocs: tuple[int | None, ...]
+    if toc is None:
+        tocs = (None,)
+    elif isinstance(toc, int):
+        tocs = (toc,)
+    else:
+        tocs = tuple(toc) or (None,)
+    starts = sorted({func for func, _ in descriptors})
     tables: dict[int, JumpTable] = {}
     unresolved: dict[int, UnresolvedJump] = {}
     enter = _EntryBranches(image)
@@ -345,7 +394,8 @@ def recover_jump_tables(image: CodeImage, read_mem: Callable[[int, int], bytes |
         if insn.spec is None or insn.spec.name != "bcctr" or insn.field("LK"):
             continue
         try:
-            tables[insn.addr] = _recover_site(image, insn.addr, read_mem, toc, enter)
+            tables[insn.addr] = _recover_site_any_toc(
+                image, insn.addr, read_mem, tocs, enter, descriptors, starts)
         except _Unresolved as e:
             unresolved[insn.addr] = UnresolvedJump(insn.addr, e.reason, e.detail)
     return tables, unresolved

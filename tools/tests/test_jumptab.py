@@ -406,6 +406,89 @@ class UnresolvedReasonTest(unittest.TestCase):
         self.assertEqual(self.reason(code + spine(asm.slwi(9, 9, 2))), "no_bound")
 
 
+TOC2 = 0x00119F80
+
+
+class MultiTocTest(unittest.TestCase):
+    """The same `lwz r11,-8(r2)` dispatch resolves through whichever TOC holds the table slot."""
+
+    def code(self):
+        return [asm.cmplwi(7, 9, 1), asm.bgt(7, BASE + 4, DEFAULT)] + spine(asm.slwi(9, 9, 2))
+
+    def fixture(self, slots, *, second_table=False):
+        code = self.code()
+        table = pc(code)
+        entries = [(t - table) & 0xFFFFFFFF for t in targets_for(2)]
+        tail = list(entries)
+        extra = {toc + TOC_SLOT: table for toc in slots}
+        if second_table:
+            # Same layout, different targets, for the TOC that must disagree.
+            table2 = table + 8
+            tail += [(CASES + 4 * 3 - table2) & 0xFFFFFFFF, (CASES + 4 * 4 - table2) & 0xFFFFFFFF]
+            extra = {slots[0] + TOC_SLOT: table, slots[1] + TOC_SLOT: table2}
+        return Fixture(code, tail, extra), table
+
+    def recover(self, fx, tocs, descriptors=()):
+        return jumptab.recover_jump_tables(fx.image, fx.read_mem, tocs, descriptors)
+
+    def test_non_entry_toc_resolves_the_site(self):
+        fx, table = self.fixture([TOC2])
+        tables, unresolved = self.recover(fx, (TOC, TOC2))
+        self.assertEqual(unresolved, {})
+        self.assertEqual((tables[fx.branch].table, tables[fx.branch].count), (table, 2))
+        self.assertEqual(list(tables[fx.branch].targets), targets_for(2))
+
+    def test_entry_toc_alone_does_not_resolve_it(self):
+        fx, _ = self.fixture([TOC2])
+        tables, unresolved = self.recover(fx, (TOC,))
+        self.assertEqual(tables, {})
+        self.assertEqual(unresolved[fx.branch].reason, "no_table_base")
+
+    def test_single_toc_int_and_sequence_agree(self):
+        fx, _ = self.fixture([TOC])
+        self.assertEqual(self.recover(fx, TOC), self.recover(fx, (TOC,)))
+
+    def test_tocs_giving_the_same_table_resolve(self):
+        fx, table = self.fixture([TOC, TOC2])
+        tables, unresolved = self.recover(fx, (TOC, TOC2))
+        self.assertEqual(unresolved, {})
+        self.assertEqual(tables[fx.branch].table, table)
+
+    def test_tocs_giving_different_tables_are_ambiguous(self):
+        fx, _ = self.fixture([TOC, TOC2], second_table=True)
+        tables, unresolved = self.recover(fx, (TOC, TOC2))
+        self.assertEqual(tables, {})
+        self.assertEqual(unresolved[fx.branch].reason, "ambiguous_toc")
+
+    def test_owner_descriptor_toc_picks_its_table(self):
+        fx, table = self.fixture([TOC, TOC2], second_table=True)
+        # The function owning the site is the nearest descriptor start at or below it.
+        far = BASE + 4 * (WORDS + 1)
+        for owner_toc, expected in ((TOC, table), (TOC2, table + 8)):
+            descriptors = [(BASE - 0x100, TOC2 + 8), (BASE, owner_toc), (far, 0)]
+            tables, unresolved = self.recover(fx, (TOC, TOC2), descriptors)
+            self.assertEqual(unresolved, {})
+            self.assertEqual(tables[fx.branch].table, expected)
+        self.assertEqual(list(tables[fx.branch].targets),
+                         [CASES + 4 * 3, CASES + 4 * 4])
+
+    def test_owner_toc_outside_the_yielding_tocs_is_ambiguous(self):
+        fx, _ = self.fixture([TOC, TOC2], second_table=True)
+        for descriptors in ([(BASE, TOC2 + 8)],          # owner names a third TOC
+                            [(BASE + 4 * WORDS, TOC2)]):  # no descriptor at or below the site
+            tables, unresolved = self.recover(fx, (TOC, TOC2, TOC2 + 8), descriptors)
+            self.assertEqual(tables, {})
+            self.assertEqual(unresolved[fx.branch].reason, "ambiguous_toc")
+
+    def test_failure_keeps_the_furthest_reason(self):
+        # No bound check: every TOC fails; the TOC that does hold the slot reaches no_bound.
+        code = spine(asm.slwi(9, 9, 2))
+        table = pc(code)
+        fx = Fixture(code, [0, 0], {TOC2 + TOC_SLOT: table})
+        _, unresolved = self.recover(fx, (TOC, TOC2))
+        self.assertEqual(unresolved[fx.branch].reason, "no_bound")
+
+
 class RecoverAllTest(unittest.TestCase):
     def test_every_bctr_lands_in_exactly_one_dict(self):
         good = [asm.cmplwi(7, 9, 1), asm.bgt(7, BASE + 4, DEFAULT)] + spine(asm.slwi(9, 9, 2))
@@ -422,7 +505,7 @@ class RecoverAllTest(unittest.TestCase):
                          "ctr_from_load")
 
     def test_reasons_are_documented(self):
-        self.assertEqual(len(set(jumptab.UNRESOLVED_REASONS)), 9)
+        self.assertEqual(len(set(jumptab.UNRESOLVED_REASONS)), 10)
 
 
 class MakeReaderTest(unittest.TestCase):

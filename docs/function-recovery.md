@@ -30,6 +30,11 @@ python tools/ps3tool.py recover        <elf> -o config/functions.json
   database (`-o`, default `generated/analysis/functions.json`), a report (`--report`, default
   `generated/analysis/recovery_report.json`) and the list of recovered starts that Ghidra
   lacks (`--seeds-out`, default `generated/analysis/ghidra_seeds.txt`).
+  An executable can use several TOCs. `recover` finds them from the function descriptors
+  (the entry TOC first), accepts OPD seeds of any of them, and tries each TOC when it
+  resolves a jump table. When the TOCs that yield a table disagree, the table from the TOC of
+  the owning function's descriptor (the nearest descriptor start at or below the site) is
+  used; if that does not single one out, the site is listed as `ambiguous_toc`.
 - `--no-ghidra` runs `recover` without a summary, from the ELF's own seeds only. Without
   it, a missing default summary is an error that points at `ghidra-summary` and
   `--no-ghidra`.
@@ -107,7 +112,7 @@ python tools/ps3tool.py recover        <elf> -o config/functions.json
 - `input`: the ELF SHA-256, the summary SHA-256 (`null` with `--no-ghidra`) and the number
   of extra seeds;
 - `text`, `code` and `toc`: the `.text` range, the code range that was recovered and emitted,
-  and the TOC base;
+  and the entry TOC base;
 - `functions`: for each function its entry, a name (Ghidra's non-default name, otherwise
   `null`), the sources that found it (`bl`, `ghidra`, `ghidra_data_ref`, `opd`, `entry`,
   `manual`, and `prologue` with `--prologue-seeds`) and its address ranges;
@@ -126,7 +131,7 @@ top-level sections:
 | --- | --- |
 | `seeds` | Seed counts per source and the rejected candidates with reasons |
 | `thunks` | Import thunk count, slot mismatches, thunks that no `bl` reaches |
-| `jump_tables` | `bctr` sites, resolved tables and targets, unresolved sites by reason |
+| `jump_tables` | The TOC set, `bctr` sites, resolved tables and targets, unresolved sites by reason |
 | `partition` | Rounds, convergence, functions by source, promoted shared code, tail-edge kinds, invalid flow, rejected calls, external targets, functions seeded only by an unowned `bl` |
 | `coverage` | Words owned and not owned in the code range; uncovered runs classified as `zero`, `padding`, `jump_table`, `data` or `code`; prologue candidates by position |
 | `ghidra` | Function extents compared with Ghidra's (`equal`, `ours_larger`, `ours_smaller`, `different`, `missing`), Ghidra functions cut at Cell-only vector instructions and whether ours extend past them, Ghidra code not owned by any function, data references by target class, Ghidra starts reached only by branches |
