@@ -10,6 +10,8 @@
 #include <string_view>
 #include <vector>
 
+#include "tox2/ppu_context.h"
+
 namespace tox2 {
 
 // Other: a device the VFS configuration mounts under a name the console does not define here.
@@ -141,5 +143,11 @@ std::uint32_t fsReadWithOffset(std::uint8_t* base, std::uint32_t fd, std::uint64
                                std::uint64_t size, std::uint32_t count_addr);
 std::uint32_t fsWriteWithOffset(std::uint8_t* base, std::uint32_t fd, std::uint64_t offset, std::uint32_t buf,
                                 std::uint64_t size, std::uint32_t count_addr);
+
+// The sequential read/write/lseek syscalls (802, 803, 818). Their argument registers match the
+// cellFsRead, cellFsWrite and cellFsLseek imports, so the imports call them directly.
+void sysFsRead(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysFsWrite(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysFsLseek(Tox2PpuContext* ctx, std::uint8_t* base);
 
 }  // namespace tox2

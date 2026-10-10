@@ -1981,19 +1981,21 @@ void testCellGame() {
     }
     tox2::configureVfs(game, root / "hdd");
 
-    enum Import : std::uint32_t { Create, Permit, ErrorDialog, DataCheck, ImportCount };
+    enum Import : std::uint32_t { Create, Permit, ErrorDialog, DataCheck, BootCheck, ImportCount };
     const Tox2ImportInfo imports[] = {
             {0x00800000, 0x42a2e133, "cellGame", "cellGameCreateGameData"},
             {0x00800010, 0x70acec67, "cellGame", "cellGameContentPermit"},
             {0x00800020, 0xb0a1f8c6, "cellGame", "cellGameContentErrorDialog"},
             {0x00800030, 0xdb9819f3, "cellGame", "cellGameDataCheck"},
+            {0x00800040, 0xf52639ea, "cellGame", "cellGameBootCheck"},
     };
     tox2::installImports(imports, ImportCount);
     auto ctx = std::make_unique<Tox2PpuContext>();
-    auto call = [&](Import which, std::uint64_t a, std::uint64_t b, std::uint64_t c) {
+    auto call = [&](Import which, std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d = 0) {
         ctx->gpr[3] = a;
         ctx->gpr[4] = b;
         ctx->gpr[5] = c;
+        ctx->gpr[6] = d;
         tox2HleCall(ctx.get(), base, which);
         return static_cast<std::uint32_t>(ctx->gpr[3]);
     };
@@ -2012,6 +2014,23 @@ void testCellGame() {
     CHECK(call(Permit, info, usrdir, 0) == 0);
     CHECK(get(info) == "/dev_bdvd/PS3_GAME" && get(usrdir) == "/dev_bdvd/PS3_GAME/USRDIR");
     CHECK(call(Permit, info, usrdir, 0) == kFailure);  // no outstanding check
+
+    // Disc boot check: type, attributes, size and the empty directory name, then the permit returns the
+    // disc directories. The out-parameters are optional.
+    const std::uint32_t type = scratch + 0x500, attrs = scratch + 0x510, dir_name = scratch + 0x520;
+    tox2Write32(base, type, 0xDEADBEEF);
+    tox2Write32(base, attrs, 0xDEADBEEF);
+    put(dir_name, "junk");
+    CHECK(call(BootCheck, type, attrs, size, dir_name) == 0);
+    CHECK(tox2Read32(base, type) == 1 && tox2Read32(base, attrs) == 0 && get(dir_name).empty());
+    CHECK(tox2Read32(base, size) == 40 * 1024 * 1024 - 256);
+    CHECK(static_cast<std::int32_t>(tox2Read32(base, size + 4)) == -1 && tox2Read32(base, size + 8) == 0);
+    CHECK(call(BootCheck, type, attrs, size, dir_name) == kBusy);  // the permit is still outstanding
+    CHECK(call(Permit, info, usrdir, 0) == 0);
+    CHECK(get(info) == "/dev_bdvd/PS3_GAME" && get(usrdir) == "/dev_bdvd/PS3_GAME/USRDIR");
+    CHECK(call(BootCheck, 0, 0, 0, 0) == 0);
+    CHECK(call(Permit, info, usrdir, 0) == 0 && get(usrdir) == "/dev_bdvd/PS3_GAME/USRDIR");
+    CHECK(call(Permit, info, usrdir, 0) == kFailure);
 
     // Argument validation and the busy state.
     CHECK(call(DataCheck, 0, name, 0) == kParam);
@@ -2097,7 +2116,21 @@ void testCellFs() {
     std::ofstream(game / "b.txt", std::ios::binary) << "0123456789";
     tox2::configureVfs(game, root / "hdd");
 
-    enum Import : std::uint32_t { Read, Close, Open, Stat, Unlink, Write, SdataOpen, Mkdir, Fstat, ImportCount };
+    enum Import : std::uint32_t {
+        Read,
+        Close,
+        Open,
+        Stat,
+        Unlink,
+        Write,
+        SdataOpen,
+        Mkdir,
+        Fstat,
+        SeqRead,
+        Lseek,
+        SeqWrite,
+        ImportCount
+    };
     const Tox2ImportInfo imports[] = {
             {0x00800000, 0x0d5b4a14, "sys_fs", "cellFsReadWithOffset"},
             {0x00800010, 0x2cb51f0d, "sys_fs", "cellFsClose"},
@@ -2108,6 +2141,9 @@ void testCellFs() {
             {0x00800060, 0xb1840b53, "sys_fs", "cellFsSdataOpen"},
             {0x00800070, 0xba901fe6, "sys_fs", "cellFsMkdir"},
             {0x00800080, 0xef3efa34, "sys_fs", "cellFsFstat"},
+            {0x00800090, 0x4d5ff8e2, "sys_fs", "cellFsRead"},
+            {0x008000a0, 0xa397d042, "sys_fs", "cellFsLseek"},
+            {0x008000b0, 0xecdcf2ab, "sys_fs", "cellFsWrite"},
     };
     tox2::installImports(imports, ImportCount);
     auto ctx = std::make_unique<Tox2PpuContext>();
@@ -2150,6 +2186,29 @@ void testCellFs() {
     CHECK(call(Read, 0, 0, buf, 1, out) == err(tox2::kCellEbadf));
     CHECK(call(Write, fd, 0, buf, 1, out) == err(tox2::kCellEbadf));  // opened read-only
 
+    // Sequential cellFsRead and cellFsLseek move the file position and agree with the syscalls.
+    CHECK(call(Lseek, fd, 0, 0, out) == 0 && tox2Read64(base, out) == 0);  // earlier syscalls moved it to 6
+    CHECK(call(SeqRead, fd, buf, 4, out) == 0 && tox2Read64(base, out) == 4 && std::memcmp(base + buf, "0123", 4) == 0);
+    CHECK(call(Lseek, fd, 0, 1, out) == 0 && tox2Read64(base, out) == 4);                               // SEEK_CUR
+    CHECK(call(Lseek, fd, static_cast<std::uint64_t>(-3), 2, out) == 0 && tox2Read64(base, out) == 7);  // SEEK_END
+    CHECK(call(SeqRead, fd, buf, 100, out) == 0 && tox2Read64(base, out) == 3 &&
+          std::memcmp(base + buf, "789", 3) == 0);
+    CHECK(call(SeqRead, fd, buf, 4, out) == 0 && tox2Read64(base, out) == 0);  // at the end
+    CHECK(call(Lseek, fd, 2, 0, out) == 0 && tox2Read64(base, out) == 2);
+    CHECK(syscall(802, fd, buf, 2, out) == 0 && std::memcmp(base + buf, "23", 2) == 0);
+    // Offsets and positions above 2 GiB and 4 GiB are kept in full; a read there finds nothing.
+    CHECK(call(Lseek, fd, 0xC0000005ull, 0, out) == 0 && tox2Read64(base, out) == 0xC0000005ull);
+    CHECK(call(Lseek, fd, 0x1'0000'0000ull + 7, 0, out) == 0 && tox2Read64(base, out) == 0x1'0000'0007ull);
+    CHECK(call(SeqRead, fd, buf, 4, out) == 0 && tox2Read64(base, out) == 0);
+    CHECK(call(Lseek, fd, static_cast<std::uint64_t>(-1), 0, out) != 0);  // before the start
+    CHECK(call(Lseek, fd, 0, 3, out) == err(tox2::kCellEinval));
+    CHECK(call(Lseek, fd, 0, 0, 0) == err(tox2::kCellEfault));
+    CHECK(call(Lseek, 99, 0, 0, out) == err(tox2::kCellEbadf));
+    CHECK(call(SeqRead, fd, 0, 1, out) == err(tox2::kCellEfault) && tox2Read64(base, out) == 0);
+    CHECK(call(SeqRead, fd, buf, 1, 0) == err(tox2::kCellEfault));
+    CHECK(call(SeqRead, 99, buf, 1, out) == err(tox2::kCellEbadf));
+    CHECK(call(SeqWrite, fd, buf, 1, out) == err(tox2::kCellEbadf));  // opened read-only
+
     // Stat of a file and of a directory, fstat of the open file.
     CHECK(call(Stat, path_a, sb) == 0 && tox2Read32(base, sb) == 0100444 && tox2Read64(base, sb + 36) == 10);
     CHECK(call(Stat, path_a, 0) == err(tox2::kCellEfault));
@@ -2179,8 +2238,18 @@ void testCellFs() {
     put(buf + 0x20, "Z");
     CHECK(syscall(803, wfd, buf + 0x20, 1, out) == 0);
     CHECK(call(Fstat, wfd, sb) == 0 && tox2Read64(base, sb + 36) == 6);
+    // Sequential cellFsWrite writes at the current position, which cellFsLseek moves.
+    CHECK(call(Lseek, wfd, 0, 2, out) == 0 && tox2Read64(base, out) == 6);
+    put(buf + 0x30, "!?");
+    CHECK(call(SeqWrite, wfd, buf + 0x30, 2, out) == 0 && tox2Read64(base, out) == 2);
+    CHECK(call(Lseek, wfd, 1, 0, out) == 0 && tox2Read64(base, out) == 1);
+    CHECK(call(SeqWrite, wfd, buf + 0x30, 1, out) == 0 && tox2Read64(base, out) == 1);
+    CHECK(call(SeqWrite, wfd, 0, 1, out) == err(tox2::kCellEfault) && tox2Read64(base, out) == 0);
+    CHECK(call(SeqWrite, wfd, buf, 1, 0) == err(tox2::kCellEfault));
+    CHECK(call(SeqWrite, 99, buf, 1, out) == err(tox2::kCellEbadf));
     CHECK(call(Close, wfd) == 0);
-    CHECK(hostRead(root / "hdd" / "dev_hdd0" / "tmp" / "d" / "f.bin") == "ZbXYef");
+    CHECK(call(Lseek, wfd, 0, 0, out) == err(tox2::kCellEbadf));
+    CHECK(hostRead(root / "hdd" / "dev_hdd0" / "tmp" / "d" / "f.bin") == "Z!XYef!?");
     CHECK(call(Unlink, path_a) == 0);
     CHECK(call(Unlink, path_a) == err(tox2::kCellEnoent));
     CHECK(!stdfs::exists(root / "hdd" / "dev_hdd0" / "tmp" / "d" / "f.bin"));

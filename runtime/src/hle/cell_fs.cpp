@@ -69,15 +69,29 @@ void fsWriteWithOffsetHandler(Tox2PpuContext* ctx, std::uint8_t* base) {
                   fsWriteWithOffset(base, argU32(ctx, 0), ctx->gpr[4], argU32(ctx, 2), ctx->gpr[6], argU32(ctx, 4)));
 }
 
+// cellFsRead(u32 fd, void* buf, u64 nbytes, u64* nread). The import takes the same arguments and has the
+// same results as sys_fs_read, so the syscall handler serves both; the 64-bit counts are not narrowed.
+void fsRead(Tox2PpuContext* ctx, std::uint8_t* base) { sysFsRead(ctx, base); }
+
+// cellFsWrite(u32 fd, const void* buf, u64 nbytes, u64* nwrite)
+void fsWrite(Tox2PpuContext* ctx, std::uint8_t* base) { sysFsWrite(ctx, base); }
+
+// cellFsLseek(u32 fd, s64 offset, s32 whence, u64* pos); the offset and the resulting position stay 64-bit
+// because the game's archive is larger than 2 GiB.
+void fsLseek(Tox2PpuContext* ctx, std::uint8_t* base) { sysFsLseek(ctx, base); }
+
 constexpr HleEntry kHandlers[] = {
         {kModule, 0x0d5b4a14, "cellFsReadWithOffset", fsReadWithOffsetHandler},
         {kModule, 0x2cb51f0d, "cellFsClose", fsClose},
+        {kModule, 0x4d5ff8e2, "cellFsRead", fsRead},
         {kModule, 0x718bf5f8, "cellFsOpen", fsOpen},
         {kModule, 0x7de6dced, "cellFsStat", fsStat},
         {kModule, 0x7f4677a8, "cellFsUnlink", fsUnlink},
         {kModule, 0x8cb722d5, "cellFsWriteWithOffset", fsWriteWithOffsetHandler},
+        {kModule, 0xa397d042, "cellFsLseek", fsLseek},
         {kModule, 0xb1840b53, "cellFsSdataOpen", fsSdataOpen},
         {kModule, 0xba901fe6, "cellFsMkdir", fsMkdir},
+        {kModule, 0xecdcf2ab, "cellFsWrite", fsWrite},
         {kModule, 0xef3efa34, "cellFsFstat", fsFstat},
 };
 

@@ -1,5 +1,6 @@
 // HLE handlers of the cellGame module: the content-directory handshake a game performs at startup
-// (cellGameDataCheck, cellGameCreateGameData, cellGameContentPermit) and cellGameContentErrorDialog.
+// (cellGameBootCheck, cellGameDataCheck, cellGameCreateGameData, cellGameContentPermit) and
+// cellGameContentErrorDialog.
 // Behaviour follows RPCS3 `Emu/Cell/Modules/cellGame.cpp` (function of the same name); the
 // lv2_sleep delays that emulate the console's slowness are omitted. Handlers run under the guest
 // lock, so the shared handshake state needs no mutex of its own.
@@ -108,6 +109,51 @@ std::filesystem::path hostPathOf(const std::string& guest) {
 // RPCS3 psf::is_cat_hdd: any two-letter category except the disc and game data ones.
 bool isHddCategory(std::string_view cat) { return cat.size() == 2 && cat[1] != 'D' && cat != "DG" && cat != "MS"; }
 
+void storeContentSize(std::uint8_t* base, std::uint32_t size_addr, bool has_sfo) {
+    tox2Write32(base, size_addr + kSizeHddFree, static_cast<std::uint32_t>(kHddFreeSizeKb));
+    tox2Write32(base, size_addr + kSizeContent, has_sfo ? static_cast<std::uint32_t>(kSizeNotCalculated) : 0u);
+    tox2Write32(base, size_addr + kSizeSystem, 0);
+}
+
+// cellGameBootCheck(u32* type, u32* attributes, CellGameContentSize* size, char dirName[32])
+// The game is always booted from the disc here. Every out-pointer is optional.
+void gameBootCheck(Tox2PpuContext* ctx, std::uint8_t* base) {
+    const std::uint32_t type_addr = argU32(ctx, 0);
+    const std::uint32_t attributes_addr = argU32(ctx, 1);
+    const std::uint32_t size_addr = argU32(ctx, 2);
+    const std::uint32_t dir_name_addr = argU32(ctx, 3);
+
+    if (g_permission.active) {
+        ctx->gpr[3] = kErrorBusy;
+        return;
+    }
+
+    ParamSfo sfo;
+    const std::filesystem::path sfo_path = hostPathOf(std::string(kDiscContentDir) + "/PARAM.SFO");
+    if (!sfo_path.empty()) {
+        auto parsed = readParamSfoFile(sfo_path);
+        if (parsed) {
+            sfo = std::move(*parsed);
+        } else if (std::filesystem::exists(sfo_path)) {
+            logWarn("tox2: game: {}: {}", sfo_path.string(), parsed.error());
+        }
+    }
+
+    if (type_addr != 0) tox2Write32(base, type_addr, kTypeDisc);
+    if (attributes_addr != 0) tox2Write32(base, attributes_addr, 0);
+    if (size_addr != 0) storeContentSize(base, size_addr, !sfo.empty());
+    // The content directory of a disc boot has no name below /dev_hdd0/game, so the name is empty.
+    if (dir_name_addr != 0) storeGuestString(base, dir_name_addr, kDirNameSize, "");
+
+    // The permit that follows returns the disc directory, which is what an empty `dir` stands for.
+    g_permission.reset();
+    g_permission.active = true;
+    g_permission.exists = true;
+    g_permission.sfo = std::move(sfo);
+    logInfo("tox2: game: cellGameBootCheck: disc boot, content directory '{}'", kDiscContentDir);
+    ctx->gpr[3] = kCellOk;
+}
+
 // cellGameDataCheck(u32 type, const char* dirName, CellGameContentSize* size)
 void gameDataCheck(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t type = argU32(ctx, 0);
@@ -156,11 +202,7 @@ void gameDataCheck(Tox2PpuContext* ctx, std::uint8_t* base) {
         }
     }
 
-    if (size_addr != 0) {
-        tox2Write32(base, size_addr + kSizeHddFree, static_cast<std::uint32_t>(kHddFreeSizeKb));
-        tox2Write32(base, size_addr + kSizeContent, sfo.empty() ? 0u : static_cast<std::uint32_t>(kSizeNotCalculated));
-        tox2Write32(base, size_addr + kSizeSystem, 0);
-    }
+    if (size_addr != 0) storeContentSize(base, size_addr, !sfo.empty());
 
     g_permission.reset();
     g_permission.active = true;
@@ -335,6 +377,7 @@ constexpr HleEntry kHandlers[] = {
         {kModule, 0x70acec67, "cellGameContentPermit", gameContentPermit},
         {kModule, 0xb0a1f8c6, "cellGameContentErrorDialog", gameContentErrorDialog},
         {kModule, 0xdb9819f3, "cellGameDataCheck", gameDataCheck},
+        {kModule, 0xf52639ea, "cellGameBootCheck", gameBootCheck},
 };
 
 }  // namespace
