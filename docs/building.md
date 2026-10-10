@@ -83,6 +83,6 @@ The full list of tests and the conditions under which each one is registered are
 
 - Ghidra 12.x and a JDK 21, for `ps3tool.py ghidra-export` only (see
   [Analysis tools](analysis-tools.md#ghidra-cross-check)). `recover` does not need Ghidra: it reads
-  the committed Ghidra summary, or runs with `--no-ghidra`. No Ghidra summary is committed for this game yet.
+  the committed Ghidra summary, or runs with `--no-ghidra`.
 - git and a sparse checkout of the RPCS3 sources, for `ps3tool.py nidgen` only (see
   [Analysis tools](analysis-tools.md#nid-and-syscall-name-tables)).

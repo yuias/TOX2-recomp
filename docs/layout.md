@@ -33,7 +33,7 @@
 | `config/target.json` | Pinned size and hashes of the target executable |
 | `config/vfs.example.json` | Example VFS configuration for `tox2_game --vfs-config`, placeholder paths only; see [VFS configuration file](virtual-file-system.md#vfs-configuration-file) |
 | `config/nids.json`, `config/lv2_syscalls.json` | FNID and lv2 syscall name tables generated from RPCS3 sources |
-| `config/ghidra_summary.json`, `config/extra_seeds.json`, `config/functions.json` | Ghidra summary, extra function starts and the recovered function database (no Ghidra summary is committed yet). See [Function recovery](function-recovery.md#function-recovery) |
+| `config/ghidra_summary.json`, `config/extra_seeds.json`, `config/functions.json` | Ghidra summary, extra function starts and the recovered function database. See [Function recovery](function-recovery.md#function-recovery) |
 | `docs/` | Development documentation |
 | `LICENSE`, `THIRD_PARTY_NOTICES.md` | Licence of this project (0BSD) and notices of third-party components (FFmpeg, GameInput) |
 | `generated/` | Tool output, including `generated/ppu` from `emit` (git-ignored) |
