@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(cmake/CompilerChecks.cmake)
 include(cmake/PpuCodegen.cmake)
+include(cmake/SpuCodegen.cmake)
 include(cmake/Runtime.cmake)
 include(cmake/Render.cmake)
 include(cmake/Media.cmake)
@@ -66,6 +67,8 @@ set_tests_properties(runtime_musttail PROPERTIES
 add_test(NAME ppu_header_check COMMAND tox2_ppu_header_check)
 set_tests_properties(ppu_header_check PROPERTIES
   PASS_REGULAR_EXPRESSION "ppu header ok")
+
+tox2_spu_add_header_check()
 
 find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 tox2_ppu_add_semantics_harness()
