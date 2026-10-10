@@ -2,5 +2,6 @@
   "title_id": "BLJS10188",
   "title": "Tales of Xillia 2",
   "eboot_bin": {"size": 17594768, "sha256": "d0f551ee674db4edb632c23a77bea0f31b611c9fd8d84d473f2367adf06d5d74"},
-  "eboot_elf": {"size": 17592336, "sha256": "a1d8a56ce1d6300bff704a43218f1b8b87c80c1e1342929a266e58af4e5891e9"}
+  "eboot_elf": {"size": 17592336, "sha256": "a1d8a56ce1d6300bff704a43218f1b8b87c80c1e1342929a266e58af4e5891e9"},
+  "libsre_prx": {"size": 239344, "sha256": "9e7ee6edc99b1d372686cf927b883b18f19ed4d32d1faf35e214cca4ae0737b6", "firmware": "4.93"}
 }

@@ -206,6 +206,9 @@ class PinTest(InfoTestBase):
         self.assertEqual(config["title_id"], "BLJS10188")
         for key in ("eboot_bin", "eboot_elf"):
             self.assertRegex(config[key]["sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(config["libsre_prx"]["sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(config["libsre_prx"]["size"], 239344)
+        self.assertEqual(config["libsre_prx"]["firmware"], "4.93")
         # The config must stay path-free.
         self.assertNotRegex(info.DEFAULT_CONFIG.read_text(encoding="utf-8"), r"[A-Za-z]:[\\/]")
 

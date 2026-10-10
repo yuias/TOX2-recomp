@@ -143,4 +143,5 @@ status if the syscall table disagrees with its own comments.
 `config/target.json` records the title ID and the size and SHA-256 of both the encrypted
 `EBOOT.bin` and the decrypted `EBOOT.elf` that the tools were written against. It never
 contains paths. `ps3tool.py info` compares the input with the `eboot_elf` entry so analysis
-results are only trusted for the expected build.
+results are only trusted for the expected build. The file also pins the size, SHA-256 and firmware
+version of `libsre.prx`, which `tox2_decrypt` checks.
