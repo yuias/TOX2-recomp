@@ -16,6 +16,7 @@ include(cmake/Render.cmake)
 include(cmake/Media.cmake)
 include(cmake/Audio.cmake)
 include(cmake/Input.cmake)
+include(cmake/Decrypt.cmake)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
@@ -34,6 +35,7 @@ set(TOX2_EBOOT_ELF "" CACHE FILEPATH "Decrypted EBOOT.elf for optional tests")
 
 tox2_ppu_add_generated_tree()
 tox2_runtime_add_core()
+tox2_decrypt_add()
 tox2_media_add()
 tox2_audio_add()
 tox2_input_add()
