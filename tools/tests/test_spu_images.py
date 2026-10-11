@@ -527,12 +527,12 @@ class ExtractCommandTest(SpuFixtureTest):
 class CommittedRegistryTest(unittest.TestCase):
     """The registry in the repository, checked without any container."""
 
-    # Every emitted image: the registry entries with a load address, i.e. all but the two
-    # position-independent blobs.
+    # Every emitted image: every registry entry has a load address now.
     GATE = {
         "eboot_spline", "eboot_edgelzma", "eboot_bnuscore", "eboot_animation", "eboot_updatematrix",
         "eboot_renderparticle", "eboot_morph", "eboot_skin", "libsre_kernel1", "libsre_kernel2",
-        "libsre_system_service", "libsre_taskset_pm", "libsre_jobchain_pm1", "libsre_jobchain_pm2",
+        "libsre_system_service", "libsre_taskset_pm", "libsre_taskset2_exit", "libsre_exit_code_plugin",
+        "libsre_jobchain_pm1", "libsre_jobchain_pm2",
     }
 
     @classmethod
@@ -564,14 +564,14 @@ class CommittedRegistryTest(unittest.TestCase):
                for e in self.registry.images if e.kind == "raw"}
         self.assertEqual(raw["libsre_system_service"], (0x2200, 0xA00, 0xA00))
         self.assertEqual(raw["libsre_taskset_pm"], (0x1E40, 0xA00, 0xA00))
-        self.assertEqual(raw["libsre_taskset2_exit"], (0x670, None, None))
-        self.assertEqual(raw["libsre_exit_code_plugin"], (0x710, None, None))
+        self.assertEqual(raw["libsre_taskset2_exit"], (0x670, 0x10000, 0x10000))
+        self.assertEqual(raw["libsre_exit_code_plugin"], (0x710, 0x10000, 0x10000))
         self.assertEqual(raw["libsre_jobchain_pm1"], (0x3E30, 0xA00, 0xA00))
         self.assertEqual(raw["libsre_jobchain_pm2"], (0x3E30, 0xA00, 0xA00))
 
-    def test_default_selection_skips_position_independent_blobs(self):
+    def test_no_position_independent_blobs(self):
         known = spu_images.select_entries(self.registry, None, include_position_independent=False)
-        self.assertEqual(len(known), 14)
+        self.assertEqual(len(known), 16)
         everything = spu_images.select_entries(self.registry, None,
                                                include_position_independent=True)
         self.assertEqual(len(everything), 16)

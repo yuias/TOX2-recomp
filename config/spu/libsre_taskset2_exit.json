@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "image": "libsre_taskset2_exit",
+  "input": {
+    "container_sha256": "4fc712e6967da90a4657cb8893dbaa3b58c27c3fc3a834e3edea07c5ffc2d7ca",
+    "image_sha256": "301e9daffb1b1bea411f36d70875e391147f6f909a1f53e3e98c30e4bb39732f",
+    "registry_entry_sha256": "b15eeff7c78337baa2762686659479c2aff40139a7491aafd8fa1eafc8ac8bf0"
+  },
+  "segments": [{"ls": "0x10000", "size": "0x670", "code": true}],
+  "entry": "0x10000",
+  "functions": [
+    {
+      "entry": "0x10000",
+      "sources": ["entry"],
+      "ranges": [["0x10000", "0x10014"], ["0x10018", "0x102d8"]],
+      "call_sites": [
+        {"site": "0x10158", "kind": "brsl", "target": "0x104a8", "link": 0},
+        {"site": "0x10280", "kind": "brsl", "target": "0x10610", "link": 0},
+        {"site": "0x10298", "kind": "brsl", "target": "0x102d8", "link": 0}
+      ],
+      "returns": ["0x102d4"],
+      "indirect": []
+    },
+    {
+      "entry": "0x102d8",
+      "sources": ["brsl"],
+      "ranges": [["0x102d8", "0x104a4"]],
+      "call_sites": [{"site": "0x10484", "kind": "brsl", "target": "0x10568", "link": 0}],
+      "returns": ["0x104a0"],
+      "indirect": []
+    },
+    {
+      "entry": "0x104a8",
+      "sources": ["brsl"],
+      "ranges": [["0x104a8", "0x10568"]],
+      "call_sites": [],
+      "returns": ["0x10564"],
+      "indirect": []
+    },
+    {
+      "entry": "0x10568",
+      "sources": ["brsl"],
+      "ranges": [["0x10568", "0x10610"]],
+      "call_sites": [],
+      "returns": ["0x1060c"],
+      "indirect": []
+    },
+    {
+      "entry": "0x10610",
+      "sources": ["brsl"],
+      "ranges": [["0x10610", "0x1064c"]],
+      "call_sites": [],
+      "returns": ["0x10648"],
+      "indirect": []
+    }
+  ],
+  "dispatch_seeds": [
+    {"ls": "0x10000", "sources": ["entry"]},
+    {"ls": "0x1015c", "sources": ["return"]},
+    {"ls": "0x10284", "sources": ["return"]},
+    {"ls": "0x1029c", "sources": ["return"]},
+    {"ls": "0x102d8", "sources": ["brsl"]},
+    {"ls": "0x10488", "sources": ["return"]},
+    {"ls": "0x104a8", "sources": ["brsl"]},
+    {"ls": "0x10568", "sources": ["brsl"]},
+    {"ls": "0x10610", "sources": ["brsl"]}
+  ],
+  "jump_tables": [],
+  "constant_targets": [],
+  "unresolved_indirect": []
+}

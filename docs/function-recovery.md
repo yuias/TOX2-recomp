@@ -227,7 +227,7 @@ runs into a word that is not code, for example the return site of a call that ne
 `rejected_calls`, `rejected_seeds` and `dispatchable`. Stdout has one line
 per image and a last line with the number of databases written.
 
-On the pinned inputs (the output is byte-identical on a second run, `14 databases, 0 written`, in about 1 s):
+On the pinned inputs (the output is byte-identical on a second run, `16 databases, 0 written`, in about 1 s):
 
 | Image | Functions | Rounds | Owned words | Unowned | Unresolved | External | Promoted | Jump tables | Dispatchable |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -243,9 +243,11 @@ On the pinned inputs (the output is byte-identical on a second run, `14 database
 | `libsre_kernel2` | 3 | 3 | 377 | 14 | 0 | 1 | 0 | 0 | 6 |
 | `libsre_system_service` | 18 | 5 | 2,104 | 46 | 2 | 0 | 2 | 0 | 50 |
 | `libsre_taskset_pm` | 19 | 4 | 1,766 | 49 | 2 | 1 | 0 | 4 | 89 |
+| `libsre_taskset2_exit` | 5 | 3 | 401 | 9 | 0 | 0 | 0 | 0 | 9 |
+| `libsre_exit_code_plugin` | 6 | 4 | 441 | 9 | 0 | 0 | 0 | 0 | 11 |
 | `libsre_jobchain_pm1` | 32 | 5 | 3,872 | 54 | 3 | 0 | 0 | 1 | 114 |
 | `libsre_jobchain_pm2` | 30 | 5 | 3,861 | 57 | 3 | 0 | 0 | 1 | 110 |
-| Total | 708 | | 70,690 | 4,991 | 59 | 3 | 9 | 11 | 2,276 |
+| Total | 719 | | 71,532 | 5,009 | 59 | 3 | 9 | 11 | 2,296 |
 
 - Unowned words are non-zero words of code segments that no function owns and that are not data. 2,844 of
   them are in `eboot_bnuscore` (the sound engine core, 21,252 code words), where the seeds reach 18,248
@@ -256,7 +258,7 @@ On the pinned inputs (the output is byte-identical on a second run, `14 database
 - The external targets are one in each of `libsre_kernel1`, `libsre_kernel2` and `libsre_taskset_pm`.
 - `libsre_kernel1` needs `data_ranges` for its context (`0x100..0x290`); `eboot_edgelzma` needs
   `pic_delta_regs` (`$126`) and five `extra_entries`.
-- The 14 databases are about 370 KB in total.
+- The 16 databases are about 380 KB in total.
 
 ## Committed files and regeneration
 

@@ -17,7 +17,7 @@ A run starts with the load log, for example (TOX2 values):
 [host] tox2: sfo: TITLE_ID BLJS10188 RESOLUTION 0x15 SOUND_FORMAT 0x107
 [host] tox2: load: phdr 0 type 0x1 flags 0x00400005 vaddr 0x00010000 filesz 0x103a828 memsz 0x103a828 ...
 [host] tox2: load: libsre.reloc.elf phdr 0 type 0x1 flags 0x00400005 vaddr 0x011d0000 paddr 0x0001dd4c filesz 0x2e000 memsz 0x2e000
-[host] tox2: spu: 14 images ok
+[host] tox2: spu: 16 images ok
 [host] tox2: dispatch: 29369 entries, span 0x00010200..0x00c9098c
 [host] tox2: dispatch: 384 entries, span 0x011d0000..0x011edafc
 [host] tox2: hle: 173 imports, 120 with handlers, 30 bound to libsre

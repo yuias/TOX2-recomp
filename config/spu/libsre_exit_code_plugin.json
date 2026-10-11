@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "image": "libsre_exit_code_plugin",
+  "input": {
+    "container_sha256": "4fc712e6967da90a4657cb8893dbaa3b58c27c3fc3a834e3edea07c5ffc2d7ca",
+    "image_sha256": "46c6cc843880e00fa06092e485335466bb35f580e3c12a1814fca345f449815d",
+    "registry_entry_sha256": "06c8507ae1b983cfafb1e653798b53119a124402d994bd676ae7e2243e3cd48c"
+  },
+  "segments": [{"ls": "0x10000", "size": "0x710", "code": true}],
+  "entry": "0x10000",
+  "functions": [
+    {
+      "entry": "0x10000",
+      "sources": ["entry"],
+      "ranges": [["0x10000", "0x1001c"], ["0x10020", "0x10048"]],
+      "call_sites": [{"site": "0x10030", "kind": "brsl", "target": "0x10048", "link": 0}],
+      "returns": ["0x10044"],
+      "indirect": []
+    },
+    {
+      "entry": "0x10048",
+      "sources": ["brsl"],
+      "ranges": [["0x10048", "0x101c8"]],
+      "call_sites": [
+        {"site": "0x10170", "kind": "brsl", "target": "0x101c8", "link": 0},
+        {"site": "0x1018c", "kind": "brsl", "target": "0x10608", "link": 0}
+      ],
+      "returns": ["0x101c4"],
+      "indirect": []
+    },
+    {
+      "entry": "0x101c8",
+      "sources": ["brsl"],
+      "ranges": [["0x101c8", "0x10394"]],
+      "call_sites": [{"site": "0x10374", "kind": "brsl", "target": "0x10398", "link": 0}],
+      "returns": ["0x10390"],
+      "indirect": []
+    },
+    {
+      "entry": "0x10398",
+      "sources": ["brsl"],
+      "ranges": [["0x10398", "0x10440"]],
+      "call_sites": [],
+      "returns": ["0x1043c"],
+      "indirect": []
+    },
+    {
+      "entry": "0x10608",
+      "sources": ["brsl"],
+      "ranges": [["0x10440", "0x10604"], ["0x10608", "0x106a4"]],
+      "call_sites": [{"site": "0x105dc", "kind": "brsl", "target": "0x106a8", "link": 0}],
+      "returns": ["0x10600", "0x106a0"],
+      "indirect": []
+    },
+    {
+      "entry": "0x106a8",
+      "sources": ["brsl"],
+      "ranges": [["0x106a8", "0x106f4"]],
+      "call_sites": [],
+      "returns": ["0x106f0"],
+      "indirect": []
+    }
+  ],
+  "dispatch_seeds": [
+    {"ls": "0x10000", "sources": ["entry"]},
+    {"ls": "0x10034", "sources": ["return"]},
+    {"ls": "0x10048", "sources": ["brsl"]},
+    {"ls": "0x10174", "sources": ["return"]},
+    {"ls": "0x10190", "sources": ["return"]},
+    {"ls": "0x101c8", "sources": ["brsl"]},
+    {"ls": "0x10378", "sources": ["return"]},
+    {"ls": "0x10398", "sources": ["brsl"]},
+    {"ls": "0x105e0", "sources": ["return"]},
+    {"ls": "0x10608", "sources": ["brsl"]},
+    {"ls": "0x106a8", "sources": ["brsl"]}
+  ],
+  "jump_tables": [],
+  "constant_targets": [],
+  "unresolved_indirect": []
+}

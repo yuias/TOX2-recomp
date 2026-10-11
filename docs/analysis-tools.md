@@ -184,15 +184,18 @@ Registry fields of one image:
 | `kind` | `elf`: LS addresses, entry and code segments come from the SPU ELF (the `PF_X` segments are code). `raw`: `size`, `ls_base` and `entry` (default `ls_base`) are given, and the whole blob is one code segment |
 | `role` | `spurs_kernel`, `spurs_system_service`, `spurs_policy_module`, `spurs_task`, `raw_thread`, `exit_handler` or `job_chain_pm`; informational |
 | `lowering` | How control transfers are emitted. Only `stackfree` exists; any other value is an error (exit 2). `lowering_overrides` (`{"0xLS": "<lowering>"}`) is the per-function form of the same choice |
-| `gate` | `true` for every image with a non-null `ls_base`: `spu-emit --max-unhandled` and `spu-objdump-diff` count the image toward their gate |
+| `gate` | `true` for every image with a non-null `ls_base` (all 16): `spu-emit --max-unhandled` and `spu-objdump-diff` count the image toward their gate |
 | `extra_entries` | `[{ls, reason}]`: LS addresses that other code reaches through a pointer that recovery cannot see, for example the exit address that the kernel stores at LS `0x1e0` for the policy modules |
 | `data_ranges` | `[{start, end, reason}]`: LS ranges inside a code segment that hold data, not code (the kernel context of `libsre_kernel1`, `0x100..0x290`) |
 | `pic_delta_regs` | Registers that hold the load delta of position-independent code (`eboot_edgelzma`: `$126`). The delta is 0 for an image at its link address, so recovery evaluates them as 0 and `a rX,rY,$126` with a constant `rY` is a constant address |
 
-The two libsre blobs `libsre_taskset2_exit` and `libsre_exit_code_plugin` have `ls_base` null: they are
-position independent and have no fixed LS address. `spu-extract`, `spu-disasm` (listing mode, at LS base
-0) and `spu-objdump-diff` handle them; `spu-disasm --stats`, `spu-recover` and `spu-emit` skip them, and
-an explicit `--images` naming one of them is an error. They are neither recovered, emitted nor gated.
+The two libsre blobs `libsre_taskset2_exit` and `libsre_exit_code_plugin` have `ls_base` and `entry`
+`0x10000`: the taskset policy module loads whichever of them its exit path needs to LS `0x10000` and
+jumps there (both paths call the same load-and-jump function at LS `0x1438`). They use only
+PC-relative branches. A registry entry with `ls_base` null is position independent and has no fixed
+LS address: `spu-extract`, `spu-disasm` (listing mode, at LS base 0) and `spu-objdump-diff` handle it;
+`spu-disasm --stats`, `spu-recover` and `spu-emit` skip it, and an explicit `--images` naming it is an
+error. No entry is position independent at present.
 
 ```sh
 python tools/ps3tool.py spu-extract
@@ -215,7 +218,7 @@ python tools/ps3tool.py spu-disasm --stats --json generated/analysis/spu_census.
   (with their names), every `stop` code, and the constants written to `MFC_Cmd`. `--json OUT` also writes
   it. It was written to find what an image needs before recovery existed.
 
-The code words of the 14 images that have an LS base (the first line of each image in the census):
+The code words of the 16 images (the first line of each image in the census):
 
 | Image | Code words | Decoded | `.long` | Zero |
 | --- | --- | --- | --- | --- |
@@ -231,6 +234,8 @@ The code words of the 14 images that have an LS base (the first line of each ima
 | `libsre_kernel2` | 484 | 391 | 0 | 93 |
 | `libsre_system_service` | 2,176 | 2,142 | 8 | 26 |
 | `libsre_taskset_pm` | 1,936 | 1,817 | 11 | 108 |
+| `libsre_taskset2_exit` | 412 | 410 | 0 | 2 |
+| `libsre_exit_code_plugin` | 452 | 450 | 0 | 2 |
 | `libsre_jobchain_pm1` | 3,980 | 3,930 | 3 | 47 |
 | `libsre_jobchain_pm2` | 3,980 | 3,922 | 3 | 55 |
 
@@ -240,8 +245,8 @@ undecodable words; the zero words are padding.
 ## SPU decoder cross-check with objdump
 
 `spu-objdump-diff` compares the SPU decoder and formatter with the `objdump` of GNU binutils, word by word,
-on every code segment of the registry images (all 16, including the two position-independent blobs, which
-are fed at LS base 0 because SPU branches are PC-relative in both tools). It is a developer check: nothing
+on every code segment of the registry images (all 16; an image without an LS base would be fed at LS
+base 0 because SPU branches are PC-relative in both tools). It is a developer check: nothing
 else depends on it, and it needs WSL, which the other commands do not.
 
 The reference `objdump` is built from the binutils release tarball (version 2.47, SHA-256 checked before
@@ -300,8 +305,7 @@ path to a local copy of the tarball, which gets the same SHA-256 check; in Git B
 On this executable and libsre the run takes about 6 s with `objdump` 2.47.20260726 (`GNU objdump (GNU
 Binutils) 2.47.20260726`) and ends with `gate: ok`. Over the 16 images and 77,332 words: 75,945 `match`,
 34 `known_difference` (2 `bihnz` in `eboot_edgelzma` and 32 `sync` in `eboot_bnuscore`), 0 in each of the
-four disagreement categories, and 1,353 `both_unknown`. The two blobs without an LS base also have
-0 disagreements.
+four disagreement categories, and 1,353 `both_unknown`.
 
 ## NID and syscall name tables
 

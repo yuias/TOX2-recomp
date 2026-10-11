@@ -20,8 +20,8 @@ The run below was made with the build of commit `e013aa8`. `libsre.prx` of firmw
 registers its 352 functions for dispatch and binds all 30 `cellSpurs` imports of the game to libsre's
 exported functions. Of the game's 173 imports, 120 have a handler, 30 are bound to libsre and 23 get the
 default handler. The load log says `tox2: hle: 173 imports, 120 with handlers, 30 bound to libsre`, and
-`tox2: hle: libsre: 32 imports, 30 with handlers` for libsre's own imports. It also checks the 14 emitted
-SPU images against guest memory (`tox2: spu: 14 images ok`).
+`tox2: hle: libsre: 32 imports, 30 with handlers` for libsre's own imports. It also checks the 16 emitted
+SPU images against guest memory (`tox2: spu: 16 images ok`).
 
 The headless run (`--no-window --seconds 30`; the `game_boot` test uses the same arguments) goes like this:
 
@@ -245,10 +245,9 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   SPU thread calls 193 and 194; it has none for the vm calls (300, 301) and the file system calls 810,
   812, 813, 815, 820, 831, 832 and 834. Beyond what the game issues, the runtime also implements the SPU
   calls that libsre and the SPU runtime need (177, 181, 182, 185, 186, 190 to 192 and 250 to 252).
-- Of the 16 SPU images (8 in the executable, 8 in libsre) the 14 with a fixed LS address are recovered
-  and recompiled, and every instruction word of them has an emitter handler (see
-  [Emitting C](emitter.md#spu-images)). The two position-independent blobs of libsre are neither
-  recovered nor emitted; the game does not use them.
+- Of the 16 SPU images (8 in the executable, 8 in libsre) all 16 are recovered and recompiled
+  (the two exit blobs of libsre load at LS `0x10000`), and every instruction word of them has an emitter
+  handler (see [Emitting C](emitter.md#spu-images)).
 - libsre is 239,344 bytes with 352 functions, 32 imports and 267 exports; its recovery and its C
   output are described in [Function recovery](function-recovery.md#on-libsre) and
   [Emitting C](emitter.md#a-prx-module-libsre).

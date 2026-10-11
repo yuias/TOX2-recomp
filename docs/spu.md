@@ -50,8 +50,8 @@ that image. Each program is referenced by the PPU code: libsre imports the kerne
 | `0x011f0c00` | ELF, one `0x790` byte segment | SPURS kernel, version 2 (`spurs_kernel2_executable.elf`) | `0x100` / `0x848` | the same call with the flag set; not imported by this game |
 | `0x011f1480` | `0x2200` | system service module | `0xa00` | SPURS instance setup (its address and size are stored in the `CellSpurs` structure) |
 | `0x011f3680` | `0x1e40` | taskset policy module | `0xa00`..`0x2840` | `_cellSpursCreateTaskset`, which adds the taskset as a workload |
-| `0x011f5500` | `0x670` | taskset 2 exit handler | position independent | `cellSpursCreateTaskset2` |
-| `0x011f5b80` | `0x710` | exit code plugin | not recorded | `cellSpursCreateTaskset2` |
+| `0x011f5500` | `0x670` | taskset 2 exit handler | `0x10000` | `cellSpursCreateTaskset2`; the taskset policy module loads it when a task exits (word at LS `0x2fd4` equal to 4) |
+| `0x011f5b80` | `0x710` | exit code plugin | `0x10000` | `cellSpursCreateTaskset2`; the policy module's other exit path loads it |
 | `0x011f6300`, `0x011fa180` | `0x3e30` each | job chain policy modules | `0xa00` | job chains; this game uses none |
 
 The two kernels are SPU ELF files (class 1, big-endian, machine 23); the other six blobs are raw and
@@ -321,7 +321,7 @@ The SPU's own floating-point rules are emitted as written (the full list of devi
 
 - Lines written by an SPU thread carry the prefix `[spu XXXXXXXX]` (the lv2 SPU thread id) instead of
   `[t XXXXXXXX]`.
-- At start-up `tox2: spu: 14 images ok` reports that the SHA-256 of each emitted image matches the bytes in
+- At start-up `tox2: spu: 16 images ok` reports that the SHA-256 of each emitted image matches the bytes in
   guest memory (a mismatch is a load error, exit code 4). A group logs `tox2: spu: group ... created`,
   `... initialized`, `start group ...` with a line per thread, segment, connected queue and bound port,
   then `thread ... started at <image> ls 0x<entry>` and, when the last thread has ended,
@@ -436,7 +436,13 @@ Open issues:
   above had 158 of 55,806 before `cellAtracCreateDecoderExt` had a handler.
 - SPURS instance B ("atrac3plus", one SPU, created for `cellAtracCreateDecoderExt`) gets its thread group
   and thread, but nothing starts the group; the host decoder makes that unnecessary.
-- The spline task (image 1) has not run in these runs.
+- The spline task (image 1) runs, and its exit loads the taskset 2 exit handler. Both exit paths of the
+  policy module call the same function (LS `0x1438`), which DMAs the blob to LS `0x10000` and jumps there
+  with `bi $7`; the blob uses only PC-relative branches and returns with `bi $0` to the policy module. In a
+  400 s headless run with a scripted new game, the log has
+  `first image libsre_taskset2_exit at ls 0x10000..0x10670`, no unknown target, and the opening scenes
+  (the event fight, the bedroom, a choice screen with L1 and R1 answers) are rendered. The exit code plugin
+  has not been loaded in that run.
 - Two PPU jump tables stay unresolved (`0x00186a20`, `0x0025a1dc`); no run has reached one.
 - The reservation race window above is documented, not closed.
 
@@ -445,14 +451,16 @@ Open issues:
 - SPURS task entry at LS `0x3070` in images 1, 4, 5, 6, 7 and 8 (tasks 4 to 8 have run).
 - SPURS task entry at LS `0x3090` in image 2 (runs).
 - SPU thread entry at LS `0xd0` in image 3 (runs up to the unknown target above).
+- Exit handler entry at LS `0x10000` in `libsre_taskset2_exit` and `libsre_exit_code_plugin` (the first runs).
 - SPURS kernel entry at LS `0x818` (version 1, in libsre at `0x011f0380`): the first code every SPU thread
   of the SPURS group runs. The taskset policy module (libsre, `0x011f3680`) that the task images depend on
   is loaded by the kernel.
 - Not in the executable or in libsre: the firmware ATRAC3plus SPU decoder (not needed if `cellAtrac`
   is implemented on the host).
-- Not run: the version 2 kernel, the two job chain policy modules, the taskset 2 exit handler and the exit
-  code plugin. The game does not use them; the last two are position independent and are neither
-  recovered nor emitted.
+- Not run: the version 2 kernel, the two job chain policy modules and the exit code plugin. The game does
+  not use the first three. The exit code plugin is recovered and emitted (it loads at LS `0x10000` like the
+  taskset 2 exit handler, which does run) but no run has reached its exit path. Its EA is the registry's
+  assumption: the policy module reads it from LS `0x2fc0` at run time.
 
 ## References
 

@@ -22,11 +22,12 @@ _SKIP_REASON = "TOX2_EBOOT_ELF and TOX2_LIBSRE_ELF must name existing files"
 _AVAILABLE = bool(_EBOOT and _LIBSRE and Path(_EBOOT).is_file() and Path(_LIBSRE).is_file())
 
 _DB_DIR = REPO_ROOT / "config" / "spu"
-# Every emitted image is gated; the two position-independent blobs are neither emitted nor gated.
+# Every registry image is emitted and gated.
 _GATE_IMAGES = [
     "eboot_spline", "eboot_edgelzma", "eboot_bnuscore", "eboot_animation", "eboot_updatematrix",
     "eboot_renderparticle", "eboot_morph", "eboot_skin", "libsre_kernel1", "libsre_kernel2",
-    "libsre_system_service", "libsre_taskset_pm", "libsre_jobchain_pm1", "libsre_jobchain_pm2",
+    "libsre_system_service", "libsre_taskset_pm", "libsre_taskset2_exit", "libsre_exit_code_plugin",
+    "libsre_jobchain_pm1", "libsre_jobchain_pm2",
 ]
 
 # Images whose unresolved indirect sites are pinned below
@@ -46,6 +47,8 @@ _COUNTS = {
     "libsre_kernel2": (3, 377, 6, 0),
     "libsre_system_service": (18, 2104, 50, 0),
     "libsre_taskset_pm": (19, 1766, 89, 0),
+    "libsre_taskset2_exit": (5, 401, 9, 0),
+    "libsre_exit_code_plugin": (6, 441, 11, 0),
     "libsre_jobchain_pm1": (32, 3872, 114, 0),
     "libsre_jobchain_pm2": (30, 3861, 110, 0),
 }

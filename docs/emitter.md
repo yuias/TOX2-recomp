@@ -176,17 +176,16 @@ and writes no files.
   mode (counts, the commonest mnemonics, the unhandled ones) and one line per image otherwise, then
   `gate unhandled: N`.
 - `--max-unhandled N` makes `spu-emit` exit with 9 if the gate images together have more than `N` unhandled
-  words. Every emitted image is a gate image (a registry `gate` is true for each image with an LS base), so
-  no `ungated unhandled: <image> <n>` line appears; the two position-independent blobs are neither emitted
-  nor gated. The gate is checked after the files are written.
+  words. Every emitted image is a gate image (a registry `gate` is true for each image with an LS base, which
+  is every image today), so no `ungated unhandled: <image> <n>` line appears. The gate is checked after the files are written.
 - A word whose group has no handler, an operand the handler refuses (a conversion scale outside 0..127), or a
   rounding mode in the double-precision operations (below) reaches `tox2SpuUnhandled` at run time.
 
-For the committed databases the run gives 14 images, 708 functions, 70,690 instructions and 2,276 dispatch
-entries, written as 23 chunk files and the three shared files (26 files, about 5.3 MB of C, under one
+For the committed databases the run gives 16 images, 719 functions, 71,532 instructions and 2,296 dispatch
+entries, written as 25 chunk files and the three shared files (28 files, about 5.4 MB of C, under one
 second). `gate unhandled: 0`, so `--max-unhandled 0` exits with 0; no mnemonic of any emitted image lacks a
-handler. The edges are 3,184 `goto`s, 1,500 direct jumps, 839 indirect dispatches, 676 returns, 15 fall-through
-jumps, 6 `stop`s and 4 leaves, with 2,424 labels and 1,288 loop hooks. Two flows end in a non-code word (`invalid_flow`
+handler. The edges are 3,242 `goto`s, 1,509 direct jumps, 851 indirect dispatches, 688 returns, 15 fall-through
+jumps, 6 `stop`s and 4 leaves, with 2,462 labels and 1,299 loop hooks. Two flows end in a non-code word (`invalid_flow`
 2: one each in `libsre_kernel1` and `libsre_kernel2`, where a fall-through runs into a non-code word); the
 emitted code calls `tox2SpuUnhandled` there, and they are not counted as unhandled words. Per image:
 
@@ -204,6 +203,8 @@ emitted code calls `tox2SpuUnhandled` there, and they are not counted as unhandl
 | `libsre_kernel2` | 3 | 377 | 6 | 1 |
 | `libsre_system_service` | 18 | 2,104 | 50 | 1 |
 | `libsre_taskset_pm` | 19 | 1,766 | 89 | 1 |
+| `libsre_taskset2_exit` | 5 | 401 | 9 | 1 |
+| `libsre_exit_code_plugin` | 6 | 441 | 11 | 1 |
 | `libsre_jobchain_pm1` | 32 | 3,872 | 114 | 1 |
 | `libsre_jobchain_pm2` | 30 | 3,861 | 110 | 1 |
 
@@ -349,7 +350,7 @@ group (`tools/ps3recomp/emit_ops_<group>.py`) together with semantics cases. Kno
   allocation: it exits on import calls and returns 0 from syscalls. The runtime in `tox2_game`
   implements a subset; see [Runtime internals](runtime.md).
 
-For the SPU, every instruction word of the 14 emitted images has a handler (`gate unhandled: 0`), including the
+For the SPU, every instruction word of the 16 emitted images has a handler (`gate unhandled: 0`), including the
 single-precision and double-precision groups that the engine tasks use. A word that needs a new handler goes
 into the module of its group (`tools/ps3recomp/spu_emit_ops_<group>.py`) together with semantics cases in
 `tools/tests/spu_semantics/cases_<group>.py`. Known deviations from the architecture:
