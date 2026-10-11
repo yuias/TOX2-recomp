@@ -98,18 +98,18 @@ the current tools; `config/functions.json` comes out byte-identical, in about 27
   and the entry point.
 - 173 import thunks, no slot mismatches, none that no `bl` reaches.
 - Two TOCs in the descriptors: `0x010b6330` (the entry TOC) and `0x010c62d0`. `.opd` holds
-  descriptors of both, interleaved. Jump tables: 512 `bctr` sites, 509 resolved (10,013 targets,
-  3,880 distinct), 3 unresolved (all `no_bound`).
-- Code range `0x00010200..0x00c8f408`; 3,024,438 of 3,275,906 `.text` words are owned (92.3%).
-  The 251,468 uncovered words are mostly code that no seed reaches (240,149 words in 4,729
-  runs); 9,353 are jump tables.
+  descriptors of both, interleaved. Jump tables: 512 `bctr` sites, 510 resolved (10,022 targets,
+  3,889 distinct), 2 unresolved (both `no_bound`).
+- Code range `0x00010200..0x00c8f408`; 3,024,489 of 3,275,906 `.text` words are owned (92.3%).
+  The 251,417 uncovered words are mostly code that no seed reaches (240,103 words in 4,728
+  runs); 9,362 are jump tables.
 - 267 `sc` sites, 266 with a resolved syscall number, 1 unresolved.
 - `functions.json` is 3.8 MB and `ghidra_summary.json` is 6.7 MB.
 
-With `--no-ghidra` the same executable gives the same 29,196 functions, 509 of 512 jump tables and
+With `--no-ghidra` the same executable gives the same 29,196 functions, 510 of 512 jump tables and
 266 of 267 syscall numbers: the descriptors and `bl` targets already find every start. The
-difference is in the classification of uncovered words (1,445 words of data instead of 1,459, and
-240,163 words of code instead of 240,149), because Ghidra's data ranges are missing. The
+difference is in the classification of uncovered words (1,431 words of data instead of 1,445, and
+240,117 words of code instead of 240,103), because Ghidra's data ranges are missing. The
 function database differs in `input.ghidra_summary_sha256` and in the sources it records.
 
 ## On libsre

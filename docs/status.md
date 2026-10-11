@@ -264,8 +264,8 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   notification is not implemented, and reservations have a documented race window against PPU plain
   stores (the SPU floating-point deviations are listed in
   [Emitting C](emitter.md#what-is-and-is-not-implemented)). See [SPU usage](spu.md).
-- Function recovery leaves three `bctr` jump tables unresolved (`no_bound`): at `0x00186a20`, `0x0025a1dc`
-  and `0x0058231c`. No run has reached them.
+- Function recovery leaves two `bctr` jump tables unresolved (`no_bound`): at `0x00186a20` and `0x0025a1dc`.
+  No run has reached them.
 - The game's data archive `TLFILE.TLDAT` (about 3 GB) and its index `FILEHEADER.TOFHDB`: the install
   step copies them, and the game's own code then reads items from the archive (6,975 `cellFsRead` and
   6,746 `cellFsLseek` calls in the 30 s run) and has the Edge LZMA task inflate them. The runtime has no

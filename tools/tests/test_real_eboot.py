@@ -342,7 +342,7 @@ class RealSeedsTest(unittest.TestCase):
 class RealJumpTableTest(unittest.TestCase):
     # Not every site resolves: the others are reported per reason (all rel32 tables are
     # placed right after the branch).
-    EXPECTED_UNRESOLVED = {"no_bound": 3}
+    EXPECTED_UNRESOLVED = {"no_bound": 2}
 
     @classmethod
     def setUpClass(cls):
@@ -370,8 +370,8 @@ class RealJumpTableTest(unittest.TestCase):
         self.assertEqual(set(self.tables) & set(self.unresolved), set())
 
     def test_sites_resolve_with_expected_counts(self):
-        self.assertEqual(len(self.tables), 509)
-        self.assertEqual(sum(t.count for t in self.tables.values()), 10013)
+        self.assertEqual(len(self.tables), 510)
+        self.assertEqual(sum(t.count for t in self.tables.values()), 10022)
         reasons = {}
         for jump in self.unresolved.values():
             reasons[jump.reason] = reasons.get(jump.reason, 0) + 1
@@ -385,7 +385,7 @@ class RealJumpTableTest(unittest.TestCase):
 
     def test_entry_totals(self):
         targets = [t for table in self.tables.values() for t in table.targets]
-        self.assertEqual((len(targets), len(set(targets))), (10013, 3880))
+        self.assertEqual((len(targets), len(set(targets))), (10022, 3889))
 
     def test_targets_are_decodable_code_in_text(self):
         for table in self.tables.values():
@@ -459,9 +459,9 @@ class RealRecoverTest(unittest.TestCase):
 
     def test_jump_tables_are_resolved_or_listed(self):
         jt = self.report["jump_tables"]
-        self.assertEqual((jt["bcctr_sites"], jt["resolved"], jt["targets"]), (512, 509, 10013))
-        self.assertEqual(len(self.db["unresolved_indirect"]), 512 - 509)
-        self.assertEqual(len(self.db["jump_tables"]), 509)
+        self.assertEqual((jt["bcctr_sites"], jt["resolved"], jt["targets"]), (512, 510, 10022))
+        self.assertEqual(len(self.db["unresolved_indirect"]), 512 - 510)
+        self.assertEqual(len(self.db["jump_tables"]), 510)
         self.assertEqual(jt["tocs"], ["0x010b6330", "0x010c62d0"])
 
     def test_database_is_sorted_and_ranges_are_disjoint(self):
@@ -489,10 +489,10 @@ class RealCoverageTest(unittest.TestCase):
         self.assertEqual(cov["owned_words"] + cov["uncovered"]["words"], cov["text_words"])
         by_class = cov["uncovered"]["by_class"]
         self.assertEqual(sum(v["words"] for v in by_class.values()), cov["uncovered"]["words"])
-        # Only runs made entirely of table words count here; the rest of the 10013 entries of the
-        # 509 recovered tables lie in runs classified as data or code, or in owned ranges.
+        # Only runs made entirely of table words count here; the rest of the 10022 entries of the
+        # 510 recovered tables lie in runs classified as data or code, or in owned ranges.
         self.assertEqual((by_class["jump_table"]["words"], by_class["jump_table"]["runs"]),
-                         (9353, 476))
+                         (9362, 477))
 
     def test_no_ghidra_functions_are_cell_truncated(self):
         # The committed summary comes from a Cell PPU language export, which decodes the
@@ -566,7 +566,7 @@ class RealEmitCensusTest(unittest.TestCase):
 
     def test_census_totals(self):
         self.assertEqual(self.code, 0)
-        self.assertEqual((self.doc["words"], self.doc["distinct"]), (3024438, 188))
+        self.assertEqual((self.doc["words"], self.doc["distinct"]), (3024489, 188))
         self.assertEqual(self.doc["invalid_owned"], [])
 
     def test_every_counted_mnemonic_has_a_group(self):
@@ -577,7 +577,7 @@ class RealEmitCensusTest(unittest.TestCase):
 
     def test_stdout_header(self):
         self.assertEqual(self.stdout.splitlines()[0],
-                         "census: 3024438 words, 188 distinct mnemonics, 0 invalid owned")
+                         "census: 3024489 words, 188 distinct mnemonics, 0 invalid owned")
 
 
 _EMIT_CACHE = []
@@ -612,7 +612,7 @@ class RealEmitTest(unittest.TestCase):
     def test_counts(self):
         self.assertEqual(self.code, 0)
         self.assertEqual((self.report["functions"], self.report["import_trampolines"],
-                          self.report["edges"]["switches"]), (29196, 173, 477))
+                          self.report["edges"]["switches"]), (29196, 173, 478))
 
     def test_no_unhandled_words(self):
         # `--max-unhandled 0` makes a non-zero count exit 9, which test_counts also catches.

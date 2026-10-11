@@ -582,6 +582,35 @@ class ThroughCallsTest(unittest.TestCase):
         self.assertEqual(fx.reason(), "no_table_base")
 
 
+class IndexCopiesAcrossCallsTest(unittest.TestCase):
+    """The index and the compared value are callee-saved copies of one argument, with calls between."""
+
+    def code(self, compared_src=4, index_src=4):
+        code = [asm.clrldi(31, index_src, 32), asm.mr(29, compared_src)]
+        code += [asm.bl(pc(code), DEFAULT)]
+        code += [asm.bl(pc(code), DEFAULT), asm.cmplwi(7, 29, 8)]
+        code += [asm.bgt(7, pc(code), DEFAULT)]
+        return code + spine(asm.sldi(9, 31, 2))
+
+    def test_copies_of_the_same_argument_share_a_bound(self):
+        fx, table, targets = rel_fixture(self.code(), 9)
+        tables, unresolved = fx.recover()
+        self.assertEqual(unresolved, {})
+        jt = tables[fx.branch]
+        self.assertEqual((jt.table, jt.count, list(jt.targets)), (table, 9, targets))
+
+    def test_copies_of_different_arguments_are_not_a_bound(self):
+        fx, _, _ = rel_fixture(self.code(compared_src=5), 9)
+        self.assertEqual(fx.reason(), "no_bound")
+
+    def test_volatile_copies_are_not_followed_across_calls(self):
+        code = [asm.clrldi(9, 4, 32), asm.mr(10, 4)]
+        code += [asm.bl(pc(code), DEFAULT), asm.cmplwi(7, 10, 8)]
+        code += [asm.bgt(7, pc(code), DEFAULT)]
+        fx, _, _ = rel_fixture(code + spine(asm.sldi(9, 9, 2)), 9)
+        self.assertEqual(fx.reason(), "no_bound")
+
+
 class SpilledIndexTest(unittest.TestCase):
     """Unoptimised code: the index is spilled after its bound check and reloaded before scaling."""
 

@@ -9,8 +9,8 @@ from dataclasses import dataclass
 
 from .elf import ElfError, ElfFile
 from .ppu import Insn
-from .ppu_flow import (CodeImage, eval_const, find_def, find_spill_store, flow_of, walk_back,
-                       written_gprs)
+from .ppu_flow import (_CALLEE_SAVED, CodeImage, eval_const, find_def, find_spill_store, flow_of,
+                       walk_back, written_gprs)
 
 UNRESOLVED_REASONS = ("no_mtctr", "ctr_from_load", "unknown_def", "no_table_base", "no_index",
                       "no_bound", "bad_bound", "table_unreadable", "bad_target", "ambiguous_toc")
@@ -120,9 +120,13 @@ def _root(image: CodeImage, addr: int, reg: int, spills: int = 1) -> tuple[int |
     An unoptimised build spills the index right after its bound check and reloads it before
     scaling. A stack reload is followed to the store of its slot and takes the identity of the
     stored register, so the compare on that register matches the reloaded one.
+
+    A callee-saved register is followed across calls: the index and the compared value are often
+    two such copies of one argument, made before calls that sit between the copies and the bound
+    check. A volatile register still stops at the first call.
     """
     for _ in range(_MAX_HOPS + 1):
-        d = _def(image, addr, reg)
+        d = find_def(image, addr, reg, _WALK_LIMIT, through_calls=reg in _CALLEE_SAVED)
         if d is None:
             return None, reg
         src = _copy_source(d, True)

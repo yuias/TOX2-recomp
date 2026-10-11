@@ -437,7 +437,7 @@ Open issues:
 - SPURS instance B ("atrac3plus", one SPU, created for `cellAtracCreateDecoderExt`) gets its thread group
   and thread, but nothing starts the group; the host decoder makes that unnecessary.
 - The spline task (image 1) has not run in these runs.
-- Three PPU jump tables stay unresolved (`0x00186a20`, `0x0025a1dc`, `0x0058231c`); no run has reached one.
+- Two PPU jump tables stay unresolved (`0x00186a20`, `0x0025a1dc`); no run has reached one.
 - The reservation race window above is documented, not closed.
 
 ## Entry points
