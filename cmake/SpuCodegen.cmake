@@ -23,6 +23,11 @@ function(tox2_spu_add_header_check)
 
   add_test(NAME spu_header_check COMMAND tox2_spu_header_check)
   set_tests_properties(spu_header_check PROPERTIES PASS_REGULAR_EXPRESSION "spu header ok")
+
+  add_executable(tox2_spu_vector_helpers_test runtime/tests/spu_vector_helpers_test.c)
+  tox2_ppu_codegen_options(tox2_spu_vector_helpers_test ${TOX2_SPU_CODEGEN_OPT_LEVEL})
+  add_test(NAME spu_vector_helpers COMMAND tox2_spu_vector_helpers_test)
+  set_tests_properties(spu_vector_helpers PROPERTIES PASS_REGULAR_EXPRESSION "spu vector helpers ok")
 endfunction()
 
 # Adds the generated SPU tree and its link test from TOX2_PPU_GENERATED_DIR/spu/spu_sources.cmake

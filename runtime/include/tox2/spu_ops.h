@@ -463,6 +463,25 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuRotqmbybi(Tox2Vr a, uint32_t count) { return tox2
 // Byte k (architected numbering) of RA || RB is selected by the matching byte of RC. The control
 // bytes are read lane by lane because RC and RT share the same lane order.
 TOX2_FORCEINLINE Tox2Vr tox2SpuShufb(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+#if defined(__SSSE3__)
+    // Architected byte k of a register is host lane 15 - k, so (~sel) & 15 is the lane that pshufb
+    // picks from RA and from RB; bit 4 of the control chooses between them.
+    typedef char Tox2SpuC8x16 __attribute__((vector_size(16)));
+    const Tox2U8x16 sel = c.u8;
+    const Tox2U8x16 lane = ~sel & (uint8_t)0x0f;
+    const Tox2U8x16 from_a = (Tox2U8x16)__builtin_ia32_pshufb128((Tox2SpuC8x16)a.u8, (Tox2SpuC8x16)lane);
+    const Tox2U8x16 from_b = (Tox2U8x16)__builtin_ia32_pshufb128((Tox2SpuC8x16)b.u8, (Tox2SpuC8x16)lane);
+    const Tox2U8x16 use_b = (Tox2U8x16)((sel & (uint8_t)0x10) != (uint8_t)0);
+    Tox2U8x16 v = (from_a & ~use_b) | (from_b & use_b);
+    // The special controls: 10xxxxxx gives 0x00, 110xxxxx gives 0xff and 111xxxxx gives 0x80.
+    const Tox2U8x16 zero = (Tox2U8x16)((sel & (uint8_t)0xc0) == (uint8_t)0x80);
+    const Tox2U8x16 ones = (Tox2U8x16)((sel & (uint8_t)0xe0) == (uint8_t)0xc0);
+    const Tox2U8x16 sign = (Tox2U8x16)((sel & (uint8_t)0xe0) == (uint8_t)0xe0);
+    v = (v & ~(zero | sign)) | ones | (sign & (uint8_t)0x80);
+    Tox2Vr r;
+    r.u8 = v;
+    return r;
+#else
     uint8_t concat[32];
     for (uint32_t k = 0; k < 16; k++) {
         concat[k] = a.u8[15 - k];
@@ -482,6 +501,7 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuShufb(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
         r.u8[lane] = v;
     }
     return r;
+#endif
 }
 
 // The mask for inserting an element of `size` bytes (1, 2, 4 or 8) at the aligned position of `addr`:

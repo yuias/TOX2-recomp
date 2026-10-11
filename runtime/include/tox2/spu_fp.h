@@ -114,41 +114,106 @@ TOX2_FORCEINLINE uint32_t tox2SpuSfNegMulSub(uint32_t a, uint32_t b, uint32_t c)
     return tox2SpuSfFromExact(hi, lo);
 }
 
+// --- Single precision: four lanes at once -----------------------------------------------------
+//
+// The same arithmetic as the scalar helpers above, lane by lane in 256-bit vectors, so that the
+// compiler emits one AVX2 sequence per register instead of four scalar ones with branches. The audio
+// decoder's transforms are made of these instructions. Masks are 0 or all ones per lane.
+
+typedef uint64_t Tox2SpuU64x4 __attribute__((vector_size(32)));
+typedef double Tox2SpuF64x4 __attribute__((vector_size(32)));
+
+TOX2_FORCEINLINE Tox2SpuF64x4 tox2SpuSf4ToDouble(Tox2U32x4 w) {
+    Tox2SpuU64x4 x = __builtin_convertvector(w, Tox2SpuU64x4);
+    // Exponent and fraction move up by 29 bits; adding 896 to the exponent field rebiases it.
+    Tox2SpuU64x4 bits = (((x & 0x7fffffffull) << 29) + (896ull << 52)) | ((x >> 31) << 63);
+    bits &= (Tox2SpuU64x4)((x & 0x7f800000ull) != 0ull);
+    Tox2SpuF64x4 d;
+    __builtin_memcpy(&d, &bits, sizeof d);
+    return d;
+}
+
+TOX2_FORCEINLINE void tox2SpuTwoSum4(Tox2SpuF64x4 a, Tox2SpuF64x4 b, Tox2SpuF64x4* hi, Tox2SpuF64x4* lo) {
+    Tox2SpuF64x4 s = a + b;
+    Tox2SpuF64x4 bb = s - a;
+    Tox2SpuF64x4 t = s - bb;
+    Tox2SpuF64x4 e1 = a - t;
+    Tox2SpuF64x4 e2 = b - bb;
+    *hi = s;
+    *lo = e1 + e2;
+}
+
+// tox2SpuSfFromExact on four lanes.
+TOX2_FORCEINLINE Tox2U32x4 tox2SpuSf4FromExact(Tox2SpuF64x4 hi, Tox2SpuF64x4 lo) {
+    Tox2SpuU64x4 h;
+    Tox2SpuU64x4 l;
+    __builtin_memcpy(&h, &hi, sizeof h);
+    __builtin_memcpy(&l, &lo, sizeof l);
+    Tox2SpuU64x4 exp = (h >> 52) & 0x7ffull;
+    Tox2SpuU64x4 sign = (h >> 63) << 31;
+    // Meaningful only for exponents in range; the other lanes are replaced below.
+    Tox2SpuU64x4 w = ((h & 0x7fffffffffffffffull) - (896ull << 52)) >> 29;
+    Tox2SpuU64x4 inside = (Tox2SpuU64x4)((h & 0x1fffffffull) == 0ull) & (Tox2SpuU64x4)(lo != 0.0) &
+                          (Tox2SpuU64x4)(((l ^ h) >> 63) != 0ull);
+    w += inside;  // all ones: one step toward zero
+    Tox2SpuU64x4 zero = (Tox2SpuU64x4)(exp < 897ull) | (Tox2SpuU64x4)((w >> 23) == 0ull);
+    Tox2SpuU64x4 over = (Tox2SpuU64x4)(exp >= 1152ull);
+    Tox2SpuU64x4 r = (w | sign) & ~zero;
+    r = (r & ~over) | ((sign | 0x7fffffffull) & over);
+    return __builtin_convertvector(r, Tox2U32x4);
+}
+
 // --- Single precision: register helpers (RT = f(RA, RB[, RC])) --------------------------------------
 //
-// Host lanes run opposite to the big-endian words, but each lane is independent, so the loops need no
-// index mapping.
+// Host lanes run opposite to the big-endian words, but each lane is independent, so no index mapping
+// is needed.
 
 TOX2_FORCEINLINE Tox2Vr tox2SpuFa(Tox2Vr a, Tox2Vr b) {
-    for (uint32_t lane = 0; lane < 4; lane++) a.u32[lane] = tox2SpuSfAdd(a.u32[lane], b.u32[lane]);
+    Tox2SpuF64x4 hi;
+    Tox2SpuF64x4 lo;
+    tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32), tox2SpuSf4ToDouble(b.u32), &hi, &lo);
+    a.u32 = tox2SpuSf4FromExact(hi, lo);
     return a;
 }
 
 TOX2_FORCEINLINE Tox2Vr tox2SpuFs(Tox2Vr a, Tox2Vr b) {
-    for (uint32_t lane = 0; lane < 4; lane++) a.u32[lane] = tox2SpuSfSub(a.u32[lane], b.u32[lane]);
+    Tox2SpuF64x4 hi;
+    Tox2SpuF64x4 lo;
+    tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32), -tox2SpuSf4ToDouble(b.u32), &hi, &lo);
+    a.u32 = tox2SpuSf4FromExact(hi, lo);
     return a;
 }
 
 TOX2_FORCEINLINE Tox2Vr tox2SpuFm(Tox2Vr a, Tox2Vr b) {
-    for (uint32_t lane = 0; lane < 4; lane++) a.u32[lane] = tox2SpuSfMul(a.u32[lane], b.u32[lane]);
+    const Tox2SpuF64x4 no_error = {0.0, 0.0, 0.0, 0.0};
+    a.u32 = tox2SpuSf4FromExact(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32), no_error);
     return a;
 }
 
 // RA * RB + RC.
 TOX2_FORCEINLINE Tox2Vr tox2SpuFma(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
-    for (uint32_t lane = 0; lane < 4; lane++) a.u32[lane] = tox2SpuSfMulAdd(a.u32[lane], b.u32[lane], c.u32[lane]);
+    Tox2SpuF64x4 hi;
+    Tox2SpuF64x4 lo;
+    tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32), tox2SpuSf4ToDouble(c.u32), &hi, &lo);
+    a.u32 = tox2SpuSf4FromExact(hi, lo);
     return a;
 }
 
 // RA * RB - RC.
 TOX2_FORCEINLINE Tox2Vr tox2SpuFms(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
-    for (uint32_t lane = 0; lane < 4; lane++) a.u32[lane] = tox2SpuSfMulSub(a.u32[lane], b.u32[lane], c.u32[lane]);
+    Tox2SpuF64x4 hi;
+    Tox2SpuF64x4 lo;
+    tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32), -tox2SpuSf4ToDouble(c.u32), &hi, &lo);
+    a.u32 = tox2SpuSf4FromExact(hi, lo);
     return a;
 }
 
 // RC - RA * RB.
 TOX2_FORCEINLINE Tox2Vr tox2SpuFnms(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
-    for (uint32_t lane = 0; lane < 4; lane++) a.u32[lane] = tox2SpuSfNegMulSub(a.u32[lane], b.u32[lane], c.u32[lane]);
+    Tox2SpuF64x4 hi;
+    Tox2SpuF64x4 lo;
+    tox2SpuTwoSum4(-(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32)), tox2SpuSf4ToDouble(c.u32), &hi, &lo);
+    a.u32 = tox2SpuSf4FromExact(hi, lo);
     return a;
 }
 

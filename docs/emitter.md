@@ -360,7 +360,9 @@ into the module of its group (`tools/ps3recomp/spu_emit_ops_<group>.py`) togethe
   result below the smallest normal number is +0 or above the largest saturates to `sign | 0x7fffffff`.
   `spu_fp.h` computes this on bits, with the host `double` only as exact arithmetic (an exact product and an
   error-free sum), so it needs IEEE double arithmetic in the default environment and `-ffp-contract=off`,
-  which the codegen options set.
+  which the codegen options set. `fa`, `fs`, `fm`, `fma`, `fms` and `fnms` run the same arithmetic on all four
+  lanes at once in 256-bit vectors; the scalar `tox2SpuSf*` functions stay as their definition, and the
+  `spu_vector_helpers` test compares the two.
 - `frest` and `frsqest` return the exact reciprocal (square root) truncated to 24 bits, and `fi` returns its
   second operand unchanged, because the ISA does not publish the hardware's estimate tables. Results of
   sequences that use them (a reciprocal refined by `fi`, `fnms` and `fma`) stay within the ISA's one-ulp
