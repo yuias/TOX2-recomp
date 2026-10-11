@@ -1514,6 +1514,175 @@ void testRendererTextures(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// ---- 3D and cube textures ----
+
+// Two quads (pixels 4..28 and 36..60) that sample unit 0 with three coordinates, TEX H0, TEX0 as in
+// texturedPrograms(). The unit holds a 2x2x2 linear A8R8G8B8 3D texture: slice 0 is the 2x2 texture
+// (red, green / blue, half-transparent white), slice 1 yellow, cyan / magenta, grey. Or it holds a cube map
+// of 2x2 faces, each face one color (+X red, -X green, +Y blue, -Y yellow, +Z cyan, -Z magenta). The
+// texture coordinates run 0..1 in u and v over a quad; w (3D) or the direction (cube) is constant per quad.
+// Without `bytes` the image rect has no rows, so no texture bytes are copied and the draw reads a placeholder.
+struct VolumeOptions {
+    bool cube = false;
+    bool bytes = true;
+    float left[3] = {0.0f, 0.0f, 0.25f};   // 3D: w of the left quad is left[2]; cube: its direction
+    float right[3] = {0.0f, 0.0f, 0.75f};  // the same for the right quad
+    bool nearest = true;                   // else LINEAR filters
+    bool texel_center = false;             // 3D: u = v = 0.25 over the whole quad, the center of texel (0, 0)
+    std::uint32_t slices = 2;              // 3D: depth register; one slice is still a 3D texture
+};
+
+constexpr std::uint32_t kVolumeSlice1[4] = {0xFFFFFF00, 0xFF00FFFF, 0xFFFF00FF, 0xFF808080};
+constexpr std::uint32_t kCubeFaces[6] = {0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00, 0xFF00FFFF, 0xFFFF00FF};
+
+std::vector<std::uint8_t> makeVolumeCapture(const VolumeOptions& options) {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    scene.setSurface();
+    scene.clear(0xFF000000);
+    scene.bindTexture(kTextureOffset, 2, 2);
+    if (options.cube) {
+        for (std::uint32_t face = 0; face < 6; face++) {
+            for (std::uint32_t texel = 0; texel < 4; texel++) {
+                scene.memory().putWord(0, kTextureOffset + face * 16 + (texel / 2) * 8 + (texel % 2) * 4,
+                                       kCubeFaces[face]);
+            }
+        }
+        scene.write(tox2::kMethodNv4097SetTextureFormat, 1u | (1u << 2) | (2u << 4) | (0xA5u << 8) | (1u << 16));
+        scene.write(tox2::kMethodNv4097SetTextureControl3, 8);
+    } else {
+        for (std::uint32_t texel = 0; texel < 4; texel++) {
+            scene.memory().putWord(0, kTextureOffset + (texel / 2) * 8 + (texel % 2) * 4, kTexturePixels[texel]);
+            scene.memory().putWord(0, kTextureOffset + 16 + (texel / 2) * 8 + (texel % 2) * 4, kVolumeSlice1[texel]);
+        }
+        scene.write(tox2::kMethodNv4097SetTextureFormat, 1u | (3u << 4) | (0xA5u << 8) | (1u << 16));
+        scene.write(tox2::kMethodNv4097SetTextureControl3, (options.slices << 20) | 8);
+    }
+    if (!options.bytes) scene.write(tox2::kMethodNv4097SetTextureImageRect, 2u << 16);
+    if (!options.nearest) scene.write(tox2::kMethodNv4097SetTextureFilter, (2u << 16) | (2u << 24));
+
+    setQuadRenderState(scene);
+    scene.write(tox2::kMethodNv4097SetVertexAttribOutputMask, 1u << 14);  // TEX0
+    scene.write(tox2::kMethodNv4097SetShaderControl, 0x400);              // color from H0
+    scene.write(tox2::kMethodNv4097SetTexCoordControl, 0);                // 3D coordinate
+    scene.setFloatAttrib(0, 3, kPositionsOffset);
+    scene.setFloatAttrib(8, 3, kTexCoordsOffset);
+    scene.setPrograms(texturedPrograms());
+
+    const auto quad = [&](float x0, float x1, const float (&third)[3]) {
+        const float xs[4] = {x0, x1, x0, x1};
+        for (std::uint32_t v = 0; v < 4; v++) {
+            scene.memory().putFloat(1, kPositionsOffset + v * 12, xs[v]);
+            scene.memory().putFloat(1, kPositionsOffset + v * 12 + 4, kQuadCorners[v][1]);
+            scene.memory().putFloat(1, kPositionsOffset + v * 12 + 8, 0.0f);
+            // A cube lookup takes the direction as it is; a 3D lookup takes u and v from the corner.
+            const float u = options.texel_center ? 0.25f : (v & 1) != 0 ? 1.0f : 0.0f;
+            const float t = options.texel_center ? 0.25f : (v & 2) != 0 ? 1.0f : 0.0f;
+            scene.memory().putFloat(1, kTexCoordsOffset + v * 12, options.cube ? third[0] : u);
+            scene.memory().putFloat(1, kTexCoordsOffset + v * 12 + 4, options.cube ? third[1] : t);
+            scene.memory().putFloat(1, kTexCoordsOffset + v * 12 + 8, third[2]);
+        }
+        scene.drawStrip(4);
+    };
+    quad(-0.875f, -0.125f, options.left);
+    quad(0.125f, 0.875f, options.right);
+    return scene.finish();
+}
+
+void testRendererVolumeTextures(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+    CHECK(renderer.valid());
+    std::vector<std::uint8_t> bgra;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    const auto render = [&](const VolumeOptions& options) {
+        std::vector<tox2::RsxCommand> commands = replaySynthetic(makeVolumeCapture(options));
+        tox2::rsxUnimplementedReset();
+        renderer.execute(commands);
+        CHECK(renderer.valid());
+        CHECK(renderer.readDisplay(bgra, width, height));
+        if (bgra.size() != 64 * 64 * 4) bgra.assign(64 * 64 * 4, 0);
+    };
+    const auto expectNoNotes = [] {
+        for (const auto& [name, count] : tox2::rsxUnimplementedSnapshot()) {
+            std::fprintf(stderr, "unimplemented: %s: %llu\n", name.c_str(), static_cast<unsigned long long>(count));
+        }
+        CHECK(tox2::rsxUnimplementedSnapshot().empty());
+    };
+
+    // The left quad reads the slice at w = 0.25 (slice 0), the right one the slice at w = 0.75 (slice 1); u
+    // and v pick the texel as in 2D.
+    render({});
+    CHECK(pixelArgb(bgra, width, 10, 24) == 0xFFFF0000 && pixelArgb(bgra, width, 22, 24) == 0xFF00FF00);
+    CHECK(pixelArgb(bgra, width, 10, 40) == 0xFF0000FF && pixelArgb(bgra, width, 22, 40) == 0x80FFFFFF);
+    CHECK(pixelArgb(bgra, width, 42, 24) == 0xFFFFFF00 && pixelArgb(bgra, width, 54, 24) == 0xFF00FFFF);
+    CHECK(pixelArgb(bgra, width, 42, 40) == 0xFFFF00FF && pixelArgb(bgra, width, 54, 40) == 0xFF808080);
+    CHECK(pixelArgb(bgra, width, 2, 2) == 0xFF000000);
+    // The guest bytes are uploaded again for every draw.
+    CHECK(renderer.stats().draws_skipped == 0 && renderer.stats().texture_uploads == 2);
+    expectNoNotes();
+
+    // A single slice is still a 3D texture: both quads read it (w repeats).
+    VolumeOptions flat;
+    flat.slices = 1;
+    render(flat);
+    CHECK(pixelArgb(bgra, width, 10, 24) == 0xFFFF0000 && pixelArgb(bgra, width, 42, 24) == 0xFFFF0000);
+    CHECK(pixelArgb(bgra, width, 22, 40) == 0x80FFFFFF && pixelArgb(bgra, width, 54, 40) == 0x80FFFFFF);
+    expectNoNotes();
+
+    // With a linear filter, w = 0.5 is halfway between the slices: at the center of texel (0, 0) red and
+    // yellow average to (255, 128, 0).
+    VolumeOptions halfway;
+    halfway.nearest = false;
+    halfway.texel_center = true;
+    halfway.left[2] = halfway.right[2] = 0.5f;
+    render(halfway);
+    const std::uint32_t mixed = pixelArgb(bgra, width, 16, 32);
+    CHECK(((mixed >> 16) & 0xFF) >= 250 && std::abs(static_cast<int>((mixed >> 8) & 0xFF) - 128) <= 3 &&
+          (mixed & 0xFF) <= 3);
+    expectNoNotes();
+
+    // Each direction selects its face.
+    VolumeOptions faces;
+    faces.cube = true;
+    faces.left[0] = 1.0f;
+    faces.left[1] = 0.0f;
+    faces.left[2] = 0.0f;
+    faces.right[0] = 0.0f;
+    faces.right[1] = -1.0f;
+    faces.right[2] = 0.0f;
+    render(faces);
+    CHECK(pixelArgb(bgra, width, 10, 24) == kCubeFaces[0] && pixelArgb(bgra, width, 22, 40) == kCubeFaces[0]);
+    CHECK(pixelArgb(bgra, width, 42, 24) == kCubeFaces[3] && pixelArgb(bgra, width, 54, 40) == kCubeFaces[3]);
+    CHECK(renderer.stats().draws_skipped == 0);
+    expectNoNotes();
+    faces.left[0] = -0.2f;
+    faces.left[1] = 0.1f;
+    faces.left[2] = 1.0f;  // +Z is the major axis
+    faces.right[0] = 0.0f;
+    faces.right[1] = 0.3f;
+    faces.right[2] = -2.0f;  // -Z
+    render(faces);
+    CHECK(pixelArgb(bgra, width, 16, 32) == kCubeFaces[4] && pixelArgb(bgra, width, 48, 32) == kCubeFaces[5]);
+    expectNoNotes();
+
+    // A 3D or cube texture without bytes reads the placeholder of its type (a placeholder of another view type
+    // would be a validation error) and is counted.
+    for (const bool cube : {false, true}) {
+        VolumeOptions empty;
+        empty.cube = cube;
+        empty.bytes = false;
+        if (cube) empty.left[2] = empty.right[2] = 1.0f;
+        render(empty);
+        CHECK(pixelArgb(bgra, width, 10, 24) == 0xFFFF00FF && pixelArgb(bgra, width, 54, 40) == 0xFFFF00FF);
+        CHECK(unimplementedCount("texture placeholder: no texture data") == 2);
+        CHECK(renderer.stats().draws_skipped == 0);
+    }
+    CHECK(renderer.valid());
+    tox2::rsxUnimplementedReset();
+}
+
 // A clear that includes stencil under a write mask other than 0 or 0xFF is counted by the frame
 // builder (the renderer clears the whole byte).
 void testPartialStencilNote() {
@@ -1641,6 +1810,7 @@ int main() {
     testRendererQuad(*ctx);
     testRendererBranchBits(*ctx);
     testRendererTextures(*ctx);
+    testRendererVolumeTextures(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
     ctx.reset();

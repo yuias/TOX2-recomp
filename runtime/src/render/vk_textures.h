@@ -24,6 +24,10 @@ namespace tox2 {
 // identity remap gives an identity view (which keeps border colours defined). A guest texture has its whole
 // mip chain (rsxTextureMipCount levels); render targets and their copies have one level.
 //
+// A guest texture is a 2D image, a 3D image or a cube map (a 2D image of six layers with a cube view), as
+// rsxTextureKind says. The cube faces are in the order +X, -X, +Y, -Y, +Z, -Z, which is both the RSX and the
+// Vulkan layer order.
+//
 // Component mapping of a view for the texture's SET_TEXTURE_CONTROL1 word: bits 0..7 select the source
 // channel of A, R, G, B (two bits each: A = 0, R = 1, G = 2, B = 3) and bits 8..15 say whether the
 // channel reads it (2), is forced to 1 or to 0. The identity word is 0xAAE4. Only the low 16 bits are used;
@@ -63,6 +67,9 @@ struct TextureImage {
     VmaAllocation allocation = nullptr;
     VkFormat format = VK_FORMAT_UNDEFINED;
     std::uint32_t width = 0, height = 0, levels = 1;
+    std::uint32_t depth = 1;                            // slices of a 3D image
+    std::uint32_t layers = 1;                           // 6 for a cube map
+    VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D;  // 3D for a volume even when it has one slice
     VkDeviceSize bytes = 0;
     // Layout at the end of the commands recorded so far (the frame's command buffer is submitted in order).
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -86,7 +93,8 @@ public:
     const std::string& error() const { return error_; }
 
     // Image for a texture whose bytes the draw carries, cached by (location, offset, format, width, height,
-    // pitch, levels). Null with a counted note when the texture cannot be sampled (format, size).
+    // pitch, levels, depth, kind). Null with a counted note when the texture cannot be sampled (format, size,
+    // a cube map that is not square).
     std::shared_ptr<TextureImage> acquire(const RsxTextureDesc& texture);
 
     // Image the size of a render target that receives a copy of it. One per size.
@@ -95,12 +103,13 @@ public:
     // View with the component mapping of `remap`; null on a Vulkan failure.
     VkImageView view(TextureImage& image, std::uint32_t remap);
     // View of an image the cache does not own, with the same mapping rule.
-    VkImageView createView(VkImage image, VkFormat format, std::uint32_t remap, std::uint32_t levels = 1);
+    VkImageView createView(VkImage image, VkFormat format, std::uint32_t remap, std::uint32_t levels = 1,
+                           VkImageViewType type = VK_IMAGE_VIEW_TYPE_2D, std::uint32_t layers = 1);
 
     VkSampler sampler(const RsxTextureDesc& texture);
 
-    // Copies every level of the image from the staging buffer, which holds them tightly packed at the
-    // offsets of `levels` (the packed layout of rsx_texture_layout.h) from `offset`. The image ends in
+    // Copies every level (and cube face) of the image from the staging buffer, which holds them tightly packed
+    // at the offsets of `levels` (the packed layout of rsx_texture_layout.h) from `offset`. The image ends in
     // SHADER_READ_ONLY. The previous contents are discarded. The staging texels must already be byte
     // swapped (see above).
     void recordUpload(VkCommandBuffer cmd, TextureImage& image, VkBuffer staging, VkDeviceSize offset,
@@ -115,10 +124,11 @@ public:
 
 private:
     using Key = std::tuple<std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t,
-                           std::uint32_t>;
+                           std::uint32_t, std::uint32_t, std::uint32_t>;
 
     std::shared_ptr<TextureImage> create(std::uint32_t width, std::uint32_t height, VkFormat format,
-                                         VkImageUsageFlags usage, std::uint32_t levels = 1);
+                                         VkImageUsageFlags usage, std::uint32_t levels = 1, std::uint32_t depth = 1,
+                                         std::uint32_t layers = 1, VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D);
     bool formatUsable(VkFormat format);
     void fail(std::string message);
 

@@ -325,6 +325,62 @@ void testTextureOnly() {
     CHECK(!expand.ok && hasReport(expand, "texture expand"));
 }
 
+// The sampler type of each unit comes from the texture bound to it: sampler3D and samplerCube read three
+// coordinates, TXP divides them by w, and a cube lookup is not scaled for unnormalized coordinates.
+void testTextureTypes() {
+    const auto types = [](std::uint32_t unit, std::uint32_t type) { return type << (unit * 2); };
+    const auto build = [&](const std::vector<Asm>& instructions, std::uint32_t texture_types) {
+        return tox2::translateFragmentProgram(program(instructions), 0x40, 0, texture_types);
+    };
+
+    Asm tex;
+    tex.op = 0x17;
+    tex.input = 4;  // TEX0
+    tex.end = true;
+    const tox2::GlslResult volume = build({tex}, types(0, tox2::kFpTextureType3D));
+    CHECK(volume.ok);
+    CHECK(contains(volume.glsl, "layout(set = 0, binding = 3) uniform sampler3D tex0;"));
+    CHECK(contains(volume.glsl, "texture(tex0, var_tex0.xyz * draw.texture_scale[0].xyz)"));
+    CHECK(volume.texture_units == 1u && compiles(volume, 0xf0f3));
+
+    Asm txp;
+    txp.op = 0x18;
+    txp.unit = 5;
+    txp.input = 7;  // TEX3
+    txp.src0 = inputSrc("xyzw");
+    txp.end = true;
+    const tox2::GlslResult projective = build({txp}, types(5, tox2::kFpTextureType3D));
+    CHECK(projective.ok && contains(projective.glsl, "uniform sampler3D tex5;"));
+    CHECK(contains(projective.glsl, "texture(tex5, (var_tex3.xyz / var_tex3.w) * draw.texture_scale[5].xyz)"));
+    CHECK(compiles(projective, 0xf0f4));
+
+    const tox2::GlslResult cube = build({txp}, types(5, tox2::kFpTextureTypeCube));
+    CHECK(cube.ok && contains(cube.glsl, "layout(set = 0, binding = 8) uniform samplerCube tex5;"));
+    CHECK(contains(cube.glsl, "texture(tex5, (var_tex3.xyz / var_tex3.w))") &&
+          !contains(cube.glsl, "texture_scale[5]"));
+    CHECK(compiles(cube, 0xf0f5));
+    tex.unit = 2;
+    CHECK(contains(build({tex}, types(2, tox2::kFpTextureTypeCube)).glsl, "texture(tex2, var_tex0.xyz)"));
+
+    // The types are per unit, and a unit the program does not sample does not change its text.
+    Asm first = tex, second = tex, third = tex;
+    first.unit = 0;
+    first.dest = 0;
+    first.end = false;
+    second.unit = 1;
+    second.dest = 1;
+    second.end = false;
+    third.unit = 2;
+    third.dest = 2;
+    const std::uint32_t mixed = types(0, tox2::kFpTextureType3D) | types(1, tox2::kFpTextureTypeCube);
+    const tox2::GlslResult three = build({first, second, third}, mixed);
+    CHECK(three.ok && contains(three.glsl, "uniform sampler3D tex0;") &&
+          contains(three.glsl, "uniform samplerCube tex1;"));
+    CHECK(contains(three.glsl, "uniform sampler2D tex2;") && three.texture_units == 7u && compiles(three, 0xf0f6));
+    CHECK(build({tex}, types(7, tox2::kFpTextureType3D)).glsl == build({tex}, 0).glsl);
+    CHECK(build({tex}, 0).glsl == translate({tex}).glsl);
+}
+
 void testConstants() {
     // Each instruction with a constant operand takes the next fc slot; all its constant sources share it.
     Asm first;
@@ -829,6 +885,7 @@ void testLayout() {
 int main() {
     testAssembler();
     testTextureOnly();
+    testTextureTypes();
     testConstants();
     testOperations();
     testCompareAndRounding();

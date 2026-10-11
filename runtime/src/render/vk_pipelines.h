@@ -25,12 +25,21 @@ struct DrawShaders {
     VkShaderModule fragment = VK_NULL_HANDLE;
     std::uint32_t inputs_used = 0;    // bit n: the vertex program reads attribute slot n
     std::uint32_t texture_units = 0;  // bit n: the fragment program samples unit n
+    // kFpTextureType* of each sampled unit, 2 bits per unit (the fragment program declares those samplers);
+    // 0 for a unit the program does not sample.
+    std::uint32_t texture_types = 0;
 };
+
+// Sampler types the draw's textures call for, 2 bits per unit (fpTextureType). A unit without a texture is
+// 2D, like one whose texture the renderer cannot sample.
+std::uint32_t drawTextureTypes(const RsxDraw& draw);
 
 struct PipelineKey {
     std::uint64_t vp_hash = 0, fp_hash = 0;
     // The fragment GLSL depends on both words, so they are part of the program identity.
     std::uint32_t fp_control = 0, texcoord_control = 0;
+    // Sampler types of the sampled units (DrawShaders::texture_types): the module declares them.
+    std::uint32_t fp_texture_types = 0;
     VkFormat color_format = VK_FORMAT_UNDEFINED;
     VkFormat depth_format = VK_FORMAT_UNDEFINED;                               // undefined: no depth/stencil attachment
     VkPrimitiveTopology topology_class = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;  // point, line or triangle list
@@ -74,10 +83,10 @@ public:
 
 private:
     struct Program;
-    using FragmentKey = std::tuple<std::uint64_t, std::uint32_t, std::uint32_t>;
+    using FragmentKey = std::tuple<std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t>;
 
     const Program* vertexProgram(const RsxDraw& draw);
-    const Program* fragmentProgram(const RsxDraw& draw);
+    const Program* fragmentProgram(const RsxDraw& draw, std::uint32_t texture_types);
     bool createClearShaders();
     void fail(std::string message);
 

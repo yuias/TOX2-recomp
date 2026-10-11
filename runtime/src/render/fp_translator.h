@@ -16,9 +16,18 @@ namespace tox2 {
 // Descriptor set 0 bindings used by the fragment stage.
 inline constexpr std::uint32_t kFpConstantsBinding = 1;          // UBO: vec4 fc[N], std140, N = inline constants
 inline constexpr std::uint32_t kFpDrawBinding = kVpDrawBinding;  // same buffer as the vertex stage
-inline constexpr std::uint32_t kFpTextureBindingBase = 3;        // sampler2D of unit n at base + n
+inline constexpr std::uint32_t kFpTextureBindingBase = 3;        // sampler of unit n at base + n
 inline constexpr std::uint32_t kFpTextureUnitCount = 16;
 inline constexpr std::uint32_t kFpDrawBlockOffset = sizeof(VpDrawUniforms);  // 64
+
+// Sampler type of each texture unit, 2 bits per unit (unit n at bit 2n). The translator declares sampler2D,
+// sampler3D or samplerCube for a sampled unit accordingly, so the types are part of a program's identity:
+// the same ucode used with a 2D and a 3D texture on one unit is two programs, each with its own pipelines.
+// Units the program does not sample have no effect on its text.
+inline constexpr std::uint32_t kFpTextureType2D = 0;
+inline constexpr std::uint32_t kFpTextureType3D = 1;
+inline constexpr std::uint32_t kFpTextureTypeCube = 2;
+constexpr std::uint32_t fpTextureType(std::uint32_t types, std::uint32_t unit) { return (types >> (unit * 2)) & 3; }
 
 // Fragment-stage per-draw values, stored in binding 2 from byte kFpDrawBlockOffset (std140; the
 // vertex stage declares only the first 64 bytes). The bound range must be at least
@@ -33,8 +42,9 @@ inline constexpr std::uint32_t kFpDrawBlockOffset = sizeof(VpDrawUniforms);  // 
 //   offset  8  uint  flags        kFpFlag* bits
 //   offset 12  uint  reserved
 //   offset 16  vec4  texture_scale[16]  per texture unit: xy = 1 / width, 1 / height for
-//                                 unnormalised textures, (1, 1) otherwise. The shader always
-//                                 multiplies the sampled coordinate by it.
+//                                 unnormalised textures, (1, 1) otherwise; z = 1 / depth for an
+//                                 unnormalised 3D texture, 1 otherwise. The shader multiplies the
+//                                 sampled coordinate by it (except for a cube map).
 //
 // kFpFlagTwoSided: set from the two-side lighting enable register (0x142C). The colour inputs then
 // pick the back colours when !gl_FrontFacing, so the Vulkan front face must be set from
@@ -71,12 +81,12 @@ constexpr std::uint32_t fpFixupWord(std::uint32_t stored) { return std::rotl(sto
 // RsxDraw::fp_constants) after an instruction that has a constant operand, ending at the instruction
 // with the END bit. `control` is RsxDraw::fp_control (SET_SHADER_CONTROL) and `texcoord_control` is
 // RsxDraw::texcoord_control (bit n = texture coordinate n is 2D: z = 0, w = fragment w).
-// GlslResult::texture_units is the mask of sampled units. TEX/TXP always use sampler2D; until a
-// dimension parameter exists the caller must check each sampled unit's dimension and skip draws
-// that sample a 3D or cube texture. Inputs use the vertex translator's varying
+// `texture_types` gives the sampler type of each unit (fpTextureType). GlslResult::texture_units is the
+// mask of sampled units. TEX and TXP read two coordinates (xy) from a 2D unit and three (xyz) from a 3D or
+// cube unit; TXP divides them by w. Inputs use the vertex translator's varying
 // locations. Inline constants read `fc[i]` in program order; the array covers the entries the
 // program reads (at most RsxDraw::fp_constants.size() / 4), so bind at least that many.
 GlslResult translateFragmentProgram(std::span<const std::uint32_t> ucode, std::uint32_t control,
-                                    std::uint32_t texcoord_control);
+                                    std::uint32_t texcoord_control, std::uint32_t texture_types = 0);
 
 }  // namespace tox2

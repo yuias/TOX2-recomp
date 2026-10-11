@@ -17,8 +17,8 @@ constexpr VkDeviceSize kCacheBudgetBytes = 256ull << 20;
 constexpr std::size_t kMaxScratchImages = 4;
 
 // Callers pass UNDEFINED as the old layout before a copy that overwrites the whole image.
-void imageBarrier(VkCommandBuffer cmd, VkImage image, std::uint32_t levels, VkImageLayout from, VkImageLayout to,
-                  VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access) {
+void imageBarrier(VkCommandBuffer cmd, VkImage image, std::uint32_t levels, std::uint32_t layers, VkImageLayout from,
+                  VkImageLayout to, VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access) {
     VkImageMemoryBarrier2 barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     // Everything recorded or submitted earlier may use the image (an earlier draw sampling it, an earlier
@@ -32,7 +32,7 @@ void imageBarrier(VkCommandBuffer cmd, VkImage image, std::uint32_t levels, VkIm
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image;
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, layers};
     VkDependencyInfo dependency{};
     dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dependency.imageMemoryBarrierCount = 1;
@@ -218,11 +218,18 @@ bool TextureCache::formatUsable(VkFormat format) {
 }
 
 std::shared_ptr<TextureImage> TextureCache::create(std::uint32_t width, std::uint32_t height, VkFormat format,
-                                                   VkImageUsageFlags usage, std::uint32_t levels) {
-    const VkPhysicalDeviceProperties& props = context_.deviceProperties();
-    if (width == 0 || height == 0 || width > props.limits.maxImageDimension2D ||
-        height > props.limits.maxImageDimension2D) {
-        rsxNoteUnimplemented("texture layout", std::format("size {}x{}", width, height));
+                                                   VkImageUsageFlags usage, std::uint32_t levels, std::uint32_t depth,
+                                                   std::uint32_t layers, VkImageViewType view_type) {
+    const VkPhysicalDeviceLimits& limits = context_.deviceProperties().limits;
+    // A 3D image is limited by maxImageDimension3D on all three sides; a cube by maxImageDimensionCube.
+    const std::uint32_t max_side = view_type == VK_IMAGE_VIEW_TYPE_3D     ? limits.maxImageDimension3D
+                                   : view_type == VK_IMAGE_VIEW_TYPE_CUBE ? limits.maxImageDimensionCube
+                                                                          : limits.maxImageDimension2D;
+    if (width == 0 || height == 0 || width > max_side || height > max_side || depth > max_side ||
+        layers > limits.maxImageArrayLayers) {
+        rsxNoteUnimplemented("texture layout", view_type == VK_IMAGE_VIEW_TYPE_3D
+                                                       ? std::format("size {}x{}x{}", width, height, depth)
+                                                       : std::format("size {}x{}", width, height));
         return nullptr;
     }
     auto texture = std::make_shared<TextureImage>();
@@ -230,24 +237,29 @@ std::shared_ptr<TextureImage> TextureCache::create(std::uint32_t width, std::uin
     texture->format = format;
     texture->width = width;
     texture->height = height;
+    texture->depth = depth;
+    texture->layers = layers;
+    texture->view_type = view_type;
     const std::uint32_t block_bytes = format == VK_FORMAT_BC1_RGBA_UNORM_BLOCK                                     ? 8
                                       : format == VK_FORMAT_BC2_UNORM_BLOCK || format == VK_FORMAT_BC3_UNORM_BLOCK ? 16
                                                                                                                    : 0;
     texture->levels = levels;
     texture->bytes = 0;
-    for (std::uint32_t level = 0, w = width, h = height; level < levels;
-         level++, w = std::max(w / 2, 1u), h = std::max(h / 2, 1u)) {
-        texture->bytes += block_bytes != 0 ? static_cast<VkDeviceSize>((w + 3) / 4) * ((h + 3) / 4) * block_bytes
-                                           : static_cast<VkDeviceSize>(w) * h * 4;
+    for (std::uint32_t level = 0, w = width, h = height, d = depth; level < levels;
+         level++, w = std::max(w / 2, 1u), h = std::max(h / 2, 1u), d = std::max(d / 2, 1u)) {
+        texture->bytes += (block_bytes != 0 ? static_cast<VkDeviceSize>((w + 3) / 4) * ((h + 3) / 4) * block_bytes
+                                            : static_cast<VkDeviceSize>(w) * h * 4) *
+                          d * layers;
     }
 
     VkImageCreateInfo image_info{};
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.imageType = view_type == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+    image_info.flags = view_type == VK_IMAGE_VIEW_TYPE_CUBE ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
     image_info.format = format;
-    image_info.extent = {width, height, 1};
+    image_info.extent = {width, height, depth};
     image_info.mipLevels = levels;
-    image_info.arrayLayers = 1;
+    image_info.arrayLayers = layers;
     image_info.samples = VK_SAMPLE_COUNT_1_BIT;
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
     image_info.usage = usage;
@@ -274,9 +286,25 @@ std::shared_ptr<TextureImage> TextureCache::acquire(const RsxTextureDesc& textur
                              std::format("{} (device lacks block compression)", rsxTextureFormatName(texture.format)));
         return nullptr;
     }
+    const RsxTextureKind kind = rsxTextureKind(texture);
+    if (kind == RsxTextureKind::Unsupported) {
+        rsxNoteUnimplemented("texture layout", std::format("dimension {}", texture.dimension));
+        return nullptr;
+    }
+    if (kind == RsxTextureKind::Cube && texture.width != texture.height) {
+        // Vulkan cube images have square faces.
+        rsxNoteUnimplemented("texture layout", "cubemap that is not square");
+        return nullptr;
+    }
     const std::uint32_t levels = rsxTextureMipCount(texture.format, texture.width, texture.height, texture.mips);
-    const Key key{texture.location, texture.offset, texture.format, texture.width,
-                  texture.height,   texture.pitch,  levels};
+    const std::uint32_t depth = kind == RsxTextureKind::Tex3D ? texture.depth : 1;
+    const std::uint32_t layers = kind == RsxTextureKind::Cube ? 6 : 1;
+    const VkImageViewType view_type = kind == RsxTextureKind::Cube    ? VK_IMAGE_VIEW_TYPE_CUBE
+                                      : kind == RsxTextureKind::Tex3D ? VK_IMAGE_VIEW_TYPE_3D
+                                                                      : VK_IMAGE_VIEW_TYPE_2D;
+    const Key key{texture.location, texture.offset, texture.format,
+                  texture.width,    texture.height, texture.pitch,
+                  levels,           depth,          static_cast<std::uint32_t>(kind)};
     const auto it = images_.find(key);
     if (it != images_.end()) {
         it->second->last_used = ++tick_;
@@ -284,7 +312,7 @@ std::shared_ptr<TextureImage> TextureCache::acquire(const RsxTextureDesc& textur
     }
     std::shared_ptr<TextureImage> created =
             create(texture.width, texture.height, format, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                   levels);
+                   levels, depth, layers, view_type);
     if (!created) return nullptr;
     created->last_used = ++tick_;
     images_[key] = created;
@@ -303,14 +331,15 @@ std::shared_ptr<TextureImage> TextureCache::scratch(std::uint32_t width, std::ui
     return created;
 }
 
-VkImageView TextureCache::createView(VkImage image, VkFormat format, std::uint32_t remap, std::uint32_t levels) {
+VkImageView TextureCache::createView(VkImage image, VkFormat format, std::uint32_t remap, std::uint32_t levels,
+                                     VkImageViewType type, std::uint32_t layers) {
     VkImageViewCreateInfo view_info{};
     view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     view_info.image = image;
-    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.viewType = type;
     view_info.format = format;
     view_info.components = textureComponentMapping(remap);
-    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
+    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, layers};
     VkImageView view = VK_NULL_HANDLE;
     if (vkCreateImageView(context_.device(), &view_info, nullptr, &view) != VK_SUCCESS) {
         fail("vkCreateImageView failed for a texture");
@@ -323,7 +352,7 @@ VkImageView TextureCache::view(TextureImage& image, std::uint32_t remap) {
     const std::uint32_t key = remap & 0xFFFF;
     const auto it = image.views.find(key);
     if (it != image.views.end()) return it->second;
-    const VkImageView created = createView(image.image, image.format, key, image.levels);
+    const VkImageView created = createView(image.image, image.format, key, image.levels, image.view_type, image.layers);
     if (created != VK_NULL_HANDLE) image.views[key] = created;
     return created;
 }
@@ -357,35 +386,35 @@ VkSampler TextureCache::sampler(const RsxTextureDesc& texture) {
 
 void TextureCache::recordUpload(VkCommandBuffer cmd, TextureImage& image, VkBuffer staging, VkDeviceSize offset,
                                 std::span<const RsxTextureLevel> levels) {
-    imageBarrier(cmd, image.image, image.levels, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    imageBarrier(cmd, image.image, image.levels, image.layers, VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
     std::vector<VkBufferImageCopy> regions;
     regions.reserve(levels.size());
     for (const RsxTextureLevel& level : levels) {
         VkBufferImageCopy region{};
         region.bufferOffset = offset + level.packed_offset;  // rows are tightly packed: bufferRowLength stays 0
-        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level.level, 0, 1};
-        region.imageExtent = {level.width, level.height, 1};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level.level, level.layer, 1};
+        region.imageExtent = {level.width, level.height, level.depth};
         regions.push_back(region);
     }
     vkCmdCopyBufferToImage(cmd, staging, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            static_cast<std::uint32_t>(regions.size()), regions.data());
-    imageBarrier(cmd, image.image, image.levels, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    imageBarrier(cmd, image.image, image.levels, image.layers, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     image.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 void TextureCache::recordCopy(VkCommandBuffer cmd, TextureImage& image, VkImage source) {
-    imageBarrier(cmd, image.image, image.levels, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    imageBarrier(cmd, image.image, image.levels, image.layers, VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
     VkImageCopy region{};
     region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.extent = {image.width, image.height, 1};
     vkCmdCopyImage(cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    1, &region);
-    imageBarrier(cmd, image.image, image.levels, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    imageBarrier(cmd, image.image, image.levels, image.layers, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     image.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

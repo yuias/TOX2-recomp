@@ -71,7 +71,8 @@ struct Expr {
 
 class Translator {
 public:
-    GlslResult run(std::span<const std::uint32_t> ucode, std::uint32_t control, std::uint32_t texcoord_control);
+    GlslResult run(std::span<const std::uint32_t> ucode, std::uint32_t control, std::uint32_t texcoord_control,
+                   std::uint32_t texture_types);
 
 private:
     void note(std::string message);
@@ -89,6 +90,7 @@ private:
     std::string body_;
     std::uint64_t temps_used_[2] = {};  // [0] = R, [1] = H
     std::uint32_t texcoord_control_ = 0;
+    std::uint32_t texture_types_ = 0;  // kFpTextureType* per unit, 2 bits each
     std::uint32_t control_ = 0;
     std::uint32_t tex_inputs_used_ = 0;  // bit n = TEXn read
     std::uint32_t texture_units_ = 0;
@@ -265,9 +267,15 @@ bool Translator::computeValue(const Instruction& in, std::uint32_t op, int const
             const std::uint32_t unit = bits(in.w[0], 17, 4);
             texture_units_ |= 1u << unit;
             const std::string coord = operand(in, 0, constant_slot);
-            const std::string scale = std::format("draw.texture_scale[{}].xy", unit);
-            const std::string uv = op == 0x17 ? std::format("{}.xy * {}", coord, scale)
-                                              : std::format("({}.xy / {}.w) * {}", coord, coord, scale);
+            // The sampler type follows the texture bound to the unit. A 2D lookup reads two coordinates, a 3D
+            // or cube lookup three; TXP divides them by w first. The unnormalized-coordinate scale applies to
+            // 2D and 3D lookups only (a cube direction has no unnormalized form).
+            const std::uint32_t type = fpTextureType(texture_types_, unit);
+            const char* lanes = type == kFpTextureType2D ? "xy" : "xyz";
+            const std::string scale = std::format("draw.texture_scale[{}].{}", unit, lanes);
+            std::string uv = op == 0x17 ? std::format("{}.{}", coord, lanes)
+                                        : std::format("({}.{} / {}.w)", coord, lanes, coord);
+            if (type != kFpTextureTypeCube) uv += " * " + scale;
             // The expand (bx2) bit cannot be verified against the reference output.
             if (bits(in.w[0], 21, 1) != 0) {
                 note("fp texture expand");
@@ -405,8 +413,12 @@ std::string Translator::assemble() const {
 
     for (std::uint32_t unit = 0; unit < kFpTextureUnitCount; unit++) {
         if ((texture_units_ & (1u << unit)) != 0) {
-            glsl += std::format("layout(set = 0, binding = {}) uniform sampler2D tex{};\n",
-                                kFpTextureBindingBase + unit, unit);
+            const std::uint32_t type = fpTextureType(texture_types_, unit);
+            glsl += std::format("layout(set = 0, binding = {}) uniform {} tex{};\n", kFpTextureBindingBase + unit,
+                                type == kFpTextureType3D     ? "sampler3D"
+                                : type == kFpTextureTypeCube ? "samplerCube"
+                                                             : "sampler2D",
+                                unit);
         }
     }
     for (std::uint32_t n = 0; n < kVaryingTexCoordCount; n++) {
@@ -504,11 +516,12 @@ std::string Translator::assemble() const {
     return glsl;
 }
 
-GlslResult Translator::run(std::span<const std::uint32_t> ucode, std::uint32_t control,
-                           std::uint32_t texcoord_control) {
+GlslResult Translator::run(std::span<const std::uint32_t> ucode, std::uint32_t control, std::uint32_t texcoord_control,
+                           std::uint32_t texture_types) {
     GlslResult result;
     control_ = control;
     texcoord_control_ = texcoord_control;
+    texture_types_ = texture_types;
     if (ucode.size() < 4 || ucode.size() % 4 != 0) {
         result.unimplemented.push_back("fp malformed ucode size");
         return result;
@@ -542,8 +555,8 @@ GlslResult Translator::run(std::span<const std::uint32_t> ucode, std::uint32_t c
 }  // namespace
 
 GlslResult translateFragmentProgram(std::span<const std::uint32_t> ucode, std::uint32_t control,
-                                    std::uint32_t texcoord_control) {
-    return Translator().run(ucode, control, texcoord_control);
+                                    std::uint32_t texcoord_control, std::uint32_t texture_types) {
+    return Translator().run(ucode, control, texcoord_control, texture_types);
 }
 
 }  // namespace tox2

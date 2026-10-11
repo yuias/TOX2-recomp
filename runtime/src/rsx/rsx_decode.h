@@ -107,6 +107,18 @@ bool rsxTextureEnabled(const RsxRegisters& regs, std::uint32_t unit);
 // Layout fields of a texture unit; the caller decides whether the layout is supported.
 RsxTextureDesc decodeTexture(const RsxRegisters& regs, std::uint32_t unit);
 
+// How a unit's texture is sampled. As in RPCS3 `get_extended_texture_dimension`, dimension 3 is a 3D
+// texture whatever the cube bit says, and the cube bit makes a dimension-2 texture a cube map.
+// Unsupported: 1D and any dimension value outside 1..3.
+enum class RsxTextureKind : std::uint8_t { Tex2D, Tex3D, Cube, Unsupported };
+constexpr RsxTextureKind rsxTextureKind(const RsxTextureDesc& texture) {
+    switch (texture.dimension) {
+        case 2: return texture.cubemap ? RsxTextureKind::Cube : RsxTextureKind::Tex2D;
+        case 3: return RsxTextureKind::Tex3D;
+        default: return RsxTextureKind::Unsupported;
+    }
+}
+
 // Texture address word (SET_TEXTURE_ADDRESS) and filter word (SET_TEXTURE_FILTER) fields; enum values
 // as in RPCS3 `gcm_enums.h` (WRAP = 1 ... MIRROR_ONCE_CLAMP = 8, NEAREST = 1 ... LINEAR_LINEAR = 6).
 constexpr std::uint32_t rsxTextureWrapS(std::uint32_t address) { return address & 0xF; }

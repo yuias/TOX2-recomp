@@ -164,19 +164,27 @@ These exist and are generic, but were written for and checked against the earlie
 - A Vulkan 1.3 renderer that draws what the RSX commands describe into a window or PNG files, and
   `tox2_rsxreplay`, which renders single recorded frames without the game (see
   [Rendering](rendering.md)). The game's flips run in the fake RSX. A headless run with `--dump-frames` also runs the renderer
-  (a 120 s headless run with `--vk-validation`: 7,278 flips, 326,887 draws rendered, 8,110 skipped and
-  8,795 clears, 0 validation errors; the skipped draws are the ones without a supported colour target,
-  surface format F_X32, and the 3D-texture ones). Before the fragment
+  (a 120 s headless run with `--vk-validation` and `--dump-frames`: 5,736 flips, 310,803 draws rendered,
+  5,494 skipped and 7,195 clears, 0 validation errors; every skipped draw is one without a supported
+  colour target, surface format F_X32, and the census has no `texture layout dimension` entry). Before the fragment
   translator handled the fence, divide, reciprocal, exp2, log2 and KIL opcodes, most draws of a longer
   run were skipped for those opcodes. The textures are uploaded with their whole mip chain, linear or
-  swizzled (see [Textures](rendering.md#textures)); before that, every mipmapped or swizzled texture
-  read the magenta placeholder, and the dumped frames were uniform magenta. The run's last census has
-  no `texture placeholder` entry, and the dumped frame of flip 7,000 is the title screen (logo, the
-  "PRESS ANY BUTTON" line and a lit 3D character on a dark red background). `tox2_rsxreplay`
+  swizzled, as 2D, 3D or cube images (see [Textures](rendering.md#textures)); before the mip and swizzle
+  support, every mipmapped or swizzled texture
+  read the magenta placeholder, and the dumped frames were uniform magenta, and before the 3D support the
+  draws that sample the 3D glyph atlas of the dialog text (1,071 of them in a 120 s run) were skipped, so the
+  dialog box was empty. A run that reached flip 7,000 had no `texture placeholder` entry in its last census, and
+  its dumped frame of flip 7,000 is the title screen (logo, the
+  "PRESS ANY BUTTON" line and a lit 3D character on a dark red background). In the 120 s run above the dialog
+  box is on screen in the dumps of flips 4,440 to 4,480 (every 20th flip) with its text, a two-line Japanese message that the downloadable
+  content is being checked, in gold. `tox2_rsxreplay`
   renders frames recorded from the game: a dialog
-  frame (39 draws, 10 skipped: nine 3D-texture draws and the F_X32 one) shows the dialog box on grey, and a
-  title-screen frame (flip 8,300 recorded again after the texture change: 970 draws, 1 skipped: the F_X32
-  one) shows the same title screen. The vertex translator handles
+  frame (flip 5,160 of another run, recorded after the 3D support: 39 draws, 1 skipped: the F_X32 one) shows
+  the dialog box with that text on grey, bit for bit as the live run drew it (nine draws sample the
+  512x512x16 DXT1 glyph atlas, which is in the VTC order); the frame of flip 6,900 recorded before the
+  3D support replays without a skip too, but its atlas bytes are missing from the capture, so its text is a flat gold
+  block. A title-screen frame (flip 8,300 recorded again after the texture change: 970 draws, 1 skipped: the F_X32
+  one) shows the same title screen, bit for bit as before the 3D support. The vertex translator handles
   branches, calls and returns, which the 3D scene's skinning programs need (BRB on a bit of the branch
   bits register; see [Vertex programs](rendering.md#vertex-programs)). The frame's last draw is a
   full-screen pass that samples the scene target; the unit-12 texture that every draw of the frame

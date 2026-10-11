@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <memory>
 #include <span>
 #include <string>
@@ -21,6 +22,7 @@
 #include "render/vk_renderer.h"
 #include "rsx/rsx_capture.h"
 #include "rsx/rsx_census.h"
+#include "rsx/rsx_decode.h"
 #include "rsx/rsx_frame.h"
 #include "rsx/rsx_frame_builder.h"
 #include "rsx/rsx_unimplemented.h"
@@ -88,7 +90,13 @@ void printDraw(const tox2::RsxDraw& draw, std::span<const tox2::RsxSurface> surf
             const tox2::RsxSurface& surface = surfaces[static_cast<std::size_t>(texture.rt_alias)];
             std::printf(" tex%u=alias:%d(%ux%u)", texture.unit, texture.rt_alias, surface.width, surface.height);
         } else {
-            std::printf(" tex%u=bytes(%ux%u %s mips=%u)", texture.unit, texture.width, texture.height,
+            const tox2::RsxTextureKind kind = tox2::rsxTextureKind(texture);
+            const std::string shape = kind == tox2::RsxTextureKind::Tex3D  ? std::format("x{} 3D", texture.depth)
+                                      : kind == tox2::RsxTextureKind::Cube ? " cube"
+                                      : kind == tox2::RsxTextureKind::Unsupported
+                                              ? std::format(" dim{}", texture.dimension)
+                                              : std::string();
+            std::printf(" tex%u=bytes(%ux%u%s %s mips=%u)", texture.unit, texture.width, texture.height, shape.c_str(),
                         tox2::rsxTextureFormatName(texture.format).c_str(), texture.mips);
         }
     }

@@ -270,11 +270,12 @@ bool RsxFrameBuilder::fillVertices(const RsxRegisters& regs, RsxDraw& draw, std:
     return true;
 }
 
-// Texture bytes are copied for 2D A8R8G8B8 and DXT1/DXT23/DXT45 textures, linear or swizzled, with their
-// whole mip chain. The copy is converted to what the renderer uploads: every level in tightly packed rows
-// (padding removed) and de-swizzled, see rsx_texture_layout.h for the guest layout rules. A texture at a
-// known render target is an alias and carries no bytes. RPCS3 takes the pitch from the row size when the
-// register is 0 (`texture_cache.h` upload path).
+// Texture bytes are copied for 2D, 3D and cube map A8R8G8B8 and DXT1/DXT23/DXT45 textures, linear or
+// swizzled, with their whole mip chain. The copy is converted to what the renderer uploads: every level in
+// tightly packed rows and slices (padding removed), de-swizzled, and a cube map as six faces one after the
+// other; see rsx_texture_layout.h for the guest layout rules. A texture at a known render target is an
+// alias and carries no bytes. RPCS3 takes the pitch from the row size when the register is 0
+// (`texture_cache.h` upload path).
 void RsxFrameBuilder::fillTextures(const RsxRegisters& regs, RsxDraw& draw) {
     for (std::uint32_t unit = 0; unit < kRsxTextureUnitCount; unit++) {
         if (!rsxTextureEnabled(regs, unit)) continue;
@@ -286,12 +287,13 @@ void RsxFrameBuilder::fillTextures(const RsxRegisters& regs, RsxDraw& draw) {
             continue;
         }
 
-        if (t.cubemap) rsxNoteUnimplemented("texture layout", "cubemap");
-        if (t.dimension != 2) rsxNoteUnimplemented("texture layout", std::format("dimension {}", t.dimension));
+        const RsxTextureKind kind = rsxTextureKind(t);
+        if (kind == RsxTextureKind::Unsupported) {
+            rsxNoteUnimplemented("texture layout", std::format("dimension {}", t.dimension));
+        }
 
         const bool supported_format = rsxTextureFormatSampleable(t.format);
-        const bool supported_layout = !t.cubemap && t.dimension == 2;
-        if (supported_format && supported_layout && t.width != 0 && t.height != 0) {
+        if (supported_format && kind != RsxTextureKind::Unsupported && t.width != 0 && t.height != 0) {
             copyTexture(t, draw);
         }
         draw.textures.push_back(t);
@@ -300,10 +302,12 @@ void RsxFrameBuilder::fillTextures(const RsxRegisters& regs, RsxDraw& draw) {
 
 void RsxFrameBuilder::copyTexture(RsxTextureDesc& t, RsxDraw& draw) {
     RsxTextureLayout layout;
-    if (!rsxTextureLayout(t.format, t.linear_layout, t.width, t.height, t.mips, t.pitch, 1, layout)) {
+    const std::uint32_t layers = rsxTextureKind(t) == RsxTextureKind::Cube ? 6 : 1;
+    if (!rsxTextureLayout(t.format, t.linear_layout, t.width, t.height, t.mips, t.pitch, layers, layout, t.depth)) {
         // The swizzle needs a power-of-two image; otherwise the pitch register is smaller than a row.
         const bool compressed = rsxTextureBlockBytes(t.format) != 0;
-        const bool power_of_two = std::has_single_bit(t.width) && std::has_single_bit(t.height);
+        const bool power_of_two = std::has_single_bit(t.width) && std::has_single_bit(t.height) &&
+                                  std::has_single_bit<std::uint32_t>(t.depth);
         if (!t.linear_layout && !compressed && !power_of_two) {
             rsxNoteUnimplemented("texture layout", "swizzled non-power-of-two");
         } else {
@@ -321,7 +325,7 @@ void RsxFrameBuilder::copyTexture(RsxTextureDesc& t, RsxDraw& draw) {
     // Bytes that need no conversion are read straight into place.
     bool in_place = layout.guest_bytes == layout.packed_bytes;
     for (const RsxTextureLevel& level : layout.levels) {
-        in_place = in_place && !level.swizzled && level.guest_offset == level.packed_offset &&
+        in_place = in_place && !level.swizzled && !level.vtc && level.guest_offset == level.packed_offset &&
                    level.guest_pitch == level.row_bytes;
     }
     std::vector<std::uint8_t> guest;

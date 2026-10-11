@@ -58,8 +58,9 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   a known render target is sampled from that target (render target aliasing), and a draw that
   samples the target it renders to reads a copy of it. Other textures are uploaded from the
   guest bytes into B8G8R8A8 images (A8R8G8B8, linear or swizzled) or BC1/BC2/BC3 images
-  (DXT1/DXT23/DXT45), with the whole mip chain (see [Textures](#textures)); a unit without a
-  usable texture reads a 1x1 magenta image.
+  (DXT1/DXT23/DXT45), as 2D, 3D or cube images with the whole mip chain (see [Textures](#textures));
+  a unit without a usable texture reads a 1x1 magenta image of the type the fragment program samples
+  (2D, 3D or cube).
   Cull mode, depth state, viewport, scissor, topology and blend constants are dynamic state;
   pipelines are cached by what is baked into them.
 - **Readback** is gated. Copying the display buffer back to the host costs 8 MiB per flip at 1080p,
@@ -74,7 +75,8 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   translation from being reused. A program with an opcode that is not translated skips its draw
   and is counted. The vertex translator is described in [Vertex programs](#vertex-programs). The fragment translator handles MOV, MUL, ADD, MAD, DP3, DP4, MIN, MAX, the six
   compares (SLT to SEQ), FRC, FLR, RCP, EX2, LG2, DIV, DIVSQ, TEX, TXP and KIL, and ignores NOP and
-  the FENCT/FENCB fences. RCP, EX2 and LG2 read the x lane of source 0 and replicate the result;
+  the FENCT/FENCB fences. TEX and TXP read two coordinates from a 2D texture and three from a 3D or
+  cube texture (see [Sampler types](#sampler-types)). RCP, EX2 and LG2 read the x lane of source 0 and replicate the result;
   DIV and DIVSQ divide the whole of source 0 by the x lane of source 1 (DIVSQ leaves a zero
   numerator at zero and ignores the sign of the divisor). KIL discards the fragment when any lane
   selected by its condition passes. Other opcodes (for example RSQ, DP2, LIT, the pack and
@@ -138,9 +140,15 @@ transform and the varying outputs.
 
 ### Textures
 
-The frame builder copies the bytes of every 2D A8R8G8B8 and DXT1/DXT23/DXT45 texture a draw has
-enabled (`rsx_texture_layout.cpp`), and the renderer uploads them (`vk_textures.cpp`). The guest layout
-follows RPCS3 (`Emu/RSX/Common/TextureUtils.cpp`, `RSXTexture.cpp`, `Utils/image_utils.hpp`):
+The frame builder copies the bytes of every 2D, 3D and cube A8R8G8B8 and DXT1/DXT23/DXT45 texture a
+draw has enabled (`rsx_texture_layout.cpp`), and the renderer uploads them (`vk_textures.cpp`). The
+dimension is the field in bits 4 to 7 of SET_TEXTURE_FORMAT (1 = 1D, 2 = 2D, 3 = 3D) and the cube bit is
+bit 2. As in RPCS3 (`get_extended_texture_dimension`), dimension 3 is a 3D texture whatever the cube bit
+says, and dimension 2 with the cube bit is a cube map. A 1D texture, or a dimension outside 1 to 3, is
+counted as `texture layout dimension N` and a draw that samples one is skipped. The depth of a 3D
+texture is the top 12 bits of SET_TEXTURE_CONTROL3 (the pitch register holds the pitch in the low 20
+bits); a depth of 0 counts as 1. The guest layout follows RPCS3 (`Emu/RSX/Common/TextureUtils.cpp`,
+`RSXTexture.cpp`, `Utils/image_utils.hpp`):
 
 - **Levels.** The register's mip count (0 counts as 1) is clamped to the chain that ends at one
   texel, or at one 4x4 block for DXT. Each level is `max(size / 2, 1)` in both dimensions.
@@ -153,15 +161,30 @@ follows RPCS3 (`Emu/RSX/Common/TextureUtils.cpp`, `RSXTexture.cpp`, `Utils/image
   of two; other sizes are counted as `texture layout swizzled non-power-of-two`.
 - **DXT.** Never swizzled. Without the LN flag the block rows of a level are contiguous (the pitch
   register is ignored); with it they use the pitch register like a linear texture.
-- **Cube maps.** The layout code handles faces (a texture without the LN flag aligns each face to
-  128 bytes), but the renderer has no cube sampler, so cube and 3D textures are still counted and
-  skipped.
+- **Cube maps.** Six faces, each with its own mip chain, in the order +X, -X, +Y, -Y, +Z, -Z (the
+  order of the Vulkan array layers). A texture without the LN flag aligns each face to 128 bytes. The
+  faces must be square.
+- **3D textures.** A level is `depth` slices of the 2D level one after the other (a linear level keeps
+  the pitch of level 0 for every row of every slice), and the depth halves, to at least 1, from one
+  level to the next like the sides. A swizzled A8R8G8B8 level interleaves one bit of x, y and z per
+  round (x first) while a coordinate has bits left (`calculate_z_index`), so its width, height and depth
+  must be powers of two (otherwise `texture layout swizzled non-power-of-two`). A DXT level whose width
+  and height are powers of two and whose depth is above 1 is stored in the NVIDIA VTC order, which
+  Vulkan cannot read directly: the blocks of one position in 4 consecutive slices are adjacent, and the
+  last group holds the remaining 1 to 3 slices (`copy_unmodified_block_vtc`). The frame builder puts
+  the slices back in plain order. Other DXT 3D levels are plain slices of block rows. The RPCS3 loader
+  applies the VTC rule to every DXT 3D level that meets the conditions above, with or without the LN flag,
+  and so does this one.
 
-The copy in `RsxDraw::texture_data` is already converted: levels one after the other, each in
-tightly packed rows and de-swizzled, so the renderer needs only the texture size and mip count to
-find them. It uploads all levels in one `vkCmdCopyBufferToImage` into an image with the full chain
-(A8R8G8B8 words are byte swapped first, DXT blocks are copied as stored). A texture of the render
-target cache has one level.
+The copy in `RsxDraw::texture_data` is already converted: levels one after the other (a cube map face
+after face), each in tightly packed rows and slices and de-swizzled, so the renderer needs only the texture
+size, depth, kind and mip count to find them. It uploads all levels in one `vkCmdCopyBufferToImage` into
+an image with the full chain: a 2D image, a 3D image (`VK_IMAGE_TYPE_3D`, a copy region per level with the
+level's depth) or a cube map (a 2D image of six array layers with `CUBE_COMPATIBLE`, a region per face and
+level and a cube view). A8R8G8B8 words are byte swapped first and DXT blocks are copied as stored. The
+image cache key includes the depth and the kind, so a 3D and a 2D texture at one address do not share an
+image. A texture of the render target cache has one level; a 3D or cube texture at a render target address
+is counted (`texture layout render target alias of a 3D or cube texture`) and reads the placeholder.
 
 The sampler follows RPCS3's `update_fragment_sampler`: the mip chain is sampled only when the min
 filter is one of the four mip filters (NEAREST_NEAREST, LINEAR_NEAREST, NEAREST_LINEAR,
@@ -170,6 +193,36 @@ SET_TEXTURE_CONTROL0 clamped to the last level, the bias is the signed 5.8 field
 SET_TEXTURE_FILTER (rounded to half a level for a NEAREST mip mode), and the mip mode is LINEAR for
 NEAREST_LINEAR and LINEAR_LINEAR. Otherwise the sampler reads level 0 only. Anisotropic filtering
 and texels around the image (`CELL_GCM_TEXTURE_BORDER_TEXTURE`) are not modelled.
+
+#### Sampler types
+
+The fragment program declares one sampler type per sampled unit: `sampler2D`, `sampler3D` or
+`samplerCube`, from the kind of the texture that is bound to the unit when the draw is made. The types
+are 2 bits per unit (`fpTextureType` in `fp_translator.h`) and are an input of the translation, as in RPCS3,
+where the texture state of a draw is part of the fragment program key. The renderer does not bind a
+unit to an image of another type, because the shader and the descriptor would disagree; the choice made is
+to build program variants, not to bind by unit type:
+
+- `drawTextureTypes` (`vk_pipelines.cpp`) reads the kinds from the draw's textures. Most draws have only
+  2D textures, so the word is 0 and the program is the one translated for the ucode, control words and
+  texcoord control as before.
+- For a draw with a 3D or cube texture on some unit, the program is first translated with all units 2D,
+  which says which units it samples, and then with the types of the sampled units alone. A texture on a
+  unit the program does not sample therefore does not cause a variant. The variant is keyed by the ucode
+  hash, the two control words and the types (also in the name of the SPIR-V cache file and, through
+  `PipelineKey::fp_texture_types`, in the pipeline key), so one program used with a 2D and a 3D texture on
+  a unit is two shader modules and two pipelines.
+- TEX reads `xy` (2D) or `xyz` (3D, cube) of the coordinate register. TXP divides them by `w` first. The
+  unnormalized-coordinate scale (`draw.texture_scale`) multiplies the 2D and 3D coordinate (its z is
+  1 / depth for an unnormalized 3D texture); a cube direction is not scaled. The fragment translator
+  handles TEX and TXP only, so these are the only lookups with a type; a texture-bias, texture-LOD or
+  texture-gradient opcode is reported as not translated.
+- A unit that is sampled but has no usable texture (no bytes, a render target alias, an image that cannot be
+  created) reads a 1x1 magenta placeholder of its declared type: a 2D image, a 1x1x1 3D image or a cube
+  map of six 1x1 faces. A unit without a texture is 2D.
+- When SET_TEXCOORD_CONTROL declares coordinate n as 2D, the fragment input `in_texN` has z = 0 and w = the
+  fragment's w whatever the vertex program wrote, so a 3D lookup through it reads slice 0 and a cube
+  lookup reads the direction (x, y, 0).
 
 ### Capture and replay
 

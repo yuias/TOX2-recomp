@@ -9,6 +9,7 @@
 #include "render/fp_translator.h"
 #include "render/shader_compiler.h"
 #include "render/vp_translator.h"
+#include "rsx/rsx_decode.h"
 #include "rsx/rsx_unimplemented.h"
 
 namespace tox2 {
@@ -176,19 +177,34 @@ const DrawPipelines::Program* DrawPipelines::vertexProgram(const RsxDraw& draw) 
     return it->second.get();
 }
 
-const DrawPipelines::Program* DrawPipelines::fragmentProgram(const RsxDraw& draw) {
-    const FragmentKey key{draw.fp_hash, draw.fp_control, draw.texcoord_control};
+std::uint32_t drawTextureTypes(const RsxDraw& draw) {
+    std::uint32_t types = 0;
+    for (const RsxTextureDesc& texture : draw.textures) {
+        if (texture.unit >= kFpTextureUnitCount) continue;
+        const RsxTextureKind kind = rsxTextureKind(texture);
+        const std::uint32_t type = kind == RsxTextureKind::Tex3D  ? kFpTextureType3D
+                                   : kind == RsxTextureKind::Cube ? kFpTextureTypeCube
+                                                                  : kFpTextureType2D;
+        types |= type << (texture.unit * 2);
+    }
+    return types;
+}
+
+const DrawPipelines::Program* DrawPipelines::fragmentProgram(const RsxDraw& draw, std::uint32_t texture_types) {
+    const FragmentKey key{draw.fp_hash, draw.fp_control, draw.texcoord_control, texture_types};
     auto it = fragment_programs_.find(key);
     if (it == fragment_programs_.end()) {
         auto program = std::make_unique<Program>();
         if (draw.fp_ucode.empty()) {
             program->notes.push_back("draw without fragment program");
         } else {
-            GlslResult glsl = translateFragmentProgram(draw.fp_ucode, draw.fp_control, draw.texcoord_control);
+            GlslResult glsl =
+                    translateFragmentProgram(draw.fp_ucode, draw.fp_control, draw.texcoord_control, texture_types);
             program->notes = std::move(glsl.unimplemented);
             if (glsl.ok) {
-                auto spirv = compileGlsl(ShaderStage::Fragment, glsl.glsl,
-                                         mixKey(draw.fp_hash, draw.fp_control, draw.texcoord_control));
+                auto spirv = compileGlsl(
+                        ShaderStage::Fragment, glsl.glsl,
+                        mixKey(mixKey(draw.fp_hash, draw.fp_control, draw.texcoord_control), texture_types, 0));
                 if (spirv) {
                     program->module = createModule(context_.device(), *spirv);
                     program->ok = program->module != VK_NULL_HANDLE;
@@ -208,7 +224,21 @@ const DrawPipelines::Program* DrawPipelines::fragmentProgram(const RsxDraw& draw
 
 bool DrawPipelines::shaders(const RsxDraw& draw, DrawShaders& out) {
     const Program* vertex = vertexProgram(draw);
-    const Program* fragment = fragmentProgram(draw);
+    // The program text depends on the types of the units it samples only. The sampled units are known after
+    // the first translation, so a draw with a 3D or cube texture on some unit first gets the all-2D program,
+    // then the variant restricted to the types of its sampled units (the same program when none is 3D or cube).
+    std::uint32_t texture_types = drawTextureTypes(draw);
+    const Program* fragment = fragmentProgram(draw, 0);
+    if (texture_types != 0 && fragment->ok) {
+        std::uint32_t sampled = 0;
+        for (std::uint32_t unit = 0; unit < kFpTextureUnitCount; unit++) {
+            if ((fragment->texture_units & (1u << unit)) != 0) sampled |= 3u << (unit * 2);
+        }
+        texture_types &= sampled;
+        if (texture_types != 0) fragment = fragmentProgram(draw, texture_types);
+    } else {
+        texture_types = 0;
+    }
     if (!valid()) return false;
     if (!vertex->ok || !fragment->ok) {
         for (const std::string& note : vertex->notes) noteTranslatorMessage(note);
@@ -219,6 +249,7 @@ bool DrawPipelines::shaders(const RsxDraw& draw, DrawShaders& out) {
     out.fragment = fragment->module;
     out.inputs_used = vertex->inputs_used;
     out.texture_units = fragment->texture_units;
+    out.texture_types = texture_types;
     return true;
 }
 

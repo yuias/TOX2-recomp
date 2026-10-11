@@ -240,9 +240,11 @@ RsxRenderer::~RsxRenderer() {
     pipelines_.reset();
     textures_.reset();
     if (placeholder_sampler_ != VK_NULL_HANDLE) vkDestroySampler(device, placeholder_sampler_, nullptr);
-    if (placeholder_view_ != VK_NULL_HANDLE) vkDestroyImageView(device, placeholder_view_, nullptr);
-    if (placeholder_image_ != VK_NULL_HANDLE)
-        vmaDestroyImage(context_.allocator(), placeholder_image_, placeholder_allocation_);
+    for (const Placeholder& placeholder : placeholders_) {
+        if (placeholder.view != VK_NULL_HANDLE) vkDestroyImageView(device, placeholder.view, nullptr);
+        if (placeholder.image != VK_NULL_HANDLE)
+            vmaDestroyImage(context_.allocator(), placeholder.image, placeholder.allocation);
+    }
     color_targets_.clear();
     depth_targets_.clear();
 }
@@ -511,36 +513,49 @@ bool RsxRenderer::allocUpload(std::size_t size, UploadRef& out) {
     return true;
 }
 
-// The placeholder texture is one magenta texel, written with a clear so no staging buffer is needed.
+// The placeholders are one magenta texel each (a 2D image, a 3D image and a cube map of six such faces),
+// written with a clear so no staging buffer is needed.
 bool RsxRenderer::ensurePlaceholder() {
     if (placeholder_ready_) return true;
     const VkDevice device = context_.device();
 
-    VkImageCreateInfo image_info{};
-    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    image_info.imageType = VK_IMAGE_TYPE_2D;
-    image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
-    image_info.extent = {1, 1, 1};
-    image_info.mipLevels = 1;
-    image_info.arrayLayers = 1;
-    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
-    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    image_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VmaAllocationCreateInfo alloc_info{};
-    alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-    if (vmaCreateImage(context_.allocator(), &image_info, &alloc_info, &placeholder_image_, &placeholder_allocation_,
-                       nullptr) != VK_SUCCESS) {
-        placeholder_image_ = VK_NULL_HANDLE;
-        fail("vmaCreateImage failed for the placeholder texture");
-        return false;
+    constexpr VkImageType kImageTypes[3] = {VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_3D, VK_IMAGE_TYPE_2D};
+    constexpr VkImageViewType kViewTypes[3] = {VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_VIEW_TYPE_3D, VK_IMAGE_VIEW_TYPE_CUBE};
+    for (std::uint32_t type = 0; type < 3; type++) {
+        const std::uint32_t layers = type == kFpTextureTypeCube ? 6 : 1;
+        VkImageCreateInfo image_info{};
+        image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_info.flags = type == kFpTextureTypeCube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
+        image_info.imageType = kImageTypes[type];
+        image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+        image_info.extent = {1, 1, 1};
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = layers;
+        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VmaAllocationCreateInfo alloc_info{};
+        alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        Placeholder& placeholder = placeholders_[type];
+        if (vmaCreateImage(context_.allocator(), &image_info, &alloc_info, &placeholder.image, &placeholder.allocation,
+                           nullptr) != VK_SUCCESS) {
+            placeholder.image = VK_NULL_HANDLE;
+            fail("vmaCreateImage failed for the placeholder texture");
+            return false;
+        }
+        VkImageViewCreateInfo view_info{};
+        view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_info.image = placeholder.image;
+        view_info.viewType = kViewTypes[type];
+        view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+        view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
+        if (vkCreateImageView(device, &view_info, nullptr, &placeholder.view) != VK_SUCCESS) {
+            placeholder.view = VK_NULL_HANDLE;
+            fail("vkCreateImageView failed for the placeholder texture");
+            return false;
+        }
     }
-    VkImageViewCreateInfo view_info{};
-    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    view_info.image = placeholder_image_;
-    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
-    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     VkSamplerCreateInfo sampler_info{};
     sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     sampler_info.magFilter = VK_FILTER_NEAREST;
@@ -548,11 +563,6 @@ bool RsxRenderer::ensurePlaceholder() {
     sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     sampler_info.addressModeU = sampler_info.addressModeV = sampler_info.addressModeW =
             VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    if (vkCreateImageView(device, &view_info, nullptr, &placeholder_view_) != VK_SUCCESS) {
-        placeholder_view_ = VK_NULL_HANDLE;
-        fail("vkCreateImageView failed for the placeholder texture");
-        return false;
-    }
     if (vkCreateSampler(device, &sampler_info, nullptr, &placeholder_sampler_) != VK_SUCCESS) {
         placeholder_sampler_ = VK_NULL_HANDLE;
         fail("vkCreateSampler failed");
@@ -560,7 +570,8 @@ bool RsxRenderer::ensurePlaceholder() {
     }
 
     const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
-    const auto barrier = [&](VkImageLayout from, VkImageLayout to, VkPipelineStageFlags2 stage, VkAccessFlags2 access) {
+    const auto barrier = [&](const Placeholder& placeholder, std::uint32_t layers, VkImageLayout from, VkImageLayout to,
+                             VkPipelineStageFlags2 stage, VkAccessFlags2 access) {
         VkImageMemoryBarrier2 b{};
         b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
         b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -571,24 +582,28 @@ bool RsxRenderer::ensurePlaceholder() {
         b.newLayout = to;
         b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b.image = placeholder_image_;
-        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        b.image = placeholder.image;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
         VkDependencyInfo dependency{};
         dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
         dependency.imageMemoryBarrierCount = 1;
         dependency.pImageMemoryBarriers = &b;
         vkCmdPipelineBarrier2(cmd, &dependency);
     };
-    barrier(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_CLEAR_BIT,
-            VK_ACCESS_2_TRANSFER_WRITE_BIT);
     VkClearColorValue magenta{};
     magenta.float32[0] = 1.0f;
     magenta.float32[2] = 1.0f;
     magenta.float32[3] = 1.0f;
-    const VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdClearColorImage(cmd, placeholder_image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &magenta, 1, &range);
-    barrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    for (std::uint32_t type = 0; type < 3; type++) {
+        const std::uint32_t layers = type == kFpTextureTypeCube ? 6 : 1;
+        barrier(placeholders_[type], layers, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        const VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
+        vkCmdClearColorImage(cmd, placeholders_[type].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &magenta, 1, &range);
+        barrier(placeholders_[type], layers, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    }
     placeholder_ready_ = true;
     return true;
 }
@@ -629,7 +644,10 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
     std::vector<const TextureImage*> uploaded;  // uploaded for this draw already
     std::shared_ptr<TextureImage> feedback_copy;
     for (std::uint32_t unit = 0; unit < kFpTextureUnitCount; unit++) {
-        infos[unit] = {placeholder_sampler_, placeholder_view_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        // The placeholder has the view type of the sampler the program declares for the unit.
+        const std::uint32_t declared = fpTextureType(shaders.texture_types, unit);
+        infos[unit] = {placeholder_sampler_, placeholders_[declared < 3 ? declared : 0].view,
+                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         scales[unit][0] = scales[unit][1] = scales[unit][2] = scales[unit][3] = 1.0f;
         if ((shaders.texture_units & (1u << unit)) == 0) continue;
 
@@ -641,14 +659,21 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
             rsxNoteUnimplemented("texture", "sampled unit is disabled");
             continue;
         }
-        // Unnormalized coordinates are divided by the size in the shader (fp_translator.h).
+        // Unnormalized coordinates are divided by the size in the shader (fp_translator.h). A cube map has no
+        // unnormalized form, and the cube lookup does not read the scale.
+        const RsxTextureKind kind = rsxTextureKind(*texture);
         if (!texture->normalized && texture->width != 0 && texture->height != 0) {
             scales[unit][0] = 1.0f / static_cast<float>(texture->width);
             scales[unit][1] = 1.0f / static_cast<float>(texture->height);
+            if (kind == RsxTextureKind::Tex3D) scales[unit][2] = 1.0f / static_cast<float>(texture->depth);
         }
 
         VkImageView view = VK_NULL_HANDLE;
         if (texture->rt_alias >= 0) {
+            if (kind != RsxTextureKind::Tex2D) {
+                rsxNoteUnimplemented("texture layout", "render target alias of a 3D or cube texture");
+                continue;
+            }
             // The render target holds A8R8G8B8 data; another texture format cannot be read from it.
             if ((texture->format & kRsxTextureBaseMask) != kRsxTextureA8R8G8B8) {
                 rsxNoteUnimplemented("texture format", rsxTextureFormatName(texture->format));
@@ -716,8 +741,9 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
             // layout of a linear texture without padding.
             RsxTextureLayout layout;
             if (static_cast<std::uint64_t>(texture->data_offset) + texture->data_size > draw.texture_data.size() ||
-                !rsxTextureLayout(texture->format, true, texture->width, texture->height, texture->mips, 0, 1,
-                                  layout) ||
+                !rsxTextureLayout(texture->format, true, texture->width, texture->height, texture->mips, 0,
+                                  kind == RsxTextureKind::Cube ? 6 : 1, layout,
+                                  kind == RsxTextureKind::Tex3D ? texture->depth : 1) ||
                 texture->data_size < layout.packed_bytes) {
                 rsxNoteUnimplemented("state", "texture data short");
                 continue;
@@ -821,7 +847,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     for (std::uint32_t unit = 0; unit < kFpTextureUnitCount; unit++) {
         if ((shaders.texture_units & (1u << unit)) == 0) continue;
         for (const RsxTextureDesc& texture : draw.textures) {
-            if (texture.unit == unit && (texture.dimension != 2 || texture.cubemap)) {
+            if (texture.unit == unit && rsxTextureKind(texture) == RsxTextureKind::Unsupported) {
                 return skip("texture layout", std::format("sampled dimension {}", texture.dimension));
             }
         }
@@ -878,6 +904,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     key.fp_hash = draw.fp_hash;
     key.fp_control = draw.fp_control;
     key.texcoord_control = draw.texcoord_control;
+    key.fp_texture_types = shaders.texture_types;
     key.color_format = color->format;
     key.depth_format = depth ? depth->format : VK_FORMAT_UNDEFINED;
     key.topology_class = topology_class;

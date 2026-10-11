@@ -7155,6 +7155,26 @@ void testRsxDecode() {
     CHECK(!tox2::decodeTexture(*regs, 0).normalized);
     CHECK(unimplementedCount("texture format A8R8G8B8_LN_UN") == 0);  // the renderer scales the coordinates
 
+    // Dimension, cube bit and depth: the depth is the top 12 bits of the pitch register and counts for a 3D
+    // texture only; a 3D texture is 3D whatever the cube bit says; a zero depth is one slice.
+    regs->apply(0x1840, (7u << 20) | 0x40);
+    regs->apply(0x1A04, 1u | (3u << 4) | (0x86u << 8) | (1u << 16));
+    tox2::RsxTextureDesc volume = tox2::decodeTexture(*regs, 0);
+    CHECK(volume.dimension == 3 && volume.depth == 7 && volume.pitch == 0x40);
+    CHECK(tox2::rsxTextureKind(volume) == tox2::RsxTextureKind::Tex3D);
+    regs->apply(0x1A04, 1u | (1u << 2) | (3u << 4) | (0x86u << 8) | (1u << 16));
+    CHECK(tox2::rsxTextureKind(tox2::decodeTexture(*regs, 0)) == tox2::RsxTextureKind::Tex3D);
+    regs->apply(0x1840, 0x40);
+    CHECK(tox2::decodeTexture(*regs, 0).depth == 1);
+    regs->apply(0x1840, (7u << 20) | 0x40);
+    regs->apply(0x1A04, 1u | (1u << 2) | (2u << 4) | (0x86u << 8) | (1u << 16));
+    volume = tox2::decodeTexture(*regs, 0);
+    CHECK(volume.depth == 1 && tox2::rsxTextureKind(volume) == tox2::RsxTextureKind::Cube);
+    regs->apply(0x1A04, 1u | (2u << 4) | (0x86u << 8) | (1u << 16));
+    CHECK(tox2::rsxTextureKind(tox2::decodeTexture(*regs, 0)) == tox2::RsxTextureKind::Tex2D);
+    regs->apply(0x1A04, 1u | (1u << 4) | (0x86u << 8) | (1u << 16));
+    CHECK(tox2::rsxTextureKind(tox2::decodeTexture(*regs, 0)) == tox2::RsxTextureKind::Unsupported);
+
     // Fixed-function state: blend SRC_ALPHA / ONE_MINUS_SRC_ALPHA with ADD for color and MAX for alpha,
     // alpha test NOTEQUAL 0, back-face culling with counter-clockwise front faces.
     tox2::rsxUnimplementedReset();
@@ -7425,6 +7445,115 @@ void testRsxTextureLayout() {
     {
         tox2::RsxTextureLayout layout;
         CHECK(!tox2::rsxTextureLayout(0x84, true, 4, 4, 1, 0, 1, layout));
+    }
+
+    // A cube map with a mip chain: every face holds its levels back to back (64 + 16 + 4 bytes) and the next
+    // face starts at the next multiple of 128.
+    {
+        tox2::RsxTextureLayout layout;
+        CHECK(tox2::rsxTextureLayout(0x85, false, 4, 4, 3, 0, 6, layout) && layout.levels.size() == 18);
+        CHECK(layout.levels[3].layer == 1 && layout.levels[3].level == 0 && layout.levels[3].guest_offset == 128);
+        CHECK(layout.levels[4].guest_offset == 128 + 64 && layout.levels[5].guest_offset == 128 + 80);
+        CHECK(layout.levels[15].layer == 5 && layout.levels[15].guest_offset == 640);
+        CHECK(layout.levels[3].packed_offset == 84 && layout.packed_bytes == 6 * 84);
+        CHECK(layout.guest_bytes == 640 + 84);
+    }
+
+    // Morton order of a 3D image: one bit of x, y and z per round, a coordinate leaving the rounds once its
+    // bits are used up. With no depth bits it is the 2D order.
+    CHECK(tox2::rsxSwizzleIndex3d(1, 0, 0, 1, 1, 1) == 1 && tox2::rsxSwizzleIndex3d(0, 1, 0, 1, 1, 1) == 2);
+    CHECK(tox2::rsxSwizzleIndex3d(0, 0, 1, 1, 1, 1) == 4 && tox2::rsxSwizzleIndex3d(1, 1, 1, 1, 1, 1) == 7);
+    // 4x2x2: x0, y0, z0, then x1 above them.
+    CHECK(tox2::rsxSwizzleIndex3d(2, 0, 0, 2, 1, 1) == 8 && tox2::rsxSwizzleIndex3d(3, 1, 1, 2, 1, 1) == 15);
+    CHECK(tox2::rsxSwizzleIndex3d(2, 1, 0, 2, 1, 1) == 10);
+    // 2x2x4: z1 follows z0.
+    CHECK(tox2::rsxSwizzleIndex3d(0, 0, 2, 1, 1, 2) == 8 && tox2::rsxSwizzleIndex3d(1, 1, 3, 1, 1, 2) == 15);
+    for (const auto& [log2_w, log2_h, log2_d] :
+         {std::tuple{2u, 2u, 0u}, std::tuple{3u, 1u, 0u}, std::tuple{1u, 2u, 3u}, std::tuple{0u, 3u, 2u}}) {
+        std::vector<int> seen(std::size_t{1} << (log2_w + log2_h + log2_d), 0);
+        bool same_as_2d = true;
+        for (std::uint32_t z = 0; z < (1u << log2_d); z++) {
+            for (std::uint32_t y = 0; y < (1u << log2_h); y++) {
+                for (std::uint32_t x = 0; x < (1u << log2_w); x++) {
+                    seen[tox2::rsxSwizzleIndex3d(x, y, z, log2_w, log2_h, log2_d)]++;
+                    same_as_2d = same_as_2d && (log2_d != 0 || tox2::rsxSwizzleIndex3d(x, y, z, log2_w, log2_h, 0) ==
+                                                                       tox2::rsxSwizzleIndex(x, y, log2_w, log2_h));
+                }
+            }
+        }
+        CHECK(std::all_of(seen.begin(), seen.end(), [](int n) { return n == 1; }) && same_as_2d);
+    }
+
+    // A linear 3D chain: 4x2 texels, 3 slices, 24-byte pitch. Level 0 is 24 * 2 * 3 bytes of guest memory (the
+    // last row without padding), level 1 is 2x1x1 and follows it.
+    {
+        tox2::RsxTextureLayout layout;
+        CHECK(tox2::rsxTextureLayout(0xA5, true, 4, 2, 2, 24, 1, layout, 3) && layout.levels.size() == 2);
+        CHECK(layout.levels[0].depth == 3 && layout.levels[0].guest_bytes == 24 * 5 + 16);
+        CHECK(layout.levels[0].packed_bytes == 16 * 2 * 3 && !layout.levels[0].vtc);
+        CHECK(layout.levels[1].depth == 1 && layout.levels[1].width == 2 && layout.levels[1].guest_offset == 144);
+        CHECK(layout.levels[1].packed_offset == 96 && layout.guest_bytes == 144 + 8 && layout.packed_bytes == 104);
+        std::vector<std::uint8_t> guest(layout.guest_bytes), packed(layout.packed_bytes);
+        for (std::size_t i = 0; i < guest.size(); i++) guest[i] = static_cast<std::uint8_t>(i);
+        for (const tox2::RsxTextureLevel& level : layout.levels) {
+            CHECK(tox2::rsxExtractTextureLevel(
+                    level, 4, guest, std::span<std::uint8_t>(packed).subspan(level.packed_offset, level.packed_bytes)));
+        }
+        // Packed row r (slice r / 2, row r % 2) comes from guest row r: planes follow each other with the pitch.
+        CHECK(packed[0] == 0 && packed[15] == 15 && packed[16] == 24 && packed[32] == 48 && packed[80] == 120);
+        CHECK(packed[96] == 144);
+        // The depth halves like the sides: 4x4x4 gives 4, 2, 1 slices.
+        CHECK(tox2::rsxTextureLayout(0xA5, true, 4, 4, 3, 0, 1, layout, 4));
+        CHECK(layout.levels[0].depth == 4 && layout.levels[1].depth == 2 && layout.levels[2].depth == 1);
+        // Every level keeps the 16-byte pitch of level 0: 2x2x2 rows of 16 bytes follow the first 256 bytes.
+        CHECK(layout.levels[1].guest_offset == 4 * 4 * 4 * 4 && layout.levels[2].guest_offset == 256 + 16 * 2 * 2);
+    }
+
+    // A swizzled 3D image: guest texel k holds the bytes {k, 0, 0, 0}.
+    {
+        tox2::RsxTextureLayout layout;
+        CHECK(tox2::rsxTextureLayout(0x85, false, 4, 2, 1, 0, 1, layout, 2) && layout.levels[0].swizzled);
+        CHECK(layout.guest_bytes == 4 * 2 * 2 * 4 && layout.packed_bytes == layout.guest_bytes);
+        std::vector<std::uint8_t> guest(layout.guest_bytes, 0), packed(layout.packed_bytes, 0xEE);
+        for (std::uint32_t k = 0; k < 16; k++) guest[k * 4] = static_cast<std::uint8_t>(k);
+        CHECK(tox2::rsxExtractTextureLevel(layout.levels[0], 4, guest, packed));
+        const auto texel = [&](std::uint32_t x, std::uint32_t y, std::uint32_t z) {
+            return packed[((z * 2 + y) * 4 + x) * 4];
+        };
+        CHECK(texel(0, 0, 0) == 0 && texel(1, 0, 0) == 1 && texel(0, 1, 0) == 2 && texel(0, 0, 1) == 4);
+        CHECK(texel(2, 0, 0) == 8 && texel(2, 1, 0) == 10 && texel(3, 1, 1) == 15);
+        // The depth has to be a power of two as well; a linear layout takes any depth.
+        CHECK(!tox2::rsxTextureLayout(0x85, false, 4, 4, 1, 0, 1, layout, 3));
+        CHECK(tox2::rsxTextureLayout(0xA5, true, 4, 4, 1, 0, 1, layout, 3));
+        CHECK(!tox2::rsxTextureLayout(0x85, false, 4, 4, 1, 0, 1, layout, 0));
+    }
+
+    // DXT1 3D, power-of-two sides, depth above 1: the VTC order. 8x8 texels are 4 blocks per slice. Slices 0..3
+    // are interleaved block by block (guest block 4 * b + z holds block b of slice z); the last group of two
+    // slices (depth 6) interleaves the same way with a stride of 2. Guest block i holds the byte i.
+    {
+        tox2::RsxTextureLayout layout;
+        CHECK(tox2::rsxTextureLayout(0x86, false, 8, 8, 1, 0, 1, layout, 6) && layout.levels[0].vtc);
+        CHECK(layout.guest_bytes == 24 * 8 && layout.packed_bytes == 24 * 8 && !layout.levels[0].swizzled);
+        std::vector<std::uint8_t> guest(layout.guest_bytes), packed(layout.packed_bytes);
+        for (std::size_t i = 0; i < guest.size(); i++) guest[i] = static_cast<std::uint8_t>(i / 8);
+        CHECK(tox2::rsxExtractTextureLevel(layout.levels[0], 8, guest, packed));
+        bool vtc = true;
+        for (std::uint32_t z = 0; z < 6; z++) {
+            for (std::uint32_t b = 0; b < 4; b++) {
+                const std::uint32_t from = z < 4 ? b * 4 + z : 16 + b * 2 + (z - 4);
+                vtc = vtc && packed[(z * 4 + b) * 8] == from && packed[(z * 4 + b) * 8 + 7] == from;
+            }
+        }
+        CHECK(vtc);
+        // One slice has no VTC order; neither does a side that is not a power of two (12x8 gives 3x2 blocks).
+        CHECK(tox2::rsxTextureLayout(0x86, false, 8, 8, 1, 0, 1, layout, 1) && !layout.levels[0].vtc);
+        CHECK(tox2::rsxTextureLayout(0x86, false, 12, 8, 1, 0, 1, layout, 2) && !layout.levels[0].vtc);
+        CHECK(layout.packed_bytes == 6 * 8 * 2 && layout.guest_bytes == layout.packed_bytes);
+        // A mip chain: the second level has its own depth and VTC order (4x4x3 is one block per slice).
+        CHECK(tox2::rsxTextureLayout(0x87, false, 8, 8, 2, 0, 1, layout, 6) && layout.levels.size() == 2);
+        CHECK(layout.levels[1].depth == 3 && layout.levels[1].vtc && layout.levels[1].packed_bytes == 3 * 16);
+        CHECK(layout.levels[1].guest_offset == 24 * 16 && layout.levels[1].packed_offset == 24 * 16);
     }
 }
 
@@ -7701,6 +7830,58 @@ void testRsxFrameBuilder() {
     CHECK(unimplementedCount("texture layout swizzled non-power-of-two") == 1);
     CHECK(unimplementedCount("texture layout pitch below row size") == 1);
     CHECK(unimplementedCount("texture layout swizzled") == 0 && unimplementedCount("texture layout mips 3") == 0);
+
+    // 3D and cube textures: unit 3 is a linear A8R8G8B8 3D texture of 4x2 texels and 3 slices (24-byte
+    // pitch, depth in the top bits of the pitch register); unit 4 a swizzled A8R8G8B8 cube map of 4x4 texels
+    // (6 faces of 64 bytes, 128 bytes apart in guest memory); unit 5 a DXT1 3D texture of 8x8 texels and 5
+    // slices in the VTC order. Unit 6 is 1D, which has no copy. Unit 7 is a swizzled 3D texture with 3 slices,
+    // which has no layout.
+    tox2::rsxUnimplementedReset();
+    for (std::uint32_t unit = 8; unit < 10; unit++) write(0x1A0C + unit * 0x20, 0);
+    const auto shapeUnit = [&](std::uint32_t unit, std::uint32_t fmt, std::uint32_t dimension, std::uint32_t cube,
+                               std::uint32_t width, std::uint32_t height, std::uint32_t depth, std::uint32_t pitch) {
+        write(0x1A00 + unit * 0x20, 0x3000);
+        write(0x1A04 + unit * 0x20, 1u | (cube << 2) | (dimension << 4) | (fmt << 8) | (1u << 16));
+        write(0x1A0C + unit * 0x20, 0x80000000);
+        write(0x1A18 + unit * 0x20, (width << 16) | height);
+        write(0x1840 + unit * 4, (depth << 20) | pitch);
+    };
+    shapeUnit(3, 0xA5, 3, 0, 4, 2, 3, 24);
+    shapeUnit(4, 0x85, 2, 1, 4, 4, 0, 0);
+    shapeUnit(5, 0x86, 3, 0, 8, 8, 5, 0);
+    shapeUnit(6, 0x85, 1, 0, 4, 4, 0, 0);
+    shapeUnit(7, 0x85, 3, 0, 4, 4, 3, 0);
+    write(0x1808, 5);
+    write(0x1814, 2u << 24);
+    write(0x1808, 0);
+    commands = builder.takeCommands();
+    CHECK(commands.size() == 1);
+    const tox2::RsxDraw& shapes = std::get<tox2::RsxDraw>(commands[0]);
+    const auto shapeOf = [&](std::uint32_t unit) -> const tox2::RsxTextureDesc& {
+        for (const tox2::RsxTextureDesc& texture : shapes.textures) {
+            if (texture.unit == unit) return texture;
+        }
+        return shapes.textures[0];
+    };
+    const tox2::RsxTextureDesc& volume_texture = shapeOf(3);
+    CHECK(volume_texture.depth == 3 && volume_texture.data_size == 96 && volume_texture.pitch == 16);
+    CHECK(shapes.texture_data[volume_texture.data_offset + 16] == guestByte(24));   // slice 0, row 1
+    CHECK(shapes.texture_data[volume_texture.data_offset + 32] == guestByte(48));   // slice 1, row 0
+    CHECK(shapes.texture_data[volume_texture.data_offset + 80] == guestByte(120));  // slice 2, row 1
+    const tox2::RsxTextureDesc& cube_texture = shapeOf(4);
+    CHECK(cube_texture.cubemap && cube_texture.data_size == 6 * 64);
+    CHECK(shapes.texture_data[cube_texture.data_offset + 64] == guestByte(128));  // face 1, texel (0, 0)
+    CHECK(shapes.texture_data[cube_texture.data_offset + 2 * 64 + 4] ==
+          guestByte(256 + 1 * 4));  // face 2, texel (1, 0)
+    const tox2::RsxTextureDesc& vtc_texture = shapeOf(5);
+    CHECK(vtc_texture.depth == 5 && vtc_texture.data_size == 5 * 4 * 8);
+    // Slice 1 block 2 is guest block 2 * 4 + 1; slice 4, the last group of one slice, block 2 is guest block 16 + 2.
+    CHECK(shapes.texture_data[vtc_texture.data_offset + (1 * 4 + 2) * 8] == guestByte((2 * 4 + 1) * 8));
+    CHECK(shapes.texture_data[vtc_texture.data_offset + (4 * 4 + 2) * 8] == guestByte((16 + 2) * 8));
+    CHECK(shapeOf(6).data_size == 0 && shapeOf(7).data_size == 0);
+    CHECK(unimplementedCount("texture layout dimension 1") == 1);
+    CHECK(unimplementedCount("texture layout swizzled non-power-of-two") == 1);
+    CHECK(unimplementedCount("texture layout cubemap") == 0 && unimplementedCount("texture layout dimension 3") == 0);
 
     // The fragment program with an inline constant keeps its place in the ucode but zeroed; programs
     // that differ only in the constant hash equal.

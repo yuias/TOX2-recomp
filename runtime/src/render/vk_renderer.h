@@ -139,10 +139,14 @@ private:
     std::unique_ptr<TextureCache> textures_;
     std::map<VkFormat, bool> vertex_format_support_;
 
-    // Bound to a sampled texture unit that has no usable texture.
-    VkImage placeholder_image_ = VK_NULL_HANDLE;
-    VmaAllocation placeholder_allocation_ = nullptr;
-    VkImageView placeholder_view_ = VK_NULL_HANDLE;
+    // Bound to a sampled texture unit that has no usable texture. The view type has to match the sampler type
+    // the fragment program declares for the unit, so there is one image per type (kFpTextureType*: 2D, 3D, cube).
+    struct Placeholder {
+        VkImage image = VK_NULL_HANDLE;
+        VmaAllocation allocation = nullptr;
+        VkImageView view = VK_NULL_HANDLE;
+    };
+    std::array<Placeholder, 3> placeholders_;
     VkSampler placeholder_sampler_ = VK_NULL_HANDLE;
     bool placeholder_ready_ = false;
 

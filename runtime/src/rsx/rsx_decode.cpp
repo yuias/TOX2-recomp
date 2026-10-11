@@ -392,6 +392,12 @@ RsxTextureDesc decodeTexture(const RsxRegisters& regs, std::uint32_t unit) {
     const std::uint32_t rect = regs.reg(kMethodNv4097SetTextureImageRect + base);
     t.width = rect >> 16;
     t.height = t.dimension == 1 ? 1 : (rect & 0xFFFF);
+    // The depth shares SET_TEXTURE_CONTROL3 with the pitch (RPCS3 `fragment_texture::depth`). Games leave
+    // unused dimensions at 0, so a zero depth counts as one slice.
+    if (t.dimension == 3) {
+        t.depth = static_cast<std::uint16_t>(
+                std::max<std::uint32_t>(regs.reg(kMethodNv4097SetTextureControl3 + unit * 4) >> 20, 1));
+    }
     t.control0 = regs.reg(kMethodNv4097SetTextureControl0 + base);
     t.remap = regs.reg(kMethodNv4097SetTextureControl1 + base);
     t.filter = regs.reg(kMethodNv4097SetTextureFilter + base);
