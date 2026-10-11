@@ -278,6 +278,45 @@ reference, compare mask and write mask are the low 8 bits of their registers. Th
   A clear with a partial stencil write mask clears the whole byte (RPCS3 uses a shader pass for it) and is
   counted as `state partial stencil clear mask`.
 
+#### Initial contents and resizing
+
+The renderer never loads a surface from guest memory, so a target it creates starts defined: colour is opaque
+black (0, 0, 0, 1), depth 1.0 and stencil 0xFF, which are RPCS3's values for a surface with nothing inherited
+and "read color/depth buffers" off (`VK/VKRenderTargets.cpp`, `rpcs3/Emu/system_config.h`).
+
+A target bound at the location and offset of an existing one with another width, height or format replaces
+it and inherits the overlap, as RPCS3's surface store does (`Common/surface_store.h`,
+`Common/surface_utils.h`, `VK/VKRenderTargets.*`). The rectangle from (0, 0) to the smaller width and
+height is copied unscaled with `vkCmdCopyImage`, the old image going to `TRANSFER_SRC_OPTIMAL` and the new one
+staying in `TRANSFER_DST_OPTIMAL` behind a full barrier, when:
+
+- the row pitch is the same (the rows of both lie at the same addresses), and
+- the formats can be copied bit for bit: equal formats (a depth target copies depth and stencil together), or
+  A8R8G8B8 and F_X32, which hold the same 32-bit words in memory.
+
+The copy is skipped when the command that creates the new target is a clear that overwrites all of it: every
+colour channel over the whole target, or the depth bit plus the stencil bit (when the format has stencil)
+over the whole target. The stencil bit counts after it has been dropped for a write mask of 0, so a Z24S8
+clear under stencil mask 0 still copies the old stencil. Draws never skip the copy.
+`RendererStats::surface_inherits` counts the copies. Pairs that are not copied leave the new target at its
+initial contents and are counted, unless a full clear made the copy unnecessary:
+`state surface resize with another pitch` and `state surface resize to an incompatible format` (today only Z24S8
+to Z16: the supported colour formats are both 32-bit, and colour and depth targets are kept apart, so a colour
+target never replaces a depth one).
+
+Differences from RPCS3:
+
+- RPCS3 copies lazily, at the first barrier that needs the data; the copy here is recorded when the new
+  target is created, so a target that is never read or written afterwards still costs a copy.
+- RPCS3 keeps the parts of a larger old surface that lie outside the new extent as separate surfaces at their
+  own addresses; they are dropped here.
+- RPCS3 converts other-bytes-per-pixel colour, other depth formats and colour/depth pairs through a
+  typeless transfer; here other depth formats are counted, and the other two cases cannot arise (see above).
+- RPCS3 samples guest memory at each write and drops an inheritance that guest writes made stale; a guest write
+  between two bindings is not detected here.
+- A surface first drawn at its clip size and then bound at twice the width (the anti-aliased layouts) gets an
+  unscaled top-left copy, part of the anti-aliasing approximation described above.
+
 ### Textures
 
 The frame builder converts the bytes of every 2D, 3D and cube A8R8G8B8 and DXT1/DXT23/DXT45 texture a

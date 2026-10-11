@@ -148,6 +148,7 @@ struct RsxRenderer::RenderTarget {
     VkImageAspectFlags aspect = 0;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    std::uint32_t pitch = 0;  // the surface's row pitch; a resize only inherits contents across equal pitches
     bool depth = false;
     // Layout at the end of the commands recorded so far (the frame's command buffer is submitted in order).
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -390,9 +391,10 @@ void RsxRenderer::transition(RenderTarget& target, VkImageLayout layout) {
 }
 
 // A target the cache has not seen holds no guest data (nothing is loaded from guest memory), so it
-// starts defined instead of undefined: color is transparent black, depth is 1.0 with stencil 0xFF,
-// the values RPCS3 gives the aspect a partial clear leaves untouched (VK/VKGSRender.cpp
-// VKGSRender::clear_surface, the erase_bkgnd initialization).
+// starts defined instead of undefined: color is opaque black (0, 0, 0, 1), depth is 1.0 with stencil 0xFF.
+// These are RPCS3's values for a surface with nothing inherited and "read color/depth buffers" off
+// (VK/VKRenderTargets.cpp, rpcs3/Emu/system_config.h), and what a partial clear leaves in the aspect it does
+// not touch (VK/VKGSRender.cpp VKGSRender::clear_surface).
 std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth, const RsxSurface& surface,
                                                                      VkFormat format) {
     const VkPhysicalDeviceProperties& props = context_.deviceProperties();
@@ -417,6 +419,7 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth,
     target->aspect = depth ? depthAspect(format) : VK_IMAGE_ASPECT_COLOR_BIT;
     target->width = surface.width;
     target->height = surface.height;
+    target->pitch = surface.pitch;
     target->depth = depth;
 
     VkImageCreateInfo image_info{};
@@ -461,49 +464,102 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth,
         value.stencil = 0xFF;
         vkCmdClearDepthStencilImage(cmd, target->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value, 1, &range);
     } else {
-        const VkClearColorValue value{};
+        VkClearColorValue value{};
+        value.float32[3] = 1.0f;
         vkCmdClearColorImage(cmd, target->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value, 1, &range);
     }
     return target;
 }
 
-// One entry per (location, offset) and kind. Another size or format at the same offset replaces the
-// entry; the old target stays alive for the commands already recorded against it.
+namespace {
+
+// Formats whose texels can be copied bit for bit: equal formats, and the two 32-bit colour formats (the
+// guest memory holds the same words for both; RPCS3 `VK/VKFormats.cpp` `formats_are_bitcast_compatible`).
+bool bitcastCompatible(VkFormat a, VkFormat b) {
+    const auto is_32bit_color = [](VkFormat format) {
+        return format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_R32_SFLOAT;
+    };
+    return a == b || (is_32bit_color(a) && is_32bit_color(b));
+}
+
+}  // namespace
+
+// One entry per (location, offset) and kind. Another size or format at the same offset replaces the entry
+// and the new target inherits the overlap of the old one (inheritContents), as RPCS3's surface store does
+// (Common/surface_store.h, Common/surface_utils.h). The old target stays alive for the commands already
+// recorded against it. `overwrites_all` is true for a clear that writes every channel of the whole target:
+// the old contents would be lost at once, and RPCS3 skips the copy then too (VK/VKGSRender.cpp clear_surface).
 std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::acquire(TargetMap& map, bool depth, const RsxSurface& surface,
-                                                                VkFormat format) {
+                                                                VkFormat format, bool overwrites_all) {
     const TargetKey key{surface.location, surface.offset};
     const auto it = map.find(key);
+    std::shared_ptr<RenderTarget> previous;
     if (it != map.end()) {
         const std::shared_ptr<RenderTarget>& existing = it->second;
         if (existing->width == surface.width && existing->height == surface.height && existing->format == format) {
             touch(existing);
             return existing;
         }
-        rsxNoteUnimplemented("state", "surface resize");
+        previous = existing;
         map.erase(it);
     }
     std::shared_ptr<RenderTarget> target = createTarget(depth, surface, format);
     if (!target) return nullptr;
     map[key] = target;
     touch(target);
+    if (previous && !overwrites_all) inheritContents(previous, *target);
     return target;
+}
+
+// Copies the overlap (origin (0, 0), unscaled) of the previous target at the same address into a target that
+// was just created, so a resized surface keeps what was drawn. Differences from RPCS3: it copies lazily at
+// the first barrier that needs the data, this copy is recorded at once; the parts of a larger old surface
+// outside the new extent are dropped; other bytes per pixel, other depth formats and colour/depth pairs are
+// not converted; a guest write between the two bindings is not noticed (the renderer never reads guest
+// memory). A pair that cannot be copied leaves the new target at its initial contents and is counted. The
+// colour/depth check is a guard: the two kinds live in separate maps, so they never meet here today.
+void RsxRenderer::inheritContents(const std::shared_ptr<RenderTarget>& previous, RenderTarget& target) {
+    if (previous->pitch != target.pitch) {
+        rsxNoteUnimplemented("state", "surface resize with another pitch");
+        return;
+    }
+    if (previous->depth != target.depth || !bitcastCompatible(previous->format, target.format)) {
+        rsxNoteUnimplemented("state", "surface resize to an incompatible format");
+        return;
+    }
+
+    touch(previous);  // it may not have been used in this frame slot yet, and the copy reads it until the fence
+    transition(*previous, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    transition(target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);  // orders the copy after the initial clear
+    VkImageCopy region{};
+    region.srcSubresource = {previous->aspect, 0, 0, 1};
+    region.dstSubresource = {target.aspect, 0, 0, 1};
+    region.extent = {std::min(previous->width, target.width), std::min(previous->height, target.height), 1};
+    vkCmdCopyImage(slots_[current_slot_]->cmd, previous->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.image,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    stats_.surface_inherits++;
 }
 
 // RPCS3 `VK/VKGSRender.cpp` `get_compatible_surface_format`: F_X32 is R32_SFLOAT. The fragment program writes
 // its usual four-component color and the attachment keeps the red channel; no output swizzle is applied
 // (RSX_SHADER_CONTROL_ROP_OUTPUT_REMAP is only set for the integer formats in `RSXThread.cpp`).
-std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::acquireColor(const RsxSurface& surface) {
+std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::acquireColor(const RsxSurface& surface, bool overwrites_all) {
     switch (surface.format) {
-        case RsxColorFormat::A8R8G8B8: return acquire(color_targets_, false, surface, VK_FORMAT_B8G8R8A8_UNORM);
-        case RsxColorFormat::F_X32: return acquire(color_targets_, false, surface, VK_FORMAT_R32_SFLOAT);
+        case RsxColorFormat::A8R8G8B8:
+            return acquire(color_targets_, false, surface, VK_FORMAT_B8G8R8A8_UNORM, overwrites_all);
+        case RsxColorFormat::F_X32:
+            return acquire(color_targets_, false, surface, VK_FORMAT_R32_SFLOAT, overwrites_all);
         default: return nullptr;
     }
 }
 
-std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::acquireDepth(const RsxSurfaceState& surfaces) {
+std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::acquireDepth(const RsxSurfaceState& surfaces,
+                                                                     bool overwrites_all) {
     switch (surfaces.depth_format) {
-        case RsxDepthFormat::Z24S8: return acquire(depth_targets_, true, surfaces.depth, context_.depthStencilFormat());
-        case RsxDepthFormat::Z16: return acquire(depth_targets_, true, surfaces.depth, VK_FORMAT_D16_UNORM);
+        case RsxDepthFormat::Z24S8:
+            return acquire(depth_targets_, true, surfaces.depth, context_.depthStencilFormat(), overwrites_all);
+        case RsxDepthFormat::Z16:
+            return acquire(depth_targets_, true, surfaces.depth, VK_FORMAT_D16_UNORM, overwrites_all);
         default: return nullptr;
     }
 }
@@ -904,7 +960,7 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                 surface.width = texture->width;
                 surface.height = texture->height;
                 surface.format = wanted == VK_FORMAT_R32_SFLOAT ? RsxColorFormat::F_X32 : RsxColorFormat::A8R8G8B8;
-                target = acquireColor(surface);
+                target = acquireColor(surface, false);
                 if (!valid()) return false;
                 if (!target) {
                     rsxNoteUnimplemented("texture", "placeholder: render target unavailable");
@@ -1056,8 +1112,8 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     // The targets are created even for a draw that is skipped, so a flip of one reads back as a render
     // target rather than as a missing one.
     std::shared_ptr<RenderTarget> color;
-    if (draw.surfaces.has_color) color = acquireColor(draw.surfaces.color);
-    const std::shared_ptr<RenderTarget> depth = acquireDepth(draw.surfaces);
+    if (draw.surfaces.has_color) color = acquireColor(draw.surfaces.color, false);
+    const std::shared_ptr<RenderTarget> depth = acquireDepth(draw.surfaces, false);
     if (!valid()) return;
     if (!color) return skip("state", "draw without color target");
     if (draw.surfaces.clip_w == 0 || draw.surfaces.clip_h == 0) return skip("state", "draw with empty surface clip");
@@ -1418,9 +1474,29 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
     constexpr std::uint32_t kColorBits = kRsxClearRed | kRsxClearGreen | kRsxClearBlue | kRsxClearAlpha;
     const std::uint32_t color_bits = clear.mask & kColorBits;
 
+    // Whether this clear replaces everything a target held, so a resized target needs no copy of the old one.
+    // The rectangle is the scissor clamped to the smaller of the cleared targets, as below; the frame builder
+    // has already dropped the stencil bit for a stencil write mask of 0 (RPCS3 does that before its
+    // full-aspect check, VK/VKGSRender.cpp clear_surface).
+    const bool clears_color = color_bits != 0 && clear.surfaces.has_color;
+    const bool clears_depth = (clear.mask & (kRsxClearDepth | kRsxClearStencil)) != 0;
+    const bool color_in_area = clears_color && color_bits == kColorBits;
+    const RsxSurface& color_surface = clear.surfaces.color;
+    const RsxSurface& depth_surface = clear.surfaces.depth;
+    const auto covers = [&](const RsxSurface& target, const RsxSurface& other, bool other_in_area) {
+        if (clear.scissor[0] != 0 || clear.scissor[1] != 0) return false;
+        if (other_in_area && (other.width < target.width || other.height < target.height)) return false;
+        return clear.scissor[2] >= target.width && clear.scissor[3] >= target.height;
+    };
+    const bool color_overwritten = color_in_area && covers(color_surface, depth_surface, clears_depth);
+    const bool depth_full_aspect =
+            (clear.mask & kRsxClearDepth) != 0 &&
+            ((clear.mask & kRsxClearStencil) != 0 || clear.surfaces.depth_format != RsxDepthFormat::Z24S8);
+    const bool depth_overwritten = depth_full_aspect && covers(depth_surface, color_surface, color_in_area);
+
     std::shared_ptr<RenderTarget> color;
-    if (color_bits != 0 && clear.surfaces.has_color) {
-        color = acquireColor(clear.surfaces.color);
+    if (clears_color) {
+        color = acquireColor(clear.surfaces.color, color_overwritten);
         if (color && color_bits != kColorBits) {
             recordMaskedColorClear(clear, *color, color_bits);
             color.reset();
@@ -1428,7 +1504,7 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
     }
     if (!valid()) return;
     std::shared_ptr<RenderTarget> depth;
-    if ((clear.mask & (kRsxClearDepth | kRsxClearStencil)) != 0) depth = acquireDepth(clear.surfaces);
+    if (clears_depth) depth = acquireDepth(clear.surfaces, depth_overwritten);
     if (!color && !depth) return;
     if (depth) depth->write_serial++;
 

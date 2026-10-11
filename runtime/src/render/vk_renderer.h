@@ -43,6 +43,7 @@ struct RendererStats {
     std::uint64_t texture_uploads = 0;    // texture images written from guest bytes (when the content id changed)
     std::uint64_t feedback_copies = 0;    // render target copies made for draws that sample their own target
     std::uint64_t depth_conversions = 0;  // depth surfaces rewritten as A8R8G8B8 texels for a draw that reads them
+    std::uint64_t surface_inherits = 0;   // copies of an old target's contents into a resized one
 };
 
 // Single-threaded: execute, readDisplay and stats are called from one thread. The renderer never
@@ -102,10 +103,12 @@ private:
     bool waitSlot(FrameSlot& slot);
     bool submitFrame();
 
-    std::shared_ptr<RenderTarget> acquireColor(const RsxSurface& surface);
-    std::shared_ptr<RenderTarget> acquireDepth(const RsxSurfaceState& surfaces);
-    std::shared_ptr<RenderTarget> acquire(TargetMap& map, bool depth, const RsxSurface& surface, VkFormat format);
+    std::shared_ptr<RenderTarget> acquireColor(const RsxSurface& surface, bool overwrites_all);
+    std::shared_ptr<RenderTarget> acquireDepth(const RsxSurfaceState& surfaces, bool overwrites_all);
+    std::shared_ptr<RenderTarget> acquire(TargetMap& map, bool depth, const RsxSurface& surface, VkFormat format,
+                                          bool overwrites_all);
     std::shared_ptr<RenderTarget> createTarget(bool depth, const RsxSurface& surface, VkFormat format);
+    void inheritContents(const std::shared_ptr<RenderTarget>& previous, RenderTarget& target);
     void touch(const std::shared_ptr<RenderTarget>& target);
     void transition(RenderTarget& target, VkImageLayout layout);
 

@@ -2561,6 +2561,186 @@ void testRendererUserClip(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// ---- Surface resize ----
+
+constexpr std::uint32_t kResizeClear = 0xFF102030;
+
+// A 64x64 target (and Z24S8 unless depth_code is 0 or 1, as in beginStencilScene), cleared, with the quad
+// programs and depth test off.
+void beginResizeScene(tox2::rsx_synthetic::SceneBuilder& scene, std::uint32_t depth_code = 0) {
+    using namespace tox2::rsx_synthetic;
+    scene.setSurface();
+    scene.write(tox2::kMethodNv4097SetSurfaceFormat, 8u | (depth_code << 5) | (1u << 8));
+    scene.write(tox2::kMethodNv4097SetColorClearValue, kResizeClear);
+    scene.write(tox2::kMethodNv4097SetZstencilClearValue, 0xFFFFFF00u);
+    scene.write(tox2::kMethodNv4097ClearSurface, depth_code == 0 ? 0xF0 : 0xF3);
+    setQuadRenderState(scene);
+    scene.setFloatAttrib(0, 3, kPositionsOffset);
+    scene.setColorAttrib(3, kColorsOffset);
+    scene.setPrograms(quadPrograms());
+    scene.write(tox2::kMethodNv4097SetDepthTestEnable, 0);
+    scene.write(tox2::kMethodNv4097SetDepthMask, 0);
+}
+
+// Binds the same offsets as a square surface of `size` pixels; `pitch` is the colour row pitch.
+void rebindSurface(tox2::rsx_synthetic::SceneBuilder& scene, std::uint32_t size, std::uint32_t pitch) {
+    scene.write(tox2::kMethodNv4097SetSurfaceClipHorizontal, size << 16);
+    scene.write(tox2::kMethodNv4097SetSurfaceClipVertical, size << 16);
+    scene.write(tox2::kMethodNv4097SetSurfacePitchA, pitch);
+}
+
+// A draw that writes nothing: the renderer still acquires the targets the draw binds.
+void bindingDraw(tox2::rsx_synthetic::SceneBuilder& scene) {
+    scene.write(tox2::kMethodNv4097SetColorMask, 0);
+    putSurfaceQuad(scene, 16, 48);
+    scene.drawStrip(4);
+}
+
+void colorDraw(tox2::rsx_synthetic::SceneBuilder& scene) {
+    scene.write(tox2::kMethodNv4097SetColorMask, 0x01010101u);
+    putSurfaceQuad(scene, 16, 48);
+    scene.drawStrip(4);
+}
+
+// The scene on a fresh renderer (so the statistics belong to it) with the display of any size.
+StencilRender renderResizeScene(tox2::VkContext& ctx, tox2::rsx_synthetic::SceneBuilder& scene) {
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+    CHECK(renderer.valid());
+    std::vector<tox2::RsxCommand> commands = replaySynthetic(scene.finish());
+    tox2::rsxUnimplementedReset();
+    renderer.execute(commands);
+    CHECK(renderer.valid());
+    StencilRender result;
+    CHECK(renderer.readDisplay(result.bgra, result.width, result.height));
+    result.stats = renderer.stats();
+    if (result.bgra.size() != static_cast<std::size_t>(result.width) * result.height * 4) result.bgra.clear();
+    return result;
+}
+
+// A target bound again at the same address with another size keeps the overlap of the old one when the pitch
+// and the format allow it, unless the first command on it overwrites everything; a target seen for the first
+// time starts as opaque black.
+void testRendererSurfaceResize(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::rsxUnimplementedReset();
+
+    // 1. The quad drawn into 64x64, then the target is bound as 32x32: its top-left part survives.
+    {
+        SceneBuilder scene;
+        beginResizeScene(scene);
+        colorDraw(scene);
+        rebindSurface(scene, 32, kSurfacePitch);
+        bindingDraw(scene);
+        const StencilRender render = renderResizeScene(ctx, scene);
+        CHECK(render.width == 32 && render.height == 32 && !render.bgra.empty());
+        if (!render.bgra.empty()) {
+            CHECK(render.pixel(20, 20) == kQuadRed);
+            CHECK(render.pixel(28, 28) == kQuadRed);
+            CHECK(render.pixel(2, 2) == kResizeClear);
+            CHECK(render.pixel(30, 10) == kResizeClear);
+        }
+        CHECK(render.stats.surface_inherits == 1);
+        CHECK(render.stats.draws == 2 && render.stats.draws_skipped == 0);
+        expectNoRendererNotes();
+    }
+
+    // 2. The first command on the resized target is a full colour clear: nothing is copied.
+    {
+        SceneBuilder scene;
+        beginResizeScene(scene);
+        colorDraw(scene);
+        rebindSurface(scene, 32, kSurfacePitch);
+        scene.write(tox2::kMethodNv4097SetColorClearValue, 0xFF405060);
+        scene.write(tox2::kMethodNv4097ClearSurface, 0xF0);
+        const StencilRender render = renderResizeScene(ctx, scene);
+        CHECK(render.width == 32 && render.height == 32 && !render.bgra.empty());
+        if (!render.bgra.empty()) {
+            CHECK(render.pixel(20, 20) == 0xFF405060);
+            CHECK(render.pixel(2, 2) == 0xFF405060);
+        }
+        CHECK(render.stats.surface_inherits == 0);
+        expectNoRendererNotes();
+    }
+
+    // 3. Another pitch: not inherited, the new target is opaque black, counted once.
+    {
+        SceneBuilder scene;
+        beginResizeScene(scene);
+        colorDraw(scene);
+        rebindSurface(scene, 32, kSurfacePitch * 2);
+        bindingDraw(scene);
+        const StencilRender render = renderResizeScene(ctx, scene);
+        CHECK(render.width == 32 && render.height == 32 && !render.bgra.empty());
+        if (!render.bgra.empty()) {
+            CHECK(render.pixel(20, 20) == kBlack);
+            CHECK(render.pixel(2, 2) == kBlack);
+        }
+        CHECK(render.stats.surface_inherits == 0);
+        CHECK(unimplementedCount("state surface resize with another pitch") == 1);
+        CHECK(tox2::rsxUnimplementedSnapshot().size() == 1);
+    }
+
+    // 4. A target seen for the first time is opaque black, alpha included.
+    {
+        // Nothing is cleared: the target the draw creates holds the initial contents.
+        SceneBuilder scene;
+        scene.setSurface();
+        scene.write(tox2::kMethodNv4097SetSurfaceFormat, 8u | (1u << 8));
+        setQuadRenderState(scene);
+        scene.setFloatAttrib(0, 3, kPositionsOffset);
+        scene.setColorAttrib(3, kColorsOffset);
+        scene.setPrograms(quadPrograms());
+        bindingDraw(scene);
+        const StencilRender render = renderResizeScene(ctx, scene);
+        CHECK(render.width == 64 && render.height == 64 && !render.bgra.empty());
+        if (!render.bgra.empty()) {
+            CHECK(render.pixel(20, 20) == kBlack);
+            CHECK(render.pixel(2, 2) == kBlack);
+        }
+        expectNoRendererNotes();
+    }
+
+    // 5. Depth: both targets are resized (the size is the clip) and a depth and stencil clear is the first
+    // command that touches the depth target. Under a stencil write mask of 0xFF it overwrites both aspects; under
+    // 0 the stencil bit is dropped, only the depth is overwritten, and the old stencil is copied.
+    for (const std::uint32_t stencil_mask : {0xFFu, 0u}) {
+        SceneBuilder scene;
+        beginResizeScene(scene, 2);
+        rebindSurface(scene, 32, kSurfacePitch);
+        scene.write(tox2::kMethodNv4097SetStencilMask, stencil_mask);
+        scene.write(tox2::kMethodNv4097ClearSurface, 0x03);
+        const StencilRender render = renderResizeScene(ctx, scene);
+        CHECK(render.stats.surface_inherits == (stencil_mask == 0xFF ? 0u : 1u));
+        expectNoRendererNotes();
+    }
+
+    // 6. Z24S8 to Z16 at one address cannot be copied; counted once and the draw still works.
+    {
+        SceneBuilder scene;
+        beginResizeScene(scene, 2);
+        scene.write(tox2::kMethodNv4097SetSurfaceFormat, 8u | (1u << 5) | (1u << 8));
+        bindingDraw(scene);
+        const StencilRender render = renderResizeScene(ctx, scene);
+        CHECK(render.stats.surface_inherits == 0 && render.stats.draws_skipped == 0);
+        CHECK(unimplementedCount("state surface resize to an incompatible format") == 1);
+        CHECK(tox2::rsxUnimplementedSnapshot().size() == 1);
+    }
+
+    // 7. A8R8G8B8 to F_X32 at one address, same size and pitch: the words are copied as they are.
+    {
+        SceneBuilder scene;
+        beginResizeScene(scene);
+        colorDraw(scene);
+        scene.write(tox2::kMethodNv4097SetSurfaceFormat, 13u | (1u << 8));
+        bindingDraw(scene);
+        const StencilRender render = renderResizeScene(ctx, scene);
+        CHECK(render.stats.surface_inherits == 1 && render.stats.draws_skipped == 0);
+        CHECK(unimplementedCount("state surface resize with another pitch") == 0);
+        CHECK(unimplementedCount("state surface resize to an incompatible format") == 0);
+    }
+    tox2::rsxUnimplementedReset();
+}
+
 bool sameRect(const tox2::PixelRect& rect, std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
     return rect.x == x && rect.y == y && rect.width == width && rect.height == height;
 }
@@ -2673,6 +2853,7 @@ int main() {
     testRendererDepthTexture(*ctx);
     testRendererStencil(*ctx);
     testRendererUserClip(*ctx);
+    testRendererSurfaceResize(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
     ctx.reset();
