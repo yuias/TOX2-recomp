@@ -22,6 +22,18 @@ constexpr std::uint32_t kLsMask = kTox2SpuLsSize - 1u;
 // What fatal() prints on an SPU host thread.
 std::string dumpForFatal(const void* thread) { return describeSpuThread(*static_cast<const SpuThread*>(thread)); }
 
+// Sets the MXCSR of the generated SPU code (round toward zero, FTZ, DAZ) for its lifetime.
+class SpuFpEnvironment {
+public:
+    SpuFpEnvironment() : saved_(tox2SpuMxcsrGet()) { tox2SpuMxcsrSet(kTox2SpuMxcsrSpu); }
+    ~SpuFpEnvironment() { tox2SpuMxcsrSet(saved_); }
+    SpuFpEnvironment(const SpuFpEnvironment&) = delete;
+    SpuFpEnvironment& operator=(const SpuFpEnvironment&) = delete;
+
+private:
+    std::uint32_t saved_;
+};
+
 std::uint32_t roundDown(std::uint32_t value) { return value & ~(kSpuTagUnit - 1u); }
 std::uint32_t roundUp(std::uint64_t value) {
     return static_cast<std::uint32_t>((value + kSpuTagUnit - 1u) & ~(std::uint64_t{kSpuTagUnit} - 1u));
@@ -126,6 +138,10 @@ void SpuThread::setTags(std::uint32_t first_unit, std::uint32_t last_unit, std::
 SpuThread* currentSpuThread() { return t_current; }
 
 SpuLeave runSpu(SpuThread& thread, std::uint32_t entry_ls) {
+    // The generated float code relies on the SPU environment; restoring the caller's MXCSR on every exit
+    // keeps tests that call runSpu on their own thread unaffected. Host code reached from SPU code (channels,
+    // MFC, lv2 callbacks, logging) also runs under it, so it must not depend on float rounding.
+    const SpuFpEnvironment fp_environment;
     Tox2SpuContext& ctx = thread.context();
     ctx.runtime = &thread;
     ctx.jump_site = entry_ls;

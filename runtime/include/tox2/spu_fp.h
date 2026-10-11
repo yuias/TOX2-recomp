@@ -8,8 +8,16 @@
 // with saturation instead of Inf/NaN. Host `double` only supplies exact arithmetic here (every
 // extended-range single is a normal double, a product of two is exact, and TwoSum makes a sum
 // exact); the rounding is done on the bits, because rounding the double result to nearest first and
-// then truncating gives different words. Needs IEEE double arithmetic in the default environment and
-// -ffp-contract=off (the codegen option), which keeps the TwoSum statements unfused.
+// then truncating gives different words. The scalar tox2SpuSf* definitions are the reference: they
+// need IEEE double arithmetic in round to nearest and -ffp-contract=off (the codegen option), which
+// keeps the TwoSum statements unfused.
+//
+// Generated code runs in the SPU host environment (MXCSR: round toward zero, FTZ, DAZ; spu_context.h),
+// which the four-lane arithmetic below uses natively. Every other helper that rounds or must keep
+// denormals runs inside tox2SpuMxcsrEnterHost / tox2SpuMxcsrSet; the ones that do not (integer
+// operations, exact conversions, compares) are noted where they are defined. Targets that include this
+// header are compiled with -frounding-math, so the compiler keeps the float operations between the
+// MXCSR changes.
 //
 // Double precision (ISA 9.2) is host double arithmetic in round to nearest; the emitted code stops on
 // any other FPSCR rounding mode before it calls these helpers.
@@ -116,9 +124,30 @@ TOX2_FORCEINLINE uint32_t tox2SpuSfNegMulSub(uint32_t a, uint32_t b, uint32_t c)
 
 // --- Single precision: four lanes at once -----------------------------------------------------
 //
-// The same arithmetic as the scalar helpers above, lane by lane in 256-bit vectors, so that the
-// compiler emits one AVX2 sequence per register instead of four scalar ones with branches. The audio
-// decoder's transforms are made of these instructions. Masks are 0 or all ones per lane.
+// The audio decoder's transforms are made of these instructions, so each has two paths.
+//
+// Fast path: native single-precision AVX operations in the SPU environment (MXCSR round toward zero,
+// FTZ, DAZ; see spu_context.h). Rounding toward zero is the SPU's truncation, FTZ makes a result below
+// Smin zero (tininess is the same before and after rounding when rounding toward zero, so the
+// threshold is exactly Smin), DAZ reads an exponent-0 operand as zero, and a fused multiply-add rounds
+// once without limiting its product, so a product beyond the single range with a sum inside it is
+// exact. What differs is handled on the result words:
+//   - a zero result is +0 on the SPU but can be -0 on x86 (a negative zero, a flushed negative
+//     result): the sign of every lane with exponent field 0 is cleared;
+//   - an exponent-255 operand is an ordinary number on the SPU and Inf or NaN on x86, and any
+//     operation with such an operand gives an Inf or NaN result (exponent 255);
+//   - an overflow gives 0x7f7fffff when rounding toward zero, where the SPU has values up to
+//     2^128 and saturates only beyond that.
+// So a magnitude of 0x7f7fffff or more in any result lane, which covers the last two cases, sends the
+// whole vector to the exact path. Real data has such lanes rarely.
+//
+// Exact path: the same arithmetic as the scalar helpers above, lane by lane in 256-bit double vectors
+// (every extended-range single is a normal double, a product is exact and TwoSum makes a sum exact).
+// TwoSum needs round to nearest, so it runs in a scope of the default environment. FTZ and DAZ would
+// not matter there: every operand and error term is a multiple of 2^-298 or more, far from the double
+// denormals.
+//
+// Masks are 0 or all ones per lane.
 
 typedef uint64_t Tox2SpuU64x4 __attribute__((vector_size(32)));
 typedef double Tox2SpuF64x4 __attribute__((vector_size(32)));
@@ -163,58 +192,143 @@ TOX2_FORCEINLINE Tox2U32x4 tox2SpuSf4FromExact(Tox2SpuF64x4 hi, Tox2SpuF64x4 lo)
     return __builtin_convertvector(r, Tox2U32x4);
 }
 
-// --- Single precision: register helpers (RT = f(RA, RB[, RC])) --------------------------------------
-//
-// Host lanes run opposite to the big-endian words, but each lane is independent, so no index mapping
-// is needed.
+// The exact path of each operation. Only the vectors that the fast path rejects reach these, so they
+// stay out of line and keep the call sites small.
+#define TOX2_SPU_SLOW static inline __attribute__((noinline, cold))
 
-TOX2_FORCEINLINE Tox2Vr tox2SpuFa(Tox2Vr a, Tox2Vr b) {
+TOX2_SPU_SLOW Tox2Vr tox2SpuFaExact(Tox2Vr a, Tox2Vr b) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
     Tox2SpuF64x4 lo;
     tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32), tox2SpuSf4ToDouble(b.u32), &hi, &lo);
     a.u32 = tox2SpuSf4FromExact(hi, lo);
+    tox2SpuMxcsrSet(saved);
     return a;
 }
 
-TOX2_FORCEINLINE Tox2Vr tox2SpuFs(Tox2Vr a, Tox2Vr b) {
+TOX2_SPU_SLOW Tox2Vr tox2SpuFsExact(Tox2Vr a, Tox2Vr b) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
     Tox2SpuF64x4 lo;
     tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32), -tox2SpuSf4ToDouble(b.u32), &hi, &lo);
     a.u32 = tox2SpuSf4FromExact(hi, lo);
+    tox2SpuMxcsrSet(saved);
     return a;
 }
 
-TOX2_FORCEINLINE Tox2Vr tox2SpuFm(Tox2Vr a, Tox2Vr b) {
+TOX2_SPU_SLOW Tox2Vr tox2SpuFmExact(Tox2Vr a, Tox2Vr b) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     const Tox2SpuF64x4 no_error = {0.0, 0.0, 0.0, 0.0};
     a.u32 = tox2SpuSf4FromExact(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32), no_error);
+    tox2SpuMxcsrSet(saved);
     return a;
 }
 
-// RA * RB + RC.
-TOX2_FORCEINLINE Tox2Vr tox2SpuFma(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+TOX2_SPU_SLOW Tox2Vr tox2SpuFmaExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
     Tox2SpuF64x4 lo;
     tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32), tox2SpuSf4ToDouble(c.u32), &hi, &lo);
     a.u32 = tox2SpuSf4FromExact(hi, lo);
+    tox2SpuMxcsrSet(saved);
     return a;
 }
 
-// RA * RB - RC.
-TOX2_FORCEINLINE Tox2Vr tox2SpuFms(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+TOX2_SPU_SLOW Tox2Vr tox2SpuFmsExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
     Tox2SpuF64x4 lo;
     tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32), -tox2SpuSf4ToDouble(c.u32), &hi, &lo);
     a.u32 = tox2SpuSf4FromExact(hi, lo);
+    tox2SpuMxcsrSet(saved);
     return a;
 }
 
-// RC - RA * RB.
-TOX2_FORCEINLINE Tox2Vr tox2SpuFnms(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+TOX2_SPU_SLOW Tox2Vr tox2SpuFnmsExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
     Tox2SpuF64x4 lo;
     tox2SpuTwoSum4(-(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32)), tox2SpuSf4ToDouble(c.u32), &hi, &lo);
     a.u32 = tox2SpuSf4FromExact(hi, lo);
+    tox2SpuMxcsrSet(saved);
     return a;
+}
+
+// True when a lane of the native result may differ from the SPU's: an overflow (0x7f7fffff when
+// rounding toward zero) or an Inf or NaN from an exponent-255 operand. Both have a magnitude of at
+// least 0x7f7fffff.
+TOX2_FORCEINLINE bool tox2SpuSf4NeedsExact(Tox2U32x4 r) {
+    const Tox2S32x4 magnitude = (Tox2S32x4)(r & 0x7fffffffu);
+    return __builtin_ia32_movmskps((Tox2F32x4)(magnitude > 0x7f7ffffe)) != 0;
+}
+
+// A zero result is +0: clears the whole word of the lanes with exponent field 0, so the rule does not
+// depend on FTZ leaving no fraction.
+TOX2_FORCEINLINE Tox2U32x4 tox2SpuSf4ZeroSign(Tox2U32x4 r) {
+    const Tox2U32x4 zero = (Tox2U32x4)((r & 0x7f800000u) == 0u);
+    return r & ~zero;
+}
+
+// --- Single precision: register helpers (RT = f(RA, RB[, RC])) --------------------------------------
+//
+// Host lanes run opposite to the big-endian words, but each lane is independent, so no index mapping
+// is needed. The fast path needs the SPU environment (see above); the helpers do not check it.
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuFa(Tox2Vr a, Tox2Vr b) {
+    Tox2Vr r;
+    r.f32 = a.f32 + b.f32;
+    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) return tox2SpuFaExact(a, b);
+    r.u32 = tox2SpuSf4ZeroSign(r.u32);
+    return r;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuFs(Tox2Vr a, Tox2Vr b) {
+    Tox2Vr r;
+    r.f32 = a.f32 - b.f32;
+    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) return tox2SpuFsExact(a, b);
+    r.u32 = tox2SpuSf4ZeroSign(r.u32);
+    return r;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuFm(Tox2Vr a, Tox2Vr b) {
+    Tox2Vr r;
+    r.f32 = a.f32 * b.f32;
+    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) return tox2SpuFmExact(a, b);
+    r.u32 = tox2SpuSf4ZeroSign(r.u32);
+    return r;
+}
+
+// RA * RB + RC, fused.
+TOX2_FORCEINLINE Tox2Vr tox2SpuFma(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+    Tox2Vr r;
+    r.f32 = __builtin_elementwise_fma(a.f32, b.f32, c.f32);
+    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) return tox2SpuFmaExact(a, b, c);
+    r.u32 = tox2SpuSf4ZeroSign(r.u32);
+    return r;
+}
+
+// RA * RB - RC.
+TOX2_FORCEINLINE Tox2Vr tox2SpuFms(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+    Tox2Vr r;
+    r.f32 = __builtin_elementwise_fma(a.f32, b.f32, -c.f32);
+    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) return tox2SpuFmsExact(a, b, c);
+    r.u32 = tox2SpuSf4ZeroSign(r.u32);
+    return r;
+}
+
+// RC - RA * RB.
+TOX2_FORCEINLINE Tox2Vr tox2SpuFnms(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+    Tox2Vr r;
+    r.f32 = __builtin_elementwise_fma(-a.f32, b.f32, c.f32);
+    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) return tox2SpuFnmsExact(a, b, c);
+    r.u32 = tox2SpuSf4ZeroSign(r.u32);
+    return r;
 }
 
 // --- Single precision: compares (ISA 9.1, p.231-234; always extended range) -----------------------
@@ -276,13 +390,20 @@ TOX2_FORCEINLINE uint32_t tox2SpuSfRsqrtEstimate(uint32_t w) {
     return tox2SpuSfFromExact(1.0 / __builtin_elementwise_sqrt(tox2SpuSfToDouble(w & 0x7fffffffu)), 0.0);
 }
 
+// The division and the square root round, so they run in the default environment.
 TOX2_FORCEINLINE Tox2Vr tox2SpuFrest(Tox2Vr a) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     for (uint32_t lane = 0; lane < 4; lane++) a.u32[lane] = tox2SpuSfRecipEstimate(a.u32[lane]);
+    tox2SpuMxcsrSet(saved);
     return a;
 }
 
 TOX2_FORCEINLINE Tox2Vr tox2SpuFrsqest(Tox2Vr a) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     for (uint32_t lane = 0; lane < 4; lane++) a.u32[lane] = tox2SpuSfRsqrtEstimate(a.u32[lane]);
+    tox2SpuMxcsrSet(saved);
     return a;
 }
 
@@ -297,7 +418,9 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuFi(Tox2Vr a, Tox2Vr b) {
 // The caller passes the scale (155 - I8 for csflt/cuflt, 173 - I8 for cflts/cfltu), which the emitter
 // has already checked to lie in 0..127; the ISA leaves other scales undefined. Both 2^scale and
 // 2^-scale are normal doubles, and a 32-bit integer or an extended-range single times either is exact,
-// so the only rounding is the final truncation, and range checks precede every cast.
+// so the only rounding is the final truncation, and range checks precede every cast. Nothing here
+// depends on the MXCSR rounding mode or FTZ/DAZ: the products are exact and normal (at least 2^-127),
+// and the casts to integers truncate in every mode.
 
 // 2^n for n in -127..127.
 TOX2_FORCEINLINE double tox2SpuPow2(int32_t n) {
@@ -355,6 +478,10 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuCfltu(Tox2Vr a, uint32_t scale) {
 
 // --- Double precision (ISA 9.2, p.197-199, 203-230) -----------------------------------------------
 //
+// These run in the default environment (round to nearest, denormal results kept): each register helper
+// that does arithmetic or a rounding conversion switches to it and back, see tox2SpuMxcsrEnterHost. The
+// compares and the conversion to double only move bits or compare, which no rounding mode changes.
+//
 // Recorded choices: a denormal operand is forced to zero of the same sign (the optional behaviour of
 // p.198-199; denormal results are kept), and every NaN result is the default QNaN, which the ISA
 // allows with NaN inputs too (p.197) and which x86 would give with the sign bit set. The doubleword
@@ -375,23 +502,32 @@ TOX2_FORCEINLINE uint64_t tox2SpuDfToBits(double d) {
 }
 
 TOX2_FORCEINLINE Tox2Vr tox2SpuDfa(Tox2Vr a, Tox2Vr b) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     for (uint32_t lane = 0; lane < 2; lane++) {
         a.u64[lane] = tox2SpuDfToBits(tox2SpuDfFromBits(a.u64[lane]) + tox2SpuDfFromBits(b.u64[lane]));
     }
+    tox2SpuMxcsrSet(saved);
     return a;
 }
 
 TOX2_FORCEINLINE Tox2Vr tox2SpuDfs(Tox2Vr a, Tox2Vr b) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     for (uint32_t lane = 0; lane < 2; lane++) {
         a.u64[lane] = tox2SpuDfToBits(tox2SpuDfFromBits(a.u64[lane]) - tox2SpuDfFromBits(b.u64[lane]));
     }
+    tox2SpuMxcsrSet(saved);
     return a;
 }
 
 TOX2_FORCEINLINE Tox2Vr tox2SpuDfm(Tox2Vr a, Tox2Vr b) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     for (uint32_t lane = 0; lane < 2; lane++) {
         a.u64[lane] = tox2SpuDfToBits(tox2SpuDfFromBits(a.u64[lane]) * tox2SpuDfFromBits(b.u64[lane]));
     }
+    tox2SpuMxcsrSet(saved);
     return a;
 }
 
@@ -406,33 +542,45 @@ TOX2_FORCEINLINE uint64_t tox2SpuDfFusedLane(uint64_t a, uint64_t b, uint64_t ac
 
 // RA * RB + RT.
 TOX2_FORCEINLINE Tox2Vr tox2SpuDfma(Tox2Vr a, Tox2Vr b, Tox2Vr rt) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     for (uint32_t lane = 0; lane < 2; lane++) {
         a.u64[lane] = tox2SpuDfFusedLane(a.u64[lane], b.u64[lane], rt.u64[lane], false, false);
     }
+    tox2SpuMxcsrSet(saved);
     return a;
 }
 
 // RA * RB - RT.
 TOX2_FORCEINLINE Tox2Vr tox2SpuDfms(Tox2Vr a, Tox2Vr b, Tox2Vr rt) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     for (uint32_t lane = 0; lane < 2; lane++) {
         a.u64[lane] = tox2SpuDfFusedLane(a.u64[lane], b.u64[lane], rt.u64[lane], true, false);
     }
+    tox2SpuMxcsrSet(saved);
     return a;
 }
 
 // -(RA * RB - RT).
 TOX2_FORCEINLINE Tox2Vr tox2SpuDfnms(Tox2Vr a, Tox2Vr b, Tox2Vr rt) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     for (uint32_t lane = 0; lane < 2; lane++) {
         a.u64[lane] = tox2SpuDfFusedLane(a.u64[lane], b.u64[lane], rt.u64[lane], true, true);
     }
+    tox2SpuMxcsrSet(saved);
     return a;
 }
 
 // -(RA * RB + RT).
 TOX2_FORCEINLINE Tox2Vr tox2SpuDfnma(Tox2Vr a, Tox2Vr b, Tox2Vr rt) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     for (uint32_t lane = 0; lane < 2; lane++) {
         a.u64[lane] = tox2SpuDfFusedLane(a.u64[lane], b.u64[lane], rt.u64[lane], false, true);
     }
+    tox2SpuMxcsrSet(saved);
     return a;
 }
 
@@ -472,9 +620,12 @@ TOX2_FORCEINLINE uint32_t tox2SpuSingleFromDf(uint64_t bits) {
 
 // Each doubleword becomes a single in word 0 or 2; words 1 and 3 are zero.
 TOX2_FORCEINLINE Tox2Vr tox2SpuFrds(Tox2Vr a) {
+#pragma STDC FENV_ACCESS ON
+    const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2Vr r = tox2SpuSplatW(0);
     TOX2_VR_W(r, 0) = tox2SpuSingleFromDf(TOX2_VR_D(a, 0));
     TOX2_VR_W(r, 2) = tox2SpuSingleFromDf(TOX2_VR_D(a, 1));
+    tox2SpuMxcsrSet(saved);
     return r;
 }
 

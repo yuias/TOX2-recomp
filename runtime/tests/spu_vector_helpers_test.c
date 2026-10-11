@@ -1,7 +1,9 @@
 // The SIMD forms of the SPU helpers against their lane-by-lane definitions: the single-precision
-// arithmetic of spu_fp.h against the scalar tox2SpuSf* functions, and shufb against a byte loop that
-// follows the ISA text. Random words weighted toward the cases that differ (zero and denormal exponents,
-// exponent 255, results near Smin and Smax, cancellation).
+// arithmetic of spu_fp.h, run in the SPU float environment (round toward zero, FTZ, DAZ), against the
+// scalar tox2SpuSf* functions run in round to nearest, and shufb against a byte loop that follows the
+// ISA text. Random words weighted toward the cases that differ (zero and denormal exponents, exponent
+// 255, results near Smin and Smax, cancellation), and every combination of a list of edge words. The
+// helpers that need round to nearest must give the same result in both environments.
 
 #include <stdio.h>
 
@@ -17,13 +19,29 @@ static uint32_t next(void) {
     return (uint32_t)g_state;
 }
 
-static const uint32_t kEdges[] = {0x00000000u, 0x80000000u, 0x00000001u, 0x00800000u, 0x80800000u, 0x007fffffu,
-                                  0x7fffffffu, 0xffffffffu, 0x7f800000u, 0xff800000u, 0x3f800000u, 0xbf800000u,
-                                  0x00800001u, 0x01000000u, 0x7f7fffffu, 0x34000000u, 0x33800000u, 0x4b800000u};
+static const uint32_t kEdges[] = {
+        0x00000000u, 0x80000000u,                            // zeros
+        0x00000001u, 0x80000001u, 0x007fffffu, 0x807fffffu,  // denormals, both signs
+        0x00800000u, 0x80800000u, 0x00800001u, 0x01000000u,  // Smin and just above
+        0x3f800000u, 0xbf800000u, 0x3f7fffffu, 0x34000000u, 0x33800000u, 0x4b800000u,
+        0x00ffffffu, 0x3fffffffu, 0x1f800000u, 0x5f800000u, 0xdf800000u,               // 2^-64, 2^64
+        0x7f000000u, 0x7f7ffffeu, 0x7f7fffffu, 0xff7fffffu,                            // up to the largest single
+        0x7f800000u, 0xff800000u, 0x7f800001u, 0xff800001u, 0x7fffffffu, 0xffffffffu,  // exponent 255
+};
+static const int kEdgeCount = (int)(sizeof kEdges / sizeof kEdges[0]);
+
+static uint32_t exponentOf(uint32_t w) { return (w >> 23) & 0xffu; }
+
+// A word with exponent `e` clamped to 1..255, and a random sign and fraction.
+static uint32_t withExponent(int e) {
+    if (e < 1) e = 1;
+    if (e > 255) e = 255;
+    return (next() & 0x807fffffu) | ((uint32_t)e << 23);
+}
 
 static uint32_t pickWord(void) {
     switch (next() & 7u) {
-        case 0: return kEdges[next() % (sizeof kEdges / sizeof kEdges[0])];
+        case 0: return kEdges[next() % (uint32_t)kEdgeCount];
         case 1: return (next() & 0x807fffffu) | ((uint32_t)(0x7c + next() % 7u) << 23);  // near 1.0
         case 2: return (next() & 0x80ffffffu) | 0x00800000u;                             // near Smin
         case 3: return next() | 0x7f000000u;                                             // near Smax
@@ -31,30 +49,182 @@ static uint32_t pickWord(void) {
     }
 }
 
+enum { kBatch = 512 };
+
+// The sticky exception flags in the low bits of the MXCSR are not part of the environment.
+static const uint32_t kControlBits = 0xffc0u;
+
+static Tox2Vr g_a[kBatch];
+static Tox2Vr g_b[kBatch];
+static Tox2Vr g_c[kBatch];
+static Tox2Vr g_got[6][kBatch];
+static long g_bad;
+
+// The vector helpers run in the SPU environment, as in the runtime; the scalar definitions need round
+// to nearest, so they run in the default one.
+static void checkBatch(int n) {
+    const uint32_t saved = tox2SpuMxcsrGet();
+    tox2SpuMxcsrSet(kTox2SpuMxcsrSpu);
+    for (int i = 0; i < n; i++) {
+        g_got[0][i] = tox2SpuFa(g_a[i], g_b[i]);
+        g_got[1][i] = tox2SpuFs(g_a[i], g_b[i]);
+        g_got[2][i] = tox2SpuFm(g_a[i], g_b[i]);
+        g_got[3][i] = tox2SpuFma(g_a[i], g_b[i], g_c[i]);
+        g_got[4][i] = tox2SpuFms(g_a[i], g_b[i], g_c[i]);
+        g_got[5][i] = tox2SpuFnms(g_a[i], g_b[i], g_c[i]);
+    }
+    if ((tox2SpuMxcsrGet() & kControlBits) != kTox2SpuMxcsrSpu && g_bad++ < 10) {
+        printf("the vector helpers changed the MXCSR to %08x\n", (unsigned)tox2SpuMxcsrGet());
+    }
+    tox2SpuMxcsrSet(kTox2SpuMxcsrHost);
+    for (int i = 0; i < n; i++) {
+        for (int lane = 0; lane < 4; lane++) {
+            const uint32_t x = g_a[i].u32[lane];
+            const uint32_t y = g_b[i].u32[lane];
+            const uint32_t z = g_c[i].u32[lane];
+            const uint32_t want[6] = {tox2SpuSfAdd(x, y),       tox2SpuSfSub(x, y),       tox2SpuSfMul(x, y),
+                                      tox2SpuSfMulAdd(x, y, z), tox2SpuSfMulSub(x, y, z), tox2SpuSfNegMulSub(x, y, z)};
+            for (int op = 0; op < 6; op++) {
+                if (g_got[op][i].u32[lane] != want[op] && g_bad++ < 10) {
+                    printf("float op %d (%08x, %08x, %08x): %08x, expected %08x\n", op, x, y, z, g_got[op][i].u32[lane],
+                           want[op]);
+                }
+            }
+        }
+    }
+    tox2SpuMxcsrSet(saved);
+}
+
 static int checkFloat(void) {
-    long bad = 0;
-    for (long it = 0; it < 2000000; it++) {
+    g_bad = 0;
+    int n = 0;
+    for (long it = 0; it < 1000000; it++) {
         Tox2Vr a;
         Tox2Vr b;
         Tox2Vr c;
         for (int i = 0; i < 4; i++) {
             a.u32[i] = pickWord();
-            b.u32[i] = (it & 3) == 0 ? (a.u32[i] ^ 0x80000000u) + next() % 5u - 2u : pickWord();
+            b.u32[i] = pickWord();
             c.u32[i] = pickWord();
+            switch (it & 7) {
+                case 0: b.u32[i] = (a.u32[i] ^ 0x80000000u) + next() % 5u - 2u; break;  // cancellation
+                case 1:                                                                 // product at Smin
+                    b.u32[i] = withExponent(128 - (int)exponentOf(a.u32[i]) + (int)(next() % 3u) - 1);
+                    break;
+                case 2:  // product at the largest single, and beyond it
+                    b.u32[i] = withExponent(381 - (int)exponentOf(a.u32[i]) + (int)(next() % 3u) - 1);
+                    break;
+                case 3:  // the accumulator cancels the product, or sits a few steps from it
+                    c.u32[i] = (tox2SpuSfMul(a.u32[i], b.u32[i]) ^ (next() & 0x80000000u)) + next() % 5u - 2u;
+                    break;
+                default: break;
+            }
         }
-        const Tox2Vr got[6] = {tox2SpuFa(a, b),     tox2SpuFs(a, b),     tox2SpuFm(a, b),
-                               tox2SpuFma(a, b, c), tox2SpuFms(a, b, c), tox2SpuFnms(a, b, c)};
-        for (int i = 0; i < 4; i++) {
-            const uint32_t x = a.u32[i];
-            const uint32_t y = b.u32[i];
-            const uint32_t z = c.u32[i];
-            const uint32_t want[6] = {tox2SpuSfAdd(x, y),       tox2SpuSfSub(x, y),       tox2SpuSfMul(x, y),
-                                      tox2SpuSfMulAdd(x, y, z), tox2SpuSfMulSub(x, y, z), tox2SpuSfNegMulSub(x, y, z)};
-            for (int op = 0; op < 6; op++) {
-                if (got[op].u32[i] != want[op] && bad++ < 10) {
-                    printf("float op %d (%08x, %08x, %08x): %08x, expected %08x\n", op, x, y, z, got[op].u32[i],
-                           want[op]);
+        g_a[n] = a;
+        g_b[n] = b;
+        g_c[n] = c;
+        if (++n == kBatch) {
+            checkBatch(n);
+            n = 0;
+        }
+    }
+    if (n > 0) checkBatch(n);
+    return g_bad == 0;
+}
+
+// Every combination of the edge words, twice: spread over the four lanes of the vectors, and with the
+// same combination in all lanes, so that the fast path sees an edge without any other lane to hide it.
+static int checkEdges(void) {
+    g_bad = 0;
+    int n = 0;
+    int lane = 0;
+    for (int x = 0; x < kEdgeCount; x++) {
+        for (int y = 0; y < kEdgeCount; y++) {
+            for (int z = 0; z < kEdgeCount; z++) {
+                g_a[n] = tox2SpuSplatW(kEdges[x]);
+                g_b[n] = tox2SpuSplatW(kEdges[y]);
+                g_c[n] = tox2SpuSplatW(kEdges[z]);
+                if (++n == kBatch - 1) {
+                    checkBatch(n);
+                    n = 0;
                 }
+                g_a[kBatch - 1].u32[lane] = kEdges[x];
+                g_b[kBatch - 1].u32[lane] = kEdges[y];
+                g_c[kBatch - 1].u32[lane] = kEdges[z];
+                if (++lane == 4) {
+                    g_a[n] = g_a[kBatch - 1];
+                    g_b[n] = g_b[kBatch - 1];
+                    g_c[n] = g_c[kBatch - 1];
+                    lane = 0;
+                    if (++n == kBatch - 1) {
+                        checkBatch(n);
+                        n = 0;
+                    }
+                }
+            }
+        }
+    }
+    if (n > 0) checkBatch(n);
+    return g_bad == 0;
+}
+
+static uint64_t pickDouble(void) {
+    const uint64_t bits = ((uint64_t)next() << 32) | next();
+    const uint64_t rest = bits & 0x800fffffffffffffull;
+    switch (next() & 3u) {
+        case 0: return rest | ((uint64_t)(0x380 + next() % 0x1f) << 52);  // the single denormals and Smin
+        case 1: return rest | ((uint64_t)(0x1e0 + next() % 0x40) << 52);  // products reach double denormals
+        case 2: return rest | ((uint64_t)(0x3f0 + next() % 0x20) << 52);
+        default: return bits;
+    }
+}
+
+// The helpers that need round to nearest or denormals give the same words in the SPU environment as
+// in the default one, and leave the environment as they found it.
+static int checkRoundedHelpers(void) {
+    enum { kHelpers = 14 };
+    long bad = 0;
+    for (long it = 0; it < 200000; it++) {
+        Tox2Vr a;
+        Tox2Vr b;
+        Tox2Vr c;
+        Tox2Vr w;
+        for (int i = 0; i < 2; i++) {
+            a.u64[i] = pickDouble();
+            b.u64[i] = pickDouble();
+            c.u64[i] = pickDouble();
+        }
+        for (int i = 0; i < 4; i++) w.u32[i] = pickWord();
+        Tox2Vr got[kHelpers];
+        Tox2Vr want[kHelpers];
+        for (int env = 0; env < 2; env++) {
+            const uint32_t mxcsr = env == 0 ? kTox2SpuMxcsrHost : kTox2SpuMxcsrSpu;
+            Tox2Vr* r = env == 0 ? want : got;
+            tox2SpuMxcsrSet(mxcsr);
+            r[0] = tox2SpuDfa(a, b);
+            r[1] = tox2SpuDfs(a, b);
+            r[2] = tox2SpuDfm(a, b);
+            r[3] = tox2SpuDfma(a, b, c);
+            r[4] = tox2SpuDfms(a, b, c);
+            r[5] = tox2SpuDfnms(a, b, c);
+            r[6] = tox2SpuDfnma(a, b, c);
+            r[7] = tox2SpuFrds(a);
+            r[8] = tox2SpuFrest(w);
+            r[9] = tox2SpuFrsqest(w);
+            r[10] = tox2SpuCsflt(w, 3);
+            r[11] = tox2SpuCuflt(w, 127);
+            r[12] = tox2SpuCflts(w, 20);
+            r[13] = tox2SpuCfltu(w, 20);
+            if ((tox2SpuMxcsrGet() & kControlBits) != mxcsr && bad++ < 10) {
+                printf("a helper changed the MXCSR to %08x\n", (unsigned)tox2SpuMxcsrGet());
+            }
+        }
+        tox2SpuMxcsrSet(kTox2SpuMxcsrHost);
+        for (int k = 0; k < kHelpers; k++) {
+            if ((got[k].u64[0] != want[k].u64[0] || got[k].u64[1] != want[k].u64[1]) && bad++ < 10) {
+                printf("helper %d differs between the environments: %016llx %016llx, expected %016llx %016llx\n", k,
+                       (unsigned long long)got[k].u64[0], (unsigned long long)got[k].u64[1],
+                       (unsigned long long)want[k].u64[0], (unsigned long long)want[k].u64[1]);
             }
         }
     }
@@ -107,7 +277,7 @@ static int checkShufb(void) {
 }
 
 int main(void) {
-    const int ok = checkFloat() & checkShufb();
+    const int ok = checkFloat() & checkEdges() & checkRoundedHelpers() & checkShufb();
     if (ok) printf("spu vector helpers ok\n");
     return ok ? 0 : 1;
 }

@@ -119,6 +119,31 @@ TOX2_FORCEINLINE bool tox2SpuHaltRequested(const Tox2SpuContext* ctx) {
 
 #define TOX2_SPU_ENTER(addr) tox2SpuEnter(ctx, (addr))
 
+// --- Host floating-point environment ---------------------------------------------------------
+//
+// Generated SPU code runs with the host MXCSR in the SPU environment: round toward zero with flush-to-
+// zero and denormals-are-zero, all exceptions masked. The single-precision helpers of spu_fp.h rely on
+// it (the SPU truncates, and its denormals are zeros). The runtime sets it around the generated code
+// (runSpu); a helper that needs the default environment, round to nearest with denormals, switches
+// to it for its own duration and restores the caller's value.
+enum Tox2SpuMxcsr : uint32_t {
+    kTox2SpuMxcsrHost = 0x1f80u,  // round to nearest, exceptions masked
+    kTox2SpuMxcsrSpu = 0xffc0u,   // host | round toward zero (0x6000) | FTZ (0x8000) | DAZ (0x40)
+};
+
+TOX2_FORCEINLINE uint32_t tox2SpuMxcsrGet(void) { return __builtin_ia32_stmxcsr(); }
+
+TOX2_FORCEINLINE void tox2SpuMxcsrSet(uint32_t value) { __builtin_ia32_ldmxcsr(value); }
+
+// Switches to the default environment and returns the previous MXCSR for tox2SpuMxcsrSet. The float
+// operations of the scope must sit between the two calls; the SPU codegen options (-frounding-math) and
+// FENV_ACCESS in the helper keep the compiler from moving them out.
+TOX2_FORCEINLINE uint32_t tox2SpuMxcsrEnterHost(void) {
+    const uint32_t saved = tox2SpuMxcsrGet();
+    tox2SpuMxcsrSet(kTox2SpuMxcsrHost);
+    return saved;
+}
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

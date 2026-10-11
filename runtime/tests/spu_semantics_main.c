@@ -134,7 +134,11 @@ static bool runCase(const Tox2SemanticsCase* c, Tox2SpuContext* ctx, uint8_t* ls
 
     c->init(ctx, ls);
     ctx->jump_target = kTox2SemanticsCodeBase;
+    // The runtime runs generated code in the SPU float environment, so the cases do too.
+    const uint32_t saved_mxcsr = tox2SpuMxcsrGet();
+    tox2SpuMxcsrSet(kTox2SpuMxcsrSpu);
     if (setjmp(g_halt_env) == 0) tox2SpuDispatch(ctx, ls);
+    tox2SpuMxcsrSet(saved_mxcsr);
 
     char msg[256] = "";
     uint32_t mismatches = c->check(ctx, ls, &g_log, msg, sizeof msg);
