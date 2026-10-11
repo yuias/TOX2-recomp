@@ -24,7 +24,7 @@ files are registered only when those are configured, and configuration prints wh
 | `audio_wasapi` | The WASAPI output: device loss and reopen, priming, high-water drops and the fill level on fake streams, then (when a render device exists) opening the default device, playing silence and a real device loss and reopen. Exit code 77 (skipped) when the machine has no render device. Runs serially, because it measures timing | a render device for the real-device part |
 | `input_core` | Gamepad code behind the backend interface, with a fake backend and no GameInput: value, reading and device formatting; the `--pad-probe` logic (a line per change, one `no gamepad reading` per device, devices coming and going, the `SteamVirtualGamepadInfo` lines); the button table, dead zone, stick bytes, trigger threshold, merging of pads and motor conversion; Steam virtual path parsing, `SDL_GAMECONTROLLER_IGNORE_DEVICES` parsing and the selection rule (recorded runs, a virtual pad, the ignore list, no Steam); the hub (use of a pad, removal, two pads, a virtual pad and its physical pad, the focus gate, vibration, the provider following plugging) and the gamepad thread with a fake backend (unavailable backend, feeding the pad, start lines, probe alone) | - |
 | `input_gameinput` | The GameInput backend: the Steam context, then (with a GameInput runtime of API version 3) the device list, unique non-zero ids, a stable device generation, and `read`, `readRaw` and `setRumble` on unknown ids. No pad has to be connected. Exit code 77 (skipped) with the reason when no such runtime is installed | a GameInput runtime for all but the Steam context part (see [Input](input.md#the-gameinput-runtime-and-the-gameinput-unavailable-warning)) |
-| `game_boot` | The game reaches a milestone in a 20 s run (below) | `-GeneratedDir`, `-GameDir`, `-Pup` and `-EbootElf` or `-EbootBin` |
+| `game_boot` | The game reaches a milestone in a 30 s run (below) | `-GeneratedDir`, `-GameDir`, `-Pup` and `-EbootElf` or `-EbootBin` |
 
 `rsx_replay` is registered when the capture named in `cmake/rsx_replay.cmake` exists under
 `generated/rsx/captures/`. While `TOX2_RSX_REPLAY_REFERENCE_SHA256` in that file is empty, as it is
@@ -49,32 +49,27 @@ the output matches the milestone regular expression. The exit code is not checke
 The pin file `cmake/game_boot.cmake` holds the arguments and the milestone:
 
 ```cmake
-set(TOX2_GAME_BOOT_ARGS "--no-window --seconds 20 --hdd-dir \"${CMAKE_BINARY_DIR}/game_hdd\"")
-set(TOX2_GAME_BOOT_MILESTONE
-    "tox2: stop: spu: sys_spu_thread_group_start group 0x[0-9a-f]+ \"[^\"]*CellSpursKernelGroup\" \\([0-9]+ threads, image 0x011f0380 entry 0x818\\)")
+set(TOX2_GAME_BOOT_ARGS "--no-window --seconds 30 --hdd-dir \"${CMAKE_BINARY_DIR}/game_hdd\"")
+set(TOX2_GAME_BOOT_MILESTONE "\\[t 01000000\\] tox2: first hle cellSpurs::cellSpursEventFlagTryWait")
 ```
 
-The milestone is the stop line of the first `sys_spu_thread_group_start`. Until libsre was loaded it was
-the main thread's first call of system call 350 (`first sc 350`,
-`sys_memory_allocate_from_container`), the last main-thread `tox2: first ...` line of a run. It moved
-on purpose. The game creates SPURS instance A with PPU priority 1000 while its main thread has priority
-1001, so under the creation rule of `sys_ppu_thread_create` (see [Threads](runtime.md#threads)) libsre's
-handler thread `SpursHdlr0` runs before the main thread continues and starts the SPU thread group. The
-run therefore ends, with exit code 8, inside the main thread's `cellSpursInitializeWithAttribute`,
-before the main thread reaches any later `tox2: first ...` line, so no such line can be the milestone.
-The stop line names the kernel image that libsre imported (`0x011f0380`) and its entry point (`0x818`),
-so a wrong kernel, a failed image import, a libsre that did not run or an earlier stop leaves the
-pattern unmatched. The group id and the thread count are not pinned. The run no longer writes the 3 GB
-`TLFILE.TLDAT` copy into `build/<preset>/game_hdd`, because the stop comes before the install copy. The
-milestone guards how far the main thread gets; it does not mean that the game works.
+The milestone is the main thread's first call of `cellSpursEventFlagTryWait`, the last
+`tox2: first ...` line of the main thread. The game reaches it only after the first LZMA batch of the
+SPURS engine tasks has run on the recompiled SPU code, so a run that stops earlier (an SPU stop, a
+stall, or the watchdog before the batch ends) leaves the pattern unmatched. The line first appears at
+12 to 14 s when the hdd directory already holds the installed game data and at 14 to 16 s from an empty
+directory; the test must pass from both. The run is limited to 30 s because a gap in a PPU jump table
+stops the game at about 53 s, so a longer run would end differently. A run that passes ends with
+`tox2: stop: watchdog 30 s` (exit code 5), which the test does not check. The milestone guards how far
+the main thread gets; it does not mean that the game works.
 
-The pin file started with a placeholder milestone (the first `hle` or `sc` line of the main
-thread), which was replaced once the game reached a census stop. When a change lets the game get
-further, for example when SPU execution moves the stop, run `tox2_game --game-dir <dir> --elf <elf>
---no-window --seconds 20 --hdd-dir <empty-dir>` three times, from an empty directory and from one with
-existing game data, take a line that appears in every run (the stop line, or the last main-thread
-`tox2: first ...` line if the run no longer stops) and set the milestone to it. Update only that file;
-the test then guards against regressions.
+Earlier pins were the main thread's `first sc 350` line (before libsre was loaded) and the stop line of
+the first `sys_spu_thread_group_start`. Each moved on purpose when the game got further. When a change
+lets the game get further again, run `tox2_game --game-dir <dir> --elf <elf> --libsre <libsre.reloc.elf>
+--no-window --seconds 30 --hdd-dir <dir>` three times, from an empty directory and from one with
+existing game data, take a line that appears in every run (the last main-thread `tox2: first ...`
+line, or the stop line if the run stops) and set the milestone to it. Update only that file; the test
+then guards against regressions.
 
 Audio code is covered by `audio_core`, by `runtime_core` (`testEventQueueIpcKeys`,
 `testPpuThreadCreatePriority`, `testTimerResolution`) and by `media_ffmpeg` (`testAtracFrameDecoder`).

@@ -8,7 +8,7 @@ tox2_game [--game-dir DIR] [--vfs-config FILE] [--elf PATH] [--libsre PATH] [--h
          [--seconds N] [--strict] [--log FILE] [--log-level LEVEL] [--quiet-hle] [--dialog-answer yes|no|ok]
          [--pad none|neutral|keyboard|gamepad|keyboard+gamepad] [--pad-script FILE] [--pad-probe]
          [--audio none|wasapi] [--audio-dump FILE]
-         [--load-only] [--png-dump DIR]
+         [--load-only] [--png-dump DIR] [--dump-guest ADDR:SIZE:FILE]...
          [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]
          [--dump-frames DIR] [--dump-frames-every K]
          [--shader-cache DIR] [--vk-validation] [--no-window]
@@ -88,6 +88,12 @@ the window cannot be created, the RSX thread logs the reason and the game goes o
 | `--strict` | Treat a jump to an address that is not a recovered function as a fatal error (see [Dispatch](runtime.md#dispatch)). |
 | `--load-only` | Load and verify the executable and libsre, print the load summary and exit with 0 without running any guest code. |
 | `--png-dump DIR` | Write every image `cellPngDec` decodes to `DIR/png_<n>.png` (8-bit RGBA, at most 64), to check what the guest was given. `DIR` is created. |
+| `--dump-guest ADDR:SIZE:FILE` | Write `SIZE` bytes of guest memory from `ADDR` to `FILE` when the run stops, and log their SHA-256. Repeatable. `ADDR` and `SIZE` are decimal or `0x` hex; `SIZE` is at least 1 and `ADDR + SIZE` must stay within 4 GiB, and `FILE` is the rest of the argument after the second colon. The dump runs on every stop path (exit code, watchdog, stall, fatal stop), in the order given and before the census, so it shows the memory as the run left it while other threads may still run. `FILE` is truncated. |
+
+The dump writes one line per option: `tox2: dump: 0x<addr>..0x<end> -> <file> sha256 <hex>`, followed by
+` bytes <xx> <xx> ...` (the bytes in hex) when `SIZE` is 16 or less. A range that is not entirely committed
+guest memory gives `tox2: dump: 0x<addr>..0x<end> -> <file> not committed` and writes no file. A file that
+cannot be written gives `... write failed`.
 
 ## Exit codes and stop lines
 
@@ -117,17 +123,17 @@ also when it is started from a script.
 ## Examples by purpose
 
 A short unattended run that keeps its log and starts from an empty hdd directory, like the
-`game_boot` test (this game stops at the SPU thread group start; see [Status](status.md)):
+`game_boot` test (see [Status](status.md) for how far this game gets):
 
 ```sh
-tox2_game --game-dir <game-dir> --no-window --seconds 20 --hdd-dir <empty-dir> --log run.log
+tox2_game --game-dir <game-dir> --no-window --seconds 30 --hdd-dir <empty-dir> --log run.log
 ```
 
 The same run with an explicit executable, for a game directory that does not hold `EBOOT.elf`
 (libsre is looked up next to the ELF; `--libsre` names it when it is elsewhere):
 
 ```sh
-tox2_game --game-dir <game-dir> --elf <elf> --libsre <libsre.reloc.elf> --no-window --seconds 20 --hdd-dir <empty-dir>
+tox2_game --game-dir <game-dir> --elf <elf> --libsre <libsre.reloc.elf> --no-window --seconds 30 --hdd-dir <empty-dir>
 ```
 
 Every 30th frame of the first 30 s as PNG files, without a window (the run stops at the SPU thread
@@ -142,4 +148,10 @@ Recording the game's sound to a file without playing it (this game stops before 
 
 ```sh
 tox2_game --game-dir <game-dir> --no-window --hdd-dir <empty-dir> --seconds 30 --audio-dump out/run.wav
+```
+
+Saving two ranges of guest memory when the run ends, 16 bytes (which are also logged) and 4 KiB:
+
+```sh
+tox2_game --game-dir <game-dir> --no-window --seconds 30 --hdd-dir <empty-dir> --dump-guest 0x10000:16:head.bin --dump-guest 0x10000:4096:page.bin
 ```

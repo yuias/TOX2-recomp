@@ -1,11 +1,9 @@
-# The milestone is the stop line of the first sys_spu_thread_group_start, the point where the game's
-# cellSpursInitializeWithAttribute, running as recompiled libsre code, has built SPURS instance A and
-# its handler thread starts the kernel group. A `tox2: first ...` line cannot be the milestone any more:
-# the handler thread has a higher priority than the main thread, so the run stops inside the main
-# thread's call before it reaches later lines. The line names the kernel image that libsre imported and
-# its entry point, so a wrong kernel, a failed import or an earlier stop leaves the pattern unmatched.
-# The group id and the thread count are not pinned. Run it from an empty HDD directory and from one with
-# existing game data; both must reach the same line. Update it when SPU execution moves the stop.
-set(TOX2_GAME_BOOT_ARGS "--no-window --seconds 20 --hdd-dir \"${CMAKE_BINARY_DIR}/game_hdd\"")
-set(TOX2_GAME_BOOT_MILESTONE
-    "tox2: stop: spu: sys_spu_thread_group_start group 0x[0-9a-f]+ \"[^\"]*CellSpursKernelGroup\" \\([0-9]+ threads, image 0x011f0380 entry 0x818\\)")
+# The milestone is the main thread's first call of cellSpursEventFlagTryWait, the last `tox2: first ...`
+# line of the main thread. The game reaches it only after the first LZMA batch of the SPURS engine tasks
+# has run on the recompiled SPU code, so a run that stops earlier (an SPU stop, a stall, a watchdog before
+# the batch ends) leaves the pattern unmatched. It first appears at 12 to 14 s with game data installed in
+# the hdd directory and at 14 to 16 s from an empty one; both must reach it. The run is limited to 30 s
+# because a gap in a PPU jump table stops the game at about 53 s, so a longer run would end differently.
+# Update it when the game gets further.
+set(TOX2_GAME_BOOT_ARGS "--no-window --seconds 30 --hdd-dir \"${CMAKE_BINARY_DIR}/game_hdd\"")
+set(TOX2_GAME_BOOT_MILESTONE "\\[t 01000000\\] tox2: first hle cellSpurs::cellSpursEventFlagTryWait")
