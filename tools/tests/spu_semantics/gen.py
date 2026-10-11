@@ -38,7 +38,8 @@ TERMINATOR_STOP = 0x102
 _NAME_RE = re.compile(r"[a-z0-9_]+")
 _REG_RE = re.compile(r"r([0-9]|[1-9][0-9]|1[01][0-9]|12[0-7])")
 _MASK32 = 0xFFFFFFFF
-_CHANNEL_KEYS = frozenset({"reads", "counts", "writes", "stops", "stop_leave", "halts", "leave_channels"})
+_CHANNEL_KEYS = frozenset({"reads", "counts", "writes", "stops", "stop_leave", "halts", "unhandled",
+                           "leave_channels"})
 
 
 class CaseError(Exception):
@@ -158,7 +159,10 @@ def _channels(case: Case) -> dict[str, list]:
                              for ch in raw.get("leave_channels", ())]
     # Every case checks its halts; no key means none were taken.
     out["halts"] = [_int_in(case, "halt site", s, 0, 0x3FFFC) for s in raw.get("halts", ())]
-    for what in ("writes", "stops", "halts"):
+    # Likewise for unhandled words and the double-precision rounding-mode guard: (site, word) pairs.
+    out["unhandled"] = [(_int_in(case, "unhandled site", s, 0, 0x3FFFC), _int_in(case, "unhandled word", w, 0, _MASK32))
+                        for s, w in raw.get("unhandled", ())]
+    for what in ("writes", "stops", "halts", "unhandled"):
         if out[what] is not None and len(out[what]) > LOG_SIZE:
             raise CaseError("case %s: more than %d expected %s" % (case.name, LOG_SIZE, what))
     return out
@@ -256,6 +260,9 @@ def _render_case(case: Case) -> tuple[list[str], str, dict[str, list], int]:
     values = ", ".join("0x%xull" % s for s in channels["halts"])
     check_lines.append('n += checkSeq(msg, msg_size, n, "halts", log->halts, log->halt_count, '
                        "(const uint64_t[]){%s}, %du);" % (values or "0", len(channels["halts"])))
+    values = ", ".join("0x%08x%08xull" % (s, w) for s, w in channels["unhandled"])
+    check_lines.append('n += checkSeq(msg, msg_size, n, "unhandled", log->unhandled, log->unhandled_count, '
+                       "(const uint64_t[]){%s}, %du);" % (values or "0", len(channels["unhandled"])))
     check_lines.append("return n;")
 
     def pairs(label: str, items: list[tuple[int, int]]) -> str:
@@ -309,12 +316,14 @@ typedef struct Tox2SemanticsPair {
 } Tox2SemanticsPair;
 
 // What the hooks saw during the case. Writes are (channel << 32 | value); stops are the codes; halts
-// are the LS addresses of the taken halt instructions (the first one ends the case).
+// are the LS addresses of the taken halt instructions (the first one ends the case); unhandled words
+// are (site << 32 | word), and the first one ends the case too.
 typedef struct Tox2SemanticsLog {
-    uint32_t write_count, stop_count, halt_count;
+    uint32_t write_count, stop_count, halt_count, unhandled_count;
     uint64_t writes[kTox2SemanticsLogSize];
     uint64_t stops[kTox2SemanticsLogSize];
     uint64_t halts[kTox2SemanticsLogSize];
+    uint64_t unhandled[kTox2SemanticsLogSize];
 } Tox2SemanticsLog;
 
 // Runs before the case; sets the registers and local store the case starts from.

@@ -11,7 +11,11 @@
 // then truncating gives different words. Needs IEEE double arithmetic in the default environment and
 // -ffp-contract=off (the codegen option), which keeps the TwoSum statements unfused.
 //
-// FPSCR is not read or written: the single-precision flags are never set (a recorded deviation).
+// Double precision (ISA 9.2) is host double arithmetic in round to nearest; the emitted code stops on
+// any other FPSCR rounding mode before it calls these helpers.
+//
+// FPSCR is not read or written: the single-precision and double-precision flags are never set (a
+// recorded deviation).
 
 #ifdef __cplusplus
 extern "C" {
@@ -280,6 +284,187 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuCfltu(Tox2Vr a, uint32_t scale) {
         } else {
             a.u32[lane] = (uint32_t)d;
         }
+    }
+    return a;
+}
+
+// --- Double precision (ISA 9.2, p.197-199, 203-230) -----------------------------------------------
+//
+// Recorded choices: a denormal operand is forced to zero of the same sign (the optional behaviour of
+// p.198-199; denormal results are kept), and every NaN result is the default QNaN, which the ISA
+// allows with NaN inputs too (p.197) and which x86 would give with the sign bit set. The doubleword
+// lanes of a register are independent, so the loops use the host lanes without an index mapping.
+
+TOX2_FORCEINLINE double tox2SpuDfFromBits(uint64_t bits) {
+    if ((bits & 0x7ff0000000000000ull) == 0u) bits &= 0x8000000000000000ull;
+    double d;
+    __builtin_memcpy(&d, &bits, sizeof d);
+    return d;
+}
+
+TOX2_FORCEINLINE uint64_t tox2SpuDfToBits(double d) {
+    if (__builtin_isnan(d)) return 0x7ff8000000000000ull;
+    uint64_t bits;
+    __builtin_memcpy(&bits, &d, sizeof bits);
+    return bits;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuDfa(Tox2Vr a, Tox2Vr b) {
+    for (uint32_t lane = 0; lane < 2; lane++) {
+        a.u64[lane] = tox2SpuDfToBits(tox2SpuDfFromBits(a.u64[lane]) + tox2SpuDfFromBits(b.u64[lane]));
+    }
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuDfs(Tox2Vr a, Tox2Vr b) {
+    for (uint32_t lane = 0; lane < 2; lane++) {
+        a.u64[lane] = tox2SpuDfToBits(tox2SpuDfFromBits(a.u64[lane]) - tox2SpuDfFromBits(b.u64[lane]));
+    }
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuDfm(Tox2Vr a, Tox2Vr b) {
+    for (uint32_t lane = 0; lane < 2; lane++) {
+        a.u64[lane] = tox2SpuDfToBits(tox2SpuDfFromBits(a.u64[lane]) * tox2SpuDfFromBits(b.u64[lane]));
+    }
+    return a;
+}
+
+// RA * RB, plus or minus the accumulator RT, with a single rounding. The negated forms negate the
+// rounded result; a NaN result is the default QNaN whatever its sign (p.211, 214), which negating
+// before the NaN check gives as well.
+TOX2_FORCEINLINE uint64_t tox2SpuDfFusedLane(uint64_t a, uint64_t b, uint64_t acc, bool subtract, bool negate) {
+    double c = tox2SpuDfFromBits(acc);
+    double r = __builtin_fma(tox2SpuDfFromBits(a), tox2SpuDfFromBits(b), subtract ? -c : c);
+    return tox2SpuDfToBits(negate ? -r : r);
+}
+
+// RA * RB + RT.
+TOX2_FORCEINLINE Tox2Vr tox2SpuDfma(Tox2Vr a, Tox2Vr b, Tox2Vr rt) {
+    for (uint32_t lane = 0; lane < 2; lane++) {
+        a.u64[lane] = tox2SpuDfFusedLane(a.u64[lane], b.u64[lane], rt.u64[lane], false, false);
+    }
+    return a;
+}
+
+// RA * RB - RT.
+TOX2_FORCEINLINE Tox2Vr tox2SpuDfms(Tox2Vr a, Tox2Vr b, Tox2Vr rt) {
+    for (uint32_t lane = 0; lane < 2; lane++) {
+        a.u64[lane] = tox2SpuDfFusedLane(a.u64[lane], b.u64[lane], rt.u64[lane], true, false);
+    }
+    return a;
+}
+
+// -(RA * RB - RT).
+TOX2_FORCEINLINE Tox2Vr tox2SpuDfnms(Tox2Vr a, Tox2Vr b, Tox2Vr rt) {
+    for (uint32_t lane = 0; lane < 2; lane++) {
+        a.u64[lane] = tox2SpuDfFusedLane(a.u64[lane], b.u64[lane], rt.u64[lane], true, true);
+    }
+    return a;
+}
+
+// -(RA * RB + RT).
+TOX2_FORCEINLINE Tox2Vr tox2SpuDfnma(Tox2Vr a, Tox2Vr b, Tox2Vr rt) {
+    for (uint32_t lane = 0; lane < 2; lane++) {
+        a.u64[lane] = tox2SpuDfFusedLane(a.u64[lane], b.u64[lane], rt.u64[lane], false, true);
+    }
+    return a;
+}
+
+// --- Double precision: conversions (ISA 9.2.1, p.198, 224-225) ------------------------------------
+//
+// Both work on IEEE single words (Table 9-4), where exponent field 255 is Inf or NaN, unlike the
+// extended range of the single-precision arithmetic above.
+
+TOX2_FORCEINLINE uint64_t tox2SpuDfFromSingle(uint32_t w) {
+    uint64_t sign = (uint64_t)(w >> 31) << 63;
+    uint32_t e = (w >> 23) & 0xffu;
+    uint32_t f = w & 0x7fffffu;
+    if (e == 0u) return sign;  // zero or denormal: a signed zero
+    if (e == 0xffu) return f == 0u ? (sign | 0x7ff0000000000000ull) : 0x7ff8000000000000ull;
+    // Rebias from 127 to 1023: e - 127 + 1023.
+    return sign | ((uint64_t)(e + 896u) << 52) | ((uint64_t)f << 29);
+}
+
+// The two single-precision words 0 and 2 become the doublewords; words 1 and 3 are ignored.
+TOX2_FORCEINLINE Tox2Vr tox2SpuFesd(Tox2Vr a) {
+    Tox2Vr r;
+    TOX2_VR_D(r, 0) = tox2SpuDfFromSingle(TOX2_VR_W(a, 0));
+    TOX2_VR_D(r, 1) = tox2SpuDfFromSingle(TOX2_VR_W(a, 2));
+    return r;
+}
+
+// Round to nearest: overflow gives Inf and denormal results are kept; the cast of an out-of-range
+// double to float is defined in IEEE arithmetic (clang's undefined-behaviour check does not cover it).
+TOX2_FORCEINLINE uint32_t tox2SpuSingleFromDf(uint64_t bits) {
+    double d = tox2SpuDfFromBits(bits);
+    if (__builtin_isnan(d)) return 0x7fc00000u;
+    float f = (float)d;
+    uint32_t w;
+    __builtin_memcpy(&w, &f, sizeof w);
+    return w;
+}
+
+// Each doubleword becomes a single in word 0 or 2; words 1 and 3 are zero.
+TOX2_FORCEINLINE Tox2Vr tox2SpuFrds(Tox2Vr a) {
+    Tox2Vr r = tox2SpuSplatW(0);
+    TOX2_VR_W(r, 0) = tox2SpuSingleFromDf(TOX2_VR_D(a, 0));
+    TOX2_VR_W(r, 2) = tox2SpuSingleFromDf(TOX2_VR_D(a, 1));
+    return r;
+}
+
+// --- Double precision: compares (ISA 9.2, p.226-229) ----------------------------------------------
+//
+// Denormal operands are zero as above; a NaN makes every compare false; zeros are equal and never
+// greater whatever their signs. The magnitude forms clear the sign first.
+
+TOX2_FORCEINLINE double tox2SpuDfMagnitude(uint64_t bits) { return tox2SpuDfFromBits(bits & 0x7fffffffffffffffull); }
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuDfceq(Tox2Vr a, Tox2Vr b) {
+    for (uint32_t lane = 0; lane < 2; lane++) {
+        a.u64[lane] = tox2SpuDfFromBits(a.u64[lane]) == tox2SpuDfFromBits(b.u64[lane]) ? ~0ull : 0ull;
+    }
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuDfcmeq(Tox2Vr a, Tox2Vr b) {
+    for (uint32_t lane = 0; lane < 2; lane++) {
+        a.u64[lane] = tox2SpuDfMagnitude(a.u64[lane]) == tox2SpuDfMagnitude(b.u64[lane]) ? ~0ull : 0ull;
+    }
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuDfcgt(Tox2Vr a, Tox2Vr b) {
+    for (uint32_t lane = 0; lane < 2; lane++) {
+        a.u64[lane] = tox2SpuDfFromBits(a.u64[lane]) > tox2SpuDfFromBits(b.u64[lane]) ? ~0ull : 0ull;
+    }
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuDfcmgt(Tox2Vr a, Tox2Vr b) {
+    for (uint32_t lane = 0; lane < 2; lane++) {
+        a.u64[lane] = tox2SpuDfMagnitude(a.u64[lane]) > tox2SpuDfMagnitude(b.u64[lane]) ? ~0ull : 0ull;
+    }
+    return a;
+}
+
+// --- Double precision: test special value (ISA 9.2, p.230) ----------------------------------------
+//
+// Tests the raw operand, so a denormal is a denormal here. `mask` is the 7-bit immediate: 0x40 NaN,
+// 0x20 +Inf, 0x10 -Inf, 0x08 +0, 0x04 -0, 0x02 positive denormal, 0x01 negative denormal.
+TOX2_FORCEINLINE Tox2Vr tox2SpuDftsv(Tox2Vr a, uint32_t mask) {
+    for (uint32_t lane = 0; lane < 2; lane++) {
+        uint64_t bits = a.u64[lane];
+        bool negative = (bits >> 63) != 0u;
+        bool fraction = (bits & 0x000fffffffffffffull) != 0u;
+        uint32_t e = (uint32_t)(bits >> 52) & 0x7ffu;
+        uint32_t cls = 0u;
+        if (e == 0x7ffu) {
+            cls = fraction ? 0x40u : (negative ? 0x10u : 0x20u);
+        } else if (e == 0u) {
+            cls = fraction ? (negative ? 0x01u : 0x02u) : (negative ? 0x04u : 0x08u);
+        }
+        a.u64[lane] = (cls & mask) != 0u ? ~0ull : 0ull;
     }
     return a;
 }

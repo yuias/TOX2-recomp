@@ -3,10 +3,10 @@
 // The driver is the whole runtime of a case: it provides the dispatcher over the case's entry table,
 // scripted channel reads and event counts, recorded channel writes and stop codes. A case ends when
 // the generated code leaves (stop, halt, a channel hook that refuses) or dispatches to the exit
-// address. A taken halt (heq/hgt/hlgt, stopd) is recorded and ends the case, so a case can expect it; a case that
-// reaches another fatal hook (unknown target, unhandled word, an unscripted channel read) ends the process with status
-// 3 before the summary line is printed, so CTest fails; the message names the case. Pass case names as arguments to run
-// only those.
+// address. A taken halt (heq/hgt/hlgt, stopd) and an unhandled word are recorded and end the case, so a case can
+// expect them; a case that reaches another fatal hook (unknown target, an unscripted channel read) ends the process
+// with status 3 before the summary line is printed, so CTest fails; the message names the case. Pass case names as
+// arguments to run only those.
 
 #include <setjmp.h>
 #include <stdio.h>
@@ -105,10 +105,14 @@ bool tox2SpuStop(Tox2SpuContext* ctx, uint8_t* ls, uint32_t site, uint32_t code)
     longjmp(g_halt_env, 1);
 }
 
+// Emitted code calls this for words it could not translate and for the double-precision rounding-mode
+// guard; like a halt, the case ends here and the check compares the recorded (site << 32 | word).
 [[noreturn]] void tox2SpuUnhandled(Tox2SpuContext* ctx, uint8_t* ls, uint32_t site, uint32_t word) {
     (void)ctx;
     (void)ls;
-    fatal("unhandled word", site, word);
+    if (g_log.unhandled_count >= kTox2SemanticsLogSize) fatal("too many unhandled words", site, word);
+    g_log.unhandled[g_log.unhandled_count++] = (uint64_t)site << 32 | word;
+    longjmp(g_halt_env, 1);
 }
 
 static bool selected(const Tox2SemanticsCase* c, int argc, char** argv) {

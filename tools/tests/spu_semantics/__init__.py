@@ -35,6 +35,9 @@ class Case:
     #   "stop_leave": (code, ...)               stop codes for which the hook asks the thread to leave
     #   "halts":      [site, ...]               taken heq/hgt/hlgt and stopd; the case ends at the first
     #                                           (default: none)
+    #   "unhandled":  [(site, word), ...]       tox2SpuUnhandled calls (a word the emitter declined, the
+    #                                           double-precision rounding-mode guard); the case ends at the
+    #                                           first (default: none)
     #   "leave_channels": (channel, ...)        rdch/wrch of these channels make the hook ask the thread to
     #                                           leave (a write is still recorded; a read yields no value)
     channels: Mapping[str, object] = field(default_factory=dict)
