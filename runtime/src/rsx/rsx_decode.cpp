@@ -373,8 +373,6 @@ RsxRasterState decodeRasterState(const RsxRegisters& regs) {
     if (r.stencil_test) {
         noteStencilFace(r.stencil_front);
         if (r.two_sided_stencil) noteStencilFace(r.stencil_back);
-        // The renderer does not read the stencil state yet.
-        noteState("stencil test");
     }
     // Enabled by the game but not modelled by the renderer.
     if (regs.reg(kMethodNv4097SetLogicOpEnable) != 0) noteState("logic op");

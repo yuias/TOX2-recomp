@@ -7210,7 +7210,7 @@ void testRsxDecode() {
     const tox2::RsxRasterState signed_equation = tox2::decodeRasterState(*regs);
     CHECK(signed_equation.blend_eq_rgb == 0xF005 && signed_equation.blend_eq_a == 0x800B);
     CHECK(unimplementedCount("blend equation REVERSE_SUBTRACT_SIGNED") == 1);
-    CHECK(unimplementedCount("state stencil test") == 1);
+    CHECK(unimplementedCount("state stencil test") == 0);  // modelled by the renderer, no longer a census kind
 
     // Index array, draw range, primitive and clear.
     regs->apply(0x181C, 0x1000);

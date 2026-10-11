@@ -65,6 +65,22 @@ VkBlendFactor blendFactor(std::uint32_t value) {
     }
 }
 
+// GCM stencil op words to Vulkan (RPCS3 `VK/VKGSRender.cpp` `vk::get_stencil_op`; INCR and DECR clamp, the
+// WRAP words wrap). The word is compared in full. KEEP is also the fallback for a word outside the table,
+// which the state decoder counted; RPCS3 aborts there.
+VkStencilOp stencilOp(std::uint32_t word) {
+    switch (word) {
+        case 0x0000: return VK_STENCIL_OP_ZERO;
+        case 0x1E01: return VK_STENCIL_OP_REPLACE;
+        case 0x1E02: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+        case 0x1E03: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+        case 0x150A: return VK_STENCIL_OP_INVERT;
+        case 0x8507: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+        case 0x8508: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+        default: return VK_STENCIL_OP_KEEP;
+    }
+}
+
 // RPCS3 `vk::get_blend_op`: the signed equations are emulated with their unsigned counterparts.
 VkBlendOp blendOp(std::uint32_t value) {
     switch (value) {
@@ -1022,7 +1038,11 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
 //    x 0, y 0 and the clip size); depth range is 0..1, the vertex program remaps depth with clip_min and
 //    clip_max because the device does not enable unrestricted depth ranges (same function);
 //  - front face and cull face map one to one (`vk::get_front_face`, `vk::get_cull_face`);
-//  - GCM compare words 0x200..0x207 are in VkCompareOp order.
+//  - GCM compare words 0x200..0x207 are in VkCompareOp order;
+//  - stencil: the test runs with or without the depth test (a disabled depth test passes, so ZPASS applies),
+//    the back face uses the BACK registers only with two-sided stencil on (the decoder copies the front face
+//    otherwise), and it is only available with a Z24S8 surface (RPCS3 `VK/VKGSRender.cpp` `decode_rsx_state`,
+//    `RSXThread.cpp`). The draw writes the depth surface when `rsxZetaWriteEnabled` says so.
 void RsxRenderer::recordDraw(const RsxDraw& draw) {
     const auto skip = [&](std::string_view category, std::string_view key) {
         if (!category.empty()) rsxNoteUnimplemented(category, key);
@@ -1255,7 +1275,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     transition(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     if (depth) {
         transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-        if (raster.depth_test && raster.depth_write) depth->write_serial++;
+        if (rsxZetaWriteEnabled(raster, draw.surfaces.depth_format)) depth->write_serial++;
     }
 
     VkRenderingAttachmentInfo color_attachment{};
@@ -1306,6 +1326,21 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     vkCmdSetDepthTestEnable(cmd, depth_test ? VK_TRUE : VK_FALSE);
     vkCmdSetDepthWriteEnable(cmd, depth_test && raster.depth_write ? VK_TRUE : VK_FALSE);
     vkCmdSetDepthCompareOp(cmd, static_cast<VkCompareOp>(raster.depth_func & 7u));
+
+    // The stencil state is set on every draw, with the test off too, so no draw inherits the previous one's.
+    // Vulkan has no stencil without the aspect (Z16 or no depth target): the draw runs untested and is counted.
+    const bool stencil_test = raster.stencil_test && depth && formatHasStencil(depth->format);
+    if (raster.stencil_test && !stencil_test) rsxNoteUnimplemented("state", "stencil test without a stencil surface");
+    vkCmdSetStencilTestEnable(cmd, stencil_test ? VK_TRUE : VK_FALSE);
+    const std::pair<VkStencilFaceFlagBits, const RsxStencilFace*> faces[] = {
+            {VK_STENCIL_FACE_FRONT_BIT, &raster.stencil_front}, {VK_STENCIL_FACE_BACK_BIT, &raster.stencil_back}};
+    for (const auto& [face_bit, face] : faces) {
+        vkCmdSetStencilOp(cmd, face_bit, stencilOp(face->op_fail), stencilOp(face->op_zpass), stencilOp(face->op_zfail),
+                          static_cast<VkCompareOp>(face->func & 7u));
+        vkCmdSetStencilCompareMask(cmd, face_bit, face->func_mask);
+        vkCmdSetStencilWriteMask(cmd, face_bit, face->write_mask);
+        vkCmdSetStencilReference(cmd, face_bit, face->ref);
+    }
     float constants[4];
     blendConstants(raster.blend_color, constants);
     vkCmdSetBlendConstants(cmd, constants);

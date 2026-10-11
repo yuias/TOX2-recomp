@@ -3,7 +3,8 @@
 // Shader modules and graphics pipelines of the RSX draw path: translated vertex and fragment programs
 // compiled once per program, pipelines cached by everything that is baked into them. Cull mode, front
 // face, depth test, depth write, depth compare, primitive topology (within a topology class), primitive
-// restart, viewport, scissor and blend constants are dynamic state (Vulkan 1.3 core).
+// restart, viewport, scissor, blend constants and the whole stencil state (test enable, ops, compare and write
+// masks, reference, both faces) are dynamic state (Vulkan 1.3 core).
 
 #include <array>
 #include <cstdint>

@@ -1899,7 +1899,7 @@ void testPartialStencilNote() {
     tox2::rsxUnimplementedReset();
 }
 
-// True when the last replay counted no stencil func or op word (the "stencil test" note is a separate kind).
+// True when the last replay counted no stencil func or op word.
 bool noStencilWordNotes() {
     for (const auto& [name, count] : tox2::rsxUnimplementedSnapshot()) {
         if (name.starts_with("state stencil func") || name.starts_with("state stencil op")) return false;
@@ -2169,6 +2169,260 @@ void testZetaWriteRule() {
     tox2::rsxUnimplementedReset();
 }
 
+// ---- Stencil test in the renderer ----
+
+constexpr std::uint32_t kOpKeep = 0x1E00, kOpZero = 0x0000, kOpReplace = 0x1E01, kOpIncr = 0x1E02, kOpDecr = 0x1E03;
+constexpr std::uint32_t kOpInvert = 0x150A, kOpIncrWrap = 0x8507, kOpDecrWrap = 0x8508;
+constexpr std::uint32_t kCmpNever = 0x200, kCmpEqual = 0x202, kCmpGreater = 0x204, kCmpAlways = 0x207;
+constexpr std::uint32_t kQuadRed = 0xFF400000;  // what putSurfaceQuad draws
+constexpr std::uint32_t kBlack = 0xFF000000;
+
+StencilFaceWords stencilFace(std::uint32_t func, std::uint32_t ref, std::uint32_t op_zpass,
+                             std::uint32_t write_mask = 0xFF, std::uint32_t func_mask = 0xFF) {
+    return {func, ref, func_mask, write_mask, kOpKeep, kOpKeep, op_zpass};
+}
+
+void writeStencilFace(tox2::rsx_synthetic::SceneBuilder& scene, bool back, const StencilFaceWords& face) {
+    using namespace tox2;
+    scene.write(back ? kMethodNv4097SetBackStencilFunc : kMethodNv4097SetStencilFunc, face.func);
+    scene.write(back ? kMethodNv4097SetBackStencilFuncRef : kMethodNv4097SetStencilFuncRef, face.ref);
+    scene.write(back ? kMethodNv4097SetBackStencilFuncMask : kMethodNv4097SetStencilFuncMask, face.func_mask);
+    scene.write(back ? kMethodNv4097SetBackStencilMask : kMethodNv4097SetStencilMask, face.write_mask);
+    scene.write(back ? kMethodNv4097SetBackStencilOpFail : kMethodNv4097SetStencilOpFail, face.op_fail);
+    scene.write(back ? kMethodNv4097SetBackStencilOpZfail : kMethodNv4097SetStencilOpZfail, face.op_zfail);
+    scene.write(back ? kMethodNv4097SetBackStencilOpZpass : kMethodNv4097SetStencilOpZpass, face.op_zpass);
+}
+
+// Black color, depth 1.0 and the given stencil, the quad programs, and depth test and write off. depth_code is
+// the SET_SURFACE_FORMAT depth field: 2 Z24S8, 1 Z16, 0 none.
+void beginStencilScene(tox2::rsx_synthetic::SceneBuilder& scene, std::uint32_t stencil, std::uint32_t depth_code = 2) {
+    using namespace tox2::rsx_synthetic;
+    scene.setSurface();
+    if (depth_code != 2) scene.write(tox2::kMethodNv4097SetSurfaceFormat, 8u | (depth_code << 5) | (1u << 8));
+    scene.write(tox2::kMethodNv4097SetColorClearValue, kBlack);
+    scene.write(tox2::kMethodNv4097SetZstencilClearValue, 0xFFFFFF00u | stencil);
+    scene.write(tox2::kMethodNv4097ClearSurface, 0xF3);
+    setQuadRenderState(scene);
+    scene.setFloatAttrib(0, 3, kPositionsOffset);
+    scene.setColorAttrib(3, kColorsOffset);
+    scene.setPrograms(quadPrograms());
+    scene.write(tox2::kMethodNv4097SetDepthTestEnable, 0);
+    scene.write(tox2::kMethodNv4097SetDepthMask, 0);
+}
+
+// One draw of the quad over pixels 16..48, with the stencil test on and the given front face. The back face
+// follows it unless the caller wrote the BACK registers and `two_sided`.
+void stencilQuad(tox2::rsx_synthetic::SceneBuilder& scene, const StencilFaceWords& front, bool color_writes = true,
+                 bool two_sided = false) {
+    writeStencilFace(scene, false, front);
+    scene.write(tox2::kMethodNv4097SetTwoSidedStencilTestEnable, two_sided ? 1 : 0);
+    scene.write(tox2::kMethodNv4097SetStencilTestEnable, 1);
+    scene.write(tox2::kMethodNv4097SetColorMask, color_writes ? 0x01010101u : 0u);
+    putSurfaceQuad(scene, 16, 48);
+    scene.drawStrip(4);
+}
+
+struct StencilRender {
+    std::vector<std::uint8_t> bgra;
+    std::uint32_t width = 0, height = 0;
+    tox2::RendererStats stats;
+    std::uint32_t pixel(std::uint32_t x, std::uint32_t y) const { return pixelArgb(bgra, width, x, y); }
+};
+
+// A fresh renderer per scene so the statistics belong to it; the census holds the renderer's notes afterwards.
+StencilRender renderStencilScene(tox2::VkContext& ctx, tox2::rsx_synthetic::SceneBuilder& scene) {
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+    CHECK(renderer.valid());
+    std::vector<tox2::RsxCommand> commands = replaySynthetic(scene.finish());
+    tox2::rsxUnimplementedReset();
+    renderer.execute(commands);
+    CHECK(renderer.valid());
+    StencilRender result;
+    CHECK(renderer.readDisplay(result.bgra, result.width, result.height));
+    CHECK(result.width == 64 && result.height == 64 && result.bgra.size() == 64 * 64 * 4);
+    if (result.bgra.size() != 64 * 64 * 4) result.bgra.assign(64 * 64 * 4, 0);
+    result.stats = renderer.stats();
+    return result;
+}
+
+void expectNoRendererNotes() {
+    for (const auto& [name, count] : tox2::rsxUnimplementedSnapshot()) {
+        std::fprintf(stderr, "unimplemented: %s: %llu\n", name.c_str(), static_cast<unsigned long long>(count));
+    }
+    CHECK(tox2::rsxUnimplementedSnapshot().empty());
+}
+
+// The quad is drawn (or not) at the middle of the target, the corner stays black, and nothing was skipped.
+void expectStencilDrawn(const StencilRender& render, bool drawn) {
+    CHECK(render.pixel(32, 32) == (drawn ? kQuadRed : kBlack));
+    CHECK(render.pixel(2, 2) == kBlack);
+    CHECK(render.stats.draws_skipped == 0);
+}
+
+// Stencil bits read back through a depth-as-texture quad: the stencil is cleared to 0x78, a quad reads the
+// depth surface as an A8R8G8B8 texture, a stencil-only REPLACE pass writes 0x9A (depth test off, color mask 0),
+// and a second quad reads it again. The first quad shows the cleared stencil in its B channel, the second the
+// new one, and the surface is converted twice.
+void testStencilWriteReachesDepthTexture(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    scene.setSurface();
+    scene.write(tox2::kMethodNv4097SetColorClearValue, kBlack);
+    scene.write(tox2::kMethodNv4097SetZstencilClearValue, (kDepthFirst << 8) | kStencilFirst);
+    scene.write(tox2::kMethodNv4097ClearSurface, 0xF3);
+    setQuadRenderState(scene);
+    scene.setFloatAttrib(0, 3, kPositionsOffset);
+    setSurfaceTextureState(scene, kDepthOffset, 0x85);
+    putSurfaceQuad(scene, 16, 32);
+    scene.drawStrip(4);
+
+    setQuadRenderState(scene);
+    scene.setColorAttrib(3, kColorsOffset);
+    scene.setPrograms(quadPrograms());
+    scene.write(tox2::kMethodNv4097SetDepthTestEnable, 0);
+    scene.write(tox2::kMethodNv4097SetDepthMask, 0);
+    stencilQuad(scene, stencilFace(kCmpAlways, 0x9A, kOpReplace), false);
+
+    scene.write(tox2::kMethodNv4097SetStencilTestEnable, 0);
+    scene.write(tox2::kMethodNv4097SetColorMask, 0x01010101);
+    setSurfaceTextureState(scene, kDepthOffset, 0x85);
+    putSurfaceQuad(scene, 32, 48);
+    scene.drawStrip(4);
+
+    const StencilRender render = renderStencilScene(ctx, scene);
+    CHECK(depthWordNear(render.pixel(20, 32), kDepthFirst, kStencilFirst));
+    CHECK(depthWordNear(render.pixel(40, 32), kDepthFirst, 0x9A));
+    CHECK(render.stats.depth_conversions == 2);
+    CHECK(render.stats.draws == 3 && render.stats.draws_skipped == 0);
+    expectNoRendererNotes();
+}
+
+// The stencil test, its ops, masks, reference and two-sided mode on a Z24S8 target (D24S8 or D32S8 by device),
+// and the draw without a stencil aspect.
+void testRendererStencil(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::rsxUnimplementedReset();
+
+    // 1. The reference is compared with the cleared stencil.
+    for (const std::uint32_t ref : {5u, 6u}) {
+        SceneBuilder scene;
+        beginStencilScene(scene, 0x05);
+        stencilQuad(scene, stencilFace(kCmpEqual, ref, kOpKeep));
+        const StencilRender render = renderStencilScene(ctx, scene);
+        expectStencilDrawn(render, ref == 5);
+        expectNoRendererNotes();
+    }
+
+    // 2. A colour-less pass writes the stencil over x 16..32, a full-width pass draws where it reads 7.
+    {
+        SceneBuilder scene;
+        beginStencilScene(scene, 0x00);
+        writeStencilFace(scene, false, stencilFace(kCmpAlways, 7, kOpReplace));
+        scene.write(tox2::kMethodNv4097SetStencilTestEnable, 1);
+        scene.write(tox2::kMethodNv4097SetColorMask, 0);
+        putSurfaceQuad(scene, 16, 32);
+        scene.drawStrip(4);
+        stencilQuad(scene, stencilFace(kCmpEqual, 7, kOpKeep, 0x00));
+        const StencilRender render = renderStencilScene(ctx, scene);
+        CHECK(render.pixel(24, 32) == kQuadRed);
+        CHECK(render.pixel(40, 32) == kBlack);
+        CHECK(render.pixel(2, 2) == kBlack);
+        CHECK(render.stats.draws == 2 && render.stats.draws_skipped == 0);
+        expectNoRendererNotes();
+    }
+
+    // 3. The compare mask applies to both sides: 0x5A & 0xF0 equals 0x50 & 0xF0, but not without the mask.
+    for (const std::uint32_t func_mask : {0xF0u, 0xFFu}) {
+        SceneBuilder scene;
+        beginStencilScene(scene, 0x5A);
+        stencilQuad(scene, stencilFace(kCmpEqual, 0x50, kOpKeep, 0xFF, func_mask));
+        expectStencilDrawn(renderStencilScene(ctx, scene), func_mask == 0xF0);
+        expectNoRendererNotes();
+    }
+    // The write mask keeps the other bits: REPLACE of 0xFF under mask 0x0F turns 0x50 into 0x5F.
+    for (const std::uint32_t check_ref : {0x5Fu, 0x50u, 0xFFu}) {
+        SceneBuilder scene;
+        beginStencilScene(scene, 0x50);
+        stencilQuad(scene, stencilFace(kCmpAlways, 0xFF, kOpReplace, 0x0F), false);
+        stencilQuad(scene, stencilFace(kCmpEqual, check_ref, kOpKeep, 0x00));
+        expectStencilDrawn(renderStencilScene(ctx, scene), check_ref == 0x5F);
+        expectNoRendererNotes();
+    }
+
+    // Ops of the three outcomes (stencil fail, depth fail, pass): each case runs one colour-less pass over a
+    // cleared stencil and checks the result with an EQUAL draw. A failing depth test is GREATER against the
+    // cleared depth 1.0 (the quad lies at 0.5).
+    struct OpCase {
+        const char* name;
+        std::uint32_t initial;
+        StencilFaceWords face;
+        bool depth_fails;
+        std::uint32_t expected;
+    };
+    StencilFaceWords fail_face = stencilFace(kCmpNever, 0x42, kOpZero);
+    fail_face.op_fail = kOpReplace;
+    StencilFaceWords zfail_face = stencilFace(kCmpAlways, 0x42, kOpZero);
+    zfail_face.op_zfail = kOpReplace;
+    const OpCase kOpCases[] = {
+            {"KEEP", 0x35, stencilFace(kCmpAlways, 0x42, kOpKeep), false, 0x35},
+            {"ZERO", 0x35, stencilFace(kCmpAlways, 0x42, kOpZero), false, 0x00},
+            {"REPLACE", 0x35, stencilFace(kCmpAlways, 0x42, kOpReplace), false, 0x42},
+            {"INCR", 0x35, stencilFace(kCmpAlways, 0x42, kOpIncr), false, 0x36},
+            {"INCR clamps", 0xFF, stencilFace(kCmpAlways, 0x42, kOpIncr), false, 0xFF},
+            {"DECR", 0x35, stencilFace(kCmpAlways, 0x42, kOpDecr), false, 0x34},
+            {"DECR clamps", 0x00, stencilFace(kCmpAlways, 0x42, kOpDecr), false, 0x00},
+            {"INVERT", 0x35, stencilFace(kCmpAlways, 0x42, kOpInvert), false, 0xCA},
+            {"INCR_WRAP", 0xFF, stencilFace(kCmpAlways, 0x42, kOpIncrWrap), false, 0x00},
+            {"DECR_WRAP", 0x00, stencilFace(kCmpAlways, 0x42, kOpDecrWrap), false, 0xFF},
+            {"unknown op is KEEP", 0x35, stencilFace(kCmpAlways, 0x42, 0x1234), false, 0x35},
+            {"OP_FAIL", 0x35, fail_face, false, 0x42},
+            {"OP_ZFAIL", 0x35, zfail_face, true, 0x42},
+            {"OP_ZPASS when the depth test passes", 0x35, zfail_face, false, 0x00},
+    };
+    for (const OpCase& test : kOpCases) {
+        SceneBuilder scene;
+        beginStencilScene(scene, test.initial);
+        scene.write(tox2::kMethodNv4097SetDepthTestEnable, test.depth_fails ? 1 : 0);
+        scene.write(tox2::kMethodNv4097SetDepthFunc, kCmpGreater);
+        stencilQuad(scene, test.face, false);
+        scene.write(tox2::kMethodNv4097SetDepthTestEnable, 0);
+        stencilQuad(scene, stencilFace(kCmpEqual, test.expected, kOpKeep, 0x00));
+        const StencilRender render = renderStencilScene(ctx, scene);
+        if (render.pixel(32, 32) != kQuadRed) std::fprintf(stderr, "stencil op case failed: %s\n", test.name);
+        expectStencilDrawn(render, true);
+        expectNoRendererNotes();
+    }
+
+    // 4. Two-sided: the quad's faces are back faces with front face 0x901 and front faces with 0x900. The front
+    // registers say NEVER and the back ones ALWAYS; with two-sided stencil off the back face uses the front ones.
+    for (const std::uint32_t front_face : {0x901u, 0x900u}) {
+        for (const bool two_sided : {true, false}) {
+            SceneBuilder scene;
+            beginStencilScene(scene, 0x00);
+            scene.write(tox2::kMethodNv4097SetFrontFace, front_face);
+            writeStencilFace(scene, true, stencilFace(kCmpAlways, 0, kOpKeep));
+            stencilQuad(scene, stencilFace(kCmpNever, 0, kOpKeep), true, two_sided);
+            const bool back_face = front_face == 0x901;
+            expectStencilDrawn(renderStencilScene(ctx, scene), back_face && two_sided);
+            expectNoRendererNotes();
+        }
+    }
+
+    // 5. A stencil-only write is visible when the depth surface is read as a texture.
+    testStencilWriteReachesDepthTexture(ctx);
+
+    // 6. Z16 and no depth surface have no stencil: the draw is drawn without the test and counted once.
+    for (const std::uint32_t depth_code : {1u, 0u}) {
+        SceneBuilder scene;
+        beginStencilScene(scene, 0x00, depth_code);
+        stencilQuad(scene, stencilFace(kCmpNever, 0, kOpKeep));
+        expectStencilDrawn(renderStencilScene(ctx, scene), true);
+        CHECK(unimplementedCount("state stencil test without a stencil surface") == 1);
+        CHECK(tox2::rsxUnimplementedSnapshot().size() == 1);
+    }
+    tox2::rsxUnimplementedReset();
+}
+
 bool sameRect(const tox2::PixelRect& rect, std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
     return rect.x == x && rect.y == y && rect.width == width && rect.height == height;
 }
@@ -2278,6 +2532,7 @@ int main() {
     testRendererVolumeTextures(*ctx);
     testRendererFloatSurface(*ctx);
     testRendererDepthTexture(*ctx);
+    testRendererStencil(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
     ctx.reset();

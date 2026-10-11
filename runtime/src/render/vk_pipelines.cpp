@@ -344,12 +344,21 @@ VkPipeline DrawPipelines::pipeline(const PipelineKey& key, const DrawShaders& sh
     blend.attachmentCount = 1;
     blend.pAttachments = &attachment;
 
-    constexpr VkDynamicState kDynamic[] = {
-            VK_DYNAMIC_STATE_VIEWPORT,           VK_DYNAMIC_STATE_SCISSOR,
-            VK_DYNAMIC_STATE_CULL_MODE,          VK_DYNAMIC_STATE_FRONT_FACE,
-            VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY, VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE,
-            VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE, VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
-            VK_DYNAMIC_STATE_BLEND_CONSTANTS,    VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE};
+    constexpr VkDynamicState kDynamic[] = {VK_DYNAMIC_STATE_VIEWPORT,
+                                           VK_DYNAMIC_STATE_SCISSOR,
+                                           VK_DYNAMIC_STATE_CULL_MODE,
+                                           VK_DYNAMIC_STATE_FRONT_FACE,
+                                           VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY,
+                                           VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE,
+                                           VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
+                                           VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
+                                           VK_DYNAMIC_STATE_BLEND_CONSTANTS,
+                                           VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE,
+                                           VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE,
+                                           VK_DYNAMIC_STATE_STENCIL_OP,
+                                           VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
+                                           VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
+                                           VK_DYNAMIC_STATE_STENCIL_REFERENCE};
     VkPipelineDynamicStateCreateInfo dynamic{};
     dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
     dynamic.dynamicStateCount = static_cast<std::uint32_t>(std::size(kDynamic));
