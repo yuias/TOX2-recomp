@@ -4,7 +4,7 @@
   "input": {
     "container_sha256": "a1d8a56ce1d6300bff704a43218f1b8b87c80c1e1342929a266e58af4e5891e9",
     "image_sha256": "26a372602d14e725a3fe07d8bc72525c82ca40cc13f04d0aeca4364128f385d2",
-    "registry_entry_sha256": "e39f142e02e94e0efce37f71ff58ef9bf330745296ff65b954cc326a6a599ed3"
+    "registry_entry_sha256": "a28c75602c8e7f93537091b3902552385d74c4f1956ab253551e87076d24a971"
   },
   "segments": [
     {"ls": "0x3000", "size": "0x3c60", "code": true},

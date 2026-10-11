@@ -527,7 +527,13 @@ class ExtractCommandTest(SpuFixtureTest):
 class CommittedRegistryTest(unittest.TestCase):
     """The registry in the repository, checked without any container."""
 
-    GATE = {"libsre_kernel1", "libsre_system_service", "libsre_taskset_pm", "eboot_edgelzma"}
+    # Every emitted image: the registry entries with a load address, i.e. all but the two
+    # position-independent blobs.
+    GATE = {
+        "eboot_spline", "eboot_edgelzma", "eboot_bnuscore", "eboot_animation", "eboot_updatematrix",
+        "eboot_renderparticle", "eboot_morph", "eboot_skin", "libsre_kernel1", "libsre_kernel2",
+        "libsre_system_service", "libsre_taskset_pm", "libsre_jobchain_pm1", "libsre_jobchain_pm2",
+    }
 
     @classmethod
     def setUpClass(cls):

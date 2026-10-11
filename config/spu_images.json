@@ -2,7 +2,7 @@
   "schema": 1,
   "images": [
     {"name": "eboot_spline", "container": "eboot", "ea": "0x00f75400", "kind": "elf",
-     "role": "spurs_task", "lowering": "stackfree", "gate": false, "extra_entries": []},
+     "role": "spurs_task", "lowering": "stackfree", "gate": true, "extra_entries": []},
     {"name": "eboot_edgelzma", "container": "eboot", "ea": "0x00f76700", "kind": "elf",
      "role": "spurs_task", "lowering": "stackfree", "gate": true,
      "pic_delta_regs": [126],
@@ -14,17 +14,17 @@
        {"ls": "0x5bf8", "reason": "called through bisl on a position-independent address (ila plus the delta in $126)"}
      ]},
     {"name": "eboot_bnuscore", "container": "eboot", "ea": "0x00f7b080", "kind": "elf",
-     "role": "raw_thread", "lowering": "stackfree", "gate": false, "extra_entries": []},
+     "role": "raw_thread", "lowering": "stackfree", "gate": true, "extra_entries": []},
     {"name": "eboot_animation", "container": "eboot", "ea": "0x00f90280", "kind": "elf",
-     "role": "spurs_task", "lowering": "stackfree", "gate": false, "extra_entries": []},
+     "role": "spurs_task", "lowering": "stackfree", "gate": true, "extra_entries": []},
     {"name": "eboot_updatematrix", "container": "eboot", "ea": "0x00fb0b80", "kind": "elf",
-     "role": "spurs_task", "lowering": "stackfree", "gate": false, "extra_entries": []},
+     "role": "spurs_task", "lowering": "stackfree", "gate": true, "extra_entries": []},
     {"name": "eboot_renderparticle", "container": "eboot", "ea": "0x00fe1480", "kind": "elf",
-     "role": "spurs_task", "lowering": "stackfree", "gate": false, "extra_entries": []},
+     "role": "spurs_task", "lowering": "stackfree", "gate": true, "extra_entries": []},
     {"name": "eboot_morph", "container": "eboot", "ea": "0x00ff7580", "kind": "elf",
-     "role": "spurs_task", "lowering": "stackfree", "gate": false, "extra_entries": []},
+     "role": "spurs_task", "lowering": "stackfree", "gate": true, "extra_entries": []},
     {"name": "eboot_skin", "container": "eboot", "ea": "0x01027680", "kind": "elf",
-     "role": "spurs_task", "lowering": "stackfree", "gate": false, "extra_entries": []},
+     "role": "spurs_task", "lowering": "stackfree", "gate": true, "extra_entries": []},
     {"name": "libsre_kernel1", "container": "libsre", "ea": "0x011f0380", "kind": "elf",
      "role": "spurs_kernel", "lowering": "stackfree", "gate": true,
      "data_ranges": [
@@ -35,7 +35,7 @@
        {"ls": "0x808", "reason": "exit-to-kernel address stored at LS 0x1e0; policy modules branch to it"}
      ]},
     {"name": "libsre_kernel2", "container": "libsre", "ea": "0x011f0c00", "kind": "elf",
-     "role": "spurs_kernel", "lowering": "stackfree", "gate": false, "extra_entries": []},
+     "role": "spurs_kernel", "lowering": "stackfree", "gate": true, "extra_entries": []},
     {"name": "libsre_system_service", "container": "libsre", "ea": "0x011f1480", "kind": "raw",
      "size": "0x2200", "ls_base": "0xa00", "entry": "0xa00", "role": "spurs_system_service",
      "lowering": "stackfree", "gate": true, "extra_entries": []},
@@ -53,9 +53,9 @@
      "lowering": "stackfree", "gate": false, "extra_entries": []},
     {"name": "libsre_jobchain_pm1", "container": "libsre", "ea": "0x011f6300", "kind": "raw",
      "size": "0x3e30", "ls_base": "0xa00", "entry": "0xa00", "role": "job_chain_pm",
-     "lowering": "stackfree", "gate": false, "extra_entries": []},
+     "lowering": "stackfree", "gate": true, "extra_entries": []},
     {"name": "libsre_jobchain_pm2", "container": "libsre", "ea": "0x011fa180", "kind": "raw",
      "size": "0x3e30", "ls_base": "0xa00", "entry": "0xa00", "role": "job_chain_pm",
-     "lowering": "stackfree", "gate": false, "extra_entries": []}
+     "lowering": "stackfree", "gate": true, "extra_entries": []}
   ]
 }

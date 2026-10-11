@@ -22,18 +22,26 @@ _SKIP_REASON = "TOX2_EBOOT_ELF and TOX2_LIBSRE_ELF must name existing files"
 _AVAILABLE = bool(_EBOOT and _LIBSRE and Path(_EBOOT).is_file() and Path(_LIBSRE).is_file())
 
 _DB_DIR = REPO_ROOT / "config" / "spu"
-_GATE_IMAGES = ["eboot_edgelzma", "libsre_kernel1", "libsre_system_service", "libsre_taskset_pm"]
+# Every emitted image is gated; the two position-independent blobs are neither emitted nor gated.
+_GATE_IMAGES = [
+    "eboot_spline", "eboot_edgelzma", "eboot_bnuscore", "eboot_animation", "eboot_updatematrix",
+    "eboot_renderparticle", "eboot_morph", "eboot_skin", "libsre_kernel1", "libsre_kernel2",
+    "libsre_system_service", "libsre_taskset_pm", "libsre_jobchain_pm1", "libsre_jobchain_pm2",
+]
+
+# Images whose unresolved indirect sites are pinned below
+_PINNED_INDIRECT_IMAGES = ["eboot_edgelzma", "libsre_kernel1", "libsre_system_service", "libsre_taskset_pm"]
 
 # image: (functions, instructions, dispatchable blocks, unhandled words)
 _COUNTS = {
-    "eboot_spline": (16, 1106, 41, 142),
+    "eboot_spline": (16, 1106, 41, 0),
     "eboot_edgelzma": (38, 3823, 87, 0),
-    "eboot_bnuscore": (50, 3583, 232, 44),
-    "eboot_animation": (54, 3841, 116, 77),
-    "eboot_updatematrix": (182, 14567, 608, 829),
-    "eboot_renderparticle": (73, 8303, 268, 575),
-    "eboot_morph": (62, 3745, 145, 17),
-    "eboot_skin": (43, 3811, 100, 188),
+    "eboot_bnuscore": (50, 3583, 232, 0),
+    "eboot_animation": (54, 3841, 116, 0),
+    "eboot_updatematrix": (182, 14567, 608, 0),
+    "eboot_renderparticle": (73, 8303, 268, 0),
+    "eboot_morph": (62, 3745, 145, 0),
+    "eboot_skin": (43, 3811, 100, 0),
     "libsre_kernel1": (4, 366, 7, 0),
     "libsre_kernel2": (3, 377, 6, 0),
     "libsre_system_service": (18, 2104, 50, 0),
@@ -148,30 +156,27 @@ class RealSpuEmitTest(unittest.TestCase):
                 counts[m.group(1)] = tuple(int(g) for g in m.groups()[1:])
         self.assertEqual(counts, _COUNTS)
 
-    def test_ungated_images_report_their_unhandled_words(self):
+    def test_no_image_is_left_ungated(self):
         _, out, _ = self.runs["first"]
-        for name, counts in _COUNTS.items():
-            if name in _GATE_IMAGES:
-                self.assertNotIn("ungated unhandled: %s " % name, out)
-            else:
-                self.assertIn("ungated unhandled: %s %d\n" % (name, counts[3]), out)
+        self.assertNotIn("ungated unhandled:", out)
 
-    def test_unhandled_words_are_floating_point_only(self):
+    def test_every_image_has_no_unhandled_words_and_is_gated(self):
+        self.assertEqual(sorted(i["image"] for i in self.runs["report"]["images"]), sorted(_COUNTS))
         for image in self.runs["report"]["images"]:
             with self.subTest(image=image["image"]):
-                groups = image["unhandled"]["by_group"]
-                other = {g: n for g, n in groups.items() if g not in ("fp_single", "fp_double")}
-                self.assertEqual(other, {g: 0 for g in other})
                 self.assertEqual(image["unhandled"]["total"], _COUNTS[image["image"]][3])
-                self.assertEqual(image["gate"], image["image"] in _GATE_IMAGES)
+                self.assertEqual({g: n for g, n in image["unhandled"]["by_group"].items() if n}, {})
+                self.assertEqual(image["unhandled"]["total"], 0)
+                self.assertTrue(image["gate"])
+                self.assertIn(image["image"], _GATE_IMAGES)
 
     def test_no_invalid_flow_or_unlisted_target_in_gate_images(self):
         for image in self.runs["report"]["images"]:
             if image["gate"]:
                 with self.subTest(image=image["image"]):
                     self.assertEqual(image["unlisted_targets"], [])
-                    # kernel 1 falls from 0x844 into the data that follows the code
-                    expected = 1 if image["image"] == "libsre_kernel1" else 0
+                    # each kernel falls from its last code word into the data that follows
+                    expected = 1 if image["image"] in ("libsre_kernel1", "libsre_kernel2") else 0
                     self.assertEqual(image["edges"]["invalid_flow"], expected)
 
     def test_second_run_rewrites_nothing(self):
@@ -245,7 +250,7 @@ class RealSpuDatabaseTest(unittest.TestCase):
 
     def test_unresolved_indirect_sites_are_the_known_run_time_pointers(self):
         sites = {name: [u["site"] for u in _database(name)["unresolved_indirect"]]
-                 for name in _GATE_IMAGES}
+                 for name in _PINNED_INDIRECT_IMAGES}
         self.assertEqual(sites, {
             "eboot_edgelzma": ["0x5074", "0x50ac", "0x50d8", "0x576c", "0x5e34", "0x6214",
                                "0x6a6c", "0x6d3c"],
