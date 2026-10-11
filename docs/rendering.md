@@ -37,7 +37,8 @@ rendered and skipped.
 
 ## Rendering
 
-The renderer is on when `tox2_game` shows its window (the default) and off with `--no-window`.
+The renderer is on when `tox2_game` shows its window (the default) or `--dump-frames` is given, and off
+with `--no-window` alone (a run with `--no-window --dump-frames` renders without a window).
 `--render vulkan` (implied by the window and by `--dump-frames`) creates it on the RSX thread when that thread starts; the RSX thread then hands each
 frame's commands to it outside the guest lock, so rendering does not hold up guest threads. The
 code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the renderer).
@@ -71,7 +72,14 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   `<stage>_<program hash>_<GLSL hash>_<translator version>.spv`. A missing or corrupt file is
   recompiled and rewritten, and the translator version in the name keeps SPIR-V from an older
   translation from being reused. A program with an opcode that is not translated skips its draw
-  and is counted.
+  and is counted. The fragment translator handles MOV, MUL, ADD, MAD, DP3, DP4, MIN, MAX, the six
+  compares (SLT to SEQ), FRC, FLR, RCP, EX2, LG2, DIV, DIVSQ, TEX, TXP and KIL, and ignores NOP and
+  the FENCT/FENCB fences. RCP, EX2 and LG2 read the x lane of source 0 and replicate the result;
+  DIV and DIVSQ divide the whole of source 0 by the x lane of source 1 (DIVSQ leaves a zero
+  numerator at zero and ignores the sign of the divisor). KIL discards the fragment when any lane
+  selected by its condition passes. Other opcodes (for example RSQ, DP2, LIT, the pack and
+  unpack group and the flow-control opcodes), the WPOS, FOGC and SSA inputs, and the texture
+  expand bit are not translated.
 - **Flips and vsync.** A flip is done when the command executes (see [Fake RSX](#fake-rsx)). With the window
   the displayed buffer is also blitted, letterboxed to 16:9, to a swapchain with the FIFO present
   mode, so the display's refresh is what paces the RSX thread; presenting runs outside the guest

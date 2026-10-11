@@ -14,6 +14,10 @@ constexpr std::uint32_t kCondGreater = 4;
 constexpr std::uint32_t kCondNever = 0;
 constexpr std::uint32_t kCondAlways = kCondLess | kCondEqual | kCondGreater;
 
+constexpr std::uint32_t kOpKil = 0x12;
+constexpr std::uint32_t kOpFenceTexture = 0x3d;  // FENCT
+constexpr std::uint32_t kOpFenceBranch = 0x3e;   // FENCB
+
 constexpr std::uint32_t kSourceTemp = 0;
 constexpr std::uint32_t kSourceInput = 1;
 constexpr std::uint32_t kSourceConstant = 2;
@@ -95,6 +99,7 @@ private:
     bool col1_used_ = false;
     bool uses_clamp_ = false;
     bool uses_half_ = false;
+    bool uses_divsq_ = false;
 };
 
 void Translator::note(std::string message) {
@@ -235,6 +240,26 @@ bool Translator::computeValue(const Instruction& in, std::uint32_t op, int const
         case 0x11:  // FLR
             out = {"floor(" + operand(in, 0, constant_slot) + ")", false};
             return true;
+        case 0x1a:  // RCP
+            out = {"vec4(1.0 / " + operand(in, 0, constant_slot) + ".x)", false};
+            return true;
+        case 0x1c:  // EX2
+            out = {"vec4(exp2(" + operand(in, 0, constant_slot) + ".x))", false};
+            return true;
+        case 0x1d:  // LG2
+            out = {"vec4(log2(" + operand(in, 0, constant_slot) + ".x))", false};
+            return true;
+        case 0x3a: {  // DIV: vector numerator, scalar divisor from src1.x
+            const std::string a = operand(in, 0, constant_slot), b = operand(in, 1, constant_slot);
+            out = {a + " / " + b + ".x", true};
+            return true;
+        }
+        case 0x3b: {  // DIVSQ: vector numerator, scalar divisor from src1.x
+            const std::string a = operand(in, 0, constant_slot), b = operand(in, 1, constant_slot);
+            uses_divsq_ = true;
+            out = {"fp_divsq(" + a + ", " + b + ".x)", false};
+            return true;
+        }
         case 0x17:    // TEX
         case 0x18: {  // TXP
             const std::uint32_t unit = bits(in.w[0], 17, 4);
@@ -264,13 +289,20 @@ std::string Translator::destination(const Instruction& in) {
 
 void Translator::translateInstruction(const Instruction& in, int constant_slot) {
     const std::uint32_t op = in.opcode();
-    if (op == 0x00) return;  // NOP
+    // The fences order texture and branch work on the hardware and write nothing.
+    if (op == 0x00 || op == kOpFenceTexture || op == kOpFenceBranch) return;
 
     // No condition bit set disables the instruction; all set is unconditional. A partial condition
     // gates each written lane on the condition register.
     const std::uint32_t cond = bits(in.w[1], 18, 3);
     if (cond == kCondNever) return;
     const std::string pred = predicate(in, cond);
+
+    if (op == kOpKil) {
+        // KIL has no destination; any lane passing the condition discards the fragment.
+        body_ += pred.empty() ? "  discard;\n" : std::format("  if (any({})) discard;\n", pred);
+        return;
+    }
 
     Expr value;
     if (!computeValue(in, op, constant_slot, value)) return;
@@ -400,6 +432,12 @@ std::string Translator::assemble() const {
         glsl += "// NaN becomes 0, like the hardware clamps.\n"
                 "vec4 fp_clamp(vec4 v, float lo, float hi) {\n"
                 "  return mix(clamp(v, lo, hi), vec4(0.0), isnan(v));\n"
+                "}\n\n";
+    }
+    if (uses_divsq_) {
+        // A zero numerator stays zero even for a zero divisor, and the divisor's sign is ignored.
+        glsl += "vec4 fp_divsq(vec4 a, float b) {\n"
+                "  return mix(a, a / sqrt(abs(b)), greaterThan(abs(a), vec4(0.0)));\n"
                 "}\n\n";
     }
     if (uses_half_) {

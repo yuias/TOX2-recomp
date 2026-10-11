@@ -639,12 +639,12 @@ void testUnimplementedReports() {
     // An unsupported opcode is still reported when the instruction is conditional or updates a
     // condition register.
     Asm conditional_unknown;
-    conditional_unknown.op = 0x3e;
+    conditional_unknown.op = 0x1b;
     conditional_unknown.cond = 2;
     conditional_unknown.cc_update = true;
     conditional_unknown.end = true;
     result = translate({conditional_unknown});
-    CHECK(!result.ok && hasReport(result, "fp opcode 0x3e"));
+    CHECK(!result.ok && hasReport(result, "fp opcode 0x1b"));
 
     Asm wpos;
     wpos.input = 0;
@@ -700,6 +700,117 @@ void testUnimplementedReports() {
     CHECK(!result.ok);
 }
 
+void testScalarAndDivide() {
+    // RCP, EX2 and LG2 read the x lane of the swizzled source and replicate the result.
+    const struct {
+        std::uint32_t op;
+        const char* expected;
+    } scalar[] = {
+            {0x1a, "  r_2 = vec4(1.0 / in_col0.yyyy.x);\n"},
+            {0x1c, "  r_2 = vec4(exp2(in_col0.yyyy.x));\n"},
+            {0x1d, "  r_2 = vec4(log2(in_col0.yyyy.x));\n"},
+    };
+    std::uint32_t key = 0xf600;
+    for (const auto& test : scalar) {
+        Asm in;
+        in.op = test.op;
+        in.dest = 2;
+        in.src0 = inputSrc("yyyy");
+        in.end = true;
+        const tox2::GlslResult result = translate({in});
+        CHECK(result.ok);
+        CHECK(contains(result.glsl, test.expected));
+        CHECK(compiles(result, key++));
+    }
+
+    // DIV and DIVSQ divide the whole src0 vector by src1.x; modifiers stay inside the scalar operand.
+    Asm div;
+    div.op = 0x3a;
+    div.dest = 2;
+    div.src0 = inputSrc();
+    div.src1 = temp(1, true, "zyxw");
+    div.src1.negate = true;
+    div.end = true;
+    tox2::GlslResult result = translate({div});
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "  r_2 = in_col0 / -h_1.zyxw.x;\n"));
+    CHECK(compiles(result, key++));
+
+    // The scale applies to the whole quotient.
+    div.scale = 1;
+    div.src1.negate = false;
+    result = translate({div});
+    CHECK(result.ok && contains(result.glsl, "  r_2 = (in_col0 / h_1.zyxw.x) * 2.0;\n"));
+    CHECK(compiles(result, key++));
+
+    Asm divsq;
+    divsq.op = 0x3b;
+    divsq.dest = 2;
+    divsq.mask = 0x7;
+    divsq.src0 = inputSrc();
+    divsq.src1 = temp(1, true);
+    divsq.end = true;
+    result = translate({divsq});
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "vec4 fp_divsq(vec4 a, float b) {"));
+    CHECK(contains(result.glsl, "  r_2.xyz = (fp_divsq(in_col0, h_1.x)).xyz;\n"));
+    CHECK(compiles(result, key++));
+
+    // The helper is only emitted for programs that use it.
+    CHECK(!contains(translate({div}).glsl, "fp_divsq"));
+}
+
+void testKillAndFences() {
+    std::uint32_t key = 0xf700;
+
+    // An unconditional KIL discards; it writes no register.
+    Asm kil;
+    kil.op = 0x12;
+    kil.end = true;
+    tox2::GlslResult result = translate({kil});
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "  discard;\n\n  if ((draw.flags & 2u)"));
+    CHECK(!contains(result.glsl, "  r_0 = ") && !contains(result.glsl, "mix("));
+    CHECK(compiles(result, key++));
+
+    // A conditional KIL discards when any selected lane passes; the condition register is declared.
+    Asm cond_kil;
+    cond_kil.op = 0x12;
+    cond_kil.cond = 1;  // less than zero
+    cond_kil.cond_swizzle = "wzyx";
+    cond_kil.cc_read = 1;
+    Asm mov;
+    mov.op = 1;
+    mov.end = true;
+    result = translate({cond_kil, mov});
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "  if (any(lessThan(cc1.wzyx, vec4(0.0)))) discard;\n  r_0 = in_col0;\n"));
+    CHECK(contains(result.glsl, "  vec4 cc1 = vec4(0.0);\n") && !contains(result.glsl, "cc0"));
+    CHECK(compiles(result, key++));
+
+    // No condition bit set disables KIL.
+    Asm never_kil = cond_kil;
+    never_kil.cond = 0;
+    result = translate({never_kil, mov});
+    CHECK(result.ok && !contains(result.glsl, "discard;\n  r_0") && !contains(result.glsl, "if (any("));
+
+    // FENCT and FENCB schedule work and emit nothing, however their condition or update bits are set.
+    for (const std::uint32_t op : {0x3du, 0x3eu}) {
+        Asm fence;
+        fence.op = op;
+        fence.cond = 2;
+        fence.cc_update = true;
+        Asm out;
+        out.op = 1;
+        out.end = true;
+        result = translate({fence, out});
+        CHECK(result.ok && result.unimplemented.empty());
+        CHECK(contains(result.glsl, "  r_0 = in_col0;\n"));
+        CHECK(!contains(result.glsl, "cc0") && !contains(result.glsl, "mix("));
+        CHECK(compiles(result, key++));
+    }
+}
+
 void testLayout() {
     CHECK(tox2::kFpDrawBlockOffset == 64);
     CHECK(tox2::fpFixupWord(0x9e811700u) == 0x17009e81u);
@@ -726,6 +837,8 @@ int main() {
     testModifiers();
     testInputsAndEpilogue();
     testUnimplementedReports();
+    testScalarAndDivide();
+    testKillAndFences();
     testLayout();
     testTextProgram();
     testDumps();

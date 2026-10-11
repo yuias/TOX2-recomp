@@ -164,8 +164,14 @@ These exist and are generic, but were written for and checked against the earlie
 - A Vulkan 1.3 renderer that draws what the RSX commands describe into a window or PNG files, and
   `tox2_rsxreplay`, which renders single recorded frames without the game (see
   [Rendering](rendering.md)). The game's flips run in the fake RSX. A headless run with `--dump-frames` also runs the renderer
-  (6,674 draws rendered, 9,173 skipped and 2,845 clears in 30 s), but the frame viewed was blank white;
-  `tox2_rsxreplay` has not been used with this game's commands.
+  (8,338 draws rendered, 1,622 skipped and 1,862 clears in 30 s; the skipped draws all lack a supported
+  colour target, surface format F_X32). The dumped frames of that run are the loading screen: plain grey,
+  with one magenta region (a placeholder for a texture without data) in the first. Before the fragment
+  translator handled the fence, divide, reciprocal, exp2, log2 and KIL opcodes, most draws of a longer
+  run were skipped for those opcodes. `tox2_rsxreplay` renders frames recorded from the game: a dialog
+  frame (39 draws, 10 skipped: nine 3D-texture draws and the F_X32 one) shows the dialog box on grey, and a
+  3D-scene frame (968 draws, 829 skipped: 828 vertex programs with the BRB opcode and the F_X32 one)
+  still comes out as a uniform dark colour.
 - Sound through the runtime's audio engine and WASAPI (see [Audio](audio.md)). The game initialises
   `cellAudio` in the current run and creates two ATRAC3plus decoders, which the host decodes; a 120 s
   headless run (output `none`) counts 22,071 blocks, 4,017 of them non-silent, and the audio dump is
@@ -236,8 +242,7 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   [Rendering](rendering.md#rendering)). Known gaps are the ZPASS report values (the constant 0 is
   written, no occlusion query runs) and user clip planes (the vertex translator does not write the
   clip distances). The 30 s headless run counts 6.9 million FIFO headers, 238 distinct methods and 8,208 flips in the
-  fake RSX. With `--dump-frames` the dumped frames were blank white (the frame viewed, and all four
-  files have the same size); nothing has been checked about why.
+  fake RSX. With `--dump-frames` the dumped frames of the first 30 s are the plain grey loading screen.
 - Audio: WASAPI is the only device output, in shared mode on the default device. The output is
   stereo (an 8-channel port is reduced to its front pair), and there is no volume setting or device
   choice. ATRAC3 (non-plus) is not supported. The `cellAtrac` calls of this game all have handlers,

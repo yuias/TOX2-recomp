@@ -137,7 +137,7 @@ tox2_game --game-dir <game-dir> --elf <elf> --libsre <libsre.reloc.elf> --no-win
 ```
 
 Every 600th flip of the first 30 s as PNG files, without a window (the fake RSX executes the game's
-flips, so files appear, but the frames written so far are blank white):
+flips, so files appear; the frames written in the first 30 s are still the loading screen, a plain grey):
 
 ```sh
 tox2_game --game-dir <game-dir> --no-window --seconds 30 --dump-frames out/frames --dump-frames-every 600
