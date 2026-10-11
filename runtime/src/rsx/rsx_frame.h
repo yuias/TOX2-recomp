@@ -105,6 +105,7 @@ struct RsxDraw {
     std::uint64_t vp_hash = 0;
     std::vector<std::uint32_t> vp_ucode;
     std::uint32_t vp_input_mask = 0, vp_output_mask = 0;
+    std::uint32_t vp_branch_bits = 0;         // SET_TRANSFORM_BRANCH_BITS: the boolean constants of BRB and CLB
     std::vector<std::uint32_t> vp_constants;  // full constant snapshot, kRsxVpConstantCount * 4 words
     std::uint64_t fp_hash = 0;                // hash of the ucode with inline constants zeroed
     std::vector<std::uint32_t> fp_ucode;      // decoded words

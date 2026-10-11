@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <format>
 
+#include "rsx/rsx_census.h"
 #include "rsx/rsx_registers.h"
 
 namespace tox2 {
@@ -12,6 +13,10 @@ constexpr std::uint32_t kNoTemp = 63;
 constexpr std::uint32_t kNoOutput = 31;
 constexpr std::uint32_t kOutputSlotCount = 16;
 constexpr std::uint32_t kCondAlways = 7;
+constexpr std::uint32_t kCondNever = 0;
+// The hardware call stack is four deep; callees are inlined at their call sites, so the cap also
+// bounds the size of the generated code.
+constexpr int kMaxCallDepth = 8;
 
 // Bits of the output mask register for the slots the translator exports (bit = column of the
 // register; slots without a bit, like position, are always exported).
@@ -32,6 +37,13 @@ const char* const kVecNames[0x1a] = {"NOP", "MOV", "MUL", "ADD", "MAD", "DP3",  
 const char* const kScaNames[0x15] = {"NOP", "MOV", "RCP", "RCC", "RSQ", "EXP", "LOG", "LIT", "BRA", "BRI", "CAL",
                                      "CLI", "RET", "LG2", "EX2", "SIN", "COS", "BRB", "CLB", "PSH", "POP"};
 
+// Flow-control opcodes the translator emits code for. BRA is left out: its target comes from the
+// address register, which the translator does not model.
+bool isHandledFlowOp(std::uint32_t op) {
+    return op == kRsxVpScaBri || op == kRsxVpScaCal || op == kRsxVpScaCli || op == kRsxVpScaRet || op == kRsxVpScaBrb ||
+           op == kRsxVpScaClb;
+}
+
 std::string opcodeText(const char* const* names, std::size_t count, std::uint32_t op) {
     if (op < count && names[op] != nullptr) return names[op];
     return std::format("0x{:02x}", op);
@@ -42,6 +54,9 @@ struct Instruction {
 
     std::uint32_t vecOpcode() const { return bits(w[1], 22, 5); }
     std::uint32_t scaOpcode() const { return bits(w[1], 27, 5); }
+    std::uint32_t condition() const { return bits(w[0], 10, 3); }
+    bool end() const { return (w[3] & 1u) != 0; }
+    std::uint32_t target() const { return rsxVpBranchTarget(w); }
     std::uint32_t source(int index) const {
         switch (index) {
             case 0: return (bits(w[1], 0, 8) << 9) | bits(w[2], 23, 9);
@@ -71,8 +86,18 @@ public:
     GlslResult run(std::span<const std::uint32_t> ucode);
 
 private:
+    enum class Condition { Always, Never, Unsupported };
+
     void note(std::string message);
-    void translateInstruction(const Instruction& in);
+    void translateData(const Instruction& in);
+    Instruction instructionAt(std::uint32_t pc) const;
+    Condition branchCondition(const Instruction& in);
+    std::string booleanCondition(const Instruction& in) const;
+    void emitStraightLine();
+    void emitControlFlow();
+    void emitCall(const Instruction& in, int depth);
+    void emitJump(const Instruction& in);
+    std::uint32_t blockLevel(std::uint32_t target) const;
     std::string operand(const Instruction& in, int index);
     bool vectorExpr(const Instruction& in, std::uint32_t op, Expr& out);
     bool scalarExpr(const Instruction& in, std::uint32_t op, Expr& out);
@@ -81,6 +106,9 @@ private:
     std::string assemble() const;
 
     std::vector<std::string> unimplemented_;
+    std::span<const std::uint32_t> ucode_;
+    RsxVpFlow flow_;
+    std::vector<std::uint32_t> labels_;  // sorted branch targets above 0; each starts a jump-position block
     std::string body_;
     std::uint64_t temps_used_ = 0;
     std::uint32_t inputs_used_ = 0;
@@ -270,7 +298,7 @@ bool Translator::scalarExpr(const Instruction& in, std::uint32_t op, Expr& out) 
             out = {"vec4(cos(" + operand(in, 2) + ".x))", false};
             return true;
         default:
-            // Every branch, call and stack opcode.
+            // BRA (target from the address register) and the stack opcodes.
             note("vp scalar opcode " + opcodeText(kScaNames, std::size(kScaNames), op));
             return false;
     }
@@ -299,7 +327,8 @@ void Translator::emitWrite(const std::vector<std::string>& destinations, const E
     body_ += "  }\n";
 }
 
-void Translator::translateInstruction(const Instruction& in) {
+// The vector and scalar data operations of one instruction; flow control is emitted by the callers.
+void Translator::translateData(const Instruction& in) {
     const std::uint32_t w0 = in.w[0], w3 = in.w[3];
     const std::uint32_t vec_op = in.vecOpcode(), sca_op = in.scaOpcode();
 
@@ -343,6 +372,8 @@ void Translator::translateInstruction(const Instruction& in) {
     for (int stage = 0; stage < 2; stage++) {
         const Part& part = parts[stage];
         if (part.op == 0) continue;
+        // The target and branch index overlap the source 2 fields, and there is nothing to write.
+        if (stage == 1 && isHandledFlowOp(part.op)) continue;
 
         Expr value;
         if (!(stage == 0 ? vectorExpr(in, part.op, value) : scalarExpr(in, part.op, value))) continue;
@@ -363,6 +394,152 @@ void Translator::translateInstruction(const Instruction& in) {
         if (part.to_output) slots_written_ |= 1u << slot;
         emitWrite(destinations, value, part.lanes);
     }
+}
+
+Instruction Translator::instructionAt(std::uint32_t pc) const {
+    return {{ucode_[pc * 4], ucode_[pc * 4 + 1], ucode_[pc * 4 + 2], ucode_[pc * 4 + 3]}};
+}
+
+// The condition of BRI, CAL, CLI and RET. Anything but "always" and "never" tests a condition
+// register, which the translator does not model.
+Translator::Condition Translator::branchCondition(const Instruction& in) {
+    switch (in.condition()) {
+        case kCondAlways: return Condition::Always;
+        case kCondNever: return Condition::Never;
+        default: note("vp condition other than always"); return Condition::Unsupported;
+    }
+}
+
+// BRB and CLB test bit `index` of the branch bits register and ignore the condition field.
+std::string Translator::booleanCondition(const Instruction& in) const {
+    const bool taken_when_set = bits(in.w[3], 28, 1) != 0;
+    return std::format("(draw.branch_bits & (1u << {})) {} 0u", bits(in.w[3], 23, 5), taken_when_set ? "!=" : "==");
+}
+
+// Jump-position level of the block that starts at `target`; level 0 is the block at the program start.
+std::uint32_t Translator::blockLevel(std::uint32_t target) const {
+    if (target == 0) return 0;
+    return 1 + static_cast<std::uint32_t>(std::lower_bound(labels_.begin(), labels_.end(), target) - labels_.begin());
+}
+
+void Translator::emitJump(const Instruction& in) {
+    std::string condition;
+    if (in.scaOpcode() == kRsxVpScaBrb) {
+        condition = booleanCondition(in);
+    } else if (branchCondition(in) != Condition::Always) {
+        return;
+    }
+    const std::uint32_t level = blockLevel(in.target());
+    if (condition.empty()) {
+        body_ += std::format("  jump_position = {};\n  continue;\n", level);
+    } else {
+        body_ += std::format("  if ({}) {{\n    jump_position = {};\n    continue;\n  }}\n", condition, level);
+    }
+}
+
+// Callees are inlined at the call site, so a subroutine needs no call stack. Branches inside a
+// subroutine would need their own jump-position blocks and are reported instead.
+void Translator::emitCall(const Instruction& call, int depth) {
+    std::string condition;
+    if (call.scaOpcode() == kRsxVpScaClb) {
+        condition = booleanCondition(call);
+    } else if (branchCondition(call) != Condition::Always) {
+        return;
+    }
+    if (depth >= kMaxCallDepth) {
+        note("vp call nesting too deep");
+        return;
+    }
+    body_ += condition.empty() ? "  {\n" : std::format("  if ({}) {{\n", condition);
+    for (std::uint32_t pc = call.target(); pc < ucode_.size() / 4; pc++) {
+        if (flow_.reached[pc] == 0) {
+            note("vp call target not reached");
+            break;
+        }
+        const Instruction in = instructionAt(pc);
+        translateData(in);
+        bool returned = false;
+        switch (in.scaOpcode()) {
+            case kRsxVpScaBri:
+            case kRsxVpScaBrb: note("vp branch inside a subroutine"); break;
+            case kRsxVpScaCal:
+            case kRsxVpScaCli:
+            case kRsxVpScaClb: emitCall(in, depth + 1); break;
+            case kRsxVpScaRet: returned = branchCondition(in) != Condition::Never; break;
+            default: break;
+        }
+        if (returned) break;
+        if (in.end()) {
+            // The end bit ends the whole program, also inside a subroutine.
+            body_ += "  break;\n";
+            break;
+        }
+    }
+    body_ += "  }\n";
+}
+
+void Translator::emitStraightLine() {
+    for (std::uint32_t pc = 0; pc < ucode_.size() / 4; pc++) {
+        if (flow_.reached[pc] == 0) continue;
+        const Instruction in = instructionAt(pc);
+        translateData(in);
+        if (in.end()) break;
+    }
+}
+
+// Branches select among the blocks of one `while (true)` loop: block k runs when jump_position <= k,
+// so leaving block k enters block k + 1, and a jump stores the level of its target block and restarts
+// the loop. This is the structure RPCS3's VertexProgramDecompiler uses, and it also expresses backward
+// branches. The end bit leaves the loop, not main(), so the epilogue still runs.
+void Translator::emitControlFlow() {
+    const std::uint32_t count = static_cast<std::uint32_t>(ucode_.size() / 4);
+    for (std::uint32_t pc = 0; pc < count; pc++) {
+        if (flow_.reached[pc] == 0) continue;
+        const Instruction in = instructionAt(pc);
+        const std::uint32_t op = in.scaOpcode();
+        const bool jumps = op == kRsxVpScaBrb || (op == kRsxVpScaBri && in.condition() != kCondNever);
+        if (jumps && in.target() > 0 && in.target() < count) labels_.push_back(in.target());
+    }
+    std::sort(labels_.begin(), labels_.end());
+    labels_.erase(std::unique(labels_.begin(), labels_.end()), labels_.end());
+
+    body_ += "  int jump_position = 0;\n  while (true) {\n  if (jump_position <= 0) {\n";
+    // After an end bit, a return or an unconditional jump, only a label can start reachable code.
+    bool dead = false;
+    for (std::uint32_t pc = 0; pc < count; pc++) {
+        if (flow_.reached[pc] == 0) continue;
+        if (pc > 0 && std::binary_search(labels_.begin(), labels_.end(), pc)) {
+            body_ += std::format("  }}\n  if (jump_position <= {}) {{\n", blockLevel(pc));
+            dead = false;
+        }
+        if (dead) continue;
+
+        const Instruction in = instructionAt(pc);
+        translateData(in);
+        switch (in.scaOpcode()) {
+            case kRsxVpScaBrb: emitJump(in); break;
+            case kRsxVpScaBri:
+                emitJump(in);
+                dead = in.condition() == kCondAlways;
+                break;
+            case kRsxVpScaCal:
+            case kRsxVpScaCli:
+            case kRsxVpScaClb: emitCall(in, 0); break;
+            case kRsxVpScaRet:
+                // A return outside a subroutine ends the program.
+                if (branchCondition(in) == Condition::Always) {
+                    body_ += "  break;\n";
+                    dead = true;
+                }
+                break;
+            default: break;
+        }
+        if (in.end()) {
+            body_ += "  break;\n";
+            dead = true;
+        }
+    }
+    body_ += "  }\n  break;\n  }\n";
 }
 
 // GLSL for an exported slot: the value when the draw's output mask enables it and the program
@@ -390,8 +567,8 @@ std::string Translator::assemble() const {
             "  vec4 clip_params;  // clip width, clip height, depth clip min, depth clip max\n"
             "  uint output_mask;\n"
             "  float point_size;\n"
+            "  uint branch_bits;\n"
             "  uint reserved0;\n"
-            "  uint reserved1;\n"
             "} draw;\n"
             "\n";
 
@@ -495,10 +672,13 @@ GlslResult Translator::run(std::span<const std::uint32_t> ucode) {
         result.unimplemented.push_back("vp malformed ucode size");
         return result;
     }
-    for (std::size_t i = 0; i + 4 <= ucode.size(); i += 4) {
-        const Instruction in = {{ucode[i], ucode[i + 1], ucode[i + 2], ucode[i + 3]}};
-        translateInstruction(in);
-        if ((in.w[3] & 1u) != 0) break;
+    ucode_ = ucode;
+    flow_ = analyzeVertexProgramFlow(ucode.data(), static_cast<std::uint32_t>(ucode.size() / 4), 0);
+    if (flow_.bad_target) note("vp branch target out of range");
+    if (flow_.has_flow_control) {
+        emitControlFlow();
+    } else {
+        emitStraightLine();
     }
 
     // Without a position write the whole program is disabled.

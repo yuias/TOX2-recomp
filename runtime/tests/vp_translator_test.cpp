@@ -70,6 +70,9 @@ struct Asm {
     std::uint32_t cond = 7;
     bool cond_enable = false, saturate = false, cc_update = false, relative_const = false, end = false;
     std::uint32_t abs_bits = 0;
+    // Flow-control fields (BRI, CAL, CLI, RET, BRB, CLB); they overlap the source 2 fields.
+    std::uint32_t branch_target = 0, branch_bit = 0;
+    bool branch_taken_when_set = false;
 
     std::array<std::uint32_t, 4> words() const {
         const std::uint32_t s0 = src0.encode(), s1 = src1.encode(), s2 = src2.encode();
@@ -80,7 +83,7 @@ struct Asm {
         if (saturate) w0 |= 1u << 26;
         const std::uint32_t w1 =
                 (s0 >> 9) | (input_index << 8) | (constant_index << 12) | (vec_op << 22) | (sca_op << 27);
-        const std::uint32_t w2 = (s2 >> 11) | (s1 << 6) | ((s0 & 0x1ff) << 23);
+        std::uint32_t w2 = (s2 >> 11) | (s1 << 6) | ((s0 & 0x1ff) << 23);
         std::uint32_t w3 =
                 (end ? 1u : 0u) | (relative_const ? 2u : 0u) | (slot << 2) | (sca_temp << 7) | ((s2 & 0x7ff) << 21);
         // The write mask bits run w, z, y, x from low to high.
@@ -89,6 +92,12 @@ struct Asm {
                    (((mask >> 1) & 1u) << (base + 2)) | ((mask & 1u) << (base + 3));
         };
         w3 |= spread(vec_mask, 13) | spread(sca_mask, 17);
+        if (sca_op == 0x09 || sca_op == 0x0a || sca_op == 0x0b || sca_op == 0x0c || sca_op == 0x11 || sca_op == 0x12) {
+            w0 |= ((branch_target >> 9) & 1u) << 23;
+            w2 = (w2 & ~0x3Fu) | ((branch_target >> 3) & 0x3Fu);
+            w3 = (w3 & 0x007FFFFFu) | (branch_bit << 23) | (branch_taken_when_set ? 1u << 28 : 0u) |
+                 ((branch_target & 7u) << 29);
+        }
         return {w0, w1, w2, w3};
     }
 };
@@ -464,6 +473,174 @@ void testScalarDualDestination() {
     CHECK(contains(result.glsl, "out_0.xz = res.xz;"));
 }
 
+// ---- Flow control ----
+
+std::size_t position(const std::string& text, const std::string& part) { return text.find(part); }
+
+Asm movTo(std::uint32_t slot, bool end = false) {
+    Asm in;
+    in.vec_op = 1;
+    in.slot = slot;
+    in.end = end;
+    return in;
+}
+
+Asm flowOp(std::uint32_t sca_op, std::uint32_t target, std::uint32_t bit = 0, bool taken_when_set = false) {
+    Asm in;
+    in.sca_op = sca_op;
+    in.branch_target = target;
+    in.branch_bit = bit;
+    in.branch_taken_when_set = taken_when_set;
+    in.vec_mask = 0;
+    return in;
+}
+
+void checkCompiles(const tox2::GlslResult& result, std::uint64_t key) {
+    auto spirv = tox2::compileGlsl(tox2::ShaderStage::Vertex, result.glsl, key);
+    CHECK(spirv.has_value());
+    if (!spirv) std::fprintf(stderr, "%s\n%s\n", spirv.error().c_str(), result.glsl.c_str());
+}
+
+void printReports(const tox2::GlslResult& result) {
+    for (const std::string& entry : result.unimplemented) std::fprintf(stderr, "unimplemented: %s\n", entry.c_str());
+}
+
+void testBranchOnBooleanConstant() {
+    // o[0] = v[0]; BRB b5 (taken when clear) over the o[1] write; o[2] write; o[3] write and end.
+    const tox2::GlslResult clear_taken =
+            translate({movTo(0), flowOp(0x11, 3, 5, false), movTo(1), movTo(2), movTo(3, true)});
+    CHECK(clear_taken.ok);
+    if (!clear_taken.ok) printReports(clear_taken);
+    CHECK(contains(clear_taken.glsl, "if ((draw.branch_bits & (1u << 5)) == 0u) {\n    jump_position = 1;\n"));
+    // The skipped write sits in block 0 and the target is the first instruction of block 1.
+    const std::size_t skipped = position(clear_taken.glsl, "out_1 = attr_0;");
+    const std::size_t block1 = position(clear_taken.glsl, "if (jump_position <= 1) {");
+    const std::size_t target = position(clear_taken.glsl, "out_3 = attr_0;");
+    CHECK(skipped != std::string::npos && block1 != std::string::npos && target != std::string::npos);
+    CHECK(skipped < block1 && block1 < target);
+    checkCompiles(clear_taken, 0xd0e0);
+
+    // The sense bit selects the polarity; the index selects the bit.
+    const tox2::GlslResult set_taken = translate({movTo(0), flowOp(0x11, 2, 31, true), movTo(1), movTo(2, true)});
+    CHECK(set_taken.ok);
+    CHECK(contains(set_taken.glsl, "if ((draw.branch_bits & (1u << 31)) != 0u) {"));
+    CHECK(contains(set_taken.glsl, "uint branch_bits;"));
+    checkCompiles(set_taken, 0xd0e1);
+
+    // The vector part of the branch instruction runs before the branch.
+    Asm dual = flowOp(0x11, 2, 0, false);
+    dual.vec_op = 1;
+    dual.vec_mask = 0xf;
+    dual.slot = 1;
+    const tox2::GlslResult with_vector = translate({movTo(0), dual, movTo(2, true)});
+    CHECK(with_vector.ok);
+    CHECK(position(with_vector.glsl, "out_1 = attr_0;") < position(with_vector.glsl, "(draw.branch_bits"));
+
+    // A program without flow control keeps the straight-line body.
+    const tox2::GlslResult plain = translate({movTo(0, true)});
+    CHECK(plain.ok && !contains(plain.glsl, "jump_position") && !contains(plain.glsl, "branch_bits &"));
+}
+
+void testProgramPastTheFirstEnd() {
+    // The first end bit is skipped by the branch; the instructions after it are reached through the label.
+    const tox2::GlslResult result =
+            translate({movTo(0), flowOp(0x11, 3, 1, true), movTo(1, true), movTo(2), movTo(3, true)});
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "out_2 = attr_0;") && contains(result.glsl, "out_3 = attr_0;"));
+    // The end bit leaves the loop, not main(), so the epilogue still runs.
+    CHECK(contains(result.glsl, "  break;\n  }\n  if (jump_position <= 1) {"));
+    CHECK(!contains(result.glsl, "return;"));
+    checkCompiles(result, 0xd0e2);
+
+    // Instructions no path reaches are not translated, whatever they hold.
+    Asm garbage;
+    garbage.vec_op = 0x1f;
+    const tox2::GlslResult unreached = translate({movTo(0, true), garbage});
+    CHECK(unreached.ok);
+}
+
+void testBackwardBranch() {
+    // 0: o[0] = v[0]   1: o[1] = v[0]   2: BRB b2 back to 1   3: end. The target is above 0, so it gets a block.
+    const tox2::GlslResult loop = translate({movTo(0), movTo(1), flowOp(0x11, 1, 2, true), movTo(3, true)});
+    CHECK(loop.ok);
+    CHECK(contains(loop.glsl, "if ((draw.branch_bits & (1u << 2)) != 0u) {\n    jump_position = 1;\n    continue;\n"));
+    CHECK(position(loop.glsl, "if (jump_position <= 1) {") < position(loop.glsl, "out_1 = attr_0;"));
+    checkCompiles(loop, 0xd0e3);
+
+    // A jump to the first instruction restarts block 0.
+    const tox2::GlslResult restart = translate({movTo(0), flowOp(0x11, 0, 7, true), movTo(3, true)});
+    CHECK(restart.ok);
+    CHECK(contains(restart.glsl, "jump_position = 0;\n    continue;"));
+    checkCompiles(restart, 0xd0e4);
+
+    // BRI with condition "always" is an unconditional jump; what follows it is dead until the next label.
+    const tox2::GlslResult unconditional =
+            translate({movTo(0), flowOp(0x09, 3), movTo(1), movTo(2, true), movTo(3, true)});
+    CHECK(unconditional.ok);
+    if (!unconditional.ok) printReports(unconditional);
+    CHECK(contains(unconditional.glsl, "  jump_position = 1;\n  continue;\n"));
+    CHECK(!contains(unconditional.glsl, "out_1 = attr_0;"));  // skipped by the jump
+    CHECK(contains(unconditional.glsl, "out_2 = attr_0;"));   // the jump target
+    CHECK(!contains(unconditional.glsl, "out_3 = attr_0;"));  // past the end bit, reached by nothing
+    checkCompiles(unconditional, 0xd0e5);
+}
+
+void testSubroutines() {
+    // 0: o[0] = v[0]   1: CAL 4   2: o[1] = v[0]   3: end   4: o[2] = v[0]   5: RET
+    const tox2::GlslResult call =
+            translate({movTo(0), flowOp(0x0a, 4), movTo(1), movTo(3, true), movTo(2), flowOp(0x0c, 0)});
+    CHECK(call.ok);
+    if (!call.ok) printReports(call);
+    // The callee is inlined at the call, once, and the code after the call still runs.
+    CHECK(contains(call.glsl, "  {\n  out_2 = attr_0;\n  }\n"));
+    CHECK(position(call.glsl, "out_2 = attr_0;") < position(call.glsl, "out_1 = attr_0;"));
+    CHECK(call.glsl.find("out_2 = attr_0;") == call.glsl.rfind("out_2 = attr_0;"));
+    checkCompiles(call, 0xd0e6);
+
+    // CLB calls when its bit is set (or clear, by the sense bit).
+    const tox2::GlslResult conditional_call =
+            translate({movTo(0), flowOp(0x12, 3, 6, true), movTo(3, true), movTo(2), flowOp(0x0c, 0)});
+    CHECK(conditional_call.ok);
+    if (!conditional_call.ok) printReports(conditional_call);
+    CHECK(contains(conditional_call.glsl, "if ((draw.branch_bits & (1u << 6)) != 0u) {\n  out_2 = attr_0;"));
+    checkCompiles(conditional_call, 0xd0e7);
+
+    // A call inside a call: 1: CAL 4, 4: o[2] write and CAL 7, 7: o[1] write, RET, RET.
+    const tox2::GlslResult nested = translate({movTo(0), flowOp(0x0a, 4), movTo(3, true), movTo(3), movTo(2),
+                                               flowOp(0x0a, 7), flowOp(0x0c, 0), movTo(1), flowOp(0x0c, 0)});
+    CHECK(nested.ok);
+    if (!nested.ok) printReports(nested);
+    CHECK(position(nested.glsl, "out_2 = attr_0;") < position(nested.glsl, "out_1 = attr_0;"));
+    checkCompiles(nested, 0xd0e8);
+}
+
+void testFlowControlReports() {
+    // A branch inside a subroutine would need its own blocks.
+    tox2::GlslResult result =
+            translate({movTo(0), flowOp(0x0a, 3), movTo(3, true), flowOp(0x11, 5, 0, true), movTo(1), flowOp(0x0c, 0)});
+    CHECK(!result.ok && hasReport(result, "branch inside a subroutine"));
+
+    // A condition-code branch needs the condition registers.
+    Asm conditional = flowOp(0x09, 2);
+    conditional.cond = 2;
+    result = translate({movTo(0), conditional, movTo(3, true)});
+    CHECK(!result.ok && hasReport(result, "condition other than always"));
+
+    // A target outside the program.
+    result = translate({movTo(0), flowOp(0x11, 40, 0, true), movTo(3, true)});
+    CHECK(!result.ok && hasReport(result, "branch target out of range"));
+
+    // BRA stays unimplemented, whatever surrounds it.
+    Asm bra = movTo(0, true);
+    bra.sca_op = 0x08;
+    result = translate({bra});
+    CHECK(!result.ok && hasReport(result, "BRA"));
+
+    // A call that calls itself is bounded by the call depth.
+    result = translate({movTo(0), flowOp(0x0a, 3), movTo(3, true), flowOp(0x0a, 3)});
+    CHECK(!result.ok && hasReport(result, "call nesting"));
+}
+
 void testLocations() {
     CHECK(tox2::vpOutputSlotLocation(0) == -1);
     CHECK(tox2::vpOutputSlotLocation(1) == 10);
@@ -488,6 +665,11 @@ int main() {
     testUnwrittenOutputsAreDefault();
     testUnimplementedReports();
     testScalarDualDestination();
+    testBranchOnBooleanConstant();
+    testProgramPastTheFirstEnd();
+    testBackwardBranch();
+    testSubroutines();
+    testFlowControlReports();
     testLocations();
     testDumps();
     std::printf("vp translator tests: %d passed, %d failed\n", g_passed, g_failed);

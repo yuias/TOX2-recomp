@@ -71,6 +71,52 @@ struct RsxVpScan {
 // one with the end bit.
 RsxVpScan scanVertexProgram(const std::uint32_t* ucode, std::uint32_t start);
 
+// Scalar opcodes of the vertex program flow control (RSX_SCA_OPCODE_* in RPCS3 `RSXVertexProgram.h`).
+inline constexpr std::uint32_t kRsxVpScaBra = 0x08;  // branch by address register
+inline constexpr std::uint32_t kRsxVpScaBri = 0x09;  // branch by condition code
+inline constexpr std::uint32_t kRsxVpScaCal = 0x0a;  // call
+inline constexpr std::uint32_t kRsxVpScaCli = 0x0b;  // call by condition code
+inline constexpr std::uint32_t kRsxVpScaRet = 0x0c;  // return
+inline constexpr std::uint32_t kRsxVpScaBrb = 0x11;  // branch by boolean constant
+inline constexpr std::uint32_t kRsxVpScaClb = 0x12;  // call by boolean constant
+
+// Fields of one 4-word instruction that the flow control uses. The target and the boolean index
+// overlap the source 2 fields, so an instruction with a flow-control opcode has no source 2.
+inline std::uint32_t rsxVpScaOpcode(const std::uint32_t* instruction) { return (instruction[1] >> 27) & 0x1F; }
+inline std::uint32_t rsxVpCondition(const std::uint32_t* instruction) { return (instruction[0] >> 10) & 7; }
+inline bool rsxVpIsEnd(const std::uint32_t* instruction) { return (instruction[3] & 1) != 0; }
+inline std::uint32_t rsxVpBranchTarget(const std::uint32_t* instruction) {
+    return (((instruction[0] >> 23) & 1) << 9) | ((instruction[2] & 0x3F) << 3) | (instruction[3] >> 29);
+}
+inline void rsxVpSetBranchTarget(std::uint32_t* instruction, std::uint32_t target) {
+    instruction[0] = (instruction[0] & ~(1u << 23)) | (((target >> 9) & 1) << 23);
+    instruction[2] = (instruction[2] & ~0x3Fu) | ((target >> 3) & 0x3F);
+    instruction[3] = (instruction[3] & 0x1FFFFFFFu) | ((target & 7) << 29);
+}
+inline std::uint32_t rsxVpBranchIndex(const std::uint32_t* instruction) { return (instruction[3] >> 23) & 0x1F; }
+inline bool rsxVpBranchTrueSense(const std::uint32_t* instruction) { return ((instruction[3] >> 28) & 1) != 0; }
+// True for the opcodes that carry a fixed target address (BRA takes its target from the address register).
+inline bool rsxVpHasBranchTarget(std::uint32_t sca_opcode) {
+    return sca_opcode == kRsxVpScaBri || sca_opcode == kRsxVpScaCal || sca_opcode == kRsxVpScaCli ||
+           sca_opcode == kRsxVpScaBrb || sca_opcode == kRsxVpScaClb;
+}
+
+// Result of following the control flow of a vertex program.
+struct RsxVpFlow {
+    std::vector<std::uint8_t> reached;  // per instruction index (absolute), 1 when some path executes it
+    std::uint32_t last = 0;             // highest reached index; the program occupies [entry, last]
+    bool terminated = false;            // a reached instruction has the end bit
+    bool bad_target = false;            // a branch or call leaves [entry, instruction_count)
+    bool has_flow_control = false;      // a reached instruction is a branch, call or return
+};
+
+// Follows the program from `entry` through `instruction_count` instructions: falls through, takes
+// the target of every branch (a conditional one also falls through), and runs a call's callee up to
+// its return before continuing after the call. A program may therefore extend past its first end
+// bit; the reference is `analyse_vertex_program` in RPCS3 `Program/ProgramStateCache.cpp`.
+// BRA targets come from the address register at run time, so BRA is treated as falling through.
+RsxVpFlow analyzeVertexProgramFlow(const std::uint32_t* ucode, std::uint32_t instruction_count, std::uint32_t entry);
+
 // ---- collector ----
 
 class RsxArgCensus {

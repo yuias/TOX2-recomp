@@ -170,8 +170,14 @@ These exist and are generic, but were written for and checked against the earlie
   translator handled the fence, divide, reciprocal, exp2, log2 and KIL opcodes, most draws of a longer
   run were skipped for those opcodes. `tox2_rsxreplay` renders frames recorded from the game: a dialog
   frame (39 draws, 10 skipped: nine 3D-texture draws and the F_X32 one) shows the dialog box on grey, and a
-  3D-scene frame (968 draws, 829 skipped: 828 vertex programs with the BRB opcode and the F_X32 one)
-  still comes out as a uniform dark colour.
+  3D-scene frame (968 draws, 1 skipped: the F_X32 one) renders every draw. The vertex translator handles
+  branches, calls and returns, which the 3D scene's skinning programs need (BRB on a bit of the branch
+  bits register; see [Vertex programs](rendering.md#vertex-programs)). That frame's displayed image is
+  still uniform, now magenta: its last draw is a full-screen pass, and the magenta placeholder for a
+  texture without usable data fills the screen (the cause was not traced further). The scene's own
+  target, read back before that pass, shows a character as a flat magenta silhouette on the clear
+  colour; its textures are mipmapped and swizzled, which are not uploaded yet. The three captures
+  never write the branch bits register, so every draw in them ran with the bits at 0.
 - Sound through the runtime's audio engine and WASAPI (see [Audio](audio.md)). The game initialises
   `cellAudio` in the current run and creates two ATRAC3plus decoders, which the host decodes; a 120 s
   headless run (output `none`) counts 22,071 blocks, 4,017 of them non-silent, and the audio dump is

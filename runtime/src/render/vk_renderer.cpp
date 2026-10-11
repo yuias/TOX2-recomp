@@ -1011,6 +1011,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     vp.clip_min = raster.clip_min;
     vp.clip_max = raster.clip_max;
     vp.output_mask = draw.vp_output_mask;
+    vp.branch_bits = draw.vp_branch_bits;
     vp.point_size = raster.point_size > 0.0f ? raster.point_size : 1.0f;
     // Output mask bits 6..11 enable the user clip distances, which the vertex translator does not write.
     if ((draw.vp_output_mask & 0xFC0u) != 0) rsxNoteUnimplemented("state", "user clip");

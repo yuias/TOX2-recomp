@@ -13,7 +13,7 @@ enum class ShaderStage { Vertex, Fragment };
 
 // Part of every cache file name. Bump it on any change to the GLSL the translators emit, so stale
 // SPIR-V is never reused.
-inline constexpr std::uint32_t kTranslatorVersion = 3;
+inline constexpr std::uint32_t kTranslatorVersion = 4;
 
 // Directory of the on-disk SPIR-V cache; an empty path disables caching. Set it before the first
 // compileGlsl call.

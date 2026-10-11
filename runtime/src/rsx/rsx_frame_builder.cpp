@@ -371,15 +371,30 @@ void RsxFrameBuilder::fillFragmentProgram(const RsxRegisters& regs, RsxDraw& dra
 void RsxFrameBuilder::fillVertexProgram(const RsxRegisters& regs, RsxDraw& draw) {
     draw.vp_input_mask = regs.reg(kMethodNv4097SetVertexAttribInputMask);
     draw.vp_output_mask = regs.reg(kMethodNv4097SetVertexAttribOutputMask);
+    draw.vp_branch_bits = regs.reg(kMethodNv4097SetTransformBranchBits);
     draw.vp_constants.assign(regs.vp_constants.begin(), regs.vp_constants.end());
     const std::uint32_t start = regs.vp_start;
     if (start >= kRsxVpInstructionCount) {
         noteState("vertex program start out of range");
         return;
     }
-    const RsxVpScan scan = scanVertexProgram(regs.vp_ucode.data(), start);
-    if (!scan.terminated) noteState("unterminated vertex program");
-    draw.vp_ucode.assign(regs.vp_ucode.begin() + start * 4, regs.vp_ucode.begin() + (start + scan.instructions) * 4);
+    // The program may extend past its first end bit when branches or calls lead there, and the store
+    // can hold stale words in between. Only reached instructions are kept (the rest are zeroed, which
+    // decodes as a NOP) so that the hash does not depend on leftovers, and branch targets are rebased
+    // to the first instruction so that the same program hashes the same wherever it was loaded.
+    const RsxVpFlow flow = analyzeVertexProgramFlow(regs.vp_ucode.data(), kRsxVpInstructionCount, start);
+    if (!flow.terminated) noteState("unterminated vertex program");
+    if (flow.bad_target) {
+        noteState("vertex program branch outside the program");
+        return;
+    }
+    draw.vp_ucode.assign((flow.last - start + 1) * 4, 0);
+    for (std::uint32_t i = start; i <= flow.last; i++) {
+        if (flow.reached[i] == 0) continue;
+        std::uint32_t* out = &draw.vp_ucode[(i - start) * 4];
+        std::copy_n(&regs.vp_ucode[i * 4], 4, out);
+        if (rsxVpHasBranchTarget(rsxVpScaOpcode(out))) rsxVpSetBranchTarget(out, rsxVpBranchTarget(out) - start);
+    }
     draw.vp_hash = hashWords(draw.vp_ucode);
 }
 

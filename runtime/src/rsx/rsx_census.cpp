@@ -682,6 +682,69 @@ RsxVpScan scanVertexProgram(const std::uint32_t* ucode, std::uint32_t start) {
     return scan;
 }
 
+RsxVpFlow analyzeVertexProgramFlow(const std::uint32_t* ucode, std::uint32_t instruction_count, std::uint32_t entry) {
+    RsxVpFlow flow;
+    flow.reached.assign(instruction_count, 0);
+    flow.last = entry;
+
+    std::vector<std::uint32_t> pending{entry};
+    while (!pending.empty()) {
+        std::uint32_t pc = pending.back();
+        pending.pop_back();
+
+        // Return addresses of the calls on this path; the hardware stack is not modelled beyond that.
+        std::vector<std::uint32_t> returns;
+        while (true) {
+            // Falling off the end of the store without an end bit leaves `terminated` unset.
+            if (pc >= instruction_count) break;
+            if (flow.reached[pc] != 0) {
+                // Already walked (a loop, or a tail shared by several paths).
+                if (returns.empty()) break;
+                pc = returns.back();
+                returns.pop_back();
+                continue;
+            }
+            flow.reached[pc] = 1;
+            flow.last = std::max(flow.last, pc);
+
+            const std::uint32_t* instruction = ucode + pc * 4;
+            const std::uint32_t op = rsxVpScaOpcode(instruction);
+            const std::uint32_t condition = rsxVpCondition(instruction);
+            const std::uint32_t target = rsxVpBranchTarget(instruction);
+            const bool is_call = op == kRsxVpScaCal || op == kRsxVpScaCli || op == kRsxVpScaClb;
+            const bool is_branch = op == kRsxVpScaBri || op == kRsxVpScaBrb;
+            const bool is_return = op == kRsxVpScaRet;
+            if (is_call || is_branch || is_return) flow.has_flow_control = true;
+            if ((is_call || is_branch) && (target < entry || target >= instruction_count)) {
+                flow.bad_target = true;
+            } else if (is_branch) {
+                if (op == kRsxVpScaBri && condition == 7) {
+                    // Always taken: nothing falls through.
+                    pc = target;
+                    continue;
+                }
+                pending.push_back(target);
+            } else if (is_call) {
+                returns.push_back(pc + 1);
+                pc = target;
+                continue;
+            } else if (is_return && condition == 7) {
+                if (returns.empty()) break;
+                pc = returns.back();
+                returns.pop_back();
+                continue;
+            }
+
+            if (rsxVpIsEnd(instruction)) {
+                flow.terminated = true;
+                break;
+            }
+            pc++;
+        }
+    }
+    return flow;
+}
+
 // ---- collector ----
 
 RsxArgCensus::RsxArgCensus(std::filesystem::path json_path, std::filesystem::path dump_dir, MemoryReader reader,

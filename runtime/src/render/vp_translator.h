@@ -30,7 +30,8 @@ inline constexpr std::uint32_t kVpDrawBinding = 2;       // UBO: VpDrawUniforms,
 //   offset 32  vec4  clip_params      (surface clip width, clip height, depth clip min, depth clip max)
 //   offset 48  uint  output_mask      SET_VERTEX_ATTRIB_OUTPUT_MASK register value
 //   offset 52  float point_size       used when the program does not export a point size
-//   offset 56  uint  reserved[2]
+//   offset 56  uint  branch_bits      SET_TRANSFORM_BRANCH_BITS register value (BRB and CLB read bit n)
+//   offset 60  uint  reserved
 // Bytes 64.. of binding 2 are free for the fragment stage's per-draw values (the vertex shader only
 // declares the first 64 bytes).
 struct VpDrawUniforms {
@@ -42,11 +43,13 @@ struct VpDrawUniforms {
     float clip_max;
     std::uint32_t output_mask;
     float point_size;
-    std::uint32_t reserved[2];
+    std::uint32_t branch_bits;
+    std::uint32_t reserved;
 };
 static_assert(sizeof(VpDrawUniforms) == 64);
 static_assert(offsetof(VpDrawUniforms, clip_width) == 32);
 static_assert(offsetof(VpDrawUniforms, output_mask) == 48);
+static_assert(offsetof(VpDrawUniforms, branch_bits) == 56);
 
 // Vertex output slot (the `o[n]` destination of the program) -> varying `layout(location = N)`
 // shared by the vertex outputs and the fragment inputs. -1 for slots without a varying.
@@ -76,7 +79,9 @@ constexpr int vpOutputSlotLocation(std::uint32_t slot) {
 }
 
 // `ucode` holds the program words in host order (RsxDraw::vp_ucode), starting at the first
-// instruction (4 words each) and ending at the instruction with the END bit. `input_mask` is accepted
+// instruction (4 words each) and ending at the last instruction the program can reach: the one with
+// the END bit, or a later one when a branch or call leads past it. Branch and call targets are
+// instruction indices into `ucode`, and instructions no path reaches are ignored. `input_mask` is accepted
 // for the interface but not used: every attribute the program reads becomes a vertex input at
 // location = attribute slot, and the renderer binds default values for unbound slots.
 GlslResult translateVertexProgram(std::span<const std::uint32_t> ucode, std::uint32_t input_mask);

@@ -964,6 +964,89 @@ void testRendererQuad(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// A vertex program instruction with a flow-control opcode: the target, the boolean index and its sense
+// overlap the source 2 fields of `words`, so those are replaced.
+std::array<std::uint32_t, 4> vpWithBranch(std::array<std::uint32_t, 4> words, std::uint32_t sca_opcode,
+                                          std::uint32_t target, std::uint32_t bit, bool taken_when_set) {
+    words[1] |= sca_opcode << 27;
+    words[0] |= ((target >> 9) & 1u) << 23;
+    words[2] = (words[2] & ~0x3Fu) | ((target >> 3) & 0x3Fu);
+    words[3] = (words[3] & 0x007FFFFFu) | (bit << 23) | (taken_when_set ? 1u << 28 : 0u) | ((target & 7u) << 29);
+    return words;
+}
+
+// BRB reads its boolean constant from SET_TRANSFORM_BRANCH_BITS at draw time: the program writes red to
+// the front diffuse output, branches over the instruction that overwrites it with green, and the bit
+// decides which color the quad has.
+void testRendererBranchBits(tox2::VkContext& ctx) {
+    tox2::rsxUnimplementedReset();
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+    CHECK(renderer.valid());
+
+    const auto render = [&](std::uint32_t bit, bool taken_when_set, std::uint32_t branch_bits) {
+        using namespace tox2::rsx_synthetic;
+        SceneBuilder scene;
+        scene.setSurface();
+        scene.clear(0xFF404040);
+        setQuadRenderState(scene);
+        scene.setFloatAttrib(0, 3, kPositionsOffset);
+        for (std::uint32_t slot = 5; slot <= 6; slot++) {
+            // Slot 5 is red, slot 6 green; both opaque.
+            const float value[4] = {slot == 5 ? 1.0f : 0.0f, slot == 6 ? 1.0f : 0.0f, 0.0f, 1.0f};
+            for (std::uint32_t i = 0; i < 4; i++) {
+                scene.write(tox2::kMethodNv4097SetVertexData4fM + slot * 16 + i * 4,
+                            std::bit_cast<std::uint32_t>(value[i]));
+            }
+        }
+        Programs programs = quadPrograms();
+        programs.vertex.clear();
+        const std::array<std::array<std::uint32_t, 4>, 4> instructions = {
+                vpMove(0, 0, "xyzw", false),
+                vpWithBranch(vpMove(1, 5, "xyzw", false), 0x11 /* BRB */, 3, bit, taken_when_set),
+                vpMove(1, 6, "xyzw", false),
+                vpMove(0, 0, "xyzw", true),
+        };
+        for (const auto& instruction : instructions) {
+            programs.vertex.insert(programs.vertex.end(), instruction.begin(), instruction.end());
+        }
+        scene.setPrograms(programs);
+        scene.write(tox2::kMethodNv4097SetTransformBranchBits, branch_bits);
+        for (std::uint32_t v = 0; v < 4; v++) {
+            for (std::uint32_t c = 0; c < 3; c++)
+                scene.memory().putFloat(1, kPositionsOffset + v * 12 + c * 4, kQuadCorners[v][c]);
+        }
+        scene.drawStrip(4);
+        std::vector<tox2::RsxCommand> commands = replaySynthetic(scene.finish());
+        tox2::rsxUnimplementedReset();
+        renderer.execute(commands);
+        std::vector<std::uint8_t> bgra;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        CHECK(renderer.valid());
+        CHECK(renderer.readDisplay(bgra, width, height));
+        if (bgra.size() != 64 * 64 * 4) return std::uint32_t{0};
+        CHECK(tox2::rsxUnimplementedSnapshot().empty());
+        return pixelArgb(bgra, width, 32, 32);
+    };
+
+    constexpr std::uint32_t kRed = 0xFFFF0000, kGreen = 0xFF00FF00;
+    // Taken when the bit is clear: the red written first survives.
+    CHECK(render(3, false, 0x00) == kRed);
+    CHECK(render(3, false, 0x08) == kGreen);
+    CHECK(render(3, false, 0xF7) == kRed);  // only bit 3 counts
+    // Taken when the bit is set.
+    CHECK(render(3, true, 0x00) == kGreen);
+    CHECK(render(3, true, 0x08) == kRed);
+    CHECK(render(3, true, 0xF7) == kGreen);
+    // The highest bit of the register.
+    CHECK(render(31, true, 0x80000000u) == kRed);
+    CHECK(render(31, true, 0x7FFFFFFFu) == kGreen);
+
+    CHECK(renderer.stats().draws_skipped == 0);
+    CHECK(renderer.valid());
+    tox2::rsxUnimplementedReset();
+}
+
 // ---- Textures ----
 
 // Needs no Vulkan device.
@@ -1478,6 +1561,7 @@ int main() {
     testRendererReadbackGate(*ctx);
     testRendererScissorAndMask(*ctx);
     testRendererQuad(*ctx);
+    testRendererBranchBits(*ctx);
     testRendererTextures(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 

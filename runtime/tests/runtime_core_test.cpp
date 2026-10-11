@@ -6810,6 +6810,50 @@ void testRsxArgCensus() {
     CHECK(!tox2::scanVertexProgram(std::vector<std::uint32_t>(tox2::kRsxVpInstructionCount * 4, 0).data(), 540)
                    .terminated);
 
+    // Flow analysis: the program extends past its first end bit when a branch leads there, and the
+    // instruction no path reaches stays out.
+    constexpr std::uint32_t kBrb = 0x11, kCal = 0x0a, kRet = 0x0c, kBri = 0x09;
+    const auto setFlow = [](std::vector<std::uint32_t>& store, std::uint32_t index, std::uint32_t sca_opcode,
+                            std::uint32_t target, bool end) {
+        std::uint32_t* instruction = &store[index * 4];
+        instruction[0] = (7u << 10) | (((target >> 9) & 1u) << 23);
+        instruction[1] = sca_opcode << 27;
+        instruction[2] = (target >> 3) & 0x3F;
+        instruction[3] = (end ? 1u : 0u) | ((target & 7u) << 29);
+    };
+    std::vector<std::uint32_t> flow_store(tox2::kRsxVpInstructionCount * 4, 0);
+    setFlow(flow_store, 2, kBrb, 6, false);
+    setFlow(flow_store, 3, 0, 0, true);
+    setFlow(flow_store, 4, kBrb, 900, false);  // stale, never reached
+    setFlow(flow_store, 6, 0, 0, true);
+    tox2::RsxVpFlow flow = tox2::analyzeVertexProgramFlow(flow_store.data(), tox2::kRsxVpInstructionCount, 2);
+    CHECK(flow.terminated && !flow.bad_target && flow.has_flow_control && flow.last == 6);
+    CHECK(flow.reached[2] == 1 && flow.reached[3] == 1 && flow.reached[4] == 0 && flow.reached[5] == 0 &&
+          flow.reached[6] == 1);
+    CHECK(tox2::rsxVpBranchTarget(&flow_store[2 * 4]) == 6 && tox2::rsxVpBranchTarget(&flow_store[4 * 4]) == 900);
+    tox2::rsxVpSetBranchTarget(&flow_store[2 * 4], 0x2A5);
+    CHECK(tox2::rsxVpBranchTarget(&flow_store[2 * 4]) == 0x2A5 && flow_store[2 * 4 + 1] == kBrb << 27);
+    tox2::rsxVpSetBranchTarget(&flow_store[2 * 4], 6);
+
+    // A target before the entry or past the store is reported.
+    setFlow(flow_store, 2, kBrb, 1, false);
+    CHECK(tox2::analyzeVertexProgramFlow(flow_store.data(), tox2::kRsxVpInstructionCount, 2).bad_target);
+    setFlow(flow_store, 2, kBrb, 600, false);
+    CHECK(tox2::analyzeVertexProgramFlow(flow_store.data(), tox2::kRsxVpInstructionCount, 2).bad_target);
+
+    // A call runs its callee to the return and continues after the call; a jump that is always taken
+    // leaves the instructions it skips unreached; a loop is walked once.
+    std::fill(flow_store.begin(), flow_store.end(), 0);
+    setFlow(flow_store, 0, kCal, 5, false);
+    setFlow(flow_store, 1, kBri, 8, false);
+    setFlow(flow_store, 2, 0, 0, true);  // skipped by the jump
+    setFlow(flow_store, 5, kRet, 0, false);
+    setFlow(flow_store, 8, kBri, 0, false);  // back to the start
+    flow = tox2::analyzeVertexProgramFlow(flow_store.data(), tox2::kRsxVpInstructionCount, 0);
+    CHECK(!flow.terminated && !flow.bad_target && flow.last == 8);
+    CHECK(flow.reached[0] == 1 && flow.reached[1] == 1 && flow.reached[2] == 0 && flow.reached[5] == 1 &&
+          flow.reached[8] == 1);
+
     // Collector: feed the register writes of one draw.
     namespace stdfs = std::filesystem;
     const stdfs::path root =
@@ -7815,6 +7859,34 @@ void testRsxSyntheticCaptures() {
     CHECK(textured.textures[0].data_size == 16 && textured.texture_data.size() == 16);
     CHECK(textured.texture_data[0] == 0xFF && textured.texture_data[1] == 0xFF && textured.texture_data[2] == 0x00);
     CHECK(unimplementedCount("capture missing range") == 0);
+
+    // A draw carries the branch bits register, and its vertex program runs on past the first end bit
+    // when a branch leads there: 0: BRB b1 -> 3, 1: end, 2: stale words, 3: end.
+    {
+        using namespace tox2::rsx_synthetic;
+        SceneBuilder scene;
+        scene.setSurface();
+        scene.putQuadPositions();
+        scene.setFloatAttrib(0, 3, kPositionsOffset);
+        Programs programs;
+        programs.vertex = {
+                (7u << 10), 0x11u << 27, 0, (1u << 23) | (3u << 29),  // BRB, bit 1, taken when clear, target 3
+                0,          0,           0, 1,                        // end
+                0xDEAD0001, 0x0F000000,  0, 0,                        // stale, never reached
+                0,          0,           0, 1,                        // end
+        };
+        scene.setPrograms(programs);
+        scene.write(tox2::kMethodNv4097SetTransformBranchBits, 0xA5);
+        scene.drawStrip(4);
+        commands = replay(scene.finish());
+        CHECK(commands.size() == 2 && std::holds_alternative<tox2::RsxDraw>(commands[0]));
+        const tox2::RsxDraw& branchy = std::get<tox2::RsxDraw>(commands[0]);
+        CHECK(branchy.vp_branch_bits == 0xA5);
+        CHECK(branchy.vp_ucode.size() == 16 && branchy.vp_ucode[3] == ((1u << 23) | (3u << 29)));
+        CHECK(branchy.vp_ucode[8] == 0 && branchy.vp_ucode[9] == 0 && branchy.vp_ucode[15] == 1);
+        CHECK(unimplementedCount("state unterminated vertex program") == 0);
+        CHECK(unimplementedCount("state vertex program branch outside the program") == 0);
+    }
     tox2::rsxUnimplementedReset();
 }
 

@@ -72,7 +72,7 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   `<stage>_<program hash>_<GLSL hash>_<translator version>.spv`. A missing or corrupt file is
   recompiled and rewritten, and the translator version in the name keeps SPIR-V from an older
   translation from being reused. A program with an opcode that is not translated skips its draw
-  and is counted. The fragment translator handles MOV, MUL, ADD, MAD, DP3, DP4, MIN, MAX, the six
+  and is counted. The vertex translator is described in [Vertex programs](#vertex-programs). The fragment translator handles MOV, MUL, ADD, MAD, DP3, DP4, MIN, MAX, the six
   compares (SLT to SEQ), FRC, FLR, RCP, EX2, LG2, DIV, DIVSQ, TEX, TXP and KIL, and ignores NOP and
   the FENCT/FENCB fences. RCP, EX2 and LG2 read the x lane of source 0 and replicate the result;
   DIV and DIVSQ divide the whole of source 0 by the x lane of source 1 (DIVSQ leaves a zero
@@ -92,6 +92,49 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   section, most frequent first (omitted when empty). It is the work list for later scenes: a draw
   that depends on one of them is skipped or drawn incompletely, and the `skipped` count in the
   `rsx` section says which.
+
+### Vertex programs
+
+`vp_translator.cpp` translates one vertex program to one GLSL `main()` that ends with the viewport
+transform and the varying outputs.
+
+- **Opcodes.** Vector: MOV, MUL, ADD, MAD, DP3, DPH, DP4, DST, MIN, MAX, SLT, SGE, FRC, FLR, SEQ, SFL,
+  SGT, SLE, SNE, STR and SSG. Scalar: MOV, RCP, RCC, RSQ, EXP, LOG, LIT, LG2, EX2, SIN and COS, and the
+  flow-control opcodes below. Not translated, and the draw is skipped and counted: ARL and relative
+  constant addressing, TXL, the condition code registers (a condition other than "always", or a
+  write that only updates a condition code), BRA (its target comes from the address register) and
+  PSH and POP.
+- **Flow control.** BRB and BRI branch, CAL, CLI and CLB call, and RET returns. The target is a 10-bit
+  instruction index; the boolean index (0 to 31) and the branch sense of BRB and CLB share the bits
+  of source 2, as in RPCS3's `RSXVertexProgram.h`. BRB and CLB read bit `n` of the branch bits and take
+  the jump when the bit is set if the instruction's sense bit is set, and when it is clear otherwise.
+  BRI, CAL, CLI and RET are translated when their condition is "always" (a condition of "never"
+  skips them); any other condition tests a condition register and is reported as not translated.
+  BRB and BRI are translated outside subroutines only; one inside a subroutine is reported.
+  The vector operation of an instruction that carries a branch still runs first.
+- **Structure of the output.** A program without flow control is emitted as straight-line code, as
+  before. Otherwise the body is a `while (true)` loop whose blocks start at the branch targets: block
+  `k` runs when `jump_position <= k`, so leaving a block enters the next one, and a branch stores the
+  level of its target block and `continue`s. This is the layout RPCS3's `VertexProgramDecompiler`
+  uses, and it covers backward branches. An end bit inside the loop is a `break`, so the output
+  epilogue still runs. A call is inlined at its call site, up to 8 deep, which needs no call stack.
+- **Which instructions are translated.** `analyzeVertexProgramFlow` (`rsx_census.cpp`) follows the
+  program from its first instruction: it falls through, follows every branch target, and runs a call
+  to its return. The program may extend past its first end bit; the end bit stops the walk only on the
+  path that reaches it. The frame builder uses it to cut the program out of the store, zeroing the
+  instructions no path reaches (stale words from an earlier, longer program) and rebasing branch
+  targets to the first instruction, so that equal programs hash equal wherever they were loaded. A
+  target before the first instruction or outside the store is not accepted: the draw is counted as
+  `state vertex program branch outside the program` and has no vertex program.
+- **Branch bits.** `NV4097_SET_TRANSFORM_BRANCH_BITS` (method 0x1FF8) sits in the register file like
+  any other register, so the capture holds its value at the start of the frame and every write to it
+  after that, and a replay needs nothing extra. The frame builder copies it into `RsxDraw::vp_branch_bits`
+  at each draw and the renderer writes it into the `branch_bits` member of the per-draw uniform block
+  (binding 2). It is a uniform, not part of the program or pipeline key, because a 32-bit value in the
+  key would build up to 2^32 variants of one program, while a uniform costs a bit test at each branch
+  and lets draws that differ only in the bits share a shader module and a pipeline.
+- **Limits.** The census program dumps (`vp_*.bin`) still end at the first end bit, and the translator
+  tests that read them use programs without flow control.
 
 ### Capture and replay
 

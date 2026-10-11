@@ -133,6 +133,7 @@ inline constexpr std::uint32_t kMethodNv4097SetVertexData1fM = 0x1E40;  // 16 re
 inline constexpr std::uint32_t kMethodNv4097SetPointSize = 0x1EE0;
 inline constexpr std::uint32_t kMethodNv4097SetVertexAttribInputMask = 0x1FF0;
 inline constexpr std::uint32_t kMethodNv4097SetVertexAttribOutputMask = 0x1FF4;
+inline constexpr std::uint32_t kMethodNv4097SetTransformBranchBits = 0x1FF8;
 inline constexpr std::uint32_t kMethodNv0039BufferNotify = 0x2328;
 inline constexpr std::uint32_t kMethodNv3062SetContextDmaImageDestin = 0x6188;
 inline constexpr std::uint32_t kMethodNv3062SetColorFormat = 0x6300;
