@@ -25,6 +25,20 @@ _NO_FALL_THROUGH = frozenset({"jump", "return", "indirect_jump", "trap", "invali
 _WALK_BARRIERS = frozenset({"invalid", "jump", "return", "indirect_jump",
                             "call", "cond_call", "indirect_call"})
 
+# `walk_back` stops at every one of these; the call-crossing walk stops at the rest only.
+_CALL_KINDS = frozenset({"call", "cond_call", "indirect_call"})
+_HARD_BARRIERS = _WALK_BARRIERS - _CALL_KINDS
+
+# Registers a callee preserves (ELF64 PPC ABI): their value survives a `bl`.
+_CALLEE_SAVED = frozenset(range(14, 32))
+# Words searched back for a definition or a stack-slot store when calls may be crossed; a function
+# prologue spills and the code that reloads the value can be this far apart.
+_CALL_WINDOW = 64
+
+_STACK_REG = 1
+# Byte widths of the D/DS-form stores that can overlap a stack slot.
+_STORE_WIDTH = {"stb": 1, "sth": 2, "stw": 4, "std": 8, "stfs": 4, "stfd": 8}
+
 _UPDATE_FORMS = frozenset(
     "lwzu lbzu lhzu lhau lfsu lfdu stwu stbu sthu stfsu stfdu ldu stdu "
     "lwzux lbzux lhzux lhaux lwaux ldux stwux stbux sthux stdux lfsux lfdux "
@@ -148,29 +162,89 @@ def walk_back(image: CodeImage, addr: int, limit: int) -> Iterator[Insn]:
         cur -= 4
 
 
-def find_def(image: CodeImage, addr: int, reg: int, limit: int = 16) -> Insn | None:
-    for insn in walk_back(image, addr, limit):
+def _walk_back_calls(image: CodeImage, addr: int, limit: int, cross_calls: bool) -> Iterator[Insn]:
+    """`walk_back` that may pass calls; the other barriers still end the walk."""
+    barriers = _HARD_BARRIERS if cross_calls else _WALK_BARRIERS
+    cur = addr - 4
+    for _ in range(limit):
+        if not image.contains(cur):
+            return
+        insn = image.insn(cur)
+        if flow_of(insn).kind in barriers:
+            return
+        yield insn
+        cur -= 4
+
+
+def find_def(image: CodeImage, addr: int, reg: int, limit: int = 16, *,
+             through_calls: bool = False) -> Insn | None:
+    """Nearest instruction before `addr` that writes `reg`, within `limit` words.
+
+    With `through_calls`, the search is `_CALL_WINDOW` words long and passes calls when `reg` is
+    callee-saved; a volatile register still stops at the first call.
+    """
+    if through_calls:
+        limit = _CALL_WINDOW
+    cross = through_calls and reg in _CALLEE_SAVED
+    for insn in _walk_back_calls(image, addr, limit, cross):
         if reg in written_gprs(insn):
             return insn
     return None
 
 
+def _spilled_value(image: CodeImage, load: Insn, eval_stored: Callable[[Insn], int | None]
+                   ) -> int | None:
+    """Value a stack reload `ld/lwz rD,D(r1)` reads back, from the nearest store to that slot.
+
+    Stack slots persist across calls, so calls are crossed. The search gives up on a write to
+    r1, on a store of another width that overlaps the slot, and on an indexed or multi-word
+    store through r1, since the slot may have changed.
+    """
+    if load.spec.name == "ld":
+        disp, size, store_name = load.field("DS"), 8, "std"
+    else:
+        disp, size, store_name = load.field("D"), 4, "stw"
+    for insn in _walk_back_calls(image, load.addr, _CALL_WINDOW, True):
+        if _STACK_REG in written_gprs(insn):
+            return None
+        name = insn.spec.name
+        if not name.startswith("st") or insn.field("rA") != _STACK_REG:
+            continue
+        width = _STORE_WIDTH.get(name)
+        if width is None:
+            return None
+        store_disp = insn.field("DS") if name == "std" else insn.field("D")
+        if store_disp + width <= disp or disp + size <= store_disp:
+            continue
+        if name == store_name and store_disp == disp:
+            return eval_stored(insn)
+        return None
+    return None
+
+
 def eval_const(image: CodeImage, addr: int, reg: int, *, toc: int | None = None,
                read_mem: Callable[[int, int], bytes | None] | None = None,
-               depth: int = 6) -> int | None:
-    """Value of GPR `reg` just before `addr`, or None when it is not a recoverable constant."""
+               depth: int = 6, through_calls: bool = False) -> int | None:
+    """Value of GPR `reg` just before `addr`, or None when it is not a recoverable constant.
+
+    `through_calls` lets the search pass calls for callee-saved registers and follow a reload
+    from a stack slot to the store that spilled it (see `find_def` and `_spilled_value`). It is
+    off by default because passing a call is only sound for the table-base uses of the jump-table
+    recovery; the other callers keep the call as a barrier.
+    """
     if reg == 2:
         # r2 is constant in this ELF; any write to it is a TOC restore.
         return toc
     if depth <= 0:
         return None
-    d = find_def(image, addr, reg)
+    d = find_def(image, addr, reg, through_calls=through_calls)
     if d is None:
         return None
 
     def src(r: int) -> int | None:
         # rA == 0 reads as literal zero in the address and addi/addis forms only.
-        return eval_const(image, d.addr, r, toc=toc, read_mem=read_mem, depth=depth - 1)
+        return eval_const(image, d.addr, r, toc=toc, read_mem=read_mem, depth=depth - 1,
+                          through_calls=through_calls)
 
     def base(r: int) -> int | None:
         return 0 if r == 0 else src(r)
@@ -193,6 +267,10 @@ def eval_const(image: CodeImage, addr: int, reg: int, *, toc: int | None = None,
             return None
         v = src(d.field("rS"))
         return None if v is None else v & _MASK32
+    if name in ("lwz", "ld") and through_calls and d.field("rA") == _STACK_REG:
+        return _spilled_value(image, d, lambda store: eval_const(
+            image, store.addr, store.field("rS"), toc=toc, read_mem=read_mem, depth=depth - 1,
+            through_calls=True))
     if name in ("lwz", "ld"):
         # Update forms are separate mnemonics, so rD is the only register written here.
         if read_mem is None:

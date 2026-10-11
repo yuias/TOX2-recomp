@@ -70,6 +70,10 @@ def _sext32(value: int) -> int:
     return value - (1 << 32) if value & 0x80000000 else value
 
 
+# Constant evaluation (`eval_const(..., through_calls=True)`) may look past calls for a table base
+# held in a callee-saved register or a stack slot. `_def` and `walk_back` must keep stopping at
+# calls: a base found across a retry-loop call would move `spine_start` below the loop's
+# back-edge and hide the bound check from `_bound_by_walk`.
 def _def(image: CodeImage, addr: int, reg: int) -> Insn | None:
     return find_def(image, addr, reg, _WALK_LIMIT)
 
@@ -153,7 +157,8 @@ def _unsigned_compare(image: CodeImage, insn: Insn, toc: int | None,
     if name == "cmpli":
         return insn.field("rA"), insn.field("UIMM")
     if name == "cmpl":
-        k = eval_const(image, insn.addr, insn.field("rB"), toc=toc, read_mem=read_mem)
+        k = eval_const(image, insn.addr, insn.field("rB"), toc=toc, read_mem=read_mem,
+                       through_calls=True)
         return None if k is None else (insn.field("rA"), k)
     return None
 
@@ -256,7 +261,7 @@ def _split_add(image: CodeImage, add: Insn, toc, read_mem) -> tuple[Insn, int]:
         cand = _skip_copies(image, add.addr, loaded)
         if cand is None or cand.spec.name not in _LOAD_INDEXED:
             continue
-        base = eval_const(image, add.addr, other, toc=toc, read_mem=read_mem)
+        base = eval_const(image, add.addr, other, toc=toc, read_mem=read_mem, through_calls=True)
         if base is not None:
             return cand, base
         problem = _Unresolved("no_table_base", "add operand r%d is not constant" % other)
@@ -283,7 +288,8 @@ def _recover_site(image: CodeImage, branch: int, read_mem, toc, enter: _EntryBra
         kind = "rel32"
     elif name in ("lwz", "ld"):
         ra = d.field("rA")
-        const = 0 if ra == 0 else eval_const(image, d.addr, ra, toc=toc, read_mem=read_mem)
+        const = 0 if ra == 0 else eval_const(image, d.addr, ra, toc=toc, read_mem=read_mem,
+                                             through_calls=True)
         if const is None:
             raise _Unresolved("ctr_from_load", "%s at 0x%08x" % (name, d.addr))
         raise _Unresolved("unknown_def", "%s from a constant address at 0x%08x" % (name, d.addr))
@@ -293,8 +299,8 @@ def _recover_site(image: CodeImage, branch: int, read_mem, toc, enter: _EntryBra
     ra, rb = load.field("rA"), load.field("rB")
     if ra == 0:
         raise _Unresolved("no_index", "lwzx with rA = 0")
-    const_a = eval_const(image, load.addr, ra, toc=toc, read_mem=read_mem)
-    const_b = eval_const(image, load.addr, rb, toc=toc, read_mem=read_mem)
+    const_a = eval_const(image, load.addr, ra, toc=toc, read_mem=read_mem, through_calls=True)
+    const_b = eval_const(image, load.addr, rb, toc=toc, read_mem=read_mem, through_calls=True)
     if const_a is None and const_b is None:
         raise _Unresolved("no_table_base", "neither r%d nor r%d is constant" % (ra, rb))
     if const_a is not None and const_b is not None:

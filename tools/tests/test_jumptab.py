@@ -489,6 +489,64 @@ class MultiTocTest(unittest.TestCase):
         self.assertEqual(unresolved[fx.branch].reason, "no_bound")
 
 
+class ThroughCallsTest(unittest.TestCase):
+    """A table base kept across a call: in a callee-saved register or in a stack slot."""
+
+    SLOT = 0x78
+
+    def check(self, code, count):
+        fx, table, targets = rel_fixture(code, count)
+        tables, unresolved = fx.recover()
+        self.assertEqual(unresolved, {})
+        jt = tables[fx.branch]
+        self.assertEqual((jt.table, jt.count, list(jt.targets)), (table, count, targets))
+
+    def tail(self, base):
+        return [asm.slwi(9, 3, 2), asm.lwzx(0, 9, base), asm.extsw(0, 0), asm.add(0, 0, base),
+                asm.mtctr(0), asm.bctr()]
+
+    def bound_after_call(self, code):
+        # Call, then a bound check that leaves the table path.
+        code += [asm.bl(pc(code), DEFAULT), asm.cmplwi(7, 3, 4)]
+        return code + [asm.bgt(7, pc(code), DEFAULT)]
+
+    def test_callee_saved_base_before_a_retry_loop_call(self):
+        # lwz r30; L: bl f; cmplwi cr7,r3,5; bgt cr7,L; the base is defined above the loop's
+        # back-edge, so only the constant evaluation may look past the call.
+        code = [asm.lwz(30, TOC_SLOT, 2)]
+        loop = pc(code)
+        code += [asm.bl(pc(code), DEFAULT), asm.cmplwi(7, 3, 5)]
+        code += [asm.bgt(7, pc(code), loop)]
+        self.check(code + self.tail(30), 6)
+
+    def test_base_spilled_to_a_stack_slot_across_a_call(self):
+        code = [asm.lwz(9, TOC_SLOT, 2), asm.std(9, self.SLOT, 1)]
+        code = self.bound_after_call(code)
+        self.check(code + [asm.ld(11, self.SLOT, 1)] + self.tail(11), 5)
+
+    def test_word_spill_and_reload(self):
+        code = [asm.lwz(9, TOC_SLOT, 2), asm.stw(9, self.SLOT, 1)]
+        code = self.bound_after_call(code)
+        self.check(code + [asm.lwz(11, self.SLOT, 1)] + self.tail(11), 5)
+
+    def test_volatile_base_is_not_carried_across_a_call(self):
+        code = self.bound_after_call([asm.lwz(11, TOC_SLOT, 2)])
+        fx, _, _ = rel_fixture(code + self.tail(11), 5)
+        self.assertEqual(fx.reason(), "no_table_base")
+
+    def test_stack_pointer_write_between_store_and_reload(self):
+        code = [asm.lwz(9, TOC_SLOT, 2), asm.std(9, self.SLOT, 1), asm.addi(1, 1, -0x10)]
+        code = self.bound_after_call(code)
+        fx, _, _ = rel_fixture(code + [asm.ld(11, self.SLOT, 1)] + self.tail(11), 5)
+        self.assertEqual(fx.reason(), "no_table_base")
+
+    def test_overlapping_store_of_another_width_hides_the_spill(self):
+        code = [asm.lwz(9, TOC_SLOT, 2), asm.std(9, self.SLOT, 1), asm.stw(0, self.SLOT + 4, 1)]
+        code = self.bound_after_call(code)
+        fx, _, _ = rel_fixture(code + [asm.ld(11, self.SLOT, 1)] + self.tail(11), 5)
+        self.assertEqual(fx.reason(), "no_table_base")
+
+
 class RecoverAllTest(unittest.TestCase):
     def test_every_bctr_lands_in_exactly_one_dict(self):
         good = [asm.cmplwi(7, 9, 1), asm.bgt(7, BASE + 4, DEFAULT)] + spine(asm.slwi(9, 9, 2))

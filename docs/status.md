@@ -7,7 +7,7 @@ The game does not run in any useful sense yet. `tox2_game` loads the executable 
 module (`libsre`), runs the game's start-up code on real guest threads, runs SPURS (libsre's recompiled
 PPU code and the recompiled SPU programs of the kernels and the game's tasks), loads the first archive
 items and reaches the game's frame loop. A 30 s headless run ends at the watchdog; a longer one stops at
-about 53 s at a gap in the recovered PPU jump tables. Nothing visible has been drawn and nothing has been heard.
+about 54 s at a gap in the recovered PPU jump tables. Nothing visible has been drawn and nothing has been heard.
 This is work in progress.
 The code was taken over from an earlier recompilation project of another game and is being pointed
 at *Tales of Xillia 2* (BLJS10188); the parts that this game has not reached have never run against
@@ -64,11 +64,10 @@ The counts differ from run to run. The default-handled system call is `sys_spu_t
 (the game's sound engine); the seven default-handled imports are `cellRtcGetCurrentTick`,
 `cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`.
 
-A run with `--seconds 70` ends earlier, at about 53 s, with exit code 3: the PPU function at
-`0x0035d068` jumps through a table whose entry for `0x0035d084` was not recovered
-(`unknown target 0x0035d084 from 0x0035d068: inside a code span (missed function?)`), the dispatch
-returns as if the callee had returned, and the next instruction faults with
-`tox2: stop: fatal guest fault: read from guest address 0x00000004`. The SPU census of that run still has
+A run with `--seconds 90` ends earlier, at about 54 s, with exit code 3: the `bctr` at `0x002997f0`
+(function `0x00299748`) is one of the six jump tables that function recovery leaves unresolved
+(`no_bound`), and the run stops with
+`tox2: stop: fatal unknown target: target 0x002998a0 from 0x002997f0`. The SPU census of that run still has
 0 unknown targets.
 
 ## Earlier runs
@@ -216,8 +215,8 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   notification is not implemented, and reservations have a documented race window against PPU plain
   stores (the SPU floating-point deviations are listed in
   [Emitting C](emitter.md#what-is-and-is-not-implemented)). See [SPU usage](spu.md).
-- The PPU jump table of the function at `0x0035d068` has an entry that function recovery did not find
-  (`0x0035d084`); the game stops there at about 53 s (see above).
+- Function recovery leaves six `bctr` jump tables unresolved (`no_bound`); the game stops at one of them,
+  `0x002997f0`, at about 54 s (see above).
 - The game's data archive `TLFILE.TLDAT` (about 3 GB) and its index `FILEHEADER.TOFHDB`: the install
   step copies them, and the game's own code then reads items from the archive (6,975 `cellFsRead` and
   6,746 `cellFsLseek` calls in the 30 s run) and has the Edge LZMA task inflate them. The runtime has no

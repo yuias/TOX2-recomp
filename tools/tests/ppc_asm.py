@@ -129,6 +129,14 @@ def ld(rd: int, ds: int, ra: int) -> int:
     return _ds_form(58, rd, ra, ds, 0)
 
 
+def stw(rs: int, d: int, ra: int) -> int:
+    return _d_form(36, rs, ra, d)
+
+
+def std(rs: int, ds: int, ra: int) -> int:
+    return _ds_form(62, rs, ra, ds, 0)
+
+
 def stdu(rs: int, ds: int, ra: int) -> int:
     return _ds_form(62, rs, ra, ds, 1)
 

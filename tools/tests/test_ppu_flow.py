@@ -358,6 +358,19 @@ class EvalConstTest(unittest.TestCase):
         img = image(asm.li(3, 1), asm.b(BASE + 4, 0x2000, lk=True), asm.nop())
         self.assertIsNone(eval_const(img, BASE + 8, 3))
 
+    def test_calls_stay_barriers_unless_through_calls(self):
+        img = image(asm.lwz(30, -8, 2), asm.bl(BASE + 4, 0x2000), asm.nop())
+        read_mem = lambda ea, n: (0x1234).to_bytes(n, "big")
+        self.assertIsNone(eval_const(img, BASE + 8, 30, toc=TOC, read_mem=read_mem))
+        self.assertEqual(eval_const(img, BASE + 8, 30, toc=TOC, read_mem=read_mem,
+                                    through_calls=True), 0x1234)
+
+    def test_through_calls_keeps_volatile_registers_behind_calls(self):
+        img = image(asm.lwz(11, -8, 2), asm.bl(BASE + 4, 0x2000), asm.nop())
+        read_mem = lambda ea, n: (0x1234).to_bytes(n, "big")
+        self.assertIsNone(eval_const(img, BASE + 8, 11, toc=TOC, read_mem=read_mem,
+                                     through_calls=True))
+
 
 if __name__ == "__main__":
     unittest.main()

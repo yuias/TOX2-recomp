@@ -351,11 +351,11 @@ The counts differ from run to run; the shape does not. In this run:
   `game_boot` milestone. The game then runs its frame loop: about 8,200 flips and 7,800 `cellPadGetData`
   calls in the 30 s run.
 
-Later stop: with `--seconds 70` the run ends at about 53 s, with exit code 3, because of a gap in the
-PPU function recovery. A jump table of a function around `0x0035d068` has an entry the recovery did not
-find, and the run logs `unknown target 0x0035d084 from 0x0035d068: inside a code span (missed function?)`
-followed by `tox2: stop: fatal guest fault: read from guest address 0x00000004`. That is not an SPU
-problem: the census of that run says `census: spu 5 threads, 155155 dispatches, 0 unknown targets`.
+Later stop: with `--seconds 90` the run ends at about 54 s, with exit code 3, because of a gap in the
+PPU function recovery. The `bctr` at `0x002997f0` (function `0x00299748`) is one of the six jump tables the
+recovery leaves unresolved (`no_bound`), and the run logs
+`tox2: stop: fatal unknown target: target 0x002998a0 from 0x002997f0`. That is not an SPU problem: the
+census of that run says `census: spu 5 threads, 158413 dispatches, 0 unknown targets`.
 
 Open issues:
 
@@ -371,7 +371,7 @@ Open issues:
 - SPURS instance B ("atrac3plus", one SPU, created for `cellAtracCreateDecoderExt`) gets its thread group
   and thread, but nothing starts the group.
 - The spline task (image 1) has not run in these runs.
-- The PPU jump-table gap at `0x0035d068` above ends the game at about 53 s.
+- The unresolved PPU jump table at `0x002997f0` above ends the game at about 54 s.
 - The reservation race window above is documented, not closed.
 
 ## Entry points
