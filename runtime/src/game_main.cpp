@@ -51,6 +51,7 @@
 #include "render/vk_renderer.h"
 #include "render/vk_window.h"
 #include "rsx/rsx_thread.h"
+#include "spu/spu_thread.h"
 
 namespace {
 
@@ -712,6 +713,11 @@ int main(int argc, char** argv) {
         libsre_ok = false;
     }
     if (!libsre_ok) return static_cast<int>(tox2::ExitCode::LoadError);
+
+    // The SPU tables hold hashes of the blobs inside the two images; a mismatch means they were emitted from
+    // other inputs, so this stops before an SPU thread can run code the tables do not describe.
+    tox2::registerSpuImages(kTox2SpuImages, kTox2SpuImageCount);
+    if (!tox2::checkSpuImages(process.memory.base())) return static_cast<int>(tox2::ExitCode::LoadError);
 
     tox2RegisterFuncs(kTox2PpuFuncMappings, kTox2PpuFuncMappingCount);
     tox2::appendFuncs(kTox2LibsrePpuFuncMappings, kTox2LibsrePpuFuncMappingCount);

@@ -5,6 +5,7 @@
 
 #include "libsre_ppu_tables.h"
 #include "tox2/ppu_context.h"
+#include "tox2/spu_context.h"
 
 namespace {
 
@@ -55,14 +56,21 @@ int main() {
         CHECK(kTox2LibsrePpuExports[i].module != nullptr);
     }
 
+    // The game registers these tables next to the PPU ones; here they only have to link and be well formed.
+    CHECK(kTox2SpuImageCount > 0);
+    for (uint32_t i = 0; i < kTox2SpuImageCount; i++) {
+        CHECK(kTox2SpuImages[i].name != nullptr);
+        CHECK(kTox2SpuImages[i].entry_count > 0 && kTox2SpuImages[i].entries != nullptr);
+    }
+
     if (g_failures != 0) {
         std::fprintf(stderr, "ppu link: %d failure(s)\n", g_failures);
         return 1;
     }
     std::printf(
             "ppu link ok: %u mappings, %u imports, executable %.16s; libsre: %u mappings, %u imports, %u exports, "
-            "image %.16s\n",
+            "image %.16s; spu: %u images\n",
             count, kTox2PpuImportCount, kTox2PpuExecutableSha256, kTox2LibsrePpuFuncMappingCount,
-            kTox2LibsrePpuImportCount, kTox2LibsrePpuExportCount, kTox2LibsrePpuExecutableSha256);
+            kTox2LibsrePpuImportCount, kTox2LibsrePpuExportCount, kTox2LibsrePpuExecutableSha256, kTox2SpuImageCount);
     return 0;
 }

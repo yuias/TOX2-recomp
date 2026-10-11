@@ -53,22 +53,33 @@ function(tox2_ppu_add_generated_tree)
   include("${libsre_sources_file}")
   message(STATUS "TOX2: generated PPU code from ${generated_dir} (with libsre)")
 
+  # The SPU tables are part of the program too: the game's SPURS tasks are recompiled SPU code.
+  set(spu_sources_file "${generated_dir}/spu/spu_sources.cmake")
+  if(NOT EXISTS "${spu_sources_file}")
+    message(FATAL_ERROR
+      "TOX2: ${spu_sources_file} not found. Generate it with: "
+      "python tools/ps3tool.py spu-emit --eboot generated/inputs/EBOOT.elf "
+      "--libsre generated/inputs/libsre.reloc.elf --out ${TOX2_PPU_GENERATED_DIR}/spu --max-unhandled 0")
+  endif()
+
   add_library(tox2_ppu_generated STATIC ${TOX2_PPU_GENERATED_SOURCES} ${TOX2_LIBSRE_PPU_GENERATED_SOURCES})
   tox2_ppu_codegen_options(tox2_ppu_generated)
   target_include_directories(tox2_ppu_generated PUBLIC "${generated_dir}" "${generated_dir}/libsre")
 
   add_executable(tox2_ppu_link_test runtime/tests/ppu_link_test.cpp)
   target_compile_options(tox2_ppu_link_test PRIVATE -march=x86-64-v3 -Wall -Wextra)
-  target_link_libraries(tox2_ppu_link_test PRIVATE tox2_ppu_generated tox2_ppu_stub)
+  # The stub runtimes only supply the hooks of the generated code; the SPU library is defined by
+  # tox2_spu_add_generated_tree, which runs after this function.
+  target_link_libraries(tox2_ppu_link_test PRIVATE tox2_ppu_generated tox2_spu_generated tox2_ppu_stub tox2_spu_stub)
 
   add_test(NAME ppu_link COMMAND tox2_ppu_link_test)
   set_tests_properties(ppu_link PROPERTIES PASS_REGULAR_EXPRESSION "ppu link ok")
 
   # Only game_main.cpp references the generated tables, so the runtime core builds without them.
-  # The runtime core supplies every hook; the stub must not be linked here (duplicate symbols).
+  # The runtime core supplies every hook; neither stub may be linked here (duplicate symbols).
   add_executable(tox2_game runtime/src/game_main.cpp)
   target_compile_options(tox2_game PRIVATE -march=x86-64-v3 -Wall -Wextra)
-  target_link_libraries(tox2_game PRIVATE tox2_ppu_generated tox2_runtime_core tox2_audio_wasapi tox2_input_gameinput)
+  target_link_libraries(tox2_game PRIVATE tox2_ppu_generated tox2_spu_generated tox2_runtime_core tox2_audio_wasapi tox2_input_gameinput)
 
   # Pins how far the game gets; updated by whoever moves the milestone.
   include("${CMAKE_SOURCE_DIR}/cmake/game_boot.cmake")
