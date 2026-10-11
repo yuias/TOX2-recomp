@@ -22,8 +22,10 @@ drawn; with `--render vulkan` the same thread also feeds a renderer (see [Render
   command and the user command. It then publishes `get`. Method semantics follow RPCS3's
   `Emu/RSX/NV47/HW` sources. Every register write is counted for the census, and the thread
   raises one vertical-blank event every 1/60 s. A flip from the command buffer completes where
-  the command executes, as in RPCS3, and does not wait for a vertical blank. Where the game's
-  frame rate comes from is described under [Rendering](#rendering).
+  the command executes, as in RPCS3, and does not wait for a vertical blank. The vblank is due on a
+  1/60 s deadline that is checked between slices of the command buffer too, so a consumer that is behind
+  (a long draw backlog) still delivers it on time. Where the game's frame rate comes from is described
+  under [Rendering](#rendering).
 - `_gcm_intr_thread` is a guest service thread, created as in RPCS3. The RSX thread queues the
   interrupts and this thread runs the handlers the game registered with
   `cellGcmSetVBlankHandler`, `cellGcmSetFlipHandler` and `cellGcmSetUserHandler`, with the guest
@@ -48,7 +50,8 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   to it, and turns the stream into three kinds of plain commands: clear, draw and flip. The state
   decoders (`rsx_decode.cpp`) read surface, blend, depth, texture, vertex and program state from
   the register file. Each command carries every guest byte it needs (vertex and index data,
-  texture texels, shader ucode), so the renderer never touches guest memory. Draw boundaries,
+  texture texels, shader ucode), so the renderer never touches guest memory. Texture texels are kept
+  in a cache between draws (see [Textures](#textures)). Draw boundaries,
   addressing and register meanings follow RPCS3's `Emu/RSX` sources. At a flip the registers are
   reset the way RPCS3 resets them, so the next frame starts from the same state.
 - **Renderer** (`vk_renderer.cpp` and neighbours). Vulkan 1.3 with dynamic rendering, the loader
@@ -201,7 +204,7 @@ picture up to the filtering across the missing samples. The count marks that app
 
 ### Textures
 
-The frame builder copies the bytes of every 2D, 3D and cube A8R8G8B8 and DXT1/DXT23/DXT45 texture a
+The frame builder converts the bytes of every 2D, 3D and cube A8R8G8B8 and DXT1/DXT23/DXT45 texture a
 draw has enabled (`rsx_texture_layout.cpp`), and the renderer uploads them (`vk_textures.cpp`). The
 dimension is the field in bits 4 to 7 of SET_TEXTURE_FORMAT (1 = 1D, 2 = 2D, 3 = 3D) and the cube bit is
 bit 2. As in RPCS3 (`get_extended_texture_dimension`), dimension 3 is a 3D texture whatever the cube bit
@@ -237,15 +240,53 @@ bits); a depth of 0 counts as 1. The guest layout follows RPCS3 (`Emu/RSX/Common
   applies the VTC rule to every DXT 3D level that meets the conditions above, with or without the LN flag,
   and so does this one.
 
-The copy in `RsxDraw::texture_data` is already converted: levels one after the other (a cube map face
-after face), each in tightly packed rows and slices and de-swizzled, so the renderer needs only the texture
-size, depth, kind and mip count to find them. It uploads all levels in one `vkCmdCopyBufferToImage` into
-an image with the full chain: a 2D image, a 3D image (`VK_IMAGE_TYPE_3D`, a copy region per level with the
-level's depth) or a cube map (a 2D image of six array layers with `CUBE_COMPATIBLE`, a region per face and
-level and a cube view). A8R8G8B8 words are byte swapped first and DXT blocks are copied as stored. The
-image cache key includes the depth and the kind, so a 3D and a 2D texture at one address do not share an
-image. A texture of the render target cache has one level; a 3D or cube texture at a render target address
-is counted (`texture layout render target alias of a 3D or cube texture`) and reads the placeholder.
+The converted texture, `RsxTextureDesc::data`, is a blob shared between draws: levels one after the other
+(a cube map face after face), each in tightly packed rows and slices and de-swizzled, so the renderer needs
+only the texture size, depth, kind and mip count to find them. It uploads all levels in one
+`vkCmdCopyBufferToImage` into an image with the full chain: a 2D image, a 3D image (`VK_IMAGE_TYPE_3D`, a
+copy region per level with the level's depth) or a cube map (a 2D image of six array layers with
+`CUBE_COMPATIBLE`, a region per face and level and a cube view). A8R8G8B8 words are byte swapped first and
+DXT blocks are copied as stored. The image cache key includes the depth and the kind, so a 3D and a 2D
+texture at one address do not share an image. A texture of the render target cache has one level; a 3D or
+cube texture at a render target address is counted (`texture layout render target alias of a 3D or cube
+texture`) and reads the placeholder.
+
+**Texture cache of the frame builder** (`rsx_texture_cache.cpp`). Copying and converting every enabled unit
+for every draw dominated the cost of UI screens (a frame has thousands of draws that enable the same
+handful of textures, some of them several megabytes), so the builder keeps the converted blobs:
+
+- *Key.* Everything that changes the packed bytes: location, offset, the format byte (it carries the
+  linear and normalized flags), the linear flag, width, height, depth, mip count, the pitch register and the
+  face count. Two descriptors that differ in any of them get separate entries; the filter, address, remap
+  and border words only affect sampling and are not part of the key. A texture at the address of a known
+  render target is an alias and never reaches the cache.
+- *Entry.* The shared blob, a content id, a 64-bit hash of the guest bytes it was made from, the guest range
+  and the layout. The content id comes from a process-wide counter, so two blobs never share an id, whichever
+  builder made them. A draw carries the blob and the id in its `RsxTextureDesc`.
+- *Epochs.* Guest memory can change between draws and the builder cannot see it, so an entry is trusted only
+  inside an epoch. A new epoch starts at every flip, every `NV406E_SEMAPHORE_ACQUIRE` and
+  `NV406E_SEMAPHORE_RELEASE`, every `NV4097` semaphore release, and on the inline blit and image-in methods
+  (`NV308A_COLOR`, `NV3089_IMAGE_IN`, `NV0039_BUFFER_NOTIFY`): the points where the game learns how far the
+  RSX has got, or the RSX writes memory itself. A game has to synchronize with the RSX before it reuses
+  texture memory the RSX may still read, so a change it makes behind the RSX's back shows up at the next of
+  these points (this title does two acquires per flip); a guest write inside an epoch, with none of them
+  in between, is not seen until the epoch ends. Inside an epoch an entry is used without reading guest
+  memory. On the first use in a later epoch the guest range is read into a scratch buffer and hashed
+  (`rsxHashBytes`, four multiply-fold lanes over 64 bytes per step); an unchanged hash keeps the blob and
+  its id, a changed one converts a new blob under a new id. The reads go through the memory view, so a
+  capture records them where the replay builder, which starts with an empty cache, makes the same reads.
+- *Writes by the RSX.* A color or depth surface that a clear or a draw writes ends the trust in every entry
+  whose range overlaps it, at once and without a new epoch; such an entry is read and hashed again at its
+  next use. (The renderer keeps surface contents on the GPU, so the guest bytes are normally unchanged and
+  the hash keeps the blob.)
+- *Bounds.* Blobs are kept up to 256 MiB; past that the least recently used entries go. Every 32 flips
+  entries unused for 600 flips are dropped. A draw that still holds a dropped blob keeps it alive.
+
+The renderer uploads from a blob only when the image does not hold it already: each `TextureImage` remembers
+the content id it was last given and `prepareTextures` skips the upload when the id matches (an id of 0,
+used by hand-made descriptors, always uploads). `RendererStats::texture_uploads` counts the uploads. An upload
+that replaces content mid-frame is ordered after the draws recorded earlier by the image barrier of
+`recordUpload`, whose source scope is all commands.
 
 The sampler follows RPCS3's `update_fragment_sampler`: the mip chain is sampled only when the min
 filter is one of the four mip filters (NEAREST_NEAREST, LINEAR_NEAREST, NEAREST_LINEAR,

@@ -1258,7 +1258,9 @@ std::vector<std::uint8_t> makeTexturedCapture(const TextureOptions& options) {
 }
 
 // Two quads (pixels 4..28 and 36..60) textured by the same 2x2 texture; the texel words change between
-// the draws, so the second quad must show yellow, cyan, magenta and grey instead.
+// the draws, so the second quad must show yellow, cyan, magenta and grey instead. A semaphore acquire sits
+// between them, the kind of synchronization a game does before it rewrites texture memory: the frame builder
+// only looks at guest memory again after one.
 std::vector<std::uint8_t> makeChangedTextureCapture() {
     using namespace tox2::rsx_synthetic;
     SceneBuilder scene;
@@ -1290,6 +1292,7 @@ std::vector<std::uint8_t> makeChangedTextureCapture() {
         scene.memory().putWord(0, kTextureOffset + (i / kTextureSize) * (kTextureSize * 4) + (i % kTextureSize) * 4,
                                kSecond[i]);
     }
+    scene.write(tox2::kMethodNv406eSemaphoreAcquire, 0);
     quad(0.125f, 0.875f);
     return scene.finish();
 }
@@ -1401,6 +1404,7 @@ void testRendererTextures(tox2::VkContext& ctx) {
     {
         std::vector<tox2::RsxCommand> commands = replaySynthetic(makeChangedTextureCapture());
         tox2::rsxUnimplementedReset();
+        const std::uint64_t uploads_before = renderer.stats().texture_uploads;
         renderer.execute(commands);
         CHECK(renderer.valid());
         CHECK(renderer.readDisplay(bgra, width, height));
@@ -1408,6 +1412,36 @@ void testRendererTextures(tox2::VkContext& ctx) {
         CHECK(pixelArgb(bgra, width, 10, 24) == 0xFFFF0000 && pixelArgb(bgra, width, 22, 40) == 0x80FFFFFF);
         CHECK(pixelArgb(bgra, width, 42, 24) == 0xFFFFFF00 && pixelArgb(bgra, width, 54, 40) == 0xFF808080);
         CHECK(renderer.stats().draws_skipped == 0);
+        // The two draws carry different content ids, so the one image is uploaded for each of them.
+        CHECK(renderer.stats().texture_uploads == uploads_before + 2);
+        expectNoNotes();
+    }
+
+    // An image is uploaded from a blob once: the same commands again carry the same content ids and upload
+    // nothing, and a new content id (the guest bytes changed) uploads again. A blob with no id is always new.
+    {
+        std::vector<tox2::RsxCommand> commands = replaySynthetic(makeTexturedCapture({}));
+        tox2::rsxUnimplementedReset();
+        const auto texture = [&]() -> tox2::RsxTextureDesc& {
+            for (tox2::RsxCommand& command : commands) {
+                if (auto* draw = std::get_if<tox2::RsxDraw>(&command)) return draw->textures.at(0);
+            }
+            std::abort();
+        };
+        CHECK(texture().data != nullptr && texture().content_id != 0);
+        const std::uint64_t uploads_before = renderer.stats().texture_uploads;
+        renderer.execute(commands);
+        CHECK(renderer.stats().texture_uploads == uploads_before + 1);
+        renderer.execute(commands);
+        CHECK(renderer.stats().texture_uploads == uploads_before + 1);
+        texture().content_id = tox2::RsxTextureCache::nextContentId();
+        renderer.execute(commands);
+        CHECK(renderer.stats().texture_uploads == uploads_before + 2);
+        texture().content_id = 0;
+        renderer.execute(commands);
+        renderer.execute(commands);
+        CHECK(renderer.stats().texture_uploads == uploads_before + 4);
+        CHECK(renderer.valid() && renderer.stats().draws_skipped == 0);
         expectNoNotes();
     }
 
@@ -1626,8 +1660,8 @@ void testRendererVolumeTextures(tox2::VkContext& ctx) {
     CHECK(pixelArgb(bgra, width, 42, 24) == 0xFFFFFF00 && pixelArgb(bgra, width, 54, 24) == 0xFF00FFFF);
     CHECK(pixelArgb(bgra, width, 42, 40) == 0xFFFF00FF && pixelArgb(bgra, width, 54, 40) == 0xFF808080);
     CHECK(pixelArgb(bgra, width, 2, 2) == 0xFF000000);
-    // The guest bytes are uploaded again for every draw.
-    CHECK(renderer.stats().draws_skipped == 0 && renderer.stats().texture_uploads == 2);
+    // Both draws sample the same unchanged texture: one blob, one upload.
+    CHECK(renderer.stats().draws_skipped == 0 && renderer.stats().texture_uploads == 1);
     expectNoNotes();
 
     // A single slice is still a 3D texture: both quads read it (w repeats).

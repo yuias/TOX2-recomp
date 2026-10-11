@@ -14,6 +14,7 @@
 #include "rsx/rsx_frame.h"
 #include "rsx/rsx_registers.h"
 #include "rsx/rsx_state.h"
+#include "rsx/rsx_texture_cache.h"
 
 namespace tox2 {
 
@@ -69,6 +70,9 @@ public:
     // Index the next flip command gets; a replay continues the numbering of the run it was captured from.
     void setFlipIndex(std::uint64_t index) { flips_ = index; }
 
+    // Converted textures kept across draws (see rsx_texture_cache.h).
+    const RsxTextureCache& textureCache() const { return textures_; }
+
 private:
     struct Range {
         std::uint32_t first = 0, count = 0;
@@ -81,7 +85,7 @@ private:
     void clear(const RsxRegisters& regs, std::uint32_t mask);
     bool fillVertices(const RsxRegisters& regs, RsxDraw& draw, std::uint32_t vertex_base, std::uint32_t vertex_count);
     void fillTextures(const RsxRegisters& regs, RsxDraw& draw);
-    void copyTexture(RsxTextureDesc& texture, RsxDraw& draw);
+    void copyTexture(RsxTextureDesc& texture);
     void fillFragmentProgram(const RsxRegisters& regs, RsxDraw& draw);
     void fillVertexProgram(const RsxRegisters& regs, RsxDraw& draw);
     std::int32_t noteSurface(const RsxSurface& surface);
@@ -91,6 +95,8 @@ private:
     std::vector<RsxCommand> commands_;
     std::vector<RsxSurface> known_surfaces_;
     std::uint64_t flips_ = 0;
+    RsxTextureCache textures_;
+    std::vector<std::uint8_t> texture_scratch_;  // guest bytes of the texture being checked or converted
 
     // The open draw clause between SET_BEGIN_END(prim) and SET_BEGIN_END(0).
     bool in_draw_ = false;

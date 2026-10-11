@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <variant>
 #include <vector>
 
@@ -60,13 +61,17 @@ struct RsxTextureDesc {
     // words. For a texture with bytes, pitch is the row size of level 0 in the copied (tightly packed) data.
     std::uint32_t location = 0, offset = 0, pitch = 0, width = 0, height = 0, control0 = 0, remap = 0, filter = 0,
                   address = 0, border = 0;
-    std::int32_t rt_alias = -1;  // index into the builder's known surfaces, -1 = bytes in texture_data
+    std::int32_t rt_alias = -1;  // index into the builder's known surfaces, -1 = bytes in `data`
     // The aliased surface is a depth surface (its RsxSurface::depth_format is not None); meaningful with rt_alias.
     bool rt_depth = false;
-    // The copy in RsxDraw::texture_data holds every mip level one after the other (for a cube map, the six
-    // faces one after the other), each level in tightly packed rows and slices, de-swizzled (rsxTextureLayout
-    // with packed offsets); data_size 0 means no bytes were copied.
-    std::uint32_t data_offset = 0, data_size = 0;
+    // Converted texture bytes: every mip level one after the other (for a cube map, the six faces one after the
+    // other), each level in tightly packed rows and slices, de-swizzled (rsxTextureLayout with packed offsets).
+    // Null means no bytes were copied. The blob is shared by every draw that samples the same unchanged guest
+    // texture, and `content_id` names its content: it is the same for those draws and differs from the id of any
+    // other blob, whichever builder made it, so a renderer can skip an upload whose id it already holds. 0 is
+    // "unnamed" (hand-made descriptors): such a blob is always treated as new.
+    std::shared_ptr<const std::vector<std::uint8_t>> data;
+    std::uint64_t content_id = 0;
 };
 
 struct RsxRasterState {
@@ -112,7 +117,6 @@ struct RsxDraw {
     std::array<float, 16 * 4> default_attribs{};
     std::uint32_t default_written = 0;
     std::vector<RsxTextureDesc> textures;
-    std::vector<std::uint8_t> texture_data;
     std::uint64_t vp_hash = 0;
     std::vector<std::uint32_t> vp_ucode;
     std::uint32_t vp_input_mask = 0, vp_output_mask = 0;

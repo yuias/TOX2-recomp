@@ -7278,6 +7278,7 @@ class FakeRsxMemory final : public tox2::RsxMemoryView {
 public:
     FakeRsxMemory() : local(0x10000), main(0x10000) {}
     bool read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override {
+        reads[{location, offset}]++;
         const std::vector<std::uint8_t>& bytes = location == 0 ? local : main;
         if (offset > bytes.size() || out.size() > bytes.size() - offset) return false;
         std::memcpy(out.data(), bytes.data() + offset, out.size());
@@ -7287,7 +7288,13 @@ public:
         std::vector<std::uint8_t>& bytes = location == 0 ? local : main;
         for (int i = 0; i < 4; i++) bytes[offset + i] = static_cast<std::uint8_t>(word >> (24 - 8 * i));
     }
+    // Reads that started at (location, offset).
+    int readsAt(std::uint32_t location, std::uint32_t offset) const {
+        const auto it = reads.find({location, offset});
+        return it == reads.end() ? 0 : it->second;
+    }
     std::vector<std::uint8_t> local, main;
+    std::map<std::pair<std::uint32_t, std::uint32_t>, int> reads;
 };
 
 // Guest layout of mip chains and de-swizzling, checked against the rules of RPCS3's `TextureUtils.cpp`.
@@ -7557,6 +7564,13 @@ void testRsxTextureLayout() {
     }
 }
 
+// Bytes of a texture's converted blob; empty when the builder copied none.
+std::size_t texSize(const tox2::RsxTextureDesc& texture) { return texture.data ? texture.data->size() : 0; }
+
+std::uint8_t texByte(const tox2::RsxTextureDesc& texture, std::size_t index) {
+    return texture.data && index < texture.data->size() ? (*texture.data)[index] : 0xEE;
+}
+
 void testRsxFrameBuilder() {
     auto regs = std::make_unique<tox2::RsxRegisters>();
     regs->reset();
@@ -7729,18 +7743,18 @@ void testRsxFrameBuilder() {
     CHECK(commands.size() == 1);
     const tox2::RsxDraw& textured = std::get<tox2::RsxDraw>(commands[0]);
     CHECK(textured.textures.size() == 3);
-    CHECK(textured.textures[0].unit == 0 && textured.textures[0].rt_alias == 0 && textured.textures[0].data_size == 0);
+    CHECK(textured.textures[0].unit == 0 && textured.textures[0].rt_alias == 0 && texSize(textured.textures[0]) == 0);
     CHECK(textured.textures[1].unit == 1 && textured.textures[1].rt_alias == -1 &&
-          textured.textures[1].data_size == 64 * 3 + 64);
-    CHECK(textured.texture_data.size() == 512 && textured.texture_data[0] == (0 ^ 0x5A) &&
-          textured.texture_data[255] == (255 ^ 0x5A));
+          texSize(textured.textures[1]) == 64 * 3 + 64);
+    CHECK(texSize(textured.textures[2]) == 256 && texByte(textured.textures[1], 0) == (0 ^ 0x5A) &&
+          texByte(textured.textures[1], 255) == (255 ^ 0x5A));
     // Texel (x, y) of the swizzled image comes from guest texel (x & 3 interleaved with y & 3) | (x >> 2) << 4:
     // (5, 1) is guest texel 19, (15, 3) is guest texel 63.
     const tox2::RsxTextureDesc& swizzled = textured.textures[2];
-    CHECK(swizzled.unit == 2 && swizzled.data_offset == 256 && swizzled.data_size == 256 && swizzled.pitch == 64);
-    CHECK(textured.texture_data[swizzled.data_offset + 0] == (0 ^ 0x5A));
-    CHECK(textured.texture_data[swizzled.data_offset + (1 * 16 + 5) * 4 + 2] == ((19 * 4 + 2) ^ 0x5A));
-    CHECK(textured.texture_data[swizzled.data_offset + (3 * 16 + 15) * 4 + 3] == ((63 * 4 + 3) ^ 0x5A));
+    CHECK(swizzled.unit == 2 && texSize(swizzled) == 256 && swizzled.pitch == 64);
+    CHECK(texByte(swizzled, 0) == (0 ^ 0x5A));
+    CHECK(texByte(swizzled, (1 * 16 + 5) * 4 + 2) == ((19 * 4 + 2) ^ 0x5A));
+    CHECK(texByte(swizzled, (3 * 16 + 15) * 4 + 3) == ((63 * 4 + 3) ^ 0x5A));
     CHECK(unimplementedCount("texture layout swizzled") == 0 && unimplementedCount("texture layout mips 3") == 0);
     CHECK(unimplementedCount("state texture location 0x0") == 0);
 
@@ -7768,16 +7782,14 @@ void testRsxFrameBuilder() {
     CHECK(commands.size() == 1);
     const tox2::RsxDraw& compressed = std::get<tox2::RsxDraw>(commands[0]);
     CHECK(compressed.textures.size() == 3);
-    CHECK(compressed.textures[0].unit == 3 && compressed.textures[0].data_size == 64 &&
+    CHECK(compressed.textures[0].unit == 3 && texSize(compressed.textures[0]) == 64 &&
           compressed.textures[0].pitch == 32);
-    CHECK(compressed.textures[1].unit == 4 && compressed.textures[1].data_size == 16 &&
+    CHECK(compressed.textures[1].unit == 4 && texSize(compressed.textures[1]) == 16 &&
           compressed.textures[1].pitch == 16);
-    CHECK(compressed.textures[2].unit == 5 && compressed.textures[2].data_size == 40);
-    CHECK(compressed.texture_data.size() == 64 + 16 + 40);
-    CHECK(compressed.texture_data[0] == (0 ^ 0x5A) && compressed.texture_data[63] == (63 ^ 0x5A));
-    CHECK(compressed.texture_data[compressed.textures[1].data_offset] == (0 ^ 0x5A) &&
-          compressed.texture_data[compressed.textures[1].data_offset + 15] == (15 ^ 0x5A));
-    CHECK(compressed.texture_data[compressed.textures[2].data_offset + 39] == (39 ^ 0x5A));
+    CHECK(compressed.textures[2].unit == 5 && texSize(compressed.textures[2]) == 40);
+    CHECK(texByte(compressed.textures[0], 0) == (0 ^ 0x5A) && texByte(compressed.textures[0], 63) == (63 ^ 0x5A));
+    CHECK(texByte(compressed.textures[1], 0) == (0 ^ 0x5A) && texByte(compressed.textures[1], 15) == (15 ^ 0x5A));
+    CHECK(texByte(compressed.textures[2], 39) == (39 ^ 0x5A));
     CHECK(unimplementedCount("texture layout swizzled") == 0 && unimplementedCount("texture layout mips 2") == 0);
     CHECK(unimplementedCount("texture format DXT45_SZ_NR") == 0);
 
@@ -7814,22 +7826,22 @@ void testRsxFrameBuilder() {
         return chains.textures[0];
     };
     const tox2::RsxTextureDesc& swizzled_chain = unitOf(6);
-    CHECK(swizzled_chain.data_size == 168 && swizzled_chain.pitch == 32);
+    CHECK(texSize(swizzled_chain) == 168 && swizzled_chain.pitch == 32);
     const auto guestByte = [](std::uint32_t i) { return static_cast<std::uint8_t>(i ^ 0x5A); };
     // Level 0 texel (3, 2) is guest texel 13 (x bits 0 and 1 interleave with y bits 0 and 1).
     CHECK(tox2::rsxSwizzleIndex(3, 2, 3, 2) == 13);
-    CHECK(chains.texture_data[swizzled_chain.data_offset + (2 * 8 + 3) * 4 + 1] == guestByte(13 * 4 + 1));
+    CHECK(texByte(swizzled_chain, (2 * 8 + 3) * 4 + 1) == guestByte(13 * 4 + 1));
     // Level 1 is 4x2 from guest byte 128: texel (3, 1) is guest texel 7 of that level.
     CHECK(tox2::rsxSwizzleIndex(3, 1, 2, 1) == 7);
-    CHECK(chains.texture_data[swizzled_chain.data_offset + 128 + (1 * 4 + 3) * 4] == guestByte(128 + 7 * 4));
+    CHECK(texByte(swizzled_chain, 128 + (1 * 4 + 3) * 4) == guestByte(128 + 7 * 4));
     // Level 2 is 2x1 from guest byte 160, a plain row.
-    CHECK(chains.texture_data[swizzled_chain.data_offset + 160 + 4] == guestByte(160 + 4));
+    CHECK(texByte(swizzled_chain, 160 + 4) == guestByte(160 + 4));
     const tox2::RsxTextureDesc& linear_chain = unitOf(7);
-    CHECK(linear_chain.data_size == 128 + 32 && linear_chain.pitch == 32);
-    CHECK(chains.texture_data[linear_chain.data_offset + 32] == guestByte(64));         // row 1 of level 0
-    CHECK(chains.texture_data[linear_chain.data_offset + 128] == guestByte(256));       // row 0 of level 1
-    CHECK(chains.texture_data[linear_chain.data_offset + 128 + 16] == guestByte(320));  // row 1 of level 1
-    CHECK(unitOf(8).data_size == 0 && unitOf(9).data_size == 0);
+    CHECK(texSize(linear_chain) == 128 + 32 && linear_chain.pitch == 32);
+    CHECK(texByte(linear_chain, 32) == guestByte(64));         // row 1 of level 0
+    CHECK(texByte(linear_chain, 128) == guestByte(256));       // row 0 of level 1
+    CHECK(texByte(linear_chain, 128 + 16) == guestByte(320));  // row 1 of level 1
+    CHECK(texSize(unitOf(8)) == 0 && texSize(unitOf(9)) == 0);
     CHECK(unimplementedCount("texture layout swizzled non-power-of-two") == 1);
     CHECK(unimplementedCount("texture layout pitch below row size") == 1);
     CHECK(unimplementedCount("texture layout swizzled") == 0 && unimplementedCount("texture layout mips 3") == 0);
@@ -7867,21 +7879,20 @@ void testRsxFrameBuilder() {
         return shapes.textures[0];
     };
     const tox2::RsxTextureDesc& volume_texture = shapeOf(3);
-    CHECK(volume_texture.depth == 3 && volume_texture.data_size == 96 && volume_texture.pitch == 16);
-    CHECK(shapes.texture_data[volume_texture.data_offset + 16] == guestByte(24));   // slice 0, row 1
-    CHECK(shapes.texture_data[volume_texture.data_offset + 32] == guestByte(48));   // slice 1, row 0
-    CHECK(shapes.texture_data[volume_texture.data_offset + 80] == guestByte(120));  // slice 2, row 1
+    CHECK(volume_texture.depth == 3 && texSize(volume_texture) == 96 && volume_texture.pitch == 16);
+    CHECK(texByte(volume_texture, 16) == guestByte(24));   // slice 0, row 1
+    CHECK(texByte(volume_texture, 32) == guestByte(48));   // slice 1, row 0
+    CHECK(texByte(volume_texture, 80) == guestByte(120));  // slice 2, row 1
     const tox2::RsxTextureDesc& cube_texture = shapeOf(4);
-    CHECK(cube_texture.cubemap && cube_texture.data_size == 6 * 64);
-    CHECK(shapes.texture_data[cube_texture.data_offset + 64] == guestByte(128));  // face 1, texel (0, 0)
-    CHECK(shapes.texture_data[cube_texture.data_offset + 2 * 64 + 4] ==
-          guestByte(256 + 1 * 4));  // face 2, texel (1, 0)
+    CHECK(cube_texture.cubemap && texSize(cube_texture) == 6 * 64);
+    CHECK(texByte(cube_texture, 64) == guestByte(128));                  // face 1, texel (0, 0)
+    CHECK(texByte(cube_texture, 2 * 64 + 4) == guestByte(256 + 1 * 4));  // face 2, texel (1, 0)
     const tox2::RsxTextureDesc& vtc_texture = shapeOf(5);
-    CHECK(vtc_texture.depth == 5 && vtc_texture.data_size == 5 * 4 * 8);
+    CHECK(vtc_texture.depth == 5 && texSize(vtc_texture) == 5 * 4 * 8);
     // Slice 1 block 2 is guest block 2 * 4 + 1; slice 4, the last group of one slice, block 2 is guest block 16 + 2.
-    CHECK(shapes.texture_data[vtc_texture.data_offset + (1 * 4 + 2) * 8] == guestByte((2 * 4 + 1) * 8));
-    CHECK(shapes.texture_data[vtc_texture.data_offset + (4 * 4 + 2) * 8] == guestByte((16 + 2) * 8));
-    CHECK(shapeOf(6).data_size == 0 && shapeOf(7).data_size == 0);
+    CHECK(texByte(vtc_texture, (1 * 4 + 2) * 8) == guestByte((2 * 4 + 1) * 8));
+    CHECK(texByte(vtc_texture, (4 * 4 + 2) * 8) == guestByte((16 + 2) * 8));
+    CHECK(texSize(shapeOf(6)) == 0 && texSize(shapeOf(7)) == 0);
     CHECK(unimplementedCount("texture layout dimension 1") == 1);
     CHECK(unimplementedCount("texture layout swizzled non-power-of-two") == 1);
     CHECK(unimplementedCount("texture layout cubemap") == 0 && unimplementedCount("texture layout dimension 3") == 0);
@@ -7960,10 +7971,10 @@ bool sameCommand(const tox2::RsxCommand& left, const tox2::RsxCommand& right) {
     if (!sameSurfaceState(a.surfaces, b.surfaces) || a.primitive != b.primitive || a.indexed != b.indexed ||
         a.index_type != b.index_type || a.first != b.first || a.count != b.count || a.min_index != b.min_index ||
         a.attribs.size() != b.attribs.size() || a.textures.size() != b.textures.size() ||
-        a.vertex_data != b.vertex_data || a.index_data != b.index_data || a.texture_data != b.texture_data ||
-        a.vp_hash != b.vp_hash || a.vp_ucode != b.vp_ucode || a.vp_constants != b.vp_constants ||
-        a.fp_hash != b.fp_hash || a.fp_ucode != b.fp_ucode || a.fp_constants != b.fp_constants ||
-        a.fp_control != b.fp_control || a.texcoord_control != b.texcoord_control || a.raster.cull != b.raster.cull ||
+        a.vertex_data != b.vertex_data || a.index_data != b.index_data || a.vp_hash != b.vp_hash ||
+        a.vp_ucode != b.vp_ucode || a.vp_constants != b.vp_constants || a.fp_hash != b.fp_hash ||
+        a.fp_ucode != b.fp_ucode || a.fp_constants != b.fp_constants || a.fp_control != b.fp_control ||
+        a.texcoord_control != b.texcoord_control || a.raster.cull != b.raster.cull ||
         a.default_attribs != b.default_attribs) {
         return false;
     }
@@ -7971,8 +7982,8 @@ bool sameCommand(const tox2::RsxCommand& left, const tox2::RsxCommand& right) {
         const auto& x = a.textures[i];
         const auto& y = b.textures[i];
         if (x.unit != y.unit || x.rt_alias != y.rt_alias || x.offset != y.offset || x.pitch != y.pitch ||
-            x.width != y.width || x.height != y.height || x.data_offset != y.data_offset ||
-            x.data_size != y.data_size) {
+            x.width != y.width || x.height != y.height || (x.data == nullptr) != (y.data == nullptr) ||
+            (x.data != nullptr && *x.data != *y.data)) {
             return false;
         }
     }
@@ -7991,6 +8002,220 @@ bool sameCommand(const tox2::RsxCommand& left, const tox2::RsxCommand& right) {
 // F_X32 color surfaces and depth surfaces as render target aliases: decoding, registration in the builder
 // (which draws and clears make a surface known, what a clear of a float surface does), the alias flags of a
 // texture, and the capture round trip of both kinds.
+// The frame builder's texture cache: one blob and one guest read per epoch for an unchanged texture, a new
+// content id when the guest bytes change, and the events that end the trust in a cached blob.
+void testRsxTextureCache() {
+    // Hash: any single changed byte, and a changed length of zero bytes, give another value.
+    {
+        std::vector<std::uint8_t> bytes(300);
+        for (std::size_t i = 0; i < bytes.size(); i++) bytes[i] = static_cast<std::uint8_t>(i * 7 + 1);
+        bool distinct = true;
+        for (std::size_t length : {0, 1, 7, 8, 15, 16, 17, 63, 64, 65, 127, 128, 129, 300}) {
+            const std::uint64_t base = tox2::rsxHashBytes(std::span(bytes).first(length));
+            for (std::size_t i = 0; i < length; i++) {
+                bytes[i] ^= 0x10;
+                distinct = distinct && tox2::rsxHashBytes(std::span(bytes).first(length)) != base;
+                bytes[i] ^= 0x10;
+            }
+            distinct = distinct && base == tox2::rsxHashBytes(std::span(bytes).first(length));
+        }
+        CHECK(distinct);
+        const std::vector<std::uint8_t> zeros(64);
+        CHECK(tox2::rsxHashBytes(std::span(zeros).first(8)) != tox2::rsxHashBytes(std::span(zeros).first(9)));
+    }
+
+    // Eviction: past the byte budget the least recently used entry goes; an entry unused for many flips
+    // goes at the next sweep.
+    {
+        tox2::RsxTextureCache cache(250);
+        tox2::RsxTextureLayout layout;
+        layout.guest_bytes = 100;
+        layout.levels.resize(1);
+        const auto blob = [] { return std::make_shared<const std::vector<std::uint8_t>>(100); };
+        const auto key = [](std::uint32_t offset) {
+            tox2::RsxTextureCache::Key k;
+            k.offset = offset;
+            return k;
+        };
+        cache.store(key(0), layout, 1, blob());
+        cache.store(key(100), layout, 2, blob());
+        CHECK(cache.find(key(0)) != nullptr);  // key(100) is now the least recently used
+        const std::uint64_t first_id = cache.find(key(0))->content_id;
+        cache.store(key(200), layout, 3, blob());
+        CHECK(cache.entryCount() == 2 && cache.byteCount() == 200);
+        CHECK(cache.find(key(100)) == nullptr && cache.find(key(0)) != nullptr && cache.find(key(200)) != nullptr);
+        CHECK(cache.find(key(0))->content_id == first_id);
+        cache.onFlip(32);
+        CHECK(cache.entryCount() == 2);
+        cache.onFlip((tox2::RsxTextureCache::kIdleFlips / 32 + 2) * 32);  // a sweep flip, past the idle limit
+        CHECK(cache.entryCount() == 0 && cache.byteCount() == 0);
+    }
+
+    tox2::rsxUnimplementedReset();
+    auto regs = std::make_unique<tox2::RsxRegisters>();
+    regs->reset();
+    FakeRsxMemory memory;
+    tox2::RsxFrameBuilder builder(memory);
+    const auto write = [&](std::uint32_t method, std::uint32_t value) {
+        regs->apply(method, value);
+        builder.onWrite(*regs, method, value);
+    };
+    const auto flip = [&] {
+        builder.onFlip(*regs, 0, {});
+        regs->contextReset();
+    };
+    const auto setSurface = [&](std::uint32_t offset, std::uint32_t pitch, std::uint32_t height) {
+        write(0x0200, 16u << 16);
+        write(0x0204, height << 16);
+        write(0x0208, 8u | (2u << 5) | (1u << 8));
+        write(0x020C, pitch);
+        write(0x0210, offset);
+        write(0x0214, 0x900000);
+        write(0x022C, pitch);
+        write(0x0220, 1);
+        write(0x08C0, 16u << 16);
+        write(0x08C4, height << 16);
+    };
+    // Unit `unit` samples a texture at local `offset`: format byte `fmt` (0x85 swizzled, 0xA5 linear) and
+    // `mips` levels, width x height texels, pitch register `pitch`.
+    const auto setTexture = [&](std::uint32_t unit, std::uint32_t offset, std::uint32_t fmt, std::uint32_t mips,
+                                std::uint32_t width, std::uint32_t height, std::uint32_t pitch) {
+        write(0x1A00 + unit * 0x20, offset);
+        write(0x1A04 + unit * 0x20, 1u | (2u << 4) | (fmt << 8) | (mips << 16));
+        write(0x1A0C + unit * 0x20, 0x80000000);
+        write(0x1A18 + unit * 0x20, (width << 16) | height);
+        write(0x1840 + unit * 4, pitch);
+    };
+    // A fragment program that ends at its first word, so that the builder does not scan guest memory for the
+    // end flag (and read the texture bytes on the way).
+    memory.putWord(0, 0x2000, 0x00010000);
+    const auto draw = [&]() {
+        write(0x08E4, 0x2000 | 1);
+        write(0x1808, 5);
+        write(0x1814, 2u << 24);
+        write(0x1808, 0);
+        // The commands since the last call: possibly a flip, then the draw.
+        std::vector<tox2::RsxCommand> commands = builder.takeCommands();
+        tox2::RsxDraw result;
+        int draws = 0;
+        for (const tox2::RsxCommand& command : commands) {
+            if (const auto* found = std::get_if<tox2::RsxDraw>(&command)) {
+                result = *found;
+                draws++;
+            }
+        }
+        CHECK(draws == 1);
+        return result;
+    };
+    const auto fill = [&](std::uint32_t offset, std::uint32_t size, std::uint8_t seed) {
+        for (std::uint32_t i = 0; i < size; i++) memory.local[offset + i] = static_cast<std::uint8_t>(i + seed);
+    };
+    constexpr std::uint32_t kTex = 0x3000;
+    setSurface(0x100000, 64, 4);
+    fill(kTex, 64, 1);
+    setTexture(0, kTex, 0xA5, 1, 4, 4, 16);
+
+    // Draws in one epoch share the blob and read guest memory once; a guest write nobody announced is not
+    // seen yet.
+    const tox2::RsxDraw first = draw();
+    CHECK(first.textures.size() == 1 && first.textures[0].data != nullptr && first.textures[0].content_id != 0);
+    CHECK(texSize(first.textures[0]) == 64 && texByte(first.textures[0], 0) == 1);
+    fill(kTex, 64, 100);
+    const tox2::RsxDraw second = draw();
+    CHECK(second.textures[0].data == first.textures[0].data &&
+          second.textures[0].content_id == first.textures[0].content_id);
+    CHECK(memory.readsAt(0, kTex) == 1);
+
+    // A flip ends the epoch: the changed bytes get a new blob and id, and the earlier draws keep theirs.
+    flip();
+    setTexture(0, kTex, 0xA5, 1, 4, 4, 16);
+    const tox2::RsxDraw third = draw();
+    CHECK(memory.readsAt(0, kTex) == 2);
+    CHECK(third.textures[0].content_id != first.textures[0].content_id &&
+          third.textures[0].data != first.textures[0].data);
+    CHECK(texByte(third.textures[0], 0) == 100 && texByte(first.textures[0], 0) == 1);
+
+    // After a flip with the bytes unchanged the guest memory is read and compared, and the blob and id stay.
+    flip();
+    setTexture(0, kTex, 0xA5, 1, 4, 4, 16);
+    const tox2::RsxDraw fourth = draw();
+    const tox2::RsxDraw fifth = draw();
+    CHECK(memory.readsAt(0, kTex) == 3);
+    CHECK(fourth.textures[0].content_id == third.textures[0].content_id &&
+          fourth.textures[0].data == third.textures[0].data);
+    CHECK(fifth.textures[0].data == third.textures[0].data);
+
+    // A semaphore acquire (and a release) ends the epoch too.
+    setSurface(0x100000, 64, 4);
+    write(tox2::kMethodNv4097SetColorMask, 0x01010101);
+    fill(kTex, 64, 7);
+    write(tox2::kMethodNv406eSemaphoreAcquire, 0);
+    const tox2::RsxDraw after_acquire = draw();
+    CHECK(memory.readsAt(0, kTex) == 4 && after_acquire.textures[0].content_id != third.textures[0].content_id);
+    fill(kTex, 64, 9);
+    write(tox2::kMethodNv406eSemaphoreRelease, 1);
+    const tox2::RsxDraw after_release = draw();
+    CHECK(memory.readsAt(0, kTex) == 5 && after_release.textures[0].content_id != after_acquire.textures[0].content_id);
+
+    // A target the RSX draws or clears over the texture's range ends the trust at once, inside the epoch; a
+    // target elsewhere does not.
+    fill(kTex, 64, 11);
+    write(0x1D90, 0xFF102030);
+    write(0x1D8C, 0xFFFFFF00);
+    write(0x1D94, 0xF3);  // clears the surface at 0x100000
+    CHECK(builder.takeCommands().size() == 1);
+    const tox2::RsxDraw elsewhere = draw();
+    CHECK(memory.readsAt(0, kTex) == 5 && elsewhere.textures[0].content_id == after_release.textures[0].content_id);
+    setSurface(kTex - 0x40, 64, 4);  // covers [kTex - 0x40, kTex + 0xC0)
+    write(0x1D94, 0xF3);
+    CHECK(builder.takeCommands().size() == 1);
+    const tox2::RsxDraw overlapped = draw();
+    CHECK(memory.readsAt(0, kTex) == 6 && overlapped.textures[0].content_id != after_release.textures[0].content_id);
+    CHECK(overlapped.textures[0].rt_alias == -1 && texByte(overlapped.textures[0], 0) == 11);
+    CHECK(overlapped.surfaces.color.offset == kTex - 0x40);
+    const tox2::RsxDraw again = draw();  // the draw above wrote the target again, so the texture is read again
+    CHECK(memory.readsAt(0, kTex) == 7 && again.textures[0].content_id == overlapped.textures[0].content_id);
+
+    // A texture at the address of a known render target is an alias and carries no bytes, cached blob or not.
+    setSurface(kTex, 64, 4);
+    write(0x1D94, 0xF3);
+    CHECK(builder.takeCommands().size() == 1);
+    const tox2::RsxDraw alias = draw();
+    CHECK(alias.textures[0].rt_alias >= 0 && alias.textures[0].data == nullptr && alias.textures[0].content_id == 0);
+
+    // Descriptors that differ in anything that changes the packed bytes get their own entries.
+    flip();
+    setSurface(0x100000, 64, 4);
+    fill(kTex + 0x100, 256, 3);
+    const std::size_t entries_before = builder.textureCache().entryCount();
+    setTexture(0, kTex + 0x100, 0xA5, 1, 4, 4, 16);  // linear 4x4
+    setTexture(1, kTex + 0x100, 0x85, 1, 4, 4, 0);   // the same bytes swizzled
+    setTexture(2, kTex + 0x100, 0xA5, 1, 4, 4, 32);  // padded pitch
+    setTexture(3, kTex + 0x100, 0xA5, 2, 4, 4, 16);  // two levels
+    setTexture(4, kTex + 0x100, 0xA5, 1, 8, 2, 32);  // another shape
+    setTexture(5, kTex + 0x100, 0xA5, 1, 4, 4, 16);  // same as unit 0
+    const tox2::RsxDraw variants = draw();
+    CHECK(variants.textures.size() == 6);
+    CHECK(builder.textureCache().entryCount() == entries_before + 5);
+    for (std::size_t a = 0; a < 5; a++) {
+        for (std::size_t b = a + 1; b < 5; b++) {
+            CHECK(variants.textures[a].content_id != variants.textures[b].content_id);
+        }
+    }
+    CHECK(variants.textures[5].content_id == variants.textures[0].content_id &&
+          variants.textures[5].data == variants.textures[0].data);
+    CHECK(texSize(variants.textures[1]) == 64 && variants.textures[1].data != variants.textures[0].data);
+    CHECK(*variants.textures[1].data != *variants.textures[0].data);
+    CHECK(unimplementedCount("state unreadable texture memory") == 0);
+
+    // An unreadable range is counted on every draw and leaves no entry.
+    for (std::uint32_t unit = 0; unit < 6; unit++) write(0x1A0C + unit * 0x20, 0);
+    setTexture(6, 0xFFF0, 0xA5, 1, 16, 16, 64);
+    const tox2::RsxDraw unreadable = draw();
+    CHECK(texSize(unreadable.textures.back()) == 0 && unimplementedCount("state unreadable texture memory") == 1);
+    CHECK(builder.textureCache().entryCount() == entries_before + 5);
+}
+
 void testRsxFloatAndDepthSurfaces() {
     auto regs = std::make_unique<tox2::RsxRegisters>();
     regs->reset();
@@ -8078,8 +8303,8 @@ void testRsxFloatAndDepthSurfaces() {
     const tox2::RsxDraw& textured = std::get<tox2::RsxDraw>(commands[0]);
     CHECK(textured.textures.size() == 3);
     CHECK(textured.textures[0].rt_alias == 1 && !textured.textures[0].rt_depth);
-    CHECK(textured.textures[1].rt_alias == 0 && textured.textures[1].rt_depth && textured.textures[1].data_size == 0);
-    CHECK(textured.textures[2].rt_alias == -1 && !textured.textures[2].rt_depth && textured.textures[2].data_size == 0);
+    CHECK(textured.textures[1].rt_alias == 0 && textured.textures[1].rt_depth && texSize(textured.textures[1]) == 0);
+    CHECK(textured.textures[2].rt_alias == -1 && !textured.textures[2].rt_depth && texSize(textured.textures[2]) == 0);
     CHECK(unimplementedCount("texture format X32_FLOAT_LN_NR") == 1);
     CHECK(tox2::rsxTextureFormatRenderTargetOnly(0x9C | 0x20) && !tox2::rsxTextureFormatRenderTargetOnly(0x85) &&
           !tox2::rsxTextureFormatSampleable(0x9C));
@@ -8172,7 +8397,17 @@ void testRsxCapture() {
           std::holds_alternative<tox2::RsxDraw>(live[1]));
     CHECK(std::get<tox2::RsxDraw>(live[2]).textures.size() == 2 &&
           std::get<tox2::RsxDraw>(live[2]).textures[0].rt_alias == 0);
-    CHECK(!std::get<tox2::RsxDraw>(live[2]).texture_data.empty());
+    CHECK(texSize(std::get<tox2::RsxDraw>(live[2]).textures[1]) != 0);
+
+    // The same draw again: the texture is cached, so the builder reads no guest memory for it, yet the capture
+    // has its bytes once and the replay, which starts with an empty cache, rebuilds both draws.
+    const int texture_reads = memory.readsAt(0, 0x3000);
+    write(0x1808, 5);
+    write(0x1814, 2u << 24);
+    write(0x1808, 0);
+    collect();
+    CHECK(live.size() == 4 && memory.readsAt(0, 0x3000) == texture_reads);
+    CHECK(std::get<tox2::RsxDraw>(live[3]).textures[1].data == std::get<tox2::RsxDraw>(live[2]).textures[1].data);
 
     // The flip, as the consumer runs it: the builder and the writer see it, the context registers are
     // reset, and only then does the flip method write itself land.
@@ -8195,9 +8430,9 @@ void testRsxCapture() {
     write(0x0220, 1);
     write(0x1D94, 0xF3);
     collect();
-    CHECK(live.size() == 5 && std::holds_alternative<tox2::RsxFlip>(live[3]) &&
-          std::holds_alternative<tox2::RsxClear>(live[4]));
-    CHECK(std::get<tox2::RsxClear>(live[4]).surfaces.color.offset == 0);
+    CHECK(live.size() == 6 && std::holds_alternative<tox2::RsxFlip>(live[4]) &&
+          std::holds_alternative<tox2::RsxClear>(live[5]));
+    CHECK(std::get<tox2::RsxClear>(live[5]).surfaces.color.offset == 0);
     CHECK(std::get<tox2::RsxClear>(live[0]).surfaces.color.offset == 0x100000);
 
     std::array<tox2::RsxDisplayBuffer, tox2::kRsxDisplayBufferCount> displays{};
@@ -8225,7 +8460,7 @@ void testRsxCapture() {
                                                        replay_builder.knownSurfaces().end())};
     };
     const auto [replayed, replay_surfaces] = replayCommands(reader);
-    CHECK(replayed.size() == live.size() && std::get<tox2::RsxFlip>(live[3]).flip_index == 7);
+    CHECK(replayed.size() == live.size() && std::get<tox2::RsxFlip>(live[4]).flip_index == 7);
     bool same = replayed.size() == live.size();
     for (std::size_t i = 0; same && i < live.size(); i++) same = sameCommand(live[i], replayed[i]);
     CHECK(same);
@@ -8367,8 +8602,9 @@ void testRsxSyntheticCaptures() {
     CHECK(commands.size() == 3 && std::holds_alternative<tox2::RsxDraw>(commands[1]));
     const tox2::RsxDraw& textured = std::get<tox2::RsxDraw>(commands[1]);
     CHECK(textured.textures.size() == 1 && textured.textures[0].rt_alias == -1 && textured.textures[0].width == 2);
-    CHECK(textured.textures[0].data_size == 16 && textured.texture_data.size() == 16);
-    CHECK(textured.texture_data[0] == 0xFF && textured.texture_data[1] == 0xFF && textured.texture_data[2] == 0x00);
+    CHECK(texSize(textured.textures[0]) == 16);
+    CHECK(texByte(textured.textures[0], 0) == 0xFF && texByte(textured.textures[0], 1) == 0xFF &&
+          texByte(textured.textures[0], 2) == 0x00);
     CHECK(unimplementedCount("capture missing range") == 0);
 
     // A draw carries the branch bits register, and its vertex program runs on past the first end bit
@@ -10887,6 +11123,7 @@ int main(int argc, char** argv) {
     testRsxDecode();
     testRsxTextureLayout();
     testRsxFrameBuilder();
+    testRsxTextureCache();
     testRsxFloatAndDepthSurfaces();
     testRsxCapture();
     testRsxSyntheticCaptures();

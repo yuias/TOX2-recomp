@@ -771,8 +771,9 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
 
 // Fills the image info and coordinate scale of every texture unit the draw's fragment program samples.
 // A unit without a usable texture keeps the placeholder, and every such case is counted with
-// rsxNoteUnimplemented, so a census without texture kinds means no placeholder was sampled. Texture memory is uploaded
-// again for every draw, as the guest may have changed it between draws.
+// rsxNoteUnimplemented, so a census without texture kinds means no placeholder was sampled. A texture image is
+// uploaded only when the content id of the blob differs from the one it received last: the frame builder gives
+// an unchanged guest texture the same blob and id in every draw, and a new id once the guest bytes changed.
 //
 // A texture at a known render target samples that target's image. When the target is the one the draw
 // renders to (a cyclic reference), the draw would read and write the same image: it samples a copy
@@ -791,7 +792,7 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
         }
     };
 
-    std::vector<const TextureImage*> uploaded;  // uploaded for this draw already
+    std::vector<const TextureImage*> uploaded;  // uploaded for this draw already (several units, one image)
     std::shared_ptr<TextureImage> feedback_copy;
     for (std::uint32_t unit = 0; unit < kFpTextureUnitCount; unit++) {
         // The placeholder has the view type of the sampler the program declares for the unit.
@@ -933,15 +934,15 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                     if (view == VK_NULL_HANDLE) target->sampled_views.erase(remap);
                 }
             }
-        } else if (texture->data_size != 0) {
-            // The copy holds every level in tightly packed rows (see RsxTextureDesc::data_size), which is the
+        } else if (texture->data != nullptr) {
+            // The blob holds every level in tightly packed rows (see RsxTextureDesc::data), which is the
             // layout of a linear texture without padding.
+            const std::vector<std::uint8_t>& blob = *texture->data;
             RsxTextureLayout layout;
-            if (static_cast<std::uint64_t>(texture->data_offset) + texture->data_size > draw.texture_data.size() ||
-                !rsxTextureLayout(texture->format, true, texture->width, texture->height, texture->mips, 0,
+            if (!rsxTextureLayout(texture->format, true, texture->width, texture->height, texture->mips, 0,
                                   kind == RsxTextureKind::Cube ? 6 : 1, layout,
                                   kind == RsxTextureKind::Tex3D ? texture->depth : 1) ||
-                texture->data_size < layout.packed_bytes) {
+                blob.size() < layout.packed_bytes) {
                 rsxNoteUnimplemented("state", "texture data short");
                 continue;
             }
@@ -956,10 +957,14 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                 continue;
             }
             reference(image);
-            if (std::find(uploaded.begin(), uploaded.end(), image.get()) == uploaded.end()) {
+            // The image keeps what it was last given: a blob it already holds is not uploaded again. An id of 0
+            // names no content, so such a blob is always uploaded. A second unit that names the same image
+            // within one draw is left alone, whatever its id says, so the first unit's texels stay.
+            const bool current = texture->content_id != 0 && image->content_id == texture->content_id;
+            if (!current && std::find(uploaded.begin(), uploaded.end(), image.get()) == uploaded.end()) {
                 UploadRef staging;
                 if (!allocUpload(layout.packed_bytes, staging)) return false;
-                const std::uint8_t* source = draw.texture_data.data() + texture->data_offset;
+                const std::uint8_t* source = blob.data();
                 if (compressed) {
                     // Blocks are stored the way Vulkan expects them.
                     std::memcpy(staging.data, source, layout.packed_bytes);
@@ -972,7 +977,10 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                         std::memcpy(staging.data + i, &word, 4);
                     }
                 }
+                // The barrier before the copy waits for every earlier use of the image, so draws recorded
+                // before this one still sample the old texels.
                 textures_->recordUpload(cmd, *image, staging.buffer, staging.offset, layout.levels);
+                image->content_id = texture->content_id;
                 uploaded.push_back(image.get());
                 stats_.texture_uploads++;
             }

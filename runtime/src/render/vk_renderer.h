@@ -40,7 +40,7 @@ struct RendererStats {
     std::uint64_t draws = 0;          // draws handled: recorded into a command buffer, or dropped with an empty scissor
     std::uint64_t draws_skipped = 0;  // draws seen but not rendered (unimplemented state, program or primitive)
     std::uint64_t flips = 0;
-    std::uint64_t texture_uploads = 0;    // texture images written from guest bytes (once per image per draw)
+    std::uint64_t texture_uploads = 0;    // texture images written from guest bytes (when the content id changed)
     std::uint64_t feedback_copies = 0;    // render target copies made for draws that sample their own target
     std::uint64_t depth_conversions = 0;  // depth surfaces rewritten as A8R8G8B8 texels for a draw that reads them
 };
