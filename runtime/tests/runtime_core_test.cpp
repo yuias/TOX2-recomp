@@ -1046,7 +1046,7 @@ void testSyscalls() {
     CHECK(tox2::findSyscall(999) == nullptr);
 
     auto ctx = std::make_unique<Tox2PpuContext>();
-    ctx->gpr[11] = 193;  // sys_spu_thread_bind_queue has no handler
+    ctx->gpr[11] = 300;  // sys_vm_memory_map has no handler
     ctx->gpr[3] = 0x1234;
     tox2Syscall(ctx.get(), nullptr, 0x10000);
     CHECK(ctx->gpr[3] == tox2::kCellOk);
@@ -1056,14 +1056,14 @@ void testSyscalls() {
     tox2Syscall(ctx.get(), nullptr, 0x10004);
     CHECK(ctx->gpr[3] == tox2::kCellOk);
 
-    CHECK(countContaining(lines, "tox2: first sc 193 sys_spu_thread_bind_queue") == 1);
+    CHECK(countContaining(lines, "tox2: first sc 300 sys_vm_memory_map") == 1);
     CHECK(countContaining(lines, "tox2: first sc 999 ?") == 1);
-    CHECK(countContaining(lines, "tox2: default sc 193 sys_spu_thread_bind_queue(0x1234") == 1);
+    CHECK(countContaining(lines, "tox2: default sc 300 sys_vm_memory_map(0x1234") == 1);
     CHECK(countContaining(lines, "tox2: default sc 999 ?(0x1234") == 1);
 
     const std::string census = tox2::formatCensus();
     CHECK(census.find("census: syscalls 3 calls, 2 distinct, 2 default-handled") != std::string::npos);
-    CHECK(census.find("  sc 193 sys_spu_thread_bind_queue: 2 [default]") != std::string::npos);
+    CHECK(census.find("  sc 300 sys_vm_memory_map: 2 [default]") != std::string::npos);
     CHECK(census.find("  sc 999 ?: 1 [default]") != std::string::npos);
 
     tox2::setLogSink({});
@@ -2787,7 +2787,7 @@ void testSpuThreadGroups() {
     CHECK(syscallAs(*a, 172, thread_out, group, 0, image, 0, args) == err(tox2::kCellEfault));
     CHECK(syscallAs(*a, 172, thread_out, group, 0, image, thread_attr, 0) == err(tox2::kCellEfault));
     CHECK(init(0x04000900, 0) == err(tox2::kCellEsrch));
-    CHECK(init(group, 2) == err(tox2::kCellEinval));  // the group has two threads
+    CHECK(init(group, 256) == err(tox2::kCellEinval));  // the SPU number indexes a table of 256
     tox2Write32(base, thread_attr + 4, 0x81);
     CHECK(init(group, 0) == err(tox2::kCellEinval));
     tox2Write32(base, thread_attr + 4, 6);
@@ -2875,6 +2875,42 @@ void testSpuThreadGroups() {
     CHECK(syscallAs(*a, 191, thread0, queue, 1, 4) == 0);
     CHECK(syscallAs(*a, 192, thread0, 1, 4) == 0);
     CHECK(syscallAs(*a, 192, thread0, 1, 4) == err(tox2::kCellEnotconn));
+
+    // Queue bindings: only SPU queues; one binding per key and per queue and thread; 32 slots a thread.
+    tox2Write32(base, queue_attr + 4, 1);
+    CHECK(syscallAs(*a, 128, id_out, queue_attr, 0, 8) == 0);
+    const std::uint32_t ppu_queue = tox2Read32(base, id_out);
+    tox2Write32(base, queue_attr + 4, 2);
+    CHECK(syscallAs(*a, 193, 0x03000100, queue, 5) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 193, thread0, 0x8d000fff, 5) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 193, 0x03000100, ppu_queue, 5) == err(tox2::kCellEsrch));  // the lookups come first
+    CHECK(syscallAs(*a, 193, thread0, ppu_queue, 5) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 193, thread0, queue, 0) == 0);                       // any key is valid, also 0
+    CHECK(syscallAs(*a, 193, thread0, queue2, 0) == err(tox2::kCellEbusy));  // the key is taken
+    CHECK(syscallAs(*a, 193, thread0, queue, 1) == err(tox2::kCellEbusy));   // the queue is bound already
+    CHECK(syscallAs(*a, 193, thread1, queue, 0) == 0);                       // the table belongs to the thread
+    CHECK(syscallAs(*a, 194, 0x03000100, 0) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 194, thread0, 7) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 194, thread0, 0) == 0);
+    CHECK(syscallAs(*a, 194, thread0, 0) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 193, thread0, queue, 1) == 0);  // the slot and the queue are free again
+    std::vector<std::uint32_t> more;
+    for (std::uint32_t i = 0; i < 32; i++) {
+        CHECK(syscallAs(*a, 128, id_out, queue_attr, 0, 8) == 0);
+        more.push_back(tox2Read32(base, id_out));
+    }
+    for (std::uint32_t i = 0; i < 31; i++) CHECK(syscallAs(*a, 193, thread0, more[i], 100 + i) == 0);
+    CHECK(syscallAs(*a, 193, thread0, more[31], 200) == err(tox2::kCellEagain));  // 32 slots are in use
+    CHECK(syscallAs(*a, 194, thread0, 100) == 0);
+    CHECK(syscallAs(*a, 193, thread0, more[31], 200) == 0);
+    // A destroyed queue keeps its slot: the key stays taken and can be unbound.
+    CHECK(syscallAs(*a, 129, more[31], 0) == 0);
+    CHECK(syscallAs(*a, 193, thread0, queue2, 200) == err(tox2::kCellEbusy));
+    CHECK(syscallAs(*a, 194, thread0, 200) == 0);
+    // The queue calls that take events refuse an SPU queue.
+    CHECK(syscallAs(*a, 130, queue, 0, 1000) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 131, queue, scratch + 0x800, 1, scratch + 0x7f0) == err(tox2::kCellEinval));
+    CHECK(syscallAs(*a, 194, thread1, 0) == 0);
 
     // Event connection on all threads. Port 3 is taken on thread 0, so it is skipped for the group.
     const std::uint32_t spup = scratch + 0x1C0;

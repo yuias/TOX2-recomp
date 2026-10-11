@@ -17,7 +17,7 @@ images (see [Analysis tools](analysis-tools.md)); the names come from each image
 | --- | --- | --- | --- | --- | --- |
 | 1 | `0x00f75400` | 4,480 | `0x3000` / `0x3070` | SpursTaskSpline.elf | SPURS task: spline evaluation |
 | 2 | `0x00f76700` | 18,336 | `0x3000` / `0x3090` | edgelzma_inflate_task | SPURS task: Edge LZMA inflate |
-| 3 | `0x00f7b080` | 85,008 | `0x80` / `0xd0` | bnusCoreSpu.elf | Raw SPU thread: core of the game's sound engine |
+| 3 | `0x00f7b080` | 85,008 | `0x80` / `0xd0` | bnusCoreSpu.elf | SPU thread of a normal group: core of the game's sound engine |
 | 4 | `0x00f90280` | 19,568 | `0x3000` / `0x3070` | SpursTaskAnimation.elf | SPURS task: animation |
 | 5 | `0x00fb0b80` | 59,552 | `0x3000` / `0x3070` | SpursTaskUpdateMatrix | SPURS task: matrix and hierarchy update |
 | 6 | `0x00fe1480` | 35,920 | `0x3000` / `0x3070` | SpursTaskRenderParticle | SPURS task: particle rendering |
@@ -88,10 +88,16 @@ The game imports 30 `cellSpurs` functions, `sys_spu_image_import`/`sys_spu_image
 - Spline tasks (fns `0x004a77b4`, `0x004a7d74`, `0x004a947c`): four more tasksets on instance A;
   tasks of image 1 are created on demand with `cellSpursCreateTask2WithBinInfo` from a
   `CellSpursTaskBinInfo` table at `0x0104a700` and joined afterwards.
-- Sound engine (fn `0x00955380`): `cellAudioInit`, then a raw SPU thread group "bnusCore" with one
-  thread "bnusCoreMain" running image 3, an SPU queue `'nuAS'` bound to an event queue, an event
-  port connected for `cellAudio` notifications, and the PPU threads "bnusCoreUpdateThread",
-  "bnusCoreDecoderServerThread" and "bnusCoreDecoderAT3PThread". Shutdown is fn `0x00955804`.
+- Sound engine (fn `0x00955380`): `cellAudioInit`, then an SPU thread group "bnusCore" (type 0, so it has a
+  scheduler context; it is not a raw SPU) with one thread "bnusCoreMain" running image 3, initialised as SPU
+  number 1. The function then creates two event queues and a local port for each: queue A of SPU type
+  (size 127) and queue B of PPU type (size 127). It binds queue A to the thread under the key `'nuAS'`
+  (`0x6e754153`) with `sys_spu_thread_bind_queue` (`0x0095570c`), connects queue B to the thread's SPU port 7
+  with `sys_spu_thread_connect_event`, and only then starts the group (`0x00955730`). It also creates the
+  PPU threads "bnusCoreUpdateThread", "bnusCoreDecoderServerThread" and "bnusCoreDecoderAT3PThread".
+  Shutdown is fn `0x00955804`. The PPU sends `STAT` (`0x53544154`) and `QUIT` (`0x51554954`) commands to
+  queue A through its port; the SPU thread receives them with `stop 0x110` on `'nuAS'` and answers on
+  port 7.
 - SPURS instance B "atrac3plus" (fn `0x009568c0`): one SPU, created only to be passed to
   `cellAtracCreateDecoderExt`, so that the firmware ATRAC3plus decoder can run on it.
 - The SPU printf server (`0x0098dd24`-`0x0098e26c`, `0x00997928`-`0x00998dd4`) is the only code
@@ -250,7 +256,8 @@ specific to execution:
   group's RUN event when a queue is connected, and starts the host threads. The group is running until the
   last thread ends.
 - `stop` codes: `0x100` continues, `0x102` ends the thread with the status from the outbound mailbox,
-  `0x101` ends the group with that status and halts the other threads. Any other code is a fatal stop
+  `0x101` ends the group with that status and halts the other threads. `0x110` and `0x111` receive an event
+  (below). Any other code, `0x120` included, is a fatal stop
   (`tox2: stop: spu: stop 0x<code> at ls 0x<site> on thread 0x<id>: not implemented`). When the last thread
   has ended the group returns to the initialised state and `sys_spu_thread_group_join` wakes with cause 1
   (group exit), 2 (all threads exited) or 4 (terminated) and the status. A finished group can be started
@@ -261,8 +268,32 @@ specific to execution:
   retried every millisecond. Other codes (129 to 191, above 192) are fatal stops.
 - `sys_spu_thread_write_ls`, `_read_ls` and `_write_spu_mb` reach the LS and mailbox of the latest run of a
   thread. `write_spu_mb` into a full mailbox replaces the newest entry, as the hardware does, and logs a
-  warning once per thread. Not implemented: `sys_spu_thread_bind_queue` and `_unbind_queue` (193, 194) and
-  raw SPU threads.
+  warning once per thread. Raw SPU threads are not implemented.
+- Receiving an event: `sys_spu_thread_bind_queue` (193) gives a thread a key (any 32-bit number) for an SPU
+  event queue, and the SPU program receives from it with the key in the outbound mailbox (`wrch 28`) and
+  `stop 0x110` (blocking) or `stop 0x111` (not blocking). The answer is in the inbound mailbox: a status word
+  (0, or an error code) and, when it is 0, three words with the low 32 bits of the event's `data1`, `data2` and
+  `data3` (the source is not delivered). The queue is looked up in the thread's own table; the replies are:
+
+  | Situation | Reply |
+  | --- | --- |
+  | an event is stored | 0 and the three data words |
+  | inbound mailbox not empty | `CELL_EBUSY` (the old contents are replaced by this word) |
+  | key not bound, or its queue destroyed | `CELL_EINVAL` |
+  | `0x110` in a group of type `0x08`/`0x18` (no scheduler context) | `CELL_EINVAL` |
+  | `0x111`, no event | `CELL_EBUSY` |
+  | `0x110`, no event | the thread waits; an event sent to the queue gives the first row |
+  | `0x110`, the queue is destroyed with the force mode meanwhile | `CELL_ECANCELED` |
+
+  An empty outbound mailbox at `0x110` or `0x111` is a fatal stop. The key is always taken from the mailbox,
+  also when the answer is `CELL_EBUSY`; for `0x110` lv2 leaves it there on that path. A waiting thread is shown as
+  `blocked in stop 0x110 sys_spu_thread_receive_event` in the census and the thread health, and counts as an
+  indefinite wait; `stop 0x110: <n>` in the census counts the receives started, including one that still waits.
+  Deviation: lv2 suspends the whole group while one of its threads waits in `0x110`, and refuses
+  `sys_spu_thread_group_terminate` with `CELL_ESTAT` in that state. Here only the calling SPU thread waits (it
+  is a host thread; the game's group has one thread), and terminate, `stop 0x101` of another thread and
+  teardown end the wait: the thread leaves, as at any other halt. Group states such as waiting or suspended
+  are not modelled.
 
 ### Floating point
 
@@ -298,7 +329,8 @@ The SPU's own floating-point rules are emitted as written (the full list of devi
   `jump_site`, the trace ring of recent dispatches, the four words of every non-zero register and the LS
   map (which image occupies which LS range). The stop lines are `unknown target ls ... from ls ... (<image>
   or untracked)`, `code mismatch at ls ...`, `unhandled word ...`, `halt at ls ...`, the MFC and channel
-  stops above, `stop 0x... not implemented` and the `WrOutIntrMbox` stops.
+  stops above, `stop 0x... not implemented`, the empty-mailbox stop of `0x110`/`0x111` and the
+  `WrOutIntrMbox` stops.
 - The census has a `census: spu` section after `threads` (see the run below): the thread count, the total
   number of dispatches and the number of unknown targets; one line per SPU thread with its state, the
   image it ran last and its LS address; one line per image that ran, with its dispatches and the number of
@@ -349,7 +381,7 @@ The counts differ from run to run; the shape does not. In this run:
   kernels (`libsre_kernel1`) load the system service module and the taskset policy module, which loads the
   tasks. The log shows `first image` lines for `libsre_kernel1`, `libsre_system_service`,
   `libsre_taskset_pm`, `eboot_edgelzma`, `eboot_skin`, `eboot_animation`, `eboot_updatematrix`,
-  `eboot_renderparticle` and `eboot_morph`. `eboot_spline` and `eboot_bnuscore` have not run. Four kernels
+  `eboot_renderparticle` and `eboot_morph`. `eboot_spline` has not run, and `eboot_bnuscore` runs only in later builds (below). Four kernels
   idle in the system service (`RdEventStat`), one runs an Edge LZMA task.
 - The game loads its archive: the Edge LZMA task inflates the first archive item, and `--dump-guest
   0x31d50020:0x3073c:<file>` logs SHA-256 `f4ad1f7125d9b31abf228e8043587aebc8f1501f0f4debed6d9814d06a12c751`,
@@ -370,17 +402,36 @@ at `0x0092d178` (function `0x0092d0c8`) unresolved, and the run stopped there at
 `tox2: stop: fatal unknown target: target 0x0092d1a4 from 0x0092d178`; that was a gap in the PPU function
 recovery, not an SPU problem.
 
+The bnusCore thread runs in the builds after that run. Its `sys_spu_thread_initialize` call used to fail
+because the SPU number (1) was checked against the group's thread count (1); the number is now checked
+against the 256 entries of lv2's per-group table, as RPCS3 does. The log shows the bound key
+(`tox2: spu:   thread 1 key 0x6e754153 -> queue ...`), the thread starting at `eboot_bnuscore ls 0x000d0`, and its
+first receive (`tox2: spu: thread 0x06000200 first stop 0x110 at ls 0x11e2c: key 0x6e754153: waits`). The
+thread waits until the PPU sends the `STAT` command, receives it, and handles it. An earlier recovery then
+stopped it:
+
+```
+tox2: stop: spu: unknown target ls 0x07900 from ls 0x0dae4 on thread 0x06000200 (eboot_bnuscore)
+```
+
+The jump is the indirect call `bisl $0,$80` at `0x0dae4`. `$80` is the result of the function at `0x0cd50`,
+which looks up the id `0x564f4c50` ("VOLP") in a table of 28-byte entries at LS `0x15290` and returns a word of the
+entry; here it is `0x7900`. The table is in the bss part of the data segment (the segment has 960 bytes of
+file data from `0x14d00` and ends at `0x15810`); the function at `0x0cc40` copies the static records at
+`0x14f20` and later into it, and the one at `0x0c770` registers those at `0x14d20` in the same way. Each record holds a 4-character id, sizes and
+function pointers, so the code reaches `0x7900` through a register and no constant names it. The function
+recovery now takes the words of the data segments that point at a function start as entries (source
+`data`, see [Function recovery](function-recovery.md#on-the-spu-images)): 43 new functions in
+`eboot_bnuscore`, among them `0x7900`. The site `0x0dae4` stays one of the image's 14 unresolved indirect
+calls; only its targets became dispatchable. In a 300 s headless run (two runs, from installed `hdd` copies)
+the census says `spu 6 threads, 0 unknown targets`, `eboot_bnuscore` has 3,084,088 dispatches through 154
+distinct entries, and `bnusCoreMain` is blocked in `stop 0x110` (`sys_spu_thread_receive_event`) at the
+watchdog. The audio census counts 55,806 blocks, 158 of them non-silent.
+
 Open issues:
 
-- The bnusCore SPU thread (image 3, the sound engine core) is not started. The run makes 7
-  `sys_spu_thread_initialize` calls and only six are logged as initialised (the five kernel threads and
-  the atrac3plus kernel thread), so the call for the bnusCore thread returns an error; the group start
-  that follows is refused as well, and the game then calls `sys_spu_thread_bind_queue` (193) with thread
-  id 0. That call has no handler and the default handler returns success without binding anything. The
-  cause of the failed initialisation has not been investigated. Raw SPU thread groups, the stop-and-signal
-  codes from `0x110` up and `sys_spu_thread_bind_queue`/`_unbind_queue` are not implemented. Until the
-  thread runs, the sound engine produces no sound (the audio census of the run counts no non-silent
-  block).
+- Raw SPU thread groups and `stop 0x120` are not implemented. Only 158 of the 55,806 audio blocks of a
+  300 s headless run are non-silent.
 - SPURS instance B ("atrac3plus", one SPU, created for `cellAtracCreateDecoderExt`) gets its thread group
   and thread, but nothing starts the group.
 - The spline task (image 1) has not run in these runs.
@@ -391,7 +442,7 @@ Open issues:
 
 - SPURS task entry at LS `0x3070` in images 1, 4, 5, 6, 7 and 8 (tasks 4 to 8 have run).
 - SPURS task entry at LS `0x3090` in image 2 (runs).
-- Raw SPU thread entry at LS `0xd0` in image 3 (not started).
+- SPU thread entry at LS `0xd0` in image 3 (runs up to the unknown target above).
 - SPURS kernel entry at LS `0x818` (version 1, in libsre at `0x011f0380`): the first code every SPU thread
   of the SPURS group runs. The taskset policy module (libsre, `0x011f3680`) that the task images depend on
   is loaded by the kernel.

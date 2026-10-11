@@ -111,6 +111,8 @@ void sysSpuThreadGroupConnectEvent(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysSpuThreadGroupDisconnectEvent(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysSpuThreadConnectEvent(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysSpuThreadDisconnectEvent(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadBindQueue(Tox2PpuContext* ctx, std::uint8_t* base);
+void sysSpuThreadUnbindQueue(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysSpuThreadGroupSetCooperativeVictims(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysSpuThreadGroupConnectEventAllThreads(Tox2PpuContext* ctx, std::uint8_t* base);
 void sysSpuThreadGroupDisconnectEventAllThreads(Tox2PpuContext* ctx, std::uint8_t* base);
@@ -181,8 +183,8 @@ constexpr SyscallEntry kSyscalls[] = {
         {190, "sys_spu_thread_write_spu_mb", sysSpuThreadWriteSpuMb},
         {191, "sys_spu_thread_connect_event", sysSpuThreadConnectEvent},
         {192, "sys_spu_thread_disconnect_event", sysSpuThreadDisconnectEvent},
-        {193, "sys_spu_thread_bind_queue", nullptr},
-        {194, "sys_spu_thread_unbind_queue", nullptr},
+        {193, "sys_spu_thread_bind_queue", sysSpuThreadBindQueue},
+        {194, "sys_spu_thread_unbind_queue", sysSpuThreadUnbindQueue},
         {250, "sys_spu_thread_group_set_cooperative_victims", sysSpuThreadGroupSetCooperativeVictims},
         {251, "sys_spu_thread_group_connect_event_all_threads", sysSpuThreadGroupConnectEventAllThreads},
         {252, "sys_spu_thread_group_disconnect_event_all_threads", sysSpuThreadGroupDisconnectEventAllThreads},

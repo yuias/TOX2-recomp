@@ -42,6 +42,13 @@ constexpr std::uint32_t kGroupCount = 255;
 constexpr std::uint32_t kMaxThreadsPerGroup = 6;
 constexpr std::uint32_t kMaxNameSize = 0x80;
 constexpr std::uint32_t kMaxPort = 63;
+// The SPU number of sys_spu_thread_initialize indexes a per-group table of 256 entries (RPCS3 bounds it the
+// same way); it need not be below the group's thread count.
+constexpr std::uint32_t kMaxSpuNumber = 256;
+
+// Queue bindings of one thread (sys_spu_thread_bind_queue) and the type of queue that can be bound.
+constexpr std::uint32_t kMaxQueueBindings = 32;
+constexpr std::uint32_t kSpuQueueType = 2;
 
 // Group types that sys_spu_thread_group_create accepts. Bit 0x08 marks groups that do not use the
 // scheduler, so their priority is not range-checked.
@@ -71,6 +78,8 @@ constexpr std::int32_t kSegmentInfo = 4;
 constexpr std::uint32_t kStopYield = 0x100;
 constexpr std::uint32_t kStopGroupExit = 0x101;
 constexpr std::uint32_t kStopThreadExit = 0x102;
+constexpr std::uint32_t kStopReceiveEvent = 0x110;
+constexpr std::uint32_t kStopTryReceiveEvent = 0x111;
 
 // Why a group stopped, as sys_spu_thread_group_join reports it.
 constexpr std::uint32_t kCauseGroupExit = 1;
@@ -99,8 +108,16 @@ struct SpuSegment {
     std::uint32_t addr_or_value;
 };
 
+// A slot of the thread's queue table: the number the SPU program writes before stop 0x110/0x111 and the
+// queue id. Queue ids are never 0, so 0 marks a free slot.
+struct QueueBinding {
+    std::uint32_t key = 0;
+    std::uint32_t queue = 0;
+};
+
 struct SpuThreadRecord {
     bool initialized = false;
+    std::uint32_t spu_num = 0;  // the slot number the caller chose; records stay dense in initialisation order
     std::uint32_t id = 0;
     std::string name;
     std::uint32_t option = 0;
@@ -109,6 +126,8 @@ struct SpuThreadRecord {
     std::uint32_t source = 0;  // guest address of the imported ELF, 0 when the image is not recorded
     std::vector<SpuSegment> segments;
     std::map<std::uint32_t, std::uint32_t> ports;  // SPU port -> event queue id
+    // Like the ports, the bindings outlive each run. A queue that is destroyed stays in its slot, as in lv2.
+    std::array<QueueBinding, kMaxQueueBindings> bindings{};
 
     // The runtime thread of the latest run. It stays after the run ends so that read_ls and the mailbox
     // calls still reach it; the next start replaces it.
@@ -283,8 +302,82 @@ void GroupOwner::onInterruptMailbox(SpuThread& cpu, std::uint32_t value) {
     }
 }
 
+// Puts the reply of a completed receive into the inbound mailbox, replacing what it holds: the status and,
+// when it is OK, the three data words; otherwise the status alone.
+void replyReceive(SpuThread& cpu, const SpuQueueWaiter& waiter) {
+    if (waiter.code == kCellOk) {
+        const std::uint32_t words[] = {kCellOk, waiter.data[0], waiter.data[1], waiter.data[2]};
+        cpu.channels().replaceInMbox(words, 4);
+    } else {
+        cpu.channels().replaceInMbox(waiter.code);
+    }
+}
+
+// stop 0x110 (sys_spu_thread_receive_event) and 0x111 (sys_spu_thread_tryreceive_event): the queue is picked
+// from the thread's bindings by the key in the outbound mailbox, and the answer comes through the inbound
+// mailbox. Only the calling SPU thread waits, where lv2 suspends the whole group; the guest lock is not held
+// while it waits, so terminate and halts still reach it.
+bool receiveEvent(SpuThread& cpu, std::uint32_t site, std::uint32_t code) {
+    const bool block = code == kStopReceiveEvent;
+    std::uint32_t key = 0;
+    // The key is always consumed; lv2 leaves it in the mailbox on some paths so that a stopped thread can retry
+    // the instruction, which nothing here does.
+    if (!cpu.channels().takeOutMbox(&key)) {
+        spuStop(cpu, std::format("tox2: stop: spu: stop {:#x} at ls {:#07x} on thread {:#010x}: the outbound mailbox "
+                                 "is empty, there is no queue key to receive on",
+                                 code, site, cpu.id()));
+    }
+    if (cpu.channels().inMboxCount() != 0) {
+        cpu.channels().replaceInMbox(kCellEbusy);
+        return true;
+    }
+
+    SpuQueueWaiter waiter;
+    waiter.thread = &cpu;
+    SpuQueueResult result = SpuQueueResult::Invalid;
+    {
+        std::lock_guard<GuestLock> guard(guestLock());
+        const SpuGroup* group = findGroupOfThread(cpu.id());
+        const SpuThreadRecord* record = findSpuThread(cpu.id());
+        if (group == nullptr || record == nullptr) return false;  // the group is gone (test teardown)
+        // Only the blocking call needs the scheduler context that the non-context group types lack.
+        const bool allowed = !block || (group->type & kGroupTypeNoScheduler) == 0;
+        // A destroyed queue is skipped like an unbound key.
+        const auto bound = std::ranges::find_if(record->bindings, [key](const QueueBinding& b) {
+            return b.queue != 0 && b.key == key && eventQueueExists(b.queue);
+        });
+        if (allowed && bound != record->bindings.end()) result = spuQueueReceive(bound->queue, waiter, block);
+        if (firstUse("spu:receive-event")) {
+            const char* outcome = result == SpuQueueResult::Received  ? "an event"
+                                  : result == SpuQueueResult::Waiting ? "waits"
+                                  : result == SpuQueueResult::Empty   ? "no event"
+                                                                      : "no usable queue";
+            logInfo("tox2: spu: thread {:#010x} first stop {:#x} at ls {:#07x}: key {:#x}: {}", cpu.id(), code, site,
+                    key, outcome);
+        }
+        if (result == SpuQueueResult::Received) replyReceive(cpu, waiter);
+    }
+
+    switch (result) {
+        case SpuQueueResult::Received: return true;
+        case SpuQueueResult::Empty: cpu.channels().replaceInMbox(kCellEbusy); return true;
+        case SpuQueueResult::Invalid: cpu.channels().replaceInMbox(kCellEinval); return true;
+        case SpuQueueResult::Waiting: break;
+    }
+    cpu.channels().waitForOwner("stop 0x110 sys_spu_thread_receive_event", waiter.done);
+    // `done` changes only under the guest lock, so it is settled once the lock is held.
+    std::lock_guard<GuestLock> guard(guestLock());
+    if (!waiter.done.load()) {
+        spuQueueCancelWait(waiter);  // the queue must not keep a pointer to this frame
+        return false;
+    }
+    replyReceive(cpu, waiter);
+    return true;
+}
+
 bool GroupOwner::onStop(SpuThread& cpu, std::uint32_t site, std::uint32_t code) {
     if (code == kStopYield) return true;
+    if (code == kStopReceiveEvent || code == kStopTryReceiveEvent) return receiveEvent(cpu, site, code);
     if (code != kStopGroupExit && code != kStopThreadExit) {
         spuStop(cpu, std::format("tox2: stop: spu: stop {:#x} at ls {:#07x} on thread {:#010x}: not implemented", code,
                                  site, cpu.id()));
@@ -538,6 +631,13 @@ void sysSpuThreadGroupDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, kCellOk);
 }
 
+// Error returns of the thread and group calls are logged: libraries treat most of them as fatal or ignore
+// them, so a failed call otherwise shows up only later as a thread that never runs.
+static void rejectSpuCall(Tox2PpuContext* ctx, const char* call, std::uint32_t code, const char* why) {
+    logWarn("tox2: spu: {} -> {:#x}: {}", call, code, why);
+    setResultCode(ctx, code);
+}
+
 // 172 sys_spu_thread_initialize(u32* thread, u32 group, u32 index, sys_spu_image* img, attr*, arg*),
 // attr = {u32 name, u32 nsize, u32 option}, arg = four u64. The image struct and its segment list are
 // read from guest memory; the import record only supplies the ELF's address for the logs.
@@ -551,23 +651,26 @@ void sysSpuThreadInitialize(Tox2PpuContext* ctx, std::uint8_t* base) {
     const Process& p = process();
     if (thread_addr == 0 || image == 0 || attr == 0 || arg_addr == 0 || !p.memory.isCommitted(thread_addr, 4) ||
         !p.memory.isCommitted(image, 16) || !p.memory.isCommitted(attr, 12) || !p.memory.isCommitted(arg_addr, 32)) {
-        setResultCode(ctx, kCellEfault);
+        rejectSpuCall(ctx, "sys_spu_thread_initialize", kCellEfault, "bad or uncommitted pointer argument");
         return;
     }
     SpuGroup* group = findGroup(group_id);
     if (group == nullptr) {
-        setResultCode(ctx, kCellEsrch);
+        rejectSpuCall(ctx, "sys_spu_thread_initialize", kCellEsrch, "unknown group");
         return;
     }
     const std::uint32_t name_addr = tox2Read32(base, attr);
     const std::uint32_t name_size = tox2Read32(base, attr + 4);
     const std::uint32_t option = tox2Read32(base, attr + 8);
-    if (index >= group->num || name_size > kMaxNameSize) {
-        setResultCode(ctx, kCellEinval);
+    // The game's sound engine creates a one-thread group and initialises SPU number 1 in it.
+    if (index >= kMaxSpuNumber || name_size > kMaxNameSize) {
+        rejectSpuCall(ctx, "sys_spu_thread_initialize", kCellEinval, "SPU number or name size out of range");
         return;
     }
-    if (group->state != GroupState::NotInitialized || group->threads[index].initialized) {
-        setResultCode(ctx, kCellEbusy);
+    const auto taken = [index](const SpuThreadRecord& t) { return t.initialized && t.spu_num == index; };
+    if (group->state != GroupState::NotInitialized || std::ranges::any_of(group->threads, taken)) {
+        rejectSpuCall(ctx, "sys_spu_thread_initialize", kCellEbusy,
+                      "group not NotInitialized or thread already initialized");
         return;
     }
 
@@ -575,11 +678,11 @@ void sysSpuThreadInitialize(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t segs = tox2Read32(base, image + 8);
     const auto nsegs = static_cast<std::int32_t>(tox2Read32(base, image + 12));
     if (entry > kMaxEntryPoint || nsegs < 1 || nsegs > kMaxSegments) {
-        setResultCode(ctx, kCellEinval);
+        rejectSpuCall(ctx, "sys_spu_thread_initialize", kCellEinval, "entry or segment count out of range");
         return;
     }
     if (segs == 0 || !p.memory.isCommitted(segs, kSpuSegmentSize * static_cast<std::uint32_t>(nsegs))) {
-        setResultCode(ctx, kCellEfault);
+        rejectSpuCall(ctx, "sys_spu_thread_initialize", kCellEfault, "segment list not committed");
         return;
     }
     std::vector<SpuSegment> segments;
@@ -590,19 +693,22 @@ void sysSpuThreadInitialize(Tox2PpuContext* ctx, std::uint8_t* base) {
         const bool known = segment.type == kSegmentCopy || segment.type == kSegmentFill || segment.type == kSegmentInfo;
         if (!known || segment.size < 0 ||
             std::uint64_t{segment.ls_start} + static_cast<std::uint64_t>(segment.size) > kLocalStoreSize) {
-            setResultCode(ctx, kCellEinval);
+            rejectSpuCall(ctx, "sys_spu_thread_initialize", kCellEinval, "unknown segment type or segment outside LS");
             return;
         }
         segments.push_back(segment);
     }
     const std::optional<std::string> name = readName(base, name_addr, name_size);
     if (!name) {
-        setResultCode(ctx, kCellEfault);
+        rejectSpuCall(ctx, "sys_spu_thread_initialize", kCellEfault, "name not readable");
         return;
     }
 
-    SpuThreadRecord& thread = group->threads[index];
+    // Not full: the group is NotInitialized, so fewer than num records are initialised.
+    SpuThreadRecord& thread =
+            *std::ranges::find_if(group->threads, [](const SpuThreadRecord& t) { return !t.initialized; });
     thread.initialized = true;
+    thread.spu_num = index;
     thread.id = (g_next_thread_number++ << 24) | (group->id & 0x00FFFFFF);
     thread.name = *name;
     thread.option = option;
@@ -656,11 +762,11 @@ std::unique_ptr<SpuThread> makeSpuThread(const SpuThreadRecord& thread, std::uin
 void sysSpuThreadGroupStart(Tox2PpuContext* ctx, std::uint8_t* base) {
     SpuGroup* group = findGroup(arg32(ctx, 3));
     if (group == nullptr) {
-        setResultCode(ctx, kCellEsrch);
+        rejectSpuCall(ctx, "sys_spu_thread_group_start", kCellEsrch, "unknown group");
         return;
     }
     if (group->state != GroupState::Initialized) {
-        setResultCode(ctx, kCellEstat);
+        rejectSpuCall(ctx, "sys_spu_thread_group_start", kCellEstat, "group not Initialized");
         return;
     }
     // Nothing has changed yet when a segment source is not guest memory.
@@ -668,7 +774,7 @@ void sysSpuThreadGroupStart(Tox2PpuContext* ctx, std::uint8_t* base) {
         for (const SpuSegment& segment : thread.segments) {
             if (segment.type == kSegmentCopy && segment.size > 0 &&
                 !process().memory.isCommitted(segment.addr_or_value, static_cast<std::uint32_t>(segment.size))) {
-                setResultCode(ctx, kCellEfault);
+                rejectSpuCall(ctx, "sys_spu_thread_group_start", kCellEfault, "segment source not committed");
                 return;
             }
         }
@@ -678,7 +784,7 @@ void sysSpuThreadGroupStart(Tox2PpuContext* ctx, std::uint8_t* base) {
     for (std::uint32_t i = 0; i < group->num; i++) {
         const SpuThreadRecord& thread = group->threads[i];
         logInfo("tox2: spu:   thread {} {:#010x} \"{}\" image {} entry {:#x} segments {} args {:#x} {:#x} {:#x} {:#x}",
-                i, thread.id, thread.name, sourceText(thread.source), thread.entry, thread.segments.size(),
+                thread.spu_num, thread.id, thread.name, sourceText(thread.source), thread.entry, thread.segments.size(),
                 thread.args[0], thread.args[1], thread.args[2], thread.args[3]);
         for (const SpuSegment& segment : thread.segments) {
             logInfo("tox2: spu:     segment {} ls {:#x} size {:#x} {} {:#x}", segmentKind(segment.type),
@@ -691,7 +797,13 @@ void sysSpuThreadGroupStart(Tox2PpuContext* ctx, std::uint8_t* base) {
     }
     for (std::uint32_t i = 0; i < group->num; i++) {
         for (const auto& [port, queue] : group->threads[i].ports) {
-            logInfo("tox2: spu:   thread {} port {} -> queue {:#010x}", i, port, queue);
+            logInfo("tox2: spu:   thread {} port {} -> queue {:#010x}", group->threads[i].spu_num, port, queue);
+        }
+        for (const QueueBinding& binding : group->threads[i].bindings) {
+            if (binding.queue != 0) {
+                logInfo("tox2: spu:   thread {} key {:#x} -> queue {:#010x}", group->threads[i].spu_num, binding.key,
+                        binding.queue);
+            }
         }
     }
 
@@ -930,6 +1042,58 @@ void sysSpuThreadConnectEvent(Tox2PpuContext* ctx, std::uint8_t* base) {
         return;
     }
     thread->ports[port] = queue;
+    setResultCode(ctx, kCellOk);
+}
+
+// 193 sys_spu_thread_bind_queue(u32 thread, u32 queue, u32 spuq_num): makes the SPU queue receivable by the
+// thread under the key `spuq_num`. A thread has 32 slots; a key or a queue can be bound once per thread.
+void sysSpuThreadBindQueue(Tox2PpuContext* ctx, std::uint8_t* base) {
+    (void)base;
+    SpuThreadRecord* thread = findSpuThread(arg32(ctx, 3));
+    const std::uint32_t queue = arg32(ctx, 4);
+    const std::uint32_t key = arg32(ctx, 5);
+    if (thread == nullptr || !eventQueueExists(queue)) {
+        rejectSpuCall(ctx, "sys_spu_thread_bind_queue", kCellEsrch, "unknown thread or event queue");
+        return;
+    }
+    if (eventQueueType(queue) != kSpuQueueType) {
+        rejectSpuCall(ctx, "sys_spu_thread_bind_queue", kCellEinval, "not an SPU queue");
+        return;
+    }
+    QueueBinding* free_slot = nullptr;
+    for (QueueBinding& binding : thread->bindings) {
+        if (binding.queue == 0) {
+            if (free_slot == nullptr) free_slot = &binding;
+        } else if (binding.key == key || binding.queue == queue) {
+            rejectSpuCall(ctx, "sys_spu_thread_bind_queue", kCellEbusy, "key or queue already bound on this thread");
+            return;
+        }
+    }
+    if (free_slot == nullptr) {
+        rejectSpuCall(ctx, "sys_spu_thread_bind_queue", kCellEagain, "all 32 slots are bound");
+        return;
+    }
+    *free_slot = QueueBinding{key, queue};
+    setResultCode(ctx, kCellOk);
+}
+
+// 194 sys_spu_thread_unbind_queue(u32 thread, u32 spuq_num): frees the slot of the key. A receive that
+// waits on the queue is not woken.
+void sysSpuThreadUnbindQueue(Tox2PpuContext* ctx, std::uint8_t* base) {
+    (void)base;
+    SpuThreadRecord* thread = findSpuThread(arg32(ctx, 3));
+    const std::uint32_t key = arg32(ctx, 4);
+    if (thread == nullptr) {
+        rejectSpuCall(ctx, "sys_spu_thread_unbind_queue", kCellEsrch, "unknown thread");
+        return;
+    }
+    const auto bound = std::ranges::find_if(thread->bindings,
+                                            [key](const QueueBinding& b) { return b.queue != 0 && b.key == key; });
+    if (bound == thread->bindings.end()) {
+        rejectSpuCall(ctx, "sys_spu_thread_unbind_queue", kCellEsrch, "key not bound");
+        return;
+    }
+    *bound = QueueBinding{};
     setResultCode(ctx, kCellOk);
 }
 

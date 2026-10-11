@@ -16,6 +16,7 @@
 
 #include "core/guest_memory.h"
 #include "core/threads.h"
+#include "spu/spu_channels.h"
 #include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
@@ -99,7 +100,8 @@ struct EventQueue {
     std::uint64_t ipc_key = 0;  // 0: local queue, not findable by key
     bool exists = true;         // false once destroyed; ports that still point here are disconnected
     std::deque<Event> events;
-    std::deque<QueueWaiter*> waiters;  // arrival order
+    std::deque<QueueWaiter*> waiters;         // arrival order; PPU threads, on PPU queues
+    std::deque<SpuQueueWaiter*> spu_waiters;  // arrival order; SPU threads, on SPU queues
     std::condition_variable_any cv;
 };
 
@@ -123,9 +125,26 @@ IdMap<EventPort> g_ports(kEventPortIdBase, kSyncIdStep);
 // type in lv2, and event queues are the only keyed objects here.
 std::map<std::uint64_t, std::uint32_t> g_queue_keys;
 
+// SPU receivers see only the low 32 bits of data1..data3. The woken thread takes the guest lock, which the
+// caller holds, before it touches or drops the waiter, so the wake may follow the store of `done`.
+void completeSpuWaiter(SpuQueueWaiter& waiter, std::uint32_t code, const Event& event) {
+    SpuThread* thread = waiter.thread;
+    waiter.code = code;
+    waiter.data = {static_cast<std::uint32_t>(event.data1), static_cast<std::uint32_t>(event.data2),
+                   static_cast<std::uint32_t>(event.data3)};
+    waiter.done.store(true);
+    thread->channels().wake();
+}
+
 // Hands `event` to the oldest receiver or stores it. RPCS3 `lv2_event_queue::send`.
 std::uint32_t queueSend(EventQueue& queue, const Event& event) {
     if (!queue.exists) return kCellEnotconn;
+    if (!queue.spu_waiters.empty()) {
+        SpuQueueWaiter* waiter = queue.spu_waiters.front();
+        queue.spu_waiters.pop_front();
+        completeSpuWaiter(*waiter, kCellOk, Event{0, event.data1, event.data2, event.data3});
+        return kCellOk;
+    }
     if (queue.waiters.empty()) {
         if (queue.events.size() >= queue.size) return kCellEbusy;
         queue.events.push_back(event);
@@ -145,6 +164,34 @@ std::uint32_t arg32(const Tox2PpuContext* ctx, int reg) { return static_cast<std
 }  // namespace
 
 bool eventQueueExists(std::uint32_t id) { return g_queues.find(id) != nullptr; }
+
+std::uint32_t eventQueueType(std::uint32_t id) {
+    const auto queue = g_queues.find(id);
+    return queue != nullptr ? queue->type : 0;
+}
+
+SpuQueueResult spuQueueReceive(std::uint32_t id, SpuQueueWaiter& waiter, bool block) {
+    const auto queue = g_queues.find(id);
+    if (queue == nullptr || queue->type != kSpuQueue) return SpuQueueResult::Invalid;
+    if (!queue->events.empty()) {
+        const Event& event = queue->events.front();
+        waiter.code = kCellOk;
+        waiter.data = {static_cast<std::uint32_t>(event.data1), static_cast<std::uint32_t>(event.data2),
+                       static_cast<std::uint32_t>(event.data3)};
+        queue->events.pop_front();
+        return SpuQueueResult::Received;
+    }
+    if (!block) return SpuQueueResult::Empty;
+    waiter.queue = id;
+    queue->spu_waiters.push_back(&waiter);
+    return SpuQueueResult::Waiting;
+}
+
+void spuQueueCancelWait(SpuQueueWaiter& waiter) {
+    if (waiter.done.load()) return;
+    const auto queue = g_queues.find(waiter.queue);
+    if (queue != nullptr) std::erase(queue->spu_waiters, &waiter);
+}
 
 std::uint32_t eventQueueIdByKey(std::uint64_t ipc_key) {
     const auto it = g_queue_keys.find(ipc_key);
@@ -381,7 +428,7 @@ void sysEventQueueDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, kCellEsrch);
         return;
     }
-    if (mode == 0 && !queue->waiters.empty()) {
+    if (mode == 0 && (!queue->waiters.empty() || !queue->spu_waiters.empty())) {
         setResultCode(ctx, kCellEbusy);
         return;
     }
@@ -391,6 +438,9 @@ void sysEventQueueDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
     }
     const bool had_waiters = !queue->waiters.empty();
     queue->waiters.clear();
+    // Cancelled SPU receivers get one status word and no data.
+    for (SpuQueueWaiter* waiter : queue->spu_waiters) completeSpuWaiter(*waiter, kCellEcanceled, Event{});
+    queue->spu_waiters.clear();
     queue->exists = false;
     if (queue->ipc_key != 0) g_queue_keys.erase(queue->ipc_key);
     g_queues.erase(id);
@@ -448,6 +498,10 @@ void sysEventQueueTryReceive(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t number = arg32(ctx, 6);
     if (queue == nullptr) {
         setResultCode(ctx, kCellEsrch);
+        return;
+    }
+    if (queue->type != kPpuQueue) {
+        setResultCode(ctx, kCellEinval);
         return;
     }
     const auto count = static_cast<std::uint32_t>(std::min<std::size_t>(queue->events.size(), size > 0 ? size : 0));

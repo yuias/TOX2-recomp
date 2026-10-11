@@ -247,6 +247,18 @@ void SpuChannels::replaceInMbox(std::uint32_t value) {
     if (table_wait_.load(std::memory_order_seq_cst)) reservations().wake();
 }
 
+void SpuChannels::replaceInMbox(const std::uint32_t* words, std::uint32_t count) {
+    count = std::min(count, kInMboxDepth);
+    {
+        std::lock_guard lock(mutex_);
+        for (std::uint32_t i = 0; i < count; i++) in_fifo_[i] = words[i];
+        in_count_.store(count, std::memory_order_release);
+    }
+    cv_.notify_all();
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (table_wait_.load(std::memory_order_seq_cst)) reservations().wake();
+}
+
 bool SpuChannels::writeOutMbox(std::uint32_t value) {
     std::unique_lock lock(mutex_);
     if (out_full_) {
@@ -291,6 +303,13 @@ bool SpuChannels::pause(std::chrono::microseconds timeout) {
     std::unique_lock lock(mutex_);
     cv_.wait_for(lock, timeout, [&] { return thread_.haltRequested(); });
     return !thread_.haltRequested();
+}
+
+bool SpuChannels::waitForOwner(const char* what, const std::atomic<bool>& flag) {
+    BlockedScope blocked(thread_, what, true);
+    std::unique_lock lock(mutex_);
+    cv_.wait(lock, [&] { return flag.load() || thread_.haltRequested(); });
+    return flag.load();
 }
 
 // ---------------------------------------------------------------------------------------------

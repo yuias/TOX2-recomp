@@ -96,6 +96,8 @@ public:
     std::uint32_t inMboxCount() const { return in_count_.load(std::memory_order_acquire); }
     // Makes `value` the only entry of the inbound mailbox (the lv2 busy reply to a send_event).
     void replaceInMbox(std::uint32_t value);
+    // Makes the `count` words (1 to kInMboxDepth) the whole contents of the inbound mailbox in one step.
+    void replaceInMbox(const std::uint32_t* words, std::uint32_t count);
 
     // Outbound mailbox (one entry). takeOutMbox consumes it and lets a blocked WrOutMbox go on.
     bool takeOutMbox(std::uint32_t* value);
@@ -106,6 +108,10 @@ public:
     // For the owner's callbacks: sleeps up to `timeout`, shown to the supervisor as a wait. False when a
     // halt was requested.
     bool pause(std::chrono::microseconds timeout);
+    // For the owner's callbacks: waits without a time limit, shown to the supervisor as an indefinite wait
+    // named `what` (a string literal), until `flag` is set or a halt is requested. Whoever stores the flag
+    // must call wake() afterwards. Returns whether the flag is set.
+    bool waitForOwner(const char* what, const std::atomic<bool>& flag);
 
     // State the SPU thread reads and writes; for its own thread and for tests.
     std::uint32_t eventMask() const { return event_mask_; }

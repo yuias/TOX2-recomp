@@ -1885,14 +1885,20 @@ constexpr std::uint32_t kLvSendBusy = 0x3b00;     // send_event while the inboun
 constexpr std::uint32_t kLvLog = 0x3c00;          // logs a line, exits with status 7
 constexpr std::uint32_t kLvFatal = 0x3d00;        // fatal() on the SPU host thread
 constexpr std::uint32_t kLvFault = 0x3e00;        // a GET from an uncommitted guest address
+constexpr std::uint32_t kLvReceive = 0x3f00;      // stop 0x110 in a loop, see lvReceive
+constexpr std::uint32_t kLvTryReceive = 0x3f80;   // one stop 0x111, see lvTryReceive
 constexpr std::uint32_t kLvCodeSize = 0x1000;
 constexpr std::uint32_t kLvDataLs = 0x8000;  // FILL segment, 0x100 bytes of kLvFillValue
 constexpr std::uint32_t kLvFillValue = 0xa5a5a5a5;
-constexpr std::uint32_t kLvBuf = 0x8200;  // the word of kLvMain; the values of kLvCollect
+constexpr std::uint32_t kLvBuf = 0x8200;  // the word of kLvMain; the values of kLvCollect; the replies of lvReceive
 
 constexpr std::uint32_t kLvEventValue = 0x1234;
 constexpr std::uint32_t kLvMainStatus = 0x2b;
 constexpr std::uint32_t kLvPort = 16;
+
+constexpr std::uint32_t kLvQueueKey = 0x6e754153;  // the key lvReceive and lvTryReceive get as argument 0
+constexpr std::uint32_t kLvQuit = 0x51554954;      // data1 that ends lvReceive
+constexpr std::uint32_t kLvReceiveRounds = 8;
 
 // Channel access that leaves the function when the hook asks the thread to leave.
 #define LV_WR(ch, value)                                                             \
@@ -2071,6 +2077,48 @@ TOX2_SPU_FUNC(lvFault) {
     LV_STOP(0x102);
 }
 
+// Receives on the queue bound to the key in argument 0 until a reply is not OK or its first data word is
+// kLvQuit, and keeps the four words of every reply in LS at kLvBuf + 16 * round. Exits with the round count.
+TOX2_SPU_FUNC(lvReceive) {
+    TOX2_SPU_SF_ENTER(kLvReceive);
+    const std::uint32_t site = kLvReceive + 4;
+    const std::uint32_t key = TOX2_VR_W(ctx->gpr[3], 1);
+    std::uint32_t rounds = 0;
+    while (rounds < kLvReceiveRounds) {
+        std::uint32_t words[4] = {};
+        LV_WR(tox2::chan::kWrOutMbox, key);
+        LV_STOP(0x110);
+        LV_RD(tox2::chan::kRdInMbox, &words[0]);
+        if (words[0] == 0) {
+            for (std::uint32_t i = 1; i < 4; i++) LV_RD(tox2::chan::kRdInMbox, &words[i]);
+        }
+        for (std::uint32_t i = 0; i < 4; i++) storeBe32(ls + kLvBuf + 16 * rounds + 4 * i, words[i]);
+        rounds++;
+        if (words[0] != 0 || words[1] == kLvQuit) break;
+    }
+    LV_WR(tox2::chan::kWrOutMbox, rounds);
+    LV_STOP(0x102);
+}
+
+// One stop 0x111 on the key in argument 0; the reply is kept at kLvBuf and its status is the exit status. A
+// non-zero argument 1 writes the key twice, so that the thread waits in WrOutMbox until the test took the first.
+TOX2_SPU_FUNC(lvTryReceive) {
+    TOX2_SPU_SF_ENTER(kLvTryReceive);
+    const std::uint32_t site = kLvTryReceive + 4;
+    const std::uint32_t key = TOX2_VR_W(ctx->gpr[3], 1);
+    std::uint32_t words[4] = {};
+    if (TOX2_VR_W(ctx->gpr[4], 1) != 0) LV_WR(tox2::chan::kWrOutMbox, key);
+    LV_WR(tox2::chan::kWrOutMbox, key);
+    LV_STOP(0x111);
+    LV_RD(tox2::chan::kRdInMbox, &words[0]);
+    if (words[0] == 0) {
+        for (std::uint32_t i = 1; i < 4; i++) LV_RD(tox2::chan::kRdInMbox, &words[i]);
+    }
+    for (std::uint32_t i = 0; i < 4; i++) storeBe32(ls + kLvBuf + 4 * i, words[i]);
+    LV_WR(tox2::chan::kWrOutMbox, words[0]);
+    LV_STOP(0x102);
+}
+
 // The image is registered with its guest address, which is only known once the fixture has memory.
 Tox2SpuSegment g_lv_segments[] = {{0, kLvMain, kLvCodeSize, 1}};
 const Tox2SpuEntry kLvEntries[] = {
@@ -2089,8 +2137,10 @@ const Tox2SpuEntry kLvEntries[] = {
         {kLvLog, 1, {0xc0de000c}, lvLog},
         {kLvFatal, 1, {0xc0de000d}, lvFatal},
         {kLvFault, 1, {0xc0de000e}, lvFault},
+        {kLvReceive, 1, {0xc0de000f}, lvReceive},
+        {kLvTryReceive, 1, {0xc0de0010}, lvTryReceive},
 };
-Tox2SpuImageInfo g_lv_image = {"lv2test", 0, kLvCodeSize, kNoHash, kLvMain, 1, g_lv_segments, 15, kLvEntries};
+Tox2SpuImageInfo g_lv_image = {"lv2test", 0, kLvCodeSize, kNoHash, kLvMain, 1, g_lv_segments, 17, kLvEntries};
 
 std::mutex g_lv_log_mutex;
 std::vector<std::string> g_lv_log;
@@ -2135,6 +2185,7 @@ constexpr std::uint32_t kLvQueueOut = 0x120;
 constexpr std::uint32_t kLvCauseOut = 0x140;
 constexpr std::uint32_t kLvStatusOut = 0x144;
 constexpr std::uint32_t kLvValueOut = 0x148;
+constexpr std::uint32_t kLvPortOut = 0x150;
 constexpr std::uint32_t kLvFlagAttr = 0x160;
 constexpr std::uint32_t kLvFlagOut = 0x190;
 constexpr std::uint32_t kLvFlagsOut = 0x198;
@@ -2205,31 +2256,34 @@ struct Lv2Fixture {
         tox2Write8(base, at + static_cast<std::uint32_t>(text.size()), 0);
     }
 
-    std::uint32_t makeGroup(std::uint32_t num) {
+    // `type` 0 is a group with a scheduler context, which the blocking receive needs.
+    std::uint32_t makeGroup(std::uint32_t num, std::uint32_t type = 0x18) {
         tox2Write32(base, scratch + kLvGroupAttr, 8);
         tox2Write32(base, scratch + kLvGroupAttr + 4, scratch + kLvNames);
-        tox2Write32(base, scratch + kLvGroupAttr + 8, 0x18);
+        tox2Write32(base, scratch + kLvGroupAttr + 8, type);
         CHECK(ppu.call(170, scratch + kLvIdOut, num, 250, scratch + kLvGroupAttr) == 0);
         groups.push_back(tox2Read32(base, scratch + kLvIdOut));
         return groups.back();
     }
 
     // Initializes thread `index` of `group` at `entry` with $3 = arg0 (a 64-bit value).
-    std::uint32_t makeThread(std::uint32_t group, std::uint32_t index, std::uint32_t entry, std::uint64_t arg0 = 0) {
+    std::uint32_t makeThread(std::uint32_t group, std::uint32_t index, std::uint32_t entry, std::uint64_t arg0 = 0,
+                             std::uint64_t arg1 = 0) {
         tox2Write32(base, scratch + kLvImage + 4, entry);
         tox2Write32(base, scratch + kLvThreadAttr, scratch + kLvNames + 0x80);
         tox2Write32(base, scratch + kLvThreadAttr + 4, 9);
         tox2Write32(base, scratch + kLvThreadAttr + 8, 2);
         tox2Write64(base, scratch + kLvArgs, arg0);
-        for (std::uint32_t i = 1; i < 4; i++) tox2Write64(base, scratch + kLvArgs + 8 * i, 0);
+        tox2Write64(base, scratch + kLvArgs + 8, arg1);
+        for (std::uint32_t i = 2; i < 4; i++) tox2Write64(base, scratch + kLvArgs + 8 * i, 0);
         CHECK(ppu.call(172, scratch + kLvThreadOut + 4 * index, group, index, scratch + kLvImage,
                        scratch + kLvThreadAttr, scratch + kLvArgs) == 0);
         return tox2Read32(base, scratch + kLvThreadOut + 4 * index);
     }
 
-    std::uint32_t makeQueue(std::uint32_t size = 8) {
+    std::uint32_t makeQueue(std::uint32_t size = 8, std::uint32_t type = 1) {
         tox2Write32(base, scratch + kLvQueueAttr, 1);
-        tox2Write32(base, scratch + kLvQueueAttr + 4, 1);
+        tox2Write32(base, scratch + kLvQueueAttr + 4, type);
         CHECK(ppu.call(128, scratch + kLvQueueOut, scratch + kLvQueueAttr, 0, size) == 0);
         return tox2Read32(base, scratch + kLvQueueOut);
     }
@@ -2251,6 +2305,21 @@ struct Lv2Fixture {
 
     bool waitUntilBlocked(std::uint32_t thread_id, std::string_view what) {
         return waitUntil([&] { return blockedIn(thread_id, what); });
+    }
+
+    // A local event port connected to `queue`.
+    std::uint32_t makePort(std::uint32_t queue) {
+        CHECK(ppu.call(134, scratch + kLvPortOut, 1, 0) == 0);
+        const std::uint32_t port = tox2Read32(base, scratch + kLvPortOut);
+        CHECK(ppu.call(136, port, queue) == 0);
+        return port;
+    }
+
+    // The word `index` of the LS buffer at kLvBuf (see lvReceive and lvTryReceive).
+    std::uint32_t bufWord(std::uint32_t thread_id, std::uint32_t index) {
+        std::uint64_t value = 0;
+        CHECK(readLs(thread_id, kLvBuf + 4 * index, 4, &value) == 0);
+        return static_cast<std::uint32_t>(value);
     }
 
     std::uint32_t readLs(std::uint32_t thread_id, std::uint32_t lsa, std::uint32_t type, std::uint64_t* value) {
@@ -2541,6 +2610,155 @@ void testLv2InterruptMailbox() {
     }
 }
 
+// stop 0x110 and 0x111: replies, blocking, wake-up by an event, cancel by destroy and by terminate.
+void testLv2ReceiveEvent() {
+    constexpr std::uint32_t kEbusy = tox2::kCellEbusy, kEinval = tox2::kCellEinval;
+
+    // Stored events come at once, later ones wake the thread; only the low 32 bits of the data arrive. The
+    // SPU number is 1 in a one-thread group, as in the game.
+    {
+        Lv2Fixture f;
+        const std::uint32_t group = f.makeGroup(1, 0);
+        const std::uint32_t thread = f.makeThread(group, 1, kLvReceive, kLvQueueKey);
+        const std::uint32_t queue = f.makeQueue(8, 2);
+        const std::uint32_t port = f.makePort(queue);
+        CHECK(f.ppu.call(193, thread, queue, kLvQueueKey) == 0);
+        CHECK(f.ppu.call(138, port, 0x1100000011ull, 0x22, 0x3300000033ull) == 0);
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.waitUntilBlocked(thread, "0x110"));
+        CHECK(f.ppu.call(130, queue, 0, 1000) == kEinval);  // a PPU thread cannot receive from an SPU queue
+        CHECK(f.ppu.call(138, port, 0x44, 0x5500000055ull, 0x66) == 0);
+        // The thread leaves the wait, stores the reply and waits again.
+        CHECK(waitUntil([&] { return f.bufWord(thread, 5) == 0x44; }));
+        CHECK(f.waitUntilBlocked(thread, "0x110"));
+        CHECK(f.ppu.call(138, port, kLvQuit, 0, 0) == 0);
+        CHECK(f.join(group) == 0 && f.cause() == 2 && f.status() == 3);
+        const std::uint32_t expected[] = {0, 0x11, 0x22, 0x33, 0, 0x44, 0x55, 0x66, 0, kLvQuit, 0, 0};
+        for (std::uint32_t i = 0; i < 12; i++) CHECK(f.bufWord(thread, i) == expected[i]);
+        std::lock_guard<tox2::GuestLock> lock(tox2::guestLock());
+        CHECK(tox2::spuThreadById(thread)->stopCounts().at(0x110) == 3);
+    }
+
+    // A group type without a scheduler context cannot block; a missing binding gives EINVAL as well.
+    {
+        Lv2Fixture f;
+        const std::uint32_t group = f.makeGroup(1);
+        const std::uint32_t thread = f.makeThread(group, 0, kLvReceive, kLvQueueKey);
+        const std::uint32_t queue = f.makeQueue(8, 2);
+        const std::uint32_t port = f.makePort(queue);
+        CHECK(f.ppu.call(193, thread, queue, kLvQueueKey) == 0);
+        CHECK(f.ppu.call(138, port, 1, 2, 3) == 0);
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.join(group) == 0 && f.cause() == 2 && f.status() == 1);
+        CHECK(f.bufWord(thread, 0) == kEinval);
+    }
+    {
+        Lv2Fixture f;
+        const std::uint32_t group = f.makeGroup(1, 0);
+        const std::uint32_t thread = f.makeThread(group, 0, kLvReceive, kLvQueueKey);
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.join(group) == 0 && f.cause() == 2 && f.status() == 1);
+        CHECK(f.bufWord(thread, 0) == kEinval);
+    }
+
+    // tryreceive: BUSY on an empty queue, the event when there is one, EINVAL once the key is unbound or the
+    // queue is gone. The binding survives the runs.
+    {
+        Lv2Fixture f;
+        const std::uint32_t group = f.makeGroup(1, 0);
+        const std::uint32_t thread = f.makeThread(group, 0, kLvTryReceive, kLvQueueKey);
+        const std::uint32_t queue = f.makeQueue(8, 2);
+        const std::uint32_t port = f.makePort(queue);
+        CHECK(f.ppu.call(193, thread, queue, kLvQueueKey) == 0);
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.join(group) == 0 && f.status() == kEbusy && f.bufWord(thread, 0) == kEbusy);
+
+        CHECK(f.ppu.call(138, port, 0xa1, 0xa2, 0xa3) == 0);
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.join(group) == 0 && f.status() == 0);
+        CHECK(f.bufWord(thread, 1) == 0xa1 && f.bufWord(thread, 2) == 0xa2 && f.bufWord(thread, 3) == 0xa3);
+
+        CHECK(f.ppu.call(138, port, 0xb1, 0xb2, 0xb3) == 0);
+        CHECK(f.ppu.call(194, thread, kLvQueueKey) == 0);
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.join(group) == 0 && f.status() == kEinval);
+
+        CHECK(f.ppu.call(193, thread, queue, kLvQueueKey) == 0);
+        CHECK(f.ppu.call(129, queue, 0) == 0);
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.join(group) == 0 && f.status() == kEinval);
+    }
+
+    // A word still in the inbound mailbox makes the call answer BUSY, as the only word left.
+    {
+        Lv2Fixture f;
+        const std::uint32_t group = f.makeGroup(1, 0);
+        const std::uint32_t thread = f.makeThread(group, 0, kLvTryReceive, kLvQueueKey, 1);
+        const std::uint32_t queue = f.makeQueue(8, 2);
+        const std::uint32_t port = f.makePort(queue);
+        CHECK(f.ppu.call(193, thread, queue, kLvQueueKey) == 0);
+        CHECK(f.ppu.call(138, port, 1, 2, 3) == 0);
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.waitUntilBlocked(thread, "WrOutMbox"));
+        CHECK(f.ppu.call(190, thread, 7) == 0);
+        {
+            std::lock_guard<tox2::GuestLock> lock(tox2::guestLock());
+            std::uint32_t out = 0;
+            CHECK(tox2::spuThreadById(thread)->channels().takeOutMbox(&out) && out == kLvQueueKey);
+        }
+        CHECK(f.join(group) == 0 && f.status() == kEbusy);
+    }
+
+    // Destroying the queue: refused while the thread waits, otherwise the waiter gets ECANCELED.
+    {
+        Lv2Fixture f;
+        const std::uint32_t group = f.makeGroup(1, 0);
+        const std::uint32_t thread = f.makeThread(group, 0, kLvReceive, kLvQueueKey);
+        const std::uint32_t queue = f.makeQueue(8, 2);
+        CHECK(f.ppu.call(193, thread, queue, kLvQueueKey) == 0);
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.waitUntilBlocked(thread, "0x110"));
+        CHECK(f.ppu.call(129, queue, 0) == tox2::kCellEbusy);
+        CHECK(f.waitUntilBlocked(thread, "0x110"));
+        CHECK(f.ppu.call(129, queue, 1) == 0);
+        CHECK(f.join(group) == 0 && f.cause() == 2 && f.status() == 1);
+        CHECK(f.bufWord(thread, 0) == tox2::kCellEcanceled);
+    }
+
+    // Terminate ends a waiting thread. The queue keeps no waiter afterwards: the next run finds the event that was
+    // sent in between, through the binding that survived.
+    {
+        Lv2Fixture f;
+        const std::uint32_t group = f.makeGroup(1, 0);
+        const std::uint32_t thread = f.makeThread(group, 0, kLvReceive, kLvQueueKey);
+        const std::uint32_t queue = f.makeQueue(8, 2);
+        const std::uint32_t port = f.makePort(queue);
+        CHECK(f.ppu.call(193, thread, queue, kLvQueueKey) == 0);
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.waitUntilBlocked(thread, "0x110"));
+        CHECK(f.ppu.call(177, group, 0x66) == 0);
+        CHECK(f.join(group) == 0 && f.cause() == 4 && f.status() == 0x66);
+
+        CHECK(f.ppu.call(138, port, 0x77, 0x78, 0x79) == 0);
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.waitUntilBlocked(thread, "0x110"));  // the stored event was taken, the next receive waits
+        CHECK(f.bufWord(thread, 1) == 0x77 && f.bufWord(thread, 3) == 0x79);
+        CHECK(f.ppu.call(138, port, kLvQuit, 0, 0) == 0);
+        CHECK(f.join(group) == 0 && f.cause() == 2 && f.status() == 2);
+    }
+
+    // A fixture that goes away while a thread waits ends the group.
+    {
+        Lv2Fixture f;
+        const std::uint32_t group = f.makeGroup(1, 0);
+        const std::uint32_t thread = f.makeThread(group, 0, kLvReceive, kLvQueueKey);
+        const std::uint32_t queue = f.makeQueue(8, 2);
+        CHECK(f.ppu.call(193, thread, queue, kLvQueueKey) == 0);
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.waitUntilBlocked(thread, "0x110"));
+    }
+}
+
 void testLv2Teardown() {
     // A fixture that goes away with a running group ends it.
     Lv2Fixture f;
@@ -2822,6 +3040,7 @@ int main(int argc, char** argv) {
     testLv2JoinBeforeStart();
     testLv2Mailbox();
     testLv2InterruptMailbox();
+    testLv2ReceiveEvent();
     testLv2Teardown();
     testLv2StopChildren();
     testSpuLogPrefix();

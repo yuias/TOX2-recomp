@@ -202,13 +202,13 @@ name; struct layouts and error codes are restated from its headers. The SPU thre
 lightweight condition variable and the handlers that libsre needs were implemented from a written
 description of RPCS3's SPURS and lv2 SPU behaviour and from the SDK-level layouts, without reading
 RPCS3 code. The table lists what the runtime implements. The executable of this game issues 67 system
-call numbers; the ones without a handler are the SPU thread calls 193 and 194, the vm calls
+call numbers; the ones without a handler are the vm calls
 `sys_vm_memory_map` (300) and `sys_vm_unmap` (301) and the file system calls 810 (link), 812
 (rename), 813 (rmdir), 815 (utime), 820 (fsync), 831 (truncate), 832 (ftruncate) and 834 (chmod).
 libsre has 177 system call sites with 41 numbers; of those 248, 249 and 253 have no handler
 (248 and 249 have no name in `config/lv2_syscalls.json`, 253 is `sys_spu_thread_group_syscall_253`), and
-none of them was reached in the runs so far. The one default-handled system call in the latest run is
-`sys_spu_thread_bind_queue` (193), which the game issues for its sound engine (see
+none of them was reached in the runs so far. The game's sound engine issues `sys_spu_thread_bind_queue`
+(193), which an earlier build left to the default handler (see
 [SPU usage](spu.md#what-the-current-run-reaches)). The syscall table (`kSyscalls`) holds every number the game issues,
 with its name from `config/lv2_syscalls.json`, so the log and the census name them whether or not
 they have a handler.
@@ -242,7 +242,7 @@ that does not abort or exit does not issue it.
 | Semaphore | `sys_semaphore_create` (90), `_destroy` (91), `_wait` (92), `_trywait` (93), `_post` (94), `_get_value` (114). Process-shared semaphores (an IPC key) are not supported; a waiter that blocks wakes in no particular order |
 | Event flag | `sys_event_flag_create` (82), `_destroy` (83), `_wait` (85), `_set` (87), `_clear` (118), `_cancel` (132), `_get` (139) |
 | Event queue and port | `sys_event_queue_create` (128), `_destroy` (129), `_receive` (130), `_tryreceive` (131), `_drain` (133); `sys_event_port_create` (134), `_destroy` (135), `_connect_local` (136), `_disconnect` (137), `_send` (138). A queue created with a non-zero IPC key can be found by that key (the host looks it up and sends to it; the `cellAudio` notify uses this); a second live queue with the same key fails with `CELL_EEXIST`, key 0 makes a local queue, and destroying the queue forgets the key. IPC ports (`sys_event_port_connect_ipc`) are not supported. |
-| SPU | `sys_spu_initialize` (169); thread groups: `sys_spu_thread_group_create` (170), `_destroy` (171), `_start` (173), `_terminate` (177), `_join` (178), `_connect_event` (185), `_disconnect_event` (186), `_set_cooperative_victims` (250), `_connect_event_all_threads` (251), `_disconnect_event_all_threads` (252); threads: `sys_spu_thread_initialize` (172), `_write_ls` (181), `_read_ls` (182), `_write_spu_mb` (190), `_connect_event` (191), `_disconnect_event` (192). A started group runs its threads as SPU host threads (see [SPU system calls](#spu-system-calls)). `sys_spu_thread_bind_queue` (193) and `_unbind_queue` (194) have no handler and are default-handled |
+| SPU | `sys_spu_initialize` (169); thread groups: `sys_spu_thread_group_create` (170), `_destroy` (171), `_start` (173), `_terminate` (177), `_join` (178), `_connect_event` (185), `_disconnect_event` (186), `_set_cooperative_victims` (250), `_connect_event_all_threads` (251), `_disconnect_event_all_threads` (252); threads: `sys_spu_thread_initialize` (172), `_write_ls` (181), `_read_ls` (182), `_write_spu_mb` (190), `_connect_event` (191), `_disconnect_event` (192), `_bind_queue` (193), `_unbind_queue` (194). A started group runs its threads as SPU host threads (see [SPU system calls](#spu-system-calls)). |
 | File system | `sys_fs_open` (801), `_read` (802), `_write` (803), `_close` (804), `_opendir` (805), `_readdir` (806), `_closedir` (807), `_stat` (808), `_fstat` (809), `_mkdir` (811), `_unlink` (814), `_lseek` (818); see [Virtual file system](virtual-file-system.md#virtual-file-system) |
 | Thread | `_sys_ppu_thread_exit` (41), `sys_ppu_thread_yield` (43), `sys_ppu_thread_join` (44), `sys_ppu_thread_detach` (45; a thread that already exited without being joined is dropped, as in RPCS3), `sys_ppu_thread_set_priority` (47), `sys_ppu_thread_get_priority` (48); the creation rule of `sys_ppu_thread_create` is under [Threads](#threads) |
 
@@ -272,6 +272,10 @@ threads are initialised, then `Initialized`, and `Running` from a start until it
   container. Logs `tox2: spu: group <id> "<name>" created: <n> threads, priority <p>, type <t>`.
 - `sys_spu_thread_initialize`: the image (`sys_spu_image`: type, entry point, segment array, segment
   count) is checked, its segment list is copied, and the thread gets an id (`(n << 24) | group`). The
+  SPU number argument must be below 256 (the size of lv2's per-group table, as in RPCS3), not below the
+  group's thread count: the sound engine initialises SPU number 1 in a one-thread group. The records stay
+  dense, in the order of initialisation. A number that is in use gives `CELL_EBUSY`. Every error return of
+  this call, of `_group_start` and of the two bind calls is logged as `tox2: spu: <call> -> 0x<code>: <why>`. The
   four 64-bit arguments are kept and logged as they are; libsre leaves arguments 3 and 4
   uninitialised, so the log shows stack garbage there.
 - Event connections: `sys_spu_thread_group_connect_event` binds an event queue to the group for the
@@ -280,8 +284,17 @@ threads are initialised, then `Initialized`, and `Running` from a start until it
   16); `sys_spu_thread_connect_event` binds one thread's port. The disconnect calls undo them.
   Errors are the usual ones (`CELL_ESRCH` for an unknown group, thread or queue, `CELL_EBUSY`,
   `CELL_EISCONN`, `CELL_ENOTCONN`, `CELL_EINVAL`).
+- `sys_spu_thread_bind_queue` (193, thread, queue, key) and `_unbind_queue` (194, thread, key) manage a table
+  of 32 slots per thread. Bind: an unknown thread or queue gives `CELL_ESRCH` (checked first), a queue that is
+  not of SPU type `CELL_EINVAL`, a key or a queue that the thread has bound already `CELL_EBUSY` (any 32-bit
+  key is valid, 0 too; a queue can be bound to several threads), and no free slot `CELL_EAGAIN`. Unbind:
+  an unknown thread or an unbound key gives `CELL_ESRCH`. The table is part of the thread record, so it stays
+  across start, terminate and restart of the group and goes away with the group on destroy. A destroyed
+  queue keeps its slot (the key stays taken until it is unbound) but the SPU side no longer finds it.
+  Unbinding does not wake a thread that waits on the queue. The table is used by `stop 0x110` and `0x111`
+  (below).
 - `sys_spu_thread_group_start` logs `tox2: spu: start group ...`, one line per thread, its image
-  segments, the connected event queues and the bound ports, builds a fresh SPU thread for every thread
+  segments, the connected event queues, the bound ports and the bound queue keys, builds a fresh SPU thread for every thread
   record (zeroed LS, the image segments applied, the arguments in `$3` to `$6`), sends the RUN event
   to the connected queue, logs `tox2: spu: thread ... started at <image> ls 0x<entry>` for each thread
   and starts the host threads. A group that is not `Initialized` fails with `CELL_ESTAT`, and a copy
@@ -297,7 +310,21 @@ threads are initialised, then `Initialized`, and `Running` from a start until it
 - `sys_spu_thread_write_ls` (181) and `_read_ls` (182) access 1, 2, 4 or 8 bytes, aligned and big-endian,
   of the LS of the latest run of a thread (`CELL_ESTAT` for a thread that was never started);
   `_write_spu_mb` (190) pushes into the inbound mailbox and, when it is full, replaces the newest entry.
-- An unknown SPU `WrOutIntrMbox` code, a `stop` code other than `0x100`, `0x101` and `0x102`, and every
+- `stop 0x110` (sys_spu_thread_receive_event) and `0x111` (`_tryreceive_event`) take a queue key from the
+  outbound mailbox and answer in the inbound mailbox: a status word and, when it is 0, the low 32 bits of
+  the event's `data1`, `data2` and `data3` (the details and the error replies are under
+  [lv2 SPU calls](spu.md#lv2-spu-calls)). `0x110` without a stored event blocks the calling SPU thread
+  until a send to the queue (`sys_event_port_send` and the other senders hand the event to the waiter, which
+  takes precedence over storing it), `sys_event_queue_destroy` in force mode (the waiter gets
+  `CELL_ECANCELED`; mode 0 gives `CELL_EBUSY`) or a halt (terminate, `stop 0x101` of another thread). The SPU
+  host thread waits without the guest lock on its own channel condition variable, which `requestHalt` also
+  signals, and takes the guest lock again before it removes itself from the queue or reads its reply. RPCS3
+  suspends the whole group while a thread waits in `0x110` and refuses terminate with `CELL_ESTAT`; here
+  only the calling thread waits and terminate works (a deviation that the one-thread bnusCore group does not
+  show). `sys_event_queue_receive` and `_tryreceive` on an SPU queue return `CELL_EINVAL`. `0x120` and the
+  other unknown codes remain fatal.
+- An unknown SPU `WrOutIntrMbox` code, a `stop` code other than `0x100`, `0x101`, `0x102`, `0x110` and
+  `0x111`, an empty outbound mailbox at `0x110` or `0x111`, and every
   condition the SPU runtime cannot execute are fatal stops on the SPU thread with exit code 3 (see
   [Exit codes](runtime-options.md#exit-codes-and-stop-lines)).
 - `resetSpuThreadGroups` (test teardown) halts and joins all SPU host threads before freeing a record,
@@ -597,7 +624,7 @@ the handler, not facts: a register left over from an earlier call can look like 
 
 In the earlier runs of this game, before libsre was loaded, the default handlers served 24 imports and
 no system call. The current run (see [SPU usage](spu.md#what-the-current-run-reaches)) default-handles
-one system call, `sys_spu_thread_bind_queue` (193), and seven imports: `cellRtcGetCurrentTick`,
+seven imports (an earlier build also default-handled the system call `sys_spu_thread_bind_queue`, 193): `cellRtcGetCurrentTick`,
 `cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`. An earlier
 stop, a write to address 0 in fn `0x008a090c` on the GCM interrupt thread, followed the
 default-handled `cellGcmGetLabelAddress`, which returned 0 instead of a label address; with a

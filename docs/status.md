@@ -38,7 +38,9 @@ The headless run (`--no-window --seconds 30`; the `game_boot` test uses the same
   SHA-256, and the engine tasks are dispatched. At the stop four of the five SPU threads idle in the
   system service and one runs an LZMA task.
 - The main thread also initialises `cellAudio` and creates the sound engine's thread group `bnusCore`
-  and SPURS instance B.
+  (binding an SPU event queue to its thread before the group start) and SPURS instance B. The bnusCore
+  thread runs, waits in `stop 0x110` and handles the commands that the PPU sends; in a 300 s run it ends
+  blocked in `sys_spu_thread_receive_event` and the run ends at the watchdog with no unknown target.
 - The main thread passes the LZMA load and writes `tox2: first hle cellSpurs::cellSpursEventFlagTryWait`
   (at 12 to 14 s with the installed data, 14 to 16 s from an empty `--hdd-dir`). That is the `game_boot`
   milestone. The game then runs its frame loop: 8,208 flips and 7,794 `cellPadGetData` calls in the 30 s
@@ -60,8 +62,8 @@ census: threads 16 created, 12 live
 census: spu 5 threads, 87070 dispatches, 0 unknown targets
 ```
 
-The counts differ from run to run. The default-handled system call is `sys_spu_thread_bind_queue`
-(the game's sound engine); the seven default-handled imports are `cellRtcGetCurrentTick`,
+The counts differ from run to run. The default-handled system call was `sys_spu_thread_bind_queue`
+(the game's sound engine; it has a handler now); the seven default-handled imports are `cellRtcGetCurrentTick`,
 `cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`.
 
 A run with `--seconds 180` also ends at the watchdog (`tox2: stop: watchdog 180 s`). Its SPU census is
@@ -165,8 +167,8 @@ These exist and are generic, but were written for and checked against the earlie
   (6,674 draws rendered, 9,173 skipped and 2,845 clears in 30 s), but the frame viewed was blank white;
   `tox2_rsxreplay` has not been used with this game's commands.
 - Sound through the runtime's audio engine and WASAPI (see [Audio](audio.md)). The game initialises
-  `cellAudio` in the current run, and the headless run (output `none`) counts 5,194 blocks, none of
-  them non-silent: the sound engine's SPU thread does not run (see below).
+  `cellAudio` in the current run, and the headless run (output `none`) counts 55,806 blocks in 300 s, 158 of
+  them non-silent; the sound engine's SPU thread runs (see [SPU usage](spu.md#what-the-current-run-reaches)).
 - cellSail and cellPamf HLE, the PAMF demuxer, the host movie player and FFmpeg movie decoders.
   They are built but unused: this game imports neither module, so their handlers are never bound
   (see [Movies](movies.md)).
@@ -188,11 +190,10 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   `cellScreenShotUtility` functions.
 - It embeds 8 SPU images and has 267 system call sites; the probe leaves 4 of them unresolved.
 - The game issues 67 system call numbers. The runtime has a handler for the semaphore, memory
-  container and detach calls among them and for the SPU thread group calls 170 to 173 and 178; it has
-  none for the SPU thread calls 193 and 194, the vm calls (300, 301) and the file system calls 810,
-  812, 813, 815, 820, 831, 832 and 834. Only 193 ran in the current run (default-handled). Beyond what
-  the game issues, the runtime also implements the SPU calls that libsre and the SPU runtime need (177,
-  181, 182, 185, 186, 190 to 192 and 250 to 252).
+  container and detach calls among them and for the SPU thread group calls 170 to 173 and 178 and the
+  SPU thread calls 193 and 194; it has none for the vm calls (300, 301) and the file system calls 810,
+  812, 813, 815, 820, 831, 832 and 834. Beyond what the game issues, the runtime also implements the SPU
+  calls that libsre and the SPU runtime need (177, 181, 182, 185, 186, 190 to 192 and 250 to 252).
 - Of the 16 SPU images (8 in the executable, 8 in libsre) the 14 with a fixed LS address are recovered
   and recompiled, and every instruction word of them has an emitter handler (see
   [Emitting C](emitter.md#spu-images)). The two position-independent blobs of libsre are neither
@@ -203,12 +204,10 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
 
 ## Not implemented
 
-- The bnusCore SPU thread, the sound engine core (image 3), is not started. The game creates the group
-  `bnusCore`, but the `sys_spu_thread_initialize` call for its thread returns an error (the run makes 7
-  calls and 6 initialise a thread) and the group start is refused; the game then calls
-  `sys_spu_thread_bind_queue` (193) with thread id 0, which has no handler. The cause has not been
-  investigated. Raw SPU thread groups, `sys_spu_thread_bind_queue`/`_unbind_queue` and the
-  stop-and-signal codes from `0x110` up are not implemented, so the sound engine makes no sound yet.
+- Raw SPU thread groups and `stop 0x120` are not implemented. The bnusCore SPU thread, the sound engine
+  core (image 3), calls its modules through a table that is filled at run time; the recovery makes the
+  function pointers of the image's data records entries (source `data`), and no unknown target has been
+  seen since (see [SPU usage](spu.md#what-the-current-run-reaches)).
 - SPU execution has these further limits: SPURS instance B (`atrac3plus`) gets its group and thread but
   is never started, the spline task (image 1) has not run, no SPU interrupt is delivered, signal
   notification is not implemented, and reservations have a documented race window against PPU plain
@@ -226,9 +225,10 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   implemented.
 - Imports and system calls without a handler (see above), and imports whose handler is minimal.
   The census at the end of a run lists what the game called and what the default handler served.
-  The census of the current run lists one system call (`sys_spu_thread_bind_queue`) and seven
-  imports (`cellRtcGetCurrentTick`, `cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility`
-  functions and `cellSaveDataListAutoLoad`), which are still default-handled.
+  The census of a run from before the sound engine thread started listed one system call
+  (`sys_spu_thread_bind_queue`, since implemented) and seven imports (`cellRtcGetCurrentTick`,
+  `cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`),
+  which are still default-handled.
 - Graphics: only what the inherited fake RSX and renderer implement. Whatever the renderer meets and
   cannot handle is listed in the `rsx unimplemented` census (see
   [Rendering](rendering.md#rendering)). Known gaps are the ZPASS report values (the constant 0 is

@@ -4,6 +4,8 @@
 // entry points shared by the syscall and HLE handlers. Everything here runs under the guest lock,
 // so none of it needs atomics.
 
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <map>
@@ -13,6 +15,8 @@
 #include "tox2/ppu_context.h"
 
 namespace tox2 {
+
+class SpuThread;
 
 // Maps guest ids to objects. Ids are `base + n * step` for a counter n that only grows, so a
 // destroyed id is never handed out again and a stale id cannot alias a new object.
@@ -129,6 +133,34 @@ std::uint32_t eventQueueIdByKey(std::uint64_t ipc_key);
 // be called from a host thread that holds it.
 std::uint32_t sendEventToQueue(std::uint32_t id, std::uint64_t source, std::uint64_t data1, std::uint64_t data2,
                                std::uint64_t data3);
+
+// The queue type of event queue `id` (1 PPU, 2 SPU), or 0 when there is no such queue.
+std::uint32_t eventQueueType(std::uint32_t id);
+
+// An SPU thread blocked in the lv2 receive_event call (stop 0x110) on an SPU event queue. It lives on the
+// SPU host thread's stack while it is registered with the queue; whoever completes it stores the reply under
+// the guest lock, then sets `done` and wakes the thread through its channels.
+struct SpuQueueWaiter {
+    SpuThread* thread = nullptr;
+    std::uint32_t queue = 0;              // the queue it is registered with
+    std::uint32_t code = 0;               // the status word of the reply
+    std::array<std::uint32_t, 3> data{};  // low 32 bits of data1..data3, valid when `code` is kCellOk
+    std::atomic<bool> done{false};
+};
+
+enum class SpuQueueResult {
+    Received,  // an event was stored: `waiter.code` and `waiter.data` hold the reply
+    Waiting,   // none stored and blocking was asked for: `waiter` is registered with the queue
+    Empty,     // none stored and blocking was not asked for
+    Invalid,   // the queue does not exist or is not an SPU queue
+};
+
+// The receive of an SPU thread on queue `id`. Under the guest lock.
+SpuQueueResult spuQueueReceive(std::uint32_t id, SpuQueueWaiter& waiter, bool block);
+
+// Takes `waiter` off the queue it waits on; for a wait that a halt ended. Nothing happens when the waiter
+// was completed meanwhile or the queue is gone. Under the guest lock.
+void spuQueueCancelWait(SpuQueueWaiter& waiter);
 
 // Sets `bitptn` in event flag `id` and wakes the waiters it satisfies (sys_event_flag_set). Returns
 // kCellOk or kCellEsrch. Under the guest lock; may be called from a host thread that holds it.
