@@ -677,6 +677,52 @@ void testTrackingIntersection() {
     CHECK(trackedAs(pieces, 0x3000, "synth"));
 }
 
+// Overwriting tracked LS with the bytes it already holds from a non-image address keeps the tags; a changed
+// byte untags only the unit that holds it.
+void testTrackingIdenticalWrite() {
+    registerSynthImages();
+    auto guest = makeGuest();
+    constexpr std::uint32_t kMirror = 0xa000;  // a copy of the code segment outside any image
+    std::memcpy(guest.data() + kMirror, guest.data() + kEaA, 0x100);
+
+    const auto loaded = [&] {
+        auto thread = std::make_unique<tox2::SpuThread>(11, "identical", nullptr);
+        tox2::copyToLs(*thread, guest.data(), kEaA, 0x3000, 0x100);
+        return thread;
+    };
+
+    // (a) The copy from the image address tags every unit.
+    auto thread = loaded();
+    for (std::uint32_t lsa = 0x3000; lsa < 0x3100; lsa += 0x10) CHECK(trackedAs(*thread, lsa, "synth"));
+
+    // (b) The same bytes from elsewhere keep the tags and the record.
+    tox2::copyToLs(*thread, guest.data(), kMirror, 0x3000, 0x100);
+    for (std::uint32_t lsa = 0x3000; lsa < 0x3100; lsa += 0x10) {
+        CHECK(trackedAs(*thread, lsa, "synth") && tox2::trackedImageAt(*thread, lsa)->delta == 0);
+    }
+
+    // (c) One changed byte untags its unit only.
+    guest[kMirror + 0x45] ^= 0x01;
+    tox2::copyToLs(*thread, guest.data(), kMirror, 0x3000, 0x100);
+    CHECK(std::memcmp(thread->ls() + 0x3000, guest.data() + kMirror, 0x100) == 0);
+    CHECK(trackedAs(*thread, 0x3030, "synth") && untracked(*thread, 0x3040) && trackedAs(*thread, 0x3050, "synth"));
+    CHECK(trackedAs(*thread, 0x3000, "synth") && trackedAs(*thread, 0x30f0, "synth"));
+    guest[kMirror + 0x45] ^= 0x01;
+
+    // (d) A copy that covers part of two units compares only the bytes it writes: differences just outside
+    // the copied range do not matter, one inside untags that unit and leaves the other tagged.
+    thread = loaded();
+    guest[kMirror + 0x07] ^= 0x01;
+    guest[kMirror + 0x18] ^= 0x01;
+    tox2::copyToLs(*thread, guest.data(), kMirror + 0x08, 0x3008, 0x10);
+    CHECK(trackedAs(*thread, 0x3000, "synth") && trackedAs(*thread, 0x3010, "synth"));
+    CHECK(trackedAs(*thread, 0x3020, "synth"));
+    guest[kMirror + 0x17] ^= 0x01;
+    tox2::copyToLs(*thread, guest.data(), kMirror + 0x08, 0x3008, 0x10);
+    CHECK(trackedAs(*thread, 0x3000, "synth") && untracked(*thread, 0x3010) && trackedAs(*thread, 0x3020, "synth"));
+    CHECK(std::memcmp(thread->ls() + 0x3008, guest.data() + kMirror + 0x08, 0x10) == 0);
+}
+
 void testCopyWrapsAtLsEnd() {
     registerSynthImages();
     auto guest = makeGuest();
@@ -2669,6 +2715,7 @@ int main(int argc, char** argv) {
     testDispatchChain();
     testDispatchAcrossImages();
     testTrackingIntersection();
+    testTrackingIdenticalWrite();
     testCopyWrapsAtLsEnd();
     testFirstImageLog();
     testCheckImages();

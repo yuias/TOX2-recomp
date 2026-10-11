@@ -152,10 +152,24 @@ void untagLs(SpuThread& thread, std::uint32_t lsa, std::uint32_t size) {
 
 namespace {
 
+// Untags the tracked units whose bytes the copy of [lsa, lsa + size) from `src` would change. A tag says
+// "these LS bytes are image X at its link address", so overwriting a unit with the bytes it already holds
+// keeps that true (the SPURS policy module restores a task's LS pattern from a save area this way). Edge
+// units are partial: only the bytes the copy writes into them are compared.
+void untagChangedUnits(SpuThread& thread, const std::uint8_t* src, std::uint32_t lsa, std::uint32_t size) {
+    const std::uint32_t end = lsa + size;
+    for (std::uint32_t u = lsa / kSpuTagUnit; u < roundUp(end) / kSpuTagUnit; u++) {
+        if (thread.recordAt(u * kSpuTagUnit) == nullptr) continue;
+        const std::uint32_t lo = std::max(lsa, u * kSpuTagUnit);
+        const std::uint32_t hi = std::min(end, (u + 1) * kSpuTagUnit);
+        if (std::memcmp(thread.ls() + lo, src + (lo - lsa), hi - lo) != 0) thread.setTags(u, u + 1, 0);
+    }
+}
+
 // One piece of a copy that does not wrap.
 void copyPiece(SpuThread& thread, const std::uint8_t* base, std::uint32_t ea, std::uint32_t lsa, std::uint32_t size) {
+    untagChangedUnits(thread, base + ea, lsa, size);
     std::memcpy(thread.ls() + lsa, base + ea, size);
-    untagLs(thread, lsa, size);
 
     const std::uint64_t ea_end = std::uint64_t{ea} + size;
     const std::uint32_t count = spuImageCount();

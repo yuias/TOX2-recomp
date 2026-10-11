@@ -200,8 +200,9 @@ SpuLeave runSpu(SpuThread& thread, std::uint32_t entry_ls);
 
 // Copies guest bytes [ea, ea + size) to LS at `lsa` (wrapping at the LS size) and updates the image
 // tracking: the 16-byte units that lie wholly inside the intersection of the copy with a code segment of
-// a registered image are tagged with that image; every other unit the copy touches is untagged. The MFC
-// GET and the lv2 segment loads copy through here.
+// a registered image are tagged with that image. Any other tagged unit the copy touches is untagged,
+// unless the copy writes the bytes it already holds (for a partial edge unit, only the bytes written are
+// compared). The MFC GET and the lv2 segment loads copy through here.
 void copyToLs(SpuThread& thread, const std::uint8_t* base, std::uint32_t ea, std::uint32_t lsa, std::uint32_t size);
 
 // Untags every 16-byte unit that [lsa, lsa + size) touches. Any LS write that does not come from a
