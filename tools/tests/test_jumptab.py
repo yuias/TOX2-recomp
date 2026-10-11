@@ -159,6 +159,25 @@ class RelativeShapeTest(unittest.TestCase):
         code += spine(asm.slwi(9, 9, 2), load=asm.lwax(0, 9, 11))
         self.check(code, 5)
 
+    def far_compare_code(self, distance):
+        # A prologue that saves registers sits between the bound and the dispatch; the compare is
+        # `distance` words before the `bctr`.
+        code = [asm.cmplwi(7, 9, 4)]
+        code += [asm.bgt(7, pc(code), DEFAULT)]
+        spine_code = spine(asm.slwi(9, 9, 2))
+        code += [asm.stw(26, 0x20, 1)] * (distance - len(spine_code) - len(code) + 1)
+        code += spine_code
+        self.assertEqual(len(code) - 1, distance)
+        return code
+
+    def test_compare_beyond_the_definition_window(self):
+        # 34 words: the real shape of a function that stores its saved registers after the bound.
+        self.check(self.far_compare_code(34), 5)
+
+    def test_compare_past_the_walk_limit_is_not_a_bound(self):
+        fx, _, _ = rel_fixture(self.far_compare_code(jumptab._BOUND_WALK_LIMIT + 1), 5)
+        self.assertEqual(fx.reason(), "no_bound")
+
     def test_bgt_inside_table_path_is_not_a_bound(self):
         code = [asm.cmplwi(7, 9, 4)]
         code += [asm.bgt(7, pc(code), pc(code) + 8)]
@@ -196,6 +215,22 @@ class EntryBranchShapeTest(unittest.TestCase):
         # The mask 26..29 would allow 16 entries; the bound says 13.
         code += spine(asm.rlwinm(9, 0, 2, 26, 29))
         self.check(code, 13)
+
+    def far_entry_code(self, distance):
+        # cmplwi; <filler>; ble L; blr; L: table block. The compare is `distance` words before the ble.
+        code = [asm.cmplwi(7, 9, 4)] + [asm.mr(26, 5)] * (distance - 1) + [0, asm.blr()]
+        code[distance] = asm.ble(7, BASE + 4 * distance, pc(code))
+        return code + spine(asm.slwi(9, 9, 2))
+
+    def test_compare_beyond_the_old_entry_window(self):
+        self.check(self.far_entry_code(17), 5)
+
+    def test_compare_at_the_entry_limit(self):
+        self.check(self.far_entry_code(jumptab._ENTRY_COMPARE_LIMIT), 5)
+
+    def test_compare_past_the_entry_limit_is_not_a_bound(self):
+        fx, _, _ = rel_fixture(self.far_entry_code(jumptab._ENTRY_COMPARE_LIMIT + 1), 5)
+        self.assertEqual(fx.reason(), "no_bound")
 
     def test_base_built_with_two_instructions(self):
         code = [asm.cmplwi(7, 9, 4), 0, asm.blr()]

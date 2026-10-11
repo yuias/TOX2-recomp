@@ -23,8 +23,13 @@ _MAX_HOPS = 4
 # A table base built with `lis; addi` has its first instruction this far before the spine
 # start that a branch into the table block may target.
 _BASE_PREFIX = 8
-# Distance searched back from a `ble` into the table block for its compare.
-_ENTRY_COMPARE_LIMIT = 16
+# Distances searched back for the bound compare, from the `bctr` and from a `ble` into the table
+# block. A prologue that saves many registers can sit between the compare and the dispatch; the
+# farthest compares seen in the EBOOT are 34 and 17 words away, and the table set does not change
+# for any limit from those up to 128 and 64. Separate from `_WALK_LIMIT` so a wider window does not
+# also widen the definition search that decides the table base.
+_BOUND_WALK_LIMIT = 64
+_ENTRY_COMPARE_LIMIT = 32
 
 _LOAD_INDEXED = frozenset({"lwzx", "lwax"})
 _COMPARES = frozenset({"cmp", "cmpi", "cmpl", "cmpli"})
@@ -201,7 +206,7 @@ def _bound_by_walk(image: CodeImage, branch: int, spine_start: int, index_src: i
     want = _root(image, index_addr, index_src)
     clobbered: set[int] = set()
     exits: list[Insn] = []          # nearest first
-    for insn in walk_back(image, branch, _WALK_LIMIT):
+    for insn in walk_back(image, branch, _BOUND_WALK_LIMIT):
         crf = _compare_crf(insn)
         if crf is None:
             if flow_of(insn).kind == "cond_jump":

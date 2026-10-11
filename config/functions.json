@@ -2118,7 +2118,7 @@
 {"entry": "0x000eaefc", "name": null, "sources": ["ghidra", "opd"], "ranges": [["0x000eaefc", "0x000eaf44"]]},
 {"entry": "0x000eaf44", "name": null, "sources": ["ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x000eaf44", "0x000eafe4"]]},
 {"entry": "0x000eafe4", "name": null, "sources": ["ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x000eafe4", "0x000eb0a8"]]},
-{"entry": "0x000eb0a8", "name": null, "sources": ["bl", "ghidra", "opd"], "ranges": [["0x000eb0a8", "0x000eb2a4"]]},
+{"entry": "0x000eb0a8", "name": null, "sources": ["bl", "ghidra", "opd"], "ranges": [["0x000eb0a8", "0x000eb2a4"], ["0x000eb2b8", "0x000eb350"]]},
 {"entry": "0x000eb350", "name": null, "sources": ["ghidra", "opd"], "ranges": [["0x000eb350", "0x000eb4bc"]]},
 {"entry": "0x000eb4bc", "name": null, "sources": ["ghidra", "opd"], "ranges": [["0x000eb4bc", "0x000eb4cc"]]},
 {"entry": "0x000eb4cc", "name": null, "sources": ["ghidra", "opd"], "ranges": [["0x000eb4cc", "0x000eb514"]]},
@@ -20274,7 +20274,7 @@
 {"entry": "0x0092bd18", "name": null, "sources": ["ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x0092bd18", "0x0092c210"]]},
 {"entry": "0x0092c210", "name": null, "sources": ["ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x0092c210", "0x0092c6b8"]]},
 {"entry": "0x0092c6b8", "name": null, "sources": ["bl", "ghidra", "opd"], "ranges": [["0x0092c6b8", "0x0092d0c8"]]},
-{"entry": "0x0092d0c8", "name": null, "sources": ["bl", "ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x0092d0c8", "0x0092d17c"], ["0x0092d204", "0x0092d280"]]},
+{"entry": "0x0092d0c8", "name": null, "sources": ["bl", "ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x0092d0c8", "0x0092d17c"], ["0x0092d1a4", "0x0092fe64"]]},
 {"entry": "0x0092fe64", "name": null, "sources": ["bl", "ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x0092fe64", "0x00930a54"]]},
 {"entry": "0x00930a54", "name": null, "sources": ["bl", "ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x00930a54", "0x00931e94"]]},
 {"entry": "0x00931e94", "name": null, "sources": ["ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x00931e94", "0x00931ebc"]]},
@@ -29432,6 +29432,7 @@
 {"branch": "0x000d68e4", "table": "0x000d68e8", "kind": "rel32", "count": 9, "targets": ["0x000d6fd8", "0x000d74f8", "0x000d6fa0", "0x000d74a8", "0x000d74bc", "0x000d74d0", "0x000d74e4", "0x000d7480", "0x000d7494"]},
 {"branch": "0x000df9ac", "table": "0x000df9b0", "kind": "rel32", "count": 12, "targets": ["0x000dfb90", "0x000dfc1c", "0x000dfc4c", "0x000e0074", "0x000df9e0", "0x000e0290", "0x000e030c", "0x000e03f4", "0x000e0454", "0x000e05d0", "0x000e065c", "0x000dfbe0"]},
 {"branch": "0x000e2ba0", "table": "0x000e2ba4", "kind": "rel32", "count": 9, "targets": ["0x000e2b38", "0x000e2b38", "0x000e2c34", "0x000e2c6c", "0x000e2c74", "0x000e2c4c", "0x000e2c54", "0x000e2c5c", "0x000e2c64"]},
+{"branch": "0x000eb2a0", "table": "0x000eb2a4", "kind": "rel32", "count": 5, "targets": ["0x000eb2b8", "0x000eb310", "0x000eb2dc", "0x000eb300", "0x000eb310"]},
 {"branch": "0x000eb6f8", "table": "0x000eb6fc", "kind": "rel32", "count": 7, "targets": ["0x000eb930", "0x000ebb70", "0x000ebae4", "0x000eba4c", "0x000eb9c0", "0x000eb9b0", "0x000eb994"]},
 {"branch": "0x00100590", "table": "0x00100594", "kind": "rel32", "count": 31, "targets": ["0x00100610", "0x001008a0", "0x001009a0", "0x00100a38", "0x00100a98", "0x00100af8", "0x00100b58", "0x00100b84", "0x00100c70", "0x00100d44", "0x00100df8", "0x00100e44", "0x00100f0c", "0x00100fc4", "0x00100ff8", "0x001012ac", "0x0010181c", "0x001017cc", "0x001017f4", "0x001006d0", "0x001006d0", "0x00101590", "0x001015b4", "0x001015d8", "0x001017b0", "0x00101574", "0x00101eb0", "0x00101d40", "0x00101ec8", "0x00101a8c", "0x00101d54"]},
 {"branch": "0x00111524", "table": "0x00111528", "kind": "rel32", "count": 7, "targets": ["0x00111590", "0x0011162c", "0x00111660", "0x001116e8", "0x0011171c", "0x0011184c", "0x001118cc"]},
@@ -29774,6 +29775,7 @@
 {"branch": "0x00857354", "table": "0x00857358", "kind": "rel32", "count": 8, "targets": ["0x00857478", "0x008575f8", "0x00857378", "0x0085758c", "0x00857530", "0x008574d4", "0x0085741c", "0x0085741c"]},
 {"branch": "0x00857804", "table": "0x00857808", "kind": "rel32", "count": 8, "targets": ["0x00857aa8", "0x00857828", "0x00857c28", "0x00857bc0", "0x00857b64", "0x00857b08", "0x00857a04", "0x00857a04"]},
 {"branch": "0x00916050", "table": "0x00916054", "kind": "rel32", "count": 47, "targets": ["0x009161b0", "0x00916110", "0x009167a4", "0x00916704", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916628", "0x00916550", "0x00916008", "0x00916008", "0x00916474", "0x0091624c", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x00916008", "0x009161b0"]},
+{"branch": "0x0092d178", "table": "0x0092d17c", "kind": "rel32", "count": 10, "targets": ["0x0092d1a4", "0x0092e338", "0x0092e16c", "0x0092dfc0", "0x0092de0c", "0x0092dc04", "0x0092d9a0", "0x0092d744", "0x0092d5d0", "0x0092d3dc"]},
 {"branch": "0x0093b344", "table": "0x0093b348", "kind": "rel32", "count": 10, "targets": ["0x0093b464", "0x0093b408", "0x0093b674", "0x0093b648", "0x0093b408", "0x0093b408", "0x0093b408", "0x0093b408", "0x0093b4dc", "0x0093b4dc"]},
 {"branch": "0x0093b9f8", "table": "0x0093b9fc", "kind": "rel32", "count": 10, "targets": ["0x0093bee8", "0x0093ba24", "0x0093beb0", "0x0093be88", "0x0093ba24", "0x0093ba24", "0x0093ba24", "0x0093ba24", "0x0093bc84", "0x0093bc84"]},
 {"branch": "0x00942818", "table": "0x0094281c", "kind": "rel32", "count": 7, "targets": ["0x00942838", "0x00942a48", "0x009429ac", "0x0094292c", "0x009428f4", "0x009428e4", "0x00942880"]},
@@ -29888,10 +29890,8 @@
 {"branch": "0x00c42790", "table": "0x00c42794", "kind": "rel32", "count": 23, "targets": ["0x00c428a0", "0x00c429ec", "0x00c429e0", "0x00c429d4", "0x00c429c8", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42a1c", "0x00c429f8", "0x00c4299c", "0x00c42954", "0x00c428f8"]}
 ],
 "unresolved_indirect": [
-{"addr": "0x000eb2a0", "function": "0x000eb0a8", "reason": "no_bound"},
 {"addr": "0x00186a20", "function": "0x00186540", "reason": "no_bound"},
 {"addr": "0x0025a1dc", "function": "0x00259fbc", "reason": "no_bound"},
-{"addr": "0x0058231c", "function": "0x005822ac", "reason": "no_bound"},
-{"addr": "0x0092d178", "function": "0x0092d0c8", "reason": "no_bound"}
+{"addr": "0x0058231c", "function": "0x005822ac", "reason": "no_bound"}
 ]
 }
