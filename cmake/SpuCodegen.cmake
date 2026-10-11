@@ -148,3 +148,27 @@ function(tox2_spu_add_programs)
     PASS_REGULAR_EXPRESSION "spu programs: 4 passed, 0 failed"
     TIMEOUT 120)
 endfunction()
+
+# Recompiled LZMA inflate of the game's LZMA SPURS task on a real TLZC item of TLFILE.TLDAT. Needs the
+# generated SPU tree, the runtime core, the game directory and the decrypted EBOOT.elf, so it is
+# registered only when all of them are configured. Call after tox2_runtime_add_core.
+function(tox2_spu_add_lzma_inflate_test)
+  if(NOT TARGET tox2_spu_generated OR NOT TARGET tox2_runtime_core)
+    return()
+  endif()
+  if(TOX2_GAME_DIR STREQUAL "" OR TOX2_EBOOT_ELF STREQUAL "")
+    message(STATUS "TOX2: spu_lzma_inflate test not registered (TOX2_GAME_DIR or TOX2_EBOOT_ELF is empty)")
+    return()
+  endif()
+
+  add_executable(tox2_spu_lzma_inflate_test runtime/tests/spu_lzma_inflate_test.cpp)
+  target_compile_options(tox2_spu_lzma_inflate_test PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_link_libraries(tox2_spu_lzma_inflate_test PRIVATE tox2_spu_generated tox2_runtime_core)
+
+  add_test(NAME spu_lzma_inflate
+    COMMAND tox2_spu_lzma_inflate_test "${TOX2_GAME_DIR}" "${TOX2_EBOOT_ELF}")
+  set_tests_properties(spu_lzma_inflate PROPERTIES
+    PASS_REGULAR_EXPRESSION
+      "spu lzma inflate: 0x3073c bytes sha256 f4ad1f7125d9b31abf228e8043587aebc8f1501f0f4debed6d9814d06a12c751"
+    TIMEOUT 120)
+endfunction()

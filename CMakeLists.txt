@@ -79,6 +79,7 @@ find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 tox2_ppu_add_semantics_harness()
 tox2_spu_add_semantics_harness()
 tox2_spu_add_programs()
+tox2_spu_add_lzma_inflate_test()
 
 add_test(NAME tools_unittest
   COMMAND ${Python3_EXECUTABLE} -B -m unittest discover -s tools/tests -t tools
