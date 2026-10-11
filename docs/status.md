@@ -180,9 +180,12 @@ These exist and are generic, but were written for and checked against the earlie
   support the dialog
   box is on screen in the dumps of flips 4,440 to 4,480 (every 20th flip) with its text, a two-line Japanese message that the downloadable
   content is being checked, in gold. In the run with the F_X32 support (and in a run of the version before it, from
-  the same save data directory) the dumps show the Japanese legal notice on grey at flip 300, a plain grey screen
-  for most of the run and a black screen at the end; neither run reaches the title screen, so no live dump
-  shows the F_X32 passes at work. The new run flips about three times as often as the old one in the same time
+  the same save data directory) the dumps show the Japanese legal notice on grey at flip 300, then a plain grey
+  screen, the downloadable-content dialog, the "Presented By" cards and the title screen (flip 19,200 and flip
+  5,400, about 80 to 100 s into the runs), after which the game returns to the black "Presented By" card. The grey
+  phase lasts about 32 s of wall time whatever the flip rate (the game is installing, checking game data and
+  loading in that time), and once the title scene is up the flip rate falls to about 15 per second, so a dump
+  every 300 flips catches the title only once; use a smaller `--dump-frames-every` to follow these screens. The new run flips about three times as often as the old one in the same time
   (19,521 and 5,634 flips; the draws per flip differ too, 22 and 54, because the game is in another state at the
   same flip number). Without the renderer both versions flip 8,100 times in 30 s, so the rate of a rendered run is
   set by the renderer thread. The likely cause: before the change, two draws of every frame read the 2560x720
