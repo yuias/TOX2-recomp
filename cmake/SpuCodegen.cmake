@@ -1,5 +1,10 @@
 include_guard(GLOBAL)
 
+# Optimization level of generated SPU code and of the tests that run it, so the gates check the code
+# that ships. The SPU tree is small, and its decode loops (Edge LZMA, the audio decoder) run 6-7 times
+# faster than at the -O1 of the PPU tree: the game's start-up inflate went from 3.7 to 25 MB/s.
+set(TOX2_SPU_CODEGEN_OPT_LEVEL -O3)
+
 # Contract-header check for generated SPU code: the run-time test, plus object-only translation
 # units that parse the headers as C++ and with -ffreestanding. Needs tox2_ppu_codegen_options.
 function(tox2_spu_add_header_check)
@@ -37,7 +42,7 @@ function(tox2_spu_add_generated_tree)
   message(STATUS "TOX2: generated SPU code from ${generated_dir}/spu")
 
   add_library(tox2_spu_generated STATIC ${TOX2_SPU_GENERATED_SOURCES})
-  tox2_ppu_codegen_options(tox2_spu_generated)
+  tox2_ppu_codegen_options(tox2_spu_generated ${TOX2_SPU_CODEGEN_OPT_LEVEL})
   target_include_directories(tox2_spu_generated PUBLIC "${generated_dir}/spu")
 
   add_executable(tox2_spu_link_test runtime/tests/spu_link_test.cpp)
@@ -79,7 +84,7 @@ function(tox2_spu_add_semantics_harness)
     "${gen_dir}/spu_semantics_cases.c")
   set_source_files_properties("${gen_dir}/spu_semantics_cases.c" PROPERTIES GENERATED TRUE)
   add_dependencies(tox2_spu_semantics tox2_spu_semantics_gen)
-  tox2_ppu_codegen_options(tox2_spu_semantics)
+  tox2_ppu_codegen_options(tox2_spu_semantics ${TOX2_SPU_CODEGEN_OPT_LEVEL})
   target_include_directories(tox2_spu_semantics PRIVATE "${gen_dir}")
 
   if(TOX2_HAVE_UBSAN_TRAP_MUSTTAIL)
@@ -133,7 +138,7 @@ function(tox2_spu_add_programs)
   add_library(tox2_spu_programs_generated OBJECT ${gen_sources})
   set_source_files_properties(${gen_sources} PROPERTIES GENERATED TRUE)
   add_dependencies(tox2_spu_programs_generated tox2_spu_programs_gen)
-  tox2_ppu_codegen_options(tox2_spu_programs_generated)
+  tox2_ppu_codegen_options(tox2_spu_programs_generated ${TOX2_SPU_CODEGEN_OPT_LEVEL})
   target_include_directories(tox2_spu_programs_generated PRIVATE "${gen_dir}")
 
   add_executable(tox2_spu_programs runtime/tests/spu_programs_main.cpp

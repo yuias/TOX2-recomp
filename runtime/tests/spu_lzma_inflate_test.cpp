@@ -1,12 +1,14 @@
 // Runs the recompiled edgeLzmaInflateRawData of the game's LZMA SPURS task (image eboot_edgelzma) on real
 // data: a TLZC item of TLFILE.TLDAT is inflated chunk by chunk the way the task's main loop does it, and the
-// concatenated output is compared with the SHA-256 of the item as inflated by a reference decoder.
+// concatenated output is compared with the SHA-256 of the item as inflated by a reference decoder. The time
+// spent in the recompiled code is printed as a throughput figure; it is not checked.
 //
 // Usage: tox2_spu_lzma_inflate_test <game-dir> <decrypted EBOOT.elf>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -185,6 +187,7 @@ int main(int argc, char** argv) {
     Tox2SpuContext& ctx = thread.context();
     ctx.exit_ls = kExitLs;
 
+    std::chrono::steady_clock::duration spu_time{};
     std::vector<std::uint8_t> output;
     output.reserve(item.usize);
     for (std::size_t chunk = 0; chunk < item.chunk_sizes.size(); chunk++) {
@@ -217,7 +220,9 @@ int main(int argc, char** argv) {
         setWord(ctx, 7, in_ls);
         setWord(ctx, 8, csize);
 
+        const auto started = std::chrono::steady_clock::now();
         const tox2::SpuLeave how = tox2::runSpu(thread, kInflateEntry);
+        spu_time += std::chrono::steady_clock::now() - started;
         const std::uint32_t result = TOX2_VR_W(ctx.gpr[3], 0);
         if (how != tox2::SpuLeave::Exit || result != 0 || owner.stops != 0) {
             std::fprintf(stderr, "chunk %zu: leave %d, result %u, %d stops\n", chunk, static_cast<int>(how), result,
@@ -229,6 +234,8 @@ int main(int argc, char** argv) {
 
     const std::string sha256 = sha256Hex(output.data(), output.size());
     std::printf("spu lzma inflate: %#zx bytes sha256 %s\n", output.size(), sha256.c_str());
+    const double spu_us = std::chrono::duration<double, std::micro>(spu_time).count();
+    std::printf("spu lzma inflate: %.0f us in the recompiled code, %.1f MB/s\n", spu_us, output.size() / spu_us);
     if (output.size() != item.usize || sha256 != kExpectedSha256) {
         std::fprintf(stderr, "expected %#x bytes sha256 %s\n", item.usize, std::string(kExpectedSha256).c_str());
         return 1;

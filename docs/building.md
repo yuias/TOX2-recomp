@@ -45,7 +45,7 @@ These can also be passed to `cmake` directly (`cmake --preset release -D<name>=<
 | `TOX2_RPCS3_CRYPTO_DIR` | empty | Set by `-Rpcs3CryptoDir`. |
 | `TOX2_FFMPEG_DIR` | empty | An extracted FFmpeg build to use instead of `generated/deps/ffmpeg/<pinned build>` (see [Movies](movies.md); FFmpeg is used for ATRAC3plus decoding and by the inherited movie code). |
 | `TOX2_GAMEINPUT_DIR` | empty | An extracted `Microsoft.GameInput` package to use instead of `generated/deps/gameinput/<pinned version>` (see [Input](input.md#the-gameinput-package)). Configure needs the package from `tools/fetch-gameinput.ps1`. |
-| `TOX2_PPU_WERROR` | `ON` | Add `-Werror` for generated code and the code that mirrors it (header check, semantics harness, link test). Every such target is compiled with `-O1 -march=x86-64-v3 -ffp-contract=off -fpatchable-function-entry=8 -Wall -Wextra`, whatever the preset's optimization level. |
+| `TOX2_PPU_WERROR` | `ON` | Add `-Werror` for generated code and the code that mirrors it (header check, semantics harness, link test). Every such target is compiled with `-O1 -march=x86-64-v3 -ffp-contract=off -fpatchable-function-entry=8 -Wall -Wextra`, whatever the preset's optimization level; the generated SPU tree and the SPU tests that run generated code (`spu_semantics`, `spu_programs`) use `-O3` instead of `-O1` (`TOX2_SPU_CODEGEN_OPT_LEVEL` in `cmake/SpuCodegen.cmake`), because the game's SPU decode loops run several times faster at that level. |
 
 No tracked file contains a game path: they are command-line arguments, CMake cache variables, or a
 user-local VFS configuration (`config/vfs.example.json` shows the format with placeholders).

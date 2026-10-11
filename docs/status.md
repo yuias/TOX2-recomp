@@ -184,7 +184,9 @@ These exist and are generic, but were written for and checked against the earlie
   screen, the downloadable-content dialog, the "Presented By" cards and the title screen (flip 19,200 and flip
   5,400, about 80 to 100 s into the runs), after which the game returns to the black "Presented By" card. The grey
   phase lasts about 32 s of wall time whatever the flip rate (the game is installing, checking game data and
-  loading in that time), and once the title scene is up the flip rate falls to about 15 per second, so a dump
+  loading in that time; most of it was the recompiled Edge LZMA task inflating the archive, which ran at 3.7 MB/s
+  while the generated SPU code was built at `-O1`: with the SPU tree at `-O3` the downloadable-content check comes
+  about 22 s into a headless run and the title about 32 s in), and once the title scene is up the flip rate falls to about 15 per second, so a dump
   every 300 flips catches the title only once; use a smaller `--dump-frames-every` to follow these screens. The new run flips about three times as often as the old one in the same time
   (19,521 and 5,634 flips; the draws per flip differ too, 22 and 54, because the game is in another state at the
   same flip number). Without the renderer both versions flip 8,100 times in 30 s, so the rate of a rendered run is

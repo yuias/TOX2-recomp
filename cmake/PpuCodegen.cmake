@@ -3,10 +3,15 @@ include_guard(GLOBAL)
 option(TOX2_PPU_WERROR "Treat warnings in generated PPU code as errors" ON)
 
 # Options for every target that compiles generated PPU code or code that mirrors it. Target
-# COMPILE_OPTIONS follow CMAKE_C_FLAGS_<CONFIG>, so -O1 overrides Debug's -O0.
+# COMPILE_OPTIONS follow CMAKE_C_FLAGS_<CONFIG>, so the level (-O1 unless a second argument names
+# another) overrides Debug's -O0.
 function(tox2_ppu_codegen_options target)
+  set(opt_level -O1)
+  if(ARGC GREATER 1)
+    set(opt_level ${ARGV1})
+  endif()
   target_compile_options(${target} PRIVATE
-    -O1
+    ${opt_level}
     -march=x86-64-v3
     -ffp-contract=off
     -fpatchable-function-entry=8
