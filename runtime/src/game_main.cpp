@@ -26,6 +26,7 @@
 #include "core/dispatch.h"
 #include "core/elf_loader.h"
 #include "core/fatal.h"
+#include "core/guest_dump.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/param_sfo.h"
@@ -87,6 +88,7 @@ struct Options {
     std::uint32_t dump_frames_every = 1;
     std::string shader_cache;
     std::vector<std::uint32_t> rsx_capture_frames;
+    std::vector<tox2::GuestDumpSpec> dumps;  // --dump-guest
 };
 
 bool padUsesKeyboard(std::string_view pad) { return pad == "keyboard" || pad == "keyboard+gamepad"; }
@@ -247,7 +249,8 @@ void printUsage() {
             "                [--pad-script FILE] [--pad-probe] [--audio none|wasapi] [--audio-dump FILE]\n"
             "                [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]\n"
             "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
-            "                [--vk-validation] [--no-window]\n",
+            "                [--vk-validation] [--no-window]\n"
+            "                [--dump-guest ADDR:SIZE:FILE]...\n",
             stderr);
 }
 
@@ -293,6 +296,16 @@ bool parseArgs(int argc, char** argv, Options& opt) {
                 std::fprintf(stderr, "error: --rsx-capture needs frame numbers (1-based), e.g. 300,600\n");
                 return false;
             }
+        } else if (arg == "--dump-guest") {
+            std::string text;
+            if (!value(text)) return false;
+            std::string error;
+            auto spec = tox2::parseGuestDumpSpec(text, error);
+            if (!spec) {
+                std::fprintf(stderr, "error: --dump-guest %s: %s\n", text.c_str(), error.c_str());
+                return false;
+            }
+            opt.dumps.push_back(std::move(*spec));
         } else if (arg == "--log") {
             if (!value(opt.log_file)) return false;
         } else if (arg == "--log-level") {
@@ -628,6 +641,13 @@ int main(int argc, char** argv) {
     if (!opt.rsx_census.empty()) tox2::setRsxArgCensusFile(opt.rsx_census);
     if (!opt.rsx_capture_frames.empty()) {
         tox2::setRsxCaptureFrames(opt.rsx_capture_frames, std::filesystem::path("generated") / "rsx" / "captures");
+    }
+
+    for (tox2::GuestDumpSpec& dump : opt.dumps) {
+        if (!tox2::addGuestDump(std::move(dump))) {
+            std::fputs("error: too many --dump-guest options\n", stderr);
+            return static_cast<int>(tox2::ExitCode::Usage);
+        }
     }
 
     tox2::installFaultHandler();

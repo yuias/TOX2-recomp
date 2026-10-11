@@ -1,5 +1,6 @@
 #include "core/fatal.h"
 
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -20,6 +21,8 @@ namespace tox2 {
 namespace {
 
 std::atomic<CensusPrinterFn> g_census_printer{nullptr};
+std::array<std::atomic<StopHookFn>, kMaxStopHooks> g_stop_hooks;
+std::atomic<std::size_t> g_stop_hook_count{0};
 std::atomic<bool> g_stopping{false};
 thread_local const Tox2PpuContext* t_fatal_context = nullptr;
 thread_local FatalDumpFn t_fatal_dump = nullptr;
@@ -41,6 +44,11 @@ void enterStop() {
 }
 
 [[noreturn]] void finishStop(ExitCode code) {
+    // A slot is published before the count, so every counted slot is set.
+    const std::size_t hooks = g_stop_hook_count.load();
+    for (std::size_t i = 0; i < hooks; i++) {
+        g_stop_hooks[i].load()();
+    }
     if (CensusPrinterFn printer = g_census_printer.load()) {
         printer();
     }
@@ -134,6 +142,16 @@ std::string_view fatalKindName(FatalKind kind) {
 }
 
 void setCensusPrinter(CensusPrinterFn fn) { g_census_printer.store(fn); }
+
+bool addStopHook(StopHookFn fn) {
+    const std::size_t slot = g_stop_hook_count.load();
+    if (slot >= kMaxStopHooks) {
+        return false;
+    }
+    g_stop_hooks[slot].store(fn);
+    g_stop_hook_count.store(slot + 1);
+    return true;
+}
 
 void setFatalContext(const Tox2PpuContext* ctx) { t_fatal_context = ctx; }
 

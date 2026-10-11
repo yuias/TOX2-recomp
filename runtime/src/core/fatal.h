@@ -59,6 +59,13 @@ std::size_t walkGuestStack(const Tox2PpuContext& ctx, const std::uint8_t* base, 
 using CensusPrinterFn = void (*)();
 void setCensusPrinter(CensusPrinterFn fn);
 
+// Runs on the stopping thread on every stop path (fatal, stopProcess, supervisor verdicts), in registration
+// order and before the census, so it sees the guest memory as the run left it. It must not block and must
+// not call a stop function. Returns false when kMaxStopHooks hooks are already set. Call it before threads start.
+using StopHookFn = void (*)();
+inline constexpr std::size_t kMaxStopHooks = 8;
+bool addStopHook(StopHookFn fn);
+
 // Context of the guest thread running on the calling host thread (nullptr on other threads);
 // fatal() dumps its registers and trace ring. The thread layer sets it when a guest thread starts.
 void setFatalContext(const Tox2PpuContext* ctx);
