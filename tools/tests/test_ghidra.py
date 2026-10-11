@@ -37,6 +37,10 @@ VPERM = 4 << 26 | 1 << 21 | 2 << 16 | 3 << 11 | 4 << 6 | 43
 VMX_TEXT = (0x7C0802A6, VMADDFP, VPERM, LVX, STVX, LVLX, 0x4E800020)
 
 
+# The Cell path constants as defined, read before any test patches them.
+REAL_CELL_PATHS = (ghidra.CELL_PROJECT_DIR, ghidra.CELL_LOG_DIR, ghidra.CELL_OUTPUT)
+
+
 def build_vmx_elf(words=VMX_TEXT) -> bytes:
     text = b"".join(w.to_bytes(4, "big") for w in words)
     data = bytearray(0x20)
@@ -342,6 +346,44 @@ class CheckOnlyTest(GhidraTestBase):
         self.assertEqual(code, 0)
         self.assertIn("language check: lvlx at 0x00010014 -> ghidra None: info", out)
 
+    def test_cell_language_requires_lvlx(self):
+        export = make_export(self.data, language=ghidra.CELL_LANGUAGE)
+        code, out, err = self.check_only(self.data, export)
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("language check: lvlx at 0x00010014 -> ghidra 'lvlx': ok", out)
+
+    def test_cell_language_without_lvlx_is_exit_7(self):
+        export = make_export(self.data, language=ghidra.CELL_LANGUAGE,
+                             mnemonics={0x10014: None})
+        code, out, err = self.check_only(self.data, export)
+        self.assertEqual(code, 7)
+        self.assertIn("language check: lvlx at 0x00010014 -> ghidra None: FAIL", out)
+        self.assertIn("lvlx", err)
+
+    def test_cell_language_requires_lvrx(self):
+        words = VMX_TEXT[:-1] + (LVRX, VMX_TEXT[-1])
+        data = build_vmx_elf(words)
+        ok = make_export(data, words=words, language=ghidra.CELL_LANGUAGE)
+        code, out, _ = self.check_only(data, ok)
+        self.assertEqual(code, 0)
+        self.assertIn("-> ghidra 'lvrx': ok", out)
+        bad = make_export(data, words=words, language=ghidra.CELL_LANGUAGE,
+                          mnemonics={0x10018: "lvx"})
+        code, _, err = self.check_only(data, bad)
+        self.assertEqual(code, 7)
+        self.assertIn("lvrx", err)
+
+    def test_cell_flag_checks_the_cell_export_by_default(self):
+        export = make_export(self.data, language=ghidra.CELL_LANGUAGE,
+                             mnemonics={0x10014: None})
+        self.elf_path.write_bytes(self.data)
+        cell_json = self.tmp / "cell.json"
+        cell_json.write_text(json.dumps(export), encoding="utf-8")
+        with mock.patch.object(ghidra, "CELL_OUTPUT", cell_json):
+            code, out, err = self.run_main(str(self.elf_path), "--check-only", "--cell")
+        self.assertEqual(code, 7)
+        self.assertIn("lvlx", err)
+
     def test_code_word_preferred_over_data_word(self):
         words = (VMADDFP, 0x100220EE, 0x4E800020)
         data = build_vmx_elf(words)
@@ -430,6 +472,117 @@ class RunTest(GhidraTestBase):
         (code, _, err), _ = self.run_wrapper(fake_run)
         self.assertEqual(code, 6)
         self.assertEqual(len(err.strip().splitlines()), 1)
+
+
+class CellRunTest(GhidraTestBase):
+    """`--cell` defaults and hints, with a stubbed `subprocess.run`."""
+
+    def setUp(self):
+        super().setUp()
+        self.data = build_vmx_elf()
+        self.elf_path.write_bytes(self.data)
+        self.ghidra_dir = self.tmp / "ghidra"
+        support = self.ghidra_dir / "support"
+        support.mkdir(parents=True)
+        name = "analyzeHeadless.bat" if os.name == "nt" else "analyzeHeadless"
+        (support / name).write_text("")
+        self.stock_project = self.tmp / "project"
+        self.stock_logs = self.tmp / "logs"
+        self.stock_out = self.tmp / "out" / "export.json"
+        self.cell_project = self.tmp / "cell_project"
+        self.cell_logs = self.tmp / "cell_logs"
+        self.cell_out = self.tmp / "cell_out" / "export.json"
+        # Runs without -o unlink the default output, so the stock paths must not be the real ones.
+        for name, value in (("DEFAULT_PROJECT_DIR", self.stock_project),
+                            ("DEFAULT_LOG_DIR", self.stock_logs),
+                            ("DEFAULT_OUTPUT", self.stock_out),
+                            ("CELL_PROJECT_DIR", self.cell_project),
+                            ("CELL_LOG_DIR", self.cell_logs),
+                            ("CELL_OUTPUT", self.cell_out)):
+            patcher = mock.patch.object(ghidra, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def run_ghidra(self, run, *args):
+        with mock.patch.object(ghidra.subprocess, "run", side_effect=run) as m:
+            result = self.run_main(str(self.elf_path), "--ghidra-dir", str(self.ghidra_dir),
+                                   *args)
+        return result, m
+
+    def export_writer(self, path, **overrides):
+        def fake_run(cmd, **kwargs):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            export = make_export(self.data, **overrides)
+            path.write_text(json.dumps(export), encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0)
+
+        return fake_run
+
+    @staticmethod
+    def failing_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1)
+
+    def test_default_paths(self):
+        self.assertEqual(REAL_CELL_PATHS, (ghidra.GHIDRA_DIR / "project_cell",
+                                           ghidra.GHIDRA_DIR / "logs_cell",
+                                           ghidra.GHIDRA_DIR / "eboot_ghidra_cell.json"))
+        self.assertEqual(ghidra.CELL_LANGUAGE, "PowerPC:BE:64:CellPPU-32addr")
+
+    def test_cell_command_and_defaults(self):
+        writer = self.export_writer(self.cell_out, language=ghidra.CELL_LANGUAGE)
+        (code, out, err), run = self.run_ghidra(writer, "--cell")
+        self.assertEqual((code, err), (0, ""))
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("-processor") + 1], ghidra.CELL_LANGUAGE)
+        self.assertEqual(Path(cmd[1]), self.cell_project.resolve())
+        self.assertEqual(Path(cmd[cmd.index("-postScript") + 2]), self.cell_out.resolve())
+        self.assertEqual(Path(cmd[cmd.index("-log") + 1]), self.cell_logs / "application.log")
+        self.assertEqual(Path(cmd[cmd.index("-scriptlog") + 1]), self.cell_logs / "script.log")
+        self.assertTrue((self.cell_logs / "console.log").is_file())
+        self.assertFalse(self.stock_logs.exists())
+        self.assertIn("language check: lvlx at 0x00010014 -> ghidra 'lvlx': ok", out)
+
+    def test_explicit_paths_beat_the_cell_defaults(self):
+        explicit = self.tmp / "mine" / "export.json"
+        writer = self.export_writer(explicit, language=ghidra.CELL_LANGUAGE)
+        (code, _, err), run = self.run_ghidra(
+            writer, "--cell", "-o", str(explicit), "--project-dir", str(self.tmp / "myproj"))
+        self.assertEqual((code, err), (0, ""))
+        cmd = run.call_args.args[0]
+        self.assertEqual(Path(cmd[1]), (self.tmp / "myproj").resolve())
+        self.assertEqual(Path(cmd[cmd.index("-postScript") + 2]), explicit.resolve())
+        self.assertFalse(self.cell_project.exists())
+        self.assertFalse(self.cell_out.exists())
+
+    def test_cell_export_without_lvlx_is_exit_7(self):
+        writer = self.export_writer(self.cell_out, language=ghidra.CELL_LANGUAGE,
+                                    mnemonics={0x10014: None})
+        (code, _, err), _ = self.run_ghidra(writer, "--cell")
+        self.assertEqual(code, 7)
+        self.assertIn("lvlx", err)
+
+    def test_cell_with_language_is_a_usage_error(self):
+        (code, _, _), run = self.run_ghidra(self.failing_run, "--cell", "--language", "X:Y")
+        self.assertEqual(code, 2)
+        run.assert_not_called()
+
+    def test_cell_failure_has_the_install_hint(self):
+        (code, _, err), _ = self.run_ghidra(self.failing_run, "--cell")
+        self.assertEqual(code, 6)
+        self.assertIn(str(self.cell_logs), err)
+        self.assertIn("is the Cell PPU language installed? see docs/analysis-tools.md", err)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+
+    def test_explicit_cell_language_failure_has_the_install_hint(self):
+        (code, _, err), _ = self.run_ghidra(self.failing_run, "--language", ghidra.CELL_LANGUAGE)
+        self.assertEqual(code, 6)
+        self.assertIn("is the Cell PPU language installed?", err)
+
+    def test_stock_failure_has_no_cell_hint(self):
+        (code, _, err), _ = self.run_ghidra(self.failing_run)
+        self.assertEqual(code, 6)
+        self.assertIn(str(self.stock_logs), err)
+        self.assertNotIn("Cell PPU", err)
 
 
 @unittest.skipUnless(os.environ.get("TOX2_EBOOT_ELF"), "TOX2_EBOOT_ELF is not set")

@@ -22,6 +22,8 @@ from .info import (DEFAULT_CONFIG, EXIT_IO, EXIT_NOT_PPU_ELF, EXIT_PIN_MISMATCH,
 from .ppu import decode
 
 DEFAULT_LANGUAGE = "PowerPC:BE:64:A2ALT-32addr"
+# Not built here; the language module (CellPPU) must be installed in Ghidra.
+CELL_LANGUAGE = "PowerPC:BE:64:CellPPU-32addr"
 DEFAULT_CSPEC = "default"
 DEFAULT_TIMEOUT = 3600
 GHIDRA_DIR_ENV = "GHIDRA_INSTALL_DIR"
@@ -30,6 +32,10 @@ GHIDRA_DIR = REPO_ROOT / "generated" / "ghidra"
 DEFAULT_PROJECT_DIR = GHIDRA_DIR / "project"
 DEFAULT_LOG_DIR = GHIDRA_DIR / "logs"
 DEFAULT_OUTPUT = GHIDRA_DIR / "eboot_ghidra.json"
+# --cell keeps its own files so a Cell run never overwrites the stock project, export or logs.
+CELL_PROJECT_DIR = GHIDRA_DIR / "project_cell"
+CELL_LOG_DIR = GHIDRA_DIR / "logs_cell"
+CELL_OUTPUT = GHIDRA_DIR / "eboot_ghidra_cell.json"
 SCRIPT_DIR = REPO_ROOT / "tools" / "ghidra"
 
 SCHEMA = 1
@@ -48,8 +54,10 @@ _REQUIRED_KEYS = ("executable_sha256", "memory_blocks", "text", "functions", "wo
 _PROBES = ("vmaddfp", "vperm", "lvx", "stvx", "lvlx", "lvrx")
 # The first of these present in the ELF is the required VMX evidence.
 _REQUIRED_ANY = ("vmaddfp", "vperm")
-# Must match when present. lvlx/lvrx are Cell-only and merely informational.
+# Must match when present. lvlx/lvrx are Cell-only and merely informational, except in the Cell
+# language, which exists to decode them.
 _MUST_MATCH = ("vmaddfp", "vperm", "lvx", "stvx")
+_CELL_MUST_MATCH = _MUST_MATCH + ("lvlx", "lvrx")
 
 
 def resolve_ghidra_dir(arg: str | None, environ: Mapping[str, str]) -> Path:
@@ -232,6 +240,7 @@ def check_language(elf: ElfFile, export: dict) -> list[LanguageCheck]:
         if name not in first_code and by_addr.get(addr, {}).get("kind") == "code":
             first_code[name] = addr
 
+    must_match = _CELL_MUST_MATCH if export.get("language") == CELL_LANGUAGE else _MUST_MATCH
     results = []
     for probe in _PROBES:
         if probe not in first_any:
@@ -240,7 +249,7 @@ def check_language(elf: ElfFile, export: dict) -> list[LanguageCheck]:
         addr = first_code.get(probe, first_any[probe])
         mnemonic = by_addr.get(addr, {}).get("mnemonic")
         ghidra = mnemonic.lower() if isinstance(mnemonic, str) else None
-        if probe in _MUST_MATCH:
+        if probe in must_match:
             status = "ok" if ghidra == probe else "FAIL"
         else:
             status = "info"
@@ -278,7 +287,7 @@ def _print_summary(export: dict, elapsed: float | None) -> None:
         print("elapsed: %d s" % round(elapsed))
 
 
-def _run_headless(cmd: list[str], log_dir: Path, timeout: int) -> float:
+def _run_headless(cmd: list[str], log_dir: Path, timeout: int, failure_hint: str = "") -> float:
     console_log = log_dir / "console.log"
     started = time.monotonic()
     try:
@@ -292,8 +301,8 @@ def _run_headless(cmd: list[str], log_dir: Path, timeout: int) -> float:
     except OSError as e:
         raise CliError(EXIT_TOOL, "cannot run Ghidra: %s" % e.strerror)
     if proc.returncode != 0:
-        raise CliError(EXIT_TOOL, "Ghidra exited with status %d; see logs in %s"
-                       % (proc.returncode, log_dir))
+        raise CliError(EXIT_TOOL, "Ghidra exited with status %d; see logs in %s%s"
+                       % (proc.returncode, log_dir, failure_hint))
     return time.monotonic() - started
 
 
@@ -326,7 +335,13 @@ def _load_export(path: Path) -> dict:
 
 
 def _run(args: argparse.Namespace) -> int:
-    out_path = Path(args.output) if args.output else DEFAULT_OUTPUT
+    cell_mode = args.cell
+    language = CELL_LANGUAGE if cell_mode else args.language or DEFAULT_LANGUAGE
+    log_dir = CELL_LOG_DIR if cell_mode else DEFAULT_LOG_DIR
+    default_output = CELL_OUTPUT if cell_mode else DEFAULT_OUTPUT
+    default_project = CELL_PROJECT_DIR if cell_mode else DEFAULT_PROJECT_DIR
+    project_dir = Path(args.project_dir or default_project)
+    out_path = Path(args.output) if args.output else default_output
     if args.seeds_file and not Path(args.seeds_file).is_file():
         raise CliError(EXIT_IO, "seeds file not found: %s" % args.seeds_file)
     launcher = None
@@ -352,7 +367,7 @@ def _run(args: argparse.Namespace) -> int:
     if launcher is not None:
         toc, seeds = collect_seeds(elf)
         seeds_file = Path(args.seeds_file).resolve() if args.seeds_file else None
-        project_dir = Path(args.project_dir).resolve()
+        project_dir = project_dir.resolve()
         out_path = out_path.resolve()
         try:
             out_path.unlink(missing_ok=True)
@@ -362,14 +377,17 @@ def _run(args: argparse.Namespace) -> int:
             raise CliError(EXIT_IO, "cannot prepare %s: %s" % (e.filename, e.strerror))
         cmd = build_headless_command(
             launcher=launcher.resolve(), project_dir=project_dir,
-            elf_path=Path(args.elf).resolve(), out_path=out_path, language=args.language,
-            cspec=args.cspec, script_dir=SCRIPT_DIR, log_dir=DEFAULT_LOG_DIR,
+            elf_path=Path(args.elf).resolve(), out_path=out_path, language=language,
+            cspec=args.cspec, script_dir=SCRIPT_DIR, log_dir=log_dir,
             toc=toc, seeds=seeds, text_range=text_range, timeout=args.timeout,
             seeds_file=seeds_file)
-        elapsed = _run_headless(cmd, DEFAULT_LOG_DIR, args.timeout)
+        hint = ""
+        if language == CELL_LANGUAGE:
+            hint = "; is the Cell PPU language installed? see docs/analysis-tools.md"
+        elapsed = _run_headless(cmd, log_dir, args.timeout, failure_hint=hint)
         if not out_path.is_file():
             raise CliError(EXIT_TOOL, "Ghidra finished without writing %s; see logs in %s"
-                           % (out_path, DEFAULT_LOG_DIR))
+                           % (out_path, log_dir))
 
     export = _load_export(out_path)
     validate_export(export, elf, sha256)
@@ -400,14 +418,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("elf", help="decrypted EBOOT.elf")
     parser.add_argument("--ghidra-dir", metavar="DIR",
                         help="Ghidra install directory (default: $%s)" % GHIDRA_DIR_ENV)
-    parser.add_argument("--language", default=DEFAULT_LANGUAGE, metavar="ID",
-                        help="Ghidra language id (default: %(default)s)")
+    parser.add_argument("--language", metavar="ID",
+                        help="Ghidra language id (default: %s)" % DEFAULT_LANGUAGE)
+    parser.add_argument("--cell", action="store_true",
+                        help="use the installed Cell PPU language (%s) with its own project, "
+                             "output and log directories" % CELL_LANGUAGE)
     parser.add_argument("--cspec", default=DEFAULT_CSPEC, metavar="ID",
                         help="compiler spec id (default: %(default)s)")
-    parser.add_argument("--project-dir", default=str(DEFAULT_PROJECT_DIR), metavar="DIR",
-                        help="Ghidra project directory (default: generated/ghidra/project)")
+    parser.add_argument("--project-dir", metavar="DIR",
+                        help="Ghidra project directory (default: generated/ghidra/project, "
+                             "with --cell generated/ghidra/project_cell)")
     parser.add_argument("-o", "--output", metavar="OUT",
-                        help="export JSON path (default: generated/ghidra/eboot_ghidra.json)")
+                        help="export JSON path (default: generated/ghidra/eboot_ghidra.json, "
+                             "with --cell generated/ghidra/eboot_ghidra_cell.json)")
     parser.add_argument("--start", type=_addr_arg, metavar="ADDR",
                         help="first address of the exported code range "
                              "(default: largest executable section)")
@@ -424,6 +447,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.cell and args.language is not None:
+        parser.error("--cell and --language cannot be combined")
     if (args.start is None) != (args.end is None):
         parser.error("--start and --end must be given together")
     for name in ("start", "end"):

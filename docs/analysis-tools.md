@@ -9,7 +9,7 @@ module libsre as a relocated PRX (see [PRX input](#prx-input)).
 python tools/ps3tool.py info   <elf> [-o OUTPUT] [--target-config FILE] [--nids FILE] [--no-verify]
 python tools/ps3tool.py probe  <elf> [-o OUTPUT] [--syscalls FILE]
 python tools/ps3tool.py disasm <elf> (--start ADDR (--count N | --end ADDR) | --entry [--count N] | --stats [--start ADDR --end ADDR] [--json OUT]) [--raw] [--strict]
-python tools/ps3tool.py ghidra-export <elf> [--ghidra-dir DIR] [--language ID] [--cspec ID] [--project-dir DIR] [-o OUT] [--start ADDR] [--end ADDR] [--timeout SEC] [--seeds-file PATH] [--check-only]
+python tools/ps3tool.py ghidra-export <elf> [--ghidra-dir DIR] [--language ID] [--cspec ID] [--project-dir DIR] [-o OUT] [--start ADDR] [--end ADDR] [--timeout SEC] [--seeds-file PATH] [--check-only] [--cell]
 python tools/ps3tool.py ghidra-diff   <elf> --ghidra JSON [--start ADDR] [--end ADDR] [--strict] [-o OUT] [--top N] [--examples K]
 python tools/ps3tool.py ghidra-summary <elf> --ghidra JSON [-o OUT]
 python tools/ps3tool.py recover <elf> [--ghidra-summary PATH | --no-ghidra] [--extra-seeds PATH] [--nids FILE] [--syscalls FILE] [-o OUT] [--report PATH] [--seeds-out PATH] [--prologue-seeds] [--max-rounds N]
@@ -113,6 +113,17 @@ python tools/ps3tool.py ghidra-diff   <elf> --ghidra generated/ghidra/eboot_ghid
   The tool then checks that Ghidra decodes a few probe instructions (including AltiVec
   ones) as expected, so a wrong language setting is reported. `--check-only` skips Ghidra
   and only validates and language-checks an existing export.
+- `--cell` selects the Cell PPU language `PowerPC:BE:64:CellPPU-32addr` instead, which also
+  decodes the Cell-only vector loads and stores (`lvlx`, `lvrx` and related forms). It cannot be
+  combined with `--language` (exit 2) and has its own project, export and log files under
+  `generated/ghidra/` (`project_cell/`, `eboot_ghidra_cell.json`, `logs_cell/`); `--project-dir`
+  and `-o` override the first two, and `--check-only --cell` checks `eboot_ghidra_cell.json`. With
+  this language the language check also requires `lvlx` and `lvrx` to decode like this
+  repository's decoder, and the run exits with 7 if they do not; with other languages those two
+  probes are informational. This repository does not build the language: it must be installed in
+  Ghidra as the `CellPPU` module (for example by `tools/install-ghidra-cell.ps1` of
+  [DAL-Rinne-Utopia-recomp](https://github.com/yuias/DAL-Rinne-Utopia-recomp)). If Ghidra exits
+  with an error in this mode, the message asks whether the language is installed.
 - Output goes under `generated/ghidra/`: the export JSON (`eboot_ghidra.json`), the Ghidra
   project (`project/`) and the Ghidra logs (`logs/`). All of it is git-ignored.
 - `ghidra-diff` classifies every word of the range into one category and prints the
