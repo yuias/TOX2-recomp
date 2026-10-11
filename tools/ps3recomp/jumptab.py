@@ -9,7 +9,8 @@ from dataclasses import dataclass
 
 from .elf import ElfError, ElfFile
 from .ppu import Insn
-from .ppu_flow import CodeImage, eval_const, find_def, flow_of, walk_back, written_gprs
+from .ppu_flow import (CodeImage, eval_const, find_def, find_spill_store, flow_of, walk_back,
+                       written_gprs)
 
 UNRESOLVED_REASONS = ("no_mtctr", "ctr_from_load", "unknown_def", "no_table_base", "no_index",
                       "no_bound", "bad_bound", "table_unreadable", "bad_target", "ambiguous_toc")
@@ -108,14 +109,26 @@ def _skip_copies(image: CodeImage, addr: int, reg: int) -> Insn | None:
     return None
 
 
-def _root(image: CodeImage, addr: int, reg: int) -> tuple[int | None, int]:
-    """Identity of the value in `reg` before `addr`: (address of its last real def, register)."""
+def _root(image: CodeImage, addr: int, reg: int, spills: int = 1) -> tuple[int | None, int]:
+    """Identity of the value in `reg` before `addr`: (address of its last real def, register).
+
+    An unoptimised build spills the index right after its bound check and reloads it before
+    scaling. A stack reload is followed to the store of its slot and takes the identity of the
+    stored register, so the compare on that register matches the reloaded one.
+    """
     for _ in range(_MAX_HOPS + 1):
         d = _def(image, addr, reg)
         if d is None:
             return None, reg
         src = _copy_source(d, True)
         if src is None:
+            store = find_spill_store(image, d) if spills else None
+            if store is not None:
+                inner = _root(image, store.addr, store.field("rS"), spills - 1)
+                # A live-in or call-clobbered register carries no identity: two such values
+                # compare equal by register number alone, so only a real def is trusted.
+                if inner[0] is not None:
+                    return inner
             return d.addr, reg
         addr, reg = d.addr, src
     return addr, reg

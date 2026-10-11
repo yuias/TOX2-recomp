@@ -547,6 +547,46 @@ class ThroughCallsTest(unittest.TestCase):
         self.assertEqual(fx.reason(), "no_table_base")
 
 
+class SpilledIndexTest(unittest.TestCase):
+    """Unoptimised code: the index is spilled after its bound check and reloaded before scaling."""
+
+    SLOT = 0x5BC
+
+    def code(self, between=(), reload_slot=SLOT):
+        code = [asm.lwz(9, 8, 3), asm.cmplwi(7, 9, 9), asm.stw(9, self.SLOT, 1)]
+        code += [asm.bgt(7, pc(code), DEFAULT)]
+        code += list(between)
+        code += [asm.lwz(8, reload_slot, 1)]
+        return code + spine(asm.rldic(9, 8, 2, 30))
+
+    def test_reloaded_index_takes_the_bound_of_the_stored_register(self):
+        fx, table, targets = rel_fixture(self.code(), 10)
+        tables, unresolved = fx.recover()
+        self.assertEqual(unresolved, {})
+        jt = tables[fx.branch]
+        self.assertEqual((jt.table, jt.count, list(jt.targets)), (table, 10, targets))
+
+    def test_different_slot_offset(self):
+        fx, _, _ = rel_fixture(self.code(reload_slot=self.SLOT + 8), 10)
+        self.assertEqual(fx.reason(), "no_bound")
+
+    def test_slot_stored_again_before_the_reload(self):
+        fx, _, _ = rel_fixture(self.code(between=[asm.stw(6, self.SLOT, 1)]), 10)
+        self.assertEqual(fx.reason(), "no_bound")
+
+    def test_stack_pointer_written_before_the_reload(self):
+        fx, _, _ = rel_fixture(self.code(between=[asm.addi(1, 1, -0x10)]), 10)
+        self.assertEqual(fx.reason(), "no_bound")
+
+    def test_stored_register_redefined_before_the_compare(self):
+        # The compare reads a different value of the register than the one that was stored.
+        code = [asm.lwz(9, 8, 3), asm.stw(9, self.SLOT, 1), asm.lwz(9, 12, 3),
+                asm.cmplwi(7, 9, 9)]
+        code += [asm.bgt(7, pc(code), DEFAULT), asm.lwz(8, self.SLOT, 1)]
+        fx, _, _ = rel_fixture(code + spine(asm.rldic(9, 8, 2, 30)), 10)
+        self.assertEqual(fx.reason(), "no_bound")
+
+
 class RecoverAllTest(unittest.TestCase):
     def test_every_bctr_lands_in_exactly_one_dict(self):
         good = [asm.cmplwi(7, 9, 1), asm.bgt(7, BASE + 4, DEFAULT)] + spine(asm.slwi(9, 9, 2))

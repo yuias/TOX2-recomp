@@ -5080,7 +5080,7 @@
 {"entry": "0x00298360", "name": null, "sources": ["bl", "ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x00298360", "0x00298a18"]]},
 {"entry": "0x00298aa0", "name": null, "sources": ["bl", "ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x00298aa0", "0x0029916c"]]},
 {"entry": "0x0029916c", "name": null, "sources": ["bl", "ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x0029916c", "0x00299748"]]},
-{"entry": "0x00299748", "name": null, "sources": ["bl", "ghidra", "opd"], "ranges": [["0x00299748", "0x002997f4"], ["0x0029987c", "0x002998a0"], ["0x00299a50", "0x00299ac0"]]},
+{"entry": "0x00299748", "name": null, "sources": ["bl", "ghidra", "opd"], "ranges": [["0x00299748", "0x002997f4"], ["0x0029981c", "0x0029a660"], ["0x0029a67c", "0x0029a75c"], ["0x0029a778", "0x0029bfdc"], ["0x0029bfe0", "0x0029c348"], ["0x0029c358", "0x0029c390"]]},
 {"entry": "0x0029c5b8", "name": null, "sources": ["ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x0029c5b8", "0x0029c5f0"]]},
 {"entry": "0x0029c5f0", "name": null, "sources": ["bl", "ghidra", "opd"], "ranges": [["0x0029c5f0", "0x0029c654"]]},
 {"entry": "0x0029c654", "name": null, "sources": ["bl", "ghidra", "opd"], "ranges": [["0x0029c654", "0x0029c660"]]},
@@ -29482,6 +29482,7 @@
 {"branch": "0x0025842c", "table": "0x00258430", "kind": "rel32", "count": 9, "targets": ["0x00258470", "0x002584e0", "0x002584d0", "0x002584c0", "0x002584b0", "0x002584a0", "0x00258490", "0x00258480", "0x00258454"]},
 {"branch": "0x00258574", "table": "0x00258578", "kind": "rel32", "count": 9, "targets": ["0x002585e8", "0x00258690", "0x00258678", "0x00258660", "0x00258648", "0x00258630", "0x00258618", "0x00258600", "0x0025859c"]},
 {"branch": "0x00258970", "table": "0x00258974", "kind": "rel32", "count": 9, "targets": ["0x00258a0c", "0x00258a24", "0x00258a3c", "0x00258a54", "0x00258a6c", "0x00258a84", "0x00258a9c", "0x00258ab4", "0x00258acc"]},
+{"branch": "0x002997f0", "table": "0x002997f4", "kind": "rel32", "count": 10, "targets": ["0x0029987c", "0x002998a0", "0x0029981c", "0x00299ac0", "0x00299e14", "0x00299ea0", "0x00299d88", "0x00299da0", "0x00299db8", "0x00299dd0"]},
 {"branch": "0x002ae9fc", "table": "0x002aea00", "kind": "rel32", "count": 7, "targets": ["0x002aeaa4", "0x002aebdc", "0x002aec44", "0x002aecb0", "0x002aed24", "0x002aea1c", "0x002aed90"]},
 {"branch": "0x002e0cf8", "table": "0x002e0cfc", "kind": "rel32", "count": 5, "targets": ["0x002e0e4c", "0x002e0d10", "0x002e0f18", "0x002e0eec", "0x002e0e78"]},
 {"branch": "0x002eb5e4", "table": "0x002eb5e8", "kind": "rel32", "count": 12, "targets": ["0x002eb618", "0x002eb844", "0x002eb890", "0x002ebef4", "0x002ec008", "0x002ec820", "0x002ec6bc", "0x002ec7d0", "0x002ec078", "0x002ec0a0", "0x002ec518", "0x002ec59c"]},
@@ -29890,7 +29891,6 @@
 {"addr": "0x000eb2a0", "function": "0x000eb0a8", "reason": "no_bound"},
 {"addr": "0x00186a20", "function": "0x00186540", "reason": "no_bound"},
 {"addr": "0x0025a1dc", "function": "0x00259fbc", "reason": "no_bound"},
-{"addr": "0x002997f0", "function": "0x00299748", "reason": "no_bound"},
 {"addr": "0x0058231c", "function": "0x005822ac", "reason": "no_bound"},
 {"addr": "0x0092d178", "function": "0x0092d0c8", "reason": "no_bound"}
 ]

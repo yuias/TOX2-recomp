@@ -192,9 +192,8 @@ def find_def(image: CodeImage, addr: int, reg: int, limit: int = 16, *,
     return None
 
 
-def _spilled_value(image: CodeImage, load: Insn, eval_stored: Callable[[Insn], int | None]
-                   ) -> int | None:
-    """Value a stack reload `ld/lwz rD,D(r1)` reads back, from the nearest store to that slot.
+def find_spill_store(image: CodeImage, load: Insn) -> Insn | None:
+    """Store that wrote the stack slot a reload `ld/lwz rD,D(r1)` reads, or None.
 
     Stack slots persist across calls, so calls are crossed. The search gives up on a write to
     r1, on a store of another width that overlaps the slot, and on an indexed or multi-word
@@ -202,8 +201,12 @@ def _spilled_value(image: CodeImage, load: Insn, eval_stored: Callable[[Insn], i
     """
     if load.spec.name == "ld":
         disp, size, store_name = load.field("DS"), 8, "std"
-    else:
+    elif load.spec.name == "lwz":
         disp, size, store_name = load.field("D"), 4, "stw"
+    else:
+        return None
+    if load.field("rA") != _STACK_REG:
+        return None
     for insn in _walk_back_calls(image, load.addr, _CALL_WINDOW, True):
         if _STACK_REG in written_gprs(insn):
             return None
@@ -217,7 +220,7 @@ def _spilled_value(image: CodeImage, load: Insn, eval_stored: Callable[[Insn], i
         if store_disp + width <= disp or disp + size <= store_disp:
             continue
         if name == store_name and store_disp == disp:
-            return eval_stored(insn)
+            return insn
         return None
     return None
 
@@ -228,7 +231,7 @@ def eval_const(image: CodeImage, addr: int, reg: int, *, toc: int | None = None,
     """Value of GPR `reg` just before `addr`, or None when it is not a recoverable constant.
 
     `through_calls` lets the search pass calls for callee-saved registers and follow a reload
-    from a stack slot to the store that spilled it (see `find_def` and `_spilled_value`). It is
+    from a stack slot to the store that spilled it (see `find_def` and `find_spill_store`). It is
     off by default because passing a call is only sound for the table-base uses of the jump-table
     recovery; the other callers keep the call as a barrier.
     """
@@ -268,9 +271,11 @@ def eval_const(image: CodeImage, addr: int, reg: int, *, toc: int | None = None,
         v = src(d.field("rS"))
         return None if v is None else v & _MASK32
     if name in ("lwz", "ld") and through_calls and d.field("rA") == _STACK_REG:
-        return _spilled_value(image, d, lambda store: eval_const(
-            image, store.addr, store.field("rS"), toc=toc, read_mem=read_mem, depth=depth - 1,
-            through_calls=True))
+        store = find_spill_store(image, d)
+        if store is None:
+            return None
+        return eval_const(image, store.addr, store.field("rS"), toc=toc, read_mem=read_mem,
+                          depth=depth - 1, through_calls=True)
     if name in ("lwz", "ld"):
         # Update forms are separate mnemonics, so rD is the only register written here.
         if read_mem is None:

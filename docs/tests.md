@@ -65,7 +65,7 @@ SPURS engine tasks has run on the recompiled SPU code, so a run that stops earli
 stall, or the watchdog before the batch ends) leaves the pattern unmatched. The line first appears at
 12 to 14 s when the hdd directory already holds the installed game data and at 14 to 16 s from an empty
 directory; the test must pass from both. The run is limited to 30 s because a gap in a PPU jump table
-stops the game at about 54 s, so a longer run would end differently. A run that passes ends with
+stops the game at about 75 s, so a longer run would end differently. A run that passes ends with
 `tox2: stop: watchdog 30 s` (exit code 5), which the test does not check. The milestone guards how far
 the main thread gets; it does not mean that the game works.
 
@@ -105,7 +105,7 @@ additionally need `TOX2_GHIDRA_JSON`, the path of an export written by `ghidra-e
 are skipped without it. The tests never run Ghidra themselves. The tests of `recover` and
 `emit` that use the real executable also need `TOX2_EBOOT_ELF`; they read the committed
 `config/ghidra_summary.json` and `config/functions.json`. The `emit` tests assert the
-counts in [Emitting C](emitter.md) (29,196 functions, 173 import trampolines, 474 switches) and
+counts in [Emitting C](emitter.md) (29,196 functions, 173 import trampolines, 475 switches) and
 that no word is unhandled. The `recover` tests check, among other things, that the two TOCs are
 found and that the switch at `0x0081a10c`, which belongs to the second TOC, is resolved.
 

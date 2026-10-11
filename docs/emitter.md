@@ -58,9 +58,9 @@ The census (`--census-out`, default `generated/analysis/emit_census.json`) lists
 mnemonic with its count and handler group. `--max-unhandled N` makes `emit` exit with 9 if
 more than `N` words are emitted as unhandled.
 
-For the committed function database and the pinned ELF, the code range holds 3,018,842 words
+For the committed function database and the pinned ELF, the code range holds 3,021,567 words
 of 188 distinct mnemonics in 29,196 functions. `emit --chunks 256` writes 256 chunks and 173
-import trampolines (474 `switch` statements, 3,807 cases), and `--max-unhandled 0` exits with 0.
+import trampolines (475 `switch` statements, 3,817 cases), and `--max-unhandled 0` exits with 0.
 These numbers come from running `emit --census` and `emit --chunks 256` on the committed
 database. The heaviest mnemonics are `addi` (12.1%), `lwz` (11.7%), `rldicl` (8.1%) and `bc` (8.0%).
 

@@ -114,7 +114,7 @@ exits:
 A fatal stop also prints the registers and the call trace (the most recent function entries) of
 the faulting guest thread; a stop on an SPU thread prints that thread's registers, its trace of recent
 dispatches and its LS map instead (see [SPU usage](spu.md#log-lines-and-census)). A run of this game ends
-with code 5 at the `--seconds` watchdog when the limit is shorter than about 54 s, and with code 3 after
+with code 5 at the `--seconds` watchdog when the limit is shorter than about 75 s, and with code 3 after
 that, at an unknown dispatch target behind a jump table that recovery left unresolved (see [Status](status.md)). The runtime
 never calls
 `abort`: the CRT and Windows error dialogs are disabled, so a run always ends with an exit code,
