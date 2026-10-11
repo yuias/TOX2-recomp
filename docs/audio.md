@@ -2,10 +2,10 @@
 
 This page covers the audio code in the runtime: the `cellAudio` and `cellAtrac` HLE, the audio
 engine and the WASAPI output. The code was written for and checked against an earlier game, with
-synthetic data in the tests. *Tales of Xillia 2* has barely used it: in the current headless run the
-game calls `cellAudioInit`, opens and starts a port and sets the notify queue, but creates no ATRAC
-decoder, and the sound engine's SPU thread does not run, so every mixed block is silent (see
-[Status](status.md)). Where this page describes how "the game" uses the library (thread priorities,
+synthetic data in the tests. In a 120 s headless run of *Tales of Xillia 2* the game calls
+`cellAudioInit`, opens and starts a port and sets the notify queue, and creates two ATRAC decoders
+(both for sounds held in memory); the audio census counts 22,071 blocks, 4,017 of them non-silent,
+and the dump has non-silent audio from about 50 s on (see [Status](status.md)). Where this page describes how "the game" uses the library (thread priorities,
 buffer sizes, sound formats), that is how the earlier game behaved, and it is not verified for this
 one.
 
@@ -17,8 +17,7 @@ The executable imports 10 `cellAudio` functions and 15 `cellAtrac` functions:
 | --- | --- | --- |
 | `cellAudio` | `cellAudioInit`, `cellAudioQuit`, `cellAudioPortOpen`, `cellAudioPortStart`, `cellAudioPortStop`, `cellAudioPortClose`, `cellAudioGetPortConfig`, `cellAudioSetNotifyEventQueue`, `cellAudioRemoveNotifyEventQueue` | yes |
 | `cellAudio` | `cellAudioSetPortLevel` | yes |
-| `cellAtrac` | `cellAtracSetDataAndGetMemSize`, `cellAtracDeleteDecoder`, `cellAtracDecode`, `cellAtracGetStreamDataInfo`, `cellAtracAddStreamData`, `cellAtracIsSecondBufferNeeded`, `cellAtracGetSecondBufferInfo`, `cellAtracSetSecondBuffer`, `cellAtracGetLoopInfo`, `cellAtracSetLoopNum`, `cellAtracGetChannel`, `cellAtracGetMaxSample` | yes |
-| `cellAtrac` | `cellAtracCreateDecoderExt`, `cellAtracGetInternalErrorInfo`, `cellAtracGetVacantSize` | no (default handler) |
+| `cellAtrac` | `cellAtracSetDataAndGetMemSize`, `cellAtracCreateDecoderExt`, `cellAtracDeleteDecoder`, `cellAtracDecode`, `cellAtracGetStreamDataInfo`, `cellAtracAddStreamData`, `cellAtracGetVacantSize`, `cellAtracGetInternalErrorInfo`, `cellAtracIsSecondBufferNeeded`, `cellAtracGetSecondBufferInfo`, `cellAtracSetSecondBuffer`, `cellAtracGetLoopInfo`, `cellAtracSetLoopNum`, `cellAtracGetChannel`, `cellAtracGetMaxSample` | yes |
 
 The `cellAudioOut` calls come from `cellSysutil` and all four have handlers
 (`runtime/src/hle/cell_sysutil.cpp`): `cellAudioOutGetState`, `cellAudioOutGetConfiguration`,
@@ -28,21 +27,24 @@ which holds LPCM 2 ch at 48 kHz only, because the mixer outputs stereo, and one 
 
 The game does not import `cellAtracCreateDecoder`, `cellAtracGetRemainFrame` or
 `cellAtracGetSoundInfo`, which the runtime implements. It imports `cellAtracCreateDecoderExt`,
-which takes a SPURS instance and has no handler. The code that calls it creates a SPURS instance
-with one SPU, named "atrac3plus", for it; the runs create that instance's thread group but nothing starts it. On the console the ATRAC3plus decoder then runs on an SPU, and
-the firmware decoder is not part of this runtime. The stream protocol that `cellAtrac` is implemented with here
-(including `remain`, below) was derived from the earlier game, which used `cellAtracCreateDecoder`
-and `cellAtracGetRemainFrame`; this game also uses `cellAtracGetVacantSize`, so its protocol may
-differ.
+which takes a SPURS instance (the argument list is the handle, the work memory, a PPU priority and
+a `CellAtracExtRes` of `{u32 spurs; u8 priority[8]}`). The code that calls it creates a SPURS
+instance with one SPU, named "atrac3plus", for it; the runs create that instance's thread group but
+nothing starts it. On the console the ATRAC3plus decoder runs on that SPU and the firmware decoder
+is not part of this runtime, so `CreateDecoderExt` ignores its last three arguments and attaches a
+host decoder, exactly as `CreateDecoder` does. The stream protocol that `cellAtrac` is implemented
+with here (including `remain`, below) was derived from the earlier game, which used
+`cellAtracCreateDecoder` and `cellAtracGetRemainFrame`; this game also uses `cellAtracGetVacantSize`
+and the starvation code described under `Decode` below.
 
 The game's sound engine core is a raw SPU thread group named "bnusCore" (the SPU image
 `bnusCoreSpu.elf`, embedded in the executable at `0x00f7b080`, 85,008 bytes of text). The code
-that starts it uses raw SPU thread group system calls and binds an event queue to it. The group is
-created, but its thread is not initialised and never starts, so the engine does not run (see
-[Status](status.md#not-implemented)). It
+that starts it uses raw SPU thread group system calls and binds an event queue to it. It
 is not established how the game's sound is split between that engine, the PPU mixer and
-`cellAudio`, so it is not known whether the `cellAudio` code will see the game's whole mix or only
-part of it. No sound of this game has been produced or captured through this runtime.
+`cellAudio`, so it is not known whether the `cellAudio` code sees the game's whole mix or only
+part of it. In the 120 s headless run above, the dump (`--audio-dump`) has non-silent audio in
+three stretches (about 50 s to 52 s, 62 s to 79 s and 113 s to 118 s); what the sound is, and whether
+it is complete, has not been checked by listening.
 
 ```
 game mixer thread -> cellAudio port (guest memory) -> audio engine thread -> output ring -> WASAPI device thread
@@ -206,13 +208,13 @@ implemented.
 
 ## cellAtrac
 
-The runtime implements 15 functions (`runtime/src/hle/cell_atrac.cpp` for the handlers,
+The runtime implements 18 functions (`runtime/src/hle/cell_atrac.cpp` for the handlers,
 `cell_atrac_stream.*` for the per-handle model, which never touches guest memory itself):
-`SetDataAndGetMemSize`, `CreateDecoder`, `DeleteDecoder`, `Decode`, `GetStreamDataInfo`,
-`AddStreamData`, `GetRemainFrame`, `IsSecondBufferNeeded`, `GetSecondBufferInfo`, `SetSecondBuffer`,
-`GetLoopInfo`, `SetLoopNum`, `GetChannel`, `GetMaxSample` and `GetSoundInfo`. This game imports 12
-of them (see above). `CreateDecoderExt`, `GetInternalErrorInfo`, `GetVacantSize`, the other
-`cellAtrac` functions and `cellAtracMulti` are not implemented.
+`SetDataAndGetMemSize`, `CreateDecoder`, `CreateDecoderExt`, `DeleteDecoder`, `Decode`,
+`GetStreamDataInfo`, `AddStreamData`, `GetVacantSize`, `GetInternalErrorInfo`, `GetRemainFrame`,
+`IsSecondBufferNeeded`, `GetSecondBufferInfo`, `SetSecondBuffer`, `GetLoopInfo`, `SetLoopNum`,
+`GetChannel`, `GetMaxSample` and `GetSoundInfo`. This game imports 15 of them (see above). The
+other `cellAtrac` functions and `cellAtracMulti` are not implemented.
 
 The earlier game's own library never read the `CellAtracHandle` it passed, and its sound manager
 owned both sides of the stream protocol, so the state is kept on the host, keyed by the handle's guest
@@ -240,10 +242,26 @@ decoder state is on the host.
   buffered data runs out. It writes interleaved big-endian float32 (a mono sound stays one channel),
   cuts the encoder delay at the start and the samples after `delay + count` at the end, and returns
   at most 2048 frames per call (`GetMaxSample`). `finish` is set when the last valid sample was
-  output and no loop-back is left. **Starvation** (the next frame is not completely buffered)
-  returns success with 0 samples, because the earlier game ended a sound for good on any non-zero result.
-  Errors are only for a bad handle state: `Decode` before `CreateDecoder` returns `0x80610321`, a
+  output and no loop-back is left. **Starvation** (the next frame is not completely buffered and
+  nothing was decoded) returns `0x80610332` (`NODATA_IN_BUFFER`) and writes none of the output cells.
+  This game's decode thread (`bnusCoreDecoderAT3PThread`) waits on a condition variable and retries
+  on that code, publishes a PCM buffer on 0, ends the sound quietly on `0x80610331`
+  (`ALLDATA_WAS_DECODED`, never returned here: the end is `finish = 1`), and treats every other code as
+  fatal (it calls `GetInternalErrorInfo`, aborts, deletes the decoder and exits the thread). Success
+  with 0 samples and `finish = 0` would make it publish an empty PCM buffer. The earlier game ended a
+  sound for good on any non-zero result and so needed success with 0 samples; that rule was replaced
+  because this game's loop needs the code. In memory mode the whole file is buffered, so
+  starvation does not occur.
+  Other errors are for a bad handle state only: `Decode` before `CreateDecoder` returns `0x80610321`, a
   handle with no data `0x80610322`, `CreateDecoder` twice `0x80610323`.
+- **`GetVacantSize`** writes the number of ring bytes that `AddStreamData` could still take in
+  total: the buffer size minus the bytes from the decode cursor to the end of the buffered data,
+  limited by what is left of the file. This is not the contiguous run that `GetStreamDataInfo`
+  returns, which also stops at the ring end. The game stores the value without looking at the return
+  code and sizes its next file read from it. In memory mode there is nothing to add: the cell gets 0 and
+  the return value is `0x80610341` (`ALLDATA_IS_ON_MEMORY`, as for the other stream calls); this game
+  calls it in memory mode and ignores the code.
+- **`GetInternalErrorInfo`** writes 0 and returns success: the host decoder has no internal error.
 - **`remain`.** `GetRemainFrame` and `Decode` report the number of complete frames buffered ahead of
   the cursor. In memory mode it is -1. In streaming mode it is -2 once the end of the file is
   buffered and no loop-back is left. The earlier game refilled the ring only while `remain` was not negative.
@@ -299,7 +317,7 @@ Lines start with `tox2: audio:`, `tox2: atrac:`, `tox2: timer:` or `tox2: thread
 | `tox2: audio: wasapi: device thread failed[: <reason>]` | warn | The device thread stopped on an error |
 | `tox2: audio: cannot start the engine thread: <reason>; continuing without sound` | warn | The engine thread could not be created |
 | `tox2: audio: clock <+-ppm> ppm, mean fill <n> frames (target <n>), dropped <n>, underrun <n> frames` | debug | Every 10 s |
-| `tox2: atrac: decoder <handle hex>: <ch> ch <rate> Hz, <frames> frames, loop <start>-<end>\|none, all on memory\|streaming` | info | `cellAtracCreateDecoder` |
+| `tox2: atrac: decoder <handle hex>: <ch> ch <rate> Hz, <frames> frames, loop <start>-<end>\|none, all on memory\|streaming` | info | `cellAtracCreateDecoder`, `cellAtracCreateDecoderExt` |
 | `tox2: atrac: no decoder: <reason>` | warn | No FFmpeg decoder (once) |
 | `tox2: atrac: handle <hex>: unusable data: <reason>` | warn | `SetDataAndGetMemSize` failed (once per handle) |
 | `tox2: atrac: handle <hex>: decode error, playing silence for such frames: <reason>` | warn | First rejected frame of a handle |
@@ -370,5 +388,6 @@ The WASAPI output follows Microsoft's documentation.
 - ATRAC3 (non-plus) data: the earlier game had none; this game's data has not been checked.
 - `cellAudio` functions that no examined game imports, `cellAtracMulti`, `cellAudioIn` and microphone
   input.
-- `cellAtracCreateDecoderExt`, the SPURS-based ATRAC3plus decoder behind it, and any SPU code (see
+- The firmware SPURS-based ATRAC3plus decoder behind `cellAtracCreateDecoderExt`: its SPURS instance
+  is created and never started, and the sound is decoded on the host (see
   [What this game uses](#what-this-game-uses)).

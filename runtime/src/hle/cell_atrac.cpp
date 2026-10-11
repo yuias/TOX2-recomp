@@ -1,5 +1,6 @@
-// HLE of the 15 cellAtrac imports the game uses. The game's "ATRAC3 Decode Thread" drives them in a
-// fixed order: SetDataAndGetMemSize, CreateDecoder, the queries, then Decode and GetLoopInfo polls
+// HLE of the 15 cellAtrac imports the game uses, and of CreateDecoder, GetRemainFrame and GetSoundInfo,
+// which it does not import. The game's "ATRAC3 Decode Thread" drives them in a fixed order:
+// SetDataAndGetMemSize, CreateDecoder(Ext), the queries, then Decode and GetLoopInfo polls
 // until Decode reports the end, and DeleteDecoder. Streamed sounds are fed through GetStreamDataInfo
 // and AddStreamData from the file thread. All state is host side, keyed by the handle's guest
 // address; nothing is written into the handle, which the game never reads.
@@ -112,11 +113,10 @@ void atracSetDataAndGetMemSize(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, kCellOk);
 }
 
-// cellAtracCreateDecoder(CellAtracHandle* handle, u8* work_memory, u32 ppu_priority, u32 spu_priority)
-// The work memory and priorities have no meaning here: the decoder state is host side. A handle
-// without a decoder still plays (as silence), so a failure to make one is not an error to the game.
-void atracCreateDecoder(Tox2PpuContext* ctx, std::uint8_t* base) {
-    (void)base;
+// Shared by cellAtracCreateDecoder and cellAtracCreateDecoderExt. The work memory and priorities have
+// no meaning here: the decoder state is host side. A handle without a decoder still plays (as
+// silence), so a failure to make one is not an error to the game.
+void createDecoderFor(Tox2PpuContext* ctx) {
     const std::uint32_t handle = argU32(ctx, 0);
     AtracStream* sound = findSound(handle);
     if (sound == nullptr) {
@@ -142,6 +142,55 @@ void atracCreateDecoder(Tox2PpuContext* ctx, std::uint8_t* base) {
                 info.sample_rate, sound->frames(), loop, sound->memoryMode() ? "all on memory" : "streaming");
     }
     setResultCode(ctx, result);
+}
+
+// cellAtracCreateDecoder(CellAtracHandle* handle, u8* work_memory, u32 ppu_priority, u32 spu_priority)
+void atracCreateDecoder(Tox2PpuContext* ctx, std::uint8_t* base) {
+    (void)base;
+    createDecoderFor(ctx);
+}
+
+// cellAtracCreateDecoderExt(CellAtracHandle* handle, u8* work_memory, u32 ppu_priority,
+//                           CellAtracExtRes* ext_res)
+// ext_res is {u32 spurs; u8 priority[8]}: the firmware decoder ran on that SPURS instance, ours is a host
+// decoder, so it is not read.
+void atracCreateDecoderExt(Tox2PpuContext* ctx, std::uint8_t* base) {
+    (void)base;
+    createDecoderFor(ctx);
+}
+
+// cellAtracGetVacantSize(CellAtracHandle* handle, u32* vacant_bytes)
+// The game sizes its next file read from the cell and stores it without looking at the result, so the
+// cell is written whenever it is mapped, also in memory mode where there is nothing to add.
+void atracGetVacantSize(Tox2PpuContext* ctx, std::uint8_t* base) {
+    AtracStream* sound = findSound(argU32(ctx, 0));
+    if (sound == nullptr) {
+        setResultCode(ctx, kAtracErrorUnsetData);
+        return;
+    }
+    const std::uint32_t out = argU32(ctx, 1);
+    if (!cellOk(out)) {
+        setResultCode(ctx, kCellEfault);
+        return;
+    }
+    tox2Write32(base, out, sound->vacant());
+    setResultCode(ctx, sound->memoryMode() ? kAtracErrorAllDataIsOnMemory : kCellOk);
+}
+
+// cellAtracGetInternalErrorInfo(CellAtracHandle* handle, s32* result)
+// The game asks after any decode failure; the host decoder has no internal error to report.
+void atracGetInternalErrorInfo(Tox2PpuContext* ctx, std::uint8_t* base) {
+    if (findSound(argU32(ctx, 0)) == nullptr) {
+        setResultCode(ctx, kAtracErrorUnsetData);
+        return;
+    }
+    const std::uint32_t out = argU32(ctx, 1);
+    if (!cellOk(out)) {
+        setResultCode(ctx, kCellEfault);
+        return;
+    }
+    writeS32(base, out, 0);
+    setResultCode(ctx, kCellOk);
 }
 
 // cellAtracDeleteDecoder(CellAtracHandle* handle)
@@ -184,7 +233,13 @@ void atracDecode(Tox2PpuContext* ctx, std::uint8_t* base) {
     add(t.non_silent, result->counts.non_silent);
     add(t.errors, result->counts.errors);
     add(t.without_decoder, result->counts.without_decoder);
-    if (result->samples == 0 && !result->finish) add(t.starved, 1);
+    if (result->starved) {
+        // The game waits for AddStreamData on this code and retries; success with no samples and
+        // finish = 0 would make it queue an empty PCM buffer.
+        add(t.starved, 1);
+        setResultCode(ctx, kAtracErrorNodataInBuffer);
+        return;
+    }
     if (const std::string reason = sound->takeFirstError(); !reason.empty()) {
         logWarn("tox2: atrac: handle {:#x}: decode error, playing silence for such frames: {}", argU32(ctx, 0), reason);
     }
@@ -362,6 +417,7 @@ void atracSetSecondBuffer(Tox2PpuContext* ctx, std::uint8_t* base) {
 constexpr HleEntry kHandlers[] = {
         {kModule, 0x06ddb53e, "cellAtracSetSecondBuffer", atracSetSecondBuffer},
         {kModule, 0x0f9667b6, "cellAtracGetChannel", atracGetChannel},
+        {kModule, 0x2642d4cc, "cellAtracCreateDecoderExt", atracCreateDecoderExt},
         {kModule, 0x2bfff084, "cellAtracGetStreamDataInfo", atracGetStreamDataInfo},
         {kModule, 0x46cfc013, "cellAtracAddStreamData", atracAddStreamData},
         {kModule, 0x5f62d546, "cellAtracGetMaxSample", atracGetMaxSample},
@@ -371,7 +427,9 @@ constexpr HleEntry kHandlers[] = {
         {kModule, 0x8eb0e65f, "cellAtracDecode", atracDecode},
         {kModule, 0x99efe171, "cellAtracIsSecondBufferNeeded", atracIsSecondBufferNeeded},
         {kModule, 0xab6b6dbf, "cellAtracGetLoopInfo", atracGetLoopInfo},
+        {kModule, 0xb5c11938, "cellAtracGetInternalErrorInfo", atracGetInternalErrorInfo},
         {kModule, 0xbe07f05e, "cellAtracGetSecondBufferInfo", atracGetSecondBufferInfo},
+        {kModule, 0xc9a95fcb, "cellAtracGetVacantSize", atracGetVacantSize},
         {kModule, 0xcf01d5d4, "cellAtracGetSoundInfo", atracGetSoundInfo},
         {kModule, 0xdfab73aa, "cellAtracGetRemainFrame", atracGetRemainFrame},
         {kModule, 0xfa293e88, "cellAtracCreateDecoder", atracCreateDecoder},

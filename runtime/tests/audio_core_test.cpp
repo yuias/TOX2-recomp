@@ -1928,6 +1928,7 @@ constexpr std::uint32_t kAtracReadsizeOverBuffer = 0x80610311;
 constexpr std::uint32_t kAtracNoDecoder = 0x80610321;
 constexpr std::uint32_t kAtracUnsetData = 0x80610322;
 constexpr std::uint32_t kAtracDecoderWasCreated = 0x80610323;
+constexpr std::uint32_t kAtracNodataInBuffer = 0x80610332;
 constexpr std::uint32_t kAtracAllDataIsOnMemory = 0x80610341;
 constexpr std::uint32_t kAtracAddDataIsTooBig = 0x80610342;
 constexpr std::int32_t kRemainOnMemory = -1;
@@ -2203,12 +2204,12 @@ void testAtracModelStarvation() {
     std::vector<float> out(4096);
     for (int i = 0; i < 2; ++i) {
         const auto result = rig.stream->decode(rig.ring, out);
-        CHECK(result.has_value() && result->samples == 2048 && !result->finish);
+        CHECK(result.has_value() && result->samples == 2048 && !result->finish && !result->starved);
     }
     for (int i = 0; i < 3; ++i) {
         const auto starved = rig.stream->decode(rig.ring, out);
         CHECK(starved.has_value());
-        if (starved) CHECK(starved->samples == 0 && !starved->finish && starved->remain == 0);
+        if (starved) CHECK(starved->samples == 0 && !starved->finish && starved->starved && starved->remain == 0);
     }
 
     // The rest of frame 2 arrives: decoding resumes where it stopped.
@@ -2452,6 +2453,10 @@ public:
         return call("cellAtracSetDataAndGetMemSize", handle(), at(kBuffer), read_bytes, buffer_bytes, cell(0));
     }
     std::uint32_t createDecoder() { return call("cellAtracCreateDecoder", handle(), at(0x800), 0x64, 0x64); }
+    // The last argument is a CellAtracExtRes pointer, which the model must not need.
+    std::uint32_t createDecoderExt(std::uint32_t ext_res = 0) {
+        return call("cellAtracCreateDecoderExt", handle(), at(0x800), 0x64, ext_res);
+    }
 
 private:
     tox2::GuestThread caller_;
@@ -2465,6 +2470,7 @@ constexpr std::uint8_t kSentinel = 0x5a;
 struct HandlerDecode {
     std::uint32_t total = 0;
     std::uint32_t calls = 0;
+    std::uint32_t starved = 0;  // calls answered with NODATA_IN_BUFFER
     bool finished = false;
     std::int32_t last_remain = 0;
     bool ok = true;
@@ -2478,6 +2484,16 @@ HandlerDecode decodeAll(AtracGuest& guest, std::uint32_t channels,
         std::memset(guest.base() + out, kSentinel, 2048 * channels * 4 + 64);
         const std::uint32_t result =
                 guest.call("cellAtracDecode", guest.handle(), out, guest.cell(1), guest.cell(2), guest.cell(3));
+        if (result == kAtracNodataInBuffer) {
+            // Nothing is written on starvation; the caller waits and retries.
+            ++got.starved;
+            ++got.calls;
+            for (std::uint32_t i = 0; i < 2048 * channels * 4 + 64; ++i) {
+                got.ok = got.ok && guest.base()[out + i] == kSentinel;
+            }
+            if (after_call) after_call(call);
+            continue;
+        }
         got.ok = got.ok && result == 0;
         const std::uint32_t samples = guest.read(1);
         got.ok = got.ok && samples <= 2048;
@@ -2496,7 +2512,7 @@ HandlerDecode decodeAll(AtracGuest& guest, std::uint32_t channels,
 }
 
 void testAtracHandlersMemory() {
-    CHECK(tox2::cellAtracHandlers().size() == 15);
+    CHECK(tox2::cellAtracHandlers().size() == 18);
     AtracGuest guest;
     std::uint8_t* base = guest.base();
     std::memset(base + guest.handle(), 0xaa, 0x200);
@@ -2507,6 +2523,9 @@ void testAtracHandlersMemory() {
                      guest.cell(3)) == kAtracUnsetData);
     CHECK(guest.call("cellAtracDeleteDecoder", guest.handle()) == kAtracUnsetData);
     CHECK(guest.call("cellAtracIsSecondBufferNeeded", guest.handle()) == kAtracUnsetData);
+    CHECK(guest.call("cellAtracGetVacantSize", guest.handle(), guest.cell(0)) == kAtracUnsetData);
+    CHECK(guest.call("cellAtracGetInternalErrorInfo", guest.handle(), guest.cell(0)) == kAtracUnsetData);
+    CHECK(guest.createDecoderExt() == kAtracUnsetData);
 
     const Bytes file = makeAt3File(2, 4, 5000, 2232, std::pair{3000u, 7231u});
     const auto size = static_cast<std::uint32_t>(file.size());
@@ -2537,6 +2556,16 @@ void testAtracHandlersMemory() {
     CHECK(guest.call("cellAtracAddStreamData", guest.handle(), 0x100) == kAtracAllDataIsOnMemory);
     CHECK(guest.createDecoder() == 0);
     CHECK(guest.createDecoder() == kAtracDecoderWasCreated);
+    CHECK(guest.createDecoderExt() == kAtracDecoderWasCreated);
+
+    // Nothing can be added in memory mode: the vacant size is 0 and written regardless of the code.
+    tox2Write32(base, guest.cell(1), 0xdeadbeef);
+    CHECK(guest.call("cellAtracGetVacantSize", guest.handle(), guest.cell(1)) == kAtracAllDataIsOnMemory);
+    CHECK(guest.read(1) == 0);
+    CHECK(guest.call("cellAtracGetVacantSize", guest.handle(), 0) == 0x8001000d);
+    tox2Write32(base, guest.cell(1), 0xdeadbeef);
+    CHECK(guest.call("cellAtracGetInternalErrorInfo", guest.handle(), guest.cell(1)) == 0 && guest.read(1) == 0);
+    CHECK(guest.call("cellAtracGetInternalErrorInfo", guest.handle(), 0) == 0x8001000d);
 
     // The loop count: 3, then endless (-1 as a 32-bit register value).
     CHECK(guest.call("cellAtracSetLoopNum", guest.handle(), 3) == 0);
@@ -2590,6 +2619,11 @@ void testAtracHandlersStreaming() {
     const std::int32_t threshold = initial * 3 / 4;
     CHECK(initial > 100 && initial < 128);
 
+    // The ring holds 0x10000 - data_offset live bytes, the rest of the 0x20000 is free (the file is larger).
+    const std::uint32_t data_offset = at3DataOffset(file);
+    CHECK(guest.call("cellAtracGetVacantSize", guest.handle(), guest.cell(8)) == 0);
+    CHECK(guest.read(8) == 0x20000 - (0x10000 - data_offset));
+
     struct Pending {
         std::uint32_t write_ptr, bytes, read_pos;
     };
@@ -2610,6 +2644,9 @@ void testAtracHandlersStreaming() {
                                               guest.cell(6), guest.cell(7)) == 0;
             const std::uint32_t write_ptr = guest.read(5), writable = guest.read(6), read_pos = guest.read(7);
             cells_ok = cells_ok && write_ptr >= ring && write_ptr + writable <= ring + 0x20000;
+            // The contiguous run never exceeds the total free space.
+            cells_ok = cells_ok && guest.call("cellAtracGetVacantSize", guest.handle(), guest.cell(8)) == 0 &&
+                       writable <= guest.read(8) && guest.read(8) <= 0x20000;
             const std::uint32_t bytes =
                     std::min({writable, 0x4000u, static_cast<std::uint32_t>(file.size()) - read_pos});
             if (bytes > 0) {
@@ -2628,6 +2665,65 @@ void testAtracHandlersStreaming() {
     CHECK(guest.call("cellAtracGetStreamDataInfo", guest.handle(), guest.cell(5), guest.cell(6), guest.cell(7)) == 0);
     CHECK(guest.read(6) == 0 && guest.read(7) == file.size());
     CHECK(guest.call("cellAtracAddStreamData", guest.handle(), 1) == kAtracAddDataIsTooBig);
+    tox2Write32(base, guest.cell(8), 0xdeadbeef);
+    CHECK(guest.call("cellAtracGetVacantSize", guest.handle(), guest.cell(8)) == 0 && guest.read(8) == 0);
+}
+
+// Starvation, as the game's decode thread sees it: NODATA_IN_BUFFER with nothing written, then success
+// once the missing bytes are added. The ring (0x800) is smaller than the file, so the free space is
+// limited by the ring.
+void testAtracHandlersStarvation() {
+    AtracGuest guest;
+    std::uint8_t* base = guest.base();
+    const Bytes file = makeAt3File(2, 10, 10 * 2048, 0);
+    const std::uint32_t data_offset = at3DataOffset(file);
+    constexpr std::uint32_t kRing = 0x800;
+    const std::uint32_t read_bytes = data_offset + 2 * kAt3Block + kAt3Block / 2;  // two and a half frames
+    CHECK(read_bytes < kRing);
+    guest.put(guest.at(AtracGuest::kBuffer), Bytes(file.begin(), file.begin() + read_bytes));
+    CHECK(guest.call("cellAtracSetDataAndGetMemSize", guest.handle(), guest.at(AtracGuest::kBuffer), read_bytes, kRing,
+                     guest.cell(0)) == 0);
+    CHECK(guest.createDecoderExt() == 0);
+
+    const std::uint32_t out = guest.at(AtracGuest::kOut);
+    auto decodeOnce = [&] {
+        std::memset(base + out, kSentinel, 2048 * 2 * 4 + 64);
+        for (std::uint32_t n = 1; n <= 3; ++n) tox2Write32(base, guest.cell(n), 0xdeadbeef);
+        return guest.call("cellAtracDecode", guest.handle(), out, guest.cell(1), guest.cell(2), guest.cell(3));
+    };
+    for (int i = 0; i < 2; ++i) CHECK(decodeOnce() == 0 && guest.read(1) == 2048 && guest.read(2) == 0);
+
+    // Half a frame is left in the ring: every further call fails the same way and writes nothing.
+    for (int i = 0; i < 3; ++i) {
+        CHECK(decodeOnce() == kAtracNodataInBuffer);
+        bool untouched = guest.read(1) == 0xdeadbeef && guest.read(2) == 0xdeadbeef && guest.read(3) == 0xdeadbeef;
+        for (std::uint32_t b = 0; b < 2048 * 2 * 4 + 64; ++b) untouched = untouched && base[out + b] == kSentinel;
+        CHECK(untouched);
+    }
+    CHECK(tox2::cellAtracStats().starved == 3);
+
+    CHECK(guest.call("cellAtracGetVacantSize", guest.handle(), guest.cell(4)) == 0);
+    CHECK(guest.read(4) == kRing - kAt3Block / 2);  // the ring is the limit
+    CHECK(guest.call("cellAtracGetInternalErrorInfo", guest.handle(), guest.cell(5)) == 0 && guest.read(5) == 0);
+
+    // The rest of frame 2, possibly in two runs when the ring wraps.
+    std::uint32_t pos = read_bytes;
+    while (pos < data_offset + 3 * kAt3Block) {
+        CHECK(guest.call("cellAtracGetStreamDataInfo", guest.handle(), guest.cell(5), guest.cell(6), guest.cell(7)) ==
+              0);
+        CHECK(guest.read(7) == pos);
+        const std::uint32_t n = std::min(guest.read(6), data_offset + 3 * kAt3Block - pos);
+        CHECK(n > 0);
+        if (n == 0) break;
+        std::memcpy(base + guest.read(5), file.data() + pos, n);
+        CHECK(guest.call("cellAtracAddStreamData", guest.handle(), n) == 0);
+        pos += n;
+    }
+    CHECK(decodeOnce() == 0 && guest.read(1) == 2048 && guest.read(2) == 0);
+
+    // All three frames are consumed: the ring is empty again and the file has bytes left.
+    CHECK(guest.call("cellAtracGetVacantSize", guest.handle(), guest.cell(4)) == 0 && guest.read(4) == kRing);
+    CHECK(decodeOnce() == kAtracNodataInBuffer);
 }
 
 void testAtracHandlersReuseAndErrors() {
@@ -2758,6 +2854,26 @@ void testAtracHandlersDecodeThroughFactory() {
     tox2::setAtracDecoderFactory(nullptr);
 }
 
+// CreateDecoderExt attaches a working decoder without looking at its SPURS argument.
+void testAtracHandlersCreateDecoderExt() {
+    constexpr std::uint8_t kHalf[4] = {0x3f, 0x00, 0x00, 0x00};
+    AtracGuest guest;
+    tox2::setAtracDecoderFactory(std::make_unique<ConstantFactory>(0.5f, 999));
+    const Bytes file = makeAt3File(2, 2, 4096, 0);
+    const auto size = static_cast<std::uint32_t>(file.size());
+    CHECK(guest.setData(file, size, size) == 0);
+    // An unmapped CellAtracExtRes pointer must not matter.
+    CHECK(guest.call("cellAtracCreateDecoderExt", guest.handle(), 0, 0, 0xfffffff0) == 0);
+    CHECK(guest.createDecoderExt(guest.at(0x900)) == kAtracDecoderWasCreated);
+
+    const std::uint32_t out = guest.at(AtracGuest::kOut);
+    CHECK(guest.call("cellAtracDecode", guest.handle(), out, guest.cell(1), guest.cell(2), guest.cell(3)) == 0);
+    CHECK(guest.read(1) == 2048 && std::memcmp(guest.base() + out, kHalf, 4) == 0);
+    const tox2::CellAtracStats stats = tox2::cellAtracStats();
+    CHECK(stats.decoders == 1 && stats.frames == 1 && stats.non_silent == 1);
+    tox2::setAtracDecoderFactory(nullptr);
+}
+
 // A loop that ends before the valid audio starts is ignored, so it must not be advertised either.
 void testAtracLoopOutsideValidAudio() {
     ModelRig rig;
@@ -2840,8 +2956,10 @@ int main(int argc, char** argv) {
     testAtracHandlersMemory();
     testAtracHandlersMono();
     testAtracHandlersStreaming();
+    testAtracHandlersStarvation();
     testAtracHandlersReuseAndErrors();
     testAtracHandlersDecodeThroughFactory();
+    testAtracHandlersCreateDecoderExt();
     testAtracLoopOutsideValidAudio();
 
     if (!keep) fs::remove_all(g_dir, ec);

@@ -27,6 +27,7 @@ inline constexpr std::uint32_t kAtracErrorIllegalData = 0x80610315;
 inline constexpr std::uint32_t kAtracErrorNoDecoder = 0x80610321;
 inline constexpr std::uint32_t kAtracErrorUnsetData = 0x80610322;
 inline constexpr std::uint32_t kAtracErrorDecoderWasCreated = 0x80610323;
+inline constexpr std::uint32_t kAtracErrorNodataInBuffer = 0x80610332;
 inline constexpr std::uint32_t kAtracErrorAllDataIsOnMemory = 0x80610341;
 inline constexpr std::uint32_t kAtracErrorAddDataIsTooBig = 0x80610342;
 
@@ -58,8 +59,11 @@ inline constexpr float kAtracSilenceLevel = 1.0e-4f;
 struct AtracDecodeResult {
     std::uint32_t samples = 0;  // frames written to the output, at most kAtracMaxSample
     bool finish = false;
+    // The next frame is not buffered yet and nothing was produced; the handler reports this as
+    // kAtracErrorNodataInBuffer, which the game answers by waiting for AddStreamData and retrying.
+    bool starved = false;
     std::int32_t remain = 0;
-    AtracFrameCounts counts;  // frames handled by this call
+    AtracFrameCounts counts;  // frames handled by this call (also those of a starved call)
 };
 
 struct AtracSoundInfo {
@@ -98,13 +102,17 @@ public:
 
     // Streaming only (kAtracErrorAllDataIsOnMemory in memory mode).
     std::expected<AtracStreamInfo, std::uint32_t> streamDataInfo();
+    // Ring bytes that AddStreamData could still take in total (not only the contiguous run that
+    // streamDataInfo() offers): the free space, limited by what is left of the file. 0 in memory mode.
+    std::uint32_t vacant() const;
     // Commits n bytes at the write pointer of the last streamDataInfo(). Bytes of a read that was
     // requested before a loop seek are dropped (success), because they no longer match the position.
     std::uint32_t addStreamData(std::uint32_t n);
 
     // Decodes the next frame that has output into `out` (host floats, interleaved, room for
     // kAtracMaxSample * channels). `ring` is the guest buffer, bufferBytes() long. Starvation is
-    // success with no samples; the error codes are for a bad handle state only.
+    // success with `starved` set and no samples (the frame counts stay valid); the error codes are for
+    // a bad handle state only.
     std::expected<AtracDecodeResult, std::uint32_t> decode(std::span<const std::uint8_t> ring, std::span<float> out);
 
     // The reason of the first rejected frame, once; empty afterwards (the HLE layer logs it per handle).

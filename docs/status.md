@@ -167,8 +167,10 @@ These exist and are generic, but were written for and checked against the earlie
   (6,674 draws rendered, 9,173 skipped and 2,845 clears in 30 s), but the frame viewed was blank white;
   `tox2_rsxreplay` has not been used with this game's commands.
 - Sound through the runtime's audio engine and WASAPI (see [Audio](audio.md)). The game initialises
-  `cellAudio` in the current run, and the headless run (output `none`) counts 55,806 blocks in 300 s, 158 of
-  them non-silent; the sound engine's SPU thread runs (see [SPU usage](spu.md#what-the-current-run-reaches)).
+  `cellAudio` in the current run and creates two ATRAC3plus decoders, which the host decodes; a 120 s
+  headless run (output `none`) counts 22,071 blocks, 4,017 of them non-silent, and the audio dump is
+  non-silent in three stretches from about 50 s on. The sound engine's SPU thread runs (see
+  [SPU usage](spu.md#what-the-current-run-reaches)). The dump was not listened to.
 - cellSail and cellPamf HLE, the PAMF demuxer, the host movie player and FFmpeg movie decoders.
   They are built but unused: this game imports neither module, so their handlers are never bound
   (see [Movies](movies.md)).
@@ -238,10 +240,9 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   files have the same size); nothing has been checked about why.
 - Audio: WASAPI is the only device output, in shared mode on the default device. The output is
   stereo (an 8-channel port is reduced to its front pair), and there is no volume setting or device
-  choice. ATRAC3 (non-plus) is not supported. Only the `cellAudio` and `cellAtrac` calls of the
-  earlier game are implemented; this game's use of them has not been checked, and it imports
-  `cellAtracCreateDecoderExt`, `cellAtracGetInternalErrorInfo` and `cellAtracGetVacantSize`, which
-  have no handler. `cellAudioSetPortLevel` and the `cellAudioOut` imports have handlers; the mixer
+  choice. ATRAC3 (non-plus) is not supported. The `cellAtrac` calls of this game all have handlers,
+  but only the two sounds held in memory have been seen; the streaming path (`GetVacantSize` with
+  a ring, starvation) is covered by tests only. `cellAudioSetPortLevel` and the `cellAudioOut` imports have handlers; the mixer
   is stereo only, so `cellAudioOutGetSoundAvailability` offers LPCM 2 ch at 48 kHz only.
 - Input: the `neutral`, `none`, `keyboard`, `gamepad` and `keyboard+gamepad` pad providers. The
   keyboard has a fixed mapping, no analog sticks and no vibration; gamepads are read through

@@ -99,7 +99,8 @@ The game imports 30 `cellSpurs` functions, `sys_spu_image_import`/`sys_spu_image
   queue A through its port; the SPU thread receives them with `stop 0x110` on `'nuAS'` and answers on
   port 7.
 - SPURS instance B "atrac3plus" (fn `0x009568c0`): one SPU, created only to be passed to
-  `cellAtracCreateDecoderExt`, so that the firmware ATRAC3plus decoder can run on it.
+  `cellAtracCreateDecoderExt`, so that the firmware ATRAC3plus decoder can run on it. The runtime
+  decodes ATRAC3plus on the host and ignores this instance (see [Audio](audio.md#what-this-game-uses)).
 - The SPU printf server (`0x0098dd24`-`0x0098e26c`, `0x00997928`-`0x00998dd4`) is the only code
   that uses `sys_spu_thread_read_ls`/`write_ls` and the SPU thread event syscalls; the game itself
   does not exchange LS data or mailbox values with an SPU program.
@@ -430,10 +431,11 @@ watchdog. The audio census counts 55,806 blocks, 158 of them non-silent.
 
 Open issues:
 
-- Raw SPU thread groups and `stop 0x120` are not implemented. Only 158 of the 55,806 audio blocks of a
-  300 s headless run are non-silent.
+- Raw SPU thread groups and `stop 0x120` are not implemented. In the 120 s headless run, 4,017 of the
+  22,071 audio blocks are non-silent (the ATRAC3plus sounds, decoded on the host); the 300 s run
+  above had 158 of 55,806 before `cellAtracCreateDecoderExt` had a handler.
 - SPURS instance B ("atrac3plus", one SPU, created for `cellAtracCreateDecoderExt`) gets its thread group
-  and thread, but nothing starts the group.
+  and thread, but nothing starts the group; the host decoder makes that unnecessary.
 - The spline task (image 1) has not run in these runs.
 - Three PPU jump tables stay unresolved (`0x00186a20`, `0x0025a1dc`, `0x0058231c`); no run has reached one.
 - The reservation race window above is documented, not closed.

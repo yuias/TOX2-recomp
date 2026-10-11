@@ -117,14 +117,19 @@ AtracSoundInfo AtracStream::soundInfo() const {
     return sound;
 }
 
-std::uint32_t AtracStream::writableNow() const {
+std::uint32_t AtracStream::vacant() const {
     if (memory_mode_) return 0;
     const std::uint64_t head = frameOffset(cursor_);
     const std::uint64_t live = buffered_end_ > head ? buffered_end_ - head : 0;
     if (live >= buffer_bytes_) return 0;
+    return static_cast<std::uint32_t>(std::min(std::uint64_t{buffer_bytes_} - live, file_end_ - buffered_end_));
+}
+
+std::uint32_t AtracStream::writableNow() const {
+    const std::uint32_t free_bytes = vacant();
+    if (free_bytes == 0) return 0;
     const std::uint64_t to_ring_end = buffer_bytes_ - buffered_end_ % buffer_bytes_;
-    return static_cast<std::uint32_t>(
-            std::min({std::uint64_t{buffer_bytes_} - live, to_ring_end, file_end_ - buffered_end_}));
+    return static_cast<std::uint32_t>(std::min<std::uint64_t>(free_bytes, to_ring_end));
 }
 
 std::expected<AtracStreamInfo, std::uint32_t> AtracStream::streamDataInfo() {
@@ -251,6 +256,8 @@ std::expected<AtracDecodeResult, std::uint32_t> AtracStream::decode(std::span<co
         if (result.samples > 0 || finished_) break;
     }
     result.finish = finished_;
+    // The loop only leaves without samples and without finishing when the next frame is missing.
+    result.starved = !finished_ && result.samples == 0;
     result.remain = remain();
     return result;
 }
