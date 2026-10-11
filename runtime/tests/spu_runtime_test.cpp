@@ -14,6 +14,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/census.h"
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
@@ -801,11 +802,13 @@ void testHostThread() {
 int runMfcChild(std::string_view mode);
 int runChanChild(std::string_view mode);
 int runLv2Child(std::string_view mode);
+int runHostUnknownChild();
 
 int runStopChild(std::string_view mode) {
     if (mode.starts_with("--mfc-")) return runMfcChild(mode);
     if (mode.starts_with("--chan-")) return runChanChild(mode);
     if (mode.starts_with("--lv2-")) return runLv2Child(mode);
+    if (mode == "--spu-host-unknown-child") return runHostUnknownChild();
     tox2::installProcessSettings();
     registerSynthImages();
     const auto guest = makeGuest();
@@ -1757,6 +1760,9 @@ constexpr std::uint32_t kLvEmptyExit = 0x3800;    // stop 0x100, then stop 0x102
 constexpr std::uint32_t kLvIntrEmpty = 0x3900;    // WrOutIntrMbox without an OutMbox value
 constexpr std::uint32_t kLvIntrBadCode = 0x3a00;  // WrOutIntrMbox with an unsupported code
 constexpr std::uint32_t kLvSendBusy = 0x3b00;     // send_event while the inbound mailbox is full
+constexpr std::uint32_t kLvLog = 0x3c00;          // logs a line, exits with status 7
+constexpr std::uint32_t kLvFatal = 0x3d00;        // fatal() on the SPU host thread
+constexpr std::uint32_t kLvFault = 0x3e00;        // a GET from an uncommitted guest address
 constexpr std::uint32_t kLvCodeSize = 0x1000;
 constexpr std::uint32_t kLvDataLs = 0x8000;  // FILL segment, 0x100 bytes of kLvFillValue
 constexpr std::uint32_t kLvFillValue = 0xa5a5a5a5;
@@ -1922,6 +1928,27 @@ TOX2_SPU_FUNC(lvSendBusy) {
     LV_STOP(0x102);
 }
 
+TOX2_SPU_FUNC(lvLog) {
+    TOX2_SPU_SF_ENTER(kLvLog);
+    const std::uint32_t site = kLvLog + 4;
+    tox2::logInfo("tox2: test: hello from spu");
+    LV_WR(tox2::chan::kWrOutMbox, 7);
+    LV_STOP(0x102);
+}
+
+TOX2_SPU_FUNC(lvFatal) {
+    (void)ls;
+    TOX2_SPU_SF_ENTER(kLvFatal);
+    tox2::fatal(tox2::FatalKind::GuestFault, "spu test fault");
+}
+
+TOX2_SPU_FUNC(lvFault) {
+    TOX2_SPU_SF_ENTER(kLvFault);
+    const std::uint32_t site = kLvFault + 4;
+    LV_DMA(kLvBuf, std::uint64_t{0x30000000}, 16, tox2::mfc::kGet);
+    LV_STOP(0x102);
+}
+
 // The image is registered with its guest address, which is only known once the fixture has memory.
 Tox2SpuSegment g_lv_segments[] = {{0, kLvMain, kLvCodeSize, 1}};
 const Tox2SpuEntry kLvEntries[] = {
@@ -1937,8 +1964,11 @@ const Tox2SpuEntry kLvEntries[] = {
         {kLvIntrEmpty, 1, {0xc0de0009}, lvIntrEmpty},
         {kLvIntrBadCode, 1, {0xc0de000a}, lvIntrBadCode},
         {kLvSendBusy, 1, {0xc0de000b}, lvSendBusy},
+        {kLvLog, 1, {0xc0de000c}, lvLog},
+        {kLvFatal, 1, {0xc0de000d}, lvFatal},
+        {kLvFault, 1, {0xc0de000e}, lvFault},
 };
-Tox2SpuImageInfo g_lv_image = {"lv2test", 0, kLvCodeSize, kNoHash, kLvMain, 1, g_lv_segments, 12, kLvEntries};
+Tox2SpuImageInfo g_lv_image = {"lv2test", 0, kLvCodeSize, kNoHash, kLvMain, 1, g_lv_segments, 15, kLvEntries};
 
 std::mutex g_lv_log_mutex;
 std::vector<std::string> g_lv_log;
@@ -2411,6 +2441,13 @@ int runLv2Child(std::string_view mode) {
         f.makeThread(group, 0, kLvIntrEmpty);
     } else if (mode == "--lv2-intr-code-child") {
         f.makeThread(group, 0, kLvIntrBadCode);
+    } else if (mode == "--lv2-fatal-child") {
+        // The game installs the census printer; the child does it to see the SPU section.
+        tox2::installCensus();
+        f.makeThread(group, 0, kLvFatal, 0x1234);
+    } else if (mode == "--lv2-fault-child") {
+        tox2::installFaultHandler();
+        f.makeThread(group, 0, kLvFault);
     } else {
         return 99;
     }
@@ -2440,6 +2477,173 @@ void testLv2StopChildren() {
         CHECK(r.output.find("trace (oldest first)") != std::string::npos);
         if (!found) std::fprintf(stderr, "child output:\n%s\n", r.output.c_str());
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Observability: log prefix, fatal dump, supervisor view, census.
+// ---------------------------------------------------------------------------------------------
+
+// A line written on an SPU host thread carries the lv2 thread id; the PPU side keeps its own prefix.
+void testSpuLogPrefix() {
+    Lv2Fixture f;
+    const std::uint32_t group = f.makeGroup(1);
+    const std::uint32_t thread = f.makeThread(group, 0, kLvLog);
+    CHECK(thread == 0x01000100);
+    CHECK(f.ppu.call(173, group) == 0);
+    CHECK(f.join(group) == 0 && f.cause() == 2 && f.status() == 7);
+    CHECK(countLogs("[spu 01000100] tox2: test: hello from spu") == 1);
+    // The owner's callbacks run on the same host thread.
+    CHECK(countLogs("[spu 01000100] tox2: spu: group") == 1);
+    CHECK(countLogs("[host] tox2: spu: thread 0x01000100 \"lvthread\" started at lv2test") == 1);
+    tox2::logInfo("tox2: test: back on the host");
+    CHECK(countLogs("[host] tox2: test: back on the host") == 1);
+}
+
+// Starts a thread that stops at an address no image covers, so the stop and the census come from a host thread.
+int runHostUnknownChild() {
+    tox2::installProcessSettings();
+    tox2::installCensus();
+    registerSynthImages();
+    const auto guest = makeGuest();
+    tox2::SpuThread thread(0x01000109, "unknown", nullptr);
+    loadSynthImages(thread, guest);
+    TOX2_VR_W(thread.context().gpr[4], 0) = 0x6000;
+    thread.start(kLsGoto);
+    thread.join();
+    return 0;  // not reached: the stop ends the process
+}
+
+void testSpuFatalChildren() {
+    // fatal() (not spuStop) on an SPU thread: the SPU dump, no PPU dump, the census with the SPU section.
+    {
+        const ChildResult r = runChild(L"--lv2-fatal-child");
+        const std::string& out = r.output;
+        CHECK(r.exit_code == static_cast<DWORD>(tox2::ExitCode::Fatal));
+        CHECK(out.contains("[spu 01000100] tox2: stop: fatal guest fault: spu test fault"));
+        CHECK(out.contains("spu thread 0x01000100 \"lvthread\": jump_target 0x03d00"));
+        CHECK(out.contains("trace (oldest first): 03d00"));
+        CHECK(out.contains("registers (non-zero, words 0..3):"));
+        CHECK(out.contains("$3   00000000 00001234"));
+        CHECK(out.contains("ls map:") && out.contains("lv2test segment 0 delta 0"));
+        CHECK(!out.contains("guest stack:") && !out.contains("  r0  ") && !out.contains("  lr "));
+        CHECK(out.contains("census: spu 1 threads, 1 dispatches, 0 unknown targets"));
+        CHECK(out.contains("  thread 0x01000100 lvthread: running lv2test ls 0x03d00"));
+        if (!out.contains("trace (oldest first): 03d00")) std::fprintf(stderr, "child output:\n%s\n", out.c_str());
+    }
+    // A guest fault inside an MFC transfer reaches fatal() from the fault handler on the same host thread.
+    {
+        const ChildResult r = runChild(L"--lv2-fault-child");
+        const std::string& out = r.output;
+        CHECK(r.exit_code == static_cast<DWORD>(tox2::ExitCode::Fatal));
+        CHECK(out.contains("[spu 01000100] tox2: stop: fatal guest fault: read from guest address 0x30000000"));
+        CHECK(out.contains("spu thread 0x01000100 \"lvthread\": jump_target 0x03e00"));
+        CHECK(out.contains("trace (oldest first): 03e00"));
+        CHECK(out.contains("registers (non-zero, words 0..3):") && out.contains("ls map:"));
+        CHECK(!out.contains("guest stack:") && !out.contains("  r0  ") && !out.contains("  lr "));
+        if (!out.contains("trace (oldest first): 03e00")) std::fprintf(stderr, "child output:\n%s\n", out.c_str());
+    }
+    // An unknown target counts in the census of the same stop.
+    {
+        const ChildResult r = runChild(L"--spu-host-unknown-child");
+        const std::string& out = r.output;
+        CHECK(r.exit_code == static_cast<DWORD>(tox2::ExitCode::Fatal));
+        CHECK(
+                out.contains("[spu 01000109] tox2: stop: spu: unknown target ls 0x06000 from ls 0x03024 on thread "
+                             "0x01000109 (untracked)"));
+        CHECK(out.contains("census: spu 1 threads, 1 dispatches, 1 unknown targets"));
+        CHECK(out.contains("  image synth: 1 dispatches, 1 distinct entries"));
+        if (!out.contains("1 unknown targets")) std::fprintf(stderr, "child output:\n%s\n", out.c_str());
+    }
+}
+
+// The supervisor input has one entry per started SPU thread; a PPU wait on SPU work is a stall only when the SPU
+// threads wait as well.
+void testSpuSupervisor() {
+    using tox2::ThreadHealth;
+    using tox2::ThreadState;
+    using tox2::ThreadVerdict;
+    const ThreadHealth ppu_waiting{ThreadState::Blocked, true, 0, false};
+
+    // A running SPU thread keeps the run alive however long the PPU threads have waited.
+    {
+        registerSynthImages();
+        const auto guest = makeGuest();
+        tox2::SpuThread thread(0x01000120, "spin", nullptr);
+        loadSynthImages(thread, guest);
+        g_spinning = false;
+        CHECK(thread.start(kLsSpin));
+        CHECK(waitUntil([] { return g_spinning.load(); }));
+        std::vector<ThreadHealth> health{ppu_waiting, ppu_waiting};
+        tox2::appendSpuHealth(health);
+        CHECK(health.size() == 3);
+        CHECK(health[2].state == ThreadState::Running && !health[2].service);
+        std::size_t stalled = 0;
+        CHECK(tox2::judgeThreads(health, 100000, &stalled) == ThreadVerdict::Ok && stalled == 2);
+        thread.requestHalt();
+        thread.join();
+        // A finished thread is no longer part of the input.
+        health = {ppu_waiting};
+        tox2::appendSpuHealth(health);
+        CHECK(health.size() == 1);
+        CHECK(tox2::judgeThreads(health, 100000) == ThreadVerdict::Stall);
+    }
+
+    // An SPU thread blocked in an indefinite channel wait counts like a blocked PPU thread, after two seconds.
+    {
+        Lv2Fixture f;
+        const std::uint32_t group = f.makeGroup(1);
+        const std::uint32_t thread = f.makeThread(group, 0, kLvWaitMbox);
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.waitUntilBlocked(thread, "RdInMbox"));
+        std::vector<ThreadHealth> health{ppu_waiting};
+        tox2::appendSpuHealth(health);
+        CHECK(health.size() == 2);
+        CHECK(health[1].state == ThreadState::Blocked && health[1].indefinite_wait);
+        const std::int64_t since = health[1].blocked_since_ms;
+        CHECK(since > 0);
+        std::size_t stalled = 0;
+        CHECK(tox2::judgeThreads(health, since + 2500, &stalled) == ThreadVerdict::Stall && stalled == 2);
+        CHECK(tox2::judgeThreads(health, since + 500, &stalled) == ThreadVerdict::Ok && stalled == 1);
+
+        // The mailbox wakes it; the wait is over and so is the stall.
+        CHECK(f.ppu.call(190, thread, 5) == 0);
+        CHECK(f.join(group) == 0 && f.cause() == 2 && f.status() == 5);
+        health = {ppu_waiting};
+        tox2::appendSpuHealth(health);
+        CHECK(health.size() == 1);
+    }
+}
+
+// The census of a run that started twice: counters survive the fresh thread objects.
+void testSpuCensus() {
+    Lv2Fixture f;
+    tox2::resetCensus();
+    CHECK(!tox2::formatCensus().contains("census: spu"));
+
+    const std::uint32_t group = f.makeGroup(1);
+    const std::uint32_t thread = f.makeThread(group, 0, kLvMain, f.scratch + kLvWord);
+    CHECK(thread == 0x01000100);
+    for (std::uint32_t run = 0; run < 2; run++) {
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.join(group) == 0 && f.cause() == 2 && f.status() == kLvMainStatus);
+    }
+    const std::string text = tox2::formatCensus();
+    const std::size_t at = text.find("census: spu");
+    const std::string expected =
+            "census: spu 1 threads, 2 dispatches, 0 unknown targets\n"
+            "  thread 0x01000100 lvthread: finished lv2test ls 0x03000\n"
+            "  image lv2test: 2 dispatches, 1 distinct entries\n"
+            "  mfc get: 2, put: 2, getllar: 0, putllc: 0 ok 0 failed\n"
+            "  channel rdch 24 MFC_RdTagStat: 4\n"
+            "  stop 0x102: 2";
+    // The section comes last, after the thread section.
+    CHECK(at != std::string::npos && text.substr(at) == expected);
+    CHECK(text.find("census: threads") < at);
+    if (at == std::string::npos || text.substr(at) != expected) std::fprintf(stderr, "census:\n%s\n", text.c_str());
+
+    // Forgetting the counters removes the section until the next start.
+    tox2::resetCensus();
+    CHECK(!tox2::formatCensus().contains("census: spu"));
 }
 
 }  // namespace
@@ -2496,6 +2700,10 @@ int main(int argc, char** argv) {
     testLv2InterruptMailbox();
     testLv2Teardown();
     testLv2StopChildren();
+    testSpuLogPrefix();
+    testSpuFatalChildren();
+    testSpuSupervisor();
+    testSpuCensus();
 
     std::printf("spu runtime tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;

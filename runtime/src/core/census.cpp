@@ -35,6 +35,8 @@ struct CensusState {
     CensusWriterFn rsx_stop_writer = nullptr;
     SailCensusFn sail_fn = nullptr;
     AudioCensusFn audio_fn = nullptr;
+    SpuCensusFn spu_fn = nullptr;
+    CensusResetFn spu_reset = nullptr;
 };
 
 // Leaked on purpose: the census is printed from stop paths that end in _Exit and may be updated
@@ -179,6 +181,13 @@ void setAudioCensusProvider(AudioCensusFn fn) {
     s.audio_fn = fn;
 }
 
+void setSpuCensusProvider(SpuCensusFn fn, CensusResetFn reset) {
+    CensusState& s = state();
+    std::lock_guard lock(s.mutex);
+    s.spu_fn = fn;
+    s.spu_reset = reset;
+}
+
 void setRsxUnimplementedProvider(RsxUnimplementedFn fn, CensusResetFn reset) {
     CensusState& s = state();
     std::lock_guard lock(s.mutex);
@@ -200,6 +209,7 @@ std::string formatCensus() {
     RsxUnimplementedFn unimplemented_fn = nullptr;
     SailCensusFn sail_fn = nullptr;
     AudioCensusFn audio_fn = nullptr;
+    SpuCensusFn spu_fn = nullptr;
     {
         std::lock_guard lock(s.mutex);
 
@@ -244,6 +254,7 @@ std::string formatCensus() {
         unimplemented_fn = s.unimplemented_fn;
         sail_fn = s.sail_fn;
         audio_fn = s.audio_fn;
+        spu_fn = s.spu_fn;
     }
 
     if (rsx_fn != nullptr) {
@@ -312,6 +323,12 @@ std::string formatCensus() {
             out += " in " + t.blocked_in;
         }
     }
+
+    if (spu_fn != nullptr) {
+        for (const std::string& line : spu_fn()) {
+            out += "\n" + line;
+        }
+    }
     return out;
 }
 
@@ -337,6 +354,7 @@ void installCensus() { setCensusPrinter(&printCensus); }
 void resetCensus() {
     CensusState& s = state();
     CensusResetFn unimplemented_reset = nullptr;
+    CensusResetFn spu_reset = nullptr;
     {
         std::lock_guard lock(s.mutex);
         s.syscalls.clear();
@@ -348,10 +366,14 @@ void resetCensus() {
         s.unimplemented_fn = nullptr;
         s.sail_fn = nullptr;
         s.audio_fn = nullptr;
+        s.spu_fn = nullptr;
         unimplemented_reset = s.unimplemented_reset;
         s.unimplemented_reset = nullptr;
+        spu_reset = s.spu_reset;
+        s.spu_reset = nullptr;
     }
     if (unimplemented_reset != nullptr) unimplemented_reset();
+    if (spu_reset != nullptr) spu_reset();
 }
 
 }  // namespace tox2

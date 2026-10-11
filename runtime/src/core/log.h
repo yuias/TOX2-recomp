@@ -18,6 +18,11 @@ using GuestThreadIdFn = std::optional<std::uint32_t> (*)();
 
 void setGuestThreadIdProvider(GuestThreadIdFn fn);
 
+// Marks the calling host thread as the host thread of the lv2 SPU thread `id`: its lines start with
+// "[spu XXXXXXXX] " instead of "[host] " or "[t XXXXXXXX] ". nullopt clears the mark. Set once where the
+// host thread starts, not per log call.
+void setLogSpuThread(std::optional<std::uint32_t> id);
+
 // Mirrors every line to `path` (truncated) in addition to stderr. Returns false when the file
 // cannot be opened; an empty path closes the current file.
 bool setLogFile(const std::string& path);

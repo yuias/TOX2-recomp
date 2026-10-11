@@ -22,6 +22,8 @@ namespace {
 std::atomic<CensusPrinterFn> g_census_printer{nullptr};
 std::atomic<bool> g_stopping{false};
 thread_local const Tox2PpuContext* t_fatal_context = nullptr;
+thread_local FatalDumpFn t_fatal_dump = nullptr;
+thread_local const void* t_fatal_subject = nullptr;
 thread_local bool t_in_stop = false;
 
 // Takes the single right to end the process. A second host thread parks until the first one
@@ -135,10 +137,20 @@ void setCensusPrinter(CensusPrinterFn fn) { g_census_printer.store(fn); }
 
 void setFatalContext(const Tox2PpuContext* ctx) { t_fatal_context = ctx; }
 
+void setFatalDump(FatalDumpFn fn, const void* subject) {
+    t_fatal_dump = fn;
+    t_fatal_subject = subject;
+}
+
 void fatal(FatalKind kind, std::string_view message) {
     enterStop();
     logInfo("tox2: stop: fatal {}: {}", fatalKindName(kind), message);
-    if (t_fatal_context != nullptr) {
+    if (t_fatal_dump != nullptr) {
+        std::string text = t_fatal_dump(t_fatal_subject);
+        // The logger adds its own newline.
+        while (!text.empty() && text.back() == '\n') text.pop_back();
+        logInfo("{}", text);
+    } else if (t_fatal_context != nullptr) {
         dumpContext(*t_fatal_context);
     }
     finishStop(ExitCode::Fatal);

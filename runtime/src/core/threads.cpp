@@ -38,6 +38,7 @@ constexpr std::int64_t kStallMs = 2000;
 constexpr std::chrono::milliseconds kSupervisorPeriod{100};
 
 thread_local GuestThread* t_current = nullptr;
+std::atomic<SpuHealthFn> g_spu_health{nullptr};
 
 // Lock order: guest lock, then registry mutex. The census printer runs inside fatal(), possibly
 // with the guest lock held, so everything it reads here is behind this mutex or atomic.
@@ -299,6 +300,7 @@ void runSupervisor(std::uint32_t seconds) {
         for (GuestThread* t : snapshotThreads()) {
             health.push_back({t->state(), t->indefiniteWait(), t->blockedSinceMs(), t->service()});
         }
+        appendSpuHealth(health);
         std::size_t stalled = 0;
         switch (judgeThreads(health, steadyMs(), &stalled)) {
             case ThreadVerdict::NoThreads: stopProcess(ExitCode::NoThreads, "tox2: stop: no guest threads left"); break;
@@ -308,6 +310,12 @@ void runSupervisor(std::uint32_t seconds) {
             case ThreadVerdict::Ok: break;
         }
     }
+}
+
+void setSpuHealthProvider(SpuHealthFn fn) { g_spu_health.store(fn); }
+
+void appendSpuHealth(std::vector<ThreadHealth>& out) {
+    if (SpuHealthFn fn = g_spu_health.load()) fn(out);
 }
 
 ThreadVerdict judgeThreads(const std::vector<ThreadHealth>& threads, std::int64_t now_ms, std::size_t* stalled_out) {

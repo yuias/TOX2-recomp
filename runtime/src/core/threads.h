@@ -176,6 +176,15 @@ struct ThreadHealth {
     bool service = false;
 };
 
+// Registered by the SPU layer, so core does not depend on it: appends one ThreadHealth per live SPU thread
+// (running, or blocked in a channel wait with the indefinite flag of that wait). SPU threads run outside the
+// guest lock, so a run in which every PPU thread waits for SPU work is not a stall while an SPU thread runs.
+using SpuHealthFn = void (*)(std::vector<ThreadHealth>& out);
+void setSpuHealthProvider(SpuHealthFn fn);
+// Appends the SPU provider's entries to `out`; does nothing without a provider. The supervisor's input is
+// the PPU threads plus this.
+void appendSpuHealth(std::vector<ThreadHealth>& out);
+
 enum class ThreadVerdict { Ok, NoThreads, Stall };
 
 // The supervisor's decision: no live non-service thread, or every live non-service thread in an

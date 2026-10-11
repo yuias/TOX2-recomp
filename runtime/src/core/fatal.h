@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 #include <string_view>
 
 #include "tox2/ppu_context.h"
@@ -62,8 +63,17 @@ void setCensusPrinter(CensusPrinterFn fn);
 // fatal() dumps its registers and trace ring. The thread layer sets it when a guest thread starts.
 void setFatalContext(const Tox2PpuContext* ctx);
 
-// Logs the stop line, the registers and trace ring of the current guest thread, and the census,
-// then ends the process with ExitCode::Fatal. Only the first caller proceeds; others block forever.
+// What fatal() prints for a thread that is not a PPU guest thread (an SPU thread): `subject` is whatever
+// was passed to setFatalDump. The text may end in a newline. Takes precedence over the PPU context.
+using FatalDumpFn = std::string (*)(const void* subject);
+
+// Sets the dump of the calling host thread; a null function clears it. The SPU layer sets it where its host
+// thread starts, so a fatal stop raised anywhere on that thread (for example a guest fault inside an MFC
+// transfer) prints the SPU registers instead of a PPU dump.
+void setFatalDump(FatalDumpFn fn, const void* subject);
+
+// Logs the stop line, the registers and trace ring of the current guest thread (or its setFatalDump dump) and
+// the census, then ends the process with ExitCode::Fatal. Only the first caller proceeds; others block forever.
 [[noreturn]] void fatal(FatalKind kind, std::string_view message);
 
 // Like fatal() without the register dump. `line` is the complete stop line, e.g.

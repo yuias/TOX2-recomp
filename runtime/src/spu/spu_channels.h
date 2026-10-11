@@ -70,6 +70,9 @@ inline constexpr std::uint32_t kImplemented =
 
 inline constexpr std::uint32_t kInMboxDepth = 4;
 
+// "SPU_RdInMbox" and so on; "?" for a number without a name.
+const char* spuChannelName(std::uint32_t ch);
+
 class SpuChannels {
 public:
     explicit SpuChannels(SpuThread& thread);

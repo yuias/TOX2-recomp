@@ -8,13 +8,16 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include "tox2/spu_context.h"
 
@@ -94,24 +97,48 @@ public:
     SpuState state() const { return state_.load(); }
     const char* blockedIn() const { return blocked_in_.load(); }
     bool indefiniteWait() const { return indefinite_.load(); }
-    // `what` must outlive the wait (a string literal).
+    // Milliseconds on the steady clock at which the current wait (or the current kind of wait) began; the
+    // same clock the PPU threads' health uses.
+    std::int64_t blockedSinceMs() const { return blocked_since_ms_.load(); }
+    // `what` must outlive the wait (a string literal). Calling it again for the same wait keeps the start
+    // time; changing `indefinite` starts a new one.
     void setBlocked(const char* what, bool indefinite) {
+        if (state_.load() != SpuState::Blocked || indefinite_.load() != indefinite) {
+            blocked_since_ms_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::steady_clock::now().time_since_epoch())
+                                            .count());
+        }
         blocked_in_.store(what);
         indefinite_.store(indefinite);
         state_.store(SpuState::Blocked);
     }
     void setRunning() { state_.store(SpuState::Running); }
 
-    // Census counters; written by the owning host thread only.
+    // Census counters; written by the owning host thread only (relaxed).
     std::uint64_t dispatchCount() const { return dispatches_.load(std::memory_order_relaxed); }
     std::uint64_t imageDispatchCount(std::uint32_t image) const {
         return image < kMaxSpuImages ? image_dispatches_[image].load(std::memory_order_relaxed) : 0;
     }
-    void countDispatch(std::uint32_t image) {
+    // One dispatch of `image` (an index into the registered images) to LS address `target`.
+    void countDispatch(std::uint32_t image, std::uint32_t target) {
         dispatches_.store(dispatches_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         std::atomic<std::uint64_t>& n = image_dispatches_[image];
         n.store(n.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        last_image_.store(image + 1, std::memory_order_relaxed);
+        last_target_.store(target, std::memory_order_relaxed);
     }
+    // The image and LS address of the latest dispatch; the image is nullopt before the first one.
+    std::optional<std::uint32_t> lastDispatchImage() const {
+        const std::uint32_t v = last_image_.load(std::memory_order_relaxed);
+        return v == 0 ? std::nullopt : std::optional<std::uint32_t>(v - 1);
+    }
+    std::uint32_t lastDispatchTarget() const { return last_target_.load(std::memory_order_relaxed); }
+    // Dispatches that stopped at an unknown target; counted just before the stop.
+    void countUnknownTarget() { unknown_targets_.fetch_add(1, std::memory_order_relaxed); }
+    std::uint64_t unknownTargetCount() const { return unknown_targets_.load(std::memory_order_relaxed); }
+    // `stop` instructions by code, counted before the owner decides what they mean.
+    void countStop(std::uint32_t code);
+    std::map<std::uint32_t, std::uint64_t> stopCounts() const;
 
     // The load record that covers the 16-byte unit of `lsa`, or null when it is untracked.
     const SpuLoadRecord* recordAt(std::uint32_t lsa) const {
@@ -149,8 +176,14 @@ private:
     std::atomic<SpuState> state_{SpuState::Created};
     std::atomic<const char*> blocked_in_{nullptr};
     std::atomic<bool> indefinite_{false};
+    std::atomic<std::int64_t> blocked_since_ms_{0};
     std::atomic<std::uint64_t> dispatches_{0};
     std::array<std::atomic<std::uint64_t>, kMaxSpuImages> image_dispatches_{};
+    std::atomic<std::uint32_t> last_image_{0};  // image index + 1, 0 before the first dispatch
+    std::atomic<std::uint32_t> last_target_{0};
+    std::atomic<std::uint64_t> unknown_targets_{0};
+    mutable std::mutex stop_mutex_;
+    std::map<std::uint32_t, std::uint64_t> stops_;  // guarded by stop_mutex_
 
     std::thread thread_;
 };
@@ -201,6 +234,10 @@ const Tox2SpuImageInfo& spuImage(std::uint32_t index);
 const Tox2SpuEntry* spuFindEntry(std::uint32_t index, std::uint32_t ls);
 // True the first time it is called for the image since registration (for the "first image" log line).
 bool spuMarkImageSeen(std::uint32_t index);
+// Census: records a dispatch to entry `entry_index` of image `index`; the bitmap is shared by all threads, so
+// restarts and replaced threads keep their entries. Counts each entry once.
+void spuMarkEntryDispatched(std::uint32_t index, std::uint32_t entry_index);
+std::uint32_t spuDistinctEntries(std::uint32_t index);
 
 // Compares the SHA-256 of every registered image with the bytes in guest memory and logs the result.
 // False on a mismatch (the caller ends the run with ExitCode::LoadError).

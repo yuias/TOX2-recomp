@@ -38,6 +38,8 @@ std::uint32_t g_image_count = 0;
 // any thread exists.
 std::array<std::unique_ptr<ImageTable>, kMaxSpuImages> g_tables;
 std::array<std::atomic<bool>, kMaxSpuImages> g_seen;
+// One bit per entry of each image, set by the first dispatch to it from any thread (census).
+std::array<std::unique_ptr<std::atomic<std::uint64_t>[]>, kMaxSpuImages> g_entry_seen;
 
 [[noreturn]] void badTable(const Tox2SpuImageInfo& image, std::string_view why) {
     stopProcess(ExitCode::LoadError, std::format("tox2: spu: image {}: {}", image.name, why));
@@ -64,8 +66,9 @@ std::uint32_t loadWord(const std::uint8_t* ls, std::uint32_t addr) {
 }
 
 // The stop paths are out of line so the dispatcher keeps no locals that would block its tail call.
-[[noreturn]] TOX2_NOINLINE void stopUnknownTarget(const Tox2SpuContext* ctx, std::uint32_t target,
-                                                  const SpuThread& thread, const Tox2SpuImageInfo* image) {
+[[noreturn]] TOX2_NOINLINE void stopUnknownTarget(const Tox2SpuContext* ctx, std::uint32_t target, SpuThread& thread,
+                                                  const Tox2SpuImageInfo* image) {
+    thread.countUnknownTarget();
     spuStop(thread, std::format("tox2: stop: spu: unknown target ls {:#07x} from ls {:#07x} on thread {:#010x} ({})",
                                 target, ctx->jump_site, thread.id(), image != nullptr ? image->name : "untracked"));
 }
@@ -100,6 +103,7 @@ void registerSpuImages(const Tox2SpuImageInfo* images, std::uint32_t count) {
     for (std::uint32_t i = 0; i < kMaxSpuImages; i++) {
         g_tables[i].reset();
         g_seen[i].store(false);
+        g_entry_seen[i].reset();
     }
     for (std::uint32_t i = 0; i < count; i++) {
         const Tox2SpuImageInfo& image = images[i];
@@ -120,6 +124,8 @@ void registerSpuImages(const Tox2SpuImageInfo* images, std::uint32_t count) {
             table->entry_of[entry.ls / 4] = static_cast<std::uint16_t>(e);
         }
         g_tables[i] = std::move(table);
+        // Value-initialised: all bits clear.
+        g_entry_seen[i] = std::make_unique<std::atomic<std::uint64_t>[]>((image.entry_count + 63) / 64);
     }
     g_images = images;
     g_image_count = count;
@@ -135,6 +141,22 @@ const Tox2SpuEntry* spuFindEntry(std::uint32_t index, std::uint32_t ls) {
 }
 
 bool spuMarkImageSeen(std::uint32_t index) { return !g_seen[index].exchange(true); }
+
+void spuMarkEntryDispatched(std::uint32_t index, std::uint32_t entry_index) {
+    std::atomic<std::uint64_t>& word = g_entry_seen[index][entry_index / 64];
+    const std::uint64_t bit = std::uint64_t{1} << (entry_index % 64);
+    // Plain load first: after warm-up the line is only read, never written.
+    if ((word.load(std::memory_order_relaxed) & bit) == 0) word.fetch_or(bit, std::memory_order_relaxed);
+}
+
+std::uint32_t spuDistinctEntries(std::uint32_t index) {
+    if (index >= g_image_count) return 0;
+    std::uint32_t n = 0;
+    for (std::uint32_t w = 0; w < (g_images[index].entry_count + 63) / 64; w++) {
+        n += static_cast<std::uint32_t>(std::popcount(g_entry_seen[index][w].load(std::memory_order_relaxed)));
+    }
+    return n;
+}
 
 bool checkSpuImages(const std::uint8_t* base) {
     bool ok = true;
@@ -186,7 +208,8 @@ void tox2SpuDispatch(Tox2SpuContext* __restrict ctx, uint8_t* __restrict ls) {
             tox2::stopMismatch(target, *thread, image, *entry, i, word);
         }
     }
-    thread->countDispatch(record->image);
+    thread->countDispatch(record->image, target);
+    tox2::spuMarkEntryDispatched(record->image, static_cast<std::uint32_t>(entry - image.entries));
     TOX2_MUSTTAIL return entry->host(ctx, ls);
 }
 

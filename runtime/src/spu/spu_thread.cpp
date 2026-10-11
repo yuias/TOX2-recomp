@@ -9,6 +9,7 @@
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/reservation.h"
+#include "spu/spu_census.h"
 #include "spu/spu_channels.h"
 
 namespace tox2 {
@@ -17,6 +18,9 @@ namespace {
 thread_local SpuThread* t_current = nullptr;
 
 constexpr std::uint32_t kLsMask = kTox2SpuLsSize - 1u;
+
+// What fatal() prints on an SPU host thread.
+std::string dumpForFatal(const void* thread) { return describeSpuThread(*static_cast<const SpuThread*>(thread)); }
 
 std::uint32_t roundDown(std::uint32_t value) { return value & ~(kSpuTagUnit - 1u); }
 std::uint32_t roundUp(std::uint64_t value) {
@@ -35,6 +39,7 @@ SpuThread::SpuThread(std::uint32_t id, std::string name, SpuOwner* owner)
     channels_ = std::make_unique<SpuChannels>(*this);
     ctx_.exit_ls = kTox2SpuNoExit;
     ctx_.runtime = this;
+    spuCensusAdd(*this);
 }
 
 SpuThread::~SpuThread() {
@@ -42,6 +47,8 @@ SpuThread::~SpuThread() {
         requestHalt();
         thread_.join();
     }
+    // After the join, so the counters are final when the census totals take them over.
+    spuCensusRemove(*this);
 }
 
 bool SpuThread::start(std::uint32_t entry_ls) {
@@ -50,6 +57,7 @@ bool SpuThread::start(std::uint32_t entry_ls) {
     }
     // Running before the host thread exists, so the supervisor never sees a started thread as idle.
     state_.store(SpuState::Running);
+    spuCensusStarted();
     thread_ = std::thread([this, entry_ls] { threadMain(entry_ls); });
     return true;
 }
@@ -70,12 +78,27 @@ void SpuThread::requestHalt() {
 void SpuThread::threadMain(std::uint32_t entry_ls) {
     reserveFaultStack();
     t_current = this;
+    // The identity of the host thread, for log lines and for a fatal stop raised anywhere on it.
+    setLogSpuThread(id_);
+    setFatalDump(&dumpForFatal, this);
     const SpuLeave how = runSpu(*this, entry_ls);
     state_.store(SpuState::Finished);
     t_current = nullptr;
     if (owner_ != nullptr) {
         owner_->onFinished(*this, how);
     }
+    setFatalDump(nullptr, nullptr);
+    setLogSpuThread(std::nullopt);
+}
+
+void SpuThread::countStop(std::uint32_t code) {
+    std::lock_guard lock(stop_mutex_);
+    stops_[code]++;
+}
+
+std::map<std::uint32_t, std::uint64_t> SpuThread::stopCounts() const {
+    std::lock_guard lock(stop_mutex_);
+    return stops_;
 }
 
 std::uint16_t SpuThread::recordTag(std::uint32_t image, std::uint32_t segment, std::int32_t delta) {

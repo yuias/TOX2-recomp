@@ -100,6 +100,12 @@ void setSailCensusProvider(SailCensusFn fn);
 using AudioCensusFn = std::vector<std::string> (*)();
 void setAudioCensusProvider(AudioCensusFn fn);
 
+// The lines of the SPU census, printed after the thread section. The first line is the "census: spu" header;
+// an empty result omits the section (no SPU thread ever started). `reset` runs from resetCensus() after the
+// provider is forgotten. Both run without the census lock and may be called from any thread.
+using SpuCensusFn = std::vector<std::string> (*)();
+void setSpuCensusProvider(SpuCensusFn fn, CensusResetFn reset);
+
 // Called once by printCensus() after the text census, on the stop path; the RSX consumer uses it to
 // log the frame-builder totals and write its argument census (--rsx-census). Runs without the census
 // lock.

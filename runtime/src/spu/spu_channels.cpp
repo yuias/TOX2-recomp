@@ -78,6 +78,8 @@ std::uint64_t nsFromTicks(std::uint64_t ticks) {
 
 }  // namespace
 
+const char* spuChannelName(std::uint32_t ch) { return channelName(ch); }
+
 SpuChannels::SpuChannels(SpuThread& thread) : thread_(thread), mfc_(thread) {}
 
 void SpuChannels::channelStop(std::uint32_t site, const char* op, std::uint32_t ch, const char* why) const {
@@ -167,10 +169,15 @@ bool SpuChannels::readEventStat(std::uint32_t site, std::uint32_t* value) {
             table_wait_.store(false, std::memory_order_relaxed);
             return false;
         }
-        if (!blocked) blocked.emplace(thread_, "rdch 0 SPU_RdEventStat", true);
-
         Clock::time_point dec_when;
         const bool dec_wait = (mask & spu_event::kDecrementer) != 0 && decrementerDeadline(&dec_when);
+        // A running decrementer ends the wait on its own, so only a wait without one counts as indefinite for
+        // the supervisor.
+        if (!blocked) {
+            blocked.emplace(thread_, "rdch 0 SPU_RdEventStat", !dec_wait);
+        } else {
+            thread_.setBlocked("rdch 0 SPU_RdEventStat", !dec_wait);
+        }
         if (on_table) {
             std::chrono::microseconds timeout = std::chrono::duration_cast<microseconds>(kPlainStorePoll);
             if (dec_wait) {
@@ -394,6 +401,7 @@ std::uint32_t SpuChannels::count(std::uint32_t ch) {
 
 bool SpuChannels::stop(std::uint32_t site, std::uint32_t code) {
     SpuOwner* owner = thread_.owner();
+    thread_.countStop(code);
     if (owner == nullptr) {
         spuStop(thread_, std::format("tox2: stop: spu: stop {:#x} at ls {:#07x} on thread {:#010x}: not implemented",
                                      code, site, thread_.id()));

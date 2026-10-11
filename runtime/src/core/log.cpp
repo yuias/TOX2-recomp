@@ -18,7 +18,9 @@ namespace {
 struct LogState;
 LogState& state();
 
-// Writes the "[host] " / "[t XXXXXXXX] " prefix and the level tag, so the line format does not
+thread_local std::optional<std::uint32_t> t_spu_thread_id;
+
+// Writes the "[host] " / "[t XXXXXXXX] " / "[spu XXXXXXXX] " prefix and the level tag, so the line format does not
 // depend on spdlog's own thread ids and level names.
 class LinePrefixFormatter : public spdlog::custom_flag_formatter {
 public:
@@ -120,7 +122,9 @@ void LinePrefixFormatter::format(const spdlog::details::log_msg& msg, const std:
     // Runs inside logWrite(), which holds LogState::mutex.
     LogState& s = state();
     const std::optional<std::uint32_t> tid = s.thread_id_fn ? s.thread_id_fn() : std::nullopt;
-    if (tid) {
+    if (t_spu_thread_id) {
+        dest.append(std::format("[spu {:08x}] ", *t_spu_thread_id));
+    } else if (tid) {
         dest.append(std::format("[t {:08x}] ", *tid));
     } else {
         dest.append("[host] ");
@@ -135,6 +139,8 @@ void setGuestThreadIdProvider(GuestThreadIdFn fn) {
     std::lock_guard lock(s.mutex);
     s.thread_id_fn = fn;
 }
+
+void setLogSpuThread(std::optional<std::uint32_t> id) { t_spu_thread_id = id; }
 
 bool setLogFile(const std::string& path) {
     LogState& s = state();
