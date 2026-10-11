@@ -46,7 +46,51 @@ std::uint32_t surfaceLocation(std::uint32_t dma, const char* what) {
     return 0;
 }
 
-bool validCompare(std::uint32_t v) { return v >= kCompareNever && v <= kCompareAlways; }
+// RPCS3 `gcm_enums.h` `comparison_function` conversion: the word is ORed with 0x200 and must then lie in
+// 0x200..0x207, so 0x000..0x007 are accepted too.
+bool validCompare(std::uint32_t v) {
+    const std::uint32_t word = v | kCompareNever;
+    return word >= kCompareNever && word <= kCompareAlways;
+}
+
+// The eight GCM stencil op words, compared as full 32-bit words (RPCS3 `gcm_enums.h` `stencil_op`).
+bool validStencilOp(std::uint32_t v) {
+    switch (v) {
+        case 0x1E00:  // KEEP
+        case 0x0000:  // ZERO
+        case 0x1E01:  // REPLACE
+        case 0x1E02:  // INCR
+        case 0x1E03:  // DECR
+        case 0x150A:  // INVERT
+        case 0x8507:  // INCR_WRAP
+        case 0x8508:  // DECR_WRAP
+            return true;
+        default: return false;
+    }
+}
+
+// RPCS3 aborts on an unknown compare or op word; here it is counted and the renderer falls back to
+// `func & 7` and KEEP.
+void noteStencilFace(const RsxStencilFace& face) {
+    if (!validCompare(face.func)) noteState(std::format("stencil func ?{:#x}", face.func));
+    for (const std::uint32_t op : {face.op_fail, face.op_zfail, face.op_zpass}) {
+        if (!validStencilOp(op)) noteState(std::format("stencil op ?{:#x}", op));
+    }
+}
+
+RsxStencilFace decodeStencilFace(const RsxRegisters& regs, std::uint32_t mask_method, std::uint32_t func_method,
+                                 std::uint32_t ref_method, std::uint32_t func_mask_method,
+                                 std::uint32_t op_fail_method) {
+    RsxStencilFace face;
+    face.func = regs.reg(func_method);
+    face.op_fail = regs.reg(op_fail_method);
+    face.op_zfail = regs.reg(op_fail_method + 4);
+    face.op_zpass = regs.reg(op_fail_method + 8);
+    face.ref = static_cast<std::uint8_t>(regs.reg(ref_method) & 0xFF);
+    face.func_mask = static_cast<std::uint8_t>(regs.reg(func_mask_method) & 0xFF);
+    face.write_mask = static_cast<std::uint8_t>(regs.reg(mask_method) & 0xFF);
+    return face;
+}
 
 struct MethodRange {
     std::uint32_t first;
@@ -313,8 +357,24 @@ RsxRasterState decodeRasterState(const RsxRegisters& regs) {
     }
     if (r.front_face != kFrontFaceCw && r.front_face != kFrontFaceCcw)
         noteState(std::format("front face ?{:#x}", r.front_face));
+    r.stencil_test = regs.reg(kMethodNv4097SetStencilTestEnable) != 0;
+    r.two_sided_stencil = regs.reg(kMethodNv4097SetTwoSidedStencilTestEnable) != 0;
+    r.stencil_front = decodeStencilFace(regs, kMethodNv4097SetStencilMask, kMethodNv4097SetStencilFunc,
+                                        kMethodNv4097SetStencilFuncRef, kMethodNv4097SetStencilFuncMask,
+                                        kMethodNv4097SetStencilOpFail);
+    // With two-sided stencil off the back face uses the front registers (RPCS3 `VKGSRender.cpp`).
+    r.stencil_back = r.two_sided_stencil
+                             ? decodeStencilFace(regs, kMethodNv4097SetBackStencilMask, kMethodNv4097SetBackStencilFunc,
+                                                 kMethodNv4097SetBackStencilFuncRef,
+                                                 kMethodNv4097SetBackStencilFuncMask, kMethodNv4097SetBackStencilOpFail)
+                             : r.stencil_front;
+    if (r.stencil_test) {
+        noteStencilFace(r.stencil_front);
+        if (r.two_sided_stencil) noteStencilFace(r.stencil_back);
+        // The renderer does not read the stencil state yet.
+        noteState("stencil test");
+    }
     // Enabled by the game but not modelled by the renderer.
-    if (regs.reg(kMethodNv4097SetStencilTestEnable) != 0) noteState("stencil test");
     if (regs.reg(kMethodNv4097SetLogicOpEnable) != 0) noteState("logic op");
     if (regs.reg(kMethodNv4097SetPolyOffsetFillEnable) != 0) noteState("polygon offset");
     if (regs.reg(kMethodNv4097SetDepthBoundsTestEnable) != 0) noteState("depth bounds test");

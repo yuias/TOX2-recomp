@@ -1899,6 +1899,139 @@ void testPartialStencilNote() {
     tox2::rsxUnimplementedReset();
 }
 
+// True when the last replay counted no stencil func or op word (the "stencil test" note is a separate kind).
+bool noStencilWordNotes() {
+    for (const auto& [name, count] : tox2::rsxUnimplementedSnapshot()) {
+        if (name.starts_with("state stencil func") || name.starts_with("state stencil op")) return false;
+    }
+    return true;
+}
+
+struct StencilFaceWords {
+    std::uint32_t func, ref, func_mask, write_mask, op_fail, op_zfail, op_zpass;
+};
+
+bool sameFace(const tox2::RsxStencilFace& face, const StencilFaceWords& words) {
+    return face.func == words.func && face.ref == (words.ref & 0xFF) && face.func_mask == (words.func_mask & 0xFF) &&
+           face.write_mask == (words.write_mask & 0xFF) && face.op_fail == words.op_fail &&
+           face.op_zfail == words.op_zfail && face.op_zpass == words.op_zpass;
+}
+
+// One draw with the given front and back stencil registers; the replay's notes are the only ones counted.
+tox2::RsxDraw replayStencilDraw(bool test, bool two_sided, const StencilFaceWords& front,
+                                const StencilFaceWords& back) {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    scene.setSurface();
+    scene.write(tox2::kMethodNv4097SetStencilTestEnable, test ? 1 : 0);
+    scene.write(tox2::kMethodNv4097SetTwoSidedStencilTestEnable, two_sided ? 1 : 0);
+    scene.write(tox2::kMethodNv4097SetStencilFunc, front.func);
+    scene.write(tox2::kMethodNv4097SetStencilFuncRef, front.ref);
+    scene.write(tox2::kMethodNv4097SetStencilFuncMask, front.func_mask);
+    scene.write(tox2::kMethodNv4097SetStencilMask, front.write_mask);
+    scene.write(tox2::kMethodNv4097SetStencilOpFail, front.op_fail);
+    scene.write(tox2::kMethodNv4097SetStencilOpZfail, front.op_zfail);
+    scene.write(tox2::kMethodNv4097SetStencilOpZpass, front.op_zpass);
+    scene.write(tox2::kMethodNv4097SetBackStencilFunc, back.func);
+    scene.write(tox2::kMethodNv4097SetBackStencilFuncRef, back.ref);
+    scene.write(tox2::kMethodNv4097SetBackStencilFuncMask, back.func_mask);
+    scene.write(tox2::kMethodNv4097SetBackStencilMask, back.write_mask);
+    scene.write(tox2::kMethodNv4097SetBackStencilOpFail, back.op_fail);
+    scene.write(tox2::kMethodNv4097SetBackStencilOpZfail, back.op_zfail);
+    scene.write(tox2::kMethodNv4097SetBackStencilOpZpass, back.op_zpass);
+    scene.setFloatAttrib(0, 3, kPositionsOffset);
+    scene.putQuadPositions();
+    scene.drawStrip(4);
+    const std::vector<std::uint8_t> file = scene.finish();
+    // Recording runs a frame builder of its own, which decodes the same draw.
+    tox2::rsxUnimplementedReset();
+    for (const tox2::RsxCommand& command : replaySynthetic(file)) {
+        if (const auto* draw = std::get_if<tox2::RsxDraw>(&command)) return *draw;
+    }
+    CHECK(false);  // no draw was built
+    return {};
+}
+
+// Stencil registers reach RsxDraw::raster: the back face follows the front one while two-sided stencil is off,
+// raw op words are kept, and words outside the GCM sets are counted only while the test (and the face) is in use.
+void testStencilDecode() {
+    constexpr std::uint32_t kReplace = 0x1E01, kIncr = 0x1E02, kDecr = 0x1E03, kKeep = 0x1E00, kInvertOp = 0x150A;
+    // Reference and masks carry junk above bit 7 to check that only the low byte is used.
+    const StencilFaceWords front = {0x204, 0x1A5, 0x30F, 0x2F0, kReplace, kIncr, kDecr};
+    const StencilFaceWords back = {0x201, 0x109, 0x1FF, 0x10F, kInvertOp, kKeep, 0x8507};
+
+    // (a) two-sided off: the back registers are ignored and the back face equals the front one.
+    tox2::RsxDraw draw = replayStencilDraw(true, false, front, back);
+    CHECK(draw.raster.stencil_test && !draw.raster.two_sided_stencil);
+    CHECK(sameFace(draw.raster.stencil_front, front));
+    CHECK(sameFace(draw.raster.stencil_back, front));
+    CHECK(draw.raster.stencil_front.ref == 0xA5 && draw.raster.stencil_front.func_mask == 0x0F &&
+          draw.raster.stencil_front.write_mask == 0xF0);
+    CHECK(noStencilWordNotes());
+
+    // (b) two-sided on: the back face comes from the BACK registers.
+    draw = replayStencilDraw(true, true, front, back);
+    CHECK(draw.raster.two_sided_stencil);
+    CHECK(sameFace(draw.raster.stencil_front, front));
+    CHECK(sameFace(draw.raster.stencil_back, back));
+    CHECK(noStencilWordNotes());
+
+    // The test flag alone is decoded; the registers are kept with the test off.
+    draw = replayStencilDraw(false, false, front, back);
+    CHECK(!draw.raster.stencil_test && sameFace(draw.raster.stencil_front, front));
+    CHECK(noStencilWordNotes());
+
+    // (c) unknown op words are counted with the test on; the word is compared in full, not truncated to 16 bits.
+    StencilFaceWords bad = front;
+    bad.op_zpass = 0x1234;
+    draw = replayStencilDraw(true, false, bad, back);
+    CHECK(draw.raster.stencil_front.op_zpass == 0x1234);
+    CHECK(unimplementedCount("state stencil op ?0x1234") == 1);
+    bad.op_zpass = kIncr | 0x10000;
+    replayStencilDraw(true, false, bad, back);
+    CHECK(unimplementedCount("state stencil op ?0x11e02") == 1);
+    CHECK(unimplementedCount("state stencil op ?0x1234") == 0);
+
+    // (d) the same words with the test off are not counted.
+    bad.op_zpass = 0x1234;
+    replayStencilDraw(false, false, bad, back);
+    CHECK(noStencilWordNotes());
+    bad.op_zpass = kIncr | 0x10000;
+    replayStencilDraw(false, false, bad, back);
+    CHECK(noStencilWordNotes());
+
+    // (e) compare words: 0x000..0x007 are accepted like 0x200..0x207, 0x208 and words with other bits are not.
+    StencilFaceWords func = front;
+    func.func = 0x003;
+    draw = replayStencilDraw(true, false, func, back);
+    CHECK(draw.raster.stencil_front.func == 0x003);
+    CHECK(noStencilWordNotes());
+    func.func = 0x207;
+    replayStencilDraw(true, false, func, back);
+    CHECK(noStencilWordNotes());
+    func.func = 0x208;
+    replayStencilDraw(true, false, func, back);
+    CHECK(unimplementedCount("state stencil func ?0x208") == 1);
+    func.func = 0x10201;
+    replayStencilDraw(true, false, func, back);
+    CHECK(unimplementedCount("state stencil func ?0x10201") == 1);
+    func.func = 0x208;
+    replayStencilDraw(false, false, func, back);  // test off: no further note
+    CHECK(unimplementedCount("state stencil func ?0x208") == 0);
+
+    // (f) a bad back word is counted only while two-sided stencil is on.
+    bad = back;
+    bad.op_fail = 0x4321;
+    bad.func = 0x209;
+    replayStencilDraw(true, false, front, bad);
+    CHECK(noStencilWordNotes());
+    draw = replayStencilDraw(true, true, front, bad);
+    CHECK(draw.raster.stencil_back.op_fail == 0x4321);
+    CHECK(unimplementedCount("state stencil op ?0x4321") == 1);
+    CHECK(unimplementedCount("state stencil func ?0x209") == 1);
+    tox2::rsxUnimplementedReset();
+}
+
 bool sameRect(const tox2::PixelRect& rect, std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
     return rect.x == x && rect.y == y && rect.width == width && rect.height == height;
 }
@@ -1977,6 +2110,7 @@ int main() {
     testTextureMapping();
     testFrameDump();
     testPartialStencilNote();
+    testStencilDecode();
     testVertexConvert();
 
     tox2::VkContextOptions options;

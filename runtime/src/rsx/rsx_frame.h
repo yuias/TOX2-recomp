@@ -74,6 +74,16 @@ struct RsxTextureDesc {
     std::uint64_t content_id = 0;
 };
 
+// One face of the stencil state. The words are raw register values; ref and the masks are the low 8 bits of
+// theirs (RPCS3 `rsx_decode.h`). func is a compare word (0x200..0x207, or 0x000..0x007) and the ops are GCM
+// stencil op words (KEEP 0x1E00, ZERO 0, REPLACE 0x1E01, INCR 0x1E02, DECR 0x1E03, INVERT 0x150A, INCR_WRAP
+// 0x8507, DECR_WRAP 0x8508); the decoder counts any other word, which the renderer maps to `func & 7` and KEEP.
+struct RsxStencilFace {
+    std::uint32_t func = 0x207;
+    std::uint32_t op_fail = 0x1E00, op_zfail = 0x1E00, op_zpass = 0x1E00;
+    std::uint8_t ref = 0, func_mask = 0xFF, write_mask = 0xFF;
+};
+
 struct RsxRasterState {
     bool blend = false, alpha_test = false, depth_test = false, depth_write = false, cull = false;
     std::uint32_t blend_sfactor_rgb = 0, blend_dfactor_rgb = 0, blend_sfactor_a = 0, blend_dfactor_a = 0,
@@ -83,6 +93,10 @@ struct RsxRasterState {
     float clip_min = 0.0f, clip_max = 1.0f;  // SET_CLIP_MIN / SET_CLIP_MAX: the depth range of the viewport
     float point_size = 1.0f;                 // SET_POINT_SIZE
     bool two_sided_lighting = false;         // SET_TWO_SIDE_LIGHT_EN
+    bool stencil_test = false;               // SET_STENCIL_TEST_ENABLE
+    bool two_sided_stencil = false;          // SET_TWO_SIDED_STENCIL_TEST_ENABLE
+    // stencil_back equals stencil_front when two_sided_stencil is off, so a consumer never has to pick the face.
+    RsxStencilFace stencil_front, stencil_back;
     std::uint32_t scissor_x = 0, scissor_y = 0, scissor_w = 0, scissor_h = 0, window_origin = 0, pixel_center = 0;
 };
 
