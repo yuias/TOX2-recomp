@@ -618,17 +618,19 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
     std::atomic_ref<std::uint32_t> put_word(*reinterpret_cast<std::uint32_t*>(base + kRsxControlAddr + kControlPut));
 
     auto next_tick = Clock::now() + kPeriod;
+    // True when a vblank is due at `now`; moves the deadline on, without a burst after a long pause.
+    const auto tickDue = [&](Clock::time_point now) {
+        if (now < next_tick) return false;
+        next_tick += kPeriod;
+        if (next_tick <= now) next_tick = now + kPeriod;
+        return true;
+    };
     for (;;) {
         const auto before = Clock::now();
         sleeper.sleep(std::chrono::duration_cast<std::chrono::microseconds>(
                 std::min<Clock::duration>(next_tick - before, kPollInterval)));
 
-        const auto now = Clock::now();
-        const bool tick = now >= next_tick;
-        if (tick) {
-            next_tick += kPeriod;
-            if (next_tick <= now) next_tick = now + kPeriod;  // no burst after a long pause
-        }
+        const bool tick = tickDue(Clock::now());
         const std::uint32_t put = std::byteswap(put_word.load(std::memory_order_relaxed));
         if (!tick && !consumer->hasWork(put)) continue;
 
@@ -650,6 +652,9 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
                 }
                 do {
                     status = consumer->pump(kPumpSliceWords);
+                    // A backlog keeps this loop running for as long as the guest queues work, so the vblank is
+                    // delivered here too; otherwise the guest sees none while the consumer is behind.
+                    if (tickDue(Clock::now())) consumer->vblankTick();
                 } while (status == FifoStatus::Budget && !consumer->stopAfterWrite() &&
                          Clock::now() - hold_start < kMaxGuestLockHold);
             }
