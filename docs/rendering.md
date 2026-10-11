@@ -391,4 +391,8 @@ without a renderer.
 
 Three further renderer tests are registered: `render_core` (renders synthetic command lists, and
 skips itself when there is no Vulkan device), and `vp_translator` and `fp_translator` (need no
-GPU; they also check programs dumped under `generated/rsx` and skip those when absent).
+GPU; they also translate the programs dumped under `generated/rsx` and skip those when absent). A dump
+with a known expected body is compared with it. Any other dump is translated, and when the translation
+succeeds its GLSL must compile; a translation the translator reports as unimplemented is not a failure,
+and each test prints a summary line (`<n> dumps, <n> translated, <n> reported`) followed by the report
+texts and their counts, most frequent first.
