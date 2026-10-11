@@ -53,6 +53,8 @@ bool validCompare(std::uint32_t v) {
     return word >= kCompareNever && word <= kCompareAlways;
 }
 
+constexpr std::uint32_t kStencilOpKeep = 0x1E00;
+
 // The eight GCM stencil op words, compared as full 32-bit words (RPCS3 `gcm_enums.h` `stencil_op`).
 bool validStencilOp(std::uint32_t v) {
     switch (v) {
@@ -385,6 +387,26 @@ RsxRasterState decodeRasterState(const RsxRegisters& regs) {
     if ((zmin_max_control & 0xF0) != 0) noteState("depth clamp");
     if (r.shade_model != kShadeModelSmooth) noteState("flat shading");
     return r;
+}
+
+bool rsxStencilOpWrites(std::uint32_t op_word) { return op_word != kStencilOpKeep && validStencilOp(op_word); }
+
+bool rsxZetaWriteEnabled(const RsxRasterState& raster, RsxDepthFormat depth_format) {
+    if (raster.depth_test && raster.depth_write) return true;
+    if (!raster.stencil_test || depth_format != RsxDepthFormat::Z24S8) return false;
+    const auto faceActive = [](const RsxStencilFace& face) {
+        return rsxStencilOpWrites(face.op_fail) || rsxStencilOpWrites(face.op_zfail) ||
+               rsxStencilOpWrites(face.op_zpass);
+    };
+    std::uint32_t mask = raster.stencil_front.write_mask;
+    bool active = faceActive(raster.stencil_front);
+    // RPCS3 folds the back face in only when the front one cannot write, and folds its mask and ops in
+    // separately, so a front mask with all-KEEP ops plus a back op with mask 0 counts as a write.
+    if ((mask == 0 || !active) && raster.two_sided_stencil) {
+        mask |= raster.stencil_back.write_mask;
+        active = active || faceActive(raster.stencil_back);
+    }
+    return mask != 0 && active;
 }
 
 // RPCS3 `rsx_decode.h` vertex_array_helper (type bits 0-2, size 4-7, stride 8-15, frequency 16-31) and

@@ -2032,6 +2032,143 @@ void testStencilDecode() {
     tox2::rsxUnimplementedReset();
 }
 
+// A raster state with the stencil test on and the depth test and write off; `front` and `back` give the write
+// mask and the ZPASS op (REPLACE or KEEP, the other ops stay KEEP) of each face.
+struct ZetaFace {
+    std::uint8_t write_mask;
+    bool writing_op;
+};
+
+tox2::RsxRasterState zetaRaster(bool two_sided, const ZetaFace& front, const ZetaFace& back) {
+    constexpr std::uint32_t kReplace = 0x1E01, kKeep = 0x1E00;
+    tox2::RsxRasterState raster;
+    raster.stencil_test = true;
+    raster.two_sided_stencil = two_sided;
+    raster.stencil_front.write_mask = front.write_mask;
+    raster.stencil_front.op_zpass = front.writing_op ? kReplace : kKeep;
+    // Mirrors the decoder: the back face equals the front one while two-sided stencil is off.
+    raster.stencil_back = raster.stencil_front;
+    if (two_sided) {
+        raster.stencil_back.write_mask = back.write_mask;
+        raster.stencil_back.op_zpass = back.writing_op ? kReplace : kKeep;
+    }
+    return raster;
+}
+
+// A depth-test-off draw with the stencil state `raster` and stencil only (no depth) writes, followed by a draw
+// that reads the depth surface as an A8R8G8B8 texture. True when the second draw sees the depth surface as a
+// render target alias.
+bool stencilPassMakesDepthKnown(std::uint32_t op_zpass) {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    scene.setSurface();
+    // Colour-only clear: the depth surface must not become known any other way.
+    scene.write(tox2::kMethodNv4097SetColorClearValue, 0xFF000000);
+    scene.write(tox2::kMethodNv4097ClearSurface, 0xF0);
+    setQuadRenderState(scene);
+    scene.setFloatAttrib(0, 3, kPositionsOffset);
+    scene.setColorAttrib(3, kColorsOffset);
+    scene.setPrograms(quadPrograms());
+    scene.putQuadPositions();
+    scene.putQuadColors();
+    scene.write(tox2::kMethodNv4097SetDepthTestEnable, 0);
+    scene.write(tox2::kMethodNv4097SetDepthMask, 0);
+    scene.write(tox2::kMethodNv4097SetStencilTestEnable, 1);
+    scene.write(tox2::kMethodNv4097SetStencilMask, 0xFF);
+    scene.write(tox2::kMethodNv4097SetStencilOpZpass, op_zpass);
+    scene.drawStrip(4);
+
+    // The reading draw does not use the stencil, or it would register the depth surface itself.
+    scene.write(tox2::kMethodNv4097SetStencilTestEnable, 0);
+    setSurfaceTextureState(scene, kDepthOffset, 0x85);
+    putSurfaceQuad(scene, 16, 32);
+    scene.drawStrip(4);
+    const std::vector<std::uint8_t> file = scene.finish();
+    tox2::rsxUnimplementedReset();
+    int draws = 0;
+    bool known = false;
+    for (const tox2::RsxCommand& command : replaySynthetic(file)) {
+        const auto* draw = std::get_if<tox2::RsxDraw>(&command);
+        if (draw == nullptr || ++draws != 2) continue;
+        CHECK(draw->textures.size() == 1);
+        known = !draw->textures.empty() && draw->textures[0].rt_alias >= 0 && draw->textures[0].rt_depth;
+    }
+    CHECK(draws == 2);
+    return known;
+}
+
+// The zeta write rule: a draw registers the depth surface and rebuilds its A8R8G8B8 copy when the depth or the
+// stencil can write it.
+void testZetaWriteRule() {
+    using tox2::RsxDepthFormat;
+    using tox2::RsxRasterState;
+    constexpr ZetaFace kWrite = {0xFF, true}, kKeepOnly = {0xFF, false}, kNoMask = {0x00, true};
+    constexpr ZetaFace kNoMaskKeep = {0x00, false};
+    const auto zeta = [](const RsxRasterState& raster, RsxDepthFormat format = RsxDepthFormat::Z24S8) {
+        return tox2::rsxZetaWriteEnabled(raster, format);
+    };
+
+    CHECK(tox2::rsxStencilOpWrites(0x1E01) && tox2::rsxStencilOpWrites(0x0000) && tox2::rsxStencilOpWrites(0x1E02) &&
+          tox2::rsxStencilOpWrites(0x1E03) && tox2::rsxStencilOpWrites(0x150A) && tox2::rsxStencilOpWrites(0x8507) &&
+          tox2::rsxStencilOpWrites(0x8508));
+    CHECK(!tox2::rsxStencilOpWrites(0x1E00) && !tox2::rsxStencilOpWrites(0x1234) && !tox2::rsxStencilOpWrites(0x11E01));
+
+    // 1. depth test and depth write, stencil off.
+    RsxRasterState depth_only;
+    depth_only.depth_test = true;
+    depth_only.depth_write = true;
+    CHECK(zeta(depth_only));
+    depth_only.depth_write = false;
+    CHECK(!zeta(depth_only));
+
+    // 2. 3. 4. one face.
+    CHECK(zeta(zetaRaster(false, kWrite, kWrite)));
+    CHECK(!zeta(zetaRaster(false, kKeepOnly, kKeepOnly)));
+    CHECK(!zeta(zetaRaster(false, kNoMask, kNoMask)));
+
+    // 5. an unknown op word counts as KEEP.
+    RsxRasterState unknown = zetaRaster(false, kWrite, kWrite);
+    unknown.stencil_front.op_zpass = 0x1234;
+    unknown.stencil_back = unknown.stencil_front;
+    CHECK(!zeta(unknown));
+    unknown.stencil_front.op_fail = 0x1E03;  // a real op in another slot writes
+    CHECK(zeta(unknown));
+
+    // 6. front mask 0, back mask 0xFF with a back REPLACE: the back face counts only with two-sided stencil on.
+    CHECK(!zeta(zetaRaster(false, kNoMask, kWrite)));
+    CHECK(zeta(zetaRaster(true, kNoMask, kWrite)));
+
+    // 7. masks and ops are combined separately: a front mask with KEEP ops plus a back op with mask 0.
+    CHECK(zeta(zetaRaster(true, kKeepOnly, kNoMask)));
+    CHECK(!zeta(zetaRaster(false, kKeepOnly, kNoMask)));
+
+    // 8. front REPLACE with mask 0, back mask 0xFF with KEEP ops.
+    CHECK(zeta(zetaRaster(true, kNoMask, kKeepOnly)));
+
+    // Neither face has a mask or an op: nothing writes even with two-sided stencil on.
+    CHECK(!zeta(zetaRaster(true, kNoMaskKeep, kNoMaskKeep)));
+    // A front face that can write is not combined with the back one (same result either way here).
+    CHECK(zeta(zetaRaster(true, kWrite, kNoMaskKeep)));
+
+    // 9. Z16 and no depth surface have no stencil; the depth write still counts.
+    RsxRasterState z16 = zetaRaster(false, kWrite, kWrite);
+    CHECK(!zeta(z16, RsxDepthFormat::Z16));
+    CHECK(!zeta(z16, RsxDepthFormat::None));
+    z16.depth_test = true;
+    z16.depth_write = true;
+    CHECK(zeta(z16, RsxDepthFormat::Z16));
+
+    // 10. a stencil that is off writes nothing whatever its masks and ops are.
+    RsxRasterState off = zetaRaster(true, kWrite, kWrite);
+    off.stencil_test = false;
+    CHECK(!zeta(off));
+
+    // A stencil-only REPLACE pass makes the depth surface known to a later texture read; with KEEP ops it does not.
+    CHECK(stencilPassMakesDepthKnown(0x1E01));
+    CHECK(!stencilPassMakesDepthKnown(0x1E00));
+    tox2::rsxUnimplementedReset();
+}
+
 bool sameRect(const tox2::PixelRect& rect, std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
     return rect.x == x && rect.y == y && rect.width == width && rect.height == height;
 }
@@ -2111,6 +2248,7 @@ int main() {
     testFrameDump();
     testPartialStencilNote();
     testStencilDecode();
+    testZetaWriteRule();
     testVertexConvert();
 
     tox2::VkContextOptions options;

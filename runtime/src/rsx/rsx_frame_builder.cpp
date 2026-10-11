@@ -574,16 +574,16 @@ void RsxFrameBuilder::buildDraw(const RsxRegisters& regs) {
 
     if (!fillVertices(regs, draw, vertex_base, vertex_count)) return;
     // Registered only for a draw that is kept, and before the textures so that sampling the target being
-    // drawn to is seen as an alias. A depth surface counts once the draw writes it (the same rule as the
-    // renderer's depth write), so the unused depth binding of a pass that only needs a color target is
-    // not taken for a surface.
+    // drawn to is seen as an alias. A depth surface counts once the draw can write it, by depth or by
+    // stencil (rsxZetaWriteEnabled), so the unused depth binding of a pass that only needs a color target
+    // is not taken for a surface.
     if (draw.surfaces.has_color &&
         (draw.surfaces.color.format == RsxColorFormat::A8R8G8B8 ||
          draw.surfaces.color.format == RsxColorFormat::F_X32) &&
         draw.raster.color_mask != 0) {
         noteSurface(draw.surfaces.color);
     }
-    if (draw.raster.depth_test && draw.raster.depth_write) noteSurface(draw.surfaces.depth);
+    if (rsxZetaWriteEnabled(draw.raster, draw.surfaces.depth_format)) noteSurface(draw.surfaces.depth);
     fillTextures(regs, draw);
     fillFragmentProgram(regs, draw);
     fillVertexProgram(regs, draw);

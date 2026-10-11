@@ -104,6 +104,17 @@ RsxSurfaceState decodeSurfaceState(const RsxRegisters& regs);
 // A bit 24).
 RsxRasterState decodeRasterState(const RsxRegisters& regs);
 
+// True for the seven stencil op words other than KEEP. KEEP and every word outside the GCM set are false, which
+// matches the renderer's KEEP fallback for unknown words.
+bool rsxStencilOpWrites(std::uint32_t op_word);
+
+// True when a draw can change the depth surface: the depth test and depth write are on, or the stencil can
+// write (RPCS3 `RSXThread.cpp`, the zeta write decision). The stencil writes only
+// with a Z24S8 surface, the test on, and a nonzero write mask together with at least one op that is not KEEP.
+// With two-sided stencil on, the back mask and ops are ORed in separately (not per face) when the front mask
+// is 0 or the front ops are all KEEP. The compare function is not consulted.
+bool rsxZetaWriteEnabled(const RsxRasterState& raster, RsxDepthFormat depth_format);
+
 // One entry per slot whose array is enabled (size != 0); data_offset stays 0 for the builder to fill.
 std::vector<RsxVertexAttrib> decodeVertexAttribs(const RsxRegisters& regs);
 
