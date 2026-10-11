@@ -97,7 +97,7 @@ Python unit tests use synthetic ELF and PRX files built in memory. Tests that ne
 executable are skipped unless `TOX2_EBOOT_ELF` points at it, and `test_real_libsre.py` (the recovery
 of the committed `config/libsre_functions.json` from the relocated module) is skipped unless
 `TOX2_LIBSRE_ELF` points at `generated/inputs/libsre.reloc.elf`. The Ghidra comparison tests
-additionally need `TOX2_GHIDRA_JSON`, the path of an export written by `ghidra-export`, and
+additionally need `TOX2_GHIDRA_JSON`, the path of an export written by `ghidra-export --cell`, and
 are skipped without it. The tests never run Ghidra themselves. The tests of `recover` and
 `emit` that use the real executable also need `TOX2_EBOOT_ELF`; they read the committed
 `config/ghidra_summary.json` and `config/functions.json`. The `emit` tests assert the
@@ -108,10 +108,10 @@ found and that the switch at `0x0081a10c`, which belongs to the second TOC, is r
 ```sh
 python -m unittest discover -s tools/tests -t tools -v
 TOX2_EBOOT_ELF=game/EBOOT.elf python -m unittest discover -s tools/tests -t tools -v
-TOX2_EBOOT_ELF=game/EBOOT.elf TOX2_LIBSRE_ELF=generated/inputs/libsre.reloc.elf TOX2_GHIDRA_JSON=generated/ghidra/eboot_ghidra.json python -m unittest discover -s tools/tests -t tools -v
+TOX2_EBOOT_ELF=game/EBOOT.elf TOX2_LIBSRE_ELF=generated/inputs/libsre.reloc.elf TOX2_GHIDRA_JSON=generated/ghidra/eboot_ghidra_cell.json python -m unittest discover -s tools/tests -t tools -v
 ```
 
-The suite has 863 tests. Without the variables 72 are skipped; with `TOX2_EBOOT_ELF` alone 13 are,
+The suite has 1180 tests. Without the variables 89 are skipped; with `TOX2_EBOOT_ELF` alone 30 are,
 and with all three none are (that run takes a few minutes). When the pinned executable or the recovery
 changes, update the values in `tools/tests/test_real_eboot.py` and the other real-executable tests
 from the tool output.

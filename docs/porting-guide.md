@@ -35,7 +35,8 @@ Run the analysis tools first (see [Analysis tools](analysis-tools.md)); this tak
 
 - Validate the decoder against Ghidra once (see [Ghidra cross-check](analysis-tools.md#ghidra-cross-check));
   differences in rarely used instructions show up there. Ghidra does not decode some Cell
-  instructions (the `lvlx`/`lvrx` family), so expect it to cut some functions short.
+  instructions (the `lvlx`/`lvrx` family), so expect it to cut some functions short; the Cell PPU
+  language of `ghidra-export --cell` removes that truncation.
 - Recover function extents with `recover` (see [Function recovery](function-recovery.md)): Ghidra's
   starts and data references as seeds, then the own partition. Look at the real `bctr` sites
   before relying on the switch table matcher, add manual seeds for small wrappers that fall
