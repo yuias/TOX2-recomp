@@ -1,11 +1,12 @@
 """Single-precision cases: `fa`, `fs`, `fm`, `fma`, `fms`, `fnms`, `fceq`, `fcmeq`, `fcgt`, `fcmgt`, `frest`,
-`frsqest`, `fi`.
+`frsqest`, `fi`, `csflt`, `cuflt`, `cflts`, `cfltu`.
 
 Every case runs one instruction on registers whose four words differ. Source registers are $3, $4 and
 $5, the result goes to $6. The expected words are written out by hand from SPU ISA 1.2, 9.1 (p.195-196)
 and the instruction pages (fa p.202, fs p.204, fm p.206, fma p.208, fnms p.210, fms p.212, frest p.215-216,
-frsqest p.217-218, fi p.219, fceq p.231, fcmeq p.232, fcgt p.233, fcmgt p.234); none comes from running the
-emitter, and this file holds no model of the arithmetic.
+frsqest p.217-218, fi p.219, csflt p.220, cflts p.221, cuflt p.222, cfltu p.223, fceq p.231, fcmeq p.232,
+fcgt p.233, fcmgt p.234); none comes from running the emitter, and this file holds no model of the
+arithmetic.
 
 Rules used in the derivations (extended-range mode):
 
@@ -21,6 +22,10 @@ Rules used in the derivations (extended-range mode):
 - The estimates are the exact reciprocal (square root) truncated to 24 bits, a recorded deviation from
   the hardware tables that the ISA does not publish: frest of a zero exponent is sign | 0x7fffffff, of
   |x| >= 2^126 is +0; frsqest of a zero exponent is 0x7fffffff and its sign is 0. fi returns RB.
+- The conversions take scale = 155 - I8 (csflt, cuflt: integer / 2^scale) or 173 - I8 (cflts, cfltu:
+  float * 2^scale), scale in 0..127; a word with exponent field 0 is zero. csflt and cuflt truncate to 24
+  bits (below Smin gives +0). cflts truncates toward zero and saturates to 0x7fffffff / 0x80000000, cfltu
+  gives 0 for negative values and saturates to 0xffffffff.
 
 Word values used below: 1.0 = 0x3f800000, 2.0 = 0x40000000, 3.0 = 0x40400000, 4.0 = 0x40800000,
 6.0 = 0x40c00000, 7.0 = 0x40e00000, 5.0 = 0x40a00000; 0x0d800000 is 2^-100, 0x21800000 is 2^-60.
@@ -46,6 +51,10 @@ FREST_REF = FP_REF + ": frest"
 FRSQEST_REF = FP_REF + ": frsqest"
 FI_REF = FP_REF + ": fi"
 SEQUENCE_REF = FREST_REF + " programming note (p.215)"
+CSFLT_REF = FP_REF + ": csflt"
+CUFLT_REF = FP_REF + ": cuflt"
+CFLTS_REF = FP_REF + ": cflts"
+CFLTU_REF = FP_REF + ": cfltu"
 
 T = 0xFFFFFFFF
 
@@ -58,6 +67,11 @@ def rr(name: str, mnemonic: str, ref: str, a, b, out) -> Case:
 def r(name: str, mnemonic: str, ref: str, a, out) -> Case:
     """RT = op(RA) with $3 -> $6."""
     return Case(name, ref, (spu_asm.encode(mnemonic, RT=6, RA=3),), {"r3": a}, {"r6": out})
+
+
+def conv(name: str, mnemonic: str, ref: str, i8: int, a, out) -> Case:
+    """RT = convert(RA, scale) with $3 -> $6; the scale is 155 - I8 or 173 - I8 (see the module docstring)."""
+    return Case(name, ref, (spu_asm.encode(mnemonic, RT=6, RA=3, I8=i8),), {"r3": a}, {"r6": out})
 
 
 def rrr(name: str, mnemonic: str, ref: str, a, b, c, out) -> Case:
@@ -230,4 +244,68 @@ CASES: list[Case] = [
          {"r7": (0x3EAAAAAA, 0x3F000000, 0x7FFFFFFF, 0xBEAAAAAA),
           "r8": (0x33800000, 0x00000000, 0x3F800000, 0x33800000),
           "r9": (0x3EAAAAAA, 0x3F000000, 0x7FFFFFFF, 0xBEAAAAAA)}),
+    # --- csflt (signed integer / 2^scale) ---
+    # I8 155, scale 0. w0: 2^31 - 1 has 31 significant bits; truncated to 24 it is (2^24 - 1) * 2^7,
+    # exponent 30 + 127 = 157, fraction 0x7fffff. w1: -1. w2: -2^31, exponent 158. w3: zero.
+    conv("csflt_scale_0", "csflt", CSFLT_REF, 155,
+         (0x7FFFFFFF, 0xFFFFFFFF, 0x80000000, 0x00000000), (0x4EFFFFFF, 0xBF800000, 0xCF000000, 0x00000000)),
+    # I8 154, scale 1. w0: 3 / 2 = 1.5. w1: -3 / 2 = -1.5. w2: 1 / 2 = 0.5. w3: 2^24 + 1 needs 25 bits,
+    # truncated to 2^24; 2^24 / 2 = 2^23, exponent field 150 = 0x96.
+    conv("csflt_scale_1", "csflt", CSFLT_REF, 154,
+         (0x00000003, 0xFFFFFFFD, 0x00000001, 0x01000001), (0x3FC00000, 0xBFC00000, 0x3F000000, 0x4B000000)),
+    # I8 28, scale 127. w0: 2^-127 < Smin, +0. w1: 2^31 - 1 truncates to (2^24 - 1) * 2^7 and divides to
+    # 2^-97 * 1.11..1b: exponent field 30, fraction 0x7fffff. w2: -2^31 / 2^127 = -2^-96, field 31. w3:
+    # 2 / 2^127 = 2^-126 = Smin exactly, kept.
+    conv("csflt_scale_127_underflow", "csflt", CSFLT_REF, 28,
+         (0x00000001, 0x7FFFFFFF, 0x80000000, 0x00000002), (0x00000000, 0x0F7FFFFF, 0x8F800000, 0x00800000)),
+    # --- cuflt (unsigned integer / 2^scale) ---
+    # I8 155, scale 0. w0: 2^32 - 1 truncates to (2^24 - 1) * 2^8, exponent 31 + 127 = 158, fraction
+    # 0x7fffff. w1: 2^31 is unsigned here (csflt would give -2^31). w2: 1.0. w3: 2^24 + 1 truncates to 2^24.
+    conv("cuflt_scale_0", "cuflt", CUFLT_REF, 155,
+         (0xFFFFFFFF, 0x80000000, 0x00000001, 0x01000001), (0x4F7FFFFF, 0x4F000000, 0x3F800000, 0x4B800000)),
+    # I8 28, scale 127. w0: 2^-127 < Smin, +0. w1: (2^32 - 1) / 2^127 truncates to 2^-96 * 1.11..1b: field
+    # 31, fraction 0x7fffff. w2: 2^-126 = Smin. w3: 2^31 / 2^127 = 2^-96, field 31.
+    conv("cuflt_scale_127_underflow", "cuflt", CUFLT_REF, 28,
+         (0x00000001, 0xFFFFFFFF, 0x00000002, 0x80000000), (0x00000000, 0x0FFFFFFF, 0x00800000, 0x0F800000)),
+    # --- cflts (float * 2^scale -> signed integer) ---
+    # I8 173, scale 0. w0: 2^31 saturates to 0x7fffffff. w1: -2^31 is exactly 0x80000000. w2: just below
+    # -2^31 saturates to 0x80000000. w3: -1.5 truncates toward zero to -1.
+    conv("cflts_saturates_and_truncates", "cflts", CFLTS_REF, 173,
+         (0x4F000000, 0xCF000000, 0xCF000001, 0xBFC00000), (0x7FFFFFFF, 0x80000000, 0x80000000, 0xFFFFFFFF)),
+    # I8 173. w0: 2^128 (exponent 255 is a number) saturates. w1: a denormal is zero. w2: -2^128 saturates
+    # negative. w3: 1.0 is 1.
+    conv("cflts_exponent_255_and_denormals", "cflts", CFLTS_REF, 173,
+         (0x7F800000, 0x00400000, 0xFF800000, 0x3F800000), (0x7FFFFFFF, 0x00000000, 0x80000000, 0x00000001)),
+    # I8 173. w0: the largest float below 2^31 is (2^24 - 1) * 2^7 = 0x7fffff80. w1: its negative. w2:
+    # 1 - 2^-24 truncates to 0. w3: -0 is 0.
+    conv("cflts_largest_below_the_limit", "cflts", CFLTS_REF, 173,
+         (0x4EFFFFFF, 0xCEFFFFFF, 0x3F7FFFFF, 0x80000000), (0x7FFFFF80, 0x80000080, 0x00000000, 0x00000000)),
+    # I8 172, scale 1. w0: 1.5 * 2 = 3. w1: -1.5 * 2 = -3. w2: 2^30 * 2 = 2^31 saturates. w3: -2^30 * 2 =
+    # -2^31 exactly.
+    conv("cflts_scale_1", "cflts", CFLTS_REF, 172,
+         (0x3FC00000, 0xBFC00000, 0x4E800000, 0xCE800000), (0x00000003, 0xFFFFFFFD, 0x7FFFFFFF, 0x80000000)),
+    # I8 46, scale 127. w0: 2^-126 * 2^127 = 2. w1: 1.0 * 2^127 saturates. w2: -1.0 * 2^127 saturates
+    # negative. w3: zero.
+    conv("cflts_scale_127", "cflts", CFLTS_REF, 46,
+         (0x00800000, 0x3F800000, 0xBF800000, 0x00000000), (0x00000002, 0x7FFFFFFF, 0x80000000, 0x00000000)),
+    # --- cfltu (float * 2^scale -> unsigned integer) ---
+    # I8 173, scale 0. w0: -1.0 is negative, 0. w1: -0.5 is 0. w2: 2^32 saturates to 0xffffffff. w3: the
+    # largest float below 2^32 is (2^24 - 1) * 2^8.
+    conv("cfltu_negative_and_saturation", "cfltu", CFLTU_REF, 173,
+         (0xBF800000, 0xBF000000, 0x4F800000, 0x4F7FFFFF), (0x00000000, 0x00000000, 0xFFFFFFFF, 0xFFFFFF00)),
+    # I8 173. w0: -0 is 0. w1: a denormal is zero. w2: 1 - 2^-24 truncates to 0. w3: 1.0 is 1.
+    conv("cfltu_zero_and_truncation", "cfltu", CFLTU_REF, 173,
+         (0x80000000, 0x00400000, 0x3F7FFFFF, 0x3F800000), (0x00000000, 0x00000000, 0x00000000, 0x00000001)),
+    # I8 173. w0: 2^31 is 0x80000000 (unsigned, unlike cflts). w1: 2^128 saturates. w2: -2^128 is 0. w3:
+    # 1.5 truncates to 1.
+    conv("cfltu_above_the_signed_range", "cfltu", CFLTU_REF, 173,
+         (0x4F000000, 0x7F800000, 0xFF800000, 0x3FC00000), (0x80000000, 0xFFFFFFFF, 0x00000000, 0x00000001)),
+    # I8 172, scale 1. w0: 1.5 * 2 = 3. w1: 7 * 2 = 14. w2: -2 * 2 is negative, 0. w3: 2^31 * 2 = 2^32
+    # saturates.
+    conv("cfltu_scale_1", "cfltu", CFLTU_REF, 172,
+         (0x3FC00000, 0x40E00000, 0xC0000000, 0x4F000000), (0x00000003, 0x0000000E, 0x00000000, 0xFFFFFFFF)),
+    # I8 46, scale 127. w0: 2^-126 * 2^127 = 2. w1: 1.0 * 2^127 saturates. w2: -1.0 is 0. w3: 0.5 * 2^127
+    # = 2^126 saturates.
+    conv("cfltu_scale_127", "cfltu", CFLTU_REF, 46,
+         (0x00800000, 0x3F800000, 0xBF800000, 0x3F000000), (0x00000002, 0xFFFFFFFF, 0x00000000, 0xFFFFFFFF)),
 ]

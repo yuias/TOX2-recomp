@@ -223,6 +223,67 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuFi(Tox2Vr a, Tox2Vr b) {
     return b;
 }
 
+// --- Single precision: conversions (ISA 9.1, p.220-223) -------------------------------------------
+//
+// The caller passes the scale (155 - I8 for csflt/cuflt, 173 - I8 for cflts/cfltu), which the emitter
+// has already checked to lie in 0..127; the ISA leaves other scales undefined. Both 2^scale and
+// 2^-scale are normal doubles, and a 32-bit integer or an extended-range single times either is exact,
+// so the only rounding is the final truncation, and range checks precede every cast.
+
+// 2^n for n in -127..127.
+TOX2_FORCEINLINE double tox2SpuPow2(int32_t n) {
+    uint64_t bits = (uint64_t)(uint32_t)(n + 1023) << 52;
+    double d;
+    __builtin_memcpy(&d, &bits, sizeof d);
+    return d;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuCsflt(Tox2Vr a, uint32_t scale) {
+    double factor = tox2SpuPow2(-(int32_t)scale);
+    for (uint32_t lane = 0; lane < 4; lane++) {
+        a.u32[lane] = tox2SpuSfFromExact((double)a.s32[lane] * factor, 0.0);
+    }
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuCuflt(Tox2Vr a, uint32_t scale) {
+    double factor = tox2SpuPow2(-(int32_t)scale);
+    for (uint32_t lane = 0; lane < 4; lane++) {
+        a.u32[lane] = tox2SpuSfFromExact((double)a.u32[lane] * factor, 0.0);
+    }
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuCflts(Tox2Vr a, uint32_t scale) {
+    double factor = tox2SpuPow2((int32_t)scale);
+    for (uint32_t lane = 0; lane < 4; lane++) {
+        double d = tox2SpuSfToDouble(a.u32[lane]) * factor;
+        if (d >= 2147483648.0) {
+            a.u32[lane] = 0x7fffffffu;
+        } else if (d <= -2147483648.0) {
+            a.u32[lane] = 0x80000000u;
+        } else {
+            a.u32[lane] = (uint32_t)(int32_t)d;
+        }
+    }
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuCfltu(Tox2Vr a, uint32_t scale) {
+    double factor = tox2SpuPow2((int32_t)scale);
+    for (uint32_t lane = 0; lane < 4; lane++) {
+        double d = tox2SpuSfToDouble(a.u32[lane]) * factor;
+        if (d < 0.0) {
+            a.u32[lane] = 0u;
+        } else if (d >= 4294967296.0) {
+            a.u32[lane] = 0xffffffffu;
+        } else {
+            a.u32[lane] = (uint32_t)d;
+        }
+    }
+    return a;
+}
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

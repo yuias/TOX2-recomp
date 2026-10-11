@@ -229,6 +229,14 @@ class HandlerTest(unittest.TestCase):
         result, _ = emit([enc("ai", RT=3, RA=4, I10=1), stop(0x102)], handlers={"ai": ai})
         self.assertEqual(result.stats.unhandled, {"ai:imm": 1})
 
+    def test_conversion_with_a_scale_outside_0_to_127_is_declined(self):
+        # csflt scale = 155 - I8: I8 = 0 gives 155, I8 = 28 gives 127 (accepted), I8 = 156 gives -1.
+        words = [enc("csflt", RT=3, RA=4, I8=0), enc("csflt", RT=3, RA=4, I8=28),
+                 enc("csflt", RT=3, RA=4, I8=156), stop(0x102)]
+        result, text = emit(words)
+        self.assertEqual(result.stats.unhandled, {"csflt:scale": 2})
+        self.assertIn("ctx->gpr[3] = tox2SpuCsflt(ctx->gpr[4], 127u);", text)
+
     def test_registry_rejects_unknown_core_and_duplicate_names(self):
         with self.assertRaises(ValueError):
             spu_emit_core.handler("nonsense")
@@ -334,9 +342,9 @@ class CommandTest(SpuFixtureTest):
     def setUp(self):
         super().setUp()
         self.words = table_program()
-        # The gate tests need a word without a handler; double precision is outside the gate scope and
-        # stays unhandled, unlike the load and rotate words of the jump-table idiom.
-        self.words[12] = enc("dfa", RT=7, RA=3, RB=4)
+        # The gate tests need a word without a handler: a conversion with scale 155 (outside 0..127) is
+        # declined, unlike the load and rotate words of the jump-table idiom.
+        self.words[12] = enc("csflt", RT=7, RA=3, I8=0)
         blob =b"".join(w.to_bytes(4, "big") for w in self.words)
         self.libsre = container_elf({RAW_AT: blob})
         self.libsre_path = self.write("libsre.reloc.elf", self.libsre)
