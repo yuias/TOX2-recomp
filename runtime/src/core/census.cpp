@@ -27,6 +27,13 @@ struct CensusState {
     std::mutex mutex;
     std::unordered_map<std::uint32_t, CallStat> syscalls;
     std::unordered_map<std::string, CallStat> hle;
+    // Import stubs pass the same string pointers on every call, so the formatted key is built once per pair.
+    // The strings are kept to compare against: a pointer can be reused for another name.
+    struct HleSlot {
+        std::string module, name;
+        CallStat* stat = nullptr;
+    };
+    std::map<std::pair<const char*, const char*>, HleSlot> hle_slots;
     std::map<std::pair<std::uint32_t, std::uint32_t>, std::uint64_t> unknown_targets;
     ThreadCensusFn thread_fn = nullptr;
     RsxCensusFn rsx_fn = nullptr;
@@ -105,21 +112,28 @@ namespace {
 
 void countHle(const char* module, const char* name, bool implemented, const char* image) {
     CensusState& s = state();
-    std::string key = std::format("{}::{}", module != nullptr ? module : "?", name != nullptr ? name : "?");
-    bool first = false;
+    const char* module_text = module != nullptr ? module : "?";
+    const char* name_text = name != nullptr ? name : "?";
+    std::string first_key;
     {
         std::lock_guard lock(s.mutex);
-        CallStat& stat = s.hle[key];
-        if (stat.count == 0) {
-            stat.name = key;
-            stat.implemented = implemented;
-            if (image != nullptr) stat.image = image;
-            first = true;
+        CensusState::HleSlot& slot = s.hle_slots[{module, name}];
+        if (slot.stat == nullptr || slot.module != module_text || slot.name != name_text) {
+            std::string key = std::format("{}::{}", module_text, name_text);
+            slot.module = module_text;
+            slot.name = name_text;
+            slot.stat = &s.hle[key];
+            if (slot.stat->count == 0) {
+                slot.stat->name = std::move(key);
+                slot.stat->implemented = implemented;
+                if (image != nullptr) slot.stat->image = image;
+                first_key = slot.stat->name;
+            }
         }
-        stat.count++;
+        slot.stat->count++;
     }
-    if (first) {
-        logInfo("tox2: first hle {}", key);
+    if (!first_key.empty()) {
+        logInfo("tox2: first hle {}", first_key);
     }
 }
 
@@ -358,6 +372,7 @@ void resetCensus() {
     {
         std::lock_guard lock(s.mutex);
         s.syscalls.clear();
+        s.hle_slots.clear();
         s.hle.clear();
         s.unknown_targets.clear();
         s.thread_fn = nullptr;
