@@ -561,3 +561,6 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuFscrRead(Tox2Vr fpscr) {
 #ifdef __cplusplus
 }  // extern "C"
 #endif
+
+// The floating-point helpers build on the types above.
+#include "spu_fp.h"
