@@ -11,7 +11,7 @@ tox2_game [--game-dir DIR] [--vfs-config FILE] [--elf PATH] [--libsre PATH] [--h
          [--load-only] [--png-dump DIR] [--dump-guest ADDR:SIZE:FILE]...
          [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]
          [--dump-frames DIR] [--dump-frames-every K]
-         [--shader-cache DIR] [--vk-validation] [--no-window]
+         [--shader-cache DIR] [--vk-validation] [--no-window] [--frame-limit 60|off]
 ```
 
 `tox2_game` loads the decrypted `EBOOT.elf` into a 4 GiB guest address space, sets up the main PPU
@@ -59,11 +59,12 @@ prefix (the census lines and the register dump of a fatal stop do not).
 | `--vk-validation` | Enable the Khronos validation layer. It comes with the Vulkan SDK; if it is not installed, `tox2_game` logs a warning and goes on without it. |
 | `--rsx-capture N[,M...]` | Record the given frames (1-based flip numbers) as `.tox2cap` files. See [Capture and replay](rendering.md#capture-and-replay). |
 | `--rsx-census FILE` | Count the arguments the game writes to the RSX registers (surface and texture formats, vertex layouts, primitive types, draw sizes, render state, flip and vblank rates) and write them to `FILE` as JSON when the run stops. The fragment and vertex programs the game used are written next to it as `generated/rsx/fp_<hash>.bin` and `vp_<hash>.bin` (relative to the working directory). The directories are created; the file is truncated. |
+| `--frame-limit 60\|off` | Pace the flips. `60` (the default) completes at most 60 flips per second, like RPCS3's default "Auto" frame limit: a flip command that arrives early holds the command FIFO until its time. `off` completes every flip as soon as its command executes, so a headless run flips as fast as the game produces frames. Any other value is a usage error. See [Fake RSX](rendering.md#fake-rsx). |
 
 The renderer options are a usage error (exit code 2) when the renderer is off. The window and
 `--dump-frames` switch it on; `--dump-frames-every`, `--shader-cache` and `--vk-validation` need one
 of them or `--render vulkan`; an explicit `--render none` conflicts with all of them.
-`--rsx-capture` and `--rsx-census` do not need the renderer.
+`--rsx-capture`, `--rsx-census` and `--frame-limit` do not need the renderer.
 
 Frame dumps are encoded on a worker thread, so dumping does not slow the game down. When the worker
 falls more than four frames behind, a frame is skipped and counted (`tox2: render: dump skipped

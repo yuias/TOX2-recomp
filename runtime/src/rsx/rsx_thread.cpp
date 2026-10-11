@@ -272,7 +272,11 @@ bool RsxConsumer::execute(std::uint32_t method, std::uint32_t value) {
         case kMethodGcmSetUserCommand + 4:  // two registers share the handler
             userCommand(value);
             return true;
-        case kMethodGcmFlipCommand: flip(value); return true;
+        case kMethodGcmFlipCommand:
+            if (!flipDue()) return false;
+            flip(value);
+            advanceFlipDeadline();
+            return true;
         default:
             if (method >= kMethodNv308aColor && method < kMethodNv308aColor + kBlitColorRegisters * 4) {
                 inlineBlitWord(method, value);
@@ -406,11 +410,31 @@ void RsxConsumer::getReport(std::uint32_t value) {
     tox2Write32(base_, ea + 12, 0);
 }
 
+bool RsxConsumer::flipDue() {
+    if (!flip_limit_ || !flip_deadline_ || Clock::now() >= *flip_deadline_) {
+        flip_waiting_ = false;
+        return true;
+    }
+    flip_waiting_ = true;
+    return false;
+}
+
+// RPCS3's default "Auto" frame limit (`handle_emu_flip`): the RSX thread sleeps until a target time that moves on
+// by one period per flip, measured from the previous target. It does not catch up after a late flip.
+void RsxConsumer::advanceFlipDeadline() {
+    if (!flip_limit_) return;
+    const Clock::time_point now = Clock::now();
+    Clock::time_point next = flip_deadline_ ? *flip_deadline_ + kRsxFlipPeriod : now + kRsxFlipPeriod;
+    if (next <= now) next = now + kRsxFlipPeriod;
+    flip_deadline_ = next;
+}
+
 void RsxConsumer::flip(std::uint32_t buffer) {
     RsxState& state = rsxState();
-    // A flip from the command buffer completes where the command executes and never waits for a VBlank
-    // (RPCS3 `flip_command` -> `request_emu_flip` -> `handle_emu_flip`; the VBlank wait there belongs to the
-    // non-default "PS3" frame limit mode). The vsync mode only selects the present mode of the back end.
+    // The command waits in flipDue() until the flip limiter allows it, and then completes where it executes.
+    // It never waits for a VBlank (RPCS3 `flip_command` -> `request_emu_flip` -> `handle_emu_flip`; the VBlank
+    // wait there belongs to the non-default "PS3" frame limit mode). The vsync mode only selects the present
+    // mode of the back end.
     if (builder_ != nullptr) {
         static constexpr RsxDisplayBuffer kNoBuffer{};
         builder_->onFlip(*regs_, buffer, buffer < kRsxDisplayBufferCount ? state.display[buffer] : kNoBuffer);
@@ -536,6 +560,7 @@ RsxUnimplementedCensus unimplementedCensus() { return {rsxUnimplementedSnapshot(
 
 RsxCommandSink g_command_sink;
 bool g_frame_builder_enabled = false;
+bool g_flip_limit = true;
 std::vector<std::uint32_t> g_capture_frames;
 std::filesystem::path g_capture_dir;
 std::atomic<std::uint32_t> g_captures_written{0};
@@ -626,13 +651,21 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
         return true;
     };
     for (;;) {
+        // A flip held by the limiter ends the pump with Waiting and the loop comes back here, outside the guest
+        // lock. The sleep also ends at the flip's deadline, so it completes on time and the vblank ticks still
+        // arrive meanwhile.
         const auto before = Clock::now();
-        sleeper.sleep(std::chrono::duration_cast<std::chrono::microseconds>(
-                std::min<Clock::duration>(next_tick - before, kPollInterval)));
+        const std::optional<Clock::time_point> flip_deadline = consumer->flipHoldDeadline();
+        Clock::duration wait = std::min<Clock::duration>(next_tick - before, kPollInterval);
+        if (flip_deadline) wait = std::min(wait, *flip_deadline - before);
+        sleeper.sleep(std::chrono::duration_cast<std::chrono::microseconds>(wait));
 
-        const bool tick = tickDue(Clock::now());
+        const auto woke = Clock::now();
+        const bool tick = tickDue(woke);
         const std::uint32_t put = std::byteswap(put_word.load(std::memory_order_relaxed));
-        if (!tick && !consumer->hasWork(put)) continue;
+        // Nothing can advance before the deadline whatever the guest puts, so the lock is not taken for it.
+        const bool flip_held = flip_deadline && woke < *flip_deadline;
+        if (!tick && (flip_held || !consumer->hasWork(put))) continue;
 
         bool pending_tick = tick;
         FifoStatus status;
@@ -674,6 +707,8 @@ void setRsxCommandSink(RsxCommandSink sink) { g_command_sink = std::move(sink); 
 
 void setRsxFrameBuilderEnabled(bool enabled) { g_frame_builder_enabled = enabled; }
 
+void setRsxFlipLimit(bool enabled) { g_flip_limit = enabled; }
+
 void setRsxExecutorFactory(RsxExecutorFactory factory) {
     g_executor_factory = std::move(factory);
     if (g_executor_factory) g_frame_builder_enabled = true;
@@ -691,6 +726,7 @@ void startRsxThread(std::uint8_t* base) {
     if (g_consumer != nullptr) return;
     // Leaked: the thread runs until the process ends.
     g_consumer = new RsxConsumer(base);
+    g_consumer->setFlipLimit(g_flip_limit);
     setRsxCensusProvider(&consumerCensus);
     setRsxUnimplementedProvider(&unimplementedCensus, &rsxUnimplementedReset);
     if (!g_arg_census_file.empty()) {

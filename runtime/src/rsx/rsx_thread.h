@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -45,6 +46,9 @@ void setRsxInterruptHook(void (*hook)(RsxInterrupt kind, std::uint32_t arg));
 // One VBlank every 1/60 s (RPCS3's default VBlank rate).
 inline constexpr std::uint32_t kRsxVBlankPeriodUs = 16667;
 
+// Interval between completed flips while the flip limiter is on: RPCS3's default "Auto" frame limit (60.000 fps).
+inline constexpr std::chrono::nanoseconds kRsxFlipPeriod{1'000'000'000 / 60};
+
 // Register state and effects behind the parser. All members are used under the guest lock except
 // census(), which only touches atomics, and takeCommands()/takeCaptures(), which only touch state the
 // RSX thread owns.
@@ -69,6 +73,14 @@ public:
 
     // Counts a VBlank and reports it.
     void vblankTick();
+
+    using Clock = std::chrono::steady_clock;
+    // With the limiter on, a flip command is refused (the parser keeps it and retries) until the deadline
+    // that advances by kRsxFlipPeriod per completed flip; the first flip is never delayed. Off by default.
+    void setFlipLimit(bool enabled) { flip_limit_ = enabled; }
+    // The time the held flip becomes due, while the parser is stopped at one. The host thread uses it to sleep
+    // without the guest lock until then, because nothing can advance before.
+    std::optional<Clock::time_point> flipHoldDeadline() const { return flip_waiting_ ? flip_deadline_ : std::nullopt; }
 
     RsxCensus census() const;
 
@@ -115,7 +127,10 @@ private:
     void getReport(std::uint32_t value);
     // One NV308A_COLOR register write: the word goes to the NV3062 destination surface.
     void inlineBlitWord(std::uint32_t method, std::uint32_t value);
+    // True when a flip command may complete now; otherwise the flip is held.
+    bool flipDue();
     void flip(std::uint32_t buffer);
+    void advanceFlipDeadline();
     void userCommand(std::uint32_t cause);
     void publishGet(std::uint32_t get);
     // Builds the draw the last SET_BEGIN_END(0) left pending and records that write in the capture.
@@ -146,6 +161,10 @@ private:
     std::uint32_t blit_point_ = 0, blit_size_out_ = 0;
 
     std::uint64_t last_timestamp_ns_ = 0;
+
+    bool flip_limit_ = false;
+    bool flip_waiting_ = false;  // a flip command was refused and is retried
+    std::optional<Clock::time_point> flip_deadline_;
 
     std::atomic<std::uint64_t> headers_{0}, flips_{0}, user_commands_{0};
     std::unique_ptr<std::atomic<std::uint64_t>[]> method_counts_;  // by register offset >> 2
@@ -215,6 +234,10 @@ void setRsxExecutorFactory(RsxExecutorFactory factory);
 
 // Turns the frame builder on for the consumer startRsxThread creates. Call before startRsxThread.
 void setRsxFrameBuilderEnabled(bool enabled);
+
+// Turns the flip limiter (kRsxFlipPeriod between completed flips) on or off for the consumer startRsxThread
+// creates. On by default. Call before startRsxThread.
+void setRsxFlipLimit(bool enabled);
 
 // Captures the listed frames (see RsxConsumer::enableCapture) into `<dir>/frame_<N>.tox2cap`, written on
 // the RSX thread after the guest lock is released. Implies the frame builder. Call before startRsxThread.

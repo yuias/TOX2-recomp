@@ -21,11 +21,19 @@ drawn; with `--render vulkan` the same thread also feeds a renderer (see [Render
   synchronization methods: semaphores and labels, reports and timestamps, `ref`, the flip
   command and the user command. It then publishes `get`. Method semantics follow RPCS3's
   `Emu/RSX/NV47/HW` sources. Every register write is counted for the census, and the thread
-  raises one vertical-blank event every 1/60 s. A flip from the command buffer completes where
-  the command executes, as in RPCS3, and does not wait for a vertical blank. The vblank is due on a
-  1/60 s deadline that is checked between slices of the command buffer too, so a consumer that is behind
-  (a long draw backlog) still delivers it on time. Where the game's frame rate comes from is described
-  under [Rendering](#rendering).
+  raises one vertical-blank event every 1/60 s. A flip from the command buffer does not wait for a
+  vertical blank. It is limited to 60 flips per second, like RPCS3's default "Auto" frame limit: the
+  first flip is immediate, and each later flip completes no earlier than a deadline that moves on by
+  exactly 1/60 s per flip. When a flip command arrives before its deadline, the FIFO is held at that
+  command (`get` stays at its header) and nothing behind it runs. A flip that is late does not make up
+  for it: the next deadline is then 1/60 s after that flip. The flip status, the flip handler, the last
+  flip time and the flip label are updated only when the flip completes. The wait happens with the
+  guest lock released, and the RSX thread's sleep ends at the earlier of the deadline and the next
+  vblank, so vblanks are still delivered on time while a flip is held. `--frame-limit off` completes a
+  flip as soon as its command executes. The vblank is due on a 1/60 s deadline that is checked
+  between slices of the command buffer too, so a consumer that is behind (a long draw backlog) still
+  delivers it on time. The game's frame rate is therefore bounded by this limit, whatever the
+  display's refresh rate is; see also [Rendering](#rendering).
 - `_gcm_intr_thread` is a guest service thread, created as in RPCS3. The RSX thread queues the
   interrupts and this thread runs the handlers the game registered with
   `cellGcmSetVBlankHandler`, `cellGcmSetFlipHandler` and `cellGcmSetUserHandler`, with the guest
@@ -86,11 +94,12 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   selected by its condition passes. Other opcodes (for example RSQ, DP2, LIT, the pack and
   unpack group and the flow-control opcodes), the WPOS, FOGC and SSA inputs, and the texture
   expand bit are not translated.
-- **Flips and vsync.** A flip is done when the command executes (see [Fake RSX](#fake-rsx)). With the window
-  the displayed buffer is also blitted, letterboxed to 16:9, to a swapchain with the FIFO present
-  mode, so the display's refresh is what paces the RSX thread; presenting runs outside the guest
-  lock. Without a window nothing waits for a vertical blank in the renderer, and the game's own
-  waits on the 60 Hz vblank handler set its frame rate.
+- **Flips and vsync.** A flip is done when the command executes, once the 60 flips per second limit allows it
+  (see [Fake RSX](#fake-rsx)); `--frame-limit off` removes the limit. With the window the displayed buffer is
+  also blitted, letterboxed to 16:9, to a swapchain with the FIFO present mode, once per completed flip;
+  presenting runs outside the guest lock. The limiter paces the flips before they reach the swapchain, so a
+  display that refreshes faster than 60 Hz does not speed the game up; with `--frame-limit off` the display's
+  refresh paces the RSX thread instead. Without a window nothing waits for a vertical blank in the renderer.
 - **`rsx unimplemented` census.** The decoders, the frame builder and the renderer count what they
   meet but cannot handle yet (surface, depth and texture formats, texture layouts, vertex types,
   primitives, vertex and fragment opcodes, blend modes, other state and unknown methods) under

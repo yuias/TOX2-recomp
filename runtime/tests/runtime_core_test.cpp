@@ -8925,6 +8925,40 @@ void testRsxConsumer() {
         CHECK(capturing.takeCaptures().empty());
     }
 
+    // The flip limiter: the first flip is immediate, every later one waits for a deadline that moves on by one
+    // period per flip, and the parser stays at the held flip meanwhile.
+    {
+        const auto emitFlips = [&](int count) {
+            for (int i = 0; i < count; i++) emit(tox2::kMethodGcmFlipCommand, {1});
+        };
+        tox2Write32(base, kControl + 4, at);
+        tox2::RsxConsumer limited(base);
+        limited.setFlipLimit(true);
+        CHECK(!limited.flipHoldDeadline());
+        emitFlips(4);
+        tox2Write32(base, kControl, at);
+        const auto start = std::chrono::steady_clock::now();
+        CHECK(limited.pump(100) == FifoStatus::Waiting && limited.census().flips == 1);
+        CHECK(limited.flipHoldDeadline().has_value() && limited.hasWork(at));
+        const std::uint32_t held_get = tox2Read32(base, kControl + 4);
+        CHECK(held_get < at);  // get stays at the held flip
+        CHECK(!limited.write(tox2::kMethodGcmFlipCommand, 1) && limited.census().flips == 1);
+        while (limited.pump(100) != FifoStatus::Idle) {
+            CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        CHECK(limited.census().flips == 4 && !limited.flipHoldDeadline());
+        CHECK(elapsed >= 3 * tox2::kRsxFlipPeriod && elapsed < 3 * tox2::kRsxFlipPeriod + std::chrono::seconds(1));
+        CHECK(tox2Read32(base, kControl + 4) == at);
+
+        // Off, the same four flips complete in a single pump.
+        tox2::RsxConsumer unlimited(base);
+        emitFlips(4);
+        tox2Write32(base, kControl, at);
+        CHECK(unlimited.pump(100) == FifoStatus::Idle && unlimited.census().flips == 4);
+    }
+
     // The census section is printed only while a provider is registered.
     CHECK(tox2::formatCensus().find("census: rsx") == std::string::npos);
     tox2::setRsxCensusProvider(&fakeRsxCensus);
