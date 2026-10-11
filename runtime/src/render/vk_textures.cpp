@@ -1,6 +1,7 @@
 #include "render/vk_textures.h"
 
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <utility>
 #include <vector>
@@ -16,7 +17,7 @@ constexpr VkDeviceSize kCacheBudgetBytes = 256ull << 20;
 constexpr std::size_t kMaxScratchImages = 4;
 
 // Callers pass UNDEFINED as the old layout before a copy that overwrites the whole image.
-void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImageLayout to,
+void imageBarrier(VkCommandBuffer cmd, VkImage image, std::uint32_t levels, VkImageLayout from, VkImageLayout to,
                   VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access) {
     VkImageMemoryBarrier2 barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -31,7 +32,7 @@ void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImag
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.image = image;
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
     VkDependencyInfo dependency{};
     dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dependency.imageMemoryBarrierCount = 1;
@@ -93,24 +94,42 @@ std::uint32_t remapBorderColor(std::uint32_t border, std::uint32_t remap) {
     return (out[0] << 24) | (out[1] << 16) | (out[2] << 8) | out[3];
 }
 
-// Facts from RPCS3: `Emu/RSX/VK/VKFormats.cpp` `get_min_filter`, `get_mag_filter` (only the filter is
-// used here: every sampled image has one mip level), `vk_wrap_mode`, `get_border_color`, and
+// Facts from RPCS3: `Emu/RSX/VK/VKFormats.cpp` `get_min_filter` (filter, mipmap mode and whether the
+// filter samples mip levels), `get_mag_filter`, `vk_wrap_mode`, `get_border_color`,
 // `Emu/RSX/VK/vkutils/sampler.cpp` `get_closest_border_color_enum` (the substitute for a border colour
-// without the custom border colour extension). Enum values from `Emu/RSX/gcm_enums.h`; the field
-// positions are in rsx_decode.h.
+// without the custom border colour extension), and `Emu/RSX/VK/VKHelpers.cpp` `update_fragment_sampler`
+// (level range and bias are used only for a mip-sampling filter on a texture with several levels; the
+// range ends at the last level and a NEAREST mip mode rounds the bias to half a level) with
+// `Emu/RSX/RSXTexture.cpp` `min_lod`, `max_lod`, `bias` (unsigned 4.8 fixed point fields of
+// SET_TEXTURE_CONTROL0, signed 5.8 in SET_TEXTURE_FILTER). Enum values from `Emu/RSX/gcm_enums.h`; the
+// field positions are in rsx_decode.h.
 SamplerSettings samplerSettings(const RsxTextureDesc& texture) {
     SamplerSettings settings;
 
     const std::uint32_t min_filter = rsxTextureMinFilter(texture.filter);
+    bool sample_mips = false;
     switch (min_filter) {
-        case 1:
         case 3:
-        case 5: settings.min_filter = VK_FILTER_NEAREST; break;
-        case 2:
+        case 5: sample_mips = true; [[fallthrough]];
+        case 1: settings.min_filter = VK_FILTER_NEAREST; break;
         case 4:
-        case 6:
+        case 6: sample_mips = true; [[fallthrough]];
+        case 2:
         case 7: settings.min_filter = VK_FILTER_LINEAR; break;
         default: rsxNoteUnimplemented("texture sampler", std::format("min filter {:#x}", min_filter)); break;
+    }
+    const std::uint32_t levels = rsxTextureMipCount(texture.format, texture.width, texture.height, texture.mips);
+    if (sample_mips && levels > 1) {
+        const float last_level = static_cast<float>(levels - 1);
+        settings.mipmap_mode = min_filter >= 5 ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        settings.min_lod = std::min(static_cast<float>((texture.control0 >> 19) & 0xFFF) / 256.0f, last_level);
+        settings.max_lod = std::min(static_cast<float>((texture.control0 >> 7) & 0xFFF) / 256.0f, last_level);
+        settings.max_lod = std::max(settings.max_lod, settings.min_lod);
+        std::uint32_t bias_bits = texture.filter & 0x1FFF;
+        float bias = static_cast<float>(bias_bits) / 256.0f;
+        if ((bias_bits & 0x1000) != 0) bias = -static_cast<float>((0u - bias_bits) & 0x1FFF) / 256.0f;
+        if (settings.mipmap_mode == VK_SAMPLER_MIPMAP_MODE_NEAREST) bias = std::floor(bias * 2.0f + 0.5f) * 0.5f;
+        settings.lod_bias = bias;
     }
     const std::uint32_t mag_filter = rsxTextureMagFilter(texture.filter);
     switch (mag_filter) {
@@ -199,7 +218,7 @@ bool TextureCache::formatUsable(VkFormat format) {
 }
 
 std::shared_ptr<TextureImage> TextureCache::create(std::uint32_t width, std::uint32_t height, VkFormat format,
-                                                   VkImageUsageFlags usage) {
+                                                   VkImageUsageFlags usage, std::uint32_t levels) {
     const VkPhysicalDeviceProperties& props = context_.deviceProperties();
     if (width == 0 || height == 0 || width > props.limits.maxImageDimension2D ||
         height > props.limits.maxImageDimension2D) {
@@ -214,15 +233,20 @@ std::shared_ptr<TextureImage> TextureCache::create(std::uint32_t width, std::uin
     const std::uint32_t block_bytes = format == VK_FORMAT_BC1_RGBA_UNORM_BLOCK                                     ? 8
                                       : format == VK_FORMAT_BC2_UNORM_BLOCK || format == VK_FORMAT_BC3_UNORM_BLOCK ? 16
                                                                                                                    : 0;
-    texture->bytes = block_bytes != 0 ? static_cast<VkDeviceSize>((width + 3) / 4) * ((height + 3) / 4) * block_bytes
-                                      : static_cast<VkDeviceSize>(width) * height * 4;
+    texture->levels = levels;
+    texture->bytes = 0;
+    for (std::uint32_t level = 0, w = width, h = height; level < levels;
+         level++, w = std::max(w / 2, 1u), h = std::max(h / 2, 1u)) {
+        texture->bytes += block_bytes != 0 ? static_cast<VkDeviceSize>((w + 3) / 4) * ((h + 3) / 4) * block_bytes
+                                           : static_cast<VkDeviceSize>(w) * h * 4;
+    }
 
     VkImageCreateInfo image_info{};
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     image_info.imageType = VK_IMAGE_TYPE_2D;
     image_info.format = format;
     image_info.extent = {width, height, 1};
-    image_info.mipLevels = 1;
+    image_info.mipLevels = levels;
     image_info.arrayLayers = 1;
     image_info.samples = VK_SAMPLE_COUNT_1_BIT;
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -250,14 +274,17 @@ std::shared_ptr<TextureImage> TextureCache::acquire(const RsxTextureDesc& textur
                              std::format("{} (device lacks block compression)", rsxTextureFormatName(texture.format)));
         return nullptr;
     }
-    const Key key{texture.location, texture.offset, texture.format, texture.width, texture.height, texture.pitch};
+    const std::uint32_t levels = rsxTextureMipCount(texture.format, texture.width, texture.height, texture.mips);
+    const Key key{texture.location, texture.offset, texture.format, texture.width,
+                  texture.height,   texture.pitch,  levels};
     const auto it = images_.find(key);
     if (it != images_.end()) {
         it->second->last_used = ++tick_;
         return it->second;
     }
     std::shared_ptr<TextureImage> created =
-            create(texture.width, texture.height, format, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+            create(texture.width, texture.height, format, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                   levels);
     if (!created) return nullptr;
     created->last_used = ++tick_;
     images_[key] = created;
@@ -276,14 +303,14 @@ std::shared_ptr<TextureImage> TextureCache::scratch(std::uint32_t width, std::ui
     return created;
 }
 
-VkImageView TextureCache::createView(VkImage image, VkFormat format, std::uint32_t remap) {
+VkImageView TextureCache::createView(VkImage image, VkFormat format, std::uint32_t remap, std::uint32_t levels) {
     VkImageViewCreateInfo view_info{};
     view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     view_info.image = image;
     view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
     view_info.format = format;
     view_info.components = textureComponentMapping(remap);
-    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
     VkImageView view = VK_NULL_HANDLE;
     if (vkCreateImageView(context_.device(), &view_info, nullptr, &view) != VK_SUCCESS) {
         fail("vkCreateImageView failed for a texture");
@@ -296,7 +323,7 @@ VkImageView TextureCache::view(TextureImage& image, std::uint32_t remap) {
     const std::uint32_t key = remap & 0xFFFF;
     const auto it = image.views.find(key);
     if (it != image.views.end()) return it->second;
-    const VkImageView created = createView(image.image, image.format, key);
+    const VkImageView created = createView(image.image, image.format, key, image.levels);
     if (created != VK_NULL_HANDLE) image.views[key] = created;
     return created;
 }
@@ -310,12 +337,14 @@ VkSampler TextureCache::sampler(const RsxTextureDesc& texture) {
     info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     info.magFilter = settings.mag_filter;
     info.minFilter = settings.min_filter;
-    info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     info.addressModeU = settings.wrap_s;
     info.addressModeV = settings.wrap_t;
     info.addressModeW = settings.wrap_r;
-    info.minLod = 0.0f;
-    info.maxLod = 0.0f;  // one mip level
+    info.mipmapMode = settings.mipmap_mode;
+    info.mipLodBias = std::clamp(settings.lod_bias, -context_.deviceProperties().limits.maxSamplerLodBias,
+                                 context_.deviceProperties().limits.maxSamplerLodBias);
+    info.minLod = settings.min_lod;
+    info.maxLod = settings.max_lod;
     info.borderColor = settings.border;
     VkSampler created = VK_NULL_HANDLE;
     if (vkCreateSampler(context_.device(), &info, nullptr, &created) != VK_SUCCESS) {
@@ -327,22 +356,28 @@ VkSampler TextureCache::sampler(const RsxTextureDesc& texture) {
 }
 
 void TextureCache::recordUpload(VkCommandBuffer cmd, TextureImage& image, VkBuffer staging, VkDeviceSize offset,
-                                std::uint32_t row_length) {
-    imageBarrier(cmd, image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                std::span<const RsxTextureLevel> levels) {
+    imageBarrier(cmd, image.image, image.levels, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                  VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-    VkBufferImageCopy region{};
-    region.bufferOffset = offset;
-    region.bufferRowLength = row_length;
-    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {image.width, image.height, 1};
-    vkCmdCopyBufferToImage(cmd, staging, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-    imageBarrier(cmd, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    std::vector<VkBufferImageCopy> regions;
+    regions.reserve(levels.size());
+    for (const RsxTextureLevel& level : levels) {
+        VkBufferImageCopy region{};
+        region.bufferOffset = offset + level.packed_offset;  // rows are tightly packed: bufferRowLength stays 0
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level.level, 0, 1};
+        region.imageExtent = {level.width, level.height, 1};
+        regions.push_back(region);
+    }
+    vkCmdCopyBufferToImage(cmd, staging, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           static_cast<std::uint32_t>(regions.size()), regions.data());
+    imageBarrier(cmd, image.image, image.levels, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     image.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 void TextureCache::recordCopy(VkCommandBuffer cmd, TextureImage& image, VkImage source) {
-    imageBarrier(cmd, image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    imageBarrier(cmd, image.image, image.levels, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                  VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
     VkImageCopy region{};
     region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -350,8 +385,9 @@ void TextureCache::recordCopy(VkCommandBuffer cmd, TextureImage& image, VkImage 
     region.extent = {image.width, image.height, 1};
     vkCmdCopyImage(cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    1, &region);
-    imageBarrier(cmd, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    imageBarrier(cmd, image.image, image.levels, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     image.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 

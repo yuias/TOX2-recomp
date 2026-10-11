@@ -13,6 +13,7 @@
 #include "rsx/fifo_parser.h"
 #include "rsx/rsx_census.h"
 #include "rsx/rsx_decode.h"
+#include "rsx/rsx_texture_layout.h"
 #include "rsx/rsx_unimplemented.h"
 
 namespace tox2 {
@@ -269,9 +270,11 @@ bool RsxFrameBuilder::fillVertices(const RsxRegisters& regs, RsxDraw& draw, std:
     return true;
 }
 
-// Texture bytes are copied for the layouts the renderer supports: 2D, one mip level, A8R8G8B8 linear or
-// DXT1/DXT23/DXT45 in any layout (block rows, see below). A texture at a known render target is an alias and carries no
-// bytes. RPCS3 takes the pitch from the row size when the register is 0 (`texture_cache.h` upload path).
+// Texture bytes are copied for 2D A8R8G8B8 and DXT1/DXT23/DXT45 textures, linear or swizzled, with their
+// whole mip chain. The copy is converted to what the renderer uploads: every level in tightly packed rows
+// (padding removed) and de-swizzled, see rsx_texture_layout.h for the guest layout rules. A texture at a
+// known render target is an alias and carries no bytes. RPCS3 takes the pitch from the row size when the
+// register is 0 (`texture_cache.h` upload path).
 void RsxFrameBuilder::fillTextures(const RsxRegisters& regs, RsxDraw& draw) {
     for (std::uint32_t unit = 0; unit < kRsxTextureUnitCount; unit++) {
         if (!rsxTextureEnabled(regs, unit)) continue;
@@ -283,47 +286,68 @@ void RsxFrameBuilder::fillTextures(const RsxRegisters& regs, RsxDraw& draw) {
             continue;
         }
 
-        // Block-compressed rows are always contiguous, whatever the layout bit says.
-        const bool compressed = rsxTextureBlockBytes(t.format) != 0;
-        if (!t.linear_layout && !compressed) rsxNoteUnimplemented("texture layout", "swizzled");
         if (t.cubemap) rsxNoteUnimplemented("texture layout", "cubemap");
-        if (t.mips > 1) rsxNoteUnimplemented("texture layout", std::format("mips {}", t.mips));
         if (t.dimension != 2) rsxNoteUnimplemented("texture layout", std::format("dimension {}", t.dimension));
 
         const bool supported_format = rsxTextureFormatSampleable(t.format);
-        const bool supported_layout = (t.linear_layout || compressed) && !t.cubemap && t.mips <= 1 && t.dimension == 2;
+        const bool supported_layout = !t.cubemap && t.dimension == 2;
         if (supported_format && supported_layout && t.width != 0 && t.height != 0) {
-            std::uint64_t row, size;
-            if (compressed) {
-                // The pitch register is not used for the block rows (the game's value is a block row or 0).
-                row = rsxCompressedRowBytes(t.format, t.width);
-                size = rsxCompressedSize(t.format, t.width, t.height);
-                t.pitch = static_cast<std::uint32_t>(row);
-            } else {
-                row = static_cast<std::uint64_t>(t.width) * 4;
-                if (t.pitch == 0) t.pitch = static_cast<std::uint32_t>(row);
-                // The last row only needs its pixels, not the padding up to the pitch.
-                size = static_cast<std::uint64_t>(t.pitch) * (t.height - 1) + row;
-            }
-            if (t.pitch < row) {
-                rsxNoteUnimplemented("texture layout", "pitch below row size");
-            } else if (draw.texture_data.size() + size > kRsxMaxTextureBytes) {
-                rsxNoteUnimplemented("texture layout", "too large");
-            } else {
-                draw.texture_data.resize((draw.texture_data.size() + 3) & ~std::size_t{3});
-                t.data_offset = static_cast<std::uint32_t>(draw.texture_data.size());
-                t.data_size = static_cast<std::uint32_t>(size);
-                draw.texture_data.resize(draw.texture_data.size() + size);
-                if (!memory_.read(t.location, t.offset,
-                                  std::span<std::uint8_t>(draw.texture_data.data() + t.data_offset, size))) {
-                    draw.texture_data.resize(t.data_offset);
-                    t.data_offset = t.data_size = 0;
-                    noteState("unreadable texture memory");
-                }
-            }
+            copyTexture(t, draw);
         }
         draw.textures.push_back(t);
     }
+}
+
+void RsxFrameBuilder::copyTexture(RsxTextureDesc& t, RsxDraw& draw) {
+    RsxTextureLayout layout;
+    if (!rsxTextureLayout(t.format, t.linear_layout, t.width, t.height, t.mips, t.pitch, 1, layout)) {
+        // The swizzle needs a power-of-two image; otherwise the pitch register is smaller than a row.
+        const bool compressed = rsxTextureBlockBytes(t.format) != 0;
+        const bool power_of_two = std::has_single_bit(t.width) && std::has_single_bit(t.height);
+        if (!t.linear_layout && !compressed && !power_of_two) {
+            rsxNoteUnimplemented("texture layout", "swizzled non-power-of-two");
+        } else {
+            rsxNoteUnimplemented("texture layout", "pitch below row size");
+        }
+        return;
+    }
+    if (layout.guest_bytes > kRsxMaxTextureBytes ||
+        draw.texture_data.size() + layout.packed_bytes > kRsxMaxTextureBytes) {
+        rsxNoteUnimplemented("texture layout", "too large");
+        return;
+    }
+
+    const std::size_t base = (draw.texture_data.size() + 3) & ~std::size_t{3};
+    // Bytes that need no conversion are read straight into place.
+    bool in_place = layout.guest_bytes == layout.packed_bytes;
+    for (const RsxTextureLevel& level : layout.levels) {
+        in_place = in_place && !level.swizzled && level.guest_offset == level.packed_offset &&
+                   level.guest_pitch == level.row_bytes;
+    }
+    std::vector<std::uint8_t> guest;
+    draw.texture_data.resize(base + layout.packed_bytes);
+    bool ok;
+    if (in_place) {
+        ok = memory_.read(t.location, t.offset,
+                          std::span<std::uint8_t>(draw.texture_data.data() + base, layout.packed_bytes));
+    } else {
+        guest.resize(layout.guest_bytes);
+        ok = memory_.read(t.location, t.offset, guest);
+        for (std::size_t i = 0; ok && i < layout.levels.size(); i++) {
+            const RsxTextureLevel& level = layout.levels[i];
+            ok = rsxExtractTextureLevel(
+                    level, layout.block_bytes, guest,
+                    std::span<std::uint8_t>(draw.texture_data.data() + base + level.packed_offset, level.packed_bytes));
+        }
+    }
+    if (!ok) {
+        draw.texture_data.resize(base);
+        noteState("unreadable texture memory");
+        return;
+    }
+    t.pitch = static_cast<std::uint32_t>(layout.levels[0].row_bytes);
+    t.data_offset = static_cast<std::uint32_t>(base);
+    t.data_size = static_cast<std::uint32_t>(layout.packed_bytes);
 }
 
 // SET_SHADER_PROGRAM: location (value & 3) - 1, offset value & ~3 (RPCS3 `rsx_decode.h`). The program

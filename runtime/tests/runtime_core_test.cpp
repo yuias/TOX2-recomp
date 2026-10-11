@@ -63,6 +63,7 @@
 #include "rsx/rsx_frame_builder.h"
 #include "rsx/rsx_registers.h"
 #include "rsx/rsx_state.h"
+#include "rsx/rsx_texture_layout.h"
 #include "rsx/rsx_thread.h"
 #include "rsx/rsx_unimplemented.h"
 #include "rsx_synthetic.h"
@@ -7269,6 +7270,164 @@ public:
     std::vector<std::uint8_t> local, main;
 };
 
+// Guest layout of mip chains and de-swizzling, checked against the rules of RPCS3's `TextureUtils.cpp`.
+void testRsxTextureLayout() {
+    // Morton order of a square image: x and y bits interleaved, x in the even positions.
+    CHECK(tox2::rsxSwizzleIndex(0, 0, 2, 2) == 0 && tox2::rsxSwizzleIndex(1, 0, 2, 2) == 1);
+    CHECK(tox2::rsxSwizzleIndex(0, 1, 2, 2) == 2 && tox2::rsxSwizzleIndex(1, 1, 2, 2) == 3);
+    CHECK(tox2::rsxSwizzleIndex(2, 0, 2, 2) == 4 && tox2::rsxSwizzleIndex(3, 1, 2, 2) == 7);
+    CHECK(tox2::rsxSwizzleIndex(0, 2, 2, 2) == 8 && tox2::rsxSwizzleIndex(3, 3, 2, 2) == 15);
+    // A wide image interleaves up to the shorter side (one bit here) and counts the rest of x above.
+    CHECK(tox2::rsxSwizzleIndex(0, 1, 3, 1) == 2 && tox2::rsxSwizzleIndex(3, 1, 3, 1) == 7);
+    CHECK(tox2::rsxSwizzleIndex(7, 0, 3, 1) == 13 && tox2::rsxSwizzleIndex(7, 1, 3, 1) == 15);
+    // A tall image counts the rest of y above.
+    CHECK(tox2::rsxSwizzleIndex(1, 5, 1, 3) == 11 && tox2::rsxSwizzleIndex(0, 7, 1, 3) == 14);
+    // A one-texel-high image is a plain row.
+    for (std::uint32_t x = 0; x < 8; x++) CHECK(tox2::rsxSwizzleIndex(x, 0, 3, 0) == x);
+
+    // Every texel position is hit exactly once.
+    for (const auto& [log2_w, log2_h] : {std::pair{2u, 2u}, std::pair{3u, 1u}, std::pair{1u, 4u}, std::pair{5u, 0u}}) {
+        std::vector<int> seen(std::size_t{1} << (log2_w + log2_h), 0);
+        for (std::uint32_t y = 0; y < (1u << log2_h); y++) {
+            for (std::uint32_t x = 0; x < (1u << log2_w); x++) seen[tox2::rsxSwizzleIndex(x, y, log2_w, log2_h)]++;
+        }
+        CHECK(std::all_of(seen.begin(), seen.end(), [](int n) { return n == 1; }));
+    }
+
+    // De-swizzle 4x4, 8x2 and 2x8 A8R8G8B8: guest texel k holds the bytes {k, 0, 0, 0}.
+    for (const auto& [width, height] : {std::pair{4u, 4u}, std::pair{8u, 2u}, std::pair{2u, 8u}}) {
+        tox2::RsxTextureLayout layout;
+        CHECK(tox2::rsxTextureLayout(0x85, false, width, height, 1, 0, 1, layout));
+        CHECK(layout.levels.size() == 1 && layout.block_bytes == 4 && layout.levels[0].swizzled);
+        CHECK(layout.guest_bytes == width * height * 4 && layout.packed_bytes == width * height * 4);
+        std::vector<std::uint8_t> guest(layout.guest_bytes, 0), packed(layout.packed_bytes, 0xEE);
+        for (std::uint32_t k = 0; k < width * height; k++) guest[k * 4] = static_cast<std::uint8_t>(k);
+        CHECK(tox2::rsxExtractTextureLevel(layout.levels[0], 4, guest, packed));
+        const std::uint32_t log2_w = std::countr_zero(width), log2_h = std::countr_zero(height);
+        bool all = true;
+        for (std::uint32_t y = 0; y < height; y++) {
+            for (std::uint32_t x = 0; x < width; x++) {
+                all = all && packed[(y * width + x) * 4] == tox2::rsxSwizzleIndex(x, y, log2_w, log2_h) &&
+                      packed[(y * width + x) * 4 + 1] == 0;
+            }
+        }
+        CHECK(all);
+    }
+    // The 4x4 case in full: row 0 reads guest texels 0, 1, 4, 5 and row 3 reads 10, 11, 14, 15.
+    {
+        tox2::RsxTextureLayout layout;
+        CHECK(tox2::rsxTextureLayout(0x85, false, 4, 4, 1, 0, 1, layout));
+        std::vector<std::uint8_t> guest(64, 0), packed(64, 0);
+        for (std::uint32_t k = 0; k < 16; k++) guest[k * 4] = static_cast<std::uint8_t>(k);
+        CHECK(tox2::rsxExtractTextureLevel(layout.levels[0], 4, guest, packed));
+        const std::uint8_t expected[16] = {0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15};
+        bool same = true;
+        for (std::uint32_t i = 0; i < 16; i++) same = same && packed[i * 4] == expected[i];
+        CHECK(same);
+        CHECK(!tox2::rsxExtractTextureLevel(layout.levels[0], 4, std::span<const std::uint8_t>(guest).first(63),
+                                            packed));
+    }
+
+    // Level counts: the register value is clamped to the chain that ends at one texel (one block for DXT).
+    CHECK(tox2::rsxTextureMipCount(0x85, 256, 16, 0) == 1 && tox2::rsxTextureMipCount(0x85, 256, 16, 1) == 1);
+    CHECK(tox2::rsxTextureMipCount(0x85, 256, 16, 3) == 3 && tox2::rsxTextureMipCount(0x85, 256, 16, 100) == 9);
+    CHECK(tox2::rsxTextureMipCount(0x85, 1, 1, 5) == 1 && tox2::rsxTextureMipCount(0xA5, 1012, 132, 3) == 3);
+    CHECK(tox2::rsxTextureMipCount(0x86, 16, 16, 5) == 3 && tox2::rsxTextureMipCount(0x86, 64, 16, 9) == 3);
+    CHECK(tox2::rsxTextureMipCount(0x88, 4, 4, 5) == 1 && tox2::rsxTextureMipCount(0x88, 2, 2, 5) == 1);
+
+    // A linear chain keeps the pitch of level 0: 8x4 texels with a 64-byte pitch, levels 8x4, 4x2, 2x1, 1x1.
+    {
+        tox2::RsxTextureLayout layout;
+        CHECK(tox2::rsxTextureLayout(0xA5, true, 8, 4, 9, 64, 1, layout));
+        CHECK(layout.mip_count == 4 && layout.levels.size() == 4);
+        const std::uint64_t guest_offset[4] = {0, 256, 384, 448}, packed_offset[4] = {0, 128, 160, 168};
+        const std::uint32_t widths[4] = {8, 4, 2, 1}, heights[4] = {4, 2, 1, 1};
+        for (std::size_t i = 0; i < 4; i++) {
+            CHECK(layout.levels[i].guest_offset == guest_offset[i] && layout.levels[i].guest_pitch == 64);
+            CHECK(layout.levels[i].packed_offset == packed_offset[i] && !layout.levels[i].swizzled);
+            CHECK(layout.levels[i].width == widths[i] && layout.levels[i].height == heights[i]);
+        }
+        CHECK(layout.levels[0].guest_bytes == 64 * 3 + 32 && layout.levels[3].row_bytes == 4);
+        CHECK(layout.guest_bytes == 448 + 4 && layout.packed_bytes == 172);
+        // Extraction drops the padding; guest byte i holds i modulo 256.
+        std::vector<std::uint8_t> guest(layout.guest_bytes), packed(layout.packed_bytes);
+        for (std::size_t i = 0; i < guest.size(); i++) guest[i] = static_cast<std::uint8_t>(i);
+        for (const tox2::RsxTextureLevel& level : layout.levels) {
+            CHECK(tox2::rsxExtractTextureLevel(
+                    level, 4, guest, std::span<std::uint8_t>(packed).subspan(level.packed_offset, level.packed_bytes)));
+        }
+        CHECK(packed[0] == 0 && packed[31] == 31 && packed[32] == 64 && packed[63] == 95 && packed[96] == 192);
+        CHECK(packed[128] == 0 && packed[143] == 15 && packed[144] == 64);
+        CHECK(packed[160] == 128 && packed[168] == 192);
+        // A pitch of 0 stands for the row size.
+        CHECK(tox2::rsxTextureLayout(0xA5, true, 8, 4, 1, 0, 1, layout) && layout.levels[0].guest_pitch == 32);
+        // A pitch below one row, or a size of 0, has no layout.
+        CHECK(!tox2::rsxTextureLayout(0xA5, true, 8, 4, 1, 28, 1, layout));
+        CHECK(!tox2::rsxTextureLayout(0xA5, true, 0, 4, 1, 32, 1, layout));
+    }
+    // Odd sizes halve with truncation: 5x3 gives 5x3, 2x1, 1x1.
+    {
+        tox2::RsxTextureLayout layout;
+        CHECK(tox2::rsxTextureLayout(0xA5, true, 5, 3, 3, 20, 1, layout));
+        CHECK(layout.levels.size() == 3 && layout.levels[1].width == 2 && layout.levels[1].height == 1);
+        CHECK(layout.levels[2].width == 1 && layout.levels[1].guest_offset == 60);
+    }
+    // A swizzled chain has no padding: 8x4 gives 128, 32, 8 and 4 bytes back to back.
+    {
+        tox2::RsxTextureLayout layout;
+        CHECK(tox2::rsxTextureLayout(0x85, false, 8, 4, 4, 9999, 1, layout));  // the pitch register is ignored
+        CHECK(layout.levels.size() == 4 && layout.guest_bytes == 172 && layout.packed_bytes == 172);
+        const std::uint64_t offset[4] = {0, 128, 160, 168};
+        for (std::size_t i = 0; i < 4; i++) {
+            CHECK(layout.levels[i].guest_offset == offset[i] && layout.levels[i].packed_offset == offset[i]);
+            CHECK(layout.levels[i].swizzled && layout.levels[i].guest_pitch == layout.levels[i].row_bytes);
+        }
+        // Not a power of two: no swizzled layout. The same size is fine when linear.
+        CHECK(!tox2::rsxTextureLayout(0x85, false, 12, 4, 1, 0, 1, layout));
+        CHECK(tox2::rsxTextureLayout(0xA5, true, 12, 4, 1, 0, 1, layout));
+    }
+    // DXT1 with the swizzle flag: contiguous block rows per level, 16x16 gives 128, 32 and 8 bytes.
+    {
+        tox2::RsxTextureLayout layout;
+        CHECK(tox2::rsxTextureLayout(0x86, false, 16, 16, 5, 128, 1, layout));
+        CHECK(layout.block_bytes == 8 && layout.levels.size() == 3);
+        CHECK(layout.levels[0].packed_bytes == 128 && layout.levels[1].packed_bytes == 32 &&
+              layout.levels[2].packed_bytes == 8);
+        CHECK(layout.levels[1].guest_offset == 128 && layout.levels[2].guest_offset == 160 &&
+              layout.guest_bytes == 168 && !layout.levels[0].swizzled);
+        // 12x12 is not a power of two, which DXT does not care about: 3x3 blocks, then 6x6 texels in 2x2.
+        CHECK(tox2::rsxTextureLayout(0x87, false, 12, 12, 2, 0, 1, layout));
+        CHECK(layout.levels[0].packed_bytes == 9 * 16 && layout.levels[1].blocks_w == 2 && layout.levels[1].width == 6);
+        // 64x16 stops after three levels, whatever the register says.
+        CHECK(tox2::rsxTextureLayout(0x86, false, 64, 16, 9, 128, 1, layout) && layout.levels.size() == 3);
+        CHECK(layout.levels[2].width == 16 && layout.levels[2].height == 4 && layout.levels[2].packed_bytes == 32);
+    }
+    // DXT45 with the linear flag uses the pitch register for every level: 8x8 with a 64-byte pitch.
+    {
+        tox2::RsxTextureLayout layout;
+        CHECK(tox2::rsxTextureLayout(0xA8, true, 8, 8, 2, 64, 1, layout));
+        CHECK(layout.levels.size() == 2 && layout.block_bytes == 16);
+        CHECK(layout.levels[0].guest_pitch == 64 && layout.levels[0].guest_bytes == 64 + 32 &&
+              layout.levels[0].row_bytes == 32);
+        CHECK(layout.levels[1].guest_offset == 128 && layout.levels[1].guest_pitch == 64 &&
+              layout.levels[1].row_bytes == 16 && layout.levels[1].packed_offset == 64);
+        CHECK(!tox2::rsxTextureLayout(0xA8, true, 8, 8, 2, 16, 1, layout));
+    }
+    // Faces of a cube map: a texture without the linear flag aligns each to 128 bytes; a linear one does not.
+    {
+        tox2::RsxTextureLayout layout;
+        CHECK(tox2::rsxTextureLayout(0x85, false, 4, 4, 1, 0, 6, layout) && layout.levels.size() == 6);
+        CHECK(layout.levels[1].guest_offset == 128 && layout.levels[5].guest_offset == 640 &&
+              layout.levels[1].packed_offset == 64);
+        CHECK(tox2::rsxTextureLayout(0xA5, true, 4, 4, 1, 0, 6, layout) && layout.levels[1].guest_offset == 64);
+    }
+    // Formats other than A8R8G8B8 and DXT have no layout.
+    {
+        tox2::RsxTextureLayout layout;
+        CHECK(!tox2::rsxTextureLayout(0x84, true, 4, 4, 1, 0, 1, layout));
+    }
+}
+
 void testRsxFrameBuilder() {
     auto regs = std::make_unique<tox2::RsxRegisters>();
     regs->reset();
@@ -7412,9 +7571,9 @@ void testRsxFrameBuilder() {
     CHECK(builder.takeCommands().empty());
 
     // Texture unit 0 sits at the cleared surface and is an alias; unit 1 is a linear 4x4 texture whose
-    // bytes are copied without the row padding; unit 2 is swizzled and only counted. Disabled units are
-    // not decoded.
-    for (std::uint32_t i = 0; i < 256; i++) memory.local[0x3000 + i] = static_cast<std::uint8_t>(i ^ 0x5A);
+    // bytes are copied without the row padding; unit 2 is a swizzled 16x4 texture that is de-swizzled into
+    // tightly packed rows. Disabled units are not decoded.
+    for (std::uint32_t i = 0; i < 1024; i++) memory.local[0x3000 + i] = static_cast<std::uint8_t>(i ^ 0x5A);
     const std::uint32_t format = 1u | (2u << 4) | ((0x85u | 0x20u) << 8) | (1u << 16);
     write(0x1A00, 0x100000);
     write(0x1A04, format);
@@ -7441,15 +7600,21 @@ void testRsxFrameBuilder() {
     CHECK(textured.textures[0].unit == 0 && textured.textures[0].rt_alias == 0 && textured.textures[0].data_size == 0);
     CHECK(textured.textures[1].unit == 1 && textured.textures[1].rt_alias == -1 &&
           textured.textures[1].data_size == 64 * 3 + 64);
-    CHECK(textured.texture_data.size() == 256 && textured.texture_data[0] == (0 ^ 0x5A) &&
+    CHECK(textured.texture_data.size() == 512 && textured.texture_data[0] == (0 ^ 0x5A) &&
           textured.texture_data[255] == (255 ^ 0x5A));
-    CHECK(textured.textures[2].unit == 2 && textured.textures[2].data_size == 0);
-    CHECK(unimplementedCount("texture layout swizzled") == 1);
+    // Texel (x, y) of the swizzled image comes from guest texel (x & 3 interleaved with y & 3) | (x >> 2) << 4:
+    // (5, 1) is guest texel 19, (15, 3) is guest texel 63.
+    const tox2::RsxTextureDesc& swizzled = textured.textures[2];
+    CHECK(swizzled.unit == 2 && swizzled.data_offset == 256 && swizzled.data_size == 256 && swizzled.pitch == 64);
+    CHECK(textured.texture_data[swizzled.data_offset + 0] == (0 ^ 0x5A));
+    CHECK(textured.texture_data[swizzled.data_offset + (1 * 16 + 5) * 4 + 2] == ((19 * 4 + 2) ^ 0x5A));
+    CHECK(textured.texture_data[swizzled.data_offset + (3 * 16 + 15) * 4 + 3] == ((63 * 4 + 3) ^ 0x5A));
+    CHECK(unimplementedCount("texture layout swizzled") == 0 && unimplementedCount("texture layout mips 3") == 0);
     CHECK(unimplementedCount("state texture location 0x0") == 0);
 
-    // Block-compressed textures copy whole block rows whatever the layout bit and the pitch register say:
-    // unit 3 is a swizzled-flag DXT45 8x5 (2x2 blocks of 16 bytes), unit 4 a linear DXT1 6x4 with a
-    // padded pitch register (2x1 blocks of 8 bytes), unit 5 a DXT1 with two mip levels (counted, no bytes).
+    // Block-compressed textures copy whole block rows: unit 3 is a swizzled-flag DXT45 8x5 (2x2 blocks of 16
+    // bytes, the pitch register is ignored), unit 4 a linear DXT1 6x4 with a padded pitch register (2x1 blocks
+    // of 8 bytes, the padding is not copied), unit 5 a DXT1 8x8 with two mip levels (32 + 8 bytes).
     write(0x1A0C, 0);
     write(0x1A0C + 0x20, 0);
     write(0x1A0C + 0x40, 0);
@@ -7475,14 +7640,67 @@ void testRsxFrameBuilder() {
           compressed.textures[0].pitch == 32);
     CHECK(compressed.textures[1].unit == 4 && compressed.textures[1].data_size == 16 &&
           compressed.textures[1].pitch == 16);
-    CHECK(compressed.textures[2].unit == 5 && compressed.textures[2].data_size == 0);
-    CHECK(compressed.texture_data.size() == 64 + 16);
+    CHECK(compressed.textures[2].unit == 5 && compressed.textures[2].data_size == 40);
+    CHECK(compressed.texture_data.size() == 64 + 16 + 40);
     CHECK(compressed.texture_data[0] == (0 ^ 0x5A) && compressed.texture_data[63] == (63 ^ 0x5A));
     CHECK(compressed.texture_data[compressed.textures[1].data_offset] == (0 ^ 0x5A) &&
           compressed.texture_data[compressed.textures[1].data_offset + 15] == (15 ^ 0x5A));
-    CHECK(unimplementedCount("texture layout swizzled") == 1);  // compressed formats are never counted as swizzled
-    CHECK(unimplementedCount("texture layout mips 2") == 1);
+    CHECK(compressed.texture_data[compressed.textures[2].data_offset + 39] == (39 ^ 0x5A));
+    CHECK(unimplementedCount("texture layout swizzled") == 0 && unimplementedCount("texture layout mips 2") == 0);
     CHECK(unimplementedCount("texture format DXT45_SZ_NR") == 0);
+
+    // Mip chains: unit 6 is a swizzled A8R8G8B8 8x4 with three levels (128 + 32 + 8 bytes, back to back, each
+    // de-swizzled on its own); unit 7 a linear 8x4 with a padded 64-byte pitch and two levels, whose second
+    // level keeps that pitch (guest rows at 256 and 320) and is copied without the padding. Unit 8 is a
+    // swizzled 12x4 texture, which has no layout; unit 9 a linear texture whose pitch is below a row.
+    tox2::rsxUnimplementedReset();
+    const auto colorUnit = [&](std::uint32_t unit, std::uint32_t fmt, std::uint32_t mips, std::uint32_t width,
+                               std::uint32_t height, std::uint32_t pitch) {
+        write(0x1A00 + unit * 0x20, 0x3000);
+        write(0x1A04 + unit * 0x20, 1u | (2u << 4) | (fmt << 8) | (mips << 16));
+        write(0x1A0C + unit * 0x20, 0x80000000);
+        write(0x1A18 + unit * 0x20, (width << 16) | height);
+        write(0x1840 + unit * 4, pitch);
+    };
+    colorUnit(3, 0x85, 1, 4, 4, 0);  // reuse the units of the previous draw
+    colorUnit(4, 0x85, 1, 4, 4, 0);
+    colorUnit(5, 0x85, 1, 4, 4, 0);
+    colorUnit(6, 0x85, 3, 8, 4, 0);
+    colorUnit(7, 0xA5, 2, 8, 4, 64);
+    colorUnit(8, 0x85, 1, 12, 4, 0);
+    colorUnit(9, 0xA5, 1, 8, 4, 28);
+    write(0x1808, 5);
+    write(0x1814, 2u << 24);
+    write(0x1808, 0);
+    commands = builder.takeCommands();
+    CHECK(commands.size() == 1);
+    const tox2::RsxDraw& chains = std::get<tox2::RsxDraw>(commands[0]);
+    const auto unitOf = [&](std::uint32_t unit) -> const tox2::RsxTextureDesc& {
+        for (const tox2::RsxTextureDesc& texture : chains.textures) {
+            if (texture.unit == unit) return texture;
+        }
+        return chains.textures[0];
+    };
+    const tox2::RsxTextureDesc& swizzled_chain = unitOf(6);
+    CHECK(swizzled_chain.data_size == 168 && swizzled_chain.pitch == 32);
+    const auto guestByte = [](std::uint32_t i) { return static_cast<std::uint8_t>(i ^ 0x5A); };
+    // Level 0 texel (3, 2) is guest texel 13 (x bits 0 and 1 interleave with y bits 0 and 1).
+    CHECK(tox2::rsxSwizzleIndex(3, 2, 3, 2) == 13);
+    CHECK(chains.texture_data[swizzled_chain.data_offset + (2 * 8 + 3) * 4 + 1] == guestByte(13 * 4 + 1));
+    // Level 1 is 4x2 from guest byte 128: texel (3, 1) is guest texel 7 of that level.
+    CHECK(tox2::rsxSwizzleIndex(3, 1, 2, 1) == 7);
+    CHECK(chains.texture_data[swizzled_chain.data_offset + 128 + (1 * 4 + 3) * 4] == guestByte(128 + 7 * 4));
+    // Level 2 is 2x1 from guest byte 160, a plain row.
+    CHECK(chains.texture_data[swizzled_chain.data_offset + 160 + 4] == guestByte(160 + 4));
+    const tox2::RsxTextureDesc& linear_chain = unitOf(7);
+    CHECK(linear_chain.data_size == 128 + 32 && linear_chain.pitch == 32);
+    CHECK(chains.texture_data[linear_chain.data_offset + 32] == guestByte(64));         // row 1 of level 0
+    CHECK(chains.texture_data[linear_chain.data_offset + 128] == guestByte(256));       // row 0 of level 1
+    CHECK(chains.texture_data[linear_chain.data_offset + 128 + 16] == guestByte(320));  // row 1 of level 1
+    CHECK(unitOf(8).data_size == 0 && unitOf(9).data_size == 0);
+    CHECK(unimplementedCount("texture layout swizzled non-power-of-two") == 1);
+    CHECK(unimplementedCount("texture layout pitch below row size") == 1);
+    CHECK(unimplementedCount("texture layout swizzled") == 0 && unimplementedCount("texture layout mips 3") == 0);
 
     // The fragment program with an inline constant keeps its place in the ucode but zeroed; programs
     // that differ only in the constant hash equal.
@@ -10372,6 +10590,7 @@ int main(int argc, char** argv) {
     testRsxArgCensus();
     testRsxRegisters();
     testRsxDecode();
+    testRsxTextureLayout();
     testRsxFrameBuilder();
     testRsxCapture();
     testRsxSyntheticCaptures();

@@ -712,26 +712,17 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                 }
             }
         } else if (texture->data_size != 0) {
-            if (texture->pitch % 4 != 0) {
-                rsxNoteUnimplemented("texture layout", "pitch is not a multiple of 4");
-                continue;
-            }
-            if (static_cast<std::uint64_t>(texture->data_offset) + texture->data_size > draw.texture_data.size()) {
+            // The copy holds every level in tightly packed rows (see RsxTextureDesc::data_size), which is the
+            // layout of a linear texture without padding.
+            RsxTextureLayout layout;
+            if (static_cast<std::uint64_t>(texture->data_offset) + texture->data_size > draw.texture_data.size() ||
+                !rsxTextureLayout(texture->format, true, texture->width, texture->height, texture->mips, 0, 1,
+                                  layout) ||
+                texture->data_size < layout.packed_bytes) {
                 rsxNoteUnimplemented("state", "texture data short");
                 continue;
             }
-            // The copy reads pitch * (height - 1) + width * 4 bytes from the staging buffer, or whole block rows
-            // for a compressed texture.
             const bool compressed = rsxTextureBlockBytes(texture->format) != 0;
-            const std::uint64_t row_bytes = compressed ? rsxCompressedRowBytes(texture->format, texture->width)
-                                                       : static_cast<std::uint64_t>(texture->width) * 4;
-            const std::uint64_t needed =
-                    compressed ? rsxCompressedSize(texture->format, texture->width, texture->height)
-                               : static_cast<std::uint64_t>(texture->pitch) * (texture->height - 1) + row_bytes;
-            if (texture->pitch < row_bytes || texture->data_size < needed) {
-                rsxNoteUnimplemented("state", "texture data short");
-                continue;
-            }
             const std::shared_ptr<TextureImage> image = textures_->acquire(*texture);
             if (!textures_->valid()) {
                 fail(textures_->error());
@@ -744,25 +735,21 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
             reference(image);
             if (std::find(uploaded.begin(), uploaded.end(), image.get()) == uploaded.end()) {
                 UploadRef staging;
-                if (!allocUpload(texture->data_size, staging)) return false;
+                if (!allocUpload(layout.packed_bytes, staging)) return false;
                 const std::uint8_t* source = draw.texture_data.data() + texture->data_offset;
                 if (compressed) {
                     // Blocks are stored the way Vulkan expects them.
-                    std::memcpy(staging.data, source, texture->data_size);
+                    std::memcpy(staging.data, source, layout.packed_bytes);
                 } else {
                     // Guest texels are big-endian words A, R, G, B in memory; byte swapped they are B8G8R8A8 texels.
-                    for (std::size_t i = 0; i + 4 <= texture->data_size; i += 4) {
+                    for (std::size_t i = 0; i + 4 <= layout.packed_bytes; i += 4) {
                         std::uint32_t word;
                         std::memcpy(&word, source + i, 4);
                         word = std::byteswap(word);
                         std::memcpy(staging.data + i, &word, 4);
                     }
                 }
-                // Row length in texels: a block covers 4 texels.
-                const std::uint32_t row_length =
-                        compressed ? static_cast<std::uint32_t>(row_bytes / rsxTextureBlockBytes(texture->format)) * 4
-                                   : texture->pitch / 4;
-                textures_->recordUpload(cmd, *image, staging.buffer, staging.offset, row_length);
+                textures_->recordUpload(cmd, *image, staging.buffer, staging.offset, layout.levels);
                 uploaded.push_back(image.get());
                 stats_.texture_uploads++;
             }
@@ -773,7 +760,10 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
             continue;
         }
 
-        const VkSampler sampler = textures_->sampler(*texture);
+        // A render target has one level whatever the unit's mip count says.
+        RsxTextureDesc sampled = *texture;
+        if (texture->rt_alias >= 0) sampled.mips = 1;
+        const VkSampler sampler = textures_->sampler(sampled);
         if (!textures_->valid()) {
             fail(textures_->error());
             return false;

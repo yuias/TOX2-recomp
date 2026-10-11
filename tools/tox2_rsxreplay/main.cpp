@@ -20,6 +20,7 @@
 #include "render/vk_context.h"
 #include "render/vk_renderer.h"
 #include "rsx/rsx_capture.h"
+#include "rsx/rsx_census.h"
 #include "rsx/rsx_frame.h"
 #include "rsx/rsx_frame_builder.h"
 #include "rsx/rsx_unimplemented.h"
@@ -87,7 +88,8 @@ void printDraw(const tox2::RsxDraw& draw, std::span<const tox2::RsxSurface> surf
             const tox2::RsxSurface& surface = surfaces[static_cast<std::size_t>(texture.rt_alias)];
             std::printf(" tex%u=alias:%d(%ux%u)", texture.unit, texture.rt_alias, surface.width, surface.height);
         } else {
-            std::printf(" tex%u=bytes(%ux%u)", texture.unit, texture.width, texture.height);
+            std::printf(" tex%u=bytes(%ux%u %s mips=%u)", texture.unit, texture.width, texture.height,
+                        tox2::rsxTextureFormatName(texture.format).c_str(), texture.mips);
         }
     }
     std::printf("\n");

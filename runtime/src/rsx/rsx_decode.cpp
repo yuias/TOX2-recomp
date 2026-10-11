@@ -392,6 +392,7 @@ RsxTextureDesc decodeTexture(const RsxRegisters& regs, std::uint32_t unit) {
     const std::uint32_t rect = regs.reg(kMethodNv4097SetTextureImageRect + base);
     t.width = rect >> 16;
     t.height = t.dimension == 1 ? 1 : (rect & 0xFFFF);
+    t.control0 = regs.reg(kMethodNv4097SetTextureControl0 + base);
     t.remap = regs.reg(kMethodNv4097SetTextureControl1 + base);
     t.filter = regs.reg(kMethodNv4097SetTextureFilter + base);
     t.address = regs.reg(kMethodNv4097SetTextureAddress + base);

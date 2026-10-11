@@ -164,20 +164,28 @@ These exist and are generic, but were written for and checked against the earlie
 - A Vulkan 1.3 renderer that draws what the RSX commands describe into a window or PNG files, and
   `tox2_rsxreplay`, which renders single recorded frames without the game (see
   [Rendering](rendering.md)). The game's flips run in the fake RSX. A headless run with `--dump-frames` also runs the renderer
-  (8,338 draws rendered, 1,622 skipped and 1,862 clears in 30 s; the skipped draws all lack a supported
-  colour target, surface format F_X32). The dumped frames of that run are the loading screen: plain grey,
-  with one magenta region (a placeholder for a texture without data) in the first. Before the fragment
+  (a 120 s headless run with `--vk-validation`: 7,278 flips, 326,887 draws rendered, 8,110 skipped and
+  8,795 clears, 0 validation errors; the skipped draws are the ones without a supported colour target,
+  surface format F_X32, and the 3D-texture ones). Before the fragment
   translator handled the fence, divide, reciprocal, exp2, log2 and KIL opcodes, most draws of a longer
-  run were skipped for those opcodes. `tox2_rsxreplay` renders frames recorded from the game: a dialog
+  run were skipped for those opcodes. The textures are uploaded with their whole mip chain, linear or
+  swizzled (see [Textures](rendering.md#textures)); before that, every mipmapped or swizzled texture
+  read the magenta placeholder, and the dumped frames were uniform magenta. The run's last census has
+  no `texture placeholder` entry, and the dumped frame of flip 7,000 is the title screen (logo, the
+  "PRESS ANY BUTTON" line and a lit 3D character on a dark red background). `tox2_rsxreplay`
+  renders frames recorded from the game: a dialog
   frame (39 draws, 10 skipped: nine 3D-texture draws and the F_X32 one) shows the dialog box on grey, and a
-  3D-scene frame (968 draws, 1 skipped: the F_X32 one) renders every draw. The vertex translator handles
+  title-screen frame (flip 8,300 recorded again after the texture change: 970 draws, 1 skipped: the F_X32
+  one) shows the same title screen. The vertex translator handles
   branches, calls and returns, which the 3D scene's skinning programs need (BRB on a bit of the branch
-  bits register; see [Vertex programs](rendering.md#vertex-programs)). That frame's displayed image is
-  still uniform, now magenta: its last draw is a full-screen pass, and the magenta placeholder for a
-  texture without usable data fills the screen (the cause was not traced further). The scene's own
-  target, read back before that pass, shows a character as a flat magenta silhouette on the clear
-  colour; its textures are mipmapped and swizzled, which are not uploaded yet. The three captures
-  never write the branch bits register, so every draw in them ran with the bits at 0.
+  bits register; see [Vertex programs](rendering.md#vertex-programs)). The frame's last draw is a
+  full-screen pass that samples the scene target; the unit-12 texture that every draw of the frame
+  binds (a swizzled 256x16 A8R8G8B8) read the placeholder, which made the whole image magenta. What
+  the census still lists for it (`texture format X32_FLOAT_LN_NR`, `render target alias of another
+  size`, `user clip`, `antialiasing 0x3`, `stencil test`) does not put a placeholder on screen. A
+  capture made before this change lacks the swizzled and mipmapped texture bytes (the builder did not
+  read them), so a replay of it counts `capture missing range` and shows the same image as before.
+  The captures never write the branch bits register, so every draw in them ran with the bits at 0.
 - Sound through the runtime's audio engine and WASAPI (see [Audio](audio.md)). The game initialises
   `cellAudio` in the current run and creates two ATRAC3plus decoders, which the host decodes; a 120 s
   headless run (output `none`) counts 22,071 blocks, 4,017 of them non-silent, and the audio dump is

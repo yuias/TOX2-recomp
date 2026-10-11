@@ -80,6 +80,7 @@ private:
     void clear(const RsxRegisters& regs, std::uint32_t mask);
     bool fillVertices(const RsxRegisters& regs, RsxDraw& draw, std::uint32_t vertex_base, std::uint32_t vertex_count);
     void fillTextures(const RsxRegisters& regs, RsxDraw& draw);
+    void copyTexture(RsxTextureDesc& texture, RsxDraw& draw);
     void fillFragmentProgram(const RsxRegisters& regs, RsxDraw& draw);
     void fillVertexProgram(const RsxRegisters& regs, RsxDraw& draw);
     std::int32_t noteSurface(const RsxSurface& surface);

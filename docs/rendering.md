@@ -57,8 +57,8 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   kept in a render target cache keyed by memory location and offset. A texture whose address is
   a known render target is sampled from that target (render target aliasing), and a draw that
   samples the target it renders to reads a copy of it. Other textures are uploaded from the
-  guest bytes into B8G8R8A8 images (linear A8R8G8B8) or BC1/BC2/BC3 images (DXT1/DXT23/DXT45,
-  one 2D mip level, block rows copied as stored whatever the layout bit says); a unit without a
+  guest bytes into B8G8R8A8 images (A8R8G8B8, linear or swizzled) or BC1/BC2/BC3 images
+  (DXT1/DXT23/DXT45), with the whole mip chain (see [Textures](#textures)); a unit without a
   usable texture reads a 1x1 magenta image.
   Cull mode, depth state, viewport, scissor, topology and blend constants are dynamic state;
   pipelines are cached by what is baked into them.
@@ -136,14 +136,52 @@ transform and the varying outputs.
 - **Limits.** The census program dumps (`vp_*.bin`) still end at the first end bit, and the translator
   tests that read them use programs without flow control.
 
+### Textures
+
+The frame builder copies the bytes of every 2D A8R8G8B8 and DXT1/DXT23/DXT45 texture a draw has
+enabled (`rsx_texture_layout.cpp`), and the renderer uploads them (`vk_textures.cpp`). The guest layout
+follows RPCS3 (`Emu/RSX/Common/TextureUtils.cpp`, `RSXTexture.cpp`, `Utils/image_utils.hpp`):
+
+- **Levels.** The register's mip count (0 counts as 1) is clamped to the chain that ends at one
+  texel, or at one 4x4 block for DXT. Each level is `max(size / 2, 1)` in both dimensions.
+- **Linear (LN flag).** Every level keeps the pitch register of level 0 (0 means the row size), so a
+  level takes `pitch * rows` bytes and the next one follows without padding. The last row of a level
+  is read without the padding after it. A pitch below one row is counted, not uploaded.
+- **Swizzled (no LN flag).** A level is `width * height` texels with no row padding, in Morton order:
+  the x and y bits are interleaved up to the shorter side and the remaining bits of the longer side
+  count above them (an 8x2 texture holds `x0 | y0 << 1 | (x >> 1) << 2`). The size must be a power
+  of two; other sizes are counted as `texture layout swizzled non-power-of-two`.
+- **DXT.** Never swizzled. Without the LN flag the block rows of a level are contiguous (the pitch
+  register is ignored); with it they use the pitch register like a linear texture.
+- **Cube maps.** The layout code handles faces (a texture without the LN flag aligns each face to
+  128 bytes), but the renderer has no cube sampler, so cube and 3D textures are still counted and
+  skipped.
+
+The copy in `RsxDraw::texture_data` is already converted: levels one after the other, each in
+tightly packed rows and de-swizzled, so the renderer needs only the texture size and mip count to
+find them. It uploads all levels in one `vkCmdCopyBufferToImage` into an image with the full chain
+(A8R8G8B8 words are byte swapped first, DXT blocks are copied as stored). A texture of the render
+target cache has one level.
+
+The sampler follows RPCS3's `update_fragment_sampler`: the mip chain is sampled only when the min
+filter is one of the four mip filters (NEAREST_NEAREST, LINEAR_NEAREST, NEAREST_LINEAR,
+LINEAR_LINEAR) and the texture has more than one level. The level range is the min and max LOD of
+SET_TEXTURE_CONTROL0 clamped to the last level, the bias is the signed 5.8 field of
+SET_TEXTURE_FILTER (rounded to half a level for a NEAREST mip mode), and the mip mode is LINEAR for
+NEAREST_LINEAR and LINEAR_LINEAR. Otherwise the sampler reads level 0 only. Anisotropic filtering
+and texels around the image (`CELL_GCM_TEXTURE_BORDER_TEXTURE`) are not modelled.
+
 ### Capture and replay
 
 `--rsx-capture N[,M...]` records the RSX inputs of the given frames: the numbers are 1-based flip
 numbers, and each capture is written when its frame's flip completes, to
 `generated/rsx/captures/frame_<N>.tox2cap` (relative to the working directory). A capture holds the
 register writes from the previous flip to this one, the guest bytes the frame builder read while
-handling them, and the register and surface state the frame started from. It needs no renderer
-and no window. Captures are derived from the game, so they are git-ignored with the rest of
+handling them, and the register and surface state the frame started from. It holds only the bytes
+the frame builder read when it was recorded, so a replay with a builder that reads more (such as
+the textures it did not copy before the mip and swizzle support) counts the missing ranges as
+`capture missing range` and draws those textures as placeholders; record the frame again. It needs
+no renderer and no window. Captures are derived from the game, so they are git-ignored with the rest of
 `generated/`.
 
 `tox2_rsxreplay` replays a capture through the frame builder and the renderer without the game:
@@ -165,7 +203,8 @@ tox2_rsxreplay CAPTURE [--out DIR] [--compare PNG [--max-diff N] [--max-mean X] 
 | `--shader-cache DIR` | SPIR-V cache directory. Without it nothing is cached. |
 
 The thresholds are optional and unchecked unless given, and they need `--compare`. The tool prints
-the commands the frame builder produced (`clear`, `draw`, `flip`), then a summary line
+the commands the frame builder produced (`clear`, `draw` with the format and mip count of each
+texture that has bytes, `flip`), then a summary line
 `replay: N commands, N draws, N skipped` (with the diff figures when comparing), the
 `rsx unimplemented` section (`census: rsx unimplemented 0 kinds` when it is empty), the path of
 the PNG, and `validation: active|inactive|disabled, N errors`. The exit code is 1 when a

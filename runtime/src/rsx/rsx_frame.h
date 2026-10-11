@@ -51,10 +51,13 @@ struct RsxVertexAttrib {
 struct RsxTextureDesc {
     std::uint8_t unit = 0, format = 0 /* raw 8-bit */, mips = 0, dimension = 0;
     bool linear_layout = false, normalized = true, cubemap = false;
-    // remap/filter/address/border are the raw SET_TEXTURE_CONTROL1/FILTER/ADDRESS/BORDER_COLOR words.
-    std::uint32_t location = 0, offset = 0, pitch = 0, width = 0, height = 0, remap = 0, filter = 0, address = 0,
-                  border = 0;
+    // control0/remap/filter/address/border are the raw SET_TEXTURE_CONTROL0/CONTROL1/FILTER/ADDRESS/BORDER_COLOR
+    // words. For a texture with bytes, pitch is the row size of level 0 in the copied (tightly packed) data.
+    std::uint32_t location = 0, offset = 0, pitch = 0, width = 0, height = 0, control0 = 0, remap = 0, filter = 0,
+                  address = 0, border = 0;
     std::int32_t rt_alias = -1;  // index into the builder's known surfaces, -1 = bytes in texture_data
+    // The copy in RsxDraw::texture_data holds every mip level one after the other, each in tightly packed
+    // rows and de-swizzled (rsxTextureLayout with packed offsets); data_size 0 means no bytes were copied.
     std::uint32_t data_offset = 0, data_size = 0;
 };
 

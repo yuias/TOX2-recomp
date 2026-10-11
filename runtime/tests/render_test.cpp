@@ -27,6 +27,7 @@
 #include "rsx/rsx_decode.h"
 #include "rsx/rsx_frame_builder.h"
 #include "rsx/rsx_registers.h"
+#include "rsx/rsx_texture_layout.h"
 #include "rsx/rsx_unimplemented.h"
 #include "rsx_synthetic.h"
 
@@ -1124,6 +1125,7 @@ enum class TextureScene {
     Memory,    // the 2x2 texture in guest memory
     Alias,     // a cleared render target at another offset
     Feedback,  // the render target the draw writes to
+    Chain,     // a 4x4 texture with three mip levels, swizzled or linear
 };
 
 struct TextureOptions {
@@ -1136,7 +1138,36 @@ struct TextureOptions {
     bool unnormalized = false;  // _UN format: coordinates are in texels
     std::uint32_t dxt = 0;      // Memory scene: base format 0x86/0x87/0x88 for a 4x4 block-compressed texture
     bool zero_height = false;   // Memory scene: the image rect says 0 rows, so no bytes are copied
+    // Chain scene: the swizzled layout (else linear with a 32-byte pitch), and the min filter, NEAREST_NEAREST
+    // by default; 1 is NEAREST, which samples level 0 only.
+    bool swizzled = false;
+    std::uint32_t min_filter = 3;
 };
+
+// Chain scene: level 0 texel (x, y) has red 85 * x, green 85 * y and blue 0x40; level 1 (2x2) is green and
+// level 2 (1x1) is blue.
+constexpr std::uint32_t chainTexel(std::uint32_t x, std::uint32_t y) {
+    return 0xFF000040u | ((x * 85u) << 16) | ((y * 85u) << 8);
+}
+
+// Guest bytes of the chain: swizzled levels follow each other (64, 16 and 4 bytes, Morton order inside a
+// level); linear levels keep the 32-byte pitch of level 0 (4 rows, 2 rows, 1 row).
+void putChainTexture(tox2::rsx_synthetic::SyntheticMemory& memory, bool swizzled) {
+    using tox2::rsx_synthetic::kTextureOffset;
+    constexpr std::uint32_t kGreen = 0xFF00FF00, kBlue = 0xFF0000FF;
+    for (std::uint32_t y = 0; y < 4; y++) {
+        for (std::uint32_t x = 0; x < 4; x++) {
+            const std::uint32_t at = swizzled ? tox2::rsxSwizzleIndex(x, y, 2, 2) * 4 : y * 32 + x * 4;
+            memory.putWord(0, kTextureOffset + at, chainTexel(x, y));
+        }
+    }
+    for (std::uint32_t y = 0; y < 2; y++) {
+        for (std::uint32_t x = 0; x < 2; x++) {
+            memory.putWord(0, kTextureOffset + (swizzled ? 64 + (y * 2 + x) * 4 : 128 + y * 32 + x * 4), kGreen);
+        }
+    }
+    memory.putWord(0, kTextureOffset + (swizzled ? 80 : 192), kBlue);
+}
 
 constexpr std::uint32_t kAliasOffset = 0x50000;
 constexpr std::uint32_t kAliasColor = 0xFF336699;
@@ -1156,6 +1187,15 @@ std::vector<std::uint8_t> makeTexturedCapture(const TextureOptions& options) {
     } else if (options.scene == TextureScene::Feedback) {
         scene.clear(kAliasColor);
         scene.bindTexture(kSurfaceOffset, kSurfaceSize, kSurfaceSize);
+    } else if (options.scene == TextureScene::Chain) {
+        scene.clear(0xFF000000);
+        putChainTexture(scene.memory(), options.swizzled);
+        scene.bindTexture(kTextureOffset, 4, 4);
+        scene.write(tox2::kMethodNv4097SetTextureFormat,
+                    1u | (2u << 4) | ((options.swizzled ? 0x85u : 0xA5u) << 8) | (3u << 16));
+        scene.write(tox2::kMethodNv4097SetTextureControl0, 0x80000000u | (0xC00u << 7));  // levels 0..12
+        scene.write(tox2::kMethodNv4097SetTextureControl3, options.swizzled ? 0 : 32);
+        scene.write(tox2::kMethodNv4097SetTextureFilter, (options.min_filter << 16) | (1u << 24));
     } else {
         scene.clear(0xFF000000);
         const std::uint32_t pitch = options.pitch != 0 ? options.pitch : kTextureSize * 4;
@@ -1423,6 +1463,44 @@ void testRendererTextures(tox2::VkContext& ctx) {
         render(swapped_block);
         CHECK(pixelArgb(bgra, width, 20, 20) == 0xFF0000FF && pixelArgb(bgra, width, 44, 28) == 0xFFFF0000);
         expectNoNotes();
+    }
+
+    // A swizzled 4x4 texture with three levels, magnified 8 times so that level 0 is sampled: each texel fills
+    // 8x8 pixels of the quad at 16..48 and comes from its Morton position in the guest bytes.
+    {
+        const std::uint64_t uploads_before = renderer.stats().texture_uploads;
+        TextureOptions chain;
+        chain.scene = TextureScene::Chain;
+        chain.swizzled = true;
+        render(chain);
+        bool all = true;
+        for (std::uint32_t y = 0; y < 4; y++) {
+            for (std::uint32_t x = 0; x < 4; x++) {
+                all = all && pixelArgb(bgra, width, 20 + 8 * x, 20 + 8 * y) == chainTexel(x, y);
+            }
+        }
+        CHECK(all);
+        CHECK(pixelArgb(bgra, width, 2, 2) == 0xFF000000);
+        CHECK(renderer.stats().draws_skipped == 0 && renderer.stats().texture_uploads == uploads_before + 1);
+        expectNoNotes();
+
+        // The same bytes minified: coordinates run 0..16 over the quad, 2 texels per pixel, which picks level 1
+        // (green); 0..32 is 4 texels per pixel and picks level 2 (blue). With a NEAREST min filter only
+        // level 0 is sampled whatever the coordinates are. Linear levels keep the pitch of level 0.
+        for (const bool swizzled : {true, false}) {
+            chain.swizzled = swizzled;
+            chain.min_filter = 3;
+            chain.coord_scale = 16.0f;
+            render(chain);
+            CHECK(pixelArgb(bgra, width, 24, 24) == 0xFF00FF00 && pixelArgb(bgra, width, 41, 37) == 0xFF00FF00);
+            chain.coord_scale = 32.0f;
+            render(chain);
+            CHECK(pixelArgb(bgra, width, 24, 24) == 0xFF0000FF && pixelArgb(bgra, width, 41, 37) == 0xFF0000FF);
+            chain.min_filter = 1;
+            render(chain);
+            CHECK(pixelArgb(bgra, width, 24, 24) != 0xFF0000FF && pixelArgb(bgra, width, 24, 24) != 0xFF00FF00);
+            expectNoNotes();
+        }
     }
 
     // A texture without bytes samples the magenta placeholder, and that is counted.

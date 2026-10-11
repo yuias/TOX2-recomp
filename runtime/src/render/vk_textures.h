@@ -8,18 +8,21 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <span>
 #include <string>
 #include <tuple>
 
 #include "render/vk_context.h"
 #include "rsx/rsx_frame.h"
+#include "rsx/rsx_texture_layout.h"
 
 namespace tox2 {
 
 // Sampled images are B8G8R8A8 for render targets and A8R8G8B8 guest textures (after a 32-bit byte swap
 // of each texel on upload, guest bytes A, R, G, B become B, G, R, A), and BC1/BC2/BC3 for DXT1/DXT23/DXT45
 // guest textures (block bytes uploaded as stored). Their channels read as the guest's R, G, B, A, and the
-// identity remap gives an identity view (which keeps border colours defined).
+// identity remap gives an identity view (which keeps border colours defined). A guest texture has its whole
+// mip chain (rsxTextureMipCount levels); render targets and their copies have one level.
 //
 // Component mapping of a view for the texture's SET_TEXTURE_CONTROL1 word: bits 0..7 select the source
 // channel of A, R, G, B (two bits each: A = 0, R = 1, G = 2, B = 3) and bits 8..15 say whether the
@@ -41,6 +44,10 @@ struct SamplerSettings {
     VkSamplerAddressMode wrap_t = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     VkSamplerAddressMode wrap_r = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     VkBorderColor border = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+    // The mip chain is sampled only for a mip-mapping min filter and a texture with more than one level;
+    // otherwise the range is level 0 alone.
+    VkSamplerMipmapMode mipmap_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    float min_lod = 0.0f, max_lod = 0.0f, lod_bias = 0.0f;
 
     auto operator<=>(const SamplerSettings&) const = default;
 };
@@ -55,7 +62,7 @@ struct TextureImage {
     VkImage image = VK_NULL_HANDLE;
     VmaAllocation allocation = nullptr;
     VkFormat format = VK_FORMAT_UNDEFINED;
-    std::uint32_t width = 0, height = 0;
+    std::uint32_t width = 0, height = 0, levels = 1;
     VkDeviceSize bytes = 0;
     // Layout at the end of the commands recorded so far (the frame's command buffer is submitted in order).
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -79,7 +86,7 @@ public:
     const std::string& error() const { return error_; }
 
     // Image for a texture whose bytes the draw carries, cached by (location, offset, format, width, height,
-    // pitch). Null with a counted note when the texture cannot be sampled (format, size).
+    // pitch, levels). Null with a counted note when the texture cannot be sampled (format, size).
     std::shared_ptr<TextureImage> acquire(const RsxTextureDesc& texture);
 
     // Image the size of a render target that receives a copy of it. One per size.
@@ -88,15 +95,16 @@ public:
     // View with the component mapping of `remap`; null on a Vulkan failure.
     VkImageView view(TextureImage& image, std::uint32_t remap);
     // View of an image the cache does not own, with the same mapping rule.
-    VkImageView createView(VkImage image, VkFormat format, std::uint32_t remap);
+    VkImageView createView(VkImage image, VkFormat format, std::uint32_t remap, std::uint32_t levels = 1);
 
     VkSampler sampler(const RsxTextureDesc& texture);
 
-    // Copies `row_length` texels per source row from the staging buffer into the whole image, which ends in
+    // Copies every level of the image from the staging buffer, which holds them tightly packed at the
+    // offsets of `levels` (the packed layout of rsx_texture_layout.h) from `offset`. The image ends in
     // SHADER_READ_ONLY. The previous contents are discarded. The staging texels must already be byte
     // swapped (see above).
     void recordUpload(VkCommandBuffer cmd, TextureImage& image, VkBuffer staging, VkDeviceSize offset,
-                      std::uint32_t row_length);
+                      std::span<const RsxTextureLevel> levels);
     // Copies a whole B8G8R8A8 image of the same size, which is in TRANSFER_SRC_OPTIMAL, into `image`; the
     // image ends in SHADER_READ_ONLY.
     void recordCopy(VkCommandBuffer cmd, TextureImage& image, VkImage source);
@@ -106,10 +114,11 @@ public:
     void trim();
 
 private:
-    using Key = std::tuple<std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t>;
+    using Key = std::tuple<std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t,
+                           std::uint32_t>;
 
     std::shared_ptr<TextureImage> create(std::uint32_t width, std::uint32_t height, VkFormat format,
-                                         VkImageUsageFlags usage);
+                                         VkImageUsageFlags usage, std::uint32_t levels = 1);
     bool formatUsable(VkFormat format);
     void fail(std::string message);
 
