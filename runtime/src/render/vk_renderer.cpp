@@ -1042,7 +1042,11 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
 //  - stencil: the test runs with or without the depth test (a disabled depth test passes, so ZPASS applies),
 //    the back face uses the BACK registers only with two-sided stencil on (the decoder copies the front face
 //    otherwise), and it is only available with a Z24S8 surface (RPCS3 `VK/VKGSRender.cpp` `decode_rsx_state`,
-//    `RSXThread.cpp`). The draw writes the depth surface when `rsxZetaWriteEnabled` says so.
+//    `RSXThread.cpp`). The draw writes the depth surface when `rsxZetaWriteEnabled` says so;
+//  - user clip planes are applied by the vertex program through gl_ClipDistance (`vp_translator.h`): the
+//    control word travels in the draw uniforms and every plane is gated at run time by its control nibble and
+//    output-mask bit (RPCS3 `Core/RSXDrawCommands.cpp`, `VK/VKVertexProgram.cpp`). Without shaderClipDistance
+//    the draw is not clipped, which RPCS3 does not handle either (`VK/vkutils/device.cpp`).
 void RsxRenderer::recordDraw(const RsxDraw& draw) {
     const auto skip = [&](std::string_view category, std::string_view key) {
         if (!category.empty()) rsxNoteUnimplemented(category, key);
@@ -1257,8 +1261,18 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     vp.output_mask = draw.vp_output_mask;
     vp.branch_bits = draw.vp_branch_bits;
     vp.point_size = raster.point_size > 0.0f ? raster.point_size : 1.0f;
-    // Output mask bits 6..11 enable the user clip distances, which the vertex translator does not write.
-    if ((draw.vp_output_mask & 0xFC0u) != 0) rsxNoteUnimplemented("state", "user clip");
+    vp.user_clip = raster.user_clip;
+    // The program only writes clip distances on a device with shaderClipDistance. The renderer does not know
+    // which slots the program writes, so this can count a draw whose planes have no source.
+    if (!context_.hasClipDistance()) {
+        for (std::uint32_t plane = 0; plane < 6; plane++) {
+            const std::uint32_t op = (raster.user_clip >> (4 * plane)) & 0xFu;
+            if ((op == 1 || op == 2) && (draw.vp_output_mask & (1u << (6 + plane))) != 0) {
+                rsxNoteUnimplemented("state", "user clip unavailable");
+                break;
+            }
+        }
+    }
 
     // A 32-bit float target has no alpha test and no 8-bit rounding (RPCS3 `rsx_methods.h`
     // `alpha_test_enabled`, `RSXThread.cpp` RSX_SHADER_CONTROL_8BIT_FRAMEBUFFER).

@@ -684,8 +684,10 @@ void testVertexConvert() {
 // ---- Drawing ----
 
 // One vertex program instruction: MOV o[slot] = v[input].swizzle. Field layout as in the vertex program
-// translator test's assembler; the end flag marks the last instruction.
-std::array<std::uint32_t, 4> vpMove(std::uint32_t slot, std::uint32_t input, const char* swizzle, bool end) {
+// translator test's assembler; the end flag marks the last instruction. `write_mask` holds the destination
+// lanes with w in bit 0 up to x in bit 3 (0x4 is y only).
+std::array<std::uint32_t, 4> vpMove(std::uint32_t slot, std::uint32_t input, const char* swizzle, bool end,
+                                    std::uint32_t write_mask = 0xF) {
     const auto lane = [&](int i) { return static_cast<std::uint32_t>(std::string("xyzw").find(swizzle[i])); };
     const std::uint32_t src0 =
             2u | (lane(3) << 8) | (lane(2) << 10) | (lane(1) << 12) | (lane(0) << 14);  // input source
@@ -693,8 +695,9 @@ std::array<std::uint32_t, 4> vpMove(std::uint32_t slot, std::uint32_t input, con
     const std::uint32_t w0 = (3u << 2) | (2u << 4) | (1u << 6) | (7u << 10) | (63u << 15) | (1u << 30);
     const std::uint32_t w1 = (src0 >> 9) | (input << 8) | (1u << 22);
     const std::uint32_t w2 = (src12 >> 11) | (src12 << 6) | ((src0 & 0x1ff) << 23);
-    // The write mask bits run w, z, y, x from low to high: all four lanes.
-    const std::uint32_t w3 = (end ? 1u : 0u) | (slot << 2) | (63u << 7) | ((src12 & 0x7ff) << 21) | (0xFu << 13);
+    // The write mask bits run w, z, y, x from low to high.
+    const std::uint32_t w3 =
+            (end ? 1u : 0u) | (slot << 2) | (63u << 7) | ((src12 & 0x7ff) << 21) | ((write_mask & 0xFu) << 13);
     return {w0, w1, w2, w3};
 }
 
@@ -2469,6 +2472,95 @@ void testRendererStencil(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// The quad programs plus MOV o[5].y = v0.x (the model-space x, -0.5 on the left half and +0.5 on the right),
+// and a second write of the same value to o[6].y when `second_slot` is set. The colour move keeps the quad
+// distinguishable from the clear colour.
+tox2::rsx_synthetic::Programs userClipPrograms(bool second_slot) {
+    tox2::rsx_synthetic::Programs programs = quadPrograms();
+    programs.vertex.clear();
+    std::vector<std::array<std::uint32_t, 4>> instructions = {vpMove(0, 0, "xyzw", false), vpMove(1, 3, "yzwx", false)};
+    if (second_slot) instructions.push_back(vpMove(6, 0, "xxxx", false, 0x4));
+    instructions.push_back(vpMove(5, 0, "xxxx", true, 0x4));
+    for (const auto& instruction : instructions) {
+        programs.vertex.insert(programs.vertex.end(), instruction.begin(), instruction.end());
+    }
+    return programs;
+}
+
+// User clip planes: the program writes a distance per plane and the control word and the output mask decide
+// which planes cut the quad (pixels 16..48, red where drawn).
+void testRendererUserClip(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::rsxUnimplementedReset();
+    const bool clipping = ctx.hasClipDistance();
+    if (!clipping) std::printf("user clip: device has no shaderClipDistance, checking the unclipped path\n");
+
+    struct ClipCase {
+        const char* name;
+        std::uint32_t output_mask;
+        std::uint32_t control;
+        bool second_slot;
+        bool left_drawn;   // pixel (24, 32), model x < 0
+        bool right_drawn;  // pixel (40, 32), model x >= 0
+    };
+    constexpr std::uint32_t kMaskPlane0 = 0x41, kMaskPlane2 = 0x101, kMaskPlane0And3 = 0x241;
+    const ClipCase kCases[] = {
+            {"plane 0 off", kMaskPlane0, 0x0, false, true, true},
+            {"plane 0 greater or equal", kMaskPlane0, 0x2, false, false, true},
+            {"plane 0 less than", kMaskPlane0, 0x1, false, true, false},
+            // Bit 6 of the output mask is clear: the plane is off whatever the control word says.
+            {"plane 0 without the mask bit", 0x1, 0x2, false, true, true},
+            // Plane 2 reads the unwritten .w lane of o[5], which holds 1.
+            {"plane 2 greater or equal on .w", kMaskPlane2, 0x200, false, true, true},
+            {"plane 2 less than on .w", kMaskPlane2, 0x100, false, false, false},
+            // The program writes only o[5] here: plane 3 has no source and keeps everything.
+            {"plane 3 without a source slot", kMaskPlane0And3, 0x1002, false, false, true},
+            // With o[6] written, plane 3 reads o[6].y = x: less than keeps the left half.
+            {"plane 3 with a source slot", kMaskPlane0And3, 0x1000, true, true, false},
+            {"planes 0 and 3 together", kMaskPlane0And3, 0x1002, true, false, false},
+    };
+    for (const ClipCase& test : kCases) {
+        SceneBuilder scene;
+        scene.setSurface();
+        scene.write(tox2::kMethodNv4097SetColorClearValue, kBlack);
+        scene.write(tox2::kMethodNv4097ClearSurface, 0xF0);
+        setQuadRenderState(scene);
+        scene.write(tox2::kMethodNv4097SetVertexAttribOutputMask, test.output_mask);
+        scene.write(tox2::kMethodNv4097SetUserClipPlaneControl, test.control);
+        scene.setFloatAttrib(0, 3, kPositionsOffset);
+        scene.setColorAttrib(3, kColorsOffset);
+        scene.setPrograms(userClipPrograms(test.second_slot));
+        scene.write(tox2::kMethodNv4097SetDepthTestEnable, 0);
+        scene.write(tox2::kMethodNv4097SetDepthMask, 0);
+        scene.write(tox2::kMethodNv4097SetColorMask, 0x01010101u);
+        putSurfaceQuad(scene, 16, 48);
+        scene.drawStrip(4);
+        const StencilRender render = renderStencilScene(ctx, scene);
+
+        // Without the device feature nothing is clipped; the planes the control word enables are counted.
+        const bool left = clipping ? test.left_drawn : true, right = clipping ? test.right_drawn : true;
+        if (render.pixel(24, 32) != (left ? kQuadRed : kBlack) || render.pixel(40, 32) != (right ? kQuadRed : kBlack)) {
+            std::fprintf(stderr, "user clip case failed: %s\n", test.name);
+        }
+        CHECK(render.pixel(24, 32) == (left ? kQuadRed : kBlack));
+        CHECK(render.pixel(40, 32) == (right ? kQuadRed : kBlack));
+        CHECK(render.pixel(2, 2) == kBlack);
+        CHECK(render.stats.draws == 1 && render.stats.draws_skipped == 0);
+        if (clipping) {
+            expectNoRendererNotes();
+        } else {
+            std::uint32_t enabled = 0;
+            for (std::uint32_t plane = 0; plane < 6; plane++) {
+                const std::uint32_t op = (test.control >> (4 * plane)) & 0xFu;
+                if ((op == 1 || op == 2) && (test.output_mask & (1u << (6 + plane))) != 0) enabled = 1;
+            }
+            CHECK(unimplementedCount("state user clip unavailable") == enabled);
+            CHECK(tox2::rsxUnimplementedSnapshot().size() == enabled);
+        }
+    }
+    tox2::rsxUnimplementedReset();
+}
+
 bool sameRect(const tox2::PixelRect& rect, std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
     return rect.x == x && rect.y == y && rect.width == width && rect.height == height;
 }
@@ -2580,6 +2672,7 @@ int main() {
     testRendererFloatSurface(*ctx);
     testRendererDepthTexture(*ctx);
     testRendererStencil(*ctx);
+    testRendererUserClip(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
     ctx.reset();

@@ -149,6 +149,28 @@ transform and the varying outputs.
   (binding 2). It is a uniform, not part of the program or pipeline key, because a 32-bit value in the
   key would build up to 2^32 variants of one program, while a uniform costs a bit test at each branch
   and lets draws that differ only in the bits share a shader module and a pipeline.
+- **User clip planes.** `NV4097_SET_USER_CLIP_PLANE_CONTROL` (method 0x1478) holds one nibble per plane
+  (plane `n` in bits `4n` to `4n+3`): 0 disabled, 1 enabled "less than", 2 enabled "greater or equal".
+  Plane 0 to 2 take their distance from the `y`, `z` and `w` lanes of vertex output slot 5 (`o[5]`;
+  `o[5].x` is the fog), planes 3 to 5 from `o[6].y`, `.z` and `.w` (`o[6].x` is the point size). The
+  distance is `v` for "greater or equal" and `-v` for "less than", and a primitive is kept where it is not
+  negative. A plane is live only when its control nibble is 1 or 2, bit `6+n` of the vertex attribute output
+  mask (UC0 to UC5) is set, and the program writes the plane's slot in some lane; a plane that is not live
+  has the constant distance 0.5 and cuts nothing (RPCS3 leaves it unassigned). The translator declares
+  `gl_ClipDistance[6]` and writes it only when the program writes slot 5 or 6. A slot register starts
+  at (0, 0, 0, 1), so an unwritten `.y` or `.z` lane reads 0 and an unwritten `.w` lane reads 1: planes 2
+  and 5 then keep everything with "greater or equal" and cut everything with "less than", as in RPCS3. The
+  control word is the `user_clip` member of the per-draw uniform block and the output mask is already
+  one, so both are evaluated at run time and neither enters the program or pipeline key. The facts come
+  from RPCS3's `Core/RSXDrawCommands.cpp`, `Program/GLSLCommon.cpp` and `VK/VKVertexProgram.cpp`.
+  - Clip distances need the device feature `shaderClipDistance`, which the context enables when the device
+    has it. The translator output depends on it (`VpTranslateOptions::clip_distances`), and the flag is
+    constant for a device, so programs are still keyed by their hash. Without the feature a draw is not
+    clipped and the renderer counts `state user clip unavailable` when a plane with a control nibble of 1
+    or 2 has its output-mask bit set (it does not know which slots the program writes, so this can count
+    a little too much). RPCS3 emits the clip writes anyway on such a device and renders wrongly.
+  - A nibble above 2 is not valid. RPCS3 aborts on it; here the plane is disabled and the decoder counts
+    `state user clip plane op ?0x<nibble>`.
 - **Limits.** The census program dumps (`vp_*.bin`) still end at the first end bit, and the translator
   tests that read them use programs without flow control.
 

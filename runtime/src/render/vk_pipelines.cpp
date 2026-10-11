@@ -180,7 +180,8 @@ const DrawPipelines::Program* DrawPipelines::vertexProgram(const RsxDraw& draw) 
         if (draw.vp_ucode.empty()) {
             program->notes.push_back("draw without vertex program");
         } else {
-            GlslResult glsl = translateVertexProgram(draw.vp_ucode, draw.vp_input_mask);
+            GlslResult glsl = translateVertexProgram(draw.vp_ucode, draw.vp_input_mask,
+                                                     VpTranslateOptions{context_.hasClipDistance()});
             program->notes = std::move(glsl.unimplemented);
             if (glsl.ok) {
                 auto spirv = compileGlsl(ShaderStage::Vertex, glsl.glsl, draw.vp_hash);
