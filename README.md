@@ -11,12 +11,12 @@ stored (see [Decrypting `EBOOT.elf` and `libsre.prx`](#decrypting-ebootelf-and-l
 
 Current state: work in progress. The tools and the runtime were taken over from an earlier
 recompilation project of another game and are being pointed at this one. The executable and the
-firmware's SPURS module (`libsre`) are recovered, recompiled to C and linked. `tox2_game` runs the
-game's start-up code and the SPURS initialisation inside libsre, and stops with exit code 8 when
-SPURS starts its first SPU thread group, because no SPU code can run; the game cannot be played. The
-SPU code (8 embedded SPU images, the SPURS kernels in libsre, raw SPU thread groups), the
-`TLFILE.TLDAT` / `FILEHEADER.TOFHDB` data archive and the Bink movies are not handled. See
-[Status](docs/status.md).
+firmware's SPURS module (`libsre`) are recovered, recompiled to C and linked, and so are the SPU
+programs (the SPURS kernels and policy modules in libsre and the game's 8 embedded SPU images). `tox2_game`
+runs the game's start-up code, SPURS on recompiled SPU code, the Edge LZMA task that inflates the game's
+archive items and the engine tasks, and reaches the game's frame loop; the game cannot be played. A
+headless run stops at about 53 s at a gap in the recovered PPU jump tables, the sound engine's SPU thread
+(raw SPU thread group) does not start, and the Bink movies are not decoded. See [Status](docs/status.md).
 
 ## Prerequisites
 
@@ -125,10 +125,11 @@ executable, so with `--elf generated/inputs/EBOOT.elf` it is the file the build 
 `EBOOT.elf` into `USRDIR` you copy `libsre.reloc.elf` next to it. `--libsre <path>` names it
 explicitly.
 
-In the headless runs so far the game ran its start-up code, libsre built its SPURS instance, and the
-run stopped with exit code 8 when libsre started the SPU thread group of the SPURS kernel, because the
-runtime cannot run SPU code; nothing was drawn. [Status](docs/status.md) has the details. Closing the
-window ends the run. Game data and
+In the headless runs so far the game ran its start-up code, libsre built its SPURS instance, the SPURS
+kernels and the game's SPU tasks ran, and the game reached its frame loop; a run with `--seconds 30` ends
+at the watchdog and a longer one stops at about 53 s. Nothing visible has been drawn (the frames dumped
+so far are blank) and nothing has been heard.
+[Status](docs/status.md) has the details. Closing the window ends the run. Game data and
 saves are written to `build/release/hdd`; `tools/build.ps1 -Clean` deletes them together with the
 rest of `build/release`.
 

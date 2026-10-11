@@ -3,9 +3,11 @@
 What works on the pinned executable today, and what does not. The [top-level README](../README.md)
 has the short version.
 
-The game does not run in any useful sense. `tox2_game` loads the executable and the firmware's SPURS
-module (`libsre`), runs the game's start-up code on real guest threads, and stops with exit code 8 when
-the SPURS code that runs inside libsre starts its first SPU thread group, because no SPU code can run.
+The game does not run in any useful sense yet. `tox2_game` loads the executable and the firmware's SPURS
+module (`libsre`), runs the game's start-up code on real guest threads, runs SPURS (libsre's recompiled
+PPU code and the recompiled SPU programs of the kernels and the game's tasks), loads the first archive
+items and reaches the game's frame loop. A 30 s headless run ends at the watchdog; a longer one stops at
+about 53 s at a gap in the recovered PPU jump tables. Nothing visible has been drawn and nothing has been heard.
 This is work in progress.
 The code was taken over from an earlier recompilation project of another game and is being pointed
 at *Tales of Xillia 2* (BLJS10188); the parts that this game has not reached have never run against
@@ -13,56 +15,67 @@ its executable.
 
 ## What the current run does
 
-`libsre.prx` of firmware 4.93 is part of the program (see
+The run below was made with the build of commit `e013aa8`. `libsre.prx` of firmware 4.93 is part of the program (see
 [SPU usage](spu.md#where-the-spurs-code-lives)). `tox2_game` loads `libsre.reloc.elf` at `0x011d0000`,
 registers its 352 functions for dispatch and binds all 30 `cellSpurs` imports of the game to libsre's
 exported functions. Of the game's 173 imports, 120 have a handler, 30 are bound to libsre and 23 get the
 default handler. The load log says `tox2: hle: 173 imports, 120 with handlers, 30 bound to libsre`, and
-`tox2: hle: libsre: 32 imports, 30 with handlers` for libsre's own imports.
+`tox2: hle: libsre: 32 imports, 30 with handlers` for libsre's own imports. It also checks the 14 emitted
+SPU images against guest memory (`tox2: spu: 14 images ok`).
 
-The headless run (`--no-window --seconds 20`) from an empty `--hdd-dir` now goes like this:
+The headless run (`--no-window --seconds 30`; the `game_boot` test uses the same arguments) goes like this:
 
-- The main thread runs the start-up code up to `sys_spu_initialize`. Then the game's calls
-  `_cellSpursAttributeInitialize`, `cellSpursAttributeSetNamePrefix`,
-  `cellSpursAttributeEnableSpuPrintfIfAvailable`, `cellSpursAttributeSetSpuThreadGroupType` and
-  `cellSpursInitializeWithAttribute` execute as recompiled libsre code. The census marks them `[libsre]`.
-- Inside `cellSpursInitializeWithAttribute` libsre creates 17 semaphores, imports its version 1 SPURS
-  kernel from `0x011f0380` (`sys_spu_image_import`, entry `0x818`), creates the SPU thread group
-  `SpursTLGraphicsCellSpursKernelGroup` (5 threads, priority 250, type `0x18`), initialises its five
-  threads, creates a lightweight mutex, a lightweight condition variable and an event queue, connects
-  the queue to the group, and creates the helper threads `SpursTLGraphicsSpursHdlr1` and
-  `SpursTLGraphicsSpursHdlr0`.
-- The game creates SPURS with PPU priority 1000 and its main thread has priority 1001, so the creation
-  rule of `sys_ppu_thread_create` (see [Threads](runtime.md#threads)) runs both helper threads before
-  the main thread continues. `Hdlr1` blocks on the event queue. `Hdlr0` calls
-  `sys_spu_thread_group_start`, and the run stops there with exit code 8. The main thread has not
-  returned from `cellSpursInitializeWithAttribute`, so the game no longer reaches its install copy or
-  the LZMA wait.
+- The main thread runs the start-up code, creates the memory container and, from an empty `--hdd-dir`,
+  the game's install step copies the three data files (see [Earlier runs](#earlier-runs)). The game
+  creates SPURS instance A: libsre creates its semaphores, imports the version 1 SPURS kernel from
+  `0x011f0380`, creates the SPU thread group `SpursTLGraphicsCellSpursKernelGroup` (5 threads, priority
+  250, type `0x18`), the lightweight mutex and condition variable, the event queue and the helper threads.
+  The creation rule of `sys_ppu_thread_create` (see [Threads](runtime.md#threads)) runs the helper threads
+  first. `SpursHdlr0` starts the group and waits in `sys_spu_thread_group_join`.
+- The five SPU threads run the kernel, which loads the system service module and the taskset policy
+  module. The game creates the Edge LZMA taskset and the engine tasksets (skin, morph, animation, update
+  matrix, render particle). The LZMA task inflates the first archive item, which matches its oracle
+  SHA-256, and the engine tasks are dispatched. At the stop four of the five SPU threads idle in the
+  system service and one runs an LZMA task.
+- The main thread also initialises `cellAudio` and creates the sound engine's thread group `bnusCore`
+  and SPURS instance B.
+- The main thread passes the LZMA load and writes `tox2: first hle cellSpurs::cellSpursEventFlagTryWait`
+  (at 12 to 14 s with the installed data, 14 to 16 s from an empty `--hdd-dir`). That is the `game_boot`
+  milestone. The game then runs its frame loop: 8,208 flips and 7,794 `cellPadGetData` calls in the 30 s
+  run, executed by the fake RSX. No renderer runs in a headless run.
+- A PPU worker busy-waits for the whole run (`sys_ppu_thread_yield`, `sys_lwmutex_lock` and
+  `sys_lwmutex_unlock` are about 62 million calls each in 30 s). The SPU side of the run is described in
+  [SPU usage](spu.md#what-the-current-run-reaches), which also quotes the whole `census: spu` block.
 
-The stop line and the census of that run:
+The stop line and the head of the census of that run (the other sections follow as in
+[Census](runtime.md#census)):
 
 ```
-tox2: stop: spu: sys_spu_thread_group_start group 0x04000100 "SpursTLGraphicsCellSpursKernelGroup" (5 threads, image 0x011f0380 entry 0x818): SPU execution is not implemented
-census: syscalls 136 calls, 17 distinct, 0 default-handled
-census: hle 12498 calls, 27 distinct, 0 default-handled
+tox2: stop: watchdog 30 s
+census: syscalls 61982172 calls, 32 distinct, 1 default-handled
+census: hle 125394298 calls, 110 distinct, 7 default-handled
 census: unknown targets 0 distinct
-census: threads 3 created, 3 live
+census: rsx 6897906 headers, 238 distinct methods, 8208 flips
+census: threads 16 created, 12 live
+census: spu 5 threads, 87070 dispatches, 0 unknown targets
 ```
 
-Three runs gave the same stop line apart from the thread group id. Before the stop the log lists the
-group, its five threads (each with the image, entry point and arguments), the event queue that was
-connected and the SPU ports that were bound to it. Arguments 3 and 4 of every thread are
-`0x554e444552464c4f`: libsre passes uninitialised stack words there, and the runtime only logs them. No
-import and no system call was default-handled.
+The counts differ from run to run. The default-handled system call is `sys_spu_thread_bind_queue`
+(the game's sound engine); the seven default-handled imports are `cellRtcGetCurrentTick`,
+`cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`.
 
-The next step is SPU execution: the SPURS kernel that libsre imports, and then the task images of the
-game, have to run. See [SPU usage](spu.md).
+A run with `--seconds 70` ends earlier, at about 53 s, with exit code 3: the PPU function at
+`0x0035d068` jumps through a table whose entry for `0x0035d084` was not recovered
+(`unknown target 0x0035d084 from 0x0035d068: inside a code span (missed function?)`), the dispatch
+returns as if the callee had returned, and the next instruction faults with
+`tox2: stop: fatal guest fault: read from guest address 0x00000004`. The SPU census of that run still has
+0 unknown targets.
 
 ## Earlier runs
 
 These runs were made before libsre was loaded, when the `cellSpurs` calls were default-handled and
-returned success without creating anything. The game no longer gets this far, because the SPURS
-initialisation now stops the run (see above); the findings about the rest of the start-up still hold.
+returned success without creating anything. The game gets further now (see above); the findings about the
+start-up still hold.
 Headless runs (`--no-window --seconds 20`) of the build from the generated code, one with an empty
 `--hdd-dir` and one reusing the installed data, ended the same way:
 
@@ -150,10 +163,12 @@ These exist and are generic, but were written for and checked against the earlie
   buffer (see [Runtime internals](runtime.md)).
 - A Vulkan 1.3 renderer that draws what the RSX commands describe into a window or PNG files, and
   `tox2_rsxreplay`, which renders single recorded frames without the game (see
-  [Rendering](rendering.md)). The game's flips ran in the fake RSX, but the headless runs had no
-  renderer, so neither has been exercised with this game's commands.
-- Sound through the runtime's audio engine and WASAPI (see [Audio](audio.md)). The game has not
-  initialised `cellAudio` before the stop.
+  [Rendering](rendering.md)). The game's flips run in the fake RSX. A headless run with `--dump-frames` also runs the renderer
+  (6,674 draws rendered, 9,173 skipped and 2,845 clears in 30 s), but the frame viewed was blank white;
+  `tox2_rsxreplay` has not been used with this game's commands.
+- Sound through the runtime's audio engine and WASAPI (see [Audio](audio.md)). The game initialises
+  `cellAudio` in the current run, and the headless run (output `none`) counts 5,194 blocks, none of
+  them non-silent: the sound engine's SPU thread does not run (see below).
 - cellSail and cellPamf HLE, the PAMF demuxer, the host movie player and FFmpeg movie decoders.
   They are built but unused: this game imports neither module, so their handlers are never bound
   (see [Movies](movies.md)).
@@ -177,35 +192,52 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
 - The game issues 67 system call numbers. The runtime has a handler for the semaphore, memory
   container and detach calls among them and for the SPU thread group calls 170 to 173 and 178; it has
   none for the SPU thread calls 193 and 194, the vm calls (300, 301) and the file system calls 810,
-  812, 813, 815, 820, 831, 832 and 834. None of those ran before the stop.
+  812, 813, 815, 820, 831, 832 and 834. Only 193 ran in the current run (default-handled). Beyond what
+  the game issues, the runtime also implements the SPU calls that libsre and the SPU runtime need (177,
+  181, 182, 185, 186, 190 to 192 and 250 to 252).
+- Of the 16 SPU images (8 in the executable, 8 in libsre) the 14 with a fixed LS address are recovered
+  and recompiled, and every instruction word of them has an emitter handler (see
+  [Emitting C](emitter.md#spu-images)). The two position-independent blobs of libsre are neither
+  recovered nor emitted; the game does not use them.
 - libsre is 239,344 bytes with 352 functions, 32 imports and 267 exports; its recovery and its C
   output are described in [Function recovery](function-recovery.md#on-libsre) and
   [Emitting C](emitter.md#a-prx-module-libsre).
 
 ## Not implemented
 
-- SPU and SPURS: the game embeds 8 SPU images, uses SPURS and creates raw SPU thread groups, and
-  libsre embeds the SPURS kernels and policy modules. SPURS initialisation runs in recompiled libsre
-  code, but no SPU code runs: the SPU thread group calls only keep bookkeeping, and
-  `sys_spu_thread_group_start` stops the run (exit code 8). Whether and how to run SPU code
-  (recompiling the SPU blobs, or an interpreter) is undecided; [SPU usage](spu.md) describes what runs
-  on the SPUs. There is no SPU local store, MFC or mailbox, and `sys_spu_thread_write_ls`, `_read_ls`,
-  `_write_spu_mb`, `_bind_queue` and `_unbind_queue` have no handler.
-- The game's data archive `TLFILE.TLDAT` (about 3 GB) and its index `FILEHEADER.TOFHDB` are only
-  copied by the game's install step, and no reader for their format exists. The file system code
-  uses 64-bit offsets (see [Virtual file system](virtual-file-system.md#large-files)); the copy
-  read the whole archive sequentially, but no read at a chosen offset above 2 GiB has happened.
+- The bnusCore SPU thread, the sound engine core (image 3), is not started. The game creates the group
+  `bnusCore`, but the `sys_spu_thread_initialize` call for its thread returns an error (the run makes 7
+  calls and 6 initialise a thread) and the group start is refused; the game then calls
+  `sys_spu_thread_bind_queue` (193) with thread id 0, which has no handler. The cause has not been
+  investigated. Raw SPU thread groups, `sys_spu_thread_bind_queue`/`_unbind_queue` and the
+  stop-and-signal codes from `0x110` up are not implemented, so the sound engine makes no sound yet.
+- SPU execution has these further limits: SPURS instance B (`atrac3plus`) gets its group and thread but
+  is never started, the spline task (image 1) has not run, no SPU interrupt is delivered, signal
+  notification is not implemented, and reservations have a documented race window against PPU plain
+  stores (the SPU floating-point deviations are listed in
+  [Emitting C](emitter.md#what-is-and-is-not-implemented)). See [SPU usage](spu.md).
+- The PPU jump table of the function at `0x0035d068` has an entry that function recovery did not find
+  (`0x0035d084`); the game stops there at about 53 s (see above).
+- The game's data archive `TLFILE.TLDAT` (about 3 GB) and its index `FILEHEADER.TOFHDB`: the install
+  step copies them, and the game's own code then reads items from the archive (6,975 `cellFsRead` and
+  6,746 `cellFsLseek` calls in the 30 s run) and has the Edge LZMA task inflate them. The runtime has no
+  reader of the format itself, and which items the game asks for has not been mapped. The file system
+  code uses 64-bit offsets (see [Virtual file system](virtual-file-system.md#large-files)); whether a
+  read at an offset above 2 GiB has happened has not been checked.
 - Movies: the game's movies are Bink files (`USRDIR/MOVIE/*.DAT`). Bink decoding is not
   implemented.
 - Imports and system calls without a handler (see above), and imports whose handler is minimal.
   The census at the end of a run lists what the game called and what the default handler served.
-  The census of the current run lists none, because the run stops earlier; the imports that the game
-  reaches after SPURS (for example `cellSaveDataListAutoLoad`) are still default-handled.
+  The census of the current run lists one system call (`sys_spu_thread_bind_queue`) and seven
+  imports (`cellRtcGetCurrentTick`, `cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility`
+  functions and `cellSaveDataListAutoLoad`), which are still default-handled.
 - Graphics: only what the inherited fake RSX and renderer implement. Whatever the renderer meets and
   cannot handle is listed in the `rsx unimplemented` census (see
   [Rendering](rendering.md#rendering)). Known gaps are the ZPASS report values (the constant 0 is
   written, no occlusion query runs) and user clip planes (the vertex translator does not write the
-  clip distances). Nothing in this game's command stream beyond the first 186 headers has been seen.
+  clip distances). The 30 s headless run counts 6.9 million FIFO headers, 238 distinct methods and 8,208 flips in the
+  fake RSX. With `--dump-frames` the dumped frames were blank white (the frame viewed, and all four
+  files have the same size); nothing has been checked about why.
 - Audio: WASAPI is the only device output, in shared mode on the default device. The output is
   stereo (an 8-channel port is reduced to its front pair), and there is no volume setting or device
   choice. ATRAC3 (non-plus) is not supported. Only the `cellAudio` and `cellAtrac` calls of the
@@ -216,6 +248,6 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
 - Input: the `neutral`, `none`, `keyboard`, `gamepad` and `keyboard+gamepad` pad providers. The
   keyboard has a fixed mapping, no analog sticks and no vibration; gamepads are read through
   GameInput with a fixed mapping. Only port 0 exists; there is no mouse or `cellKb` input. See
-  [Input](input.md). The game initialised `cellPad` in the runs but never read it before the stop.
+  [Input](input.md). The game reads port 0 (7,794 `cellPadGetData` calls in the 30 s run); no input has been sent to it.
 - Priority scheduling beyond the creation rule (a new thread with a numerically lower priority than
   its creator runs first), lv2 interrupt threads, savestates.

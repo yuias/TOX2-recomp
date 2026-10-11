@@ -1,9 +1,11 @@
 # SPU usage
 
-The runtime cannot run SPU code yet. This page records how the game uses the SPUs, measured from
-the executable, from libsre and from headless runs, as the basis for choosing how to run that code.
-Addresses are guest addresses in the pinned `EBOOT.elf`, or in the relocated `libsre.reloc.elf` where
-the text says so (libsre sits at `0x011d0000`).
+The runtime runs SPU code. The SPU programs of the game and of libsre are recompiled to C like the PPU
+code (see [Emitting C](emitter.md#spu-images)) and run on host threads, one per SPU. This page records
+how the game uses the SPUs, measured from the executable, from libsre and from headless runs, then how
+the runtime runs them and what a run reaches today. Addresses are guest addresses in the pinned
+`EBOOT.elf`, or in the relocated `libsre.reloc.elf` where the text says so (libsre sits at
+`0x011d0000`).
 
 ## SPU images
 
@@ -96,55 +98,295 @@ The game imports 30 `cellSpurs` functions, `sys_spu_image_import`/`sys_spu_image
   that uses `sys_spu_thread_read_ls`/`write_ls` and the SPU thread event syscalls; the game itself
   does not exchange LS data or mailbox values with an SPU program.
 
+## How the runtime runs SPU code
+
+The code is in `runtime/src/spu/` (threads, dispatch, MFC, channels, census), `runtime/src/core/reservation.*`
+(atomic reservations) and `runtime/src/lv2/sys_spu.*` (thread groups). The emitted C is described in
+[Emitting C](emitter.md#spu-images); this section covers what happens at run time.
+
+### Execution model
+
+- The firmware SPU programs from libsre (the version 1 kernel, the system service module and the
+  taskset policy module) and the game's task images run as they are, as recompiled C. Nothing of SPURS is
+  reimplemented on the host: the PPU side is libsre's recompiled PPU code and the SPU side is its
+  recompiled SPU code.
+- Control flow does not use the host stack. A call or branch to another function writes the link register
+  and tail-calls the target; every return and every other indirect branch goes through `tox2SpuDispatch`,
+  keyed by the LS address. A restored task context (the taskset policy module branches to a saved `$0`)
+  is a dispatch like any other.
+- The dispatch finds the image that occupies the target address (see [Image tracking](#image-tracking)),
+  looks the address up in that image's table of dispatchable entries, compares a few instruction words of
+  the entry with the LS bytes, and tail-calls the entry. A target that is not a dispatchable entry, or code
+  that does not match the image, is a fatal stop: with no host stack there is no caller to return to.
+- Every SPU thread is a `SpuThread` with a 256 KiB LS, the 128 registers, the channels, the MFC and its own
+  host thread. A group start creates fresh `SpuThread` objects, so a restarted group starts from a zeroed
+  LS. A thread ends when it reaches its exit address, executes a `stop` that ends it, or is halted: group
+  termination and `stop 0x101` set a halt flag that generated code checks at backward branches and that
+  wakes channel waits.
+- **Guest lock.** SPU threads run outside the guest lock, in parallel with the PPU threads and with each
+  other. Generated SPU code never sees guest memory; only MFC commands reach it. An SPU thread takes the
+  guest lock only around the lv2 state its callbacks touch (sending an event, replying in the inbound
+  mailbox, group bookkeeping when a thread stops or ends), and never while it waits on a channel. The
+  PPU-side calls that wait for SPU threads (`sys_spu_thread_group_join` and `_terminate`) give the guest
+  lock up while they wait. The PPU `sync` instruction is a full host fence, because SPU threads observe
+  guest memory while PPU code runs (see [Threads](runtime.md#threads)).
+- The supervisor counts an SPU thread as running, or as blocked in a channel wait. A run in which every PPU
+  thread waits for SPU work is therefore not a stall while an SPU thread runs.
+
+### Image tracking
+
+The LS has one tag per 16 bytes. A tag says that these LS bytes are code of a registered image at its
+link address. A copy of guest bytes into LS that covers part of a code segment of an image (an MFC GET,
+or the segment load of a group start) tags the 16-byte units that lie wholly inside that part. The
+dispatch accepts a target only when its unit is tagged, so an overlay (the system service module and the taskset policy
+module share the LS area at `0xa00`, and the kernel swaps between them) is found by what was copied, and the first time an image is tagged the runtime
+logs `tox2: spu: first image <name> at ls 0x<start>..0x<end> on thread 0x<id>`.
+
+- A copy (an MFC GET or a segment load) that overwrites tagged units untags only the units whose bytes
+  change. The taskset policy module restores a task's LS pattern from its context save area with a GET
+  that rewrites the code with the bytes it already holds; those units stay tagged.
+- The other LS writes untag every unit they touch: GETLLAR (its 128 bytes), a FILL segment and
+  `sys_spu_thread_write_ls`. These untag the whole range even when the bytes would be the same.
+- SPU store instructions do not change tags. Code that a store overwrites is found by the check words at
+  the dispatch (`code mismatch` stop), not by the tags.
+- Limitation: when a copy writes different bytes over tagged code, the next dispatch there stops as
+  `unknown target ... (untracked)`; the runtime does not identify code by its content. Only images at their
+  link address are accepted (a tagged address with another offset stops with `loaded at a non-link
+  address`), and one thread can hold at most 255 distinct load records.
+
+### Reservations and memory ordering
+
+GETLLAR, PUTLLC, PUTLLUC and PUT, and the PPU store-conditionals (`stwcx.`, `stdcx.`), share one table of
+65,536 stripes indexed by the 128-byte line (`(ea >> 7) & 0xffff`). A stripe word has a lock bit and a
+version. A writer locks the stripes of the lines it writes, writes, and bumps the version; a line that
+shares a stripe with another one causes at worst a spurious PUTLLC failure, which SPU code retries.
+
+- GETLLAR copies the line (retrying while a writer holds the stripe) and keeps the version and a 128-byte
+  snapshot. PUTLLC fails at once when the version moved, fails when the line differs from the snapshot,
+  and otherwise writes only the aligned 8-byte chunks whose value differs from the snapshot, each with one
+  atomic store. The reservation is cleared either way.
+- A thread waiting in `RdEventStat` for the reservation-lost event (`0x400`) sleeps until a reservation-aware
+  write changes the store epoch or 1 ms passes, then compares the line with the snapshot. A plain PPU
+  store is therefore seen within about 1 ms.
+- **Known race window.** PPU plain stores (and host plain writes) are not instrumented. A plain store to
+  an 8-byte chunk that a PUTLLC changes, landing after that PUTLLC's snapshot compare and before its chunk
+  store (well under a microsecond), is overwritten without the PUTLLC failing. Plain stores before the
+  compare make the PUTLLC fail; plain stores to chunks the PUTLLC leaves alone are kept; a plain-store
+  sequence that restores the snapshot value is not seen; a PPU load can observe a PUTLLC of several chunks
+  half applied.
+- Reserved lines that receive PPU plain stores, from a sweep of the code (medium confidence; a runtime
+  watchpoint would confirm). All live ones are in libsre's recompiled PPU code:
+
+  | Line (instance A) | Plain stores | Overlaps SPU PUTLLC chunks |
+  | --- | --- | --- |
+  | `CellSpurs` line 0, `0x01127c80..0x01127cff` | `cellSpursAddWorkload` (`stbx` at `+0x00+wid`, `stb` at `+0x10+wid`, `+0x40+wid` and `+0x72`), `ShutdownWorkload` (`+0x72`), `Finalize`. The workload slots are written when each taskset is created, five times while the group runs | `+0x72` shares a chunk with the kernel's workload-select PUTLLC and the system service's idle PUTLLC; this plain store is also the only PPU wake-up of the idle system service |
+  | `CellSpurs` `+0x80` line, `0x01127d00..0x01127d7f` | `AddWorkload` (`+0x80+wid`, `+0x90+wid`, `+0xa0+wid`, `+0xbd`), `ShutdownWorkload`, `Finalize` | the system service's activate-workloads PUTLLCs |
+  | event flag at `0x01127b00` | `cellSpursEventFlagWait` stores byte `+0x07` after the lv2 receive | the SPU event flag set PUTLLC rewrites the same chunk |
+  | counter line at `0x01127a80` | the game stores the counter once before the first push; its lwmutex (host-side, at `0x01127a88`) is in another chunk than the counter | a worst case is one PUTLLC retry |
+
+  Task set lines, the lock-free queue header and the `+0x900` line of `CellSpurs` receive plain stores only
+  before any task exists, or none.
+- **Decision.** libsre's plain stores are not routed through the table (`reservations().put`). In the
+  runs with the engine tasks the PUTLLC failure rate was about 62 % (26,075 succeeded and 41,879 failed in
+  the 30 s run quoted below), which is what retries on shared lines look like when five kernels contend
+  for them. No livelock and no stale data was seen: the first inflated archive item matches its
+  oracle hash in every run. The race window above and the line list stay a known limitation; if a hang
+  or lost workload shows up, those stores are the first suspects.
+- Barriers: SPU `sync` and `dsync` need no host fence (the LS is private); the MFC barrier, `mfcsync` and
+  `mfceieio` are sequentially consistent fences, and atomic commands are sequentially consistent.
+
+### MFC
+
+Commands run synchronously when `MFC_Cmd` is written, so a transfer is complete before the SPU reads its
+tag status and the command queue is never full.
+
+- Implemented: GET and PUT with their barrier and fence forms, the list forms (`getl`, `putl`; a list
+  element with the stall-and-notify bit is a fatal stop), GETLLAR, PUTLLC, PUTLLUC, PUTQLLUC, the barrier
+  command, `mfceieio` and `mfcsync`. `sndsig` and any other opcode stop the run and name the command.
+- Sizes and alignment follow the hardware rules: 1, 2, 4, 8 or a multiple of 16 bytes up to `0x4000`,
+  naturally aligned below 16 bytes. A violation, a tag id above 31 or a guest fault is a fatal stop
+  (`tox2: stop: spu: mfc <name> (command 0x<op>): <reason> at ls 0x<site> on thread 0x<id>`, followed by
+  the parameters). LS addresses wrap at 256 KiB.
+- Tag groups: `WrTagUpdate` 0, 1 and 2 are all satisfied at once and `RdTagStat` returns the tag mask.
+  `RdAtomicStat` returns the status of the last atomic command (GETLLAR 4, PUTLLC 0 or 1, PUTLLUC 2).
+- A GET tracks the LS image (above); PUT, PUTLLUC and atomic commands go through the reservation table.
+
+### Channels and mailboxes
+
+- Inbound mailbox (4 entries, `RdInMbox` blocks when empty), outbound mailbox (1 entry, `WrOutMbox` blocks
+  when full) and the interrupt mailbox (`WrOutIntrMbox`, which calls the owner, see below).
+- Events (`WrEventMask`, `RdEventMask`, `WrEventAck`, `RdEventStat`): the lock-line-lost event `0x400`, the
+  inbound mailbox event `0x10`, MFC queue vacancy `0x8` (always set), tag status update `0x1` (after a tag
+  update request) and the decrementer `0x20`. Waiting on a mask with none of these is a fatal stop that
+  names the mask. The decrementer counts down at the timebase frequency.
+- `RdMachStat` returns the interrupt-enable state in bit 0. `WrSRR0`/`RdSRR0` hold `srr0`. Every other
+  channel is a fatal stop that names the channel, for example the signal notification channels.
+- Every blocking wait uses the thread's own mutex and condition variable (or the store epoch of the
+  reservation table), never the guest lock, and ends when a halt is requested.
+- No SPU interrupt is ever delivered: `iret` and the interrupt enable bits are executed, but nothing
+  raises an interrupt.
+
+### lv2 SPU calls
+
+The calls and their checks are listed under [SPU system calls](runtime.md#spu-system-calls). What is
+specific to execution:
+
+- `sys_spu_thread_group_start` zeroes each thread's LS, applies the image segments (a copy goes through the
+  tracked copy, a fill is an untagging fill), sets `$3` to `$6` to the four arguments as 64-bit values in
+  the preferred doublewords (argument 1 is `index << 32` for SPURS), clears all other registers, sends the
+  group's RUN event when a queue is connected, and starts the host threads. The group is running until the
+  last thread ends.
+- `stop` codes: `0x100` continues, `0x102` ends the thread with the status from the outbound mailbox,
+  `0x101` ends the group with that status and halts the other threads. Any other code is a fatal stop
+  (`tox2: stop: spu: stop 0x<code> at ls 0x<site> on thread 0x<id>: not implemented`). When the last thread
+  has ended the group returns to the initialised state and `sys_spu_thread_group_join` wakes with cause 1
+  (group exit), 2 (all threads exited) or 4 (terminated) and the status. A finished group can be started
+  again.
+- `WrOutIntrMbox` is the SPU thread's system call: codes 0 to 63 send an event to the queue bound to the
+  port in the low bits and put the result in the inbound mailbox, codes 64 to 127 throw an event, and codes
+  128 and 192 set a bit of an event flag. The event source is `0xFFFFFFFF53505501`. A full event queue is
+  retried every millisecond. Other codes (129 to 191, above 192) are fatal stops.
+- `sys_spu_thread_write_ls`, `_read_ls` and `_write_spu_mb` reach the LS and mailbox of the latest run of a
+  thread. `write_spu_mb` into a full mailbox replaces the newest entry, as the hardware does, and logs a
+  warning once per thread. Not implemented: `sys_spu_thread_bind_queue` and `_unbind_queue` (193, 194) and
+  raw SPU threads.
+
+### Floating point
+
+The SPU's own floating-point rules are emitted as written (the full list of deviations is in
+[Emitting C](emitter.md#what-is-and-is-not-implemented)):
+
+- Single precision uses the extended range: an exponent field of 0 is zero whatever the other bits are
+  (denormals are zero), exponent 255 is an ordinary number, results are truncated toward zero to 24 bits,
+  and a result below the smallest normal number is +0 (every zero result is +0) while a larger one
+  saturates to the largest magnitude with its sign.
+- `frest` and `frsqest` return the exact reciprocal and reciprocal square root truncated to 24 bits, and `fi`
+  returns its second operand, because the architecture does not publish the hardware's estimate tables. A
+  reciprocal refined with `fi`, `fnms` and `fma` stays within the architected one-ulp bound but can differ
+  from the hardware by an ulp.
+- The FPSCR exception flags (single and double precision) are never set by operations.
+- Double precision is host `double` arithmetic. Denormal operands are flushed to zero, every NaN result is
+  the default quiet NaN, and only round to nearest is implemented.
+- A directed rounding mode selected through FPSCR stops the run with `tox2: stop: spu: unhandled word
+  0x<word> at ls 0x<site> on thread 0x<id>` at the double-precision instruction that would use it.
+  `eboot_updatematrix` contains a routine at LS `0x0ef88` that rewrites FPSCR fields from its argument. No
+  run of this game has selected a directed mode so far.
+
+### Log lines and census
+
+- Lines written by an SPU thread carry the prefix `[spu XXXXXXXX]` (the lv2 SPU thread id) instead of
+  `[t XXXXXXXX]`.
+- At start-up `tox2: spu: 14 images ok` reports that the SHA-256 of each emitted image matches the bytes in
+  guest memory (a mismatch is a load error, exit code 4). A group logs `tox2: spu: group ... created`,
+  `... initialized`, `start group ...` with a line per thread, segment, connected queue and bound port,
+  then `thread ... started at <image> ls 0x<entry>` and, when the last thread has ended,
+  `group ... stopped: cause <n>, status 0x<s>`.
+- A stop on an SPU thread ends the process with exit code 3 and prints the stop line, then `jump_target`,
+  `jump_site`, the trace ring of recent dispatches, the four words of every non-zero register and the LS
+  map (which image occupies which LS range). The stop lines are `unknown target ls ... from ls ... (<image>
+  or untracked)`, `code mismatch at ls ...`, `unhandled word ...`, `halt at ls ...`, the MFC and channel
+  stops above, `stop 0x... not implemented` and the `WrOutIntrMbox` stops.
+- The census has a `census: spu` section after `threads` (see the run below): the thread count, the total
+  number of dispatches and the number of unknown targets; one line per SPU thread with its state, the
+  image it ran last and its LS address; one line per image that ran, with its dispatches and the number of
+  distinct entries; the MFC counters (an extra line for list commands, PUTLLUC and fences when there were
+  any); the number of reads of each channel; and the `stop` codes that were seen. The counters add up over
+  all SPU threads of the run, also those of an earlier start of a group.
+
 ## What the current run reaches
 
-The headless run (see [Status](status.md)) executes the game's calls up to
-`cellSpursInitializeWithAttribute` as recompiled code. libsre builds SPURS instance A: it creates 16
-semaphores for the workload slots and one for the private lock, imports the version 1 kernel from
-`0x011f0380`, creates the SPU thread group `SpursTLGraphicsCellSpursKernelGroup` with 5 threads,
-initialises the threads, creates the event queue, port and helper threads, and its handler thread
-starts the group. The runtime logs the group, its threads (each with `image 0x011f0380 entry 0x818`,
-one copy segment of `0x780` bytes to LS `0x100`, and the arguments), the event queue and the ports,
-then stops with exit code 8:
+The run below was made with the build of commit `e013aa8`, headless, from a hdd directory that already holds
+the installed game data (`<scratch>` is any directory outside the repository):
 
-```
-tox2: stop: spu: sys_spu_thread_group_start group 0x04000100 "SpursTLGraphicsCellSpursKernelGroup" (5 threads, image 0x011f0380 entry 0x818): SPU execution is not implemented
+```sh
+build/release/bin/tox2_game --game-dir <game-dir> --elf generated/inputs/EBOOT.elf --libsre generated/inputs/libsre.reloc.elf --no-window --seconds 30 --hdd-dir <scratch>/hdd
 ```
 
-The game does not return from `cellSpursInitializeWithAttribute`, so it creates no taskset, task or
-queue, pushes no work and waits on nothing. The LZMA taskset, the engine tasksets, the sound engine,
-the spline tasks and instance B are not reached.
+It ends at the watchdog (exit code 5), with no SPU stop and no unknown dispatch target:
 
-Once SPU code runs, the game's first likely dependency is the LZMA path: fn `0x0080d370` parses a
-0x18-byte header and, for one compression type, fn `0x0080d5b0` waits on the event flags after
-`LFQueue` pushes at `0x00c2e294`/`0x00c2e450`. Whether the game's archive data goes through this path
-has not been checked. In the earlier runs, where the `cellSpurs` functions were default-handled and
-returned success at once, the first symptom was a worker thread that polled `cellSpursEventFlagWait`
-without end.
+```
+tox2: stop: watchdog 30 s
+census: spu 5 threads, 87070 dispatches, 0 unknown targets
+  thread 0x01000100 SpursTLGraphicsCellSpursKernel0: blocked in rdch 0 SPU_RdEventStat libsre_system_service ls 0x013f4
+  thread 0x02000100 SpursTLGraphicsCellSpursKernel1: blocked in rdch 0 SPU_RdEventStat libsre_system_service ls 0x013f4
+  thread 0x03000100 SpursTLGraphicsCellSpursKernel2: running eboot_edgelzma ls 0x03688
+  thread 0x04000100 SpursTLGraphicsCellSpursKernel3: blocked in rdch 0 SPU_RdEventStat libsre_system_service ls 0x013f4
+  thread 0x05000100 SpursTLGraphicsCellSpursKernel4: blocked in rdch 0 SPU_RdEventStat libsre_system_service ls 0x013f4
+  image eboot_edgelzma: 29569 dispatches, 28 distinct entries
+  image eboot_animation: 309 dispatches, 57 distinct entries
+  image eboot_updatematrix: 154 dispatches, 61 distinct entries
+  image eboot_renderparticle: 90 dispatches, 12 distinct entries
+  image eboot_morph: 47 dispatches, 10 distinct entries
+  image eboot_skin: 37 dispatches, 9 distinct entries
+  image libsre_kernel1: 8407 dispatches, 4 distinct entries
+  image libsre_system_service: 14926 dispatches, 15 distinct entries
+  image libsre_taskset_pm: 33531 dispatches, 40 distinct entries
+  mfc get: 12006, put: 6458, getllar: 67982, putllc: 26075 ok 41879 failed
+  channel rdch 0 SPU_RdEventStat: 25420
+  channel rdch 11 SPU_RdEventMask: 994
+  channel rdch 12 MFC_RdTagMask: 994
+  channel rdch 13 SPU_RdMachStat: 1252
+  channel rdch 24 MFC_RdTagStat: 15134
+  channel rdch 27 MFC_RdAtomicStat: 135936
+```
 
-## Entry points to cover
+The counts differ from run to run; the shape does not. In this run:
 
-- SPURS task entry at LS `0x3070` in images 1, 4, 5, 6, 7 and 8.
-- SPURS task entry at LS `0x3090` in image 2.
-- Raw SPU thread entry at LS `0xd0` in image 3.
-- SPURS kernel entry at LS `0x818` (version 1, in libsre at `0x011f0380`), the first code a run
-  would execute. The taskset policy module (libsre, `0x011f3680`) that the task images depend on is
-  loaded by the kernel.
+- libsre builds SPURS instance A and its handler thread starts the group of five kernel threads. The
+  kernels (`libsre_kernel1`) load the system service module and the taskset policy module, which loads the
+  tasks. The log shows `first image` lines for `libsre_kernel1`, `libsre_system_service`,
+  `libsre_taskset_pm`, `eboot_edgelzma`, `eboot_skin`, `eboot_animation`, `eboot_updatematrix`,
+  `eboot_renderparticle` and `eboot_morph`. `eboot_spline` and `eboot_bnuscore` have not run. Four kernels
+  idle in the system service (`RdEventStat`), one runs an Edge LZMA task.
+- The game loads its archive: the Edge LZMA task inflates the first archive item, and `--dump-guest
+  0x31d50020:0x3073c:<file>` logs SHA-256 `f4ad1f7125d9b31abf228e8043587aebc8f1501f0f4debed6d9814d06a12c751`,
+  the oracle value, in every run (from an empty hdd directory too). The work counter at `0x01127aa0` is
+  0 at a quiescent point and 1 to 3 while a batch is in flight, so a dump at an arbitrary stop can show
+  either. The same inflate also runs without the game in the `spu_lzma_inflate` test (see
+  [Tests](tests.md)).
+- The engine tasks (skin, animation, update matrix, render particle, morph) are created, started and
+  dispatched, and none of them stops at an unhandled word.
+- The main thread passes the LZMA load and writes `tox2: first hle cellSpurs::cellSpursEventFlagTryWait`
+  (at 12 to 14 s with installed data, 14 to 16 s from an empty hdd directory). This line is the
+  `game_boot` milestone. The game then runs its frame loop: about 8,200 flips and 7,800 `cellPadGetData`
+  calls in the 30 s run.
+
+Later stop: with `--seconds 70` the run ends at about 53 s, with exit code 3, because of a gap in the
+PPU function recovery. A jump table of a function around `0x0035d068` has an entry the recovery did not
+find, and the run logs `unknown target 0x0035d084 from 0x0035d068: inside a code span (missed function?)`
+followed by `tox2: stop: fatal guest fault: read from guest address 0x00000004`. That is not an SPU
+problem: the census of that run says `census: spu 5 threads, 155155 dispatches, 0 unknown targets`.
+
+Open issues:
+
+- The bnusCore SPU thread (image 3, the sound engine core) is not started. The run makes 7
+  `sys_spu_thread_initialize` calls and only six are logged as initialised (the five kernel threads and
+  the atrac3plus kernel thread), so the call for the bnusCore thread returns an error; the group start
+  that follows is refused as well, and the game then calls `sys_spu_thread_bind_queue` (193) with thread
+  id 0. That call has no handler and the default handler returns success without binding anything. The
+  cause of the failed initialisation has not been investigated. Raw SPU thread groups, the stop-and-signal
+  codes from `0x110` up and `sys_spu_thread_bind_queue`/`_unbind_queue` are not implemented. Until the
+  thread runs, the sound engine produces no sound (the audio census of the run counts no non-silent
+  block).
+- SPURS instance B ("atrac3plus", one SPU, created for `cellAtracCreateDecoderExt`) gets its thread group
+  and thread, but nothing starts the group.
+- The spline task (image 1) has not run in these runs.
+- The PPU jump-table gap at `0x0035d068` above ends the game at about 53 s.
+- The reservation race window above is documented, not closed.
+
+## Entry points
+
+- SPURS task entry at LS `0x3070` in images 1, 4, 5, 6, 7 and 8 (tasks 4 to 8 have run).
+- SPURS task entry at LS `0x3090` in image 2 (runs).
+- Raw SPU thread entry at LS `0xd0` in image 3 (not started).
+- SPURS kernel entry at LS `0x818` (version 1, in libsre at `0x011f0380`): the first code every SPU thread
+  of the SPURS group runs. The taskset policy module (libsre, `0x011f3680`) that the task images depend on
+  is loaded by the kernel.
 - Not in the executable or in libsre: the firmware ATRAC3plus SPU decoder (not needed if `cellAtrac`
   is implemented on the host).
-
-## Facts that bear on the method
-
-- The SPU code is a closed set of eight binaries in the executable plus the kernel and policy modules
-  in libsre, all with known entry points, as on the PPU side, which suits static recompilation.
-- Static recompilation and an interpreter both need a model of MFC DMA and atomic reservations,
-  mailboxes and event queues. The SPURS kernel and taskset interface at the fixed LS locations above
-  need no host implementation if the SPU code in libsre runs unchanged; replacing them with host code
-  is the alternative. The sound engine also needs a raw SPU thread group model.
-- Replacing single tasks with host code: Edge LZMA is a published Sony library with a known work
-  element format, and LZMA is simple to implement on the host. The engine tasks would each need
-  their element format and computation worked out. The sound engine core (85 KB) is not practical
-  to replace this way.
+- Not run: the version 2 kernel, the two job chain policy modules, the taskset 2 exit handler and the exit
+  code plugin. The game does not use them; the last two are position independent and are neither
+  recovered nor emitted.
 
 ## References
 

@@ -2,8 +2,9 @@
 
 This page covers the audio code in the runtime: the `cellAudio` and `cellAtrac` HLE, the audio
 engine and the WASAPI output. The code was written for and checked against an earlier game, with
-synthetic data in the tests. *Tales of Xillia 2* has not reached it yet: in the headless runs the
-game never called `cellAudioInit` or created an ATRAC decoder before the stop (see
+synthetic data in the tests. *Tales of Xillia 2* has barely used it: in the current headless run the
+game calls `cellAudioInit`, opens and starts a port and sets the notify queue, but creates no ATRAC
+decoder, and the sound engine's SPU thread does not run, so every mixed block is silent (see
 [Status](status.md)). Where this page describes how "the game" uses the library (thread priorities,
 buffer sizes, sound formats), that is how the earlier game behaved, and it is not verified for this
 one.
@@ -23,21 +24,22 @@ The `cellAudioOut` calls come from `cellSysutil` and all four have handlers
 (`runtime/src/hle/cell_sysutil.cpp`): `cellAudioOutGetState`, `cellAudioOutGetConfiguration`,
 `cellAudioOutGetSoundAvailability` and `cellAudioOutConfigure`. They share one list of sound modes,
 which holds LPCM 2 ch at 48 kHz only, because the mixer outputs stereo, and one stored setting
-(channel count, coding type and downmixer). The game had not called them in the headless runs.
+(channel count, coding type and downmixer). In the current headless run the game calls `cellAudioOutGetConfiguration` once and none of the other three.
 
 The game does not import `cellAtracCreateDecoder`, `cellAtracGetRemainFrame` or
 `cellAtracGetSoundInfo`, which the runtime implements. It imports `cellAtracCreateDecoderExt`,
 which takes a SPURS instance and has no handler. The code that calls it creates a SPURS instance
-with one SPU, named "atrac3plus", for it; that code was not reached before the stop. On the console the ATRAC3plus decoder then runs on an SPU, and the
-runtime has no SPU execution. The stream protocol that `cellAtrac` is implemented with here
+with one SPU, named "atrac3plus", for it; the runs create that instance's thread group but nothing starts it. On the console the ATRAC3plus decoder then runs on an SPU, and
+the firmware decoder is not part of this runtime. The stream protocol that `cellAtrac` is implemented with here
 (including `remain`, below) was derived from the earlier game, which used `cellAtracCreateDecoder`
 and `cellAtracGetRemainFrame`; this game also uses `cellAtracGetVacantSize`, so its protocol may
 differ.
 
 The game's sound engine core is a raw SPU thread group named "bnusCore" (the SPU image
 `bnusCoreSpu.elf`, embedded in the executable at `0x00f7b080`, 85,008 bytes of text). The code
-that starts it uses raw SPU thread group system calls and binds an event queue to it. None of that ran
-before the stop, and the runtime cannot run SPU code (see [Status](status.md#not-implemented)). It
+that starts it uses raw SPU thread group system calls and binds an event queue to it. The group is
+created, but its thread is not initialised and never starts, so the engine does not run (see
+[Status](status.md#not-implemented)). It
 is not established how the game's sound is split between that engine, the PPU mixer and
 `cellAudio`, so it is not known whether the `cellAudio` code will see the game's whole mix or only
 part of it. No sound of this game has been produced or captured through this runtime.

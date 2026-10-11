@@ -104,19 +104,19 @@ exits:
 | --- | --- | --- |
 | 0 | The guest called `sys_process_exit` or `_sys_process_exit`, the window was closed, or `--load-only` finished loading | `tox2: stop: process exit status N`, `tox2: stop: window closed` |
 | 2 | Usage error: bad option, neither `--game-dir` nor `--vfs-config`, game directory missing, log file or audio dump file not writable | `error: ...` (usage text) |
-| 3 | Fatal error: unhandled instruction, trap, guest fault (access outside the committed guest memory), unknown dispatch target with `--strict`, guest address space cannot be reserved; also the stops the game or libsre itself asks for (`cellGameContentErrorDialog`, a failed trophy registration, libsre's `abort`) | `tox2: stop: fatal <kind>: ...`, or a `tox2: stop: ...` line naming the call, for example `tox2: stop: abort from 0x<address> (sysPrxForUser 0x9fb6228e)` |
+| 3 | Fatal error: unhandled instruction, trap, guest fault (access outside the committed guest memory), unknown dispatch target with `--strict`, guest address space cannot be reserved; a fatal stop on an SPU thread (an unknown SPU dispatch target, code that does not match its image, an unhandled SPU word, an MFC command or channel the runtime does not implement, a `stop` code or `WrOutIntrMbox` code it does not know; see [SPU usage](spu.md#log-lines-and-census)); also the stops the game or libsre itself asks for (`cellGameContentErrorDialog`, a failed trophy registration, libsre's `abort`) | `tox2: stop: fatal <kind>: ...`, or a `tox2: stop: ...` line naming the call, for example `tox2: stop: abort from 0x<address> (sysPrxForUser 0x9fb6228e)` |
 | 4 | Load error: file missing, not a PPU executable, SHA-256 different from the one in the generated code, libsre missing, not relocated, of another hash or failing its layout check, invalid VFS configuration, or no executable can be located | `error: ...` |
 | 5 | The `--seconds` watchdog elapsed | `tox2: stop: watchdog N s` |
 | 6 | Stall: every live guest thread has been in an indefinite wait for at least 2 seconds | `tox2: stop: stall (N threads blocked)` |
 | 7 | All guest threads ended without a process exit | `tox2: stop: no guest threads left` |
-| 8 | The guest needs SPU execution, which does not exist. Two stops: `sys_spu_thread_group_start` (the run reached the start of an SPU thread group), and `sys_spu_thread_group_join` on a group that was initialised but never ran | `tox2: stop: spu: sys_spu_thread_group_start group 0x<id> "<name>" (<n> threads, image 0x<source> entry 0x<entry>): SPU execution is not implemented`, or `tox2: stop: spu: sys_spu_thread_group_join on group 0x<id> that never runs: SPU execution is not implemented` |
+| 8 | Reserved for a stop where the guest needs something the runtime deliberately does not do yet. No stop uses it at present: SPU thread groups run, and a stop on an SPU thread ends with code 3 | - |
 
 A fatal stop also prints the registers and the call trace (the most recent function entries) of
-the faulting guest thread. The current runs of this game end with code 8 and the group start stop
-line, for example `image 0x011f0380 entry 0x818` for the version 1 SPURS kernel that libsre imports
-(see [Status](status.md)). The stop is preceded by the log lines `tox2: spu: start group ...`, one
-line per thread and segment, and one per connected event queue and bound port (see
-[SPU usage](spu.md#what-the-current-run-reaches)). The runtime never calls
+the faulting guest thread; a stop on an SPU thread prints that thread's registers, its trace of recent
+dispatches and its LS map instead (see [SPU usage](spu.md#log-lines-and-census)). A run of this game ends
+with code 5 at the `--seconds` watchdog when the limit is shorter than about 53 s, and with code 3 after
+that, at a guest fault that follows a gap in the PPU jump tables (see [Status](status.md)). The runtime
+never calls
 `abort`: the CRT and Windows error dialogs are disabled, so a run always ends with an exit code,
 also when it is started from a script.
 
@@ -136,15 +136,15 @@ The same run with an explicit executable, for a game directory that does not hol
 tox2_game --game-dir <game-dir> --elf <elf> --libsre <libsre.reloc.elf> --no-window --seconds 30 --hdd-dir <empty-dir>
 ```
 
-Every 30th frame of the first 30 s as PNG files, without a window (the run stops at the SPU thread
-group start, before the game draws, so no files appear yet):
+Every 600th flip of the first 30 s as PNG files, without a window (the fake RSX executes the game's
+flips, so files appear, but the frames written so far are blank white):
 
 ```sh
-tox2_game --game-dir <game-dir> --no-window --seconds 30 --dump-frames out/frames --dump-frames-every 30
+tox2_game --game-dir <game-dir> --no-window --seconds 30 --dump-frames out/frames --dump-frames-every 600
 ```
 
-Recording the game's sound to a file without playing it (this game stops before it starts
-`cellAudio`, so no sound is written yet):
+Recording the game's sound to a file without playing it (the game initialises `cellAudio` and its mixer
+runs, but the sound engine's SPU thread does not start yet, so the file holds silence only):
 
 ```sh
 tox2_game --game-dir <game-dir> --no-window --hdd-dir <empty-dir> --seconds 30 --audio-dump out/run.wav

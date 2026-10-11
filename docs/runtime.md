@@ -5,8 +5,8 @@
 Log lines go to stderr, and to `--log FILE` when given, one line each. The logger is a thin layer
 over spdlog (the `externals/spdlog` submodule, built as a static library with `std::format`
 instead of the bundled fmt); spdlog types do not appear in the runtime's own headers. A line is
-prefixed with `[host]` or with `[t XXXXXXXX]`, the id of the guest thread that wrote it, followed
-by `warn: ` or `error: ` for those levels. The runtime's own messages then start with `tox2: ` and a
+prefixed with `[host]`, with `[t XXXXXXXX]`, the id of the guest thread that wrote it, or with
+`[spu XXXXXXXX]`, the id of the SPU thread, followed by `warn: ` or `error: ` for those levels. The runtime's own messages then start with `tox2: ` and a
 topic (`tox2: fs: ...`, `tox2: game: ...`, `tox2: pad: ...`); the census lines and the register dump
 of a fatal stop have no such prefix. Output from the guest itself (`sys_tty_write`) goes to stdout,
 unprefixed (the game's own assertion text appears there).
@@ -17,6 +17,7 @@ A run starts with the load log, for example (TOX2 values):
 [host] tox2: sfo: TITLE_ID BLJS10188 RESOLUTION 0x15 SOUND_FORMAT 0x107
 [host] tox2: load: phdr 0 type 0x1 flags 0x00400005 vaddr 0x00010000 filesz 0x103a828 memsz 0x103a828 ...
 [host] tox2: load: libsre.reloc.elf phdr 0 type 0x1 flags 0x00400005 vaddr 0x011d0000 paddr 0x0001dd4c filesz 0x2e000 memsz 0x2e000
+[host] tox2: spu: 14 images ok
 [host] tox2: dispatch: 29369 entries, span 0x00010200..0x00c9098c
 [host] tox2: dispatch: 384 entries, span 0x011d0000..0x011edafc
 [host] tox2: hle: 173 imports, 120 with handlers, 30 bound to libsre
@@ -78,7 +79,11 @@ After a run that played movies through cellSail, a `census: sail <n> movies` sec
 per-movie summary lines (see [Movies](movies.md#log-lines-and-census)); this game imports no
 cellSail, so the section does not appear. After a run in which the game
 initialised `cellAudio`, a `census: audio` section gives the audio engine, mixer input and
-`cellAtrac` counters (see [Audio](audio.md#census)).
+`cellAtrac` counters (see [Audio](audio.md#census)). After a run that started an SPU thread group, a
+`census: spu` section follows `census: threads`: it counts the dispatches, unknown targets, MFC commands
+and channel reads of all SPU threads and gives one line per thread and per image that ran (see
+[SPU usage](spu.md#log-lines-and-census) and the run quoted under
+[What the current run reaches](spu.md#what-the-current-run-reaches)).
 Thread states are `running`, `blocked in <what>` or `exited`. The first call of each syscall and
 each import also logs `tox2: first sc <number> <name>` or `tox2: first hle <module>::<name>` while
 the game runs; these lines are the progress markers that `game_boot` checks (see
@@ -129,8 +134,8 @@ census lists every such target.
 
 ## Threads
 
-Each guest thread is a host thread (16 MiB host stack) with its own context. All guest code runs
-under one global guest lock, a FIFO ticket lock, so guest threads never run in parallel. A thread
+Each guest thread is a host thread (16 MiB host stack) with its own context. All PPU guest code runs
+under one global guest lock, a FIFO ticket lock, so PPU guest threads never run in parallel. A thread
 gives up the lock only in `tox2Yield` (called from loop hooks, when another thread is waiting), in
 a blocking wait and when it exits. Blocking system calls (mutex, condition variable, event flag,
 event queue, sleep, join) wait on host condition variables with the guest lock, and record what
@@ -148,8 +153,8 @@ creates are started as before. The earlier game depended on this rule: its audio
 created by a main thread of lower precedence and had to store its notify queue key before main
 registered it with `cellAudio`. This game depends on it too: its main thread has priority 1001 and it
 creates SPURS with PPU priority 1000, so libsre's helper threads `SpursHdlr1` and `SpursHdlr0` run
-before the main thread continues, and `SpursHdlr0` reaches `sys_spu_thread_group_start`, where the run
-stops (see [Status](status.md)). The rule is logged at
+before the main thread continues, and `SpursHdlr0` starts the SPU thread group of the SPURS kernels
+and then waits in `sys_spu_thread_group_join` (see [Status](status.md)). The rule is logged at
 debug level, and a new thread that did not queue within 5 ms
 logs `tox2: thread: ... not queued within 5 ms; creator continues` at info level. There is no other
 priority behaviour: no priority-ordered hand-off, no wake order by priority, no preemption, and no
@@ -161,6 +166,14 @@ are host condition variable waits, and Windows rounds them to its timer tick (15
 so a 1 ms guest sleep would take 15 ms. The earlier game's decode loops polled with 1 ms sleeps;
 this game's main thread and a worker poll with `sys_timer_usleep` (about 21,000 calls in a 20 s run). The
 request ends with the process; a refusal is logged as a warning and the default tick stays.
+
+SPU threads are the exception to "never in parallel". Each SPU thread is a host thread that runs
+recompiled SPU code outside the guest lock, in parallel with the PPU threads and with the other SPU
+threads. It takes the guest lock only around the lv2 state its owner callbacks read or change (event
+sends, mailbox replies, group bookkeeping at a stop) and never while it waits on a channel; the PPU-side
+calls that wait for SPU threads give the lock up while they wait. Atomic reservations are shared between
+PPU and SPU threads (`stwcx.` and `stdcx.` use the same table as PUTLLC), and the PPU `sync` is a full
+host fence; see [SPU usage](spu.md#how-the-runtime-runs-spu-code).
 
 The RSX thread and the audio engine are host threads that take the same guest lock. The RSX thread
 therefore pumps the command buffer in slices of 128 words and leaves the lock once a hold has lasted
@@ -192,10 +205,11 @@ RPCS3 code. The table lists what the runtime implements. The executable of this 
 call numbers; the ones without a handler are the SPU thread calls 193 and 194, the vm calls
 `sys_vm_memory_map` (300) and `sys_vm_unmap` (301) and the file system calls 810 (link), 812
 (rename), 813 (rmdir), 815 (utime), 820 (fsync), 831 (truncate), 832 (ftruncate) and 834 (chmod).
-libsre has 177 system call sites with 41 numbers; of those 182, 248, 249 and 253 have no handler
+libsre has 177 system call sites with 41 numbers; of those 248, 249 and 253 have no handler
 (248 and 249 have no name in `config/lv2_syscalls.json`, 253 is `sys_spu_thread_group_syscall_253`), and
-none of the handler-less numbers was reached in the runs so far (the census of the latest run lists no
-default-handled system call). The syscall table (`kSyscalls`) holds every number the game issues,
+none of them was reached in the runs so far. The one default-handled system call in the latest run is
+`sys_spu_thread_bind_queue` (193), which the game issues for its sound engine (see
+[SPU usage](spu.md#what-the-current-run-reaches)). The syscall table (`kSyscalls`) holds every number the game issues,
 with its name from `config/lv2_syscalls.json`, so the log and the census name them whether or not
 they have a handler.
 
@@ -228,7 +242,7 @@ that does not abort or exit does not issue it.
 | Semaphore | `sys_semaphore_create` (90), `_destroy` (91), `_wait` (92), `_trywait` (93), `_post` (94), `_get_value` (114). Process-shared semaphores (an IPC key) are not supported; a waiter that blocks wakes in no particular order |
 | Event flag | `sys_event_flag_create` (82), `_destroy` (83), `_wait` (85), `_set` (87), `_clear` (118), `_cancel` (132), `_get` (139) |
 | Event queue and port | `sys_event_queue_create` (128), `_destroy` (129), `_receive` (130), `_tryreceive` (131), `_drain` (133); `sys_event_port_create` (134), `_destroy` (135), `_connect_local` (136), `_disconnect` (137), `_send` (138). A queue created with a non-zero IPC key can be found by that key (the host looks it up and sends to it; the `cellAudio` notify uses this); a second live queue with the same key fails with `CELL_EEXIST`, key 0 makes a local queue, and destroying the queue forgets the key. IPC ports (`sys_event_port_connect_ipc`) are not supported. |
-| SPU | `sys_spu_initialize` (169); thread groups: `sys_spu_thread_group_create` (170), `_destroy` (171), `_start` (173), `_terminate` (177), `_join` (178), `_connect_event` (185), `_disconnect_event` (186), `_set_cooperative_victims` (250), `_connect_event_all_threads` (251), `_disconnect_event_all_threads` (252); threads: `sys_spu_thread_initialize` (172), `sys_spu_thread_connect_event` (191), `_disconnect_event` (192). All of these only keep bookkeeping; no SPU code runs (see [SPU system calls](#spu-system-calls)). `sys_spu_thread_write_ls` (181), `_read_ls` (182), `_write_spu_mb` (190), `_bind_queue` (193) and `_unbind_queue` (194) have no handler and are default-handled |
+| SPU | `sys_spu_initialize` (169); thread groups: `sys_spu_thread_group_create` (170), `_destroy` (171), `_start` (173), `_terminate` (177), `_join` (178), `_connect_event` (185), `_disconnect_event` (186), `_set_cooperative_victims` (250), `_connect_event_all_threads` (251), `_disconnect_event_all_threads` (252); threads: `sys_spu_thread_initialize` (172), `_write_ls` (181), `_read_ls` (182), `_write_spu_mb` (190), `_connect_event` (191), `_disconnect_event` (192). A started group runs its threads as SPU host threads (see [SPU system calls](#spu-system-calls)). `sys_spu_thread_bind_queue` (193) and `_unbind_queue` (194) have no handler and are default-handled |
 | File system | `sys_fs_open` (801), `_read` (802), `_write` (803), `_close` (804), `_opendir` (805), `_readdir` (806), `_closedir` (807), `_stat` (808), `_fstat` (809), `_mkdir` (811), `_unlink` (814), `_lseek` (818); see [Virtual file system](virtual-file-system.md#virtual-file-system) |
 | Thread | `_sys_ppu_thread_exit` (41), `sys_ppu_thread_yield` (43), `sys_ppu_thread_join` (44), `sys_ppu_thread_detach` (45; a thread that already exited without being joined is dropped, as in RPCS3), `sys_ppu_thread_set_priority` (47), `sys_ppu_thread_get_priority` (48); the creation rule of `sys_ppu_thread_create` is under [Threads](#threads) |
 
@@ -247,9 +261,11 @@ pages, 4 KiB in the stack region, 64 KiB elsewhere). `sys_event_queue_tryreceive
 
 ### SPU system calls
 
-The groups and threads that the calls create are records in the runtime, with these checks and no
-execution. A group has an id from `0x04000100` (step `0x100`, at most 255 groups) and a state:
-created (`NotInitialized`) until all `num` threads are initialised, then `Initialized`.
+The groups and threads that the calls create are records in the runtime. A group has an id from
+`0x04000100` (step `0x100`, at most 255 groups) and a state: created (`NotInitialized`) until all `num`
+threads are initialised, then `Initialized`, and `Running` from a start until its last thread has ended
+(it then returns to `Initialized` and can be started again). How the threads execute is described in
+[SPU usage](spu.md#how-the-runtime-runs-spu-code).
 
 - `sys_spu_thread_group_create`: `num` 1 to 6, name length up to `0x80`, type 0, 4, `0x18` or `0x20`;
   unless the type has the bit `0x08` the priority must be 16 to 255; type 4 needs an existing memory
@@ -265,13 +281,27 @@ created (`NotInitialized`) until all `num` threads are initialised, then `Initia
   Errors are the usual ones (`CELL_ESRCH` for an unknown group, thread or queue, `CELL_EBUSY`,
   `CELL_EISCONN`, `CELL_ENOTCONN`, `CELL_EINVAL`).
 - `sys_spu_thread_group_start` logs `tox2: spu: start group ...`, one line per thread, its image
-  segments, the connected event queues and the bound ports, and then stops the run with exit code 8
-  (`tox2: stop: spu: sys_spu_thread_group_start group ...`, see
-  [Exit codes](runtime-options.md#exit-codes-and-stop-lines)). A group that is not `Initialized`
-  fails with `CELL_ESTAT`.
-- `sys_spu_thread_group_join` on an `Initialized` group stops the run the same way, because the wait
-  could never end; `_terminate` (177) fails with `CELL_ESTAT`, since no group ever runs;
-  `sys_spu_thread_group_destroy` frees the group.
+  segments, the connected event queues and the bound ports, builds a fresh SPU thread for every thread
+  record (zeroed LS, the image segments applied, the arguments in `$3` to `$6`), sends the RUN event
+  to the connected queue, logs `tox2: spu: thread ... started at <image> ls 0x<entry>` for each thread
+  and starts the host threads. A group that is not `Initialized` fails with `CELL_ESTAT`, and a copy
+  segment whose source is not guest memory with `CELL_EFAULT` before anything changes.
+- A thread ends with the `stop` code `0x102` (status from its outbound mailbox) or, for the whole group,
+  `0x101`; when the last has ended the group logs `tox2: spu: group ... stopped: cause <n>, status
+  0x<s>`. `sys_spu_thread_group_join` waits for the end of a run, also of one that has not started yet,
+  and writes the cause (1 group exit, 2 all threads exited, 4 terminated) and the status; null result
+  pointers give `CELL_EFAULT` after the wait, as SPURS joins with a null cause. A second joiner gets
+  `CELL_EBUSY`, and a join on a group that is not fully initialised fails with `CELL_ESTAT` without
+  waiting. `_terminate` (177) halts the threads, waits until they have ended and gives cause 4;
+  `_destroy` frees the group, and fails with `CELL_EBUSY` while it runs.
+- `sys_spu_thread_write_ls` (181) and `_read_ls` (182) access 1, 2, 4 or 8 bytes, aligned and big-endian,
+  of the LS of the latest run of a thread (`CELL_ESTAT` for a thread that was never started);
+  `_write_spu_mb` (190) pushes into the inbound mailbox and, when it is full, replaces the newest entry.
+- An unknown SPU `WrOutIntrMbox` code, a `stop` code other than `0x100`, `0x101` and `0x102`, and every
+  condition the SPU runtime cannot execute are fatal stops on the SPU thread with exit code 3 (see
+  [Exit codes](runtime-options.md#exit-codes-and-stop-lines)).
+- `resetSpuThreadGroups` (test teardown) halts and joins all SPU host threads before freeing a record,
+  and must not be called with the guest lock held while a group runs.
 
 The image calls are sysPrxForUser imports (below): `sys_spu_image_import` builds the segment list of
 an SPU ELF32 in guest memory and `sys_spu_image_close` frees it.
@@ -566,7 +596,9 @@ outside the code), as `tox2: default hle <module>::<name>: possible out-pointer 
 the handler, not facts: a register left over from an earlier call can look like a pointer too.
 
 In the earlier runs of this game, before libsre was loaded, the default handlers served 24 imports and
-no system call; the current run, which stops at the SPU thread group start, uses none. An earlier
+no system call. The current run (see [SPU usage](spu.md#what-the-current-run-reaches)) default-handles
+one system call, `sys_spu_thread_bind_queue` (193), and seven imports: `cellRtcGetCurrentTick`,
+`cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`. An earlier
 stop, a write to address 0 in fn `0x008a090c` on the GCM interrupt thread, followed the
 default-handled `cellGcmGetLabelAddress`, which returned 0 instead of a label address; with a
 handler for it the thread no longer faults. A later stop, the game's own `abort()`, followed the
@@ -574,8 +606,8 @@ memory container calls, which did not write a container id (see
 [Implemented system calls](#implemented-system-calls)). Those runs ended at the `--seconds`
 watchdog, while one worker thread looped on the default-handled `cellSpursEventFlagWait`, which
 returned success at once (about 160 million calls in 20 s; see [Status](status.md)). With libsre
-bound, the `cellSpurs` functions are no longer default-handled, and the run stops at the SPU thread
-group start.
+bound, the `cellSpurs` functions are no longer default-handled, and the SPURS code runs on recompiled
+SPU code.
 
 With the default result of `cellGameBootCheck` the game used data file paths without a directory
 prefix; with the handler they start with `/dev_bdvd/PS3_GAME`.

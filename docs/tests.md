@@ -16,6 +16,12 @@ files are registered only when those are configured, and configuration prints wh
 | `ppu_header_check`, `ppu_semantics` | Contract header and the semantics harness (see [Emitting C](emitter.md)) | - |
 | `ppu_link` | The generated code of the executable and of libsre links; the function mappings, imports and export table of both trees register and pass the checks of `runtime/tests/ppu_link_test.cpp` | `-GeneratedDir` (with the libsre tree under `<dir>/libsre`) |
 | `runtime_core` | Runtime core unit tests (memory, threads, lv2, HLE, VFS, fake RSX, the module loader and the libsre layout check; the list is below) | - |
+| `spu_header_check` | The SPU contract headers (`spu_context.h`, `spu_ops.h`, `spu_fp.h`, `spu_lower_stackfree.h`) compile as C23, as C++26 and with `-ffreestanding`, and a run-time check of the context layout, the inline helpers and the stack-free macros against a minimal dispatcher passes (`spu header ok`) | - |
+| `spu_semantics` | The SPU instruction semantics: hand-derived cases per op group (`tools/tests/spu_semantics/cases_<group>.py`, from the SPU ISA text) go through the real recovery and emitter, are compiled like emitted code and run natively (see [Emitting C](emitter.md#semantics-harness)). Pass case names as arguments to run only those | - |
+| `spu_link` | The generated SPU tree links with the stub runtime, its image tables have the expected shape (hashes, segments, entries) and every entry can be dispatched once with a halt request set, so no SPU code runs (`spu link ok`) | `-GeneratedDir` (with `spu/` under it) |
+| `spu_runtime` | The SPU runtime in `tox2_runtime_core` on synthetic images and plain host buffers: the reservation table (including the race window through a test seam, stripe sharing, wake-ups and stress runs), SPU threads and the dispatcher (flat host stack over 10,000 transfers, transfers across images, image tracking and its edge cases), MFC commands, mailboxes, events and the decrementer, lv2 thread group start, exit, terminate, join and teardown, the `[spu XXXXXXXX]` log prefix, the supervisor and the census. The fatal stops run in child processes | - |
+| `spu_programs` | Four assembled SPU programs (a sum over an array, an atomic counter, a jump table, an event throw) go through recovery, the emitter and the runtime: they run as a thread group of up to 6 threads on the real runtime and their results are checked | - |
+| `spu_lzma_inflate` | The recompiled Edge LZMA inflate routine of the game's LZMA task decompresses a real item of `TLFILE.TLDAT` on one SPU thread, chunk by chunk as the task does, and the SHA-256 of the output must be `f4ad1f71...c751` (the value of the reference decoder). Timeout 120 s | `-GeneratedDir`, `-GameDir` and `-EbootElf` or `-EbootBin` |
 | `render_core`, `vp_translator`, `fp_translator` | Renderer and shader translators (see [Rendering](rendering.md)) | a Vulkan 1.3 device for the rendering parts |
 | `rsx_replay` | Replays a local capture and, when a reference image is pinned, compares the result with it | a local capture (see [Capture and replay](rendering.md#capture-and-replay)) |
 | `media_core` | PAMF parser and demuxer, the movie player and the cellSail HLE on synthetic data, with fake codecs (inherited code that this game does not use, see [Movies](movies.md)) | - |
@@ -82,9 +88,12 @@ imports to libsre's exports, libsre's own import table, and the conflict check),
 `testProcessAndPageSyscalls` (system calls 1, 14, 25, 131 and 351), `testSpuThreadGroups` and
 `testSpuImageImport` (the SPU thread group bookkeeping and the image import), `testSpuPrintfCallbacks`,
 `testPrxModuleId` and `testProcessParamsfo`, `testLwcond`, `testGuestPrintf` and
-`testSysPrxForUserLibc` (the printf formatter and the string, printf and abort handlers). Four tests run
-a child process, because the stop ends the process: `testOverlappingSpanChild`, `testAbortChild`,
-`testSpuStartChild` and `testSpuJoinChild`.
+`testSysPrxForUserLibc` (the printf formatter and the string, printf and abort handlers), and
+`testSpuJoinNotInitialized` (a join on a group that is not fully initialised does not wait). Tests that
+run a child process, because the stop ends the process, include `testOverlappingSpanChild`,
+`testAbortChild` and `testSpuStartChild` (a group started with no SPU images registered stops at its
+first dispatch, `unknown target ls 0x00818 ... (untracked)`). The execution of SPU code is tested by
+`spu_runtime`, `spu_programs` and `spu_lzma_inflate`, not here.
 
 ## Python unit tests
 
