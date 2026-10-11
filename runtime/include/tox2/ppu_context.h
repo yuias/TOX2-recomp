@@ -99,6 +99,7 @@ typedef struct Tox2PpuContext {
     uint32_t jump_target, jump_site;  // dynamic transfers (input of tox2Dispatch)
     uint32_t reserve_addr;
     uint64_t reserve_value;
+    uint64_t reserve_version;  // reservation stripe version at lwarx/ldarx
     uint8_t reserve_valid;
     int32_t preempt_budget;
     uint32_t trace_pos;

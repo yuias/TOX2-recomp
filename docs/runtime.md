@@ -172,7 +172,7 @@ recompiled SPU code outside the guest lock, in parallel with the PPU threads and
 threads. It takes the guest lock only around the lv2 state its owner callbacks read or change (event
 sends, mailbox replies, group bookkeeping at a stop) and never while it waits on a channel; the PPU-side
 calls that wait for SPU threads give the lock up while they wait. Atomic reservations are shared between
-PPU and SPU threads (`stwcx.` and `stdcx.` use the same table as PUTLLC), and the PPU `sync` is a full
+PPU and SPU threads (`lwarx`/`stwcx.` and `ldarx`/`stdcx.` use the same table as PUTLLC and reserve the whole 128-byte line), and the PPU `sync` is a full
 host fence; see [SPU usage](spu.md#how-the-runtime-runs-spu-code).
 
 The RSX thread and the audio engine are host threads that take the same guest lock. The RSX thread

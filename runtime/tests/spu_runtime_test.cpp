@@ -172,32 +172,107 @@ void testPutPieces() {
     CHECK(mem.bytes[412 + 4] == 0);
 }
 
+// Stripe version of the line that contains `ea`, as a PPU lwarx would record it.
+std::uint64_t stripeVersion(tox2::ReservationTable& table, std::uint8_t* base, std::uint32_t ea) {
+    std::uint64_t value, version;
+    table.loadReserved(base, ea, 4, value, version);
+    return version;
+}
+
 void testStoreConditional() {
     tox2::ReservationTable table;
     TestMemory mem;
     storeBe32(mem.bytes + 4, 10);
-    CHECK(table.storeConditional(mem.base(), 4, 4, 10, 11));
+    CHECK(table.storeConditional(mem.base(), 4, 4, 10, stripeVersion(table, mem.base(), 4), 11));
     CHECK(loadBe32(mem.bytes + 4) == 11);
-    CHECK(!table.storeConditional(mem.base(), 4, 4, 10, 12));  // value changed since the load
+    // value changed since the load
+    CHECK(!table.storeConditional(mem.base(), 4, 4, 10, stripeVersion(table, mem.base(), 4), 12));
     CHECK(loadBe32(mem.bytes + 4) == 11);
 
     const std::uint64_t big = 0x0102030405060708ull;
     const std::uint64_t swapped = std::byteswap(big);
     std::memcpy(mem.bytes + 16, &swapped, 8);
     CHECK(mem.bytes[16] == 1 && mem.bytes[23] == 8);
-    CHECK(table.storeConditional(mem.base(), 16, 8, big, 0x1122334455667788ull));
+    CHECK(table.storeConditional(mem.base(), 16, 8, big, stripeVersion(table, mem.base(), 16), 0x1122334455667788ull));
     CHECK(mem.bytes[16] == 0x11 && mem.bytes[23] == 0x88);
-    CHECK(!table.storeConditional(mem.base(), 16, 8, big, 1));
-    CHECK(!table.storeConditional(mem.base(), 16, 2, 0, 0));  // unsupported width
+    CHECK(!table.storeConditional(mem.base(), 16, 8, big, stripeVersion(table, mem.base(), 16), 1));
+    CHECK(!table.storeConditional(mem.base(), 16, 2, 0, stripeVersion(table, mem.base(), 16), 0));  // bad width
 
     // A successful store-conditional invalidates an SPU reservation on the line; a failed one does not.
     tox2::Reservation res;
     std::uint8_t ls[128];
     table.getllar(mem.base(), 0, ls, res);
-    CHECK(!table.storeConditional(mem.base(), 4, 4, 99, 100));
+    CHECK(!table.storeConditional(mem.base(), 4, 4, 99, stripeVersion(table, mem.base(), 4), 100));
     CHECK(!table.lost(mem.base(), res));
-    CHECK(table.storeConditional(mem.base(), 4, 4, 11, 100));
+    CHECK(table.storeConditional(mem.base(), 4, 4, 11, stripeVersion(table, mem.base(), 4), 100));
     CHECK(table.lost(mem.base(), res));
+}
+
+// A PPU reservation is line-granular: a reservation-aware write to any word of the line since the load
+// fails the store-conditional, a write to another line does not.
+void testPpuReservationIsLineGranular() {
+    tox2::ReservationTable table;
+    TestMemory mem;
+    constexpr std::uint32_t kWord = 128 + 0x40;    // lwarx target
+    constexpr std::uint32_t kNeighbour = 128 + 8;  // another 8-byte chunk of the same line
+    storeBe32(mem.bytes + kWord, 5);
+    std::uint64_t value, version;
+
+    // PUTLLC that changes only another chunk of the line: the word itself is intact, the version moved.
+    table.loadReserved(mem.base(), kWord, 4, value, version);
+    CHECK(value == 5);
+    tox2::Reservation res;
+    std::uint8_t ls[128];
+    table.getllar(mem.base(), 128, ls, res);
+    storeBe32(ls + (kNeighbour - 128), 0xabcd);
+    CHECK(table.putllc(mem.base(), 128, ls, res));
+    CHECK(loadBe32(mem.bytes + kWord) == 5);
+    CHECK(!table.storeConditional(mem.base(), kWord, 4, value, version, 6));
+    CHECK(loadBe32(mem.bytes + kWord) == 5);
+
+    // A fresh load takes the new version and succeeds.
+    table.loadReserved(mem.base(), kWord, 4, value, version);
+    CHECK(table.storeConditional(mem.base(), kWord, 4, value, version, 6));
+    CHECK(loadBe32(mem.bytes + kWord) == 6);
+
+    // PUTLLC on a different line (a different stripe) does not disturb the reservation.
+    table.loadReserved(mem.base(), kWord, 4, value, version);
+    table.getllar(mem.base(), 256, ls, res);
+    storeBe32(ls, 1);
+    CHECK(table.putllc(mem.base(), 256, ls, res));
+    CHECK(table.storeConditional(mem.base(), kWord, 4, value, version, 7));
+    CHECK(loadBe32(mem.bytes + kWord) == 7);
+
+    // PUTLLUC and PUT on the line also fail it; so does another store-conditional.
+    table.loadReserved(mem.base(), kWord, 4, value, version);
+    table.putlluc(mem.base(), 128, ls);
+    CHECK(!table.storeConditional(mem.base(), kWord, 4, value, version, 8));
+    storeBe32(ls, 2);
+    table.loadReserved(mem.base(), kWord, 4, value, version);
+    table.put(mem.base(), kNeighbour, ls, 4);
+    CHECK(!table.storeConditional(mem.base(), kWord, 4, value, version, 8));
+    table.loadReserved(mem.base(), kWord, 4, value, version);
+    CHECK(table.storeConditional(mem.base(), kNeighbour, 4, 2, stripeVersion(table, mem.base(), kNeighbour), 3));
+    CHECK(!table.storeConditional(mem.base(), kWord, 4, value, version, 8));
+
+    // The 8-byte variant (ldarx/stdcx.) follows the same rule.
+    constexpr std::uint32_t kDouble = 128 + 0x48;
+    const std::uint64_t pattern = std::byteswap(0x0102030405060708ull);
+    std::memcpy(mem.bytes + kDouble, &pattern, 8);
+    table.loadReserved(mem.base(), kDouble, 8, value, version);
+    CHECK(value == 0x0102030405060708ull);
+    table.getllar(mem.base(), 128, ls, res);
+    storeBe32(ls + 0x70, 9);
+    CHECK(table.putllc(mem.base(), 128, ls, res));
+    CHECK(!table.storeConditional(mem.base(), kDouble, 8, value, version, 1));
+    table.loadReserved(mem.base(), kDouble, 8, value, version);
+    CHECK(table.storeConditional(mem.base(), kDouble, 8, value, version, 0x1122334455667788ull));
+    CHECK(mem.bytes[kDouble] == 0x11 && mem.bytes[kDouble + 7] == 0x88);
+
+    // A plain store to the word itself is still caught by the value compare.
+    table.loadReserved(mem.base(), kWord, 4, value, version);
+    storeBe32(mem.bytes + kWord, 77);
+    CHECK(!table.storeConditional(mem.base(), kWord, 4, value, version, 8));
 }
 
 void testIncrementStress() {
@@ -229,9 +304,9 @@ void testIncrementStress() {
         while (!go.load()) std::this_thread::yield();
         for (std::uint32_t n = 0; n < kIncrements; n++) {
             for (;;) {
-                const std::uint32_t seen = std::byteswap(
-                        __atomic_load_n(reinterpret_cast<std::uint32_t*>(mem.bytes + kPpuWord), __ATOMIC_RELAXED));
-                if (table.storeConditional(mem.base(), kPpuWord, 4, seen, seen + 1)) break;
+                std::uint64_t seen, version;
+                table.loadReserved(mem.base(), kPpuWord, 4, seen, version);
+                if (table.storeConditional(mem.base(), kPpuWord, 4, seen, version, seen + 1)) break;
             }
         }
     });
@@ -418,16 +493,17 @@ void testFailedWritersDoNotLoseReservation() {
     table.getllar(base, 0, ls, res);
 
     // Deterministic part: the stripe is back to its old version after each failure.
-    CHECK(!table.storeConditional(base, 4, 4, 1, 2));
+    CHECK(!table.storeConditional(base, 4, 4, 1, stripeVersion(table, base, 4), 2));
     CHECK(!table.lost(base, res));
-    CHECK(!table.storeConditional(base, kCollidingLine + 4, 4, 1, 2));
+    CHECK(!table.storeConditional(base, kCollidingLine + 4, 4, 1, stripeVersion(table, base, 4), 2));
     CHECK(!table.lost(base, res));
 
     // Concurrent part: lost() may see the stripe while a failing writer holds it.
     for (const std::uint32_t target : {4u, kCollidingLine + 4}) {
         std::atomic<bool> done{false};
         std::thread failer([&] {
-            for (int i = 0; i < 200000; i++) table.storeConditional(base, target, 4, 1, 2);
+            const std::uint64_t version = stripeVersion(table, base, target);
+            for (int i = 0; i < 200000; i++) table.storeConditional(base, target, 4, 1, version, 2);
             done = true;
         });
         bool wrongly_lost = false;
@@ -2704,6 +2780,7 @@ int main(int argc, char** argv) {
     testPutInvalidatesReservation();
     testPutPieces();
     testStoreConditional();
+    testPpuReservationIsLineGranular();
     testIncrementStress();
     testCompareWindow();
     testUnchangedChunkSurvivesRace();

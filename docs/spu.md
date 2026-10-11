@@ -159,12 +159,25 @@ logs `tox2: spu: first image <name> at ls 0x<start>..0x<end> on thread 0x<id>`.
 GETLLAR, PUTLLC, PUTLLUC and PUT, and the PPU store-conditionals (`stwcx.`, `stdcx.`), share one table of
 65,536 stripes indexed by the 128-byte line (`(ea >> 7) & 0xffff`). A stripe word has a lock bit and a
 version. A writer locks the stripes of the lines it writes, writes, and bumps the version; a line that
-shares a stripe with another one causes at worst a spurious PUTLLC failure, which SPU code retries.
+shares a stripe with another one causes at worst a spurious PUTLLC or store-conditional failure, which the guest code retries.
 
 - GETLLAR copies the line (retrying while a writer holds the stripe) and keeps the version and a 128-byte
   snapshot. PUTLLC fails at once when the version moved, fails when the line differs from the snapshot,
   and otherwise writes only the aligned 8-byte chunks whose value differs from the snapshot, each with one
   atomic store. The reservation is cleared either way.
+- **PPU reservations are line-granular.** `lwarx` and `ldarx` read the stripe version before the word
+  (`ReservationTable::loadReserved`, which retries while a writer holds the stripe) and keep it in the PPU
+  context. `stwcx.` and `stdcx.` take the stripe lock and succeed only when the version is unchanged and the
+  word still has the loaded value. So a PUTLLC, PUTLLUC, MFC PUT or another store-conditional that touched
+  any word of the line since the `lwarx` fails the store, as on hardware, even when the reserved word
+  itself is intact. libsre needs this: `cellSpursSendSignal` does `lwarx` on a taskset word, plain loads
+  of other words of the same line, then `stwcx.`, and retries only when the `stwcx.` fails. When the
+  taskset policy module's PUTLLC moved a task from running to waiting between those loads, a value-only
+  reservation let the `stwcx.` succeed on a torn snapshot, the call returned
+  `CELL_SPURS_TASK_ERROR_SRCH` and an assertion in libsre aborted the game. The loop in `cellSpursQueuePushBody` that
+  decides whether to signal a waiting task has the same shape against the SPU pop. Lines that share a stripe can fail a `stwcx.` spuriously; the guest
+  retries. Plain PPU stores to other words of the line do not cancel the reservation (see the race window
+  below); a plain store to the reserved word itself is still caught by the value compare.
 - A thread waiting in `RdEventStat` for the reservation-lost event (`0x400`) sleeps until a reservation-aware
   write changes the store epoch or 1 ms passes, then compares the line with the snapshot. A plain PPU
   store is therefore seen within about 1 ms.

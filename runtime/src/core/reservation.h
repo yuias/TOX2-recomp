@@ -64,11 +64,20 @@ public:
     // reservation-aware replacement for a plain store of up to 8 bytes: byte-swap the value into `src`.
     void put(std::uint8_t* base, std::uint32_t ea, const std::uint8_t* src, std::uint32_t size);
 
-    // PPU stwcx./stdcx.: writes `value` when the `size` (4 or 8) bytes at `ea` still equal `expected`,
-    // under the stripe lock. Both values are host-order numbers; memory is big-endian. Returns whether
-    // the store happened. Success bumps the stripe version and the store epoch.
+    // PPU lwarx/ldarx: loads the `size` (4 or 8) bytes at `ea` as a host-order number and returns the
+    // version of the stripe that covers the line. The version is read before the word and re-checked
+    // after it, so the pair is consistent and no write that completed before the call can be missed.
+    void loadReserved(const std::uint8_t* base, std::uint32_t ea, std::uint32_t size, std::uint64_t& value,
+                      std::uint64_t& version);
+
+    // PPU stwcx./stdcx.: writes `value` when the stripe still has `expected_version` (from loadReserved())
+    // and the `size` (4 or 8) bytes at `ea` still equal `expected`, under the stripe lock. Any
+    // reservation-aware write to the line since the load bumped the version, so the store fails like it
+    // would on hardware; a line that shares the stripe fails it too. The word compare catches plain
+    // stores to the word, which do not bump versions. Values are host-order numbers; memory is big-endian.
+    // Returns whether the store happened. Success bumps the stripe version and the store epoch.
     bool storeConditional(std::uint8_t* base, std::uint32_t ea, std::uint32_t size, std::uint64_t expected,
-                          std::uint64_t value);
+                          std::uint64_t expected_version, std::uint64_t value);
 
     // True when the reservation is gone: the stripe version changed or the line differs from the
     // snapshot. The content compare is what sees plain stores. A reservation that is not valid is

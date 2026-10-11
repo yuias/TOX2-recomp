@@ -126,7 +126,8 @@ void tox2Trap(Tox2PpuContext* ctx, uint8_t* base, uint32_t site) {
 }
 
 // Single-threaded reservation: it holds while the address matches and memory still contains the
-// value that lwarx/ldarx observed. Every store-conditional clears it, successful or not.
+// value that lwarx/ldarx observed. Every store-conditional clears it, successful or not. There is no
+// reservation table here, so reserve_version stays unused (the real runtime checks it per line).
 uint32_t tox2Lwarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
     uint32_t value = tox2Read32(base, ea);
     ctx->reserve_addr = ea;

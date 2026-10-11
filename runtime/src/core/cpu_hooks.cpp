@@ -69,20 +69,28 @@ void tox2Trap(Tox2PpuContext* ctx, uint8_t* base, uint32_t site) {
     tox2::fatal(tox2::FatalKind::Trap, std::format("at {:#010x}", site));
 }
 
-// A reservation holds while the address matches and memory still contains the value that lwarx/ldarx
-// observed (an ABA rewrite is accepted). Every store-conditional clears it, successful or not. The
-// compare and the write happen under the stripe lock of the reservation table, so they are atomic
-// against SPU GETLLAR/PUTLLC and PUT on the same line even though SPU threads run without the guest lock.
+// A reservation holds while the address matches, memory still contains the value that lwarx/ldarx
+// observed (an ABA rewrite of the word is accepted) and the stripe version of the line is unchanged. The
+// version moves on every reservation-aware write (PUTLLC, PUTLLUC, MFC PUT through the table, another
+// store-conditional), so a write to any word of the line since the lwarx fails the store like it does on
+// hardware. Guest loops read neighbouring words of the line between lwarx and stwcx. and rely on that to
+// not act on a torn snapshot. Lines that share a stripe can fail the store spuriously; the guest's retry
+// loops absorb that. Plain PPU stores to other words of the line still do not cancel the reservation:
+// they are not routed through the table (see docs/spu.md). Every store-conditional clears the
+// reservation, successful or not. The checks and the write happen under the stripe lock, so they are
+// atomic against SPU GETLLAR/PUTLLC and PUT on the same line even though SPU threads run without the guest lock.
 uint32_t tox2Lwarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
-    const uint32_t value = tox2Read32(base, ea);
+    uint64_t value;
+    tox2::reservations().loadReserved(base, ea, 4, value, ctx->reserve_version);
     ctx->reserve_addr = ea;
     ctx->reserve_value = value;
     ctx->reserve_valid = 1;
-    return value;
+    return static_cast<uint32_t>(value);
 }
 
 uint64_t tox2Ldarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
-    const uint64_t value = tox2Read64(base, ea);
+    uint64_t value;
+    tox2::reservations().loadReserved(base, ea, 8, value, ctx->reserve_version);
     ctx->reserve_addr = ea;
     ctx->reserve_value = value;
     ctx->reserve_valid = 1;
@@ -91,14 +99,14 @@ uint64_t tox2Ldarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
 
 bool tox2Stwcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint32_t value) {
     const bool ok = ctx->reserve_valid && ctx->reserve_addr == ea &&
-                    tox2::reservations().storeConditional(base, ea, 4, ctx->reserve_value, value);
+                    tox2::reservations().storeConditional(base, ea, 4, ctx->reserve_value, ctx->reserve_version, value);
     ctx->reserve_valid = 0;
     return ok;
 }
 
 bool tox2Stdcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint64_t value) {
     const bool ok = ctx->reserve_valid && ctx->reserve_addr == ea &&
-                    tox2::reservations().storeConditional(base, ea, 8, ctx->reserve_value, value);
+                    tox2::reservations().storeConditional(base, ea, 8, ctx->reserve_value, ctx->reserve_version, value);
     ctx->reserve_valid = 0;
     return ok;
 }

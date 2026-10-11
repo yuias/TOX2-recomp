@@ -186,20 +186,54 @@ void ReservationTable::put(std::uint8_t* base, std::uint32_t ea, const std::uint
     }
 }
 
+void ReservationTable::loadReserved(const std::uint8_t* base, std::uint32_t ea, std::uint32_t size,
+                                    std::uint64_t& value, std::uint64_t& version) {
+    const std::atomic<std::uint64_t>& s = stripe(ea);
+    std::uint32_t spins = 0;
+    for (;;) {
+        // The version is read before the value: a write that lands in between must not become the baseline.
+        const std::uint64_t v = s.load(std::memory_order_acquire);
+        if (v & 1) {
+            spinOnce(spins);
+            continue;
+        }
+        std::uint64_t loaded;
+        if (size == 4) {
+            loaded =
+                    std::byteswap(__atomic_load_n(reinterpret_cast<const std::uint32_t*>(base + ea), __ATOMIC_RELAXED));
+        } else {
+            loaded =
+                    std::byteswap(__atomic_load_n(reinterpret_cast<const std::uint64_t*>(base + ea), __ATOMIC_RELAXED));
+        }
+        // Keeps the word load above the re-read; without it a writer could pass unnoticed.
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (s.load(std::memory_order_relaxed) == v) {
+            value = loaded;
+            version = v;
+            return;
+        }
+    }
+}
+
 bool ReservationTable::storeConditional(std::uint8_t* base, std::uint32_t ea, std::uint32_t size,
-                                        std::uint64_t expected, std::uint64_t value) {
+                                        std::uint64_t expected, std::uint64_t expected_version, std::uint64_t value) {
     if (size != 4 && size != 8) return false;
     std::atomic<std::uint64_t>& s = stripe(ea);
-    lock(s);
-    bool ok;
-    if (size == 4) {
-        auto* target = reinterpret_cast<std::uint32_t*>(base + ea);
-        ok = std::byteswap(__atomic_load_n(target, __ATOMIC_RELAXED)) == static_cast<std::uint32_t>(expected);
-        if (ok) __atomic_store_n(target, std::byteswap(static_cast<std::uint32_t>(value)), __ATOMIC_RELEASE);
-    } else {
-        auto* target = reinterpret_cast<std::uint64_t*>(base + ea);
-        ok = std::byteswap(__atomic_load_n(target, __ATOMIC_RELAXED)) == expected;
-        if (ok) __atomic_store_n(target, std::byteswap(value), __ATOMIC_RELEASE);
+    // lock() returns the version the stripe had; a bump since loadReserved() means a reservation-aware
+    // write touched the line (or a line sharing the stripe) after the reservation was taken.
+    const bool version_ok = lock(s) == expected_version;
+    bool ok = false;
+    if (version_ok) {
+        // The word compare still matters: plain stores to the word do not bump the version.
+        if (size == 4) {
+            auto* target = reinterpret_cast<std::uint32_t*>(base + ea);
+            ok = std::byteswap(__atomic_load_n(target, __ATOMIC_RELAXED)) == static_cast<std::uint32_t>(expected);
+            if (ok) __atomic_store_n(target, std::byteswap(static_cast<std::uint32_t>(value)), __ATOMIC_RELEASE);
+        } else {
+            auto* target = reinterpret_cast<std::uint64_t*>(base + ea);
+            ok = std::byteswap(__atomic_load_n(target, __ATOMIC_RELAXED)) == expected;
+            if (ok) __atomic_store_n(target, std::byteswap(value), __ATOMIC_RELEASE);
+        }
     }
     if (ok) {
         unlockWithWrite(s);
