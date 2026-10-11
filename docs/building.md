@@ -20,7 +20,7 @@ then configures, builds, and optionally runs CTest.
 | `-Preset debug\|release` | The CMake preset (default `debug`). Build output goes to `build/<preset>/`, executables to `build/<preset>/bin/`. |
 | `-Clean` | Delete `build/<preset>/` before configuring. This also deletes the default hdd directory `build/<preset>/hdd` (game data and saves). |
 | `-Test` | Run CTest after the build. Which tests run depends on the other parameters; see [Tests](tests.md). |
-| `-GeneratedDir <dir>` | The directory written by `ps3tool.py emit --out <dir>`. Compiles it into `tox2_ppu_generated` and builds `tox2_game` and the link test. This game's executable is large, so it is emitted with `--chunks 256` and a full build compiles 256 generated C files; if the compiler runs out of memory, lower the parallelism with the `CMAKE_BUILD_PARALLEL_LEVEL` environment variable. Without it only the runtime libraries, tools and unit tests are built. The directory must hold the executable's `sources.cmake` and the libsre tree `<dir>/libsre/libsre_sources.cmake` (the second `emit` command in [Emitting C](emitter.md#a-prx-module-libsre)); if one is missing, configuration fails and prints the `emit` command to run. CMake variable `TOX2_PPU_GENERATED_DIR`. |
+| `-GeneratedDir <dir>` | The directory written by `ps3tool.py emit --out <dir>`. Compiles it into `tox2_ppu_generated` and `tox2_spu_generated` and builds `tox2_game` and the link tests. This game's executable is large, so it is emitted with `--chunks 256` and a full build compiles 256 generated C files; if the compiler runs out of memory, lower the parallelism with the `CMAKE_BUILD_PARALLEL_LEVEL` environment variable. Without it only the runtime libraries, tools and unit tests are built. The directory must hold the executable's `sources.cmake`, the libsre tree `<dir>/libsre/libsre_sources.cmake` (the second `emit` command in [Emitting C](emitter.md#a-prx-module-libsre)) and the SPU tree `<dir>/spu/spu_sources.cmake` (the `spu-emit` command in [Emitting C](emitter.md#spu-images)); if one is missing, configuration fails and prints the command to run. CMake variable `TOX2_PPU_GENERATED_DIR`. |
 | `-GameDir <dir>` | The game directory (the one that contains `PS3_GAME`). The `game_boot` test runs against it (it also needs `-EbootElf` or `-EbootBin`). CMake variable `TOX2_GAME_DIR`. |
 | `-EbootElf <path>` | The decrypted executable for the Python tests that read the real ELF and for the game tests. Not needed to build. When `-EbootBin` is given and this is not, it defaults to `generated/inputs/EBOOT.elf`, the file that `-EbootBin` produces. CMake variable `TOX2_EBOOT_ELF`. |
 | `-EbootBin <path>` | The disc's `PS3_GAME/USRDIR/EBOOT.BIN`. The build decrypts it into `generated/inputs/EBOOT.elf`; see [Decrypting the inputs](#decrypting-the-inputs). The file must exist. CMake variable `TOX2_EBOOT_BIN`. |
@@ -73,10 +73,11 @@ both presets, never into the game directory):
 Decryption runs at build time, not at configure time, and again only when an input file or the tool
 has changed. The produced `EBOOT.elf` is the default of `TOX2_EBOOT_ELF`, so `emit`, the Python
 real-executable tests and `game_boot` use it. The usual order is: build once with the two files, run
-both emit commands (`ps3tool.py emit generated/inputs/EBOOT.elf --chunks 256 --out generated/ppu` and
-`ps3tool.py emit generated/inputs/libsre.reloc.elf --db config/libsre_functions.json --symbol-prefix libsre --chunks 4 --out generated/ppu/libsre --max-unhandled 0`),
+the three emit commands (`ps3tool.py emit generated/inputs/EBOOT.elf --chunks 256 --out generated/ppu`,
+`ps3tool.py emit generated/inputs/libsre.reloc.elf --db config/libsre_functions.json --symbol-prefix libsre --chunks 4 --out generated/ppu/libsre --max-unhandled 0`
+and `ps3tool.py spu-emit --eboot generated/inputs/EBOOT.elf --libsre generated/inputs/libsre.reloc.elf --out generated/ppu/spu --max-unhandled 0`),
 then build again with `-GeneratedDir generated/ppu -GameDir <game-dir>`; the cache keeps the earlier
-parameters.
+parameters. The SPU function databases (`config/spu/`) are committed, so `spu-emit` needs no recovery run.
 
 ### Keys
 
@@ -156,7 +157,9 @@ code was emitted from.
 
 `tox2_decrypt` (with its library and the unit tests `tox2_decrypt_tests`) is always built. `tox2_inputs`,
 the target that writes `generated/inputs`, exists only with `-EbootBin` or `-Pup`. The generated code
-of the executable and of libsre are compiled together into `tox2_ppu_generated`.
+of the executable and of libsre are compiled together into `tox2_ppu_generated`, and the generated SPU code
+of the game and of libsre into `tox2_spu_generated`. The stub runtimes `tox2_ppu_stub` and `tox2_spu_stub`
+supply the hooks for the link checks and the header and semantics tests; `tox2_game` links the runtime core instead.
 
 ## Test builds
 
@@ -195,3 +198,7 @@ The full list of tests and the conditions under which each one is registered are
   the committed Ghidra summary, or runs with `--no-ghidra`.
 - git and a sparse checkout of the RPCS3 sources, for `ps3tool.py nidgen` only (see
   [Analysis tools](analysis-tools.md#nid-and-syscall-name-tables)).
+- WSL with a distribution that has a C toolchain (Ubuntu-26.04 is the verified one), for
+  `ps3tool.py spu-objdump-diff` only. The `objdump` it runs is built by `tools/build-spu-objdump.sh` (see
+  [Analysis tools](analysis-tools.md#spu-decoder-cross-check-with-objdump)); no other command and no build
+  needs it.

@@ -5,7 +5,7 @@
 | Path | Contents |
 | --- | --- |
 | `CMakeLists.txt`, `CMakePresets.json`, `cmake/` | Build configuration (clang, Ninja, `debug` and `release` presets) |
-| `runtime/` | Runtime executable stub (`tox2_runtime`), stub runtime for generated code (`tox2_ppu_stub`), the runtime core and `tox2_game` (`runtime/src/core`, `lv2`, `hle`, `input`, `rsx`, `media`, `audio`, `game_main.cpp`; see [Runtime internals](runtime.md) and [`tox2_game` options](runtime-options.md)) and runtime-side tests |
+| `runtime/` | Runtime executable stub (`tox2_runtime`), stub runtimes for generated code (`tox2_ppu_stub`, `tox2_spu_stub`), the runtime core and `tox2_game` (`runtime/src/core`, `lv2`, `hle`, `input`, `rsx`, `media`, `audio`, `spu`, `game_main.cpp`; see [Runtime internals](runtime.md) and [`tox2_game` options](runtime-options.md)) and runtime-side tests |
 | `externals/spdlog` | spdlog submodule used by the runtime logger |
 | `externals/libpng`, `externals/zlib` | libpng (v1.6.59) and zlib (v1.3.2) submodules, the PNG codec behind `cellPngDec` |
 | `externals/yyjson` | yyjson submodule (0.13.0, built as a static library), used only to parse the VFS configuration |
@@ -16,6 +16,7 @@
 | `tools/tox2_rsxreplay/` | `tox2_rsxreplay`, which replays an RSX capture without the game; see [Capture and replay](rendering.md#capture-and-replay) |
 | `cmake/Render.cmake`, `cmake/rsx_replay.cmake` | Renderer targets and tests, and the pin file of the `rsx_replay` test |
 | `cmake/game_boot.cmake` | Pin file of the `game_boot` test: arguments and milestones |
+| `cmake/SpuCodegen.cmake` | The contract-header check, the generated SPU tree with its link test, the SPU semantics harness, the whole-program SPU tests and the recompiled LZMA inflate test |
 | `runtime/src/input/` | Pad buttons, the host pad state and provider, the pad script player (no pad scripts are shipped), and the gamepad code (backend interface, GameInput backend `tox2_input_gameinput`, mapping, selection, hub, probe); see [Input](runtime.md#input) and [Gamepads](input.md) |
 | `tools/tox2_padtool/` | `tox2_padtool`: GameInput devices, live readings and rumble; see [`tox2_padtool`](input.md#tox2_padtool) |
 | `tools/fetch-gameinput.ps1`, `cmake/gameinput.cmake`, `cmake/Input.cmake` | GameInput package fetch script and pin, and the input targets and tests (`input_core`, `input_gameinput`) |
@@ -29,20 +30,28 @@
 | `tools/ps3recomp/` | ELF/PRX parsing (module info of a relocated PRX), PPU decoder and formatter, probe, Ghidra export, diff and summary, function recovery (seeds, partition, jump tables, coverage, syscall resolution), name table generator |
 | `tools/ghidra/` | Java `GhidraScript`s run by `ghidra-export` |
 | `tools/ps3recomp/emit*.py` | The `emit` command: function DB loader and census, per-instruction handlers by group, output writer and report |
+| `tools/ps3recomp/spu*.py` | The SPU commands: the image registry loader and extraction (`spu_images.py`), the decoder and formatter (`spu.py`, `spu_format.py`) and `spu-disasm` (`spu_disasm.py`), the objdump cross-check (`spu_objdump.py`, `spu_objdump_diff.py`), flow, jump tables and recovery (`spu_flow.py`, `spu_jumptab.py`, `spu_recover.py`), and the emitter with its lowering and one op-group module per group (`spu_emit*.py`, `spu_lower_stackfree.py`) |
+| `tools/build-spu-objdump.sh` | Builds the SPU-capable `objdump` under WSL for `spu-objdump-diff`; see [SPU decoder cross-check with objdump](analysis-tools.md#spu-decoder-cross-check-with-objdump) |
 | `tools/tests/` | Unit tests |
 | `tools/tests/ppu_semantics/` | Semantics harness cases and the C generator; see [Semantics harness](emitter.md#semantics-harness) |
-| `runtime/include/tox2/` | Contract header and inline helpers for generated code |
+| `tools/tests/spu_semantics/`, `tools/tests/spu_programs/`, `tools/tests/spu_asm.py` | The SPU semantics cases and their C generator, the whole-program SPU tests, and the test assembler for SPU words; see [Semantics harness](emitter.md#semantics-harness) |
+| `runtime/include/tox2/` | Contract headers and inline helpers for generated PPU code (`ppu*.h`) and SPU code (`spu_context.h`, `spu_ops.h`, `spu_fp.h`, `spu_lower_stackfree.h`, `spu_stub.h`) |
 | `config/target.json` | Pinned size and hashes of the target executable (`EBOOT.BIN` and `EBOOT.elf`), of the firmware `libsre.prx` with its firmware version, and of `libsre.reloc.elf` with its base address |
 | `config/vfs.example.json` | Example VFS configuration for `tox2_game --vfs-config`, placeholder paths only; see [VFS configuration file](virtual-file-system.md#vfs-configuration-file) |
 | `config/nids.json`, `config/lv2_syscalls.json` | FNID and lv2 syscall name tables generated from RPCS3 sources |
 | `config/ghidra_summary.json`, `config/extra_seeds.json`, `config/functions.json` | Ghidra summary, extra function starts and the recovered function database. See [Function recovery](function-recovery.md#function-recovery) |
+| `config/spu_images.json`, `config/spu/` | The registry of the 16 SPU images (eight in the executable, eight in libsre) and the recovered function databases of the 14 that have an LS base, one file per image; see [SPU images](analysis-tools.md#spu-images) and [Function recovery](function-recovery.md#on-the-spu-images) |
 | `config/libsre_functions.json` | The recovered function database of libsre, committed like `config/functions.json`; see [Function recovery](function-recovery.md#on-libsre) |
 | `runtime/src/hle/libsre.*` | The libsre layout header (the guest addresses of the relocated image, `kBase` and the others) and the check of a loaded image against it; see [libsre](runtime.md#libsre) |
 | `runtime/src/core/elf_loader.*`, `dispatch.*` | The executable and PRX loaders, and the dispatch tables with one span per loaded image |
+| `runtime/src/spu/` | The SPU runtime in the runtime core: SPU threads and the dispatcher, the MFC, channels and mailboxes, and the SPU census; see [SPU usage](spu.md) |
 | `docs/` | Development documentation |
 | `LICENSE`, `THIRD_PARTY_NOTICES.md` | Licence of this project (0BSD) and notices of third-party components (FFmpeg, GameInput, the RPCS3 key files) |
 | `generated/` | Tool output, including `generated/ppu` from `emit` (git-ignored) |
 | `generated/ppu/libsre/` | The C code of libsre from `emit --symbol-prefix libsre`, with every file and symbol prefixed `libsre` (git-ignored); see [A PRX module](emitter.md#a-prx-module-libsre) |
+| `generated/ppu/spu/` | The C code of the SPU images from `spu-emit`, with the dispatch tables (git-ignored); see [SPU images](emitter.md#spu-images) |
+| `generated/spu/images/` | The SPU images as standalone files with a manifest, from `spu-extract` (git-ignored) |
+| `generated/analysis/spu_objdump/` | The `objdump` listings that `spu-objdump-diff` reads again with `--listing-dir` (git-ignored) |
 | `generated/inputs/` | The decrypted `EBOOT.elf`, `libsre.prx` and `libsre.reloc.elf` (`libsre.prx` relocated to `0x011d0000`) written by the build with `-EbootBin` and `-Pup` (git-ignored) |
 | `generated/deps/rpcs3/` | The downloaded RPCS3 key files `key_vault.h` and `key_vault.cpp`, one directory per commit (git-ignored) |
 | `build/` | Build output (git-ignored) |

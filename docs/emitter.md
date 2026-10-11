@@ -12,7 +12,8 @@ pwsh -NoProfile -File tools/build.ps1 -Preset release -GeneratedDir generated/pp
 The `--chunks` default is 16. This executable has about 3 million code words, so it is emitted
 with `--chunks 256`; see [Chunks and build time](#chunks-and-build-time). The firmware module libsre
 is emitted as a second tree with its own symbol prefix; see [A PRX module (libsre)](#a-prx-module-libsre).
-A build with `-GeneratedDir` needs both trees.
+The SPU programs of the game and of libsre are emitted by a third command, `spu-emit`; see
+[SPU images](#spu-images). A build with `-GeneratedDir` needs all three trees.
 
 `emit` reads the function database (`--db`, default `config/functions.json`), checks that it
 matches the ELF's hash and code range, and emits every function of the database as one C
@@ -109,6 +110,103 @@ For the committed database `config/libsre_functions.json` (352 functions, see
 - 2 `switch` statements with 14 cases, 177 system call sites, no traps, 481 direct calls, 450 calls
   of import trampolines, 28 indirect calls and 15 direct tail calls.
 
+## SPU images
+
+`spu-emit` turns the committed SPU function databases (`config/spu/<name>.json`, written by `spu-recover`; see
+[Function recovery](function-recovery.md#on-the-spu-images)) and the image bytes into C source. It is the
+third emit command of a build; the registry, the databases and the inputs are the ones of the other `spu-*`
+commands (see [SPU images](analysis-tools.md#spu-images)):
+
+```sh
+python tools/ps3tool.py spu-emit --eboot generated/inputs/EBOOT.elf --libsre generated/inputs/libsre.reloc.elf --out generated/ppu/spu --max-unhandled 0
+```
+
+`--out` defaults to `generated/ppu/spu` (git-ignored), the directory that `-GeneratedDir generated/ppu` makes
+CMake read. `--db-dir` (default `config/spu`) selects the databases, `--images a,b,...` a subset, `--report`
+the report (default `generated/analysis/spu_emit_report.json`) and `--comments` annotates the code with the
+disassembly. `spu-emit` refuses a database whose recorded hashes do not match the image (exit 3). The
+output is deterministic and a file is only rewritten when its content changes, so a second run prints
+`output: 22 files, 0 written`. `--census` counts the instructions and the unhandled words of each image
+and writes no files.
+
+| File | Contents |
+| --- | --- |
+| `spu_<image>_NNN.c` | The functions of one image in address order. A new chunk starts once 4096 instructions are reached; a function is never split |
+| `spu_tables.c` | Per image the segments (guest address, LS address, size, code flag), the dispatch entries and the `kTox2SpuImages` table with the image's SHA-256 |
+| `spu_funcs.h` | Declarations of the functions; includes `tox2/spu_ops.h` and `tox2/spu_lower_stackfree.h` |
+| `spu_sources.cmake` | `TOX2_SPU_GENERATED_SOURCES`, the list of sources that `tox2_spu_generated` compiles |
+
+- Every function has the form `TOX2_SPU_FUNC(spu_<image>_<LS in 5 hex digits>)`, that is
+  `void (Tox2SpuContext* __restrict ctx, uint8_t* __restrict ls)`. Guest memory is never visible to generated
+  SPU code: only the runtime's channel hooks (the MFC among them) reach it.
+- A dispatch entry is one block that an indirect branch can reach (the `dispatch_seeds` of the database),
+  with the first one to four instruction words. The runtime compares these words with the local store
+  before it jumps, so a block whose code is not the emitted code is detected instead of run.
+- The semantics of an instruction and the way control moves are separate. The handlers of the six op
+  groups (below) return C statements; the control group computes conditions and target expressions in
+  `spu_emit_core.py`; the lowering module `tools/ps3recomp/spu_lower_stackfree.py` turns each transfer into
+  C. The registry names the lowering per image (`lowering`, only `stackfree` exists). The stack-free
+  lowering uses no host stack for the guest call stack:
+
+  | Transfer | Emitted as |
+  | --- | --- |
+  | Branch to a block of the same function | `goto L_xxxxx;` (a backward edge also gets `TOX2_SPU_SF_LOOP(site)`, the place where a halt request is noticed) |
+  | Branch or call to a dispatchable block of another function | the link register is written, then `TOX2_SPU_SF_JUMP(fn, target)`, a `musttail` call |
+  | `bi`, `bisl`, `bisled`, `iret`, conditional indirect branches, a direct branch outside the image's code | the target is computed, the link is written, then `TOX2_SPU_SF_DISPATCH(site, target)` |
+  | Fall-through off the end of a function | `TOX2_SPU_SF_JUMP` to the next function |
+  | Halt, or a `stop` that ends the thread | `TOX2_SPU_SF_LEAVE()`, a `return` to the run loop |
+
+  Every transfer between functions is a `musttail` call or a return, so the host stack holds the run loop
+  frame, one generated frame and at most one hook frame. Every indirect branch is a computed dispatch: the
+  resolutions in the database only supply entries and jump tables. A branch target is masked with
+  `0x3fffc`, the E and D bits of an indirect branch set or clear `int_enabled` before the transfer, and
+  `bisled` is taken when `tox2SpuChannelCount` of channel 0 is non-zero.
+- The op groups follow the decoder's groups, one module `tools/ps3recomp/spu_emit_ops_<group>.py` each:
+  `int` (arithmetic, logic, compare, select, multiply, byte, shift and rotate, and the conditional halts),
+  `perm` (shuffle, quadword shifts and rotates, generate controls, select masks, gathers), `mem` (quadword
+  loads and stores), `chan` (channels, `stopd`, `mfspr`, `mtspr`, `fscrrd`, `fscrwr`), `fp_single` and
+  `fp_double`. A mnemonic whose group module is missing is emitted as a call to `tox2SpuUnhandled`.
+  `sync`, `dsync`, `nop`, `lnop` and the branch hints emit no code, because the local store is private to the
+  thread.
+- The report is JSON. Per image it has `functions`, `instructions`, `dispatchable`, `chunks` (file, functions,
+  instructions, bytes), `unhandled` (total, per mnemonic, per group, with example addresses), `edges`
+  (`gotos`, `jumps`, `dispatch_direct`, `dispatch_indirect`, `fallthrough_jumps`, `fallthrough_dispatch`,
+  `returns`, `stops`, `leaves`, `invalid_flow`), `invalid_flow`, `unlisted_targets`, `labels` and `loop_hooks`;
+  at the top it has `gate_unhandled` and `ungated_unhandled`. Stdout has three lines per image in `--census`
+  mode (counts, the commonest mnemonics, the unhandled ones) and one line per image otherwise, then
+  `gate unhandled: N`.
+- `--max-unhandled N` makes `spu-emit` exit with 9 if the gate images together have more than `N` unhandled
+  words. Every emitted image is a gate image (a registry `gate` is true for each image with an LS base), so
+  no `ungated unhandled: <image> <n>` line appears; the two position-independent blobs are neither emitted
+  nor gated. The gate is checked after the files are written.
+- A word whose group has no handler, an operand the handler refuses (a conversion scale outside 0..127), or a
+  rounding mode in the double-precision operations (below) reaches `tox2SpuUnhandled` at run time.
+
+For the committed databases the run gives 14 images, 625 functions, 56,025 instructions and 1,990 dispatch
+entries, written as 19 chunk files and the three shared files (22 files, about 4.0 MB of C, under one
+second). `gate unhandled: 0`, so `--max-unhandled 0` exits with 0; no mnemonic of any emitted image lacks a
+handler. The edges are 2,332 `goto`s, 1,308 direct jumps, 746 indirect dispatches, 589 returns, 15 fall-through
+jumps, 6 `stop`s and 4 leaves, with 1,783 labels and 811 loop hooks. Two flows end in a non-code word (`invalid_flow`
+2: one each in `libsre_kernel1` and `libsre_kernel2`, where a fall-through runs into a non-code word); the
+emitted code calls `tox2SpuUnhandled` there, and they are not counted as unhandled words. Per image:
+
+| Image | Functions | Instructions | Dispatchable | Chunks |
+| --- | --- | --- | --- | --- |
+| `eboot_spline` | 16 | 1,106 | 41 | 1 |
+| `eboot_edgelzma` | 38 | 3,823 | 87 | 1 |
+| `eboot_bnuscore` | 50 | 3,583 | 232 | 1 |
+| `eboot_animation` | 55 | 4,741 | 133 | 2 |
+| `eboot_updatematrix` | 182 | 14,567 | 608 | 4 |
+| `eboot_renderparticle` | 73 | 8,303 | 268 | 2 |
+| `eboot_morph` | 62 | 3,745 | 145 | 1 |
+| `eboot_skin` | 43 | 3,811 | 100 | 1 |
+| `libsre_kernel1` | 4 | 366 | 7 | 1 |
+| `libsre_kernel2` | 3 | 377 | 6 | 1 |
+| `libsre_system_service` | 18 | 2,104 | 50 | 1 |
+| `libsre_taskset_pm` | 19 | 1,766 | 89 | 1 |
+| `libsre_jobchain_pm1` | 32 | 3,872 | 114 | 1 |
+| `libsre_jobchain_pm2` | 30 | 3,861 | 110 | 1 |
+
 ## Chunks and build time
 
 The size of the C output follows the code size: with `--chunks 256` the 29,196 functions
@@ -149,6 +247,36 @@ Vector registers are stored byte-reversed relative to guest memory; the `TOX2_VR
 accessors take big-endian element numbers. Most helpers cite the RPCS3 interpreter handler
 they follow.
 
+Generated SPU code has its own contract headers in the same directory. They compile as C23 and C++26 and
+with `-ffreestanding`, and the test `spu_header_check` compiles the headers in all three ways:
+
+- `spu_context.h` is the contract between generated SPU code and a runtime and does not depend on how
+  control is lowered. It has the context `Tox2SpuContext` (128 registers as `Tox2Vr` with the PPU's
+  byte-reversed lanes, so `TOX2_VR_W(v, 0)` is the preferred-slot word; FPSCR image; the dispatch input
+  `jump_target`, the transferring instruction `jump_site`; `srr0`; the `halt` word that other threads set;
+  `exit_ls`, the LS address whose dispatch returns to the run loop; `int_enabled`; the trace ring), the
+  table types `Tox2SpuEntry`, `Tox2SpuSegment` and `Tox2SpuImageInfo` with the generated `kTox2SpuImages`,
+  the inline local-store accessors (`tox2SpuLoadQ` and `tox2SpuStoreQ` wrap at the 256 KiB LS and ignore the
+  low four address bits), and the hooks the runtime implements: `tox2SpuDispatch`, `tox2SpuReadChannel`,
+  `tox2SpuWriteChannel`, `tox2SpuChannelCount`, `tox2SpuStop`, `tox2SpuHalt` and `tox2SpuUnhandled`. The
+  channel and stop hooks return false when the thread must leave.
+- `spu_ops.h` holds the inline semantics helpers of the integer, permute and memory groups. A helper takes
+  the source registers by value and returns the new register, so `rt` may alias a source, and every shift
+  count is in range, because the harness builds with UBSan traps. `spu_fp.h` is included at its end
+  and holds the floating-point helpers.
+- `spu_lower_stackfree.h` holds the `TOX2_SPU_SF_*` macros (`ENTER`, `LOOP`, `JUMP`, `DISPATCH`, `LEAVE`). It
+  is the only header that knows the stack-free model; another lowering would add its own header and emitter
+  module, and the context, the ops and the hooks stay.
+- `spu_stub.h` is test support of the stub runtime (`tox2SpuStubSelectImage`, `tox2SpuStubSetLabel`) and
+  not part of the contract.
+
+`runtime/src/spu_stub_runtime.cpp` (library `tox2_spu_stub`) implements the SPU hooks only far enough to link
+and test generated code: dispatch looks the target up in the image that the test selected, and every hook
+that would need a thread (channels, stops, halts, unknown targets, unhandled words) prints a message and
+exits. It defines the same symbols as the SPU runtime in `tox2_runtime_core`, so a program links one of the
+two, never both. The link checks `spu_link` and `ppu_link` use the stub; `tox2_game`, `spu_programs` and
+`spu_lzma_inflate` use the runtime, and the semantics harness has its own driver.
+
 `runtime/src/ppu_stub_runtime.cpp` (library `tox2_ppu_stub`) implements the hooks only far
 enough to link and test generated code: dispatch works, and every hook that would need the
 system (HLE calls including `tox2HleCallImport`, unknown targets, unhandled words, traps) prints a
@@ -180,6 +308,18 @@ architecture rule the expected value comes from), the instruction words (built w
 extra callee functions and switch targets. Expected values are derived by hand, not by
 running the emitter.
 
+The SPU emitter has the same kind of harness in `tools/tests/spu_semantics/` (`cases_<group>.py` for `int`,
+`perm`, `mem`, `control`, `chan`, `fp_single` and `fp_double`). `gen.py` encodes each case with the test
+assembler `tools/tests/spu_asm.py`, which builds the word of any mnemonic of the decoder's table, runs the
+words through recovery and the real emitter, and writes `spu_semantics_cases.{h,c}` into the build
+directory. `runtime/tests/spu_semantics_main.c` is the whole runtime of a case: it dispatches over the case's
+entry table, answers scripted channel reads and event counts, and records channel writes, stop codes, taken
+halts and unhandled words, which a case can expect. The expected values come from the SPU ISA 1.2 text,
+not from the emitter. CTest runs it as `spu_semantics`; pass case names as arguments to run only those.
+`tools/tests/spu_programs/` assembles four whole programs (a sum over an array, an atomic counter, a jump
+table with six threads, an event to the PPU), emits them into synthetic images through the real recovery
+and emitter, and runs them through the lv2 SPU thread group calls on the runtime core (`spu_programs`).
+
 ## What is and is not implemented
 
 Every instruction word in the code range of the pinned ELF has an emitter handler, so
@@ -208,3 +348,30 @@ group (`tools/ps3recomp/emit_ops_<group>.py`) together with semantics cases. Kno
 - The stub runtime does not implement import calls, lv2 syscalls, threads or memory
   allocation: it exits on import calls and returns 0 from syscalls. The runtime in `tox2_game`
   implements a subset; see [Runtime internals](runtime.md).
+
+For the SPU, every instruction word of the 14 emitted images has a handler (`gate unhandled: 0`), including the
+single-precision and double-precision groups that the engine tasks use. A word that needs a new handler goes
+into the module of its group (`tools/ps3recomp/spu_emit_ops_<group>.py`) together with semantics cases in
+`tools/tests/spu_semantics/cases_<group>.py`. Known deviations from the architecture:
+
+- Single precision is the SPU's extended range: an exponent field of 0 is zero whatever the other bits are
+  (denormals are zero), 255 is an ordinary exponent, results are truncated toward zero to 24 bits, and a
+  result below the smallest normal number is +0 or above the largest saturates to `sign | 0x7fffffff`.
+  `spu_fp.h` computes this on bits, with the host `double` only as exact arithmetic (an exact product and an
+  error-free sum), so it needs IEEE double arithmetic in the default environment and `-ffp-contract=off`,
+  which the codegen options set.
+- `frest` and `frsqest` return the exact reciprocal (square root) truncated to 24 bits, and `fi` returns its
+  second operand unchanged, because the ISA does not publish the hardware's estimate tables. Results of
+  sequences that use them (a reciprocal refined by `fi`, `fnms` and `fma`) stay within the ISA's one-ulp
+  bound but can differ from the hardware's bits by an ulp.
+- FPSCR is not derived from operations: no exception flag of either precision is ever set, and
+  `fscrwr` stores the register as it is, and `fscrrd` returns it with the unused bits forced to zero.
+- Double precision is host `double` arithmetic in round to nearest. A denormal operand is replaced by a zero
+  of the same sign, and every NaN result is the default quiet NaN `0x7ff8000000000000`. Only round to
+  nearest is implemented: when FPSCR selects another rounding mode (the rounding control bits `0x00000f00` of
+  word 0), the rounding operations (`dfa`, `dfs`, `dfm`, `dfma`, `dfms`, `dfnms`, `dfnma`, `frds`) call
+  `tox2SpuUnhandled` instead of computing another value, so the run stops with `spu: unhandled word` at that
+  instruction. `eboot_updatematrix` has a routine at LS `0x0ef88` that rewrites FPSCR fields from its
+  argument; whether the game ever selects a directed mode is not known.
+- `mfspr` returns 0 and `mtspr` is ignored (the architecture implements no SPR); `sync` and `dsync` emit
+  no code.

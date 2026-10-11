@@ -1,9 +1,11 @@
 # Analysis tools
 
-`tools/ps3tool.py` has nine subcommands. Each takes the path to the decrypted ELF (`<elf>`; the
-supported executable is the one pinned in `config/target.json`, see [Target pin](#target-pin)),
-except `nidgen`, which reads an RPCS3 checkout. `info`, `recover` and `emit` also accept the firmware
-module libsre as a relocated PRX (see [PRX input](#prx-input)).
+`tools/ps3tool.py` has fourteen subcommands. The first nine take the path to the decrypted ELF
+(`<elf>`; the supported executable is the one pinned in `config/target.json`, see
+[Target pin](#target-pin)), except `nidgen`, which reads an RPCS3 checkout. `info`, `recover` and `emit`
+also accept the firmware module libsre as a relocated PRX (see [PRX input](#prx-input)). The five `spu-*`
+commands work on the SPU programs that are embedded in the executable and in libsre; they take no
+positional argument (see [SPU images](#spu-images)).
 
 ```sh
 python tools/ps3tool.py info   <elf> [-o OUTPUT] [--target-config FILE] [--nids FILE] [--no-verify]
@@ -15,7 +17,15 @@ python tools/ps3tool.py ghidra-summary <elf> --ghidra JSON [-o OUT]
 python tools/ps3tool.py recover <elf> [--ghidra-summary PATH | --no-ghidra] [--extra-seeds PATH] [--nids FILE] [--syscalls FILE] [-o OUT] [--report PATH] [--seeds-out PATH] [--prologue-seeds] [--max-rounds N]
 python tools/ps3tool.py emit <elf> [--db PATH] [--out DIR] [--chunks N] [--comments] [--report PATH] [--census] [--census-out PATH] [--symbol-prefix NAME] [--max-unhandled N]
 python tools/ps3tool.py nidgen --rpcs3 DIR [--source-commit COMMIT] [--nids-out FILE] [--syscalls-out FILE]
+python tools/ps3tool.py spu-extract      [--out DIR]
+python tools/ps3tool.py spu-disasm       (--image NAME [--start LS [--end LS]] | --stats [--json OUT])
+python tools/ps3tool.py spu-objdump-diff [--objdump PATH] [--wsl-distro NAME] [--listing-dir DIR] [--report PATH] [--top N] [--examples K]
+python tools/ps3tool.py spu-recover      [--out DIR] [--report PATH]
+python tools/ps3tool.py spu-emit         [--db-dir DIR] [--out DIR] [--report PATH] [--comments] [--census] [--max-unhandled N]
 ```
+
+Every `spu-*` command also takes `[--eboot ELF] [--libsre ELF] [--images a,b,...] [--registry FILE]
+[--target-config FILE]`.
 
 - `info` checks the file against the pinned SHA-256 and writes a JSON summary (segments,
   sections, imports, exports) to `generated/analysis/eboot_info.json`. It refuses encrypted
@@ -43,6 +53,10 @@ python tools/ps3tool.py nidgen --rpcs3 DIR [--source-commit COMMIT] [--nids-out 
   `--symbol-prefix NAME` prefixes the file names and global symbols of the output; a PRX needs it and
   the main executable refuses it (see [A PRX module](emitter.md#a-prx-module-libsre)).
 - `nidgen` builds the name tables from RPCS3 sources; see below.
+- `spu-extract`, `spu-disasm` and `spu-objdump-diff` read the SPU images; see [SPU images](#spu-images) and
+  [SPU decoder cross-check with objdump](#spu-decoder-cross-check-with-objdump). `spu-recover` and `spu-emit`
+  recover and emit them; see [Function recovery](function-recovery.md#on-the-spu-images) and
+  [Emitting C](emitter.md#spu-images).
 
 Run `python tools/ps3tool.py <command> --help` for the full option list.
 
@@ -150,6 +164,144 @@ python tools/ps3tool.py ghidra-diff   <elf> --ghidra generated/ghidra/eboot_ghid
 - `--strict` makes `ghidra-diff` decode with reserved-bit checking, as `disasm --strict`
   does. Words that have reserved bits set then count as unknown to this decoder, so the
   category counts change accordingly.
+
+## SPU images
+
+The game runs SPU code that is embedded as data: eight programs in the executable and eight blobs in
+libsre (see [SPU usage](spu.md)). `config/spu_images.json` is the registry of these 16 images. It holds
+addresses, sizes, entries and roles only; the bytes are read from `generated/inputs/EBOOT.elf` and
+`generated/inputs/libsre.reloc.elf`, which every `spu-*` command checks against the `eboot_elf` and
+`libsre_reloc_elf` pins of `config/target.json` (exit 4 on a mismatch). The inputs are the defaults of
+`--eboot` and `--libsre`; `--images a,b,...` selects images by registry name, `--registry` and
+`--target-config` select other files.
+
+Registry fields of one image:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Unique, `[a-z][a-z0-9_]*`; used in file names and C symbols (`eboot_spline`, `libsre_taskset_pm`, ...) |
+| `container`, `ea` | `eboot` or `libsre`, and the absolute guest address of the image (libsre at `0x011d0000` plus its offset) |
+| `kind` | `elf`: LS addresses, entry and code segments come from the SPU ELF (the `PF_X` segments are code). `raw`: `size`, `ls_base` and `entry` (default `ls_base`) are given, and the whole blob is one code segment |
+| `role` | `spurs_kernel`, `spurs_system_service`, `spurs_policy_module`, `spurs_task`, `raw_thread`, `exit_handler` or `job_chain_pm`; informational |
+| `lowering` | How control transfers are emitted. Only `stackfree` exists; any other value is an error (exit 2). `lowering_overrides` (`{"0xLS": "<lowering>"}`) is the per-function form of the same choice |
+| `gate` | `true` for every image with a non-null `ls_base`: `spu-emit --max-unhandled` and `spu-objdump-diff` count the image toward their gate |
+| `extra_entries` | `[{ls, reason}]`: LS addresses that other code reaches through a pointer that recovery cannot see, for example the exit address that the kernel stores at LS `0x1e0` for the policy modules |
+| `data_ranges` | `[{start, end, reason}]`: LS ranges inside a code segment that hold data, not code (the kernel context of `libsre_kernel1`, `0x100..0x290`) |
+| `pic_delta_regs` | Registers that hold the load delta of position-independent code (`eboot_edgelzma`: `$126`). The delta is 0 for an image at its link address, so recovery evaluates them as 0 and `a rX,rY,$126` with a constant `rY` is a constant address |
+
+The two libsre blobs `libsre_taskset2_exit` and `libsre_exit_code_plugin` have `ls_base` null: they are
+position independent and have no fixed LS address. `spu-extract`, `spu-disasm` (listing mode, at LS base
+0) and `spu-objdump-diff` handle them; `spu-disasm --stats`, `spu-recover` and `spu-emit` skip them, and
+an explicit `--images` naming one of them is an error. They are neither recovered, emitted nor gated.
+
+```sh
+python tools/ps3tool.py spu-extract
+python tools/ps3tool.py spu-disasm --image eboot_edgelzma --start 0x3090 --end 0x30b0
+python tools/ps3tool.py spu-disasm --stats --json generated/analysis/spu_census.json
+```
+
+- `spu-extract` writes each image as a standalone file for inspection with other tools into `--out`
+  (default `generated/spu/images`): `<name>.elf` for an ELF image, `<name>.bin` for a raw blob, and
+  `manifest.json` with the SHA-256, LS range, entry and segments of every image. It prints one line per
+  image, for example `eboot_edgelzma elf ea 0x00f76700 ls 0x3000-0x37c80 entry 0x3090 code segments 1`.
+  The other SPU commands do not read these files.
+- `spu-disasm --image NAME` lists the code of one image as `<LS>: <word>  <text>`, for example
+  `03090: 43ffe808  ila $8,0x3ffd0`. Without `--start` it lists every code segment; with `--start` and no
+  `--end` it lists one instruction. Registers print as `$0`..`$127` (no aliases), channels as `$ch<N>`
+  and branch targets as LS addresses. The decoder covers every instruction of SPU ISA 1.2; any other word
+  is printed as `.long`.
+- `spu-disasm --stats` prints a census instead of a listing, per image: decoded, `.long` and all-zero words
+  of the code segments, the 20 most common mnemonics, the channels used by `rdch`, `wrch` and `rchcnt`
+  (with their names), every `stop` code, and the constants written to `MFC_Cmd`. `--json OUT` also writes
+  it. It was written to find what an image needs before recovery existed.
+
+The code words of the 14 images that have an LS base (the first line of each image in the census):
+
+| Image | Code words | Decoded | `.long` | Zero |
+| --- | --- | --- | --- | --- |
+| `eboot_spline` | 1,120 | 1,119 | 0 | 1 |
+| `eboot_edgelzma` | 4,584 | 4,259 | 248 | 77 |
+| `eboot_bnuscore` | 21,252 | 20,248 | 851 | 153 |
+| `eboot_animation` | 4,892 | 4,864 | 23 | 5 |
+| `eboot_updatematrix` | 14,888 | 14,846 | 5 | 37 |
+| `eboot_renderparticle` | 8,980 | 8,779 | 184 | 17 |
+| `eboot_morph` | 3,864 | 3,843 | 16 | 5 |
+| `eboot_skin` | 3,852 | 3,847 | 0 | 5 |
+| `libsre_kernel1` | 480 | 388 | 1 | 91 |
+| `libsre_kernel2` | 484 | 391 | 0 | 93 |
+| `libsre_system_service` | 2,176 | 2,142 | 8 | 26 |
+| `libsre_taskset_pm` | 1,936 | 1,817 | 11 | 108 |
+| `libsre_jobchain_pm1` | 3,980 | 3,930 | 3 | 47 |
+| `libsre_jobchain_pm2` | 3,980 | 3,922 | 3 | 55 |
+
+The `.long` words are data inside code segments (constants, jump tables, the kernel context) and
+undecodable words; the zero words are padding.
+
+## SPU decoder cross-check with objdump
+
+`spu-objdump-diff` compares the SPU decoder and formatter with the `objdump` of GNU binutils, word by word,
+on every code segment of the registry images (all 16, including the two position-independent blobs, which
+are fed at LS base 0 because SPU branches are PC-relative in both tools). It is a developer check: nothing
+else depends on it, and it needs WSL, which the other commands do not.
+
+The reference `objdump` is built from the binutils release tarball (version 2.47, SHA-256 checked before
+extraction) by `tools/build-spu-objdump.sh`, which runs inside WSL, builds only `objdump` and the other
+binutils programs for `--target=spu-elf` and installs them under the WSL home, in
+`~/.local/opt/tox2-spu-binutils`. The script reads no repository file, so it is fed through stdin; run it
+from the repository root, in a distribution that has `gcc`, `make`, `curl`, `xz` and `tar` (the script
+names the packages to install if one is missing). Ubuntu-26.04 is the distribution that was verified:
+
+```sh
+wsl.exe -d Ubuntu-26.04 -e bash -s -- < tools/build-spu-objdump.sh
+python tools/ps3tool.py spu-objdump-diff
+```
+
+A second run of the script prints `spu-objdump: up to date (binutils 2.47)`. `--from TARBALL` (a WSL
+path to a local copy of the tarball, which gets the same SHA-256 check; in Git Bash prefix the command with
+`MSYS_NO_PATHCONV=1`) avoids the download, and `--force` builds again.
+
+- `--objdump PATH` names the `objdump` inside WSL; the default is the environment variable
+  `TOX2_SPU_OBJDUMP`, then the install of the script. `--wsl-distro NAME` selects the distribution (default
+  `Ubuntu-26.04`; an empty name selects the WSL default). The code bytes go in through stdin, so WSL needs no
+  access to the repository drive. Each listing is also written to `generated/analysis/spu_objdump/` as
+  `<image>_<ls>.txt`, and `--listing-dir DIR` reads such listings instead of running `objdump`, which
+  needs no WSL (`objdump_version` in the report is then `null`).
+- Both sides go through one parser of the printed text that normalizes the printing differences (signed
+  against unsigned fields, register and channel names, branch targets modulo the LS size), so the
+  formatter is checked as well as the decoder. The cases where the ISA shows that the decoder is right and `objdump` is not are
+  recorded in `KNOWN_DIFFERENCES` in `tools/ps3recomp/spu_objdump_diff.py`, each with the ISA page: `objdump`
+  reads the reserved bit 11 of `bihnz` as a hint flag (`bihnzp`, `bihnzpd`) and the reserved bits 12 and
+  13 of `sync` as `d` and `e` flags (`syncd`, `synce`, ...). It also prints the false-target register of
+  the conditional halts as an extra first operand, and a displacement of 0 of `br`, `brz`, `brnz`, `brhz`,
+  `brhnz` and `hbrr` as the plain number 0; the comparison accounts for both. A disagreement is settled
+  from the ISA document, not by adopting `objdump`'s behaviour.
+- Each word is put into one category:
+
+  | Category | Meaning |
+  | --- | --- |
+  | `match` | Both decode it and the text agrees |
+  | `known_difference` | Both decode it; the pair is a recorded, explained difference |
+  | `objdump_code_we_unknown` | `objdump` decodes it and this decoder does not |
+  | `we_code_objdump_unknown` | This decoder decodes it and `objdump` prints `.long` |
+  | `mnemonic_mismatch` | Both decode it and the mnemonics (or flags) differ |
+  | `operand_mismatch` | Both decode it with the same mnemonic and the operands differ |
+  | `both_unknown` | Neither decodes it (data and padding in code segments) |
+
+  The four disagreement categories (`objdump_code_we_unknown` to `operand_mismatch`) must be 0 in every
+  gate image; every image is a gate image except the two without an LS base. The command prints one line per image with the seven counts, then for each non-gate image with
+  disagreements `ungated disagreement: <image> <category> <n>`, then `gate: ok` or
+  `gate: <n> unexplained disagreements in <images>`. The report (`--report`, default
+  `generated/analysis/spu_objdump_diff.json`) has the first line of `objdump --version`, the category counts
+  per image and segment, and for each image the `--top` (default 20) most frequent
+  `(category, ours, objdump)` triples with up to `--examples` (default 5) examples each. Exit codes: 0 gate
+  ok, 1 tool error (for example an unreadable listing), 2 usage, 4 hash mismatch, 6 `objdump` not
+  available, 9 an unexplained disagreement in a gate image.
+
+On this executable and libsre the run takes about 6 s with `objdump` 2.47.20260726 (`GNU objdump (GNU
+Binutils) 2.47.20260726`) and ends with `gate: ok`. Over the 16 images and 77,332 words: 75,945 `match`,
+34 `known_difference` (2 `bihnz` in `eboot_edgelzma` and 32 `sync` in `eboot_bnuscore`), 0 in each of the
+four disagreement categories, and 1,353 `both_unknown`. The two blobs without an LS base also have
+0 disagreements.
 
 ## NID and syscall name tables
 

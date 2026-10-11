@@ -8,7 +8,8 @@ from the seeds. The Cell PPU language of `ghidra-export --cell` (see
 [Ghidra cross-check](analysis-tools.md#ghidra-cross-check)) removes this truncation in Ghidra
 itself, and the committed summary is made with it. `recover` also resolves `bctr` jump tables,
 recognises import thunks, resolves lv2 syscall numbers over the recovered control-flow graph and
-reports coverage.
+reports coverage. The SPU programs that are embedded in the executable and in libsre have their own recovery,
+`spu-recover`; see [On the SPU images](#on-the-spu-images).
 
 ## Commands
 
@@ -145,6 +146,108 @@ Result of the run (the output is byte-identical on a second run, in under a seco
 - 177 `sc` sites, all inside functions and all with a resolved syscall number.
 - `libsre_functions.json` is about 43 KB.
 
+## On the SPU images
+
+`spu-recover` recovers the functions of the registry images that have an LS base (14 of the 16, see
+[SPU images](analysis-tools.md#spu-images)) and writes one function database per image:
+
+```sh
+python tools/ps3tool.py spu-recover
+```
+
+It needs neither Ghidra (which has no SPU language) nor a summary: SPU code has no function descriptors and no
+TOC, so every seed comes from the image itself. The inputs are `generated/inputs/EBOOT.elf`,
+`generated/inputs/libsre.reloc.elf` (`--eboot`, `--libsre`, both checked against the pins), and the registry.
+The databases go to `--out` (default `config/spu`) and the report to `--report` (default
+`generated/analysis/spu_recovery_report.json`). `--images a,b,...` limits the run. Exit code 1 means that an
+image did not converge within 64 rounds; its database is not written (the images before it are).
+
+- Seeds, recorded as the `sources` of a function: `entry` (the image entry), `extra` (the `extra_entries` of the
+  registry), `brsl` (targets of `brsl` and `brasl` inside the image), `constant` (a constant code pointer that an
+  indirect branch uses, or that position-independent code builds with a `pic_delta_regs` register),
+  `ctors` (function pointers in the GCC `.ctors` list at the start of the first data segment of an ELF image;
+  crt0 calls them through a register with `bisl $0,$3`, so no branch names them) and `promoted` (code reached
+  from several functions, which becomes a function of its own). The `.dtors` list is read the same way
+  (source `dtors`); no function of the committed databases has it. Jump-table targets are intra-function
+  edges, as on the PPU side.
+- The flow of an instruction is local, because the SPU has no delay slots. `br` and `bra` are local branches
+  or tail branches; `brz`, `brnz`, `brhz` and `brhnz` are conditional; `brsl` and `brasl` are calls that
+  continue at the next word, except `brsl $r,$+4`, which only reads the program counter; `bi $0` is a return
+  and `bi` with another register an indirect jump; `biz`, `binz`, `bihz` and `bihnz` are conditional
+  returns (`$0`) or conditional indirect jumps; `bisl` and `bisled` are indirect calls; `iret` is an
+  indirect jump to SRR0. `stop 0x101`, `stop 0x102`, `stopd` and a conditional halt with a constant-true
+  condition end the flow; every other `stop` code continues. All-zero words are padding, not code.
+- The partition works as in `partition.py` for the PPU: a function owns the blocks that its local edges
+  reach, code reached from two functions is promoted, and the rounds repeat until the set of functions no
+  longer changes (at most 64).
+- Constant targets: within a block the tool tracks registers loaded by `il`, `ila`, `ilhu` with `iohl`, `ai`
+  from a constant, and `lqr`/`lqa` from a quadword in the image whose preferred word is an address in the
+  image's code. A target outside the image's code is `external`; image tracking at run time resolves it, and
+  the image that holds it needs an `extra_entries` entry.
+- Jump tables (`tools/ps3recomp/spu_jumptab.py`) are matched structurally by walking back from the `bi`: an
+  index scaled by `shli`, the table quadword loaded by `lqx`, the word rotated into place by `rotqby`, and
+  a `clgti` whose result a `brnz` (or a conditional return, `binz $r,$0`) tests as the bound. The Duff-device
+  idiom (`brsl $r,$+4`, an offset from `andi` and `rotmi` added to the program counter, then `bi`) is a
+  `computed` table: every value that the mask allows is a target. The table words are data, not code.
+- Registry `data_ranges` and the jump-table words are excluded from the code words that count as unowned.
+
+The database `config/spu/<name>.json` (no instruction words, addresses only) has:
+
+- `input`: SHA-256 of the container, of the image and of the registry entry. `spu-emit` refuses a database
+  whose hashes do not match (exit 3);
+- `segments`, `entry`;
+- `functions`: for each its `entry`, the `sources`, the address `ranges`, the `call_sites` (`site`, `kind`,
+  `target`, `link` register), the `returns` and the `indirect` branches (`site`, `kind`, `resolution`
+  `constant`, `jump_table` or `unresolved`, the `targets`, the `link` register of a `bisl`, and a `reason` for
+  an unresolved one);
+- `dispatch_seeds`: the dispatchable set, the addresses an indirect branch can reach (function entries, return
+  sites of calls, jump-table and constant targets, `extra_entries`), each with its sources (`return` and
+  `jump_table` as well as the function sources);
+- `jump_tables`: `site`, `kind` (`table` or `computed`), `table` address (null when computed), `count` and
+  `targets`;
+- `constant_targets`: `site`, `target`, `image` (`self` or `external`) and `use` (`branch`, or `pointer` for an
+  address that is only materialised);
+- `unresolved_indirect`: the sites with a reason, for example `$3 is not a recoverable constant`.
+
+The stack-free lowering needs only the dispatchable set, but the call and return view is kept for the report
+and for later lowerings. The report has, per image: `functions`, `rounds`, `converged`, `code_words` (`owned`,
+`unowned`, `zero`, and `data` for the words of data ranges and jump tables), `unowned_ranges`, `promoted`,
+`jump_tables`, `unresolved_indirect`, `external_targets`, `invalid_flow` (`[function, from, to]`: flow that
+runs into a word that is not code, for example the return site of a call that never returns),
+`rejected_calls`, `rejected_seeds` and `dispatchable`. Stdout has one line
+per image and a last line with the number of databases written.
+
+On the pinned inputs (the output is byte-identical on a second run, `14 databases, 0 written`, in about 1 s):
+
+| Image | Functions | Rounds | Owned words | Unowned | Unresolved | External | Promoted | Jump tables | Dispatchable |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `eboot_spline` | 16 | 5 | 1,106 | 13 | 3 | 0 | 0 | 0 | 41 |
+| `eboot_edgelzma` | 38 | 6 | 3,823 | 684 | 8 | 0 | 3 | 0 | 87 |
+| `eboot_bnuscore` | 50 | 5 | 3,583 | 17,509 | 14 | 0 | 1 | 1 | 232 |
+| `eboot_animation` | 55 | 7 | 4,741 | 128 | 4 | 0 | 0 | 3 | 133 |
+| `eboot_updatematrix` | 182 | 14 | 14,567 | 280 | 4 | 0 | 0 | 1 | 608 |
+| `eboot_renderparticle` | 73 | 7 | 8,303 | 660 | 4 | 0 | 2 | 0 | 268 |
+| `eboot_morph` | 62 | 5 | 3,745 | 114 | 6 | 0 | 0 | 0 | 145 |
+| `eboot_skin` | 43 | 5 | 3,811 | 36 | 6 | 0 | 0 | 0 | 100 |
+| `libsre_kernel1` | 4 | 2 | 366 | 12 | 0 | 1 | 0 | 0 | 7 |
+| `libsre_kernel2` | 3 | 3 | 377 | 14 | 0 | 1 | 0 | 0 | 6 |
+| `libsre_system_service` | 18 | 5 | 2,104 | 46 | 2 | 0 | 2 | 0 | 50 |
+| `libsre_taskset_pm` | 19 | 4 | 1,766 | 49 | 2 | 1 | 0 | 4 | 89 |
+| `libsre_jobchain_pm1` | 32 | 5 | 3,872 | 54 | 3 | 0 | 0 | 1 | 114 |
+| `libsre_jobchain_pm2` | 30 | 5 | 3,861 | 57 | 3 | 0 | 0 | 1 | 110 |
+| Total | 625 | | 56,025 | 19,656 | 59 | 3 | 8 | 11 | 1,990 |
+
+- Unowned words are non-zero words of code segments that no function owns and that are not data. 17,509 of
+  them are in `eboot_bnuscore` (the sound engine core, 21,252 code words), where the seeds reach 3,583
+  words. A run that reaches such code stops with `unknown target ls ...`.
+- The unresolved sites are indirect calls and jumps through a value that is stored into LS at run time (for
+  example the system call entry pointer that tasks read from LS) or passed as an argument. The emitter turns every indirect branch into a computed dispatch, so an unresolved site needs no
+  special handling; image tracking finds the target at run time.
+- The external targets are one in each of `libsre_kernel1`, `libsre_kernel2` and `libsre_taskset_pm`.
+- `libsre_kernel1` needs `data_ranges` for its context (`0x100..0x290`); `eboot_edgelzma` needs
+  `pic_delta_regs` (`$126`) and five `extra_entries`.
+- The 14 databases are about 330 KB in total.
+
 ## Committed files and regeneration
 
 | File | Produced by | Notes |
@@ -153,6 +256,8 @@ Result of the run (the output is byte-identical on a second run, in under a seco
 | `config/extra_seeds.json` | by hand, or from the feedback run | Small and reviewable; edit it directly |
 | `config/functions.json` | `recover -o config/functions.json` | Input for later stages; needs only the ELF and the files above |
 | `config/libsre_functions.json` | `recover` on `generated/inputs/libsre.reloc.elf` with `--no-ghidra` | The firmware module's database; needs only the relocated file (see "On libsre") |
+| `config/spu_images.json` | by hand | The SPU image registry (see [SPU images](analysis-tools.md#spu-images)); edit it directly, and run `spu-recover` again |
+| `config/spu/<name>.json` | `spu-recover` | One database per SPU image with an LS base (14 files); needs the executable and the relocated libsre (see "On the SPU images") |
 
 None of them contains instruction words or other code bytes. `generated/` is not committed:
 the exports, the seeded export and the report stay local.
@@ -167,6 +272,9 @@ python tools/ps3tool.py ghidra-export  <elf> --cell --timeout 43200
 python tools/ps3tool.py ghidra-summary <elf> --ghidra generated/ghidra/eboot_ghidra_cell.json -o config/ghidra_summary.json
 python tools/ps3tool.py recover        <elf> -o config/functions.json
 ```
+
+Run `spu-recover` again whenever the SPU recovery code or `config/spu_images.json` changes; it rewrites only
+the databases whose content changed.
 
 ## Function database
 
