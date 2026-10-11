@@ -148,6 +148,81 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuFnms(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
     return a;
 }
 
+// --- Single precision: compares (ISA 9.1, p.231-234; always extended range) -----------------------
+//
+// A word with exponent field 0 counts as +0 whatever its sign and fraction. The remaining words
+// order like sign-magnitude integers, which is what a key of +-(w & 0x7fffffff) gives.
+
+TOX2_FORCEINLINE uint32_t tox2SpuSfMagnitude(uint32_t w) { return (w & 0x7f800000u) == 0u ? 0u : (w & 0x7fffffffu); }
+
+TOX2_FORCEINLINE int32_t tox2SpuSfKey(uint32_t w) {
+    int32_t m = (int32_t)tox2SpuSfMagnitude(w);
+    return (w >> 31) != 0u ? -m : m;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuFceq(Tox2Vr a, Tox2Vr b) {
+    for (uint32_t lane = 0; lane < 4; lane++) {
+        a.u32[lane] = tox2SpuSfKey(a.u32[lane]) == tox2SpuSfKey(b.u32[lane]) ? 0xffffffffu : 0u;
+    }
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuFcmeq(Tox2Vr a, Tox2Vr b) {
+    for (uint32_t lane = 0; lane < 4; lane++) {
+        a.u32[lane] = tox2SpuSfMagnitude(a.u32[lane]) == tox2SpuSfMagnitude(b.u32[lane]) ? 0xffffffffu : 0u;
+    }
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuFcgt(Tox2Vr a, Tox2Vr b) {
+    for (uint32_t lane = 0; lane < 4; lane++) {
+        a.u32[lane] = tox2SpuSfKey(a.u32[lane]) > tox2SpuSfKey(b.u32[lane]) ? 0xffffffffu : 0u;
+    }
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuFcmgt(Tox2Vr a, Tox2Vr b) {
+    for (uint32_t lane = 0; lane < 4; lane++) {
+        a.u32[lane] = tox2SpuSfMagnitude(a.u32[lane]) > tox2SpuSfMagnitude(b.u32[lane]) ? 0xffffffffu : 0u;
+    }
+    return a;
+}
+
+// --- Single precision: estimates (ISA 9.1, p.215-219) ---------------------------------------------
+//
+// Recorded deviation: the ISA does not publish the base and step tables of the hardware, so the
+// estimate is the exact reciprocal (or reciprocal square root) truncated to 24 bits, and `fi` has no
+// step left to apply. The ISA's frest / fi / fnms / fma sequence then stays within its 1 ulp bound.
+
+TOX2_FORCEINLINE uint32_t tox2SpuSfRecipEstimate(uint32_t w) {
+    uint32_t e = (w >> 23) & 0xffu;
+    if (e == 0u) return ((w >> 31) << 31) | 0x7fffffffu;  // 1/0: the largest number, signed
+    // |x| >= 2^126: 1/x underflows to zero in hardware, although 1/2^126 would be Smin.
+    if (e >= 253u) return 0u;
+    return tox2SpuSfFromExact(1.0 / tox2SpuSfToDouble(w), 0.0);
+}
+
+TOX2_FORCEINLINE uint32_t tox2SpuSfRsqrtEstimate(uint32_t w) {
+    if ((w & 0x7f800000u) == 0u) return 0x7fffffffu;
+    return tox2SpuSfFromExact(1.0 / __builtin_elementwise_sqrt(tox2SpuSfToDouble(w & 0x7fffffffu)), 0.0);
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuFrest(Tox2Vr a) {
+    for (uint32_t lane = 0; lane < 4; lane++) a.u32[lane] = tox2SpuSfRecipEstimate(a.u32[lane]);
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuFrsqest(Tox2Vr a) {
+    for (uint32_t lane = 0; lane < 4; lane++) a.u32[lane] = tox2SpuSfRsqrtEstimate(a.u32[lane]);
+    return a;
+}
+
+// RB already holds the final estimate (see above); RA, the operand of the estimate, is not needed.
+TOX2_FORCEINLINE Tox2Vr tox2SpuFi(Tox2Vr a, Tox2Vr b) {
+    (void)a;
+    return b;
+}
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
