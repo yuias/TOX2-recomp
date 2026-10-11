@@ -5,7 +5,8 @@ through straight-line code:
 
 - Table: the index is scaled by 4 (`shli`), the table quadword is loaded with `lqx` and the wanted
   word is rotated into the preferred slot with `rotqby`, using the same address as the load; a
-  `clgti` against the index plus a `brnz` on its result bounds the table.
+  `clgti` against the index plus a `brnz` (or a conditional return, `binz $r,$0`) on its result
+  bounds the table.
 - Computed offset (Duff device): `brsl $r,$+4` reads the PC, an offset taken from `andi` + `rotmi`
   is added to it and the sum is branched to. Every value the mask allows is a target.
 
@@ -123,7 +124,7 @@ def _match_table(code: SpuCode, branch: SpuInsn, zero_regs: frozenset[int]) -> J
 
     count = _bound(code, site, index, shift.addr)
     if count is None:
-        return "no bound check (clgti and brnz) on the table index"
+        return "no bound check (clgti and brnz or binz) on the table index"
 
     targets = []
     for i in range(count):
@@ -162,7 +163,8 @@ def _guard_branch(code: SpuCode, start: int, site: int, guard: int) -> bool:
     for addr in range(start + 4, site, 4):
         insn = code.insn(addr)
         name = insn.spec.mnemonic
-        if name == "brnz" and insn.field("RT") == guard:
+        # brnz leaves to a default case; binz on the link register returns from the function instead.
+        if name in ("brnz", "binz") and insn.field("RT") == guard:
             return True
         # A redefinition of the compare result before the branch breaks the pairing.
         if written_reg(insn) == guard:

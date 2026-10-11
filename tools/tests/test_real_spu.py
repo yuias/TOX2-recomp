@@ -37,7 +37,7 @@ _COUNTS = {
     "eboot_spline": (16, 1106, 41, 0),
     "eboot_edgelzma": (38, 3823, 87, 0),
     "eboot_bnuscore": (50, 3583, 232, 0),
-    "eboot_animation": (54, 3841, 116, 0),
+    "eboot_animation": (55, 4741, 133, 0),
     "eboot_updatematrix": (182, 14567, 608, 0),
     "eboot_renderparticle": (73, 8303, 268, 0),
     "eboot_morph": (62, 3745, 145, 0),
@@ -70,6 +70,8 @@ _MUST_DISPATCH = {
     "eboot_skin": [0x3130],
     "eboot_spline": [0x30E8, 0x3E60],
     "eboot_morph": [0x48B8, 0x5538],
+    # Jump tables whose bound check leaves through a conditional return (binz) instead of a brnz
+    "eboot_animation": [0x448C, 0x4490, 0x44A0, 0x44B0, 0x44C0, 0x45CC, 0x46C4],
 }
 
 # The policy module's two switches and the two Duff-device branches. Table 0x1cc4 is found although a

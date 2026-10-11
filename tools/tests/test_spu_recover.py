@@ -383,6 +383,12 @@ class JumpTableTest(unittest.TestCase):
         self.assertEqual(table, JumpTable(at(7), "table", at(8), tuple(at(12 + i) for i in range(4)), 4))
         self.assertEqual(found.data_ranges(), [(at(8), at(12))])
 
+    def test_a_conditional_return_also_bounds_the_table(self):
+        words = table_program()
+        words[6] = enc("binz", RT=10, RA=0)
+        table = self.resolve(words).tables[at(7)]
+        self.assertEqual(table.count, 4)
+
     def test_the_bound_is_the_clgti_limit_plus_one(self):
         words = table_program(count=6, bound=4)
         self.assertEqual(self.resolve(words).tables[at(7)].count, 5)

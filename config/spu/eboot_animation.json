@@ -124,38 +124,50 @@
       "indirect": []
     },
     {
+      "entry": "0x3a50",
+      "sources": ["brsl"],
+      "ranges": [["0x3a50", "0x3fe8"]],
+      "call_sites": [],
+      "returns": ["0x3fac", "0x3fcc", "0x3fd8", "0x3fdc"],
+      "indirect": []
+    },
+    {
       "entry": "0x4430",
       "sources": ["brsl"],
-      "ranges": [["0x4430", "0x4464"]],
-      "call_sites": [],
-      "returns": ["0x445c"],
+      "ranges": [["0x3808", "0x396c"], ["0x3970", "0x3a4c"], ["0x3fe8", "0x4464"], ["0x448c", "0x44cc"]],
+      "call_sites": [
+        {"site": "0x41ec", "kind": "brsl", "target": "0x3a50", "link": 0},
+        {"site": "0x421c", "kind": "brsl", "target": "0x3a50", "link": 0},
+        {"site": "0x4360", "kind": "brsl", "target": "0x3a50", "link": 0}
+      ],
+      "returns": ["0x38c4", "0x39e4", "0x3a48", "0x4334", "0x445c", "0x448c"],
       "indirect": [
         {
           "site": "0x4460",
           "kind": "bi",
-          "resolution": "unresolved",
-          "reason": "no bound check (clgti and brnz) on the table index"
+          "resolution": "jump_table",
+          "targets": ["0x448c", "0x4490", "0x44a0", "0x44b0", "0x44c0"]
         }
       ]
     },
     {
       "entry": "0x44d0",
       "sources": ["brsl"],
-      "ranges": [["0x44d0", "0x4524"], ["0x4538", "0x45bc"]],
+      "ranges": [["0x44d0", "0x4524"], ["0x4538", "0x45bc"], ["0x45cc", "0x477c"]],
       "call_sites": [],
-      "returns": ["0x451c", "0x45b4"],
+      "returns": ["0x451c", "0x45b4", "0x45e4", "0x461c", "0x4674", "0x46c0", "0x46d4", "0x4704", "0x474c"],
       "indirect": [
         {
           "site": "0x4520",
           "kind": "bi",
-          "resolution": "unresolved",
-          "reason": "no bound check (clgti and brnz) on the table index"
+          "resolution": "jump_table",
+          "targets": ["0x45cc", "0x45e8", "0x4620", "0x4678"]
         },
         {
           "site": "0x45b8",
           "kind": "bi",
-          "resolution": "unresolved",
-          "reason": "no bound check (clgti and brnz) on the table index"
+          "resolution": "jump_table",
+          "targets": ["0x46c4", "0x46d8", "0x4708", "0x4750"]
         }
       ]
     },
@@ -589,8 +601,25 @@
     {"ls": "0x3748", "sources": ["return"]},
     {"ls": "0x37c8", "sources": ["return"]},
     {"ls": "0x3800", "sources": ["ctors"]},
+    {"ls": "0x3a50", "sources": ["brsl"]},
+    {"ls": "0x41f0", "sources": ["return"]},
+    {"ls": "0x4220", "sources": ["return"]},
+    {"ls": "0x4364", "sources": ["return"]},
     {"ls": "0x4430", "sources": ["brsl"]},
+    {"ls": "0x448c", "sources": ["jump_table"]},
+    {"ls": "0x4490", "sources": ["jump_table"]},
+    {"ls": "0x44a0", "sources": ["jump_table"]},
+    {"ls": "0x44b0", "sources": ["jump_table"]},
+    {"ls": "0x44c0", "sources": ["jump_table"]},
     {"ls": "0x44d0", "sources": ["brsl"]},
+    {"ls": "0x45cc", "sources": ["jump_table"]},
+    {"ls": "0x45e8", "sources": ["jump_table"]},
+    {"ls": "0x4620", "sources": ["jump_table"]},
+    {"ls": "0x4678", "sources": ["jump_table"]},
+    {"ls": "0x46c4", "sources": ["jump_table"]},
+    {"ls": "0x46d8", "sources": ["jump_table"]},
+    {"ls": "0x4708", "sources": ["jump_table"]},
+    {"ls": "0x4750", "sources": ["jump_table"]},
     {"ls": "0x4780", "sources": ["brsl"]},
     {"ls": "0x47f8", "sources": ["return"]},
     {"ls": "0x4828", "sources": ["return"]},
@@ -685,13 +714,32 @@
     {"ls": "0x7a78", "sources": ["brsl"]},
     {"ls": "0x7ac8", "sources": ["brsl"]}
   ],
-  "jump_tables": [],
+  "jump_tables": [
+    {
+      "site": "0x4460",
+      "kind": "table",
+      "table": "0x4464",
+      "count": 10,
+      "targets": ["0x448c", "0x4490", "0x44a0", "0x44b0", "0x44c0"]
+    },
+    {
+      "site": "0x4520",
+      "kind": "table",
+      "table": "0x4524",
+      "count": 4,
+      "targets": ["0x45cc", "0x45e8", "0x4620", "0x4678"]
+    },
+    {
+      "site": "0x45b8",
+      "kind": "table",
+      "table": "0x45bc",
+      "count": 4,
+      "targets": ["0x46c4", "0x46d8", "0x4708", "0x4750"]
+    }
+  ],
   "constant_targets": [],
   "unresolved_indirect": [
     {"site": "0x3030", "kind": "bisl", "reason": "$3 is not a recoverable constant"},
-    {"site": "0x4460", "kind": "bi", "reason": "no bound check (clgti and brnz) on the table index"},
-    {"site": "0x4520", "kind": "bi", "reason": "no bound check (clgti and brnz) on the table index"},
-    {"site": "0x45b8", "kind": "bi", "reason": "no bound check (clgti and brnz) on the table index"},
     {"site": "0x5ea4", "kind": "bisl", "reason": "$5 is not a recoverable constant"},
     {"site": "0x69c4", "kind": "bisl", "reason": "$2 is not a recoverable constant"},
     {"site": "0x71b8", "kind": "bisl", "reason": "$65 is not a recoverable constant"}
