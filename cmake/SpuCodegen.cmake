@@ -96,3 +96,59 @@ function(tox2_spu_add_semantics_harness)
     PASS_REGULAR_EXPRESSION "spu semantics: [0-9]+ passed, 0 failed"
     TIMEOUT 120)
 endfunction()
+
+# Whole-program tests: SPU programs assembled in tools/tests/spu_programs are emitted through the real
+# recovery and emitter into synthetic images, then run through the lv2 SPU thread group calls on the
+# runtime core. Needs Python3_EXECUTABLE, tox2_ppu_codegen_options and tox2_runtime_core, so call it
+# after tox2_runtime_add_core. It reads no generated tree and no game files, and it links the real
+# SPU runtime only: tox2_spu_stub defines the same symbols as the core dispatch.
+function(tox2_spu_add_programs)
+  if(NOT TARGET tox2_runtime_core)
+    return()
+  endif()
+
+  set(gen_dir "${CMAKE_BINARY_DIR}/spu_programs")
+  set(gen_stamp "${gen_dir}/generate.stamp")
+  # One chunk per image; keep the names in step with PROGRAMS in tools/tests/spu_programs/gen.py.
+  set(program_names sum_array atomic_counter jump_table throw_event)
+  set(gen_sources "${gen_dir}/spu_tables.c" "${gen_dir}/spu_programs_data.c")
+  foreach(name IN LISTS program_names)
+    list(APPEND gen_sources "${gen_dir}/spu_${name}_000.c")
+  endforeach()
+
+  # The generator rewrites its outputs only when their content changes, so the custom command is
+  # tracked through a stamp instead of the outputs (see tox2_ppu_add_semantics_harness).
+  file(GLOB gen_inputs CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/tools/ps3recomp/*.py"
+    "${CMAKE_SOURCE_DIR}/tools/tests/spu_asm.py"
+    "${CMAKE_SOURCE_DIR}/tools/tests/spu_programs/*.py")
+  add_custom_command(
+    OUTPUT "${gen_stamp}"
+    BYPRODUCTS ${gen_sources} "${gen_dir}/spu_funcs.h" "${gen_dir}/spu_programs_data.h"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${gen_dir}"
+    COMMAND ${Python3_EXECUTABLE} -B -m tests.spu_programs.gen --out "${gen_dir}"
+    COMMAND ${CMAKE_COMMAND} -E touch "${gen_stamp}"
+    DEPENDS ${gen_inputs}
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tools"
+    COMMENT "Generating SPU test programs"
+    VERBATIM)
+  add_custom_target(tox2_spu_programs_gen DEPENDS "${gen_stamp}")
+
+  add_library(tox2_spu_programs_generated OBJECT ${gen_sources})
+  set_source_files_properties(${gen_sources} PROPERTIES GENERATED TRUE)
+  add_dependencies(tox2_spu_programs_generated tox2_spu_programs_gen)
+  tox2_ppu_codegen_options(tox2_spu_programs_generated)
+  target_include_directories(tox2_spu_programs_generated PRIVATE "${gen_dir}")
+
+  add_executable(tox2_spu_programs runtime/tests/spu_programs_main.cpp
+    $<TARGET_OBJECTS:tox2_spu_programs_generated>)
+  add_dependencies(tox2_spu_programs tox2_spu_programs_gen)
+  target_compile_options(tox2_spu_programs PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_include_directories(tox2_spu_programs PRIVATE "${gen_dir}")
+  target_link_libraries(tox2_spu_programs PRIVATE tox2_runtime_core)
+
+  add_test(NAME spu_programs COMMAND tox2_spu_programs)
+  set_tests_properties(spu_programs PROPERTIES
+    PASS_REGULAR_EXPRESSION "spu programs: 4 passed, 0 failed"
+    TIMEOUT 120)
+endfunction()
