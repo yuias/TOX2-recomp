@@ -130,6 +130,10 @@ std::uint32_t eventQueueIdByKey(std::uint64_t ipc_key);
 std::uint32_t sendEventToQueue(std::uint32_t id, std::uint64_t source, std::uint64_t data1, std::uint64_t data2,
                                std::uint64_t data3);
 
+// Sets `bitptn` in event flag `id` and wakes the waiters it satisfies (sys_event_flag_set). Returns
+// kCellOk or kCellEsrch. Under the guest lock; may be called from a host thread that holds it.
+std::uint32_t eventFlagSet(std::uint32_t id, std::uint64_t bitptn);
+
 // Forgets every event flag, event queue and event port (sys_event.cpp).
 void resetEventObjects();
 

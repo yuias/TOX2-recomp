@@ -247,17 +247,10 @@ void sysEventFlagWait(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, code);
 }
 
-// 87 sys_event_flag_set(u32 id, u64 bitptn)
-void sysEventFlagSet(Tox2PpuContext* ctx, std::uint8_t* base) {
-    (void)base;
-    const auto flag = g_flags.find(arg32(ctx, 3));
-    if (flag == nullptr) {
-        setResultCode(ctx, kCellEsrch);
-        return;
-    }
-    const std::uint64_t bitptn = ctx->gpr[4];
-    setResultCode(ctx, kCellOk);
-    if ((flag->pattern & bitptn) == bitptn) return;
+std::uint32_t eventFlagSet(std::uint32_t id, std::uint64_t bitptn) {
+    const auto flag = g_flags.find(id);
+    if (flag == nullptr) return kCellEsrch;
+    if ((flag->pattern & bitptn) == bitptn) return kCellOk;
 
     // Waiters take their turn on the new pattern; each one that matches may clear bits for the next.
     std::uint64_t pattern = flag->pattern | bitptn;
@@ -276,6 +269,13 @@ void sysEventFlagSet(Tox2PpuContext* ctx, std::uint8_t* base) {
     }
     flag->pattern = pattern;
     if (woke) flag->cv.notify_all();
+    return kCellOk;
+}
+
+// 87 sys_event_flag_set(u32 id, u64 bitptn)
+void sysEventFlagSet(Tox2PpuContext* ctx, std::uint8_t* base) {
+    (void)base;
+    setResultCode(ctx, eventFlagSet(arg32(ctx, 3), ctx->gpr[4]));
 }
 
 // 118 sys_event_flag_clear(u32 id, u64 bitptn): keeps the bits that are set in `bitptn`.

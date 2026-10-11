@@ -1,24 +1,33 @@
-// lv2 SPU thread groups and images, as bookkeeping (spurs-description section 4.1 to 4.4): groups,
-// threads, event connections and the SPU image records are kept and checked, nothing runs. Starting a
-// group, or joining one that was never started, ends the run with ExitCode::Unsupported. The SPU image
-// import and close functions (sysPrxForUser) keep their records here too. Handlers run under the
-// guest lock.
+// lv2 SPU thread groups and images (spurs-description section 4.1 to 4.4): groups, threads, event
+// connections and the SPU image records, and the execution of started groups on tox2::SpuThread host
+// threads. The SPU image import and close functions (sysPrxForUser) keep their records here too.
+//
+// Handlers run under the guest lock. An SPU host thread takes that lock only inside the owner callbacks,
+// around the group and event state it touches, and never while it waits on a channel. PPU-side waits
+// for SPU threads go through blockingWait, which gives the lock up.
 
 #include "lv2/sys_spu.h"
 
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <format>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
-#include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
+#include "core/threads.h"
+#include "spu/spu_channels.h"
+#include "spu/spu_thread.h"
 #include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_memory.h"
@@ -58,6 +67,23 @@ constexpr std::uint32_t kSpuSegmentSize = 16;
 constexpr std::int32_t kSegmentCopy = 1;
 constexpr std::int32_t kSegmentFill = 2;
 constexpr std::int32_t kSegmentInfo = 4;
+// Stop codes of SPU code that lv2 gives a meaning (spurs-description section 4.3).
+constexpr std::uint32_t kStopYield = 0x100;
+constexpr std::uint32_t kStopGroupExit = 0x101;
+constexpr std::uint32_t kStopThreadExit = 0x102;
+
+// Why a group stopped, as sys_spu_thread_group_join reports it.
+constexpr std::uint32_t kCauseGroupExit = 1;
+constexpr std::uint32_t kCauseAllThreadsExit = 2;
+constexpr std::uint32_t kCauseTerminated = 4;
+
+// Event sources: the user events of an SPU thread (WrOutIntrMbox) and the group's RUN event.
+constexpr std::uint64_t kSpuThreadEventUserKey = 0xFFFFFFFF53505501ull;
+constexpr std::uint64_t kSpuGroupEventRunKey = 0xFFFFFFFF53505500ull;
+
+// A full event queue is tried again after this long.
+constexpr std::chrono::milliseconds kQueueRetry{1};
+
 constexpr std::uint32_t kElfHeaderSize = 0x34;
 constexpr std::uint32_t kProgramHeaderSize = 0x20;
 constexpr std::uint32_t kPtLoad = 1;
@@ -73,7 +99,7 @@ struct SpuSegment {
     std::uint32_t addr_or_value;
 };
 
-struct SpuThread {
+struct SpuThreadRecord {
     bool initialized = false;
     std::uint32_t id = 0;
     std::string name;
@@ -83,9 +109,20 @@ struct SpuThread {
     std::uint32_t source = 0;  // guest address of the imported ELF, 0 when the image is not recorded
     std::vector<SpuSegment> segments;
     std::map<std::uint32_t, std::uint32_t> ports;  // SPU port -> event queue id
+
+    // The runtime thread of the latest run. It stays after the run ends so that read_ls and the mailbox
+    // calls still reach it; the next start replaces it.
+    std::unique_ptr<SpuThread> cpu;
+    bool mailbox_warned = false;  // the full-mailbox overwrite was logged
 };
 
-enum class GroupState { NotInitialized, Initialized };
+enum class GroupState { NotInitialized, Initialized, Running };
+
+// How a run ended, as sys_spu_thread_group_join reports it.
+struct JoinResult {
+    std::uint32_t cause = 0;
+    std::uint32_t status = 0;
+};
 
 struct SpuGroup {
     std::uint32_t id = 0;
@@ -94,9 +131,24 @@ struct SpuGroup {
     std::int32_t priority = 0;
     std::uint32_t type = 0;
     GroupState state = GroupState::NotInitialized;
-    std::vector<SpuThread> threads;                      // one slot per thread index
+    std::vector<SpuThreadRecord> threads;                // one slot per thread index
     std::map<std::uint32_t, std::uint32_t> connections;  // event type -> event queue id
     std::uint64_t cooperative_victims = 0;
+
+    // The run in progress; all of it is guarded by the guest lock.
+    std::uint32_t unfinished = 0;        // threads whose host thread has not reported its end
+    bool terminated = false;             // sys_spu_thread_group_terminate was called
+    bool group_exit = false;             // a thread ended with stop 0x101
+    std::uint32_t exit_status = 0;       // the status of the terminate call or of the stop 0x101
+    std::uint32_t last_exit_status = 0;  // the status of the latest stop 0x102
+    // How the latest run ended: a join that waits gets it through `handoff` (so a restart cannot drop it before
+    // that joiner runs); otherwise it stays in `result` until a join takes it or the next start discards it.
+    std::uint32_t generation = 0;  // counts starts
+    std::optional<JoinResult> handoff;
+    std::optional<JoinResult> result;
+    bool joining = false;       // a PPU thread waits in join
+    std::uint32_t waiters = 0;  // PPU threads inside join or terminate; they hold a pointer to the group
+    std::condition_variable_any changed;
 };
 
 std::array<std::optional<SpuGroup>, kGroupCount> g_groups;
@@ -110,10 +162,12 @@ SpuGroup* findGroup(std::uint32_t id) {
 }
 
 // Thread ids carry the low 24 bits of their group's id.
-SpuThread* findThread(std::uint32_t id) {
-    SpuGroup* group = findGroup((kGroupIdBase & 0xFF000000) | (id & 0x00FFFFFF));
+SpuGroup* findGroupOfThread(std::uint32_t id) { return findGroup((kGroupIdBase & 0xFF000000) | (id & 0x00FFFFFF)); }
+
+SpuThreadRecord* findSpuThread(std::uint32_t id) {
+    SpuGroup* group = findGroupOfThread(id);
     if (group == nullptr) return nullptr;
-    for (SpuThread& thread : group->threads) {
+    for (SpuThreadRecord& thread : group->threads) {
         if (thread.initialized && thread.id == id) return &thread;
     }
     return nullptr;
@@ -146,9 +200,155 @@ std::string sourceText(std::uint32_t source) {
     return source != 0 ? std::format("{:#010x}", source) : std::string("?");
 }
 
+// Ends the run of `group` once its last thread has ended. Under the guest lock.
+void stopGroup(SpuGroup& group) {
+    JoinResult result;
+    if (group.terminated) {
+        result = {kCauseTerminated, group.exit_status};
+    } else if (group.group_exit) {
+        result = {kCauseGroupExit, group.exit_status};
+    } else {
+        result = {kCauseAllThreadsExit, group.last_exit_status};
+    }
+    (group.joining ? group.handoff : group.result) = result;
+    group.state = GroupState::Initialized;
+    logInfo("tox2: spu: group {:#010x} \"{}\" stopped: cause {}, status {:#x}", group.id, group.name, result.cause,
+            result.status);
+    group.changed.notify_all();
+}
+
+// The owner of every lv2 SPU thread. The callbacks run on the SPU's host thread; each one takes the
+// guest lock for the lv2 state it reads or changes and never holds it across a wait on a channel.
+class GroupOwner final : public SpuOwner {
+public:
+    void onInterruptMailbox(SpuThread& cpu, std::uint32_t value) override;
+    bool onStop(SpuThread& cpu, std::uint32_t site, std::uint32_t code) override;
+    void onFinished(SpuThread& cpu, SpuLeave how) override;
+};
+
+GroupOwner g_owner;
+
+// WrOutIntrMbox is a system call of the SPU thread (spurs-description section 4.4).
+void GroupOwner::onInterruptMailbox(SpuThread& cpu, std::uint32_t value) {
+    const std::uint32_t code = value >> 24;
+    if (code > 128 && code != 192) {
+        spuStop(cpu,
+                std::format("tox2: stop: spu: WrOutIntrMbox {:#010x} on thread {:#010x}: code {} is not implemented",
+                            value, cpu.id(), code));
+    }
+    std::uint32_t d1 = 0;
+    if (!cpu.channels().takeOutMbox(&d1)) {
+        spuStop(cpu, std::format("tox2: stop: spu: WrOutIntrMbox {:#010x} on thread {:#010x} with an empty outbound "
+                                 "mailbox",
+                                 value, cpu.id()));
+    }
+    const bool send_event = code < 64;
+    const bool throw_event = code >= 64 && code < 128;
+
+    for (;;) {
+        {
+            std::lock_guard<GuestLock> guard(guestLock());
+            const SpuThreadRecord* record = findSpuThread(cpu.id());
+            if (record == nullptr) return;  // the group is gone (test teardown)
+            std::uint32_t result = kCellOk;
+            bool queue_full = false;
+            if (send_event || throw_event) {
+                const std::uint32_t port = code & kMaxPort;
+                const auto bound = record->ports.find(port);
+                if (send_event && cpu.channels().inMboxCount() != 0) {
+                    // The reply replaces what is queued, so the SPU thread finds it first.
+                    cpu.channels().replaceInMbox(kCellEbusy);
+                    return;
+                } else if (bound == record->ports.end()) {
+                    result = kCellEnotconn;
+                } else {
+                    const std::uint64_t data2 = (std::uint64_t{port} << 32) | (value & 0xFFFFFF);
+                    const std::uint32_t sent =
+                            sendEventToQueue(bound->second, kSpuThreadEventUserKey, cpu.id(), data2, d1);
+                    queue_full = sent == kCellEbusy;
+                    result = sent == kCellEsrch ? kCellEnotconn : sent;
+                }
+            } else {
+                const std::uint32_t bit = value & 0xFFFFFF;
+                result = bit >= 64 ? kCellEinval : eventFlagSet(d1, std::uint64_t{1} << bit);
+            }
+            if (!queue_full) {
+                // Throw and impatient set-bit calls drop their errors.
+                if (send_event || code == 128) cpu.channels().pushInMbox(result);
+                return;
+            }
+        }
+        // Not under the guest lock: the wait ends early when the thread is halted.
+        if (!cpu.channels().pause(kQueueRetry)) return;
+    }
+}
+
+bool GroupOwner::onStop(SpuThread& cpu, std::uint32_t site, std::uint32_t code) {
+    if (code == kStopYield) return true;
+    if (code != kStopGroupExit && code != kStopThreadExit) {
+        spuStop(cpu, std::format("tox2: stop: spu: stop {:#x} at ls {:#07x} on thread {:#010x}: not implemented", code,
+                                 site, cpu.id()));
+    }
+    std::uint32_t status = 0;
+    if (!cpu.channels().takeOutMbox(&status)) {
+        logWarn("tox2: spu: thread {:#010x} stop {:#x} at ls {:#07x} with an empty outbound mailbox, status 0",
+                cpu.id(), code, site);
+    }
+    std::lock_guard<GuestLock> guard(guestLock());
+    SpuGroup* group = findGroupOfThread(cpu.id());
+    if (group == nullptr || findSpuThread(cpu.id()) == nullptr) return false;
+    if (code == kStopThreadExit) {
+        group->last_exit_status = status;
+    } else if (!group->terminated && !group->group_exit) {
+        group->group_exit = true;
+        group->exit_status = status;
+        for (SpuThreadRecord& other : group->threads) {
+            if (other.cpu != nullptr && other.cpu.get() != &cpu) other.cpu->requestHalt();
+        }
+    }
+    return false;
+}
+
+void GroupOwner::onFinished(SpuThread& cpu, SpuLeave how) {
+    (void)how;  // the cause comes from the group flags, not from how the host thread left
+    std::lock_guard<GuestLock> guard(guestLock());
+    SpuGroup* group = findGroupOfThread(cpu.id());
+    if (group == nullptr || findSpuThread(cpu.id()) == nullptr || group->state != GroupState::Running) return;
+    if (--group->unfinished == 0) stopGroup(*group);
+}
+
+// Halts every thread of `group` and waits for the host threads, without freeing anything: an SPU thread that is
+// still in onStop walks the other threads' records, so those must stay intact until all host threads have
+// ended. For teardown only: a thread that is still running may be waiting for the guest lock, so the caller
+// must not hold it unless every group has stopped.
+void haltAndJoin(SpuGroup& group) {
+    for (SpuThreadRecord& thread : group.threads) {
+        if (thread.cpu != nullptr) thread.cpu->requestHalt();
+    }
+    for (SpuThreadRecord& thread : group.threads) {
+        if (thread.cpu != nullptr) thread.cpu->join();
+    }
+}
+
+// The thread record for the calls that reach into a started SPU thread: sets `*error` to ESRCH for an
+// unknown id and to ESTAT when the thread was never started.
+SpuThreadRecord* startedThread(std::uint32_t id, std::uint32_t* error) {
+    SpuThreadRecord* thread = findSpuThread(id);
+    if (thread == nullptr) {
+        *error = kCellEsrch;
+    } else if (thread->cpu == nullptr) {
+        *error = kCellEstat;
+    }
+    return *error == kCellOk ? thread : nullptr;
+}
+
 }  // namespace
 
 void resetSpuThreadGroups() {
+    // Every host thread ends before any record is freed.
+    for (auto& group : g_groups) {
+        if (group) haltAndJoin(*group);
+    }
     for (auto& group : g_groups) group.reset();
     g_next_group_slot = 0;
     g_next_thread_number = 1;
@@ -237,6 +437,16 @@ void resetSpuImages() {
     g_images.clear();
 }
 
+SpuThread* spuThreadById(std::uint32_t id) {
+    SpuThreadRecord* thread = findSpuThread(id);
+    return thread != nullptr ? thread->cpu.get() : nullptr;
+}
+
+bool spuGroupHasJoiner(std::uint32_t group_id) {
+    const SpuGroup* group = findGroup(group_id);
+    return group != nullptr && group->joining;
+}
+
 // 169 sys_spu_initialize(u32 max_usable_spu, u32 max_raw_spu): the usable count is pinned to 6 and
 // only more than 5 raw SPUs is rejected (the busy check cannot fail without SPU threads).
 void sysSpuInitialize(Tox2PpuContext* ctx, std::uint8_t* base) {
@@ -310,12 +520,18 @@ void sysSpuThreadGroupCreate(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, kCellEagain);
 }
 
-// 171 sys_spu_thread_group_destroy(u32 id): drops the group with its threads and connections.
+// 171 sys_spu_thread_group_destroy(u32 id): drops the group with its threads and connections. A running
+// group, or one that a PPU thread waits to join, is busy.
 void sysSpuThreadGroupDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     const std::uint32_t id = arg32(ctx, 3);
-    if (findGroup(id) == nullptr) {
+    const SpuGroup* group = findGroup(id);
+    if (group == nullptr) {
         setResultCode(ctx, kCellEsrch);
+        return;
+    }
+    if (group->state == GroupState::Running || group->waiters != 0) {
+        setResultCode(ctx, kCellEbusy);
         return;
     }
     g_groups[(id - kGroupIdBase) / kGroupIdStep].reset();
@@ -385,7 +601,7 @@ void sysSpuThreadInitialize(Tox2PpuContext* ctx, std::uint8_t* base) {
         return;
     }
 
-    SpuThread& thread = group->threads[index];
+    SpuThreadRecord& thread = group->threads[index];
     thread.initialized = true;
     thread.id = (g_next_thread_number++ << 24) | (group->id & 0x00FFFFFF);
     thread.name = *name;
@@ -402,15 +618,42 @@ void sysSpuThreadInitialize(Tox2PpuContext* ctx, std::uint8_t* base) {
             thread.id, thread.name, group->id, index, sourceText(thread.source), entry, thread.args[0], thread.args[1],
             thread.args[2], thread.args[3]);
 
-    const auto ready = std::ranges::count_if(group->threads, [](const SpuThread& t) { return t.initialized; });
+    const auto ready = std::ranges::count_if(group->threads, [](const SpuThreadRecord& t) { return t.initialized; });
     if (static_cast<std::uint32_t>(ready) == group->num) group->state = GroupState::Initialized;
     setResultCode(ctx, kCellOk);
 }
 
-// 173 sys_spu_thread_group_start(u32 id): there is no SPU execution, so the run ends here after the log
-// has shown everything that would have started.
+namespace {
+
+// A new SPU thread for `thread` with its segments loaded and the start registers set (SPU ABI of
+// sys_spu_thread_initialize: $3..$6 hold the four arguments as 64-bit values in the preferred slot).
+std::unique_ptr<SpuThread> makeSpuThread(const SpuThreadRecord& thread, std::uint8_t* base) {
+    auto cpu = std::make_unique<SpuThread>(thread.id, thread.name, &g_owner);
+    std::memset(cpu->ls(), 0, kTox2SpuLsSize);
+    untagLs(*cpu, 0, kTox2SpuLsSize);
+    for (const SpuSegment& segment : thread.segments) {
+        const auto size = static_cast<std::uint32_t>(segment.size);
+        if (segment.type == kSegmentCopy) {
+            copyToLs(*cpu, base, segment.addr_or_value, segment.ls_start, size);
+        } else if (segment.type == kSegmentFill) {
+            // The value is repeated as a big-endian word.
+            for (std::uint32_t i = 0; i < size; i++) {
+                cpu->ls()[segment.ls_start + i] =
+                        static_cast<std::uint8_t>(segment.addr_or_value >> (24 - 8 * (i & 3)));
+            }
+            untagLs(*cpu, segment.ls_start, size);
+        }
+    }
+    for (std::uint32_t i = 0; i < 4; i++) TOX2_VR_D(cpu->context().gpr[3 + i], 0) = thread.args[i];
+    cpu->channels().mfc().setGuestBase(base);
+    return cpu;
+}
+
+}  // namespace
+
+// 173 sys_spu_thread_group_start(u32 id): loads every thread, then lets the host threads run. The group
+// is Running until the last of them ends (see stopGroup).
 void sysSpuThreadGroupStart(Tox2PpuContext* ctx, std::uint8_t* base) {
-    (void)base;
     SpuGroup* group = findGroup(arg32(ctx, 3));
     if (group == nullptr) {
         setResultCode(ctx, kCellEsrch);
@@ -420,10 +663,20 @@ void sysSpuThreadGroupStart(Tox2PpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, kCellEstat);
         return;
     }
+    // Nothing has changed yet when a segment source is not guest memory.
+    for (const SpuThreadRecord& thread : group->threads) {
+        for (const SpuSegment& segment : thread.segments) {
+            if (segment.type == kSegmentCopy && segment.size > 0 &&
+                !process().memory.isCommitted(segment.addr_or_value, static_cast<std::uint32_t>(segment.size))) {
+                setResultCode(ctx, kCellEfault);
+                return;
+            }
+        }
+    }
     logInfo("tox2: spu: start group {:#010x} \"{}\" type {:#x} priority {}: {} threads", group->id, group->name,
             group->type, group->priority, group->num);
     for (std::uint32_t i = 0; i < group->num; i++) {
-        const SpuThread& thread = group->threads[i];
+        const SpuThreadRecord& thread = group->threads[i];
         logInfo("tox2: spu:   thread {} {:#010x} \"{}\" image {} entry {:#x} segments {} args {:#x} {:#x} {:#x} {:#x}",
                 i, thread.id, thread.name, sourceText(thread.source), thread.entry, thread.segments.size(),
                 thread.args[0], thread.args[1], thread.args[2], thread.args[3]);
@@ -441,36 +694,182 @@ void sysSpuThreadGroupStart(Tox2PpuContext* ctx, std::uint8_t* base) {
             logInfo("tox2: spu:   thread {} port {} -> queue {:#010x}", i, port, queue);
         }
     }
-    const SpuThread& first = group->threads[0];
-    stopProcess(ExitCode::Unsupported,
-                std::format("tox2: stop: spu: sys_spu_thread_group_start group {:#010x} \"{}\" ({} threads, image {} "
-                            "entry {:#x}): SPU execution is not implemented",
-                            group->id, group->name, group->num, sourceText(first.source), first.entry));
+
+    // The previous run's threads have all ended (the group was Initialized), so replacing them only
+    // joins host threads that are about to return.
+    for (SpuThreadRecord& thread : group->threads) thread.cpu = makeSpuThread(thread, base);
+    group->unfinished = group->num;
+    group->terminated = false;
+    group->group_exit = false;
+    group->exit_status = 0;
+    group->last_exit_status = 0;
+    group->result.reset();
+    group->generation++;
+    group->state = GroupState::Running;
+
+    const auto run = group->connections.find(kEventRun);
+    if (run != group->connections.end()) {
+        const std::uint32_t sent = sendEventToQueue(run->second, kSpuGroupEventRunKey, group->id, 0, 0);
+        if (sent != kCellOk) {
+            logWarn("tox2: spu: run event of group {:#010x} not delivered to queue {:#010x}: {:#x}", group->id,
+                    run->second, sent);
+        }
+    }
+    for (SpuThreadRecord& thread : group->threads) {
+        const std::optional<SpuTracked> tracked = trackedImageAt(*thread.cpu, thread.entry);
+        logInfo("tox2: spu: thread {:#010x} \"{}\" started at {} ls {:#07x}", thread.id, thread.name,
+                tracked ? tracked->image->name : "untracked", thread.entry);
+    }
+    // Started only after every line is out: a thread may end the process at once.
+    for (SpuThreadRecord& thread : group->threads) thread.cpu->start(thread.entry);
+    setResultCode(ctx, kCellOk);
 }
 
-// 177 sys_spu_thread_group_terminate(u32 id, s32 value): no group ever runs, so none can be stopped.
+// 177 sys_spu_thread_group_terminate(u32 id, s32 value): halts the threads and waits until they have
+// ended. The group stops with cause 4 and `value` as the status, unless a thread had already ended it.
 void sysSpuThreadGroupTerminate(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
-    setResultCode(ctx, findGroup(arg32(ctx, 3)) == nullptr ? kCellEsrch : kCellEstat);
-}
-
-// 178 sys_spu_thread_group_join(u32 id, u32* cause, u32* status): the wait of an initialized group
-// could never end, so the run stops instead of hanging.
-void sysSpuThreadGroupJoin(Tox2PpuContext* ctx, std::uint8_t* base) {
-    (void)base;
-    const SpuGroup* group = findGroup(arg32(ctx, 3));
+    SpuGroup* group = findGroup(arg32(ctx, 3));
     if (group == nullptr) {
         setResultCode(ctx, kCellEsrch);
         return;
     }
-    if (group->state != GroupState::Initialized) {
+    if (group->state != GroupState::Running) {
         setResultCode(ctx, kCellEstat);
         return;
     }
-    stopProcess(ExitCode::Unsupported,
-                std::format("tox2: stop: spu: sys_spu_thread_group_join on group {:#010x} that never runs: SPU "
-                            "execution is not implemented",
-                            group->id));
+    if (!group->terminated && !group->group_exit) {
+        group->terminated = true;
+        group->exit_status = arg32(ctx, 4);
+    }
+    for (SpuThreadRecord& thread : group->threads) {
+        if (thread.cpu != nullptr) thread.cpu->requestHalt();
+    }
+    group->waiters++;
+    // A run that was restarted meanwhile is not waited for.
+    const std::uint32_t generation = group->generation;
+    blockingWait(
+            group->changed,
+            [group, generation] { return group->generation != generation || group->state != GroupState::Running; },
+            "sys_spu_thread_group_terminate", std::nullopt);
+    group->waiters--;
+    setResultCode(ctx, kCellOk);
+}
+
+// 178 sys_spu_thread_group_join(u32 id, u32* cause, u32* status): waits for the end of a run, also of one
+// that has not started yet, and takes its result. A run that ended earlier is reported at once.
+void sysSpuThreadGroupJoin(Tox2PpuContext* ctx, std::uint8_t* base) {
+    SpuGroup* group = findGroup(arg32(ctx, 3));
+    if (group == nullptr) {
+        setResultCode(ctx, kCellEsrch);
+        return;
+    }
+    if (group->state == GroupState::NotInitialized) {
+        setResultCode(ctx, kCellEstat);
+        return;
+    }
+    if (group->joining) {
+        setResultCode(ctx, kCellEbusy);
+        return;
+    }
+    JoinResult result;
+    if (group->result) {
+        result = *group->result;
+        group->result.reset();
+    } else {
+        // The end of the run hands its result to the waiting joiner directly, so a start that follows it
+        // before this thread runs again cannot discard it.
+        group->joining = true;
+        group->waiters++;
+        blockingWait(
+                group->changed, [group] { return group->handoff.has_value(); }, "sys_spu_thread_group_join",
+                std::nullopt);
+        result = *group->handoff;
+        group->handoff.reset();
+        group->joining = false;
+        group->waiters--;
+    }
+
+    // A null pointer is an error after the wait, not before it (SPURS joins with a null cause).
+    const std::uint32_t cause_addr = arg32(ctx, 4), status_addr = arg32(ctx, 5);
+    const bool cause_ok = cause_addr != 0 && process().memory.isCommitted(cause_addr, 4);
+    const bool status_ok = status_addr != 0 && process().memory.isCommitted(status_addr, 4);
+    if (cause_ok) tox2Write32(base, cause_addr, result.cause);
+    if (status_ok) tox2Write32(base, status_addr, result.status);
+    setResultCode(ctx, cause_ok && status_ok ? kCellOk : kCellEfault);
+}
+
+namespace {
+
+// sys_spu_thread_write_ls and sys_spu_thread_read_ls: `type` is the size in bytes (1, 2, 4 or 8), the
+// access is aligned and big-endian.
+bool validLsAccess(std::uint32_t lsa, std::uint32_t type) {
+    return (type == 1 || type == 2 || type == 4 || type == 8) && lsa % type == 0 && lsa < kLocalStoreSize &&
+           kLocalStoreSize - lsa >= type;
+}
+
+}  // namespace
+
+// 181 sys_spu_thread_write_ls(u32 id, u32 lsa, u64 value, u32 type)
+void sysSpuThreadWriteLs(Tox2PpuContext* ctx, std::uint8_t* base) {
+    (void)base;
+    const std::uint32_t lsa = arg32(ctx, 4), type = arg32(ctx, 6);
+    if (!validLsAccess(lsa, type)) {
+        setResultCode(ctx, kCellEinval);
+        return;
+    }
+    std::uint32_t error = kCellOk;
+    SpuThreadRecord* thread = startedThread(arg32(ctx, 3), &error);
+    if (thread == nullptr) {
+        setResultCode(ctx, error);
+        return;
+    }
+    const std::uint64_t value = ctx->gpr[5];
+    for (std::uint32_t i = 0; i < type; i++) {
+        thread->cpu->ls()[lsa + i] = static_cast<std::uint8_t>(value >> (8 * (type - 1 - i)));
+    }
+    untagLs(*thread->cpu, lsa, type);
+    setResultCode(ctx, kCellOk);
+}
+
+// 182 sys_spu_thread_read_ls(u32 id, u32 lsa, u64* value, u32 type)
+void sysSpuThreadReadLs(Tox2PpuContext* ctx, std::uint8_t* base) {
+    const std::uint32_t lsa = arg32(ctx, 4), value_addr = arg32(ctx, 5), type = arg32(ctx, 6);
+    if (value_addr == 0 || !process().memory.isCommitted(value_addr, 8)) {
+        setResultCode(ctx, kCellEfault);
+        return;
+    }
+    if (!validLsAccess(lsa, type)) {
+        setResultCode(ctx, kCellEinval);
+        return;
+    }
+    std::uint32_t error = kCellOk;
+    SpuThreadRecord* thread = startedThread(arg32(ctx, 3), &error);
+    if (thread == nullptr) {
+        setResultCode(ctx, error);
+        return;
+    }
+    std::uint64_t value = 0;
+    for (std::uint32_t i = 0; i < type; i++) value = (value << 8) | thread->cpu->ls()[lsa + i];
+    tox2Write64(base, value_addr, value);
+    setResultCode(ctx, kCellOk);
+}
+
+// 190 sys_spu_thread_write_spu_mb(u32 id, u32 value): a write to a full inbound mailbox replaces the
+// newest entry, as the hardware does.
+void sysSpuThreadWriteSpuMb(Tox2PpuContext* ctx, std::uint8_t* base) {
+    (void)base;
+    std::uint32_t error = kCellOk;
+    SpuThreadRecord* thread = startedThread(arg32(ctx, 3), &error);
+    if (thread == nullptr) {
+        setResultCode(ctx, error);
+        return;
+    }
+    if (!thread->cpu->channels().pushInMbox(arg32(ctx, 4), true) && !thread->mailbox_warned) {
+        thread->mailbox_warned = true;
+        logWarn("tox2: spu: thread {:#010x} inbound mailbox is full, the newest entry was overwritten", thread->id);
+    }
+    setResultCode(ctx, kCellOk);
 }
 
 // 185 sys_spu_thread_group_connect_event(u32 id, u32 eq, u32 et)
@@ -520,7 +919,7 @@ void sysSpuThreadConnectEvent(Tox2PpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, kCellEinval);
         return;
     }
-    SpuThread* thread = findThread(arg32(ctx, 3));
+    SpuThreadRecord* thread = findSpuThread(arg32(ctx, 3));
     const std::uint32_t queue = arg32(ctx, 4);
     if (thread == nullptr || !eventQueueExists(queue)) {
         setResultCode(ctx, kCellEsrch);
@@ -543,7 +942,7 @@ void sysSpuThreadDisconnectEvent(Tox2PpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, kCellEinval);
         return;
     }
-    SpuThread* thread = findThread(arg32(ctx, 3));
+    SpuThreadRecord* thread = findSpuThread(arg32(ctx, 3));
     if (thread == nullptr) {
         setResultCode(ctx, kCellEsrch);
         return;
@@ -582,16 +981,17 @@ void sysSpuThreadGroupConnectEventAllThreads(Tox2PpuContext* ctx, std::uint8_t* 
         setResultCode(ctx, kCellEfault);
         return;
     }
-    if (group->state != GroupState::Initialized) {
+    // libsre attaches its queues while the SPURS group runs.
+    if (group->state == GroupState::NotInitialized) {
         setResultCode(ctx, kCellEstat);
         return;
     }
     for (std::uint64_t left = req; left != 0; left &= left - 1) {
         const auto port = static_cast<std::uint32_t>(std::countr_zero(left));
-        const bool free =
-                std::ranges::none_of(group->threads, [port](const SpuThread& t) { return t.ports.contains(port); });
+        const bool free = std::ranges::none_of(group->threads,
+                                               [port](const SpuThreadRecord& t) { return t.ports.contains(port); });
         if (!free) continue;
-        for (SpuThread& thread : group->threads) thread.ports[port] = queue;
+        for (SpuThreadRecord& thread : group->threads) thread.ports[port] = queue;
         tox2Write8(base, spup, static_cast<std::uint8_t>(port));
         setResultCode(ctx, kCellOk);
         return;
@@ -613,7 +1013,7 @@ void sysSpuThreadGroupDisconnectEventAllThreads(Tox2PpuContext* ctx, std::uint8_
         return;
     }
     bool bound = false;
-    for (SpuThread& thread : group->threads) bound = thread.ports.erase(port) != 0 || bound;
+    for (SpuThreadRecord& thread : group->threads) bound = thread.ports.erase(port) != 0 || bound;
     setResultCode(ctx, bound ? kCellOk : kCellEnotconn);
 }
 

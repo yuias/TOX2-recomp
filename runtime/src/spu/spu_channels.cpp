@@ -229,6 +229,17 @@ bool SpuChannels::pushInMbox(std::uint32_t value, bool overwrite_newest) {
     return queued;
 }
 
+void SpuChannels::replaceInMbox(std::uint32_t value) {
+    {
+        std::lock_guard lock(mutex_);
+        in_fifo_[0] = value;
+        in_count_.store(1, std::memory_order_release);
+    }
+    cv_.notify_all();
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (table_wait_.load(std::memory_order_seq_cst)) reservations().wake();
+}
+
 bool SpuChannels::writeOutMbox(std::uint32_t value) {
     std::unique_lock lock(mutex_);
     if (out_full_) {

@@ -1046,7 +1046,7 @@ void testSyscalls() {
     CHECK(tox2::findSyscall(999) == nullptr);
 
     auto ctx = std::make_unique<Tox2PpuContext>();
-    ctx->gpr[11] = 181;  // sys_spu_thread_write_ls has no handler
+    ctx->gpr[11] = 193;  // sys_spu_thread_bind_queue has no handler
     ctx->gpr[3] = 0x1234;
     tox2Syscall(ctx.get(), nullptr, 0x10000);
     CHECK(ctx->gpr[3] == tox2::kCellOk);
@@ -1056,14 +1056,14 @@ void testSyscalls() {
     tox2Syscall(ctx.get(), nullptr, 0x10004);
     CHECK(ctx->gpr[3] == tox2::kCellOk);
 
-    CHECK(countContaining(lines, "tox2: first sc 181 sys_spu_thread_write_ls") == 1);
+    CHECK(countContaining(lines, "tox2: first sc 193 sys_spu_thread_bind_queue") == 1);
     CHECK(countContaining(lines, "tox2: first sc 999 ?") == 1);
-    CHECK(countContaining(lines, "tox2: default sc 181 sys_spu_thread_write_ls(0x1234") == 1);
+    CHECK(countContaining(lines, "tox2: default sc 193 sys_spu_thread_bind_queue(0x1234") == 1);
     CHECK(countContaining(lines, "tox2: default sc 999 ?(0x1234") == 1);
 
     const std::string census = tox2::formatCensus();
     CHECK(census.find("census: syscalls 3 calls, 2 distinct, 2 default-handled") != std::string::npos);
-    CHECK(census.find("  sc 181 sys_spu_thread_write_ls: 2 [default]") != std::string::npos);
+    CHECK(census.find("  sc 193 sys_spu_thread_bind_queue: 2 [default]") != std::string::npos);
     CHECK(census.find("  sc 999 ?: 1 [default]") != std::string::npos);
 
     tox2::setLogSink({});
@@ -9953,7 +9953,7 @@ void testAbortChild() {
 void testSpuStartChild() {
     const ChildResult r = runChild(L"--spu-start-child");
     echoChild("spu start child", r);
-    CHECK(r.exit_code == 8);
+    CHECK(r.exit_code == 3);
     // The child names the address it imported the ELF from.
     const std::string_view marker = "spu child: elf at ";
     const std::size_t at = r.output.find(marker);
@@ -9970,17 +9970,46 @@ void testSpuStartChild() {
     CHECK(contains(r, "tox2: spu:   event queue run 0x8d000000"));
     CHECK(contains(r, "tox2: spu:   thread 0 port 2 -> queue 0x8d000000"));
     CHECK(contains(r, "tox2: spu:   thread 1 port 2 -> queue 0x8d000000"));
-    CHECK(contains(r, "tox2: stop: spu: sys_spu_thread_group_start group 0x04000100 " + group + " (2 threads, image " +
-                              elf + " entry 0x818): SPU execution is not implemented"));
+    // This binary registers no SPU images, so the entry at 0x818 is untracked and the first dispatch stops.
+    // Which of the two threads gets there first is not fixed.
+    CHECK(contains(r,
+                   "tox2: spu: thread 0x01000100 \"SpursTLGraphicsCellSpursKernel0\" started at untracked ls 0x00818"));
+    CHECK(contains(r,
+                   "tox2: spu: thread 0x02000100 \"SpursTLGraphicsCellSpursKernel0\" started at untracked ls 0x00818"));
+    CHECK(contains(r, "tox2: stop: spu: unknown target ls 0x00818"));
+    CHECK(contains(r, "(untracked)"));
 }
 
-void testSpuJoinChild() {
-    const ChildResult r = runChild(L"--spu-join-child");
-    echoChild("spu join child", r);
-    CHECK(r.exit_code == 8);
-    CHECK(contains(r,
-                   "tox2: stop: spu: sys_spu_thread_group_join on group 0x04000100 that never runs: SPU execution "
-                   "is not implemented"));
+// A join on a group that is not fully initialized does not wait.
+void testSpuJoinNotInitialized() {
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetSyncObjects();
+    tox2::resetSpuThreadGroups();
+    tox2::resetSpuImages();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    auto a = makeCaller(0x01000000);
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+
+    putText(base, scratch + kSpuGroupName, "group");
+    tox2Write32(base, scratch + kSpuGroupAttr, 6);
+    tox2Write32(base, scratch + kSpuGroupAttr + 4, scratch + kSpuGroupName);
+    tox2Write32(base, scratch + kSpuGroupAttr + 8, 0);
+    CHECK(syscallAs(*a, 170, scratch + kSpuIdOut, 2, 100, scratch + kSpuGroupAttr) == 0);
+    const std::uint32_t group = tox2Read32(base, scratch + kSpuIdOut);
+    CHECK(syscallAs(*a, 178, group, scratch + 0x1C0, scratch + 0x1C4) == err(tox2::kCellEstat));
+    CHECK(syscallAs(*a, 178, 0x04000900, scratch + 0x1C0, scratch + 0x1C4) == err(tox2::kCellEsrch));
+    CHECK(syscallAs(*a, 173, group) == err(tox2::kCellEstat));
+    CHECK(syscallAs(*a, 177, group, 0) == err(tox2::kCellEstat));
+
+    tox2::resetSpuThreadGroups();
+    tox2::resetSpuImages();
+    tox2::resetSyncObjects();
+    p.main.free(scratch);
+    tox2::setLogSink({});
 }
 
 void testGuestStackWalk() {
@@ -10102,20 +10131,12 @@ int spuStartChild() {
     std::uint8_t* base = tox2::process().memory.base();
     const std::uint32_t scratch = tox2::process().main.allocate(0x10000, 0x10000);
     auto caller = makeCaller(0x01000000);
+    std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
     const std::uint32_t group = spuChildGroup(*caller, base, scratch);
     std::printf("spu child: elf at %#010x\n", scratch + kSpuElf);
     std::fflush(stdout);
     syscallAs(*caller, 173, group);
-    return 99;
-}
-
-int spuJoinChild() {
-    tox2::installProcessSettings();
-    tox2::process().memory.reserve();
-    std::uint8_t* base = tox2::process().memory.base();
-    const std::uint32_t scratch = tox2::process().main.allocate(0x10000, 0x10000);
-    auto caller = makeCaller(0x01000000);
-    const std::uint32_t group = spuChildGroup(*caller, base, scratch);
+    // The SPU threads stop the process; the join keeps this thread from returning first.
     syscallAs(*caller, 178, group, 0, 0);
     return 99;
 }
@@ -10176,7 +10197,6 @@ int main(int argc, char** argv) {
         if (mode == "--overlapping-span-child") return overlappingSpanChild();
         if (mode == "--abort-child") return abortChild();
         if (mode == "--spu-start-child") return spuStartChild();
-        if (mode == "--spu-join-child") return spuJoinChild();
     }
 
     tox2::installProcessSettings();
@@ -10273,7 +10293,7 @@ int main(int argc, char** argv) {
     testOverlappingSpanChild();
     testAbortChild();
     testSpuStartChild();
-    testSpuJoinChild();
+    testSpuJoinNotInitialized();
     std::printf("runtime core tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }

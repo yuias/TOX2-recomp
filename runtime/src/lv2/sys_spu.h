@@ -4,13 +4,23 @@
 
 namespace tox2 {
 
-// SPU thread groups are bookkeeping only: groups, threads, their images and event connections are
-// recorded and validated, but no SPU thread ever runs. Starting a group ends the run with
-// ExitCode::Unsupported after logging what would have started. Ids: groups 0x04000100 + slot * 0x100
-// (255 slots), threads (n << 24) | (group id & 0xFFFFFF). Handlers run under the guest lock.
+class SpuThread;
 
-// Forgets every group and thread and restarts the thread counter. Intended for tests.
+// SPU thread groups: groups, threads, their images and event connections are recorded and validated;
+// starting a group runs its threads on host threads (spu/spu_thread.h) until they end through stop
+// 0x101/0x102 or the group is terminated. Ids: groups 0x04000100 + slot * 0x100 (255 slots), threads
+// (n << 24) | (group id & 0xFFFFFF). Handlers run under the guest lock.
+
+// Forgets every group and thread and restarts the thread counter. Running threads are halted and joined,
+// so a caller that holds the guest lock must have ended the groups first. Intended for tests.
 void resetSpuThreadGroups();
+
+// The runtime thread of the lv2 SPU thread `id` from its latest start, or null when the id is unknown or
+// the thread never started. Under the guest lock; the object lives until the group is started again,
+// destroyed or reset.
+SpuThread* spuThreadById(std::uint32_t id);
+// True while a PPU thread waits in sys_spu_thread_group_join on the group. Under the guest lock. For tests.
+bool spuGroupHasJoiner(std::uint32_t group_id);
 
 // An SPU ELF imported with spuImageImport. `segs` is the guest address of the segment array that the
 // sys_spu_image points to; it identifies the record.

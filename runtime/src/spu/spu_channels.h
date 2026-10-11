@@ -91,6 +91,8 @@ public:
     // is set (what the hardware does for a PPU write to a full SPU inbound mailbox).
     bool pushInMbox(std::uint32_t value, bool overwrite_newest = false);
     std::uint32_t inMboxCount() const { return in_count_.load(std::memory_order_acquire); }
+    // Makes `value` the only entry of the inbound mailbox (the lv2 busy reply to a send_event).
+    void replaceInMbox(std::uint32_t value);
 
     // Outbound mailbox (one entry). takeOutMbox consumes it and lets a blocked WrOutMbox go on.
     bool takeOutMbox(std::uint32_t* value);
