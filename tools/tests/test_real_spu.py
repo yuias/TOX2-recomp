@@ -26,14 +26,14 @@ _GATE_IMAGES = ["eboot_edgelzma", "libsre_kernel1", "libsre_system_service", "li
 
 # image: (functions, instructions, dispatchable blocks, unhandled words)
 _COUNTS = {
-    "eboot_spline": (14, 1061, 39, 142),
+    "eboot_spline": (16, 1106, 41, 142),
     "eboot_edgelzma": (38, 3823, 87, 0),
     "eboot_bnuscore": (50, 3583, 232, 44),
-    "eboot_animation": (51, 3838, 113, 77),
-    "eboot_updatematrix": (174, 14393, 600, 829),
-    "eboot_renderparticle": (66, 8112, 261, 575),
-    "eboot_morph": (60, 3644, 143, 17),
-    "eboot_skin": (42, 3810, 99, 188),
+    "eboot_animation": (54, 3841, 116, 77),
+    "eboot_updatematrix": (182, 14567, 608, 829),
+    "eboot_renderparticle": (73, 8303, 268, 575),
+    "eboot_morph": (62, 3745, 145, 17),
+    "eboot_skin": (43, 3811, 100, 188),
     "libsre_kernel1": (4, 366, 7, 0),
     "libsre_kernel2": (3, 377, 6, 0),
     "libsre_system_service": (18, 2104, 50, 0),
@@ -58,6 +58,10 @@ _MUST_DISPATCH = {
     ],
     "eboot_edgelzma": [0x3090, 0x3628, 0x5078, 0x32A4, 0x32B0, 0x5770, 0x5720, 0x59F8, 0x5BF8,
                        0x4DC0, 0x4DEC],
+    # Constructors that only crt0's __do_global_ctors_aux reaches, through the .ctors list
+    "eboot_skin": [0x3130],
+    "eboot_spline": [0x30E8, 0x3E60],
+    "eboot_morph": [0x48B8, 0x5538],
 }
 
 # The policy module's two switches and the two Duff-device branches. Table 0x1cc4 is found although a
@@ -230,6 +234,14 @@ class RealSpuDatabaseTest(unittest.TestCase):
             for target in table["targets"]:
                 with self.subTest(site=table["site"], target=target):
                     self.assertIn("jump_table", sources[target])
+
+    def test_constructor_list_pointers_are_seeds_from_the_list(self):
+        sources = {s["ls"]: s["sources"] for s in _database("eboot_skin")["dispatch_seeds"]}
+        self.assertEqual(sources["0x3130"], ["ctors"])
+        for name in ("eboot_edgelzma", "eboot_bnuscore"):
+            with self.subTest(image=name):
+                found = {tag for s in _database(name)["dispatch_seeds"] for tag in s["sources"]}
+                self.assertFalse(found & {"ctors", "dtors"})
 
     def test_unresolved_indirect_sites_are_the_known_run_time_pointers(self):
         sites = {name: [u["site"] for u in _database(name)["unresolved_indirect"]]

@@ -61,6 +61,14 @@
       "indirect": []
     },
     {
+      "entry": "0x3130",
+      "sources": ["ctors"],
+      "ranges": [["0x3130", "0x3134"]],
+      "call_sites": [],
+      "returns": ["0x3130"],
+      "indirect": []
+    },
+    {
       "entry": "0x3138",
       "sources": ["brsl"],
       "ranges": [["0x3138", "0x324c"]],
@@ -461,6 +469,7 @@
     {"ls": "0x30d4", "sources": ["return"]},
     {"ls": "0x30e0", "sources": ["return"]},
     {"ls": "0x30e8", "sources": ["brsl"]},
+    {"ls": "0x3130", "sources": ["ctors"]},
     {"ls": "0x3138", "sources": ["brsl"]},
     {"ls": "0x3210", "sources": ["return"]},
     {"ls": "0x3250", "sources": ["brsl"]},

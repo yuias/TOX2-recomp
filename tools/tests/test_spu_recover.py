@@ -515,6 +515,64 @@ def synthetic_recovery(words, entry=0, extra=(), **kwargs) -> spu_recover.ImageR
     return spu_recover.recover_image(image, "cd" * 32)
 
 
+def elf_recovery(words, data_words, data_at=DATA) -> spu_recover.ImageRecovery:
+    """An ELF-like image with one code segment and a data segment holding `data_words`."""
+    blob = b"".join(w.to_bytes(4, "big") for w in words)
+    tail = b"".join(w.to_bytes(4, "big") for w in data_words)
+    doc = {"name": "t_elf", "container": "eboot", "ea": "0x1000", "kind": "elf", "role": "spurs_task",
+           "lowering": "stackfree", "gate": False, "extra_entries": []}
+    reg = spu_images.parse_registry({"schema": 1, "images": [doc]}).images[0]
+    segments = (spu_images.SpuSegment(0x1000, BASE, len(blob), len(blob), True, 0),
+                spu_images.SpuSegment(0x1000 + len(blob), data_at, len(tail), len(tail) + 0x40, False, len(blob)))
+    image = spu_images.SpuImage(reg, blob + tail, "ab" * 32, segments, BASE, data_at + len(tail) + 0x40, at(0))
+    return spu_recover.recover_image(image, "cd" * 32)
+
+
+class InitListTest(unittest.TestCase):
+    # entry, a constructor, a second constructor, a destructor
+    PROGRAM = [enc("stop", STOP=0x102), nop(), ret(), nop(), ret(), nop(), ret()]
+    END = 0xFFFFFFFF
+
+    def seeds(self, data_words, data_at=DATA):
+        rec = elf_recovery(self.PROGRAM, data_words, data_at)
+        return {a: s for a, s in spu_recover.dispatchable_blocks(rec).items()}, rec
+
+    def test_list_pointers_are_seeded_with_their_list(self):
+        blocks, rec = self.seeds([self.END, at(2), at(4), 0, self.END, at(6), 0])
+        self.assertEqual(blocks[at(2)], ("ctors",))
+        self.assertEqual(blocks[at(4)], ("ctors",))
+        self.assertEqual(blocks[at(6)], ("dtors",))
+        self.assertEqual(sorted(rec.result.functions), [at(0), at(2), at(4), at(6)])
+        self.assertEqual(rec.result.rejected_seeds, ())
+
+    def test_empty_lists_add_nothing(self):
+        blocks, rec = self.seeds([self.END, 0, self.END, 0, 0, 0])
+        self.assertEqual(blocks, {at(0): ("entry",)})
+        self.assertEqual(spu_recover.gcc_init_lists(rec.image), ((), ()))
+
+    def test_list_must_start_the_first_data_segment(self):
+        blocks, _ = self.seeds([0, self.END, at(2), 0, self.END, 0])
+        self.assertEqual(blocks, {at(0): ("entry",)})
+
+    def test_unaligned_or_non_code_pointers_drop_the_list(self):
+        for bad in (at(2) + 2, DATA, 0x20000, at(0) - 4, 0xFFFFFFFF):
+            with self.subTest(pointer=hex(bad)):
+                blocks, _ = self.seeds([self.END, at(2), bad, 0, self.END, at(6), 0])
+                self.assertEqual(blocks, {at(0): ("entry",)})
+
+    def test_bad_destructors_keep_the_constructors(self):
+        blocks, _ = self.seeds([self.END, at(2), 0, self.END, 0x20000, 0])
+        self.assertEqual(blocks, {at(0): ("entry",), at(2): ("ctors",)})
+
+    def test_unterminated_list_is_ignored(self):
+        blocks, _ = self.seeds([self.END, at(2), at(4)])
+        self.assertEqual(blocks, {at(0): ("entry",)})
+
+    def test_raw_images_have_no_lists(self):
+        rec = synthetic_recovery(self.PROGRAM)
+        self.assertEqual(spu_recover.gcc_init_lists(rec.image), ((), ()))
+
+
 class DatabaseTest(unittest.TestCase):
     PROGRAM = [brsl(0, 3), nop(), enc("stop", STOP=0x102), ret(), nop()]
 

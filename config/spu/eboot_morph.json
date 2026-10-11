@@ -363,6 +363,14 @@
       "indirect": []
     },
     {
+      "entry": "0x48b8",
+      "sources": ["ctors"],
+      "ranges": [["0x47e0", "0x48b4"], ["0x48b8", "0x48c8"]],
+      "call_sites": [],
+      "returns": ["0x4804", "0x48b0"],
+      "indirect": []
+    },
+    {
       "entry": "0x48c8",
       "sources": ["brsl"],
       "ranges": [["0x48c8", "0x5340"]],
@@ -416,6 +424,14 @@
       "ranges": [["0x5400", "0x5494"]],
       "call_sites": [],
       "returns": ["0x5490"],
+      "indirect": []
+    },
+    {
+      "entry": "0x5538",
+      "sources": ["ctors"],
+      "ranges": [["0x5498", "0x5548"]],
+      "call_sites": [],
+      "returns": ["0x54c8", "0x5534"],
       "indirect": []
     },
     {
@@ -702,6 +718,7 @@
     {"ls": "0x4530", "sources": ["brsl"]},
     {"ls": "0x4640", "sources": ["return"]},
     {"ls": "0x4658", "sources": ["return"]},
+    {"ls": "0x48b8", "sources": ["ctors"]},
     {"ls": "0x48c8", "sources": ["brsl"]},
     {"ls": "0x49d0", "sources": ["return"]},
     {"ls": "0x4a10", "sources": ["return"]},
@@ -735,6 +752,7 @@
     {"ls": "0x53ec", "sources": ["return"]},
     {"ls": "0x53f8", "sources": ["return"]},
     {"ls": "0x5400", "sources": ["brsl"]},
+    {"ls": "0x5538", "sources": ["ctors"]},
     {"ls": "0x5548", "sources": ["brsl"]},
     {"ls": "0x55c0", "sources": ["brsl"]},
     {"ls": "0x5668", "sources": ["brsl"]},

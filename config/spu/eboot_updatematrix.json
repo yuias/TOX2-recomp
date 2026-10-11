@@ -53,6 +53,14 @@
       "indirect": []
     },
     {
+      "entry": "0x30e8",
+      "sources": ["ctors"],
+      "ranges": [["0x30e8", "0x30ec"]],
+      "call_sites": [],
+      "returns": ["0x30e8"],
+      "indirect": []
+    },
+    {
       "entry": "0x30f0",
       "sources": ["brsl"],
       "ranges": [["0x30f0", "0x3124"]],
@@ -205,6 +213,14 @@
       "ranges": [["0x4610", "0x461c"]],
       "call_sites": [],
       "returns": ["0x4618"],
+      "indirect": []
+    },
+    {
+      "entry": "0x4620",
+      "sources": ["ctors"],
+      "ranges": [["0x4620", "0x4624"]],
+      "call_sites": [],
+      "returns": ["0x4620"],
       "indirect": []
     },
     {
@@ -570,6 +586,14 @@
         {"site": "0x7ca0", "kind": "brsl", "target": "0x4420", "link": 0}
       ],
       "returns": ["0x7bc4"],
+      "indirect": []
+    },
+    {
+      "entry": "0x7cb8",
+      "sources": ["ctors"],
+      "ranges": [["0x7cb8", "0x7cbc"]],
+      "call_sites": [],
+      "returns": ["0x7cb8"],
       "indirect": []
     },
     {
@@ -1355,6 +1379,14 @@
       "indirect": []
     },
     {
+      "entry": "0xc210",
+      "sources": ["ctors"],
+      "ranges": [["0xc210", "0xc214"]],
+      "call_sites": [],
+      "returns": ["0xc210"],
+      "indirect": []
+    },
+    {
       "entry": "0xc218",
       "sources": ["brsl"],
       "ranges": [["0xc218", "0xc6e4"]],
@@ -1380,6 +1412,14 @@
         {"site": "0xc80c", "kind": "brsl", "target": "0xe660", "link": 0}
       ],
       "returns": ["0xc97c"],
+      "indirect": []
+    },
+    {
+      "entry": "0xca80",
+      "sources": ["ctors"],
+      "ranges": [["0xc980", "0xca90"]],
+      "call_sites": [],
+      "returns": ["0xc9b4", "0xca7c"],
       "indirect": []
     },
     {
@@ -1439,6 +1479,14 @@
       "indirect": []
     },
     {
+      "entry": "0xd2c0",
+      "sources": ["ctors"],
+      "ranges": [["0xd250", "0xd2d0"]],
+      "call_sites": [],
+      "returns": ["0xd280", "0xd2bc"],
+      "indirect": []
+    },
+    {
       "entry": "0xd2d0",
       "sources": ["brsl"],
       "ranges": [["0xd2d0", "0xd580"]],
@@ -1468,6 +1516,14 @@
       "ranges": [["0xd808", "0xda98"]],
       "call_sites": [],
       "returns": ["0xda94"],
+      "indirect": []
+    },
+    {
+      "entry": "0xdaf0",
+      "sources": ["ctors"],
+      "ranges": [["0xda98", "0xdb00"]],
+      "call_sites": [],
+      "returns": ["0xdac4", "0xdaec"],
       "indirect": []
     },
     {
@@ -1540,6 +1596,14 @@
       "ranges": [["0xe368", "0xe46c"]],
       "call_sites": [],
       "returns": ["0xe468"],
+      "indirect": []
+    },
+    {
+      "entry": "0xe510",
+      "sources": ["ctors"],
+      "ranges": [["0xe470", "0xe520"]],
+      "call_sites": [],
+      "returns": ["0xe4a0", "0xe50c"],
       "indirect": []
     },
     {
@@ -1905,6 +1969,7 @@
     {"ls": "0x3070", "sources": ["entry", "return"]},
     {"ls": "0x30d4", "sources": ["return"]},
     {"ls": "0x30e0", "sources": ["return"]},
+    {"ls": "0x30e8", "sources": ["ctors"]},
     {"ls": "0x30f0", "sources": ["brsl"]},
     {"ls": "0x3128", "sources": ["brsl"]},
     {"ls": "0x31a0", "sources": ["return"]},
@@ -1977,6 +2042,7 @@
     {"ls": "0x4530", "sources": ["brsl"]},
     {"ls": "0x4600", "sources": ["brsl"]},
     {"ls": "0x4610", "sources": ["brsl"]},
+    {"ls": "0x4620", "sources": ["ctors"]},
     {"ls": "0x4628", "sources": ["brsl"]},
     {"ls": "0x46b0", "sources": ["return"]},
     {"ls": "0x46d8", "sources": ["return"]},
@@ -2182,6 +2248,7 @@
     {"ls": "0x7c44", "sources": ["return"]},
     {"ls": "0x7c74", "sources": ["return"]},
     {"ls": "0x7ca4", "sources": ["return"]},
+    {"ls": "0x7cb8", "sources": ["ctors"]},
     {"ls": "0x7cc0", "sources": ["brsl"]},
     {"ls": "0x7dd8", "sources": ["return"]},
     {"ls": "0x7df0", "sources": ["brsl"]},
@@ -2396,12 +2463,14 @@
     {"ls": "0xc17c", "sources": ["return"]},
     {"ls": "0xc190", "sources": ["return"]},
     {"ls": "0xc198", "sources": ["brsl"]},
+    {"ls": "0xc210", "sources": ["ctors"]},
     {"ls": "0xc218", "sources": ["brsl"]},
     {"ls": "0xc6e8", "sources": ["brsl"]},
     {"ls": "0xc738", "sources": ["brsl"]},
     {"ls": "0xc7a8", "sources": ["return"]},
     {"ls": "0xc7dc", "sources": ["return"]},
     {"ls": "0xc810", "sources": ["return"]},
+    {"ls": "0xca80", "sources": ["ctors"]},
     {"ls": "0xca90", "sources": ["brsl"]},
     {"ls": "0xcb00", "sources": ["brsl"]},
     {"ls": "0xcc20", "sources": ["brsl"]},
@@ -2409,10 +2478,12 @@
     {"ls": "0xcf70", "sources": ["brsl"]},
     {"ls": "0xd060", "sources": ["brsl"]},
     {"ls": "0xd1e0", "sources": ["brsl"]},
+    {"ls": "0xd2c0", "sources": ["ctors"]},
     {"ls": "0xd2d0", "sources": ["brsl"]},
     {"ls": "0xd580", "sources": ["brsl"]},
     {"ls": "0xd728", "sources": ["brsl"]},
     {"ls": "0xd808", "sources": ["brsl"]},
+    {"ls": "0xdaf0", "sources": ["ctors"]},
     {"ls": "0xdb00", "sources": ["brsl"]},
     {"ls": "0xdb64", "sources": ["return"]},
     {"ls": "0xdd58", "sources": ["brsl"]},
@@ -2423,6 +2494,7 @@
     {"ls": "0xe220", "sources": ["brsl"]},
     {"ls": "0xe2b8", "sources": ["brsl"]},
     {"ls": "0xe368", "sources": ["brsl"]},
+    {"ls": "0xe510", "sources": ["ctors"]},
     {"ls": "0xe520", "sources": ["brsl"]},
     {"ls": "0xe598", "sources": ["brsl"]},
     {"ls": "0xe5e8", "sources": ["brsl"]},

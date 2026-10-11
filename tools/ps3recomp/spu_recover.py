@@ -6,7 +6,9 @@ dispatchable addresses.
 
 Seed sources: `entry`, `extra` (registry extra entries), `brsl`/`brasl` (direct call targets),
 `constant` (a constant code pointer that an indirect branch uses, or that position-independent
-code materialises with `a rX,rY,$delta`) and `promoted` (code shared by several functions). Jump-table targets are intra-function edges, as on the PPU side; the tables
+code materialises with `a rX,rY,$delta`), `ctors`/`dtors` (function pointers in the GCC `.ctors` and
+`.dtors` lists at the start of an ELF image's data, which crt0 calls through a register) and `promoted`
+(code shared by several functions). Jump-table targets are intra-function edges, as on the PPU side; the tables
 themselves are resolved by the caller and passed in.
 """
 
@@ -161,13 +163,15 @@ def recover(code: SpuCode, entry: int | None, extra_entries: Iterable[int] = (),
             data_ranges: Iterable[tuple[int, int]] = (),
             max_rounds: int = DEFAULT_MAX_ROUNDS,
             zero_regs: Iterable[int] = (),
-            table_notes: Mapping[int, str] | None = None) -> RecoveryResult:
+            table_notes: Mapping[int, str] | None = None,
+            ctors: Iterable[int] = (), dtors: Iterable[int] = ()) -> RecoveryResult:
     """Partition `code` into functions.
 
     `jump_tables` maps a `bi` site to its resolved targets. `data_ranges` are LS ranges
     [start, end) that hold data inside code segments; flow into them is an anomaly, never code.
     `zero_regs` hold 0 at the link address (see `spu_flow.eval_const`). `table_notes` explains why
-    an indirect jump that looked like a table stays unresolved.
+    an indirect jump that looked like a table stays unresolved. `ctors` and `dtors` are the
+    function pointers of the GCC init/fini lists (see `gcc_init_lists`).
     """
     zero = frozenset(zero_regs)
     notes = dict(table_notes or {})
@@ -182,6 +186,8 @@ def recover(code: SpuCode, entry: int | None, extra_entries: Iterable[int] = (),
     sources: dict[int, set[str]] = defaultdict(set)
     rejected_seeds: list[tuple[int, str]] = []
     initial = [(a, "extra") for a in extra_entries]
+    initial += [(a, "ctors") for a in ctors]
+    initial += [(a, "dtors") for a in dtors]
     if entry is not None:
         initial.append((entry, "entry"))
     for addr, source in initial:
@@ -407,6 +413,46 @@ class ImageRecovery:
     result: RecoveryResult
 
 
+_LIST_MARKER = 0xFFFFFFFF
+
+
+def _read_list(words: Sequence[int], start: int) -> tuple[list[int], int] | None:
+    """One `-1, pointer..., 0` list at word `start`: (pointers, index after the terminator)."""
+    if start >= len(words) or words[start] != _LIST_MARKER:
+        return None
+    for end in range(start + 1, len(words)):
+        if words[end] == 0:
+            return list(words[start + 1:end]), end + 1
+    return None
+
+
+def gcc_init_lists(image: SpuImage) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Function pointers of the GCC `.ctors` and `.dtors` lists of an ELF image.
+
+    crt0 reads the lists through a register and calls each entry with `bisl`, so no constant in the
+    code names them. Both lists sit back to back at the start of the first data segment, each as
+    `-1, pointer..., 0`. Arbitrary data is not taken for a list: every pointer must be word-aligned
+    and inside a code segment, or the list is dropped (`.dtors` is only looked for after a valid
+    `.ctors`).
+    """
+    data = sorted((s for s in image.segments if not s.code), key=lambda s: s.ls)
+    if not data:
+        return (), ()
+    blob = image.segment_bytes(data[0])
+    words = [int.from_bytes(blob[i:i + 4], "big") for i in range(0, len(blob) - 3, 4)]
+    code = image.code_segments
+
+    def valid(lst: tuple[list[int], int] | None) -> bool:
+        return lst is not None and all(p % 4 == 0 and any(s.ls <= p < s.ls + s.filesz for s in code)
+                                       for p in lst[0])
+
+    first = _read_list(words, 0)
+    if not valid(first):
+        return (), ()
+    second = _read_list(words, first[1])
+    return tuple(first[0]), tuple(second[0]) if valid(second) else ()
+
+
 def recover_image(image: SpuImage, container_sha256: str, *,
                   max_rounds: int = DEFAULT_MAX_ROUNDS) -> ImageRecovery:
     """Resolve jump tables, then partition the code of a registry image."""
@@ -415,9 +461,10 @@ def recover_image(image: SpuImage, container_sha256: str, *,
     zero = frozenset(entry.pic_delta_regs)
     tables = resolve_jump_tables(code, zero_regs=zero)
     data = tuple(sorted([(r.start, r.end) for r in entry.data_ranges] + tables.data_ranges()))
+    ctors, dtors = gcc_init_lists(image)
     result = recover(code, image.entry_ls, [e.ls for e in entry.extra_entries],
                      {site: t.targets for site, t in tables.tables.items()}, data, max_rounds,
-                     zero, tables.notes)
+                     zero, tables.notes, ctors, dtors)
     return ImageRecovery(image, container_sha256, code, tables, data, result)
 
 

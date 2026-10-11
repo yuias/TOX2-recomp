@@ -49,6 +49,14 @@
       "indirect": []
     },
     {
+      "entry": "0x30e8",
+      "sources": ["ctors"],
+      "ranges": [["0x30e8", "0x30ec"]],
+      "call_sites": [],
+      "returns": ["0x30e8"],
+      "indirect": []
+    },
+    {
       "entry": "0x30f0",
       "sources": ["brsl"],
       "ranges": [["0x30f0", "0x3bf8"]],
@@ -90,6 +98,14 @@
       "ranges": [["0x3d28", "0x3dbc"]],
       "call_sites": [],
       "returns": ["0x3db8"],
+      "indirect": []
+    },
+    {
+      "entry": "0x3e60",
+      "sources": ["ctors"],
+      "ranges": [["0x3dc0", "0x3e70"]],
+      "call_sites": [],
+      "returns": ["0x3df0", "0x3e5c"],
       "indirect": []
     },
     {
@@ -184,6 +200,7 @@
     {"ls": "0x3070", "sources": ["entry", "return"]},
     {"ls": "0x30d4", "sources": ["return"]},
     {"ls": "0x30e0", "sources": ["return"]},
+    {"ls": "0x30e8", "sources": ["ctors"]},
     {"ls": "0x30f0", "sources": ["brsl"]},
     {"ls": "0x31d8", "sources": ["return"]},
     {"ls": "0x31e0", "sources": ["return"]},
@@ -205,6 +222,7 @@
     {"ls": "0x3ca8", "sources": ["return"]},
     {"ls": "0x3ce0", "sources": ["return"]},
     {"ls": "0x3d28", "sources": ["brsl"]},
+    {"ls": "0x3e60", "sources": ["ctors"]},
     {"ls": "0x3e70", "sources": ["brsl"]},
     {"ls": "0x3ee8", "sources": ["brsl"]},
     {"ls": "0x3f58", "sources": ["brsl"]},

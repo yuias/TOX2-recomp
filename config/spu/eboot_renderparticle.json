@@ -53,6 +53,14 @@
       "indirect": []
     },
     {
+      "entry": "0x30e8",
+      "sources": ["ctors"],
+      "ranges": [["0x30e8", "0x30ec"]],
+      "call_sites": [],
+      "returns": ["0x30e8"],
+      "indirect": []
+    },
+    {
       "entry": "0x30f0",
       "sources": ["brsl"],
       "ranges": [["0x30f0", "0x3564"]],
@@ -245,6 +253,14 @@
       "indirect": []
     },
     {
+      "entry": "0x7cf0",
+      "sources": ["ctors"],
+      "ranges": [["0x7cf0", "0x7cf4"]],
+      "call_sites": [],
+      "returns": ["0x7cf0"],
+      "indirect": []
+    },
+    {
       "entry": "0x7cf8",
       "sources": ["brsl"],
       "ranges": [["0x7cf8", "0x7d74"]],
@@ -258,6 +274,14 @@
       "ranges": [["0x7d78", "0x7dbc"]],
       "call_sites": [],
       "returns": ["0x7db8"],
+      "indirect": []
+    },
+    {
+      "entry": "0x7dc0",
+      "sources": ["ctors"],
+      "ranges": [["0x7dc0", "0x7dc4"]],
+      "call_sites": [],
+      "returns": ["0x7dc0"],
       "indirect": []
     },
     {
@@ -554,11 +578,27 @@
       "indirect": []
     },
     {
+      "entry": "0x96f0",
+      "sources": ["ctors"],
+      "ranges": [["0x9638", "0x9700"]],
+      "call_sites": [],
+      "returns": ["0x9684", "0x96ec"],
+      "indirect": []
+    },
+    {
       "entry": "0x9700",
       "sources": ["brsl"],
       "ranges": [["0x9700", "0x9750"]],
       "call_sites": [],
       "returns": ["0x974c"],
+      "indirect": []
+    },
+    {
+      "entry": "0x9850",
+      "sources": ["ctors"],
+      "ranges": [["0x9750", "0x9860"]],
+      "call_sites": [],
+      "returns": ["0x9784", "0x984c"],
       "indirect": []
     },
     {
@@ -583,6 +623,14 @@
       "ranges": [["0x99d0", "0x9a4c"]],
       "call_sites": [],
       "returns": ["0x9a48"],
+      "indirect": []
+    },
+    {
+      "entry": "0x9aa8",
+      "sources": ["ctors"],
+      "ranges": [["0x9a50", "0x9ab8"]],
+      "call_sites": [],
+      "returns": ["0x9a7c", "0x9aa4"],
       "indirect": []
     },
     {
@@ -615,6 +663,14 @@
       "ranges": [["0x9c48", "0x9d0c"]],
       "call_sites": [],
       "returns": ["0x9d08"],
+      "indirect": []
+    },
+    {
+      "entry": "0x9db0",
+      "sources": ["ctors"],
+      "ranges": [["0x9d10", "0x9dc0"]],
+      "call_sites": [],
+      "returns": ["0x9d40", "0x9dac"],
       "indirect": []
     },
     {
@@ -794,6 +850,7 @@
     {"ls": "0x3070", "sources": ["entry", "return"]},
     {"ls": "0x30d4", "sources": ["return"]},
     {"ls": "0x30e0", "sources": ["return"]},
+    {"ls": "0x30e8", "sources": ["ctors"]},
     {"ls": "0x30f0", "sources": ["brsl"]},
     {"ls": "0x34d8", "sources": ["return"]},
     {"ls": "0x3508", "sources": ["return"]},
@@ -914,8 +971,10 @@
     {"ls": "0x76b8", "sources": ["return"]},
     {"ls": "0x76f0", "sources": ["return"]},
     {"ls": "0x784c", "sources": ["return"]},
+    {"ls": "0x7cf0", "sources": ["ctors"]},
     {"ls": "0x7cf8", "sources": ["brsl"]},
     {"ls": "0x7d78", "sources": ["brsl"]},
+    {"ls": "0x7dc0", "sources": ["ctors"]},
     {"ls": "0x7dc8", "sources": ["brsl"]},
     {"ls": "0x7e78", "sources": ["return"]},
     {"ls": "0x7ea8", "sources": ["brsl"]},
@@ -1010,14 +1069,18 @@
     {"ls": "0x9580", "sources": ["return"]},
     {"ls": "0x95c0", "sources": ["return"]},
     {"ls": "0x9600", "sources": ["return"]},
+    {"ls": "0x96f0", "sources": ["ctors"]},
     {"ls": "0x9700", "sources": ["brsl"]},
+    {"ls": "0x9850", "sources": ["ctors"]},
     {"ls": "0x9860", "sources": ["brsl"]},
     {"ls": "0x9950", "sources": ["brsl"]},
     {"ls": "0x99d0", "sources": ["brsl"]},
+    {"ls": "0x9aa8", "sources": ["ctors"]},
     {"ls": "0x9ab8", "sources": ["brsl"]},
     {"ls": "0x9b18", "sources": ["brsl"]},
     {"ls": "0x9bb0", "sources": ["brsl"]},
     {"ls": "0x9c48", "sources": ["brsl"]},
+    {"ls": "0x9db0", "sources": ["ctors"]},
     {"ls": "0x9dc0", "sources": ["brsl"]},
     {"ls": "0x9e38", "sources": ["brsl"]},
     {"ls": "0x9ed8", "sources": ["brsl"]},
