@@ -669,6 +669,73 @@ void testLocations() {
     CHECK(tox2::vpOutputSlotLocation(16) == -1);
 }
 
+// ---- User clip planes ----
+
+tox2::GlslResult translateClip(const std::vector<Asm>& instructions, bool clip_distances) {
+    const std::vector<std::uint32_t> words = program(instructions);
+    return tox2::translateVertexProgram(words, 0, tox2::VpTranslateOptions{clip_distances});
+}
+
+void testUserClipPlanes() {
+    std::vector<Asm> both = {movTo(0), movTo(5), movTo(6, true)};
+
+    // Without the option the program has no clip distance and the block still names the control word.
+    tox2::GlslResult result = translateClip(both, false);
+    CHECK(result.ok);
+    CHECK(!contains(result.glsl, "gl_ClipDistance"));
+    CHECK(contains(result.glsl, "  uint user_clip;\n"));
+    checkCompiles(result, 0xd0e0);
+
+    // Both clip slots written: six planes from o[5].y/.z/.w and o[6].y/.z/.w.
+    result = translateClip(both, true);
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "out float gl_ClipDistance[6];\n"));
+    const char* const sources[6] = {"out_5.y", "out_5.z", "out_5.w", "out_6.y", "out_6.z", "out_6.w"};
+    for (unsigned plane = 0; plane < 6; plane++) {
+        const std::string n = std::to_string(plane);
+        CHECK(contains(result.glsl,
+                       "uint clip_op_" + n + " = (draw.user_clip >> " + std::to_string(4 * plane) + "u) & 15u;\n"));
+        CHECK(contains(result.glsl, "(draw.output_mask & " + std::to_string(64u << plane) + "u) != 0u"));
+        CHECK(contains(result.glsl,
+                       "(clip_op_" + n + " == 2u ? " + sources[plane] + " : -" + sources[plane] + ") : 0.5;\n"));
+    }
+    checkCompiles(result, 0xd0e1);
+
+    // Neither slot written: nothing to clip against, so no declaration and no write.
+    result = translateClip({movTo(0, true)}, true);
+    CHECK(result.ok);
+    CHECK(!contains(result.glsl, "gl_ClipDistance"));
+    checkCompiles(result, 0xd0e2);
+
+    // Only slot 5: planes 3..5 have no source and stay at the constant 0.5.
+    result = translateClip({movTo(0), movTo(5, true)}, true);
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "out float gl_ClipDistance[6];\n"));
+    CHECK(contains(result.glsl, "? out_5.y : -out_5.y)"));
+    CHECK(contains(result.glsl, "? out_5.w : -out_5.w)"));
+    CHECK(!contains(result.glsl, "out_6"));
+    for (const char* const plane : {"3", "4", "5"}) {
+        CHECK(contains(result.glsl, std::string("  gl_ClipDistance[") + plane + "] = 0.5;\n"));
+        CHECK(!contains(result.glsl, std::string("clip_op_") + plane));
+    }
+    CHECK(!contains(result.glsl, "  gl_ClipDistance[0] = 0.5;\n"));
+    checkCompiles(result, 0xd0e3);
+
+    // Only slot 6: planes 0..2 are the constant.
+    result = translateClip({movTo(0), movTo(6, true)}, true);
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "  gl_ClipDistance[0] = 0.5;\n"));
+    CHECK(contains(result.glsl, "  gl_ClipDistance[2] = 0.5;\n"));
+    CHECK(contains(result.glsl, "? out_6.z : -out_6.z)"));
+    CHECK(!contains(result.glsl, "out_5"));
+    checkCompiles(result, 0xd0e4);
+
+    // A program without a position write is disabled whole, clip slots included.
+    result = translateClip({movTo(5, true)}, true);
+    CHECK(result.ok);
+    CHECK(!contains(result.glsl, "gl_ClipDistance"));
+}
+
 }  // namespace
 
 int main() {
@@ -685,6 +752,7 @@ int main() {
     testSubroutines();
     testFlowControlReports();
     testLocations();
+    testUserClipPlanes();
     testDumps();
     std::printf("vp translator tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;

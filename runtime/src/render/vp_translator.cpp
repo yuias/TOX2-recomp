@@ -83,7 +83,7 @@ std::string maskLanes(std::uint32_t mask_x, std::uint32_t mask_y, std::uint32_t 
 
 class Translator {
 public:
-    GlslResult run(std::span<const std::uint32_t> ucode);
+    GlslResult run(std::span<const std::uint32_t> ucode, const VpTranslateOptions& options);
 
 private:
     enum class Condition { Always, Never, Unsupported };
@@ -104,6 +104,7 @@ private:
     void emitWrite(const std::vector<std::string>& destinations, const Expr& value, const std::string& lanes);
     std::string exported(std::uint32_t slot, std::uint32_t mask, const char* member = "") const;
     std::string assemble() const;
+    bool clipPlanesEmitted() const { return clip_distances_ && (slots_written_ & ((1u << 5) | (1u << 6))) != 0; }
 
     std::vector<std::string> unimplemented_;
     std::span<const std::uint32_t> ucode_;
@@ -114,6 +115,7 @@ private:
     std::uint32_t inputs_used_ = 0;
     std::uint32_t slots_written_ = 0;
     bool uses_lit_ = false;
+    bool clip_distances_ = false;
 };
 
 void Translator::note(std::string message) {
@@ -568,7 +570,7 @@ std::string Translator::assemble() const {
             "  uint output_mask;\n"
             "  float point_size;\n"
             "  uint branch_bits;\n"
-            "  uint reserved0;\n"
+            "  uint user_clip;\n"
             "} draw;\n"
             "\n";
 
@@ -588,7 +590,10 @@ std::string Translator::assemble() const {
             "layout(location = {}) out vec4 var_back_specular;\n"
             "layout(location = {}) out vec4 var_fog;\n",
             kVaryingFrontDiffuse, kVaryingBackDiffuse, kVaryingFrontSpecular, kVaryingBackSpecular, kVaryingFog);
-    glsl += "\ninvariant gl_Position;\n\n";
+    glsl += "\ninvariant gl_Position;\n";
+    // Without a written slot 5 or 6 no plane has a source, so the array is not declared at all.
+    if (clipPlanesEmitted()) glsl += "out float gl_ClipDistance[6];\n";
+    glsl += "\n";
 
     if (uses_lit_) {
         glsl += "vec4 lit_op(vec4 v) {\n"
@@ -631,6 +636,26 @@ std::string Translator::assemble() const {
                     ? std::format("(draw.output_mask & {}u) != 0u ? out_6.x : draw.point_size", kMaskPointSize)
                     : std::string("draw.point_size"));
 
+    if (clipPlanesEmitted()) {
+        // Planes 0..2 read o[5].y/.z/.w and planes 3..5 read o[6].y/.z/.w. The slot registers start at
+        // (0, 0, 0, 1), so a lane the program did not write reads 0, or 1 for .w.
+        static constexpr char kLanes[3] = {'y', 'z', 'w'};
+        glsl += "\n";
+        for (std::uint32_t plane = 0; plane < 6; plane++) {
+            const std::uint32_t slot = plane < 3 ? 5 : 6;
+            if ((slots_written_ & (1u << slot)) == 0) {
+                glsl += std::format("  gl_ClipDistance[{}] = 0.5;\n", plane);
+                continue;
+            }
+            const std::string value = std::format("out_{}.{}", slot, kLanes[plane % 3]);
+            glsl += std::format(
+                    "  uint clip_op_{0} = (draw.user_clip >> {1}u) & 15u;\n"
+                    "  gl_ClipDistance[{0}] = ((clip_op_{0} == 1u || clip_op_{0} == 2u) && "
+                    "(draw.output_mask & {2}u) != 0u) ? (clip_op_{0} == 2u ? {3} : -{3}) : 0.5;\n",
+                    plane, 4 * plane, 1u << (6 + plane), value);
+        }
+    }
+
     // Viewport transform into clip space normalised to the surface clip size, without a y flip,
     // then the depth range remap onto a 24-bit grid (float: the device is not required to have
     // shaderFloat64).
@@ -666,8 +691,9 @@ std::string Translator::assemble() const {
     return glsl;
 }
 
-GlslResult Translator::run(std::span<const std::uint32_t> ucode) {
+GlslResult Translator::run(std::span<const std::uint32_t> ucode, const VpTranslateOptions& options) {
     GlslResult result;
+    clip_distances_ = options.clip_distances;
     if (ucode.size() < 4 || ucode.size() % 4 != 0) {
         result.unimplemented.push_back("vp malformed ucode size");
         return result;
@@ -701,8 +727,9 @@ GlslResult Translator::run(std::span<const std::uint32_t> ucode) {
 
 }  // namespace
 
-GlslResult translateVertexProgram(std::span<const std::uint32_t> ucode, std::uint32_t) {
-    return Translator().run(ucode);
+GlslResult translateVertexProgram(std::span<const std::uint32_t> ucode, std::uint32_t,
+                                  const VpTranslateOptions& options) {
+    return Translator().run(ucode, options);
 }
 
 }  // namespace tox2
