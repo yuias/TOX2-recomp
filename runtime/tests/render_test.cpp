@@ -2032,6 +2032,52 @@ void testStencilDecode() {
     tox2::rsxUnimplementedReset();
 }
 
+// One draw with SET_USER_CLIP_PLANE_CONTROL written as `control`; the replay's notes are the only ones counted.
+tox2::RsxDraw replayUserClipDraw(std::uint32_t control) {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    scene.setSurface();
+    scene.write(tox2::kMethodNv4097SetUserClipPlaneControl, control);
+    scene.setFloatAttrib(0, 3, kPositionsOffset);
+    scene.putQuadPositions();
+    scene.drawStrip(4);
+    const std::vector<std::uint8_t> file = scene.finish();
+    tox2::rsxUnimplementedReset();
+    for (const tox2::RsxCommand& command : replaySynthetic(file)) {
+        if (const auto* draw = std::get_if<tox2::RsxDraw>(&command)) return *draw;
+    }
+    CHECK(false);  // no draw was built
+    return {};
+}
+
+// True when the last replay counted no user clip plane word.
+bool noUserClipNotes() {
+    for (const auto& [name, count] : tox2::rsxUnimplementedSnapshot()) {
+        if (name.starts_with("state user clip plane")) return false;
+    }
+    return true;
+}
+
+// The control word reaches RsxDraw::raster raw; a nibble above 2 is counted once per plane.
+void testUserClipDecode() {
+    CHECK(replayUserClipDraw(0).raster.user_clip == 0);
+    CHECK(noUserClipNotes());
+    // Planes 0..5 set to 1, 2, 1, 2, 1, 2.
+    CHECK(replayUserClipDraw(0x212121).raster.user_clip == 0x212121);
+    CHECK(noUserClipNotes());
+    // Plane 4 with the nibble 3.
+    CHECK(replayUserClipDraw(0x030000).raster.user_clip == 0x030000);
+    CHECK(unimplementedCount("state user clip plane op ?0x3") == 1);
+    // Bits above plane 5 are not planes.
+    replayUserClipDraw(0xF0000000);
+    CHECK(noUserClipNotes());
+    // Two bad planes with different nibbles are counted separately.
+    replayUserClipDraw(0x0000F0A0);
+    CHECK(unimplementedCount("state user clip plane op ?0xa") == 1);
+    CHECK(unimplementedCount("state user clip plane op ?0xf") == 1);
+    tox2::rsxUnimplementedReset();
+}
+
 // A raster state with the stencil test on and the depth test and write off; `front` and `back` give the write
 // mask and the ZPASS op (REPLACE or KEEP, the other ops stay KEEP) of each face.
 struct ZetaFace {
@@ -2502,6 +2548,7 @@ int main() {
     testFrameDump();
     testPartialStencilNote();
     testStencilDecode();
+    testUserClipDecode();
     testZetaWriteRule();
     testVertexConvert();
 

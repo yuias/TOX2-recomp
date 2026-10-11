@@ -97,6 +97,9 @@ struct RsxRasterState {
     bool two_sided_stencil = false;          // SET_TWO_SIDED_STENCIL_TEST_ENABLE
     // stencil_back equals stencil_front when two_sided_stencil is off, so a consumer never has to pick the face.
     RsxStencilFace stencil_front, stencil_back;
+    // SET_USER_CLIP_PLANE_CONTROL, raw: plane n in bits 4n..4n+3; 0 off, 1 "less than", 2 "greater or equal".
+    // The decoder counts any other nibble and the vertex shader treats it as off.
+    std::uint32_t user_clip = 0;
     std::uint32_t scissor_x = 0, scissor_y = 0, scissor_w = 0, scissor_h = 0, window_origin = 0, pixel_center = 0;
 };
 

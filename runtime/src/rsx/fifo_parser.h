@@ -134,6 +134,7 @@ inline constexpr std::uint32_t kMethodNv4097SetTextureControl1 = 0x1A10;
 inline constexpr std::uint32_t kMethodNv4097SetTextureFilter = 0x1A14;
 inline constexpr std::uint32_t kMethodNv4097SetTextureImageRect = 0x1A18;
 inline constexpr std::uint32_t kMethodNv4097SetTextureBorderColor = 0x1A1C;
+inline constexpr std::uint32_t kMethodNv4097SetUserClipPlaneControl = 0x1478;
 inline constexpr std::uint32_t kMethodNv4097SetVertexData4fM = 0x1C00;  // 64 registers: 16 slots x 4 words
 inline constexpr std::uint32_t kMethodNv4097SetShaderControl = 0x1D60;
 inline constexpr std::uint32_t kMethodNv4097SetZminMaxControl = 0x1D78;

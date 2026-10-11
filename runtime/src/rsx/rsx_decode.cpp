@@ -374,6 +374,13 @@ RsxRasterState decodeRasterState(const RsxRegisters& regs) {
         noteStencilFace(r.stencil_front);
         if (r.two_sided_stencil) noteStencilFace(r.stencil_back);
     }
+    // Plane n sits in bits 4n..4n+3. RPCS3 aborts on a nibble above 2 (`gcm_enums.h`); counting it and
+    // treating the plane as off is our fallback.
+    r.user_clip = regs.reg(kMethodNv4097SetUserClipPlaneControl);
+    for (std::uint32_t plane = 0; plane < 6; plane++) {
+        const std::uint32_t op = (r.user_clip >> (4 * plane)) & 0xF;
+        if (op > 2) noteState(std::format("user clip plane op ?{:#x}", op));
+    }
     // Enabled by the game but not modelled by the renderer.
     if (regs.reg(kMethodNv4097SetLogicOpEnable) != 0) noteState("logic op");
     if (regs.reg(kMethodNv4097SetPolyOffsetFillEnable) != 0) noteState("polygon offset");
