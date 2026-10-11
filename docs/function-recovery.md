@@ -168,8 +168,18 @@ image did not converge within 64 rounds; its database is not written (the images
   `ctors` (function pointers in the GCC `.ctors` list at the start of the first data segment of an ELF image;
   crt0 calls them through a register with `bisl $0,$3`, so no branch names them) and `promoted` (code reached
   from several functions, which becomes a function of its own). The `.dtors` list is read the same way
-  (source `dtors`); no function of the committed databases has it. Jump-table targets are intra-function
-  edges, as on the PPU side.
+  (source `dtors`); no function of the committed databases has it. `data` marks a function start that a word
+  of a non-code segment of an ELF image points at: descriptor tables whose method slots the code reaches
+  through a register (`eboot_bnuscore` copies records of a 4-char id, sizes and five function pointers into a
+  registry and calls them with `bisl`), so no constant names the targets. A word counts when it is
+  word-aligned, inside a code segment, decodes as an instruction and sits right after a function end or
+  padding: skipping `nop` and `lnop`, the word before it is zero (never code), the segment start, or an
+  instruction that does not fall through (`bi $0`, `br`, `stop 0x102`, ...). Sizes and flags in the same
+  records (`0x94`, `0xb8`, `0x200`) are as small as code addresses but land inside functions, where the
+  previous instruction falls through, so they are not taken. A pointer that an init list already names keeps
+  the `ctors` or `dtors` source. Of the ELF images only `eboot_bnuscore` gains functions this way; the pointers in
+  the other images are all `.ctors` entries. Jump-table
+  targets are intra-function edges, as on the PPU side.
 - The flow of an instruction is local, because the SPU has no delay slots. `br` and `bra` are local branches
   or tail branches; `brz`, `brnz`, `brhz` and `brhnz` are conditional; `brsl` and `brasl` are calls that
   continue at the next word, except `brsl $r,$+4`, which only reads the program counter; `bi $0` is a return
@@ -223,7 +233,7 @@ On the pinned inputs (the output is byte-identical on a second run, `14 database
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `eboot_spline` | 16 | 5 | 1,106 | 13 | 3 | 0 | 0 | 0 | 41 |
 | `eboot_edgelzma` | 38 | 6 | 3,823 | 684 | 8 | 0 | 3 | 0 | 87 |
-| `eboot_bnuscore` | 50 | 5 | 3,583 | 17,509 | 14 | 0 | 1 | 1 | 232 |
+| `eboot_bnuscore` | 133 | 6 | 18,248 | 2,844 | 14 | 0 | 2 | 1 | 518 |
 | `eboot_animation` | 55 | 7 | 4,741 | 128 | 4 | 0 | 0 | 3 | 133 |
 | `eboot_updatematrix` | 182 | 14 | 14,567 | 280 | 4 | 0 | 0 | 1 | 608 |
 | `eboot_renderparticle` | 73 | 7 | 8,303 | 660 | 4 | 0 | 2 | 0 | 268 |
@@ -235,10 +245,10 @@ On the pinned inputs (the output is byte-identical on a second run, `14 database
 | `libsre_taskset_pm` | 19 | 4 | 1,766 | 49 | 2 | 1 | 0 | 4 | 89 |
 | `libsre_jobchain_pm1` | 32 | 5 | 3,872 | 54 | 3 | 0 | 0 | 1 | 114 |
 | `libsre_jobchain_pm2` | 30 | 5 | 3,861 | 57 | 3 | 0 | 0 | 1 | 110 |
-| Total | 625 | | 56,025 | 19,656 | 59 | 3 | 8 | 11 | 1,990 |
+| Total | 708 | | 70,690 | 4,991 | 59 | 3 | 9 | 11 | 2,276 |
 
-- Unowned words are non-zero words of code segments that no function owns and that are not data. 17,509 of
-  them are in `eboot_bnuscore` (the sound engine core, 21,252 code words), where the seeds reach 3,583
+- Unowned words are non-zero words of code segments that no function owns and that are not data. 2,844 of
+  them are in `eboot_bnuscore` (the sound engine core, 21,252 code words), where the seeds reach 18,248
   words. A run that reaches such code stops with `unknown target ls ...`.
 - The unresolved sites are indirect calls and jumps through a value that is stored into LS at run time (for
   example the system call entry pointer that tasks read from LS) or passed as an argument. The emitter turns every indirect branch into a computed dispatch, so an unresolved site needs no
@@ -246,7 +256,7 @@ On the pinned inputs (the output is byte-identical on a second run, `14 database
 - The external targets are one in each of `libsre_kernel1`, `libsre_kernel2` and `libsre_taskset_pm`.
 - `libsre_kernel1` needs `data_ranges` for its context (`0x100..0x290`); `eboot_edgelzma` needs
   `pic_delta_regs` (`$126`) and five `extra_entries`.
-- The 14 databases are about 330 KB in total.
+- The 14 databases are about 370 KB in total.
 
 ## Committed files and regeneration
 

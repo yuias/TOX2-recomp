@@ -541,7 +541,8 @@ class InitListTest(unittest.TestCase):
 
     def seeds(self, data_words, data_at=DATA):
         rec = elf_recovery(self.PROGRAM, data_words, data_at)
-        return {a: s for a, s in spu_recover.dispatchable_blocks(rec).items()}, rec
+        # Pointers of a list that is dropped are still plain data pointers; DataPointerTest covers those.
+        return {a: s for a, s in spu_recover.dispatchable_blocks(rec).items() if s != ("data",)}, rec
 
     def test_list_pointers_are_seeded_with_their_list(self):
         blocks, rec = self.seeds([self.END, at(2), at(4), 0, self.END, at(6), 0])
@@ -577,6 +578,58 @@ class InitListTest(unittest.TestCase):
     def test_raw_images_have_no_lists(self):
         rec = synthetic_recovery(self.PROGRAM)
         self.assertEqual(spu_recover.gcc_init_lists(rec.image), ((), ()))
+
+
+class DataPointerTest(unittest.TestCase):
+    # entry; a function after nop and `stop`; a function after a zero word and nop; a function after two
+    # nops and `bi $0`; a function whose last instruction `bi $0` follows an `ai`
+    PROGRAM = [enc("stop", STOP=0x102), nop(), ret(), 0, nop(), ret(), nop(), nop(), ret(),
+               enc("ai", RT=3, RA=3, I10=1), ret()]
+
+    def seeds(self, data_words):
+        rec = elf_recovery(self.PROGRAM, data_words)
+        return spu_recover.dispatchable_blocks(rec), rec
+
+    def test_pointer_to_a_function_start_is_seeded_as_data(self):
+        blocks, rec = self.seeds([0x1234, at(2), at(5)])
+        self.assertEqual(blocks[at(2)], ("data",))
+        self.assertEqual(blocks[at(5)], ("data",))
+        self.assertEqual(sorted(rec.result.functions), [at(0), at(2), at(5)])
+        self.assertEqual(spu_recover.data_code_pointers(rec.image, rec.code), (at(2), at(5)))
+
+    def test_padding_before_the_target_is_skipped(self):
+        # at(5) follows a zero word, at(8) follows two nops after a `bi $0`
+        blocks, _ = self.seeds([at(5)])
+        self.assertEqual(blocks[at(5)], ("data",))
+        blocks, _ = self.seeds([at(8)])
+        self.assertEqual(blocks[at(8)], ("data",))
+
+    def test_pointer_into_a_function_is_ignored(self):
+        # at(10) follows `ai`, which falls through
+        blocks, _ = self.seeds([at(10)])
+        self.assertEqual(blocks, {at(0): ("entry",)})
+
+    def test_padding_inside_a_function_does_not_make_a_start(self):
+        words = [enc("stop", STOP=0x102), nop(), enc("ai", RT=3, RA=3, I10=1), enc("lnop"),
+                 enc("ai", RT=3, RA=3, I10=2), ret()]
+        rec = elf_recovery(words, [at(4)])
+        self.assertEqual(spu_recover.data_code_pointers(rec.image, rec.code), ())
+
+    def test_non_code_unaligned_and_small_values_are_ignored(self):
+        for word in (0, 1, 0x40, at(2) + 2, at(3), DATA, 0x20000, at(0) - 4, 0xFFFFFFFF):
+            with self.subTest(word=hex(word)):
+                blocks, _ = self.seeds([word])
+                self.assertEqual(blocks, {at(0): ("entry",)})
+
+    def test_init_list_pointers_keep_their_source(self):
+        blocks, _ = self.seeds([0xFFFFFFFF, at(2), 0, 0xFFFFFFFF, 0, at(5)])
+        self.assertEqual(blocks[at(2)], ("ctors",))
+        self.assertEqual(blocks[at(5)], ("data",))
+
+    def test_images_without_data_segments_add_nothing(self):
+        rec = synthetic_recovery(self.PROGRAM)
+        self.assertEqual(spu_recover.data_code_pointers(rec.image, rec.code), ())
+        self.assertEqual(spu_recover.dispatchable_blocks(rec), {at(0): ("entry",)})
 
 
 class DatabaseTest(unittest.TestCase):

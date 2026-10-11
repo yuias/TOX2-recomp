@@ -36,7 +36,7 @@ _PINNED_INDIRECT_IMAGES = ["eboot_edgelzma", "libsre_kernel1", "libsre_system_se
 _COUNTS = {
     "eboot_spline": (16, 1106, 41, 0),
     "eboot_edgelzma": (38, 3823, 87, 0),
-    "eboot_bnuscore": (50, 3583, 232, 0),
+    "eboot_bnuscore": (133, 18248, 518, 0),
     "eboot_animation": (55, 4741, 133, 0),
     "eboot_updatematrix": (182, 14567, 608, 0),
     "eboot_renderparticle": (73, 8303, 268, 0),
@@ -70,6 +70,14 @@ _MUST_DISPATCH = {
     "eboot_skin": [0x3130],
     "eboot_spline": [0x30E8, 0x3E60],
     "eboot_morph": [0x48B8, 0x5538],
+    # Function pointers in the descriptor records at LS 0x14d20 and 0x14f20, which the code copies into a
+    # registry and calls through a register (0x7900 is the pointer of the "VOLP" record)
+    "eboot_bnuscore": [
+        0x158, 0x160, 0x168, 0x170, 0x178, 0x7E8, 0x7F0, 0x7F8, 0x800, 0x808,
+        0x1490, 0x1498, 0x14A0, 0x14A8, 0x14B0, 0x14B8, 0x1DC8, 0x1DD0, 0x1DD8, 0x1DE0, 0x1DE8, 0x1DF0, 0x1DF8,
+        0x2660, 0x2668, 0x2670, 0x2678, 0x2680, 0x2E90, 0x2E98, 0x2EA0, 0x2EA8, 0x35F0,
+        0x6320, 0x6D68, 0x7298, 0x74A0, 0x75A0, 0x7600, 0x7680, 0x76F8, 0x7900, 0x7AD0,
+    ],
     # Jump tables whose bound check leaves through a conditional return (binz) instead of a brnz
     "eboot_animation": [0x448C, 0x4490, 0x44A0, 0x44B0, 0x44C0, 0x45CC, 0x46C4],
 }

@@ -7,9 +7,10 @@ dispatchable addresses.
 Seed sources: `entry`, `extra` (registry extra entries), `brsl`/`brasl` (direct call targets),
 `constant` (a constant code pointer that an indirect branch uses, or that position-independent
 code materialises with `a rX,rY,$delta`), `ctors`/`dtors` (function pointers in the GCC `.ctors` and
-`.dtors` lists at the start of an ELF image's data, which crt0 calls through a register) and `promoted`
-(code shared by several functions). Jump-table targets are intra-function edges, as on the PPU side; the tables
-themselves are resolved by the caller and passed in.
+`.dtors` lists at the start of an ELF image's data, which crt0 calls through a register), `data` (words
+of an ELF image's data segments that point at a function start, such as the method slots of descriptor
+tables) and `promoted` (code shared by several functions). Jump-table targets are intra-function edges, as
+on the PPU side; the tables themselves are resolved by the caller and passed in.
 """
 
 from __future__ import annotations
@@ -164,14 +165,16 @@ def recover(code: SpuCode, entry: int | None, extra_entries: Iterable[int] = (),
             max_rounds: int = DEFAULT_MAX_ROUNDS,
             zero_regs: Iterable[int] = (),
             table_notes: Mapping[int, str] | None = None,
-            ctors: Iterable[int] = (), dtors: Iterable[int] = ()) -> RecoveryResult:
+            ctors: Iterable[int] = (), dtors: Iterable[int] = (),
+            data_pointers: Iterable[int] = ()) -> RecoveryResult:
     """Partition `code` into functions.
 
     `jump_tables` maps a `bi` site to its resolved targets. `data_ranges` are LS ranges
     [start, end) that hold data inside code segments; flow into them is an anomaly, never code.
     `zero_regs` hold 0 at the link address (see `spu_flow.eval_const`). `table_notes` explains why
     an indirect jump that looked like a table stays unresolved. `ctors` and `dtors` are the
-    function pointers of the GCC init/fini lists (see `gcc_init_lists`).
+    function pointers of the GCC init/fini lists (see `gcc_init_lists`). `data_pointers` are code
+    pointers found in data segments (see `data_code_pointers`).
     """
     zero = frozenset(zero_regs)
     notes = dict(table_notes or {})
@@ -188,6 +191,7 @@ def recover(code: SpuCode, entry: int | None, extra_entries: Iterable[int] = (),
     initial = [(a, "extra") for a in extra_entries]
     initial += [(a, "ctors") for a in ctors]
     initial += [(a, "dtors") for a in dtors]
+    initial += [(a, "data") for a in data_pointers]
     if entry is not None:
         initial.append((entry, "entry"))
     for addr, source in initial:
@@ -453,6 +457,51 @@ def gcc_init_lists(image: SpuImage) -> tuple[tuple[int, ...], tuple[int, ...]]:
     return tuple(first[0]), tuple(second[0]) if valid(second) else ()
 
 
+_PADDING_MNEMONICS = frozenset({"nop", "lnop"})
+
+
+def _after_function_end(code: SpuCode, addr: int) -> bool:
+    """True when `addr` follows a function end or padding, so a function can start there.
+
+    The words before `addr` are skipped over `nop`/`lnop` (the compiler aligns function starts with
+    them, but also uses them inside functions). What remains must be an all-zero word, which is
+    never code, the start of the segment, or an instruction that does not fall through.
+    """
+    pos = addr - 4
+    while code.contains(pos):
+        insn = code.insn(pos)
+        if insn.word == 0:
+            return True
+        if insn.spec is not None and insn.spec.mnemonic in _PADDING_MNEMONICS:
+            pos -= 4
+            continue
+        return not flow_of(insn).falls_through
+    return True
+
+
+def data_code_pointers(image: SpuImage, code: SpuCode) -> tuple[int, ...]:
+    """Function starts that words of the data segments point at.
+
+    Descriptor tables (a method slot per entry, copied into a registry at run time) are read through
+    a register, so no constant in the code names their targets. A word counts when it is word-aligned,
+    inside a code segment, decodes as an instruction and sits right after a function end or padding.
+    The last test matters: sizes and flags in the same records (0x40, 0x94, ...) are as small as code
+    addresses, and they land inside functions, where the preceding instruction falls through.
+    """
+    spans = [(s.ls, s.ls + s.filesz) for s in image.code_segments]
+    found: set[int] = set()
+    for seg in image.segments:
+        if seg.code:
+            continue
+        blob = image.segment_bytes(seg)
+        for i in range(0, len(blob) - 3, 4):
+            word = int.from_bytes(blob[i:i + 4], "big")
+            if (word % 4 == 0 and any(lo <= word < hi for lo, hi in spans) and code.valid(word)
+                    and _after_function_end(code, word)):
+                found.add(word)
+    return tuple(sorted(found))
+
+
 def recover_image(image: SpuImage, container_sha256: str, *,
                   max_rounds: int = DEFAULT_MAX_ROUNDS) -> ImageRecovery:
     """Resolve jump tables, then partition the code of a registry image."""
@@ -462,9 +511,12 @@ def recover_image(image: SpuImage, container_sha256: str, *,
     tables = resolve_jump_tables(code, zero_regs=zero)
     data = tuple(sorted([(r.start, r.end) for r in entry.data_ranges] + tables.data_ranges()))
     ctors, dtors = gcc_init_lists(image)
+    # A pointer that an init list already names keeps its `ctors`/`dtors` source.
+    listed = {*ctors, *dtors}
+    pointers = tuple(p for p in data_code_pointers(image, code) if p not in listed)
     result = recover(code, image.entry_ls, [e.ls for e in entry.extra_entries],
                      {site: t.targets for site, t in tables.tables.items()}, data, max_rounds,
-                     zero, tables.notes, ctors, dtors)
+                     zero, tables.notes, ctors, dtors, pointers)
     return ImageRecovery(image, container_sha256, code, tables, data, result)
 
 

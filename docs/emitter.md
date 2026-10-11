@@ -182,11 +182,11 @@ and writes no files.
 - A word whose group has no handler, an operand the handler refuses (a conversion scale outside 0..127), or a
   rounding mode in the double-precision operations (below) reaches `tox2SpuUnhandled` at run time.
 
-For the committed databases the run gives 14 images, 625 functions, 56,025 instructions and 1,990 dispatch
-entries, written as 19 chunk files and the three shared files (22 files, about 4.0 MB of C, under one
+For the committed databases the run gives 14 images, 708 functions, 70,690 instructions and 2,276 dispatch
+entries, written as 23 chunk files and the three shared files (26 files, about 5.3 MB of C, under one
 second). `gate unhandled: 0`, so `--max-unhandled 0` exits with 0; no mnemonic of any emitted image lacks a
-handler. The edges are 2,332 `goto`s, 1,308 direct jumps, 746 indirect dispatches, 589 returns, 15 fall-through
-jumps, 6 `stop`s and 4 leaves, with 1,783 labels and 811 loop hooks. Two flows end in a non-code word (`invalid_flow`
+handler. The edges are 3,184 `goto`s, 1,500 direct jumps, 839 indirect dispatches, 676 returns, 15 fall-through
+jumps, 6 `stop`s and 4 leaves, with 2,424 labels and 1,288 loop hooks. Two flows end in a non-code word (`invalid_flow`
 2: one each in `libsre_kernel1` and `libsre_kernel2`, where a fall-through runs into a non-code word); the
 emitted code calls `tox2SpuUnhandled` there, and they are not counted as unhandled words. Per image:
 
@@ -194,7 +194,7 @@ emitted code calls `tox2SpuUnhandled` there, and they are not counted as unhandl
 | --- | --- | --- | --- | --- |
 | `eboot_spline` | 16 | 1,106 | 41 | 1 |
 | `eboot_edgelzma` | 38 | 3,823 | 87 | 1 |
-| `eboot_bnuscore` | 50 | 3,583 | 232 | 1 |
+| `eboot_bnuscore` | 133 | 18,248 | 518 | 5 |
 | `eboot_animation` | 55 | 4,741 | 133 | 2 |
 | `eboot_updatematrix` | 182 | 14,567 | 608 | 4 |
 | `eboot_renderparticle` | 73 | 8,303 | 268 | 2 |
