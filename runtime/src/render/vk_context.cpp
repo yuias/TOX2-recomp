@@ -255,12 +255,15 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
     features13.synchronization2 = VK_TRUE;
     features13.shaderDemoteToHelperInvocation = VK_TRUE;
 
-    // Optional: DXT guest textures fall back to the placeholder without it.
+    // Optional: DXT guest textures fall back to the placeholder without it. shaderClipDistance is
+    // optional too: without it user clip planes are not applied (the translator emits no clip outputs).
     VkPhysicalDeviceFeatures supported_features{};
     vkGetPhysicalDeviceFeatures(chosen.device, &supported_features);
     ctx->has_texture_bc_ = supported_features.textureCompressionBC == VK_TRUE;
     VkPhysicalDeviceFeatures enabled_features{};
     enabled_features.textureCompressionBC = ctx->has_texture_bc_ ? VK_TRUE : VK_FALSE;
+    ctx->has_clip_distance_ = supported_features.shaderClipDistance == VK_TRUE;
+    enabled_features.shaderClipDistance = ctx->has_clip_distance_ ? VK_TRUE : VK_FALSE;
 
     const float priority = 1.0f;
     VkDeviceQueueCreateInfo queue_info{};

@@ -39,6 +39,8 @@ public:
     bool hasD24S8() const { return has_d24s8_; }
     // True when the device was created with textureCompressionBC (BC1/BC2/BC3 sampled images).
     bool hasTextureBC() const { return has_texture_bc_; }
+    // True when the device was created with shaderClipDistance (gl_ClipDistance in the vertex shader).
+    bool hasClipDistance() const { return has_clip_distance_; }
     // D24_UNORM_S8_UINT when usable as an attachment, else D32_SFLOAT_S8_UINT (one of the two is
     // mandatory for Vulkan implementations).
     VkFormat depthStencilFormat() const {
@@ -63,6 +65,7 @@ private:
     std::uint32_t graphics_family_ = 0;
     bool has_d24s8_ = false;
     bool has_texture_bc_ = false;
+    bool has_clip_distance_ = false;
     std::atomic<std::uint32_t> validation_errors_{0};
 };
 

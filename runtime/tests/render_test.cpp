@@ -2516,10 +2516,10 @@ int main() {
     }
 
     const std::uint32_t api = ctx->deviceProperties().apiVersion;
-    std::printf("device: %s (Vulkan %u.%u.%u), D24S8 %s, validation %s\n", ctx->deviceName().data(),
+    std::printf("device: %s (Vulkan %u.%u.%u), D24S8 %s, clip distance %s, validation %s\n", ctx->deviceName().data(),
                 VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api), VK_API_VERSION_PATCH(api),
                 ctx->hasD24S8() ? "supported" : "unsupported (D32S8 fallback)",
-                ctx->validationEnabled() ? "active" : "inactive");
+                ctx->hasClipDistance() ? "supported" : "unsupported", ctx->validationEnabled() ? "active" : "inactive");
     CHECK(layer == ctx->validationEnabled());
 
     testClearAndReadback(*ctx);
