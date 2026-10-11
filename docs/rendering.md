@@ -73,8 +73,9 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   (DXT1/DXT23/DXT45), as 2D, 3D or cube images with the whole mip chain (see [Textures](#textures));
   a unit without a usable texture reads a 1x1 magenta image of the type the fragment program samples
   (2D, 3D or cube).
-  Cull mode, depth state, viewport, scissor, topology and blend constants are dynamic state;
-  pipelines are cached by what is baked into them.
+  Cull mode, depth state, viewport, scissor, topology, blend constants and the whole stencil state (test
+  enable, ops, compare mask, write mask and reference, for both faces; see [Stencil](#stencil)) are dynamic
+  state; pipelines are cached by what is baked into them.
 - **Readback** is gated. Copying the display buffer back to the host costs 8 MiB per flip at 1080p,
   so a live run does it only for flips that are dumped (`--dump-frames`). `tox2_rsxreplay` always
   reads the last flip back.
@@ -171,8 +172,8 @@ come from RPCS3 (`VKGSRender.cpp` `get_compatible_surface_format`, `rsx_methods.
 The frame builder keeps one list of known surfaces, colour and depth together, and a texture whose address is
 in it is an alias of that surface (`RsxTextureDesc::rt_alias`, with `rt_depth` for a depth surface). A colour
 surface becomes known when a kept draw writes it (nonzero colour mask) or a clear covers it, a depth surface
-when a clear has its depth or stencil bit or a draw has depth test and depth write on (RPCS3
-`zeta_write_enabled`), so the unused depth binding of a pass that only needs a colour target is not a surface.
+when a clear has its depth or stencil bit or a draw can write it (depth test and depth write on, or a stencil
+write; see [Stencil](#stencil); RPCS3 `zeta_write_enabled`), so the unused depth binding of a pass that only needs a colour target is not a surface.
 A colour and a depth surface at one address share an entry; the later one wins. A capture stores the list at
 the start of the frame, the depth format in bits 8 to 15 of the format word of each record (older files have
 zero there and still load; a file with a depth record does not load in an older build). RPCS3 also ignores a
@@ -196,7 +197,9 @@ A texture at a known surface is read from the GPU image, not from guest memory:
   size with a full-target pass before the draw (`DrawPipelines::depthConvertPipeline`, reading the depth and
   stencil aspects with `texelFetch` and rounding the depth to 24 bits), and the draw samples that image through
   its remap like any A8R8G8B8 texture. The image stays with the depth target and is made again only after a
-  clear or a draw that can write the depth (`RendererStats::depth_conversions` counts the passes). It is a
+  clear or a draw that can write the depth or the stencil (the same zeta write rule as for known surfaces; so a
+  stencil-only pass makes the next read rebuild the copy, whose B channel is the stencil;
+  `RendererStats::depth_conversions` counts the passes). It is a
   separate image, so a draw that renders with that depth surface bound can read it.
 - Not supported and counted: a texture format that does not match the surface kind (`texture format
   <name> of a depth surface`, `texture layout render target alias of another format`), DEPTH24_D8 and DEPTH16
@@ -210,6 +213,48 @@ A texture and its surface of different sizes are sampled with the texture's norm
 are twice as wide in memory as their clip rectangle, so the texture that reads one is twice as wide as the
 surface; the renderer draws them without anti-aliasing, so the same normalized coordinates land on the same
 picture up to the filtering across the missing samples. The count marks that approximation, not a failure.
+
+#### Stencil
+
+The stencil state is decoded from the registers SET_STENCIL_TEST_ENABLE, SET_STENCIL_MASK, SET_STENCIL_FUNC,
+SET_STENCIL_FUNC_REF, SET_STENCIL_FUNC_MASK and SET_STENCIL_OP_FAIL/ZFAIL/ZPASS for the front face,
+SET_TWO_SIDED_STENCIL_TEST_ENABLE, and the matching SET_BACK_STENCIL_* registers for the back face. The
+reference, compare mask and write mask are the low 8 bits of their registers. The facts come from RPCS3
+(`RSXThread.cpp`, `VK/VKGSRender.cpp`, `VK/VKDraw.cpp`, `Common/gcm_enums.h`).
+
+- **Two faces.** With two-sided stencil off the back face uses the front function, reference, masks and ops;
+  the decoder copies the front face, so the back registers are read, and validated, only when two-sided
+  stencil is on. Vulkan's front and back faces follow the dynamic front face, which maps one to one to the RSX
+  front face.
+- **Stencil ops.** The op word is compared in full (nothing is masked to 16 bits): 0x1E00 KEEP, 0x0000 ZERO,
+  0x1E01 REPLACE, 0x1E02 INCR (increment and clamp), 0x1E03 DECR (decrement and clamp), 0x150A INVERT,
+  0x8507 INCR_WRAP and 0x8508 DECR_WRAP.
+- **Compare words.** 0x200 NEVER to 0x207 ALWAYS in `VkCompareOp` order. RPCS3 ORs the word with 0x200 before
+  it checks the range, so 0x000 to 0x007 are valid too; the rule is shared by the stencil, depth and alpha
+  functions.
+- **Unknown words.** RPCS3 aborts on a compare or op word outside these sets. Here it is counted while the
+  test is on (`state stencil func ?0x...`, `state stencil op ?0x...`, with the word) and the renderer uses
+  `func & 7` for a compare word and KEEP for an op word.
+- **Test and depth test.** The stencil test runs whether or not the depth test is on; with the depth test off
+  the depth test passes, so the ZPASS op applies.
+- **When the test is off.** The test is applied only to a Z24S8 surface. With the stencil test enabled and a
+  Z16 depth surface or no depth surface, the draw runs without it and is counted as
+  `state stencil test without a stencil surface`. Every draw sets all five dynamic stencil states for both
+  faces, also with the test off, so no draw inherits the state of the previous one.
+- **Zeta write rule.** A draw writes the depth surface when `(depth test && depth write) || stencil write`
+  (RPCS3 `zeta_write_enabled`). A stencil write needs a Z24S8 surface and the stencil test on, and a write
+  mask that is not 0 together with at least one op that is not KEEP. The compare function is not consulted,
+  and a nonzero write mask alone is not enough. The back face is folded in only when two-sided stencil is on
+  and the front mask is 0 or its ops are all KEEP; its mask and its ops are then ORed in separately, so a
+  front face with a nonzero mask and all-KEEP ops plus a back face with mask 0 and a REPLACE op counts as a
+  write, as in RPCS3. Unknown op words count as KEEP here. The frame builder uses the rule to make the depth
+  surface known, and the renderer to advance the write counter that makes the A8R8G8B8 copy of the depth
+  surface be rebuilt.
+- **Clears.** The stencil clear value is bits 0 to 7 of SET_ZSTENCIL_CLEAR_VALUE (depth is bits 8 to 31). The
+  stencil bit of a clear is dropped for a write mask of 0 and for a surface that is not Z24S8; a new depth
+  target starts at depth 1.0 and stencil 0xFF; every clear of depth or stencil advances the write counter.
+  A clear with a partial stencil write mask clears the whole byte (RPCS3 uses a shader pass for it) and is
+  counted as `state partial stencil clear mask`.
 
 ### Textures
 
