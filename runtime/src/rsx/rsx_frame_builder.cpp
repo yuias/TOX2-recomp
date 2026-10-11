@@ -186,7 +186,14 @@ std::int32_t RsxFrameBuilder::findSurface(std::uint32_t location, std::uint32_t 
     return -1;
 }
 
+// A color surface needs a color format the renderer can draw to; a depth surface carries its depth format
+// and no color format. Anything else (no depth bound, an unsupported format) is not registered.
 std::int32_t RsxFrameBuilder::noteSurface(const RsxSurface& surface) {
+    const bool is_depth = surface.depth_format != RsxDepthFormat::None;
+    if (is_depth ? surface.depth_format == RsxDepthFormat::Unsupported
+                 : surface.format == RsxColorFormat::Unsupported) {
+        return -1;
+    }
     const std::int32_t index = findSurface(surface.location, surface.offset);
     if (index >= 0) {
         known_surfaces_[index] = surface;  // size or pitch may have changed
@@ -209,7 +216,8 @@ void RsxFrameBuilder::clear(const RsxRegisters& regs, std::uint32_t mask) {
     constexpr std::uint32_t kColorBits = kRsxClearRed | kRsxClearGreen | kRsxClearBlue | kRsxClearAlpha;
     RsxClear c = decodeClear(regs, mask);
     if ((regs.reg(kMethodNv4097SetStencilMask) & 0xFF) == 0) mask &= ~kRsxClearStencil;
-    if (!c.surfaces.has_color) mask &= ~kColorBits;
+    // RPCS3 `clear_surface` turns a color clear of a 32-bit float surface into a no-op.
+    if (!c.surfaces.has_color || c.surfaces.color.format == RsxColorFormat::F_X32) mask &= ~kColorBits;
     if (c.surfaces.depth_format == RsxDepthFormat::None || c.surfaces.depth_format == RsxDepthFormat::Unsupported) {
         mask &= ~(kRsxClearDepth | kRsxClearStencil);
     } else if (c.surfaces.depth_format != RsxDepthFormat::Z24S8) {
@@ -224,6 +232,7 @@ void RsxFrameBuilder::clear(const RsxRegisters& regs, std::uint32_t mask) {
     if (c.scissor[2] == 0 || c.scissor[3] == 0) return;
 
     if ((mask & kColorBits) != 0 && c.surfaces.color.format == RsxColorFormat::A8R8G8B8) noteSurface(c.surfaces.color);
+    if ((mask & (kRsxClearDepth | kRsxClearStencil)) != 0) noteSurface(c.surfaces.depth);
     // RPCS3 clears a partially masked stencil with a shader pass; RsxClear carries no stencil mask, so
     // the renderer clears the whole byte.
     if ((mask & kRsxClearStencil) != 0 && (regs.reg(kMethodNv4097SetStencilMask) & 0xFF) != 0xFF) {
@@ -283,9 +292,12 @@ void RsxFrameBuilder::fillTextures(const RsxRegisters& regs, RsxDraw& draw) {
 
         t.rt_alias = findSurface(t.location, t.offset);
         if (t.rt_alias >= 0) {
+            t.rt_depth = known_surfaces_[t.rt_alias].depth_format != RsxDepthFormat::None;
             draw.textures.push_back(t);
             continue;
         }
+        if (rsxTextureFormatRenderTargetOnly(t.format))
+            rsxNoteUnimplemented("texture format", rsxTextureFormatName(t.format));
 
         const RsxTextureKind kind = rsxTextureKind(t);
         if (kind == RsxTextureKind::Unsupported) {
@@ -512,11 +524,16 @@ void RsxFrameBuilder::buildDraw(const RsxRegisters& regs) {
 
     if (!fillVertices(regs, draw, vertex_base, vertex_count)) return;
     // Registered only for a draw that is kept, and before the textures so that sampling the target being
-    // drawn to is seen as an alias.
-    if (draw.surfaces.has_color && draw.surfaces.color.format == RsxColorFormat::A8R8G8B8 &&
+    // drawn to is seen as an alias. A depth surface counts once the draw writes it (the same rule as the
+    // renderer's depth write), so the unused depth binding of a pass that only needs a color target is
+    // not taken for a surface.
+    if (draw.surfaces.has_color &&
+        (draw.surfaces.color.format == RsxColorFormat::A8R8G8B8 ||
+         draw.surfaces.color.format == RsxColorFormat::F_X32) &&
         draw.raster.color_mask != 0) {
         noteSurface(draw.surfaces.color);
     }
+    if (draw.raster.depth_test && draw.raster.depth_write) noteSurface(draw.surfaces.depth);
     fillTextures(regs, draw);
     fillFragmentProgram(regs, draw);
     fillVertexProgram(regs, draw);

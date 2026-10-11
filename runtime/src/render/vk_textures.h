@@ -34,6 +34,12 @@ namespace tox2 {
 // the override bits of the high half matter for formats other than A8R8G8B8.
 VkComponentMapping textureComponentMapping(std::uint32_t remap);
 
+// The same for a single-channel float image (X32_FLOAT, R32_SFLOAT): every source channel is the image's red
+// channel, so only the forced zero/one controls of the remap matter (RPCS3 `VKFormats.cpp`
+// `get_component_mapping`, X32_FLOAT: R, R, R, R; `RSXTexture.cpp` `decoded_remap` ignores the channel
+// selects of float textures).
+VkComponentMapping singleChannelComponentMapping(std::uint32_t remap);
+
 // Vulkan format of the image that holds a guest texture of RSX format `rsx_format` (flag bits ignored);
 // UNDEFINED for a format that is not sampled.
 VkFormat textureVkFormat(std::uint32_t rsx_format);
@@ -100,13 +106,20 @@ public:
     // Image the size of a render target that receives a copy of it. One per size.
     std::shared_ptr<TextureImage> scratch(std::uint32_t width, std::uint32_t height);
 
+    // A B8G8R8A8 image the renderer draws into and then samples (SAMPLED and COLOR_ATTACHMENT usage), owned by
+    // the caller. Null with a counted note when the size is not supported.
+    std::shared_ptr<TextureImage> renderable(std::uint32_t width, std::uint32_t height);
+
     // View with the component mapping of `remap`; null on a Vulkan failure.
     VkImageView view(TextureImage& image, std::uint32_t remap);
-    // View of an image the cache does not own, with the same mapping rule.
+    // View of an image the cache does not own, with the same mapping rule. An R32_SFLOAT image gets the
+    // single-channel mapping.
     VkImageView createView(VkImage image, VkFormat format, std::uint32_t remap, std::uint32_t levels = 1,
                            VkImageViewType type = VK_IMAGE_VIEW_TYPE_2D, std::uint32_t layers = 1);
 
-    VkSampler sampler(const RsxTextureDesc& texture);
+    // `format` is the format of the image the sampler reads: a linear filter is replaced by NEAREST when the
+    // device cannot filter that format linearly (R32_SFLOAT is such a format on some devices).
+    VkSampler sampler(const RsxTextureDesc& texture, VkFormat format = VK_FORMAT_UNDEFINED);
 
     // Copies every level (and cube face) of the image from the staging buffer, which holds them tightly packed
     // at the offsets of `levels` (the packed layout of rsx_texture_layout.h) from `offset`. The image ends in
@@ -130,10 +143,12 @@ private:
                                          VkImageUsageFlags usage, std::uint32_t levels = 1, std::uint32_t depth = 1,
                                          std::uint32_t layers = 1, VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D);
     bool formatUsable(VkFormat format);
+    bool linearFilterable(VkFormat format);
     void fail(std::string message);
 
     VkContext& context_;
     std::map<VkFormat, bool> format_usable_;
+    std::map<VkFormat, bool> linear_filterable_;
     std::string error_;
     std::uint64_t tick_ = 0;
     std::map<Key, std::shared_ptr<TextureImage>> images_;

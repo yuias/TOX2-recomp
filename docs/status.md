@@ -164,9 +164,10 @@ These exist and are generic, but were written for and checked against the earlie
 - A Vulkan 1.3 renderer that draws what the RSX commands describe into a window or PNG files, and
   `tox2_rsxreplay`, which renders single recorded frames without the game (see
   [Rendering](rendering.md)). The game's flips run in the fake RSX. A headless run with `--dump-frames` also runs the renderer
-  (a 120 s headless run with `--vk-validation` and `--dump-frames`: 5,736 flips, 310,803 draws rendered,
-  5,494 skipped and 7,195 clears, 0 validation errors; every skipped draw is one without a supported
-  colour target, surface format F_X32, and the census has no `texture layout dimension` entry). Before the fragment
+  (a 120 s headless run with `--vk-validation` and `--dump-frames`: 19,521 flips, 423,464 draws rendered,
+  0 skipped and 21,176 clears, 0 validation errors). Before the F_X32 colour surface was supported, a run of the
+  same length (5,736 flips) skipped one draw per frame, 5,494 in all, because it rendered to an F_X32 target (see
+  [Render targets](rendering.md#render-targets)). Before the fragment
   translator handled the fence, divide, reciprocal, exp2, log2 and KIL opcodes, most draws of a longer
   run were skipped for those opcodes. The textures are uploaded with their whole mip chain, linear or
   swizzled, as 2D, 3D or cube images (see [Textures](rendering.md#textures)); before the mip and swizzle
@@ -175,22 +176,39 @@ These exist and are generic, but were written for and checked against the earlie
   draws that sample the 3D glyph atlas of the dialog text (1,071 of them in a 120 s run) were skipped, so the
   dialog box was empty. A run that reached flip 7,000 had no `texture placeholder` entry in its last census, and
   its dumped frame of flip 7,000 is the title screen (logo, the
-  "PRESS ANY BUTTON" line and a lit 3D character on a dark red background). In the 120 s run above the dialog
+  "PRESS ANY BUTTON" line and a lit 3D character on a dark red background). In the 120 s run before the F_X32
+  support the dialog
   box is on screen in the dumps of flips 4,440 to 4,480 (every 20th flip) with its text, a two-line Japanese message that the downloadable
-  content is being checked, in gold. `tox2_rsxreplay`
+  content is being checked, in gold. In the run with the F_X32 support (and in a run of the version before it, from
+  the same save data directory) the dumps show the Japanese legal notice on grey at flip 300, a plain grey screen
+  for most of the run and a black screen at the end; neither run reaches the title screen, so no live dump
+  shows the F_X32 passes at work. The new run flips about three times as often as the old one in the same time
+  (19,521 and 5,634 flips; the draws per flip differ too, 22 and 54, because the game is in another state at the
+  same flip number). Without the renderer both versions flip 8,100 times in 30 s, so the rate of a rendered run is
+  set by the renderer thread. The likely cause: before the change, two draws of every frame read the 2560x720
+  depth surface from guest memory (the builder copied about 7 MiB for each and the renderer uploaded it), and
+  now they read the depth surface on the GPU. `tox2_rsxreplay`
   renders frames recorded from the game: a dialog
-  frame (flip 5,160 of another run, recorded after the 3D support: 39 draws, 1 skipped: the F_X32 one) shows
+  frame (flip 5,160 of another run, recorded after the 3D support: 39 draws, 0 skipped since the F_X32 support) shows
   the dialog box with that text on grey, bit for bit as the live run drew it (nine draws sample the
   512x512x16 DXT1 glyph atlas, which is in the VTC order); the frame of flip 6,900 recorded before the
   3D support replays without a skip too, but its atlas bytes are missing from the capture, so its text is a flat gold
-  block. A title-screen frame (flip 8,300 recorded again after the texture change: 970 draws, 1 skipped: the F_X32
-  one) shows the same title screen, bit for bit as before the 3D support. The vertex translator handles
+  block. A title-screen frame (flip 8,300 recorded again after the texture change: 970 draws, 0 skipped since the
+  F_X32 support) shows the same title screen as before the 3D support, except that the 3D character now fades
+  into the dark from the knees down: the lower legs and the shoes are much darker (2.1 percent of the pixels
+  differ by more than 2, up to 89 levels, all on the character). The darkening depends on the depth and is
+  smooth, which a wrong byte order in the depth decoding would not give; it has not been compared with the
+  hardware. The frame has a pass that reads the scene's
+  depth surface as A8R8G8B8 texels and writes a linear depth into an F_X32 target, and a later draw of the scene
+  that reads that target as an X32_FLOAT texture; before the F_X32 support the first was skipped and the second
+  read the placeholder. Dialog and loading frames (flips 5,160 and
+  1,500) are unchanged, bit for bit: they write the F_X32 target but nothing reads it. The vertex translator handles
   branches, calls and returns, which the 3D scene's skinning programs need (BRB on a bit of the branch
   bits register; see [Vertex programs](rendering.md#vertex-programs)). The frame's last draw is a
   full-screen pass that samples the scene target; the unit-12 texture that every draw of the frame
   binds (a swizzled 256x16 A8R8G8B8) read the placeholder, which made the whole image magenta. What
-  the census still lists for it (`texture format X32_FLOAT_LN_NR`, `render target alias of another
-  size`, `user clip`, `antialiasing 0x3`, `stencil test`) does not put a placeholder on screen. A
+  the census still lists for it (`render target alias of another size`, `user clip`, `antialiasing 0x3`,
+  `stencil test`, `surface resize`) does not put a placeholder on screen. A
   capture made before this change lacks the swizzled and mipmapped texture bytes (the builder did not
   read them), so a replay of it counts `capture missing range` and shows the same image as before.
   The captures never write the branch bits register, so every draw in them ran with the bits at 0.

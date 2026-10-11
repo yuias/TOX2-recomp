@@ -40,8 +40,9 @@ struct RendererStats {
     std::uint64_t draws = 0;          // draws handled: recorded into a command buffer, or dropped with an empty scissor
     std::uint64_t draws_skipped = 0;  // draws seen but not rendered (unimplemented state, program or primitive)
     std::uint64_t flips = 0;
-    std::uint64_t texture_uploads = 0;  // texture images written from guest bytes (once per image per draw)
-    std::uint64_t feedback_copies = 0;  // render target copies made for draws that sample their own target
+    std::uint64_t texture_uploads = 0;    // texture images written from guest bytes (once per image per draw)
+    std::uint64_t feedback_copies = 0;    // render target copies made for draws that sample their own target
+    std::uint64_t depth_conversions = 0;  // depth surfaces rewritten as A8R8G8B8 texels for a draw that reads them
 };
 
 // Single-threaded: execute, readDisplay and stats are called from one thread. The renderer never
@@ -115,6 +116,8 @@ private:
     bool prepareTextures(const RsxDraw& draw, const DrawShaders& shaders, RenderTarget& color,
                          VkDescriptorImageInfo (&infos)[kFpTextureUnitCount], float (&scales)[kFpTextureUnitCount][4]);
     bool vertexFormatSupported(VkFormat format);
+    bool blendSupported(VkFormat format);
+    std::shared_ptr<TextureImage> depthAsArgb(RenderTarget& depth);
 
     void recordClear(const RsxClear& clear);
     void recordMaskedColorClear(const RsxClear& clear, RenderTarget& color, std::uint32_t color_bits);
@@ -138,6 +141,7 @@ private:
     std::unique_ptr<DrawPipelines> pipelines_;
     std::unique_ptr<TextureCache> textures_;
     std::map<VkFormat, bool> vertex_format_support_;
+    std::map<VkFormat, bool> blend_support_;
 
     // Bound to a sampled texture unit that has no usable texture. The view type has to match the sampler type
     // the fragment program declares for the unit, so there is one image per type (kFpTextureType*: 2D, 3D, cube).

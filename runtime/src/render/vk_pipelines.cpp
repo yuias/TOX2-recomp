@@ -19,6 +19,7 @@ namespace {
 // translated programs.
 constexpr std::uint64_t kClearVertexKey = 0x434C45415256ull;
 constexpr std::uint64_t kClearFragmentKey = 0x434C45415246ull;
+constexpr std::uint64_t kDepthConvertFragmentKey = 0x44455054434Full;
 
 constexpr const char* kClearVertexGlsl = R"(#version 450
 void main() {
@@ -31,6 +32,23 @@ constexpr const char* kClearFragmentGlsl = R"(#version 450
 layout(push_constant) uniform Clear { vec4 color; } clear;
 layout(location = 0) out vec4 out_color;
 void main() { out_color = clear.color; }
+)";
+
+// RSX reads a Z24S8 word as A8R8G8B8 texel bytes: A = depth bits 23..16, R = 15..8, G = 7..0, B = stencil
+// (the depth sits in the top 24 bits of the big-endian word). This is the layout RPCS3 rebuilds in
+// `RSXFragmentTextureDepthConversion.glsl` (`decode_depth24`, `convert_z24x8_to_rgba8`), with the rounding of
+// `f32_to_unorm24`. The target is B8G8R8A8 and its view is the identity, so the output vector is the (R, G, B, A)
+// of the texel.
+constexpr const char* kDepthConvertFragmentGlsl = R"(#version 450
+layout(set = 0, binding = 0) uniform sampler2D depth_tex;
+layout(set = 0, binding = 1) uniform usampler2D stencil_tex;
+layout(location = 0) out vec4 out_color;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  uint z = uint(floor(texelFetch(depth_tex, p, 0).r * 16777215.0 + 0.5));
+  uint s = texelFetch(stencil_tex, p, 0).r;
+  out_color = vec4(float((z >> 8) & 0xFFu), float(z & 0xFFu), float(s), float(z >> 16)) / 255.0;
+}
 )";
 
 std::uint64_t mixKey(std::uint64_t hash, std::uint32_t a, std::uint32_t b) {
@@ -132,11 +150,17 @@ DrawPipelines::~DrawPipelines() {
     const VkDevice device = context_.device();
     for (auto& [key, pipeline] : pipelines_) vkDestroyPipeline(device, pipeline, nullptr);
     for (auto& [key, pipeline] : clear_pipelines_) vkDestroyPipeline(device, pipeline, nullptr);
+    if (depth_convert_pipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device, depth_convert_pipeline_, nullptr);
     for (auto& [key, program] : vertex_programs_) {
         if (program->module != VK_NULL_HANDLE) vkDestroyShaderModule(device, program->module, nullptr);
     }
     for (auto& [key, program] : fragment_programs_) {
         if (program->module != VK_NULL_HANDLE) vkDestroyShaderModule(device, program->module, nullptr);
+    }
+    if (depth_convert_fragment_ != VK_NULL_HANDLE) vkDestroyShaderModule(device, depth_convert_fragment_, nullptr);
+    if (depth_convert_layout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, depth_convert_layout_, nullptr);
+    if (depth_convert_set_layout_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device, depth_convert_set_layout_, nullptr);
     }
     if (clear_vertex_ != VK_NULL_HANDLE) vkDestroyShaderModule(device, clear_vertex_, nullptr);
     if (clear_fragment_ != VK_NULL_HANDLE) vkDestroyShaderModule(device, clear_fragment_, nullptr);
@@ -452,6 +476,122 @@ VkPipeline DrawPipelines::maskedClearPipeline(VkFormat color_format, VkColorComp
     }
     clear_pipelines_.emplace(key, pipeline);
     return pipeline;
+}
+
+bool DrawPipelines::createDepthConvertObjects() {
+    if (depth_convert_layout_ != VK_NULL_HANDLE) return true;
+    if (!createClearShaders()) return false;  // the full-target vertex shader is shared
+    auto fragment = compileGlsl(ShaderStage::Fragment, kDepthConvertFragmentGlsl, kDepthConvertFragmentKey);
+    if (!fragment) {
+        fail("the depth conversion shader did not compile: " + fragment.error());
+        return false;
+    }
+    depth_convert_fragment_ = createModule(context_.device(), *fragment);
+    if (depth_convert_fragment_ == VK_NULL_HANDLE) {
+        fail("vkCreateShaderModule failed");
+        return false;
+    }
+
+    VkDescriptorSetLayoutBinding bindings[2]{};
+    for (std::uint32_t i = 0; i < 2; i++) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo set_info{};
+    set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    set_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+    set_info.bindingCount = 2;
+    set_info.pBindings = bindings;
+    if (vkCreateDescriptorSetLayout(context_.device(), &set_info, nullptr, &depth_convert_set_layout_) != VK_SUCCESS) {
+        depth_convert_set_layout_ = VK_NULL_HANDLE;
+        fail("vkCreateDescriptorSetLayout failed");
+        return false;
+    }
+    VkPipelineLayoutCreateInfo layout_info{};
+    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layout_info.setLayoutCount = 1;
+    layout_info.pSetLayouts = &depth_convert_set_layout_;
+    if (vkCreatePipelineLayout(context_.device(), &layout_info, nullptr, &depth_convert_layout_) != VK_SUCCESS) {
+        depth_convert_layout_ = VK_NULL_HANDLE;
+        fail("vkCreatePipelineLayout failed");
+        return false;
+    }
+    return true;
+}
+
+VkPipeline DrawPipelines::depthConvertPipeline() {
+    if (depth_convert_pipeline_ != VK_NULL_HANDLE) return depth_convert_pipeline_;
+    if (!createDepthConvertObjects()) return VK_NULL_HANDLE;
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = clear_vertex_;
+    stages[0].pName = "main";
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = depth_convert_fragment_;
+    stages[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo vertex_input{};
+    vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    VkPipelineInputAssemblyStateCreateInfo assembly{};
+    assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport{};
+    viewport.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewport.viewportCount = 1;
+    viewport.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo raster{};
+    raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo multisample{};
+    multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineDepthStencilStateCreateInfo depth_stencil{};
+    depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    VkPipelineColorBlendAttachmentState attachment{};
+    attachment.colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blend{};
+    blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blend.attachmentCount = 1;
+    blend.pAttachments = &attachment;
+    constexpr VkDynamicState kDynamic[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{};
+    dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamic.dynamicStateCount = static_cast<std::uint32_t>(std::size(kDynamic));
+    dynamic.pDynamicStates = kDynamic;
+    constexpr VkFormat kColorFormat = VK_FORMAT_B8G8R8A8_UNORM;
+    VkPipelineRenderingCreateInfo rendering{};
+    rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    rendering.colorAttachmentCount = 1;
+    rendering.pColorAttachmentFormats = &kColorFormat;
+
+    VkGraphicsPipelineCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    info.pNext = &rendering;
+    info.stageCount = 2;
+    info.pStages = stages;
+    info.pVertexInputState = &vertex_input;
+    info.pInputAssemblyState = &assembly;
+    info.pViewportState = &viewport;
+    info.pRasterizationState = &raster;
+    info.pMultisampleState = &multisample;
+    info.pDepthStencilState = &depth_stencil;
+    info.pColorBlendState = &blend;
+    info.pDynamicState = &dynamic;
+    info.layout = depth_convert_layout_;
+    if (vkCreateGraphicsPipelines(context_.device(), VK_NULL_HANDLE, 1, &info, nullptr, &depth_convert_pipeline_) !=
+        VK_SUCCESS) {
+        depth_convert_pipeline_ = VK_NULL_HANDLE;
+        fail("vkCreateGraphicsPipelines failed");
+    }
+    return depth_convert_pipeline_;
 }
 
 }  // namespace tox2

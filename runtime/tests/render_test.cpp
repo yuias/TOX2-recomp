@@ -1058,7 +1058,7 @@ void testTextureMapping() {
     const auto same = [](VkComponentMapping m, VkComponentSwizzle r, VkComponentSwizzle g, VkComponentSwizzle b,
                          VkComponentSwizzle a) { return m.r == r && m.g == g && m.b == b && m.a == a; };
 
-    // Every sampled image is B8G8R8A8, so the identity remap gives an identity view.
+    // Every sampled color image is B8G8R8A8, so the identity remap gives an identity view.
     CHECK(same(tox2::textureComponentMapping(0xAAE4), kR, kG, kB, kA));
     // Red and blue exchanged (R reads B, B reads R).
     CHECK(same(tox2::textureComponentMapping(0xAA6C), kB, kG, kR, kA));
@@ -1067,6 +1067,13 @@ void testTextureMapping() {
     CHECK(same(tox2::textureComponentMapping(0x0000), kZero, kZero, kZero, kZero));
     // The high half (override bits) does not change the mapping.
     CHECK(same(tox2::textureComponentMapping(0x1234AAE4), kR, kG, kB, kA));
+
+    // A single-channel float image reads its red channel everywhere; only the forced zero or one of a channel
+    // matters, whatever channel the remap selects.
+    CHECK(same(tox2::singleChannelComponentMapping(0xAAE4), kR, kR, kR, kR));
+    CHECK(same(tox2::singleChannelComponentMapping(0xAA6C), kR, kR, kR, kR));
+    CHECK(same(tox2::singleChannelComponentMapping(0xA9E4), kR, kR, kR, kOne));
+    CHECK(same(tox2::singleChannelComponentMapping(0x0000), kZero, kZero, kZero, kZero));
 
     // The border word (ARGB) goes through the same remap.
     CHECK(tox2::remapBorderColor(0x80402010, 0xAAE4) == 0x80402010);
@@ -1683,6 +1690,158 @@ void testRendererVolumeTextures(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// ---- Float and depth surfaces as textures ----
+
+constexpr std::uint32_t kFloatOffset = 0x60000;  // the F_X32 target; never read, only addressed
+constexpr std::uint32_t kDepthOffset = tox2::rsx_synthetic::kSurfaceOffset + 0x10000;  // SceneBuilder::setSurface
+
+// A quad over pixels x0..x1 by 16..48 of the 64x64 target. Its texture coordinates select the same texels of a
+// 64x64 texture, so a surface drawn at the same pixels shows up where it was written.
+void putSurfaceQuad(tox2::rsx_synthetic::SceneBuilder& scene, std::uint32_t x0, std::uint32_t x1) {
+    using namespace tox2::rsx_synthetic;
+    for (std::uint32_t v = 0; v < 4; v++) {
+        const std::uint32_t x = (v & 1) != 0 ? x1 : x0;
+        scene.memory().putFloat(1, kPositionsOffset + v * 12, (static_cast<float>(x) - 32.0f) / 32.0f);
+        scene.memory().putFloat(1, kPositionsOffset + v * 12 + 4, kQuadCorners[v][1]);
+        scene.memory().putFloat(1, kPositionsOffset + v * 12 + 8, 0.0f);
+        scene.memory().putFloat(1, kTexCoordsOffset + v * 8, static_cast<float>(x) / 64.0f);
+        scene.memory().putFloat(1, kTexCoordsOffset + v * 8 + 4, (v & 2) != 0 ? 0.25f : 0.75f);
+        scene.memory().putWord(1, kColorsOffset + v * 4, 0xFF400000);  // red 0x40
+    }
+}
+
+// The textured pass of both scenes: unit 0 reads `offset` as a 64x64 linear texture of the base format `format`.
+void setSurfaceTextureState(tox2::rsx_synthetic::SceneBuilder& scene, std::uint32_t offset, std::uint32_t format) {
+    scene.bindTexture(offset, 64, 64);
+    scene.write(tox2::kMethodNv4097SetTextureFormat, 1u | (2u << 4) | ((format | 0x20u) << 8) | (1u << 16));
+    scene.write(tox2::kMethodNv4097SetVertexAttribOutputMask, 1u << 14);  // TEX0
+    scene.write(tox2::kMethodNv4097SetShaderControl, 0x400);              // color from H0
+    scene.write(tox2::kMethodNv4097SetTexCoordControl, 1);                // 2D coordinate
+    scene.setFloatAttrib(8, 2, tox2::rsx_synthetic::kTexCoordsOffset);
+    scene.setPrograms(texturedPrograms());
+}
+
+// Pass 1 draws a quad with red 0x40 over pixels 16..32 into an F_X32 target, with an alpha test that never
+// passes (a float target has no alpha test). Pass 2 clears the display target and draws a quad that reads the
+// float target through an X32_FLOAT texture over pixels 16..48.
+std::vector<std::uint8_t> makeFloatSurfaceCapture() {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    scene.setSurface();
+    scene.write(tox2::kMethodNv4097SetSurfaceFormat, 13u | (2u << 5) | (1u << 8));
+    scene.write(tox2::kMethodNv4097SetSurfaceColorAOffset, kFloatOffset);
+    scene.write(tox2::kMethodNv4097SetAlphaTestEnable, 1);
+    scene.write(tox2::kMethodNv4097SetAlphaFunc, 0x200);  // NEVER
+    setQuadRenderState(scene);
+    scene.setFloatAttrib(0, 3, kPositionsOffset);
+    scene.setColorAttrib(3, kColorsOffset);
+    scene.setPrograms(quadPrograms());
+    putSurfaceQuad(scene, 16, 32);
+    scene.drawStrip(4);
+
+    scene.write(tox2::kMethodNv4097SetSurfaceFormat, 8u | (2u << 5) | (1u << 8));
+    scene.write(tox2::kMethodNv4097SetSurfaceColorAOffset, kSurfaceOffset);
+    scene.write(tox2::kMethodNv4097SetAlphaTestEnable, 0);
+    scene.clear(0xFF000000);
+    setSurfaceTextureState(scene, kFloatOffset, 0x9C);
+    putSurfaceQuad(scene, 16, 48);
+    scene.drawStrip(4);
+    return scene.finish();
+}
+
+void testRendererFloatSurface(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+    CHECK(renderer.valid());
+    std::vector<tox2::RsxCommand> commands = replaySynthetic(makeFloatSurfaceCapture());
+    tox2::rsxUnimplementedReset();
+    renderer.execute(commands);
+    CHECK(renderer.valid());
+    std::vector<std::uint8_t> bgra;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    CHECK(renderer.readDisplay(bgra, width, height));
+    CHECK(width == 64 && height == 64 && bgra.size() == 64 * 64 * 4);
+    if (bgra.size() != 64 * 64 * 4) bgra.assign(64 * 64 * 4, 0);
+    // The float target holds 0x40 / 255 where the first quad was drawn and zero elsewhere. A float texture reads
+    // as (x, x, x, x), so the display pixel has every channel, alpha included, at that value.
+    CHECK(pixelArgb(bgra, width, 24, 32) == 0x40404040);
+    CHECK(pixelArgb(bgra, width, 40, 32) == 0x00000000);
+    CHECK(pixelArgb(bgra, width, 2, 2) == 0xFF000000);
+    CHECK(renderer.stats().draws == 2 && renderer.stats().draws_skipped == 0);
+    for (const auto& [name, count] : tox2::rsxUnimplementedSnapshot()) {
+        std::fprintf(stderr, "unimplemented: %s: %llu\n", name.c_str(), static_cast<unsigned long long>(count));
+    }
+    CHECK(tox2::rsxUnimplementedSnapshot().empty());
+    tox2::rsxUnimplementedReset();
+}
+
+// Two 24-bit depth values with their stencil: the Z24S8 word read as A8R8G8B8 is A = depth bits 23..16,
+// R = 15..8, G = 7..0, B = stencil.
+constexpr std::uint32_t kDepthFirst = 0x123456, kStencilFirst = 0x78;
+constexpr std::uint32_t kDepthSecond = 0x6789A0, kStencilSecond = 0x9A;
+constexpr std::uint32_t depthWordArgb(std::uint32_t depth, std::uint32_t stencil) {
+    return ((depth >> 16) << 24) | (((depth >> 8) & 0xFF) << 16) | ((depth & 0xFF) << 8) | stencil;
+}
+
+// The depth is stored as a float or a 24-bit integer, so the low byte of the 24-bit value may be one off.
+bool depthWordNear(std::uint32_t argb, std::uint32_t depth, std::uint32_t stencil) {
+    const std::uint32_t expected = depthWordArgb(depth, stencil);
+    const int low = static_cast<int>((argb >> 8) & 0xFF) - static_cast<int>((expected >> 8) & 0xFF);
+    return (argb & 0xFFFF00FF) == (expected & 0xFFFF00FF) && std::abs(low) <= 1;
+}
+
+// The depth surface is cleared to the first value, two quads (pixels 16..32 and 32..48) read it as an A8R8G8B8
+// texture, then a clear of depth and stencil alone sets the second value and a small quad (28..36) reads it.
+std::vector<std::uint8_t> makeDepthTextureCapture() {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    scene.setSurface();
+    scene.write(tox2::kMethodNv4097SetColorClearValue, 0xFF000000);
+    scene.write(tox2::kMethodNv4097SetZstencilClearValue, (kDepthFirst << 8) | kStencilFirst);
+    scene.write(tox2::kMethodNv4097ClearSurface, 0xF3);
+    setQuadRenderState(scene);
+    scene.setFloatAttrib(0, 3, kPositionsOffset);
+    setSurfaceTextureState(scene, kDepthOffset, 0x85);
+    putSurfaceQuad(scene, 16, 32);
+    scene.drawStrip(4);
+    putSurfaceQuad(scene, 32, 48);
+    scene.drawStrip(4);
+    scene.write(tox2::kMethodNv4097SetZstencilClearValue, (kDepthSecond << 8) | kStencilSecond);
+    scene.write(tox2::kMethodNv4097ClearSurface, 0x03);
+    putSurfaceQuad(scene, 28, 36);
+    scene.drawStrip(4);
+    return scene.finish();
+}
+
+void testRendererDepthTexture(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+    CHECK(renderer.valid());
+    std::vector<tox2::RsxCommand> commands = replaySynthetic(makeDepthTextureCapture());
+    tox2::rsxUnimplementedReset();
+    renderer.execute(commands);
+    CHECK(renderer.valid());
+    std::vector<std::uint8_t> bgra;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    CHECK(renderer.readDisplay(bgra, width, height));
+    CHECK(width == 64 && height == 64 && bgra.size() == 64 * 64 * 4);
+    if (bgra.size() != 64 * 64 * 4) bgra.assign(64 * 64 * 4, 0);
+    CHECK(depthWordNear(pixelArgb(bgra, width, 20, 32), kDepthFirst, kStencilFirst));
+    CHECK(depthWordNear(pixelArgb(bgra, width, 44, 32), kDepthFirst, kStencilFirst));
+    CHECK(depthWordNear(pixelArgb(bgra, width, 32, 32), kDepthSecond, kStencilSecond));
+    CHECK(pixelArgb(bgra, width, 2, 2) == 0xFF000000);
+    // The surface is rewritten once for the two draws that read it unchanged, and again after the clear.
+    CHECK(renderer.stats().depth_conversions == 2);
+    CHECK(renderer.stats().draws == 3 && renderer.stats().draws_skipped == 0);
+    for (const auto& [name, count] : tox2::rsxUnimplementedSnapshot()) {
+        std::fprintf(stderr, "unimplemented: %s: %llu\n", name.c_str(), static_cast<unsigned long long>(count));
+    }
+    CHECK(tox2::rsxUnimplementedSnapshot().empty());
+    tox2::rsxUnimplementedReset();
+}
+
 // A clear that includes stencil under a write mask other than 0 or 0xFF is counted by the frame
 // builder (the renderer clears the whole byte).
 void testPartialStencilNote() {
@@ -1811,6 +1970,8 @@ int main() {
     testRendererBranchBits(*ctx);
     testRendererTextures(*ctx);
     testRendererVolumeTextures(*ctx);
+    testRendererFloatSurface(*ctx);
+    testRendererDepthTexture(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
     ctx.reset();

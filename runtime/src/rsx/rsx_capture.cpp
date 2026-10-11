@@ -91,7 +91,9 @@ RsxCaptureWriter::RsxCaptureWriter(std::uint64_t flip_index, const RsxRegisters&
         put32(surfaces_, surface.pitch);
         put32(surfaces_, surface.width);
         put32(surfaces_, surface.height);
-        put32(surfaces_, static_cast<std::uint32_t>(surface.format));
+        // The depth format of a depth surface rides in bits 8..15 of the format word; older files have zero there.
+        put32(surfaces_,
+              static_cast<std::uint32_t>(surface.format) | (static_cast<std::uint32_t>(surface.depth_format) << 8));
     }
 }
 
@@ -254,13 +256,15 @@ bool RsxCaptureReader::parse(std::vector<std::uint8_t> bytes, std::string& error
             }
             for (std::uint32_t i = 0; i < count; i++) {
                 const std::uint8_t* p = chunk + 4 + i * kSurfaceRecordSize;
-                const std::uint32_t format = get32(p + 20);
-                if (format > static_cast<std::uint32_t>(RsxColorFormat::Unsupported)) {
+                const std::uint32_t word = get32(p + 20);
+                const std::uint32_t format = word & 0xFF, depth_format = word >> 8;
+                if (format > static_cast<std::uint32_t>(RsxColorFormat::Unsupported) ||
+                    depth_format > static_cast<std::uint32_t>(RsxDepthFormat::Unsupported)) {
                     error = "bad surface format in SURF chunk";
                     return false;
                 }
                 surfaces_.push_back({get32(p), get32(p + 4), get32(p + 8), get32(p + 12), get32(p + 16),
-                                     static_cast<RsxColorFormat>(format)});
+                                     static_cast<RsxColorFormat>(format), static_cast<RsxDepthFormat>(depth_format)});
             }
             have_surf = true;
         } else if (tag == kTagWrit) {

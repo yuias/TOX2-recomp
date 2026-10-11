@@ -81,6 +81,12 @@ public:
     VkPipelineLayout clearLayout() const { return clear_layout_; }
     VkPipeline maskedClearPipeline(VkFormat color_format, VkColorComponentFlags mask);
 
+    // Full-target triangle that writes a Z24S8 surface as the A8R8G8B8 texels the RSX would read from the same
+    // memory, into a B8G8R8A8 target. One push-descriptor set: binding 0 the depth aspect (sampler2D), binding 1
+    // the stencil aspect (usampler2D), both read with texelFetch.
+    VkPipelineLayout depthConvertLayout() const { return depth_convert_layout_; }
+    VkPipeline depthConvertPipeline();
+
 private:
     struct Program;
     using FragmentKey = std::tuple<std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t>;
@@ -88,6 +94,7 @@ private:
     const Program* vertexProgram(const RsxDraw& draw);
     const Program* fragmentProgram(const RsxDraw& draw, std::uint32_t texture_types);
     bool createClearShaders();
+    bool createDepthConvertObjects();
     void fail(std::string message);
 
     VkContext& context_;
@@ -97,6 +104,10 @@ private:
     VkPipelineLayout clear_layout_ = VK_NULL_HANDLE;
     VkShaderModule clear_vertex_ = VK_NULL_HANDLE;
     VkShaderModule clear_fragment_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout depth_convert_set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout depth_convert_layout_ = VK_NULL_HANDLE;
+    VkShaderModule depth_convert_fragment_ = VK_NULL_HANDLE;
+    VkPipeline depth_convert_pipeline_ = VK_NULL_HANDLE;
 
     std::map<std::uint64_t, std::unique_ptr<Program>> vertex_programs_;
     std::map<FragmentKey, std::unique_ptr<Program>> fragment_programs_;

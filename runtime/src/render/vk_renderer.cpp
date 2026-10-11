@@ -137,12 +137,24 @@ struct RsxRenderer::RenderTarget {
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     // Views with a non-identity channel remap for sampling the target, by remap word (low 16 bits).
     std::map<std::uint32_t, VkImageView> sampled_views;
+    bool sampled = false;  // the image has SAMPLED usage
+    // Depth targets only. Single-aspect views for reading the depth and the stencil in a shader, and the
+    // surface rewritten as the A8R8G8B8 texels the RSX reads from the same memory (see depthAsArgb). The copy
+    // is current while argb_serial equals write_serial, which every clear and every draw that can write the
+    // depth bumps.
+    VkImageView depth_view = VK_NULL_HANDLE;
+    VkImageView stencil_view = VK_NULL_HANDLE;
+    std::shared_ptr<TextureImage> argb;
+    std::uint64_t write_serial = 0;
+    std::uint64_t argb_serial = ~0ull;
 
     RenderTarget() = default;
     RenderTarget(const RenderTarget&) = delete;
     RenderTarget& operator=(const RenderTarget&) = delete;
     ~RenderTarget() {
         for (const auto& entry : sampled_views) vkDestroyImageView(context->device(), entry.second, nullptr);
+        if (depth_view != VK_NULL_HANDLE) vkDestroyImageView(context->device(), depth_view, nullptr);
+        if (stencil_view != VK_NULL_HANDLE) vkDestroyImageView(context->device(), stencil_view, nullptr);
         if (view != VK_NULL_HANDLE) vkDestroyImageView(context->device(), view, nullptr);
         if (image != VK_NULL_HANDLE) vmaDestroyImage(context->allocator(), image, allocation);
     }
@@ -379,12 +391,12 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth,
     VkImageUsageFlags usage =
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
             (depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
-    if ((format_props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0) {
-        usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
-    }
+    const bool sampled = (format_props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+    if (sampled) usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
 
     auto target = std::make_shared<RenderTarget>();
     target->context = &context_;
+    target->sampled = sampled;
     target->format = format;
     target->aspect = depth ? depthAspect(format) : VK_IMAGE_ASPECT_COLOR_BIT;
     target->width = surface.width;
@@ -461,9 +473,15 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::acquire(TargetMap& map, 
     return target;
 }
 
+// RPCS3 `VK/VKGSRender.cpp` `get_compatible_surface_format`: F_X32 is R32_SFLOAT. The fragment program writes
+// its usual four-component color and the attachment keeps the red channel; no output swizzle is applied
+// (RSX_SHADER_CONTROL_ROP_OUTPUT_REMAP is only set for the integer formats in `RSXThread.cpp`).
 std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::acquireColor(const RsxSurface& surface) {
-    if (surface.format != RsxColorFormat::A8R8G8B8) return nullptr;
-    return acquire(color_targets_, false, surface, VK_FORMAT_B8G8R8A8_UNORM);
+    switch (surface.format) {
+        case RsxColorFormat::A8R8G8B8: return acquire(color_targets_, false, surface, VK_FORMAT_B8G8R8A8_UNORM);
+        case RsxColorFormat::F_X32: return acquire(color_targets_, false, surface, VK_FORMAT_R32_SFLOAT);
+        default: return nullptr;
+    }
 }
 
 std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::acquireDepth(const RsxSurfaceState& surfaces) {
@@ -619,6 +637,138 @@ bool RsxRenderer::vertexFormatSupported(VkFormat format) {
     return supported;
 }
 
+// Blending into a float format is optional in Vulkan (R32_SFLOAT has no mandatory blend support).
+bool RsxRenderer::blendSupported(VkFormat format) {
+    const auto it = blend_support_.find(format);
+    if (it != blend_support_.end()) return it->second;
+    VkFormatProperties props{};
+    vkGetPhysicalDeviceFormatProperties(context_.physicalDevice(), format, &props);
+    const bool supported = (props.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) != 0;
+    blend_support_[format] = supported;
+    return supported;
+}
+
+// The RSX reads a Z24S8 surface through an A8R8G8B8 texture as the raw words of the surface (RPCS3 samples the
+// depth and stencil aspects and rebuilds the bytes in the fragment shader, `RSXFragmentTextureDepthConversion.glsl`).
+// Here a pass writes those texels into a B8G8R8A8 image the size of the surface, which the draw then samples
+// like any A8R8G8B8 texture, so the texture's remap applies to it as usual and the depth attachment of the
+// same draw is not read while it is written. The pass runs outside any rendering instance. The image is kept
+// with the target and made again only after the depth was cleared or drawn to. A surface without stencil (Z16)
+// has no A8R8G8B8 form. Returns null, with a counted reason, when there is no image to sample.
+std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
+    if (!formatHasStencil(depth.format) || !depth.sampled) {
+        rsxNoteUnimplemented("texture format", "A8R8G8B8 read of a surface without Z24S8");
+        return nullptr;
+    }
+    if (depth.argb && depth.argb_serial == depth.write_serial) return depth.argb;
+
+    if (!depth.argb) {
+        depth.argb = textures_->renderable(depth.width, depth.height);
+        if (!textures_->valid()) {
+            fail(textures_->error());
+            return nullptr;
+        }
+        if (!depth.argb) return nullptr;
+    }
+    const auto aspectView = [&](VkImageAspectFlags aspect, VkImageView& view) {
+        if (view != VK_NULL_HANDLE) return true;
+        VkImageViewCreateInfo view_info{};
+        view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_info.image = depth.image;
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = depth.format;
+        view_info.subresourceRange = {aspect, 0, 1, 0, 1};
+        if (vkCreateImageView(context_.device(), &view_info, nullptr, &view) != VK_SUCCESS) {
+            view = VK_NULL_HANDLE;
+            fail("vkCreateImageView failed for a depth view");
+            return false;
+        }
+        return true;
+    };
+    if (!aspectView(VK_IMAGE_ASPECT_DEPTH_BIT, depth.depth_view) ||
+        !aspectView(VK_IMAGE_ASPECT_STENCIL_BIT, depth.stencil_view)) {
+        return nullptr;
+    }
+    const VkImageView target_view = textures_->view(*depth.argb, kIdentityRemap);
+    if (!textures_->valid()) {
+        fail(textures_->error());
+        return nullptr;
+    }
+    const VkPipeline pipeline = pipelines_->depthConvertPipeline();
+    if (pipeline == VK_NULL_HANDLE || target_view == VK_NULL_HANDLE) {
+        if (!pipelines_->valid()) fail(pipelines_->error());
+        return nullptr;
+    }
+
+    const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
+    transition(depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    const auto colorBarrier = [&](VkImageLayout from, VkImageLayout to, VkPipelineStageFlags2 dst_stage,
+                                  VkAccessFlags2 dst_access) {
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+        barrier.dstStageMask = dst_stage;
+        barrier.dstAccessMask = dst_access;
+        barrier.oldLayout = from;
+        barrier.newLayout = to;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = depth.argb->image;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VkDependencyInfo dependency{};
+        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.imageMemoryBarrierCount = 1;
+        dependency.pImageMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(cmd, &dependency);
+    };
+    // The previous contents are overwritten in full, so the old layout is not preserved.
+    colorBarrier(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+
+    VkRenderingAttachmentInfo attachment{};
+    attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    attachment.imageView = target_view;
+    attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo rendering{};
+    rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    rendering.renderArea = {{0, 0}, {depth.width, depth.height}};
+    rendering.layerCount = 1;
+    rendering.colorAttachmentCount = 1;
+    rendering.pColorAttachments = &attachment;
+
+    const VkViewport viewport = {0.0f, 0.0f, static_cast<float>(depth.width), static_cast<float>(depth.height),
+                                 0.0f, 1.0f};
+    const VkRect2D scissor = {{0, 0}, {depth.width, depth.height}};
+    const VkDescriptorImageInfo infos[2] = {
+            {placeholder_sampler_, depth.depth_view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL},
+            {placeholder_sampler_, depth.stencil_view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL}};
+    VkWriteDescriptorSet writes[2]{};
+    for (std::uint32_t i = 0; i < 2; i++) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].pImageInfo = &infos[i];
+    }
+
+    vkCmdBeginRendering(cmd, &rendering);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_->depthConvertLayout(), 0, 2, writes);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+    colorBarrier(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    depth.argb->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    depth.argb_serial = depth.write_serial;
+    stats_.depth_conversions++;
+    return depth.argb;
+}
+
 // Fills the image info and coordinate scale of every texture unit the draw's fragment program samples.
 // A unit without a usable texture keeps the placeholder, and every such case is counted with
 // rsxNoteUnimplemented, so a census without texture kinds means no placeholder was sampled. Texture memory is uploaded
@@ -669,13 +819,49 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
         }
 
         VkImageView view = VK_NULL_HANDLE;
-        if (texture->rt_alias >= 0) {
+        VkFormat sampled_format = VK_FORMAT_UNDEFINED;  // of the image read, when it limits the sampler
+        if (texture->rt_alias >= 0 && texture->rt_depth) {
             if (kind != RsxTextureKind::Tex2D) {
                 rsxNoteUnimplemented("texture layout", "render target alias of a 3D or cube texture");
                 continue;
             }
-            // The render target holds A8R8G8B8 data; another texture format cannot be read from it.
+            // The only way a depth surface is read here is as the A8R8G8B8 words of Z24S8 (depthAsArgb).
             if ((texture->format & kRsxTextureBaseMask) != kRsxTextureA8R8G8B8) {
+                rsxNoteUnimplemented("texture format",
+                                     std::format("{} of a depth surface", rsxTextureFormatName(texture->format)));
+                continue;
+            }
+            const auto found = depth_targets_.find(TargetKey{texture->location, texture->offset});
+            if (found == depth_targets_.end()) {
+                rsxNoteUnimplemented("texture", "alias of unknown render target");
+                rsxNoteUnimplemented("texture", "placeholder: render target unavailable");
+                continue;
+            }
+            const std::shared_ptr<RenderTarget> target = found->second;
+            touch(target);
+            if (target->width != texture->width || target->height != texture->height) {
+                rsxNoteUnimplemented("texture layout", "render target alias of another size");
+            }
+            const std::shared_ptr<TextureImage> converted = depthAsArgb(*target);
+            if (!valid()) return false;
+            if (!converted) {
+                rsxNoteUnimplemented("texture", "placeholder: depth conversion unavailable");
+                continue;
+            }
+            reference(converted);
+            view = textures_->view(*converted, texture->remap);
+        } else if (texture->rt_alias >= 0) {
+            if (kind != RsxTextureKind::Tex2D) {
+                rsxNoteUnimplemented("texture layout", "render target alias of a 3D or cube texture");
+                continue;
+            }
+            // A color target holds A8R8G8B8 or 32-bit float data and is read through the matching texture format
+            // only: float bits are not reinterpreted as bytes or the other way round.
+            const std::uint32_t base_format = texture->format & kRsxTextureBaseMask;
+            const VkFormat wanted = base_format == kRsxTextureA8R8G8B8   ? VK_FORMAT_B8G8R8A8_UNORM
+                                    : base_format == kRsxTextureX32Float ? VK_FORMAT_R32_SFLOAT
+                                                                         : VK_FORMAT_UNDEFINED;
+            if (wanted == VK_FORMAT_UNDEFINED) {
                 rsxNoteUnimplemented("texture format", rsxTextureFormatName(texture->format));
                 continue;
             }
@@ -684,6 +870,10 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
             if (found != color_targets_.end()) {
                 target = found->second;
                 touch(target);
+                if (target->format != wanted) {
+                    rsxNoteUnimplemented("texture layout", "render target alias of another format");
+                    continue;
+                }
                 if (target->width != texture->width || target->height != texture->height) {
                     rsxNoteUnimplemented("texture layout", "render target alias of another size");
                 }
@@ -696,7 +886,7 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                 surface.pitch = texture->pitch;
                 surface.width = texture->width;
                 surface.height = texture->height;
-                surface.format = RsxColorFormat::A8R8G8B8;
+                surface.format = wanted == VK_FORMAT_R32_SFLOAT ? RsxColorFormat::F_X32 : RsxColorFormat::A8R8G8B8;
                 target = acquireColor(surface);
                 if (!valid()) return false;
                 if (!target) {
@@ -704,8 +894,14 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                     continue;
                 }
             }
+            sampled_format = wanted;
 
             if (target.get() == &color) {
+                // The copy is a B8G8R8A8 image; there is none for a float target.
+                if (wanted != VK_FORMAT_B8G8R8A8_UNORM) {
+                    rsxNoteUnimplemented("texture", "placeholder: feedback copy unavailable");
+                    continue;
+                }
                 if (!feedback_copy) {
                     feedback_copy = textures_->scratch(target->width, target->height);
                     if (!textures_->valid()) {
@@ -725,7 +921,8 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
             } else {
                 transition(*target, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 const std::uint32_t remap = texture->remap & 0xFFFF;
-                if (remap == kIdentityRemap) {
+                // A float target is read as (x, x, x, x), so its own view (red only) is not the identity one.
+                if (remap == kIdentityRemap && wanted == VK_FORMAT_B8G8R8A8_UNORM) {
                     view = target->view;
                 } else {
                     VkImageView& cached = target->sampled_views[remap];
@@ -789,7 +986,7 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
         // A render target has one level whatever the unit's mip count says.
         RsxTextureDesc sampled = *texture;
         if (texture->rt_alias >= 0) sampled.mips = 1;
-        const VkSampler sampler = textures_->sampler(sampled);
+        const VkSampler sampler = textures_->sampler(sampled, sampled_format);
         if (!textures_->valid()) {
             fail(textures_->error());
             return false;
@@ -982,7 +1179,9 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
 
     // Fixed-function state baked into the pipeline.
     key.color_mask = colorWriteMask(raster.color_mask);
-    if (raster.blend) {
+    if (raster.blend && !blendSupported(color->format)) {
+        rsxNoteUnimplemented("blend", "blending into a format the device cannot blend");
+    } else if (raster.blend) {
         key.blend = true;
         key.src_color = blendFactor(raster.blend_sfactor_rgb);
         key.dst_color = blendFactor(raster.blend_dfactor_rgb);
@@ -1033,17 +1232,23 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     // Output mask bits 6..11 enable the user clip distances, which the vertex translator does not write.
     if ((draw.vp_output_mask & 0xFC0u) != 0) rsxNoteUnimplemented("state", "user clip");
 
+    // A 32-bit float target has no alpha test and no 8-bit rounding (RPCS3 `rsx_methods.h`
+    // `alpha_test_enabled`, `RSXThread.cpp` RSX_SHADER_CONTROL_8BIT_FRAMEBUFFER).
+    const bool float_target = color->format == VK_FORMAT_R32_SFLOAT;
     FpDrawUniforms fp{};
-    fp.alpha_func = raster.alpha_test ? (raster.alpha_func & 7u) : 7u;
+    fp.alpha_func = raster.alpha_test && !float_target ? (raster.alpha_func & 7u) : 7u;
     fp.alpha_ref = static_cast<float>(raster.alpha_ref) / 255.0f;
-    fp.flags = kFpFlagRound8Bit | (raster.two_sided_lighting ? kFpFlagTwoSided : 0u);
+    fp.flags = (float_target ? 0u : kFpFlagRound8Bit) | (raster.two_sided_lighting ? kFpFlagTwoSided : 0u);
     std::memcpy(fp.texture_scale, texture_scale, sizeof(texture_scale));
     std::memcpy(draw_block.data, &vp, sizeof(vp));
     std::memcpy(draw_block.data + kFpDrawBlockOffset, &fp, sizeof(fp));
 
     const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
     transition(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    if (depth) transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    if (depth) {
+        transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        if (raster.depth_test && raster.depth_write) depth->write_serial++;
+    }
 
     VkRenderingAttachmentInfo color_attachment{};
     color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -1168,6 +1373,7 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
     std::shared_ptr<RenderTarget> depth;
     if ((clear.mask & (kRsxClearDepth | kRsxClearStencil)) != 0) depth = acquireDepth(clear.surfaces);
     if (!color && !depth) return;
+    if (depth) depth->write_serial++;
 
     const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
     std::uint32_t area_width = color ? color->width : depth->width;
@@ -1346,7 +1552,8 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     const bool read_back = options_.readback_all || dumpDue();
     display_copied_ = false;
     const auto it = color_targets_.find(TargetKey{0, flip.offset});
-    display_black_ = it == color_targets_.end();
+    // Only an A8R8G8B8 target can be shown; any other format reads back as black.
+    display_black_ = it == color_targets_.end() || it->second->format != VK_FORMAT_B8G8R8A8_UNORM;
     if (display_black_) {
         rsxNoteUnimplemented("state", "flip of non-render-target");
         display_width_ = flip.width;

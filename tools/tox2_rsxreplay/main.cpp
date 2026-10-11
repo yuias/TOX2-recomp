@@ -82,13 +82,34 @@ void printClear(const tox2::RsxClear& clear) {
                 color.offset);
 }
 
+const char* surfaceFormatName(tox2::RsxColorFormat format) {
+    switch (format) {
+        case tox2::RsxColorFormat::A8R8G8B8: return "A8R8G8B8";
+        case tox2::RsxColorFormat::F_X32: return "F_X32";
+        default: return "?";
+    }
+}
+
 void printDraw(const tox2::RsxDraw& draw, std::span<const tox2::RsxSurface> surfaces) {
     std::printf("draw %s count=%u vp=%016llx fp=%016llx", primitiveName(draw.primitive), draw.count,
                 static_cast<unsigned long long>(draw.vp_hash), static_cast<unsigned long long>(draw.fp_hash));
+    const tox2::RsxSurfaceState& target = draw.surfaces;
+    if (target.has_color) {
+        std::printf(" color=%ux%u@%#x:%s", target.color.width, target.color.height, target.color.offset,
+                    surfaceFormatName(target.color.format));
+    }
+    if (target.depth_format != tox2::RsxDepthFormat::None) {
+        const char* depth_name = target.depth_format == tox2::RsxDepthFormat::Z24S8 ? "Z24S8"
+                                 : target.depth_format == tox2::RsxDepthFormat::Z16 ? "Z16"
+                                                                                    : "?";
+        std::printf(" depth=%s@%#x", depth_name, target.depth.offset);
+    }
     for (const tox2::RsxTextureDesc& texture : draw.textures) {
         if (texture.rt_alias >= 0 && static_cast<std::size_t>(texture.rt_alias) < surfaces.size()) {
             const tox2::RsxSurface& surface = surfaces[static_cast<std::size_t>(texture.rt_alias)];
-            std::printf(" tex%u=alias:%d(%ux%u)", texture.unit, texture.rt_alias, surface.width, surface.height);
+            std::printf(" tex%u=alias:%d(%ux%u as %ux%u %s)", texture.unit, texture.rt_alias, surface.width,
+                        surface.height, texture.width, texture.height,
+                        tox2::rsxTextureFormatName(texture.format).c_str());
         } else {
             const tox2::RsxTextureKind kind = tox2::rsxTextureKind(texture);
             const std::string shape = kind == tox2::RsxTextureKind::Tex3D  ? std::format("x{} 3D", texture.depth)

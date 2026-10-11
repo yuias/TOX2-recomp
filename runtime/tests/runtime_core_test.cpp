@@ -7580,7 +7580,7 @@ void testRsxFrameBuilder() {
     write(0x08C0, 1280u << 16);
     write(0x08C4, 720u << 16);
 
-    // CLEAR_SURFACE 0xF3 gives a clear that keeps all bits and registers the color target.
+    // CLEAR_SURFACE 0xF3 gives a clear that keeps all bits and registers the color target and the depth surface.
     write(0x1D90, 0xFF102030);
     write(0x1D8C, 0xFFFFFF00);
     write(0x1D94, 0xF3);
@@ -7589,7 +7589,10 @@ void testRsxFrameBuilder() {
     const tox2::RsxClear& clear = std::get<tox2::RsxClear>(commands[0]);
     CHECK(clear.mask == 0xF3 && clear.color_argb == 0xFF102030 && clear.depth_stencil == 0xFFFFFF00);
     CHECK(clear.scissor[0] == 0 && clear.scissor[1] == 0 && clear.scissor[2] == 1280 && clear.scissor[3] == 720);
-    CHECK(builder.knownSurfaces().size() == 1 && builder.knownSurfaces()[0].offset == 0x100000);
+    CHECK(builder.knownSurfaces().size() == 2 && builder.knownSurfaces()[0].offset == 0x100000 &&
+          builder.knownSurfaces()[0].depth_format == tox2::RsxDepthFormat::None);
+    CHECK(builder.knownSurfaces()[1].offset == 0x900000 &&
+          builder.knownSurfaces()[1].depth_format == tox2::RsxDepthFormat::Z24S8);
     CHECK(builder.takeCommands().empty());
 
     // A zero stencil write mask drops the stencil bit, a clear without color, depth or stencil bits does
@@ -7931,7 +7934,7 @@ void testRsxFrameBuilder() {
 
 bool sameSurface(const tox2::RsxSurface& a, const tox2::RsxSurface& b) {
     return a.location == b.location && a.offset == b.offset && a.pitch == b.pitch && a.width == b.width &&
-           a.height == b.height && a.format == b.format;
+           a.height == b.height && a.format == b.format && a.depth_format == b.depth_format;
 }
 
 bool sameSurfaceState(const tox2::RsxSurfaceState& a, const tox2::RsxSurfaceState& b) {
@@ -7983,6 +7986,115 @@ bool sameCommand(const tox2::RsxCommand& left, const tox2::RsxCommand& right) {
         }
     }
     return true;
+}
+
+// F_X32 color surfaces and depth surfaces as render target aliases: decoding, registration in the builder
+// (which draws and clears make a surface known, what a clear of a float surface does), the alias flags of a
+// texture, and the capture round trip of both kinds.
+void testRsxFloatAndDepthSurfaces() {
+    auto regs = std::make_unique<tox2::RsxRegisters>();
+    regs->reset();
+    tox2::rsxUnimplementedReset();
+    FakeRsxMemory memory;
+    tox2::RsxFrameBuilder builder(memory);
+    const auto write = [&](std::uint32_t method, std::uint32_t value) {
+        regs->apply(method, value);
+        builder.onWrite(*regs, method, value);
+    };
+    constexpr std::uint32_t kColorOffset = 0x100000, kDepthOffset = 0x900000, kOtherDepthOffset = 0xA00000;
+
+    // SET_SURFACE_FORMAT code 13 is F_X32; the depth surface keeps its own format.
+    write(0x0200, 1280u << 16);
+    write(0x0204, 720u << 16);
+    write(0x0208, 13u | (2u << 5) | (1u << 8));
+    write(0x020C, 0x1400);
+    write(0x0210, kColorOffset);
+    write(0x0214, kDepthOffset);
+    write(0x022C, 0x1400);
+    write(0x0220, 1);
+    write(0x08C0, 1280u << 16);
+    write(0x08C4, 720u << 16);
+    const tox2::RsxSurfaceState state = tox2::decodeSurfaceState(*regs);
+    CHECK(state.has_color && state.color.format == tox2::RsxColorFormat::F_X32 &&
+          state.color.depth_format == tox2::RsxDepthFormat::None);
+    CHECK(state.depth_format == tox2::RsxDepthFormat::Z24S8 && state.depth.depth_format == tox2::RsxDepthFormat::Z24S8);
+    CHECK(unimplementedCount("surface format F_X32") == 0);
+
+    // A color clear of a float surface does nothing (RPCS3 `clear_surface`); the depth and stencil bits of the
+    // same clear still apply and register the depth surface, and no color surface is registered.
+    write(0x1D90, 0xFF102030);
+    write(0x1D8C, 0xFFFFFF00);
+    write(0x1D94, 0xF0);
+    CHECK(builder.takeCommands().empty() && builder.knownSurfaces().empty());
+    write(0x1D94, 0xF3);
+    std::vector<tox2::RsxCommand> commands = builder.takeCommands();
+    CHECK(commands.size() == 1 && std::get<tox2::RsxClear>(commands[0]).mask == 0x03);
+    CHECK(builder.knownSurfaces().size() == 1 && builder.knownSurfaces()[0].offset == kDepthOffset &&
+          builder.knownSurfaces()[0].depth_format == tox2::RsxDepthFormat::Z24S8);
+
+    // A draw into the float surface registers it. The depth binding of that draw is not a surface while the
+    // draw does not write depth.
+    for (std::uint32_t i = 0; i < 96; i++) memory.main[0x1000 + i] = static_cast<std::uint8_t>(i);
+    write(0x1740, 2u | (3u << 4) | (12u << 8));
+    write(0x1680, 0x80001000);
+    write(0x08E4, 0x2000 | 1);
+    memory.putWord(0, 0x2000, 0x00010000);
+    write(tox2::kMethodNv4097SetColorMask, 0x01010101);
+    write(0x0214, kOtherDepthOffset);
+    const auto draw = [&] {
+        write(0x1808, 5);
+        write(0x1814, 2u << 24);
+        write(0x1808, 0);
+        return builder.takeCommands();
+    };
+    commands = draw();
+    CHECK(commands.size() == 1 && std::holds_alternative<tox2::RsxDraw>(commands[0]));
+    CHECK(builder.knownSurfaces().size() == 2 && builder.knownSurfaces()[1].offset == kColorOffset &&
+          builder.knownSurfaces()[1].format == tox2::RsxColorFormat::F_X32 &&
+          builder.knownSurfaces()[1].depth_format == tox2::RsxDepthFormat::None);
+
+    // Depth test with depth write makes the draw's depth surface known.
+    write(tox2::kMethodNv4097SetDepthTestEnable, 1);
+    write(tox2::kMethodNv4097SetDepthMask, 1);
+    commands = draw();
+    CHECK(builder.knownSurfaces().size() == 3 && builder.knownSurfaces()[2].offset == kOtherDepthOffset &&
+          builder.knownSurfaces()[2].depth_format == tox2::RsxDepthFormat::Z24S8);
+
+    // Unit 0 reads the float surface as X32_FLOAT (no note, an alias of a color surface), unit 1 reads the
+    // depth surface as A8R8G8B8 (an alias of a depth surface), unit 2 is X32_FLOAT at an address that is no
+    // surface (counted, nothing to read it from).
+    const auto unit = [&](std::uint32_t index, std::uint32_t offset, std::uint32_t format, std::uint32_t width) {
+        write(0x1A00 + index * 0x20, offset);
+        write(0x1A04 + index * 0x20, 1u | (2u << 4) | (format << 8) | (1u << 16));
+        write(0x1A0C + index * 0x20, 0x80000000);
+        write(0x1A18 + index * 0x20, (width << 16) | 720u);
+        write(0x1840 + index * 4, width * 4);
+    };
+    unit(0, kColorOffset, 0x9C | 0x20, 1280);
+    unit(1, kDepthOffset, 0x85 | 0x20, 2560);
+    unit(2, 0x3000, 0x9C | 0x20, 4);
+    commands = draw();
+    CHECK(commands.size() == 1);
+    const tox2::RsxDraw& textured = std::get<tox2::RsxDraw>(commands[0]);
+    CHECK(textured.textures.size() == 3);
+    CHECK(textured.textures[0].rt_alias == 1 && !textured.textures[0].rt_depth);
+    CHECK(textured.textures[1].rt_alias == 0 && textured.textures[1].rt_depth && textured.textures[1].data_size == 0);
+    CHECK(textured.textures[2].rt_alias == -1 && !textured.textures[2].rt_depth && textured.textures[2].data_size == 0);
+    CHECK(unimplementedCount("texture format X32_FLOAT_LN_NR") == 1);
+    CHECK(tox2::rsxTextureFormatRenderTargetOnly(0x9C | 0x20) && !tox2::rsxTextureFormatRenderTargetOnly(0x85) &&
+          !tox2::rsxTextureFormatSampleable(0x9C));
+
+    // Both kinds survive a capture.
+    const std::vector<tox2::RsxSurface> known(builder.knownSurfaces().begin(), builder.knownSurfaces().end());
+    tox2::RsxCaptureWriter writer(3, *regs, known);
+    tox2::RsxCaptureReader reader;
+    std::string error;
+    CHECK(reader.parse(writer.finish({}, 0).flatten(), error));
+    CHECK(reader.surfaces().size() == known.size());
+    bool same = reader.surfaces().size() == known.size();
+    for (std::size_t i = 0; same && i < known.size(); i++) same = sameSurface(reader.surfaces()[i], known[i]);
+    CHECK(same);
+    tox2::rsxUnimplementedReset();
 }
 
 void testRsxCapture() {
@@ -8560,8 +8672,10 @@ void testRsxConsumer() {
         CHECK(reader.flipIndex() == 1);
         CHECK(reader.startRegisters().reg(0x0210) == 0 && reader.startRegisters().reg(0x0200) == 0);
         CHECK(reader.startRegisters().reg(tox2::kMethodGcmFlipCommand) == 1);  // the flip write itself landed
-        CHECK(reader.surfaces().size() == 1 && reader.surfaces()[0].offset == 0x100000 &&
+        CHECK(reader.surfaces().size() == 2 && reader.surfaces()[0].offset == 0x100000 &&
               reader.surfaces()[0].width == 1280);
+        CHECK(reader.surfaces()[1].offset == 0x900000 &&
+              reader.surfaces()[1].depth_format == tox2::RsxDepthFormat::Z24S8);
         CHECK(reader.displayCount() == 2 && reader.display()[1].offset == 0x400000);
         CHECK(captures[0].writes == reader.writeCount() && captures[0].writes == 11);
 
@@ -10773,6 +10887,7 @@ int main(int argc, char** argv) {
     testRsxDecode();
     testRsxTextureLayout();
     testRsxFrameBuilder();
+    testRsxFloatAndDepthSurfaces();
     testRsxCapture();
     testRsxSyntheticCaptures();
     testRsxConsumer();

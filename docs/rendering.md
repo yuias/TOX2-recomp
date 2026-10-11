@@ -54,7 +54,8 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
 - **Renderer** (`vk_renderer.cpp` and neighbours). Vulkan 1.3 with dynamic rendering, the loader
   through volk (`externals/volk`, loaded at run time, so no import library is linked) and memory
   through VulkanMemoryAllocator (`externals/VulkanMemoryAllocator`). Colour and depth surfaces are
-  kept in a render target cache keyed by memory location and offset. A texture whose address is
+  kept in a render target cache keyed by memory location and offset (see
+  [Render targets](#render-targets)). A texture whose address is
   a known render target is sampled from that target (render target aliasing), and a draw that
   samples the target it renders to reads a copy of it. Other textures are uploaded from the
   guest bytes into B8G8R8A8 images (A8R8G8B8, linear or swizzled) or BC1/BC2/BC3 images
@@ -137,6 +138,66 @@ transform and the varying outputs.
   and lets draws that differ only in the bits share a shader module and a pipeline.
 - **Limits.** The census program dumps (`vp_*.bin`) still end at the first end bit, and the translator
   tests that read them use programs without flow control.
+
+### Render targets
+
+Colour surfaces are A8R8G8B8 (a B8G8R8A8 image) and F_X32 (surface format code 13, an `R32_SFLOAT` image),
+depth surfaces are Z24S8 (the device's D24S8 or D32S8 format) and Z16. Another colour format is counted as
+`surface format <name>` and its draws are skipped. The surface size is the clip rectangle. The facts for F_X32
+come from RPCS3 (`VKGSRender.cpp` `get_compatible_surface_format`, `rsx_methods.h`, `RSXThread.cpp`):
+
+- The fragment program writes its usual four-component colour and the attachment keeps the red channel.
+  RPCS3 applies no output swizzle to a float surface (the swizzle word is only set for the integer formats).
+- A float surface has no 8-bit quantisation of the output and no alpha test, so the draw uniform block gets
+  neither `kFpFlagRound8Bit` nor the alpha function. The fragment GLSL does not change.
+- A colour clear of an F_X32 surface does nothing, as in RPCS3 `clear_surface`; the depth and stencil bits of
+  the same clear still apply.
+- Blending into `R32_SFLOAT` is optional in Vulkan: the draw is made without blending, and counted
+  (`blend blending into a format the device cannot blend`), when the device cannot blend that format.
+- A flip of a surface that is not A8R8G8B8 shows black (`state flip of non-render-target`).
+
+The frame builder keeps one list of known surfaces, colour and depth together, and a texture whose address is
+in it is an alias of that surface (`RsxTextureDesc::rt_alias`, with `rt_depth` for a depth surface). A colour
+surface becomes known when a kept draw writes it (nonzero colour mask) or a clear covers it, a depth surface
+when a clear has its depth or stencil bit or a draw has depth test and depth write on (RPCS3
+`zeta_write_enabled`), so the unused depth binding of a pass that only needs a colour target is not a surface.
+A colour and a depth surface at one address share an entry; the later one wins. A capture stores the list at
+the start of the frame, the depth format in bits 8 to 15 of the format word of each record (older files have
+zero there and still load; a file with a depth record does not load in an older build). RPCS3 also ignores a
+depth binding whose pitch is below the row size (`RSXThread.cpp`, `minimum_zeta_pitch`); the frame builder does
+not model that rule. The passes of the game's frames that bind such a depth surface (offset 0, pitch 0x40) do not
+write depth, so none becomes known.
+
+A texture at a known surface is read from the GPU image, not from guest memory:
+
+- **A8R8G8B8 texture, A8R8G8B8 surface.** The image itself, through a view with the texture's remap. A draw that
+  also renders to the surface reads a copy.
+- **X32_FLOAT texture, F_X32 surface.** The `R32_SFLOAT` image through a view whose four channels all read the
+  red channel; only the remap's forced-zero and forced-one controls change that (RPCS3 `VKFormats.cpp`
+  `get_component_mapping` and `RSXTexture.cpp` `decoded_remap`). The sampler uses NEAREST filters when the
+  device cannot filter the format linearly (`texture sampler linear filter on a format the device cannot
+  filter`). A draw that reads the float surface it renders to is not supported (`texture placeholder:
+  feedback copy unavailable`).
+- **A8R8G8B8 texture, Z24S8 depth surface.** The RSX reads the surface words as A8R8G8B8 texels: A is depth
+  bits 23 to 16, R is 15 to 8, G is 7 to 0, B is the stencil (RPCS3 rebuilds the same bytes in
+  `RSXFragmentTextureDepthConversion.glsl`). The renderer rewrites the surface into a B8G8R8A8 image of the same
+  size with a full-target pass before the draw (`DrawPipelines::depthConvertPipeline`, reading the depth and
+  stencil aspects with `texelFetch` and rounding the depth to 24 bits), and the draw samples that image through
+  its remap like any A8R8G8B8 texture. The image stays with the depth target and is made again only after a
+  clear or a draw that can write the depth (`RendererStats::depth_conversions` counts the passes). It is a
+  separate image, so a draw that renders with that depth surface bound can read it.
+- Not supported and counted: a texture format that does not match the surface kind (`texture format
+  <name> of a depth surface`, `texture layout render target alias of another format`), DEPTH24_D8 and DEPTH16
+  textures, an A8R8G8B8 read of a Z16 surface (`texture format A8R8G8B8 read of a surface without Z24S8`), an
+  X32_FLOAT texture whose address is no known surface (`texture format X32_FLOAT_LN_NR`; its bytes are never
+  copied), and a surface that the renderer has not drawn to (`texture alias of unknown render target`: a
+  colour target is then created empty, a depth surface reads the placeholder).
+
+A texture and its surface of different sizes are sampled with the texture's normalized coordinates and counted as
+`texture layout render target alias of another size`. The game's anti-aliased surfaces (`state antialiasing 0x3`)
+are twice as wide in memory as their clip rectangle, so the texture that reads one is twice as wide as the
+surface; the renderer draws them without anti-aliasing, so the same normalized coordinates land on the same
+picture up to the filtering across the missing samples. The count marks that approximation, not a failure.
 
 ### Textures
 
@@ -256,8 +317,8 @@ tox2_rsxreplay CAPTURE [--out DIR] [--compare PNG [--max-diff N] [--max-mean X] 
 | `--shader-cache DIR` | SPIR-V cache directory. Without it nothing is cached. |
 
 The thresholds are optional and unchecked unless given, and they need `--compare`. The tool prints
-the commands the frame builder produced (`clear`, `draw` with the format and mip count of each
-texture that has bytes, `flip`), then a summary line
+the commands the frame builder produced (`clear`, `draw` with its colour and depth target and, for each
+texture, the render target it aliases or the format and mip count of its bytes, `flip`), then a summary line
 `replay: N commands, N draws, N skipped` (with the diff figures when comparing), the
 `rsx unimplemented` section (`census: rsx unimplemented 0 kinds` when it is empty), the path of
 the PNG, and `validation: active|inactive|disabled, N errors`. The exit code is 1 when a

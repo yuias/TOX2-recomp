@@ -60,7 +60,8 @@ public:
     bool drawPending() const { return draw_pending_; }
     void finishDraw(const RsxRegisters& regs);
 
-    // Color surfaces cleared or drawn to so far, indexed by RsxTextureDesc::rt_alias. Entries are only
+    // Color and depth surfaces cleared or drawn to so far, indexed by RsxTextureDesc::rt_alias. A color
+    // surface and a depth surface at one address share an entry (the later one wins). Entries are only
     // appended or replaced in place, so an index stays valid for the life of the builder.
     std::span<const RsxSurface> knownSurfaces() const { return known_surfaces_; }
     void setKnownSurfaces(std::vector<RsxSurface> surfaces) { known_surfaces_ = std::move(surfaces); }

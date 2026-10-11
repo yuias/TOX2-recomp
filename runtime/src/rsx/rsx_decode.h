@@ -25,6 +25,7 @@ inline constexpr std::uint32_t kRsxClearAlpha = 0x80;
 
 // SET_SURFACE_FORMAT codes (RPCS3 `CELL_GCM_SURFACE_*`).
 inline constexpr std::uint32_t kRsxSurfaceColorA8R8G8B8 = 8;
+inline constexpr std::uint32_t kRsxSurfaceColorFX32 = 13;
 inline constexpr std::uint32_t kRsxSurfaceDepthZ16 = 1;
 inline constexpr std::uint32_t kRsxSurfaceDepthZ24S8 = 2;
 
@@ -41,6 +42,9 @@ inline constexpr std::uint32_t kRsxTextureA8R8G8B8 = 0x85;
 inline constexpr std::uint32_t kRsxTextureDxt1 = 0x86;   // S3TC BC1, 8-byte blocks
 inline constexpr std::uint32_t kRsxTextureDxt23 = 0x87;  // BC2, 16-byte blocks
 inline constexpr std::uint32_t kRsxTextureDxt45 = 0x88;  // BC3, 16-byte blocks
+
+// One 32-bit float per texel. Only a render target supplies it (rsxTextureFormatRenderTargetOnly).
+inline constexpr std::uint32_t kRsxTextureX32Float = 0x9C;
 
 // Bytes of one 4x4 block of a DXT format (the base format after masking the layout and normalization
 // flags); 0 for any other format.
@@ -65,6 +69,12 @@ constexpr std::uint64_t rsxCompressedSize(std::uint32_t format, std::uint32_t wi
 // Formats whose bytes the frame builder copies and the renderer samples.
 constexpr bool rsxTextureFormatSampleable(std::uint32_t format) {
     return (format & kRsxTextureBaseMask) == kRsxTextureA8R8G8B8 || rsxTextureBlockBytes(format) != 0;
+}
+
+// Formats that only a render target can supply: the renderer reads them from the GPU image of the target at
+// the texture's address. The frame builder counts one that is not at a known target.
+constexpr bool rsxTextureFormatRenderTargetOnly(std::uint32_t format) {
+    return (format & kRsxTextureBaseMask) == kRsxTextureX32Float;
 }
 
 // SET_INDEX_ARRAY_DMA type field (RPCS3 `CELL_GCM_DRAW_INDEX_ARRAY_TYPE_*`).

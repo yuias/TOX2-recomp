@@ -11,7 +11,7 @@
 
 namespace tox2 {
 
-enum class RsxColorFormat : std::uint8_t { A8R8G8B8, Unsupported };
+enum class RsxColorFormat : std::uint8_t { A8R8G8B8, F_X32, Unsupported };
 enum class RsxDepthFormat : std::uint8_t { None, Z24S8, Z16, Unsupported };
 // RSX BEGIN_END values 1..10.
 enum class RsxPrimitive : std::uint8_t {
@@ -30,6 +30,9 @@ enum class RsxPrimitive : std::uint8_t {
 struct RsxSurface {  // location 0 = local, 1 = main
     std::uint32_t location = 0, offset = 0, pitch = 0, width = 0, height = 0;
     RsxColorFormat format = RsxColorFormat::Unsupported;
+    // None for a color surface. A known depth surface is registered with its depth format and no color format
+    // (format stays Unsupported), so a texture at its address can tell the two kinds apart.
+    RsxDepthFormat depth_format = RsxDepthFormat::None;
 };
 
 struct RsxSurfaceState {
@@ -58,6 +61,8 @@ struct RsxTextureDesc {
     std::uint32_t location = 0, offset = 0, pitch = 0, width = 0, height = 0, control0 = 0, remap = 0, filter = 0,
                   address = 0, border = 0;
     std::int32_t rt_alias = -1;  // index into the builder's known surfaces, -1 = bytes in texture_data
+    // The aliased surface is a depth surface (its RsxSurface::depth_format is not None); meaningful with rt_alias.
+    bool rt_depth = false;
     // The copy in RsxDraw::texture_data holds every mip level one after the other (for a cube map, the six
     // faces one after the other), each level in tightly packed rows and slices, de-swizzled (rsxTextureLayout
     // with packed offsets); data_size 0 means no bytes were copied.

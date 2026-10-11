@@ -212,6 +212,8 @@ RsxSurfaceState decodeSurfaceState(const RsxRegisters& regs) {
         s.color.height = s.clip_h;
         if (color_code == kRsxSurfaceColorA8R8G8B8) {
             s.color.format = RsxColorFormat::A8R8G8B8;
+        } else if (color_code == kRsxSurfaceColorFX32) {
+            s.color.format = RsxColorFormat::F_X32;
         } else {
             s.color.format = RsxColorFormat::Unsupported;
             const char* name = rsxSurfaceColorName(color_code);
@@ -235,6 +237,7 @@ RsxSurfaceState decodeSurfaceState(const RsxRegisters& regs) {
         s.depth.pitch = regs.reg(kMethodNv4097SetSurfacePitchZ);
         s.depth.width = s.clip_w;
         s.depth.height = s.clip_h;
+        s.depth.depth_format = s.depth_format;
     }
     return s;
 }
@@ -405,7 +408,7 @@ RsxTextureDesc decodeTexture(const RsxRegisters& regs, std::uint32_t unit) {
     t.border = regs.reg(kMethodNv4097SetTextureBorderColor + base);
 
     // Unnormalized coordinates are supported: the renderer scales them by 1 / size.
-    if (!rsxTextureFormatSampleable(format)) {
+    if (!rsxTextureFormatSampleable(format) && !rsxTextureFormatRenderTargetOnly(format)) {
         rsxNoteUnimplemented("texture format", rsxTextureFormatName(format));
     }
     return t;

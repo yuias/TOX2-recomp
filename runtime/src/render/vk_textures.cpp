@@ -80,6 +80,18 @@ VkComponentMapping textureComponentMapping(std::uint32_t remap) {
     return {final_map[1], final_map[2], final_map[3], final_map[0]};
 }
 
+VkComponentMapping singleChannelComponentMapping(std::uint32_t remap) {
+    VkComponentSwizzle final_map[4];
+    for (std::uint32_t channel = 0; channel < 4; channel++) {
+        const std::uint32_t control = (remap >> (8 + channel * 2)) & 3;
+        final_map[channel] = control == 0   ? VK_COMPONENT_SWIZZLE_ZERO
+                             : control == 1 ? VK_COMPONENT_SWIZZLE_ONE
+                                            : VK_COMPONENT_SWIZZLE_R;
+    }
+    // Same final order as textureComponentMapping: the word's A channel is the view's alpha.
+    return {final_map[1], final_map[2], final_map[3], final_map[0]};
+}
+
 // RPCS3 `Emu/RSX/RSXTexture.cpp` `fragment_texture::remapped_border_color` passes the border colour
 // through the texture's remap (an identity word leaves it unchanged); the channels are A, R, G, B from the
 // top byte down, as in `texture_channel_remap_t::remap`.
@@ -319,6 +331,11 @@ std::shared_ptr<TextureImage> TextureCache::acquire(const RsxTextureDesc& textur
     return created;
 }
 
+std::shared_ptr<TextureImage> TextureCache::renderable(std::uint32_t width, std::uint32_t height) {
+    return create(width, height, VK_FORMAT_B8G8R8A8_UNORM,
+                  VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+}
+
 std::shared_ptr<TextureImage> TextureCache::scratch(std::uint32_t width, std::uint32_t height) {
     const auto key = std::make_pair(width, height);
     const auto it = scratch_.find(key);
@@ -338,7 +355,8 @@ VkImageView TextureCache::createView(VkImage image, VkFormat format, std::uint32
     view_info.image = image;
     view_info.viewType = type;
     view_info.format = format;
-    view_info.components = textureComponentMapping(remap);
+    view_info.components =
+            format == VK_FORMAT_R32_SFLOAT ? singleChannelComponentMapping(remap) : textureComponentMapping(remap);
     view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, layers};
     VkImageView view = VK_NULL_HANDLE;
     if (vkCreateImageView(context_.device(), &view_info, nullptr, &view) != VK_SUCCESS) {
@@ -357,8 +375,26 @@ VkImageView TextureCache::view(TextureImage& image, std::uint32_t remap) {
     return created;
 }
 
-VkSampler TextureCache::sampler(const RsxTextureDesc& texture) {
-    const SamplerSettings settings = samplerSettings(texture);
+bool TextureCache::linearFilterable(VkFormat format) {
+    const auto it = linear_filterable_.find(format);
+    if (it != linear_filterable_.end()) return it->second;
+    VkFormatProperties props{};
+    vkGetPhysicalDeviceFormatProperties(context_.physicalDevice(), format, &props);
+    const bool filterable = (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+    linear_filterable_[format] = filterable;
+    return filterable;
+}
+
+VkSampler TextureCache::sampler(const RsxTextureDesc& texture, VkFormat format) {
+    SamplerSettings settings = samplerSettings(texture);
+    if (format != VK_FORMAT_UNDEFINED && !linearFilterable(format)) {
+        if (settings.min_filter == VK_FILTER_LINEAR || settings.mag_filter == VK_FILTER_LINEAR ||
+            settings.mipmap_mode == VK_SAMPLER_MIPMAP_MODE_LINEAR) {
+            rsxNoteUnimplemented("texture sampler", "linear filter on a format the device cannot filter");
+        }
+        settings.min_filter = settings.mag_filter = VK_FILTER_NEAREST;
+        settings.mipmap_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    }
     const auto it = samplers_.find(settings);
     if (it != samplers_.end()) return it->second;
 
