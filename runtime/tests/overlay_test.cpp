@@ -1,12 +1,25 @@
-// Self-checking tests for the debug overlay library. The model and panel tests need no GPU or window.
+// Self-checking tests for the debug overlay library. The model and panel tests need no GPU or window; the
+// overlay tests draw into an offscreen image on the first Vulkan device. The only window they create is a
+// hidden one, to give the Win32 backend a handle.
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
+#include <string>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "overlay/debug_overlay.h"
 #include "overlay/overlay_model.h"
 #include "overlay/overlay_panels.h"
 
@@ -237,6 +250,316 @@ void testPanels() {
     CHECK(drawFrames(empty_state, tox2::OverlaySources{}));
 }
 
+// Raw Win32 key message values, so the test needs no windows.h.
+constexpr std::uint32_t kWmKeyDown = 0x0100;
+constexpr std::uint32_t kWmKeyUp = 0x0101;
+constexpr std::int64_t kRepeatBit = std::int64_t{1} << 30;
+
+tox2::WindowMessage keyMessage(std::uint32_t message, std::uint32_t scan_code, bool repeat = false) {
+    tox2::WindowMessage result;
+    result.message = message;
+    result.wparam = 0x70;  // the virtual key is only a fallback when the scan code is zero
+    result.lparam = static_cast<std::int64_t>(scan_code) << 16 | (repeat ? kRepeatBit : 0);
+    return result;
+}
+
+// The overlay needs a VkContext only to be constructed; the key path touches neither Vulkan nor ImGui.
+void testToggleKey(tox2::VkContext& ctx) {
+    tox2::DebugOverlay overlay(ctx, tox2::OverlaySources{});
+    const std::uint32_t f1 = tox2::kOverlayToggleScanCode;
+    CHECK(!overlay.visible() && !overlay.wantsDraw());
+
+    tox2::MessageRoute route = overlay.onWindowMessage(keyMessage(kWmKeyDown, f1));
+    CHECK(overlay.visible() && overlay.wantsDraw() && route.withhold_key && !route.handled);
+
+    // Auto-repeat neither toggles nor reaches the pad.
+    route = overlay.onWindowMessage(keyMessage(kWmKeyDown, f1, true));
+    CHECK(overlay.visible() && route.withhold_key);
+    route = overlay.onWindowMessage(keyMessage(kWmKeyUp, f1));
+    CHECK(overlay.visible() && route.withhold_key);
+
+    route = overlay.onWindowMessage(keyMessage(kWmKeyDown, f1));
+    CHECK(!overlay.visible() && route.withhold_key);
+    overlay.onWindowMessage(keyMessage(kWmKeyUp, f1));
+
+    // Other keys are never withheld here: the overlay is hidden or has no window input yet.
+    constexpr std::uint32_t kScanZ = 0x2C;
+    CHECK(!overlay.onWindowMessage(keyMessage(kWmKeyDown, kScanZ)).withhold_key);
+    CHECK(!overlay.onWindowMessage(keyMessage(kWmKeyUp, kScanZ)).withhold_key);
+    overlay.setVisible(true);
+    CHECK(!overlay.onWindowMessage(keyMessage(kWmKeyDown, kScanZ)).withhold_key);
+    CHECK(!overlay.onWindowMessage(keyMessage(kWmKeyUp, kScanZ)).withhold_key);
+}
+
+constexpr std::uint32_t kTargetWidth = 1280;
+constexpr std::uint32_t kTargetHeight = 720;
+
+void imageBarrier(VkCommandBuffer cmd, VkImage image, VkPipelineStageFlags2 src_stage, VkAccessFlags2 src_access,
+                  VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access, VkImageLayout from, VkImageLayout to) {
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = src_stage;
+    barrier.srcAccessMask = src_access;
+    barrier.dstStageMask = dst_stage;
+    barrier.dstAccessMask = dst_access;
+    barrier.oldLayout = from;
+    barrier.newLayout = to;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.imageMemoryBarrierCount = 1;
+    dependency.pImageMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+}
+
+// An offscreen stand-in for a swapchain image, with a host buffer to read it back.
+class OffscreenTarget {
+public:
+    explicit OffscreenTarget(tox2::VkContext& ctx) : ctx_(ctx) {
+        VkImageCreateInfo image_info{};
+        image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_info.imageType = VK_IMAGE_TYPE_2D;
+        image_info.format = VK_FORMAT_B8G8R8A8_UNORM;
+        image_info.extent = {kTargetWidth, kTargetHeight, 1};
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = 1;
+        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_info.usage =
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VmaAllocationCreateInfo image_alloc_info{};
+        image_alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        ok_ = vmaCreateImage(ctx.allocator(), &image_info, &image_alloc_info, &image_, &image_alloc_, nullptr) ==
+              VK_SUCCESS;
+
+        VkImageViewCreateInfo view_info{};
+        view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_info.image = image_;
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = VK_FORMAT_B8G8R8A8_UNORM;
+        view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        ok_ = ok_ && vkCreateImageView(ctx.device(), &view_info, nullptr, &view_) == VK_SUCCESS;
+
+        VkBufferCreateInfo buffer_info{};
+        buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        buffer_info.size = static_cast<VkDeviceSize>(kTargetWidth) * kTargetHeight * 4;
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        VmaAllocationCreateInfo buffer_alloc_info{};
+        buffer_alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+        buffer_alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        VmaAllocationInfo mapped{};
+        ok_ = ok_ && vmaCreateBuffer(ctx.allocator(), &buffer_info, &buffer_alloc_info, &buffer_, &buffer_alloc_,
+                                     &mapped) == VK_SUCCESS;
+        pixels_ = static_cast<const std::uint8_t*>(mapped.pMappedData);
+
+        VkCommandPoolCreateInfo pool_info{};
+        pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        pool_info.queueFamilyIndex = ctx.graphicsQueueFamily();
+        ok_ = ok_ && vkCreateCommandPool(ctx.device(), &pool_info, nullptr, &pool_) == VK_SUCCESS;
+        VkCommandBufferAllocateInfo cmd_info{};
+        cmd_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cmd_info.commandPool = pool_;
+        cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        ok_ = ok_ && vkAllocateCommandBuffers(ctx.device(), &cmd_info, &cmd_) == VK_SUCCESS;
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        ok_ = ok_ && vkCreateFence(ctx.device(), &fence_info, nullptr, &fence_) == VK_SUCCESS;
+        ok_ = ok_ && pixels_ != nullptr;
+    }
+
+    ~OffscreenTarget() {
+        vkDeviceWaitIdle(ctx_.device());
+        if (fence_ != VK_NULL_HANDLE) vkDestroyFence(ctx_.device(), fence_, nullptr);
+        if (pool_ != VK_NULL_HANDLE) vkDestroyCommandPool(ctx_.device(), pool_, nullptr);
+        if (buffer_ != VK_NULL_HANDLE) vmaDestroyBuffer(ctx_.allocator(), buffer_, buffer_alloc_);
+        if (view_ != VK_NULL_HANDLE) vkDestroyImageView(ctx_.device(), view_, nullptr);
+        if (image_ != VK_NULL_HANDLE) vmaDestroyImage(ctx_.allocator(), image_, image_alloc_);
+    }
+
+    OffscreenTarget(const OffscreenTarget&) = delete;
+    OffscreenTarget& operator=(const OffscreenTarget&) = delete;
+
+    bool ok() const { return ok_; }
+
+    // One submit that follows the renderer's present path: clear to black (the blit), the barriers around
+    // the overlay, then a copy into the host buffer instead of the present.
+    bool drawOnce(tox2::DebugOverlay& overlay, const tox2::RendererStats& stats) {
+        tox2::Presenter::Target target;
+        target.image = image_;
+        target.view = view_;
+        target.format = VK_FORMAT_B8G8R8A8_UNORM;
+        target.width = kTargetWidth;
+        target.height = kTargetHeight;
+
+        vkResetCommandBuffer(cmd_, 0);
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd_, &begin);
+
+        imageBarrier(cmd_, image_, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_CLEAR_BIT,
+                     VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkClearColorValue black{};
+        const VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdClearColorImage(cmd_, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+
+        tox2::PresentFrameInfo info;
+        info.stats = &stats;
+        overlay.onFlip(info);
+        imageBarrier(cmd_, image_, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        overlay.record(cmd_, target);
+        imageBarrier(cmd_, image_, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+                     VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {kTargetWidth, kTargetHeight, 1};
+        vkCmdCopyImageToBuffer(cmd_, image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer_, 1, &region);
+        VkMemoryBarrier2 host_barrier{};
+        host_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        host_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        host_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        host_barrier.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+        host_barrier.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+        VkDependencyInfo dependency{};
+        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.memoryBarrierCount = 1;
+        dependency.pMemoryBarriers = &host_barrier;
+        vkCmdPipelineBarrier2(cmd_, &dependency);
+        if (vkEndCommandBuffer(cmd_) != VK_SUCCESS) return false;
+
+        VkCommandBufferSubmitInfo cmd_submit{};
+        cmd_submit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        cmd_submit.commandBuffer = cmd_;
+        VkSubmitInfo2 submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submit.commandBufferInfoCount = 1;
+        submit.pCommandBufferInfos = &cmd_submit;
+        if (vkQueueSubmit2(ctx_.graphicsQueue(), 1, &submit, fence_) != VK_SUCCESS) return false;
+        const bool done = vkWaitForFences(ctx_.device(), 1, &fence_, VK_TRUE, 10'000'000'000ull) == VK_SUCCESS;
+        vkResetFences(ctx_.device(), 1, &fence_);
+        vmaInvalidateAllocation(ctx_.allocator(), buffer_alloc_, 0, VK_WHOLE_SIZE);
+        return done;
+    }
+
+    // True when any pixel of the rectangle (inclusive) has a non-zero colour channel.
+    bool anyLit(std::uint32_t x0, std::uint32_t y0, std::uint32_t x1, std::uint32_t y1) const {
+        for (std::uint32_t y = y0; y <= y1; ++y) {
+            for (std::uint32_t x = x0; x <= x1; ++x) {
+                const std::uint8_t* p = pixels_ + (static_cast<std::size_t>(y) * kTargetWidth + x) * 4;
+                if (p[0] != 0 || p[1] != 0 || p[2] != 0) return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    tox2::VkContext& ctx_;
+    VkImage image_ = VK_NULL_HANDLE;
+    VmaAllocation image_alloc_ = nullptr;
+    VkImageView view_ = VK_NULL_HANDLE;
+    VkBuffer buffer_ = VK_NULL_HANDLE;
+    VmaAllocation buffer_alloc_ = nullptr;
+    const std::uint8_t* pixels_ = nullptr;
+    VkCommandPool pool_ = VK_NULL_HANDLE;
+    VkCommandBuffer cmd_ = VK_NULL_HANDLE;
+    VkFence fence_ = VK_NULL_HANDLE;
+    bool ok_ = false;
+};
+
+// Records the overlay over two consecutive submits, then checks that the window's title bar is lit and
+// the opposite corner untouched. The probes follow the panel's window position (10, 10) and width (440).
+void drawTwice(tox2::VkContext& ctx, OffscreenTarget& target) {
+    tox2::DebugOverlay overlay(ctx, makeFakeSources());
+    overlay.attachWindow(nullptr);
+    overlay.setVisible(true);
+    CHECK(overlay.wantsDraw());
+
+    tox2::RendererStats stats;
+    stats.flips = 1;
+    stats.draws = 10;
+    CHECK(target.drawOnce(overlay, stats));
+    CHECK(!overlay.failed());
+    // ImGui keeps a new window hidden for its first frame, so the title bar shows from the second one.
+    CHECK(!target.anyLit(1270, 710, 1270, 710));
+
+    stats.flips = 2;
+    CHECK(target.drawOnce(overlay, stats));
+    CHECK(!overlay.failed());
+    CHECK(target.anyLit(10, 10, 200, 40));
+    CHECK(!target.anyLit(1270, 710, 1270, 710));
+}
+
+// Feeds the overlay Win32 input through a hidden window: the message hook has to reach the ImGui context
+// that record() created, with the real backend initialised for that window.
+void testWin32Input(tox2::VkContext& ctx, OffscreenTarget& target) {
+    HWND hwnd =
+            CreateWindowExW(0, L"STATIC", L"overlay test", WS_POPUP, 0, 0, 64, 64, nullptr, nullptr, nullptr, nullptr);
+    CHECK(hwnd != nullptr);
+    if (hwnd == nullptr) return;
+    {
+        tox2::DebugOverlay overlay(ctx, makeFakeSources());
+        overlay.attachWindow(hwnd);
+        overlay.setVisible(true);
+        tox2::RendererStats stats;
+        stats.flips = 1;
+        CHECK(target.drawOnce(overlay, stats));
+        CHECK(!overlay.failed());
+
+        tox2::WindowMessage move;
+        move.hwnd = hwnd;
+        move.message = WM_MOUSEMOVE;
+        move.lparam = (15 << 16) | 20;
+        overlay.onWindowMessage(move);
+        // WantCaptureMouse comes from the window hovered in the previous frame, so it lags by one frame.
+        stats.flips = 2;
+        CHECK(target.drawOnce(overlay, stats));
+        stats.flips = 3;
+        CHECK(target.drawOnce(overlay, stats));
+        CHECK(ImGui::GetIO().WantCaptureMouse);
+
+        // Hiding and showing again must leave ImGui focused, or it would drop all input.
+        overlay.onWindowMessage(keyMessage(kWmKeyDown, tox2::kOverlayToggleScanCode));
+        overlay.onWindowMessage(keyMessage(kWmKeyUp, tox2::kOverlayToggleScanCode));
+        CHECK(!overlay.visible());
+        overlay.onWindowMessage(keyMessage(kWmKeyDown, tox2::kOverlayToggleScanCode));
+        overlay.onWindowMessage(keyMessage(kWmKeyUp, tox2::kOverlayToggleScanCode));
+        CHECK(overlay.visible());
+        overlay.onWindowMessage(move);
+        stats.flips = 4;
+        CHECK(target.drawOnce(overlay, stats));
+        CHECK(ImGui::GetIO().WantCaptureMouse);
+    }
+    DestroyWindow(hwnd);
+}
+
+void testOverlayRecording(tox2::VkContext& ctx) {
+    OffscreenTarget target(ctx);
+    CHECK(target.ok());
+    if (!target.ok()) return;
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+
+    drawTwice(ctx, target);
+    // The first overlay is gone; a second one starts from scratch on the same device.
+    drawTwice(ctx, target);
+    testWin32Input(ctx, target);
+
+    const std::uint32_t errors = ctx.validationErrorCount() - errors_before;
+    std::printf("overlay tests: validation %s, %u error(s)\n", ctx.validationEnabled() ? "active" : "inactive", errors);
+    CHECK(errors == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -245,6 +568,17 @@ int main() {
     testDrawDeltas();
     testRefresh();
     testPanels();
+
+    tox2::VkContextOptions options;
+    options.validation = true;
+    std::string error;
+    std::unique_ptr<tox2::VkContext> ctx = tox2::createVkContext(options, error);
+    if (ctx) {
+        testToggleKey(*ctx);
+        testOverlayRecording(*ctx);
+    } else {
+        std::printf("overlay tests: vulkan: skipped (%s)\n", error.c_str());
+    }
     std::printf("overlay tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }

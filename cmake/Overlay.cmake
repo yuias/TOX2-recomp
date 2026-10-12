@@ -34,6 +34,7 @@ function(tox2_overlay_add)
   tox2_overlay_add_imgui()
 
   add_library(tox2_overlay STATIC
+    runtime/src/overlay/debug_overlay.cpp
     runtime/src/overlay/overlay_model.cpp
     runtime/src/overlay/overlay_panels.cpp)
   target_compile_options(tox2_overlay PRIVATE -march=x86-64-v3 -Wall -Wextra)
