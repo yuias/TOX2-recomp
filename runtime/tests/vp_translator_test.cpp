@@ -70,7 +70,11 @@ struct Asm {
     std::uint32_t input_index = 0, constant_index = 0;
     Src src0 = {2, 0, "xyzw", false}, src1 = {3, 0, "xyzw", false}, src2 = {3, 0, "xyzw", false};
     std::uint32_t cond = 7;
-    bool cond_enable = false, saturate = false, cc_update = false, relative_const = false, end = false;
+    bool cond_enable = false, saturate = false, relative_const = false, end = false;
+    // Condition code fields: update enables (bits 14 and 29), register select (bit 25) and the component
+    // each lane tests (x, y, z, w order).
+    bool cc_update0 = false, cc_update1 = false, cc_select = false;
+    const char* cond_swizzle = "xyzw";
     std::uint32_t abs_bits = 0;
     // Flow-control fields (BRI, CAL, CLI, RET, BRB, CLB); they overlap the source 2 fields.
     std::uint32_t branch_target = 0, branch_bit = 0;
@@ -78,10 +82,14 @@ struct Asm {
 
     std::array<std::uint32_t, 4> words() const {
         const std::uint32_t s0 = src0.encode(), s1 = src1.encode(), s2 = src2.encode();
-        std::uint32_t w0 = (3u << 2) | (2u << 4) | (1u << 6) | (cond << 10) | (vec_temp << 15) | (abs_bits << 21) |
-                           (vec_to_output ? 1u << 30 : 0u);
+        std::uint32_t swizzle[4];
+        for (int i = 0; i < 4; i++) swizzle[i] = static_cast<std::uint32_t>(std::string("xyzw").find(cond_swizzle[i]));
+        std::uint32_t w0 = (swizzle[3] << 2) | (swizzle[2] << 4) | (swizzle[1] << 6) | (swizzle[0] << 8) |
+                           (cond << 10) | (vec_temp << 15) | (abs_bits << 21) | (vec_to_output ? 1u << 30 : 0u);
         if (cond_enable) w0 |= 1u << 13;
-        if (cc_update) w0 |= 1u << 14;
+        if (cc_update0) w0 |= 1u << 14;
+        if (cc_update1) w0 |= 1u << 29;
+        if (cc_select) w0 |= 1u << 25;
         if (saturate) w0 |= 1u << 26;
         const std::uint32_t w1 =
                 (s0 >> 9) | (input_index << 8) | (constant_index << 12) | (vec_op << 22) | (sca_op << 27);
@@ -226,6 +234,15 @@ void testDumps() {
             CHECK(result.unimplemented.empty());
             CHECK(contains(result.glsl, body));
             CHECK(result.inputs_used == expectedInputs(dump.name));
+        }
+        // The one dumped program that uses condition codes: an SGT and an SLT update cc_0 (no temp, no
+        // output, both update bits) and two conditional MULs test it.
+        if (dump.name.starts_with("vp_f71bf7698f6d9744")) {
+            CHECK(result.ok);
+            CHECK(contains(result.glsl, "  cc_0.x = vec4(greaterThan(r_1.zzzz, vp_consts.c[128].zzzz)).x;\n"));
+            CHECK(contains(result.glsl, "  cc_0.y = vec4(lessThan(r_1.zzzz, vp_consts.c[128].yyyy)).y;\n"));
+            CHECK(contains(result.glsl, ", notEqual(cc_0.xxxx, vec4(0.0)).z);\n"));
+            CHECK(contains(result.glsl, ", notEqual(cc_0.yyyy, vec4(0.0)).z);\n"));
         }
         if (!result.ok) {
             reported++;
@@ -421,7 +438,8 @@ void testUnimplementedReports() {
     conditional.cond = 2;
     conditional.end = true;
     result = translate({conditional});
-    CHECK(!result.ok && hasReport(result, "condition"));
+    CHECK(result.ok && result.unimplemented.empty());
+    CHECK(contains(result.glsl, "  out_0 = mix(out_0, attr_0, equal(cc_0, vec4(0.0)));\n"));
 
     Asm branch;
     branch.sca_op = 0x08;  // BRA
@@ -449,13 +467,13 @@ void testUnimplementedReports() {
     result = translate({unused_invalid});
     CHECK(result.ok);
 
-    // Writing nothing but a condition code.
+    // A part with no temp, no output and no update bit writes nothing and is not reported.
     Asm cc_only;
     cc_only.vec_op = 1;
     cc_only.vec_mask = 0xf;
     cc_only.end = true;
     result = translate({cc_only});
-    CHECK(!result.ok && hasReport(result, "condition code"));
+    CHECK(result.ok && result.unimplemented.empty());
 
     // Condition 0 skips the instruction, even with the enable bit clear.
     Asm never;
@@ -634,11 +652,11 @@ void testFlowControlReports() {
             translate({movTo(0), flowOp(0x0a, 3), movTo(3, true), flowOp(0x11, 5, 0, true), movTo(1), flowOp(0x0c, 0)});
     CHECK(!result.ok && hasReport(result, "branch inside a subroutine"));
 
-    // A condition-code branch needs the condition registers.
+    // A condition-code branch is not translated yet.
     Asm conditional = flowOp(0x09, 2);
     conditional.cond = 2;
     result = translate({movTo(0), conditional, movTo(3, true)});
-    CHECK(!result.ok && hasReport(result, "condition other than always"));
+    CHECK(!result.ok && hasReport(result, "branch condition other than always"));
 
     // A target outside the program.
     result = translate({movTo(0), flowOp(0x11, 40, 0, true), movTo(3, true)});
@@ -653,6 +671,241 @@ void testFlowControlReports() {
     // A call that calls itself is bounded by the call depth.
     result = translate({movTo(0), flowOp(0x0a, 3), movTo(3, true), flowOp(0x0a, 3)});
     CHECK(!result.ok && hasReport(result, "call nesting"));
+}
+
+// ---- Condition codes ----
+
+// MOV into the condition register only: no temp, no output.
+Asm ccMove(bool end = true) {
+    Asm in;
+    in.vec_op = 1;
+    in.end = end;
+    return in;
+}
+
+void testConditionCodeUpdate() {
+    // Rule (a): no temp and no output, so bit 14 or bit 29 (either one) makes the condition register the
+    // destination. Bit 25 picks cc_1, the write mask picks the lanes.
+    Asm bit14 = ccMove();
+    bit14.cc_update0 = true;
+    tox2::GlslResult result = translate({movTo(0), bit14});
+    CHECK(result.ok && result.unimplemented.empty());
+    CHECK(contains(result.glsl, "  vec4 cc_0 = vec4(0.0);\n"));
+    CHECK(contains(result.glsl, "  cc_0 = attr_0;\n") && !contains(result.glsl, "cc_1"));
+    checkCompiles(result, 0xd0f0);
+
+    Asm bit29 = ccMove();
+    bit29.cc_update1 = true;
+    bit29.vec_mask = 0x3;
+    result = translate({movTo(0), bit29});
+    CHECK(result.ok && contains(result.glsl, "  cc_0.xy = attr_0.xy;\n"));
+    checkCompiles(result, 0xd0f1);
+
+    Asm second = ccMove();
+    second.cc_update0 = true;
+    second.cc_select = true;
+    result = translate({movTo(0), second});
+    CHECK(result.ok && contains(result.glsl, "  vec4 cc_1 = vec4(0.0);\n") &&
+          contains(result.glsl, "  cc_1 = attr_0;\n"));
+    CHECK(!contains(result.glsl, "cc_0"));
+
+    // The scalar part uses the same rule with its own write mask.
+    Asm scalar;
+    scalar.sca_op = 1;
+    scalar.vec_mask = 0;
+    scalar.sca_mask = 0x1;
+    scalar.cc_update1 = true;
+    scalar.src2 = input();
+    scalar.end = true;
+    result = translate({movTo(0), scalar});
+    CHECK(result.ok && contains(result.glsl, "  cc_0.x = attr_0.x;\n"));
+    checkCompiles(result, 0xd0f2);
+
+    // Saturation applies to the value the condition register receives.
+    Asm saturated = ccMove();
+    saturated.cc_update0 = true;
+    saturated.saturate = true;
+    result = translate({movTo(0), saturated});
+    CHECK(result.ok && contains(result.glsl, "  cc_0 = clamp(attr_0, 0.0, 1.0);\n"));
+
+    // Neither update bit: the part writes nothing, leaves no condition register, and its operands are not
+    // counted as inputs.
+    Asm idle = ccMove();
+    idle.input_index = 5;
+    result = translate({movTo(0), idle});
+    CHECK(result.ok && result.unimplemented.empty());
+    CHECK(!contains(result.glsl, "cc_") && !contains(result.glsl, "attr_5"));
+    CHECK(result.inputs_used == 1u);
+
+    // Condition "never" drops the instruction, its condition register update included, even with bit 13 clear.
+    Asm never = ccMove();
+    never.cc_update0 = true;
+    never.cond = 0;
+    result = translate({movTo(0), never});
+    CHECK(result.ok && !contains(result.glsl, "cc_"));
+}
+
+void testConditionCodeFallbackDestination() {
+    // Rule (b): the output belongs to the scalar part and the vector part has no temp, so the vector part
+    // writes the condition register whatever bits 14 and 29 say; the scalar part writes the output.
+    for (const bool update_bits : {false, true}) {
+        Asm both;
+        both.vec_op = 1;
+        both.sca_op = 1;
+        both.slot = 1;
+        both.vec_to_output = false;
+        both.sca_mask = 0xf;
+        both.cc_update0 = both.cc_update1 = update_bits;
+        both.end = true;
+        const tox2::GlslResult result = translate({movTo(0), both});
+        CHECK(result.ok && result.unimplemented.empty());
+        CHECK(contains(result.glsl, "  cc_0 = attr_0;\n"));
+        CHECK(contains(result.glsl, "  out_1 = vp_consts.c[0];\n"));
+        checkCompiles(result, 0xd0f3);
+    }
+
+    // The mirror case: the vector part owns the output and the scalar part writes the condition register.
+    Asm mirror;
+    mirror.vec_op = 1;
+    mirror.sca_op = 1;
+    mirror.slot = 1;
+    mirror.vec_to_output = true;
+    mirror.sca_mask = 0xf;
+    mirror.end = true;
+    tox2::GlslResult result = translate({movTo(0), mirror});
+    CHECK(result.ok && contains(result.glsl, "  out_1 = attr_0;\n"));
+    CHECK(contains(result.glsl, "  cc_0 = vp_consts.c[0];\n"));
+
+    // A temp, or the output, is written instead of the condition register even with both update bits set.
+    Asm with_temp = ccMove();
+    with_temp.vec_temp = 2;
+    with_temp.cc_update0 = with_temp.cc_update1 = true;
+    result = translate({movTo(0), with_temp});
+    CHECK(result.ok && contains(result.glsl, "  r_2 = attr_0;\n") && !contains(result.glsl, "cc_"));
+
+    Asm with_output = ccMove();
+    with_output.slot = 1;
+    with_output.cc_update0 = with_output.cc_update1 = true;
+    result = translate({movTo(0), with_output});
+    CHECK(result.ok && contains(result.glsl, "  out_1 = attr_0;\n") && !contains(result.glsl, "cc_"));
+
+    // The other part owning the output does not matter once the part has a temp.
+    Asm temp_and_other;
+    temp_and_other.vec_op = 1;
+    temp_and_other.vec_temp = 2;
+    temp_and_other.sca_op = 1;
+    temp_and_other.slot = 1;
+    temp_and_other.vec_to_output = false;
+    temp_and_other.sca_mask = 0xf;
+    temp_and_other.end = true;
+    result = translate({movTo(0), temp_and_other});
+    CHECK(result.ok && contains(result.glsl, "  r_2 = attr_0;\n") && !contains(result.glsl, "cc_"));
+
+    // A scalar part that owns the output writes it, with the vector part idle.
+    Asm lone_scalar;
+    lone_scalar.sca_op = 1;
+    lone_scalar.vec_mask = 0;
+    lone_scalar.sca_mask = 0xf;
+    lone_scalar.slot = 1;
+    lone_scalar.vec_to_output = false;
+    lone_scalar.end = true;
+    result = translate({movTo(0), lone_scalar});
+    CHECK(result.ok && contains(result.glsl, "  out_1 = vp_consts.c[0];\n") && !contains(result.glsl, "cc_"));
+}
+
+void testConditionalWrites() {
+    // Every condition selects its compare; a swizzle other than x, y, z, w is spelled out and bit 25 picks
+    // the register.
+    const char* const kCompare[7] = {nullptr,       "lessThan", "equal",           "lessThanEqual",
+                                     "greaterThan", "notEqual", "greaterThanEqual"};
+    for (std::uint32_t cond = 1; cond <= 6; cond++) {
+        Asm in = movTo(1, true);
+        in.cond = cond;
+        in.cond_enable = true;
+        const tox2::GlslResult result = translate({movTo(0), in});
+        CHECK(result.ok && result.unimplemented.empty());
+        CHECK(contains(result.glsl,
+                       std::string("  out_1 = mix(out_1, attr_0, ") + kCompare[cond] + "(cc_0, vec4(0.0)));\n"));
+        CHECK(contains(result.glsl, "  vec4 cc_0 = vec4(0.0);\n"));
+        checkCompiles(result, 0xd100 + cond);
+    }
+
+    Asm swizzled = movTo(1, true);
+    swizzled.cond = 3;
+    swizzled.cond_enable = true;
+    swizzled.cond_swizzle = "wzyx";
+    swizzled.cc_select = true;
+    swizzled.vec_mask = 0x5;  // x and z
+    tox2::GlslResult result = translate({movTo(0), swizzled});
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "  out_1.xz = mix(out_1.xz, attr_0.xz, lessThanEqual(cc_1.wzyx, vec4(0.0)).xz);\n"));
+    CHECK(!contains(result.glsl, "cc_0"));
+    checkCompiles(result, 0xd110);
+
+    // Without the test bit, or with condition "always", the write is unconditional and no register is read.
+    for (const bool enable : {false, true}) {
+        Asm plain = movTo(1, true);
+        plain.cond = enable ? 7 : 4;
+        plain.cond_enable = enable;
+        result = translate({movTo(0), plain});
+        CHECK(result.ok && contains(result.glsl, "  out_1 = attr_0;\n") && !contains(result.glsl, "cc_"));
+    }
+
+    // Condition "never" skips the instruction with or without the test bit.
+    for (const bool enable : {false, true}) {
+        Asm never = movTo(1, true);
+        never.cond = 0;
+        never.cond_enable = enable;
+        result = translate({movTo(0), never});
+        CHECK(result.ok && !contains(result.glsl, "out_1 = ") && !contains(result.glsl, "cc_"));
+    }
+
+    // Several destinations share one value and one condition.
+    Asm both;
+    both.vec_op = 1;
+    both.vec_temp = 3;
+    both.slot = 1;
+    both.cond = 4;
+    both.cond_enable = true;
+    both.vec_mask = 0x2;  // y
+    both.end = true;
+    result = translate({movTo(0), both});
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "    r_3.y = mix(r_3.y, res.y, greaterThan(cc_0, vec4(0.0)).y);\n"));
+    CHECK(contains(result.glsl, "    out_1.y = mix(out_1.y, res.y, greaterThan(cc_0, vec4(0.0)).y);\n"));
+    checkCompiles(result, 0xd111);
+
+    // The condition register update is conditional like any destination.
+    Asm update = ccMove();
+    update.cc_update0 = true;
+    update.cond = 4;
+    update.cond_enable = true;
+    update.vec_mask = 0x1;
+    result = translate({movTo(0), update});
+    CHECK(result.ok);
+    CHECK(contains(result.glsl, "  cc_0.x = mix(cc_0.x, attr_0.x, greaterThan(cc_0, vec4(0.0)).x);\n"));
+    checkCompiles(result, 0xd112);
+}
+
+void testConditionCodeOrder() {
+    // One instruction: the vector part updates the condition register (rule (b)), then the scalar part tests
+    // it. The scalar part must see the new value, so its compare comes after the update in the text.
+    Asm both;
+    both.vec_op = 1;
+    both.vec_mask = 0x1;
+    both.sca_op = 1;
+    both.sca_mask = 0xf;
+    both.slot = 1;
+    both.vec_to_output = false;
+    both.cond = 4;
+    both.cond_enable = true;
+    both.end = true;
+    const tox2::GlslResult result = translate({movTo(0), both});
+    CHECK(result.ok);
+    const std::size_t update = position(result.glsl, "  cc_0.x = mix(cc_0.x, attr_0.x, ");
+    const std::size_t test = position(result.glsl, "  out_1 = mix(out_1, vp_consts.c[0], greaterThan(cc_0");
+    CHECK(update != std::string::npos && test != std::string::npos && update < test);
+    checkCompiles(result, 0xd113);
 }
 
 void testLocations() {
@@ -751,6 +1004,10 @@ int main() {
     testBackwardBranch();
     testSubroutines();
     testFlowControlReports();
+    testConditionCodeUpdate();
+    testConditionCodeFallbackDestination();
+    testConditionalWrites();
+    testConditionCodeOrder();
     testLocations();
     testUserClipPlanes();
     testDumps();

@@ -55,6 +55,24 @@ struct Instruction {
     std::uint32_t vecOpcode() const { return bits(w[1], 22, 5); }
     std::uint32_t scaOpcode() const { return bits(w[1], 27, 5); }
     std::uint32_t condition() const { return bits(w[0], 10, 3); }
+    // Condition register component read for lane x, y, z, w (fields run w to x from bit 2 upward).
+    std::string conditionSwizzle() const {
+        std::string lanes;
+        for (const unsigned lo : {8u, 6u, 4u, 2u}) lanes += "xyzw"[bits(w[0], lo, 2)];
+        return lanes;
+    }
+    std::uint32_t conditionRegister() const { return bits(w[0], 25, 1); }
+    // Bit 13 turns the condition into a per-lane write select; BRI, CAL, CLI and RET ignore it.
+    bool conditionTest() const { return bits(w[0], 13, 1) != 0; }
+    // The condition register is a fallback destination of one part (RPCS3 VertexProgramDecompiler
+    // SetDST and GetDST): a part with a temp, or one that owns the output register, writes those and never
+    // the condition register. Without either it writes the condition register when the instruction has no
+    // output and an update bit (14 or 29) is set, or when the output belongs to the other part.
+    bool updatesCondition(bool scalar_part) const {
+        if ((scalar_part ? bits(w[3], 7, 6) : bits(w[0], 15, 6)) != kNoTemp) return false;
+        if (bits(w[3], 2, 5) == kNoOutput) return bits(w[0], 14, 1) != 0 || bits(w[0], 29, 1) != 0;
+        return (bits(w[0], 30, 1) != 0) == scalar_part;
+    }
     bool end() const { return (w[3] & 1u) != 0; }
     std::uint32_t target() const { return rsxVpBranchTarget(w); }
     std::uint32_t source(int index) const {
@@ -101,7 +119,9 @@ private:
     std::string operand(const Instruction& in, int index);
     bool vectorExpr(const Instruction& in, std::uint32_t op, Expr& out);
     bool scalarExpr(const Instruction& in, std::uint32_t op, Expr& out);
-    void emitWrite(const std::vector<std::string>& destinations, const Expr& value, const std::string& lanes);
+    std::string conditionCompare(const Instruction& in);
+    void emitWrite(const std::vector<std::string>& destinations, const Expr& value, const std::string& lanes,
+                   const std::string& select);
     std::string exported(std::uint32_t slot, std::uint32_t mask, const char* member = "") const;
     std::string assemble() const;
     bool clipPlanesEmitted() const { return clip_distances_ && (slots_written_ & ((1u << 5) | (1u << 6))) != 0; }
@@ -114,6 +134,7 @@ private:
     std::uint64_t temps_used_ = 0;
     std::uint32_t inputs_used_ = 0;
     std::uint32_t slots_written_ = 0;
+    std::uint32_t cc_used_ = 0;  // bit n: cc_n is read or written
     bool uses_lit_ = false;
     bool clip_distances_ = false;
 };
@@ -306,26 +327,38 @@ bool Translator::scalarExpr(const Instruction& in, std::uint32_t op, Expr& out) 
     }
 }
 
-void Translator::emitWrite(const std::vector<std::string>& destinations, const Expr& value, const std::string& lanes) {
+// Compare of the swizzled condition register with zero, one boolean per lane. Lane l is the compare of
+// component swizzle[l], which is what a destination lane l tests.
+std::string Translator::conditionCompare(const Instruction& in) {
+    static constexpr const char* kCompare[8] = {nullptr,    "lessThan",         "equal", "lessThanEqual", "greaterThan",
+                                                "notEqual", "greaterThanEqual", nullptr};
+    const std::uint32_t reg = in.conditionRegister();
+    cc_used_ |= 1u << reg;
+    std::string swizzle = in.conditionSwizzle();
+    swizzle = swizzle == "xyzw" ? "" : "." + swizzle;
+    return std::format("{}(cc_{}{}, vec4(0.0))", kCompare[in.condition()], reg, swizzle);
+}
+
+// `select` is empty for an unconditional write; otherwise it is a bvec4 expression and each written lane
+// keeps its old value where the lane is false.
+void Translator::emitWrite(const std::vector<std::string>& destinations, const Expr& value, const std::string& lanes,
+                           const std::string& select) {
     const bool full = lanes == "xyzw";
+    const std::string rhs = value.compound ? "(" + value.text + ")" : value.text;
+    const auto assign = [&](const std::string& dest, const std::string& source, const std::string& source_text) {
+        const std::string target = full ? dest : dest + "." + lanes;
+        const std::string lane_source = full ? source_text : source + "." + lanes;
+        if (select.empty()) return std::format("{} = {};\n", target, lane_source);
+        return std::format("{0} = mix({0}, {1}, {2}{3});\n", target, lane_source, select,
+                           full ? std::string() : "." + lanes);
+    };
     if (destinations.size() == 1) {
-        std::string rhs = value.compound ? "(" + value.text + ")" : value.text;
-        if (full) {
-            body_ += std::format("  {} = {};\n", destinations[0], value.text);
-        } else {
-            body_ += std::format("  {}.{} = {}.{};\n", destinations[0], lanes, rhs, lanes);
-        }
+        body_ += "  " + assign(destinations[0], rhs, value.text);
         return;
     }
     // One value for several destinations: evaluate once.
     body_ += std::format("  {{\n    vec4 res = {};\n", value.text);
-    for (const std::string& dest : destinations) {
-        if (full) {
-            body_ += std::format("    {} = res;\n", dest);
-        } else {
-            body_ += std::format("    {}.{} = res.{};\n", dest, lanes, lanes);
-        }
-    }
+    for (const std::string& dest : destinations) body_ += "    " + assign(dest, "res", "res");
     body_ += "  }\n";
 }
 
@@ -334,17 +367,9 @@ void Translator::translateData(const Instruction& in) {
     const std::uint32_t w0 = in.w[0], w3 = in.w[3];
     const std::uint32_t vec_op = in.vecOpcode(), sca_op = in.scaOpcode();
 
-    // Condition 0 skips the instruction whatever the enable bit says. Other conditions need the
-    // condition registers; an enable bit that is clear or condition "always" means unconditional.
-    if (bits(w0, 10, 3) == 0) return;
-    if (bits(w0, 13, 1) != 0 && bits(w0, 10, 3) != kCondAlways) {
-        note("vp condition other than always");
-        return;
-    }
-    if (bits(w0, 14, 1) != 0 || bits(w0, 29, 1) != 0) {
-        note("vp condition code update");
-        return;
-    }
+    // Condition 0 skips the whole instruction (condition register update included) whatever the test bit says.
+    if (in.condition() == kCondNever) return;
+    const bool conditional = in.conditionTest() && in.condition() != kCondAlways;
 
     const std::uint32_t vec_temp = bits(w0, 15, 6);
     const std::uint32_t sca_temp = bits(w3, 7, 6);
@@ -370,13 +395,19 @@ void Translator::translateData(const Instruction& in) {
              maskLanes(bits(w3, 20, 1), bits(w3, 19, 1), bits(w3, 18, 1), bits(w3, 17, 1))},
     };
 
-    // The vector op runs first; a scalar op that reads a temp the vector op wrote sees the new value.
+    // The vector op runs first; the scalar op sees the temps and the condition register it wrote.
     for (int stage = 0; stage < 2; stage++) {
         const Part& part = parts[stage];
         if (part.op == 0) continue;
         // The target and branch index overlap the source 2 fields, and there is nothing to write.
         if (stage == 1 && isHandledFlowOp(part.op)) continue;
 
+        // The operands are decoded first so that an opcode the translator lacks is reported even when the
+        // part writes nothing; the registers they touched are forgotten again in that case.
+        const std::uint64_t saved_temps = temps_used_;
+        const std::uint32_t saved_inputs = inputs_used_, saved_cc = cc_used_;
+        const bool saved_lit = uses_lit_;
+        const std::size_t saved_notes = unimplemented_.size();
         Expr value;
         if (!(stage == 0 ? vectorExpr(in, part.op, value) : scalarExpr(in, part.op, value))) continue;
         if (saturate) value = {"clamp(" + value.text + ", 0.0, 1.0)", false};
@@ -387,14 +418,22 @@ void Translator::translateData(const Instruction& in) {
             destinations.push_back(std::format("r_{}", part.temp));
         }
         if (part.to_output) destinations.push_back(std::format("out_{}", slot));
-        if (destinations.empty()) {
-            // Hardware would write a condition register instead.
-            note("vp condition code write");
+        if (destinations.empty() && in.updatesCondition(stage == 1)) {
+            const std::uint32_t reg = in.conditionRegister();
+            cc_used_ |= 1u << reg;
+            destinations.push_back(std::format("cc_{}", reg));
+        }
+        if (destinations.empty() || part.lanes.empty()) {
+            // Nothing is written: the part leaves no trace in the program.
+            temps_used_ = saved_temps;
+            inputs_used_ = saved_inputs;
+            cc_used_ = saved_cc;
+            uses_lit_ = saved_lit;
+            unimplemented_.resize(saved_notes);
             continue;
         }
-        if (part.lanes.empty()) continue;
         if (part.to_output) slots_written_ |= 1u << slot;
-        emitWrite(destinations, value, part.lanes);
+        emitWrite(destinations, value, part.lanes, conditional ? conditionCompare(in) : std::string());
     }
 }
 
@@ -403,12 +442,12 @@ Instruction Translator::instructionAt(std::uint32_t pc) const {
 }
 
 // The condition of BRI, CAL, CLI and RET. Anything but "always" and "never" tests a condition
-// register, which the translator does not model.
+// register, which the branches do not model yet.
 Translator::Condition Translator::branchCondition(const Instruction& in) {
     switch (in.condition()) {
         case kCondAlways: return Condition::Always;
         case kCondNever: return Condition::Never;
-        default: note("vp condition other than always"); return Condition::Unsupported;
+        default: note("vp branch condition other than always"); return Condition::Unsupported;
     }
 }
 
@@ -611,6 +650,10 @@ std::string Translator::assemble() const {
             glsl += std::format("  vec4 out_{} = vec4(0.0, 0.0, 0.0, 1.0);\n", slot);
         }
     }
+    // Both condition registers start at zero when a program begins.
+    for (std::uint32_t reg = 0; reg < 2; reg++) {
+        if ((cc_used_ & (1u << reg)) != 0) glsl += std::format("  vec4 cc_{} = vec4(0.0);\n", reg);
+    }
     glsl += body_;
 
     // Epilogue. Outputs the program did not write, or the output mask disables, are (0, 0, 0, 1).
@@ -713,6 +756,7 @@ GlslResult Translator::run(std::span<const std::uint32_t> ucode, const VpTransla
         slots_written_ = 0;
         temps_used_ = 0;
         inputs_used_ = 0;
+        cc_used_ = 0;
         uses_lit_ = false;
     }
 

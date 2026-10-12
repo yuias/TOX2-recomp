@@ -2561,6 +2561,76 @@ void testRendererUserClip(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// ---- Vertex program condition codes ----
+
+// Patches of an instruction built by vpMove: the condition and the test enable (bit 13) of a conditional
+// write, and the update enable (bit 14) together with a temp destination in place of the default "no temp".
+std::array<std::uint32_t, 4> vpWithCondition(std::array<std::uint32_t, 4> words, std::uint32_t condition) {
+    words[0] = (words[0] & ~(7u << 10)) | (condition << 10) | (1u << 13);
+    return words;
+}
+
+std::array<std::uint32_t, 4> vpUpdatesCondition(std::array<std::uint32_t, 4> words, std::uint32_t temp) {
+    words[0] = (words[0] & ~(63u << 15)) | (temp << 15) | (1u << 14);
+    return words;
+}
+
+// The quad's position, an unconditional red front diffuse, then a green one written only where the condition
+// register is greater than zero. The register is set by a MOV of default attribute v5 (all lanes `value`) that
+// has no output: with no temp it writes the register (bit 14), with a temp it writes the temp and the register
+// stays at its initial zero.
+void testRendererConditionCode(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::rsxUnimplementedReset();
+
+    const auto render = [&](float value, std::uint32_t update_temp) {
+        SceneBuilder scene;
+        scene.setSurface();
+        scene.write(tox2::kMethodNv4097SetColorClearValue, kBlack);
+        scene.write(tox2::kMethodNv4097ClearSurface, 0xF0);
+        setQuadRenderState(scene);
+        scene.setFloatAttrib(0, 3, kPositionsOffset);
+        const float colors[3][4] = {{value, value, value, value}, {1.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}};
+        for (std::uint32_t slot = 5; slot <= 7; slot++) {
+            for (std::uint32_t i = 0; i < 4; i++) {
+                scene.write(tox2::kMethodNv4097SetVertexData4fM + slot * 16 + i * 4,
+                            std::bit_cast<std::uint32_t>(colors[slot - 5][i]));
+            }
+        }
+        Programs programs = quadPrograms();
+        programs.vertex.clear();
+        const std::array<std::array<std::uint32_t, 4>, 4> instructions = {
+                vpMove(0, 0, "xyzw", false),
+                vpUpdatesCondition(vpMove(31, 5, "xyzw", false), update_temp),
+                vpMove(1, 6, "xyzw", false),
+                vpWithCondition(vpMove(1, 7, "xyzw", true), 4 /* GT */),
+        };
+        for (const auto& instruction : instructions) {
+            programs.vertex.insert(programs.vertex.end(), instruction.begin(), instruction.end());
+        }
+        scene.setPrograms(programs);
+        scene.write(tox2::kMethodNv4097SetDepthTestEnable, 0);
+        scene.write(tox2::kMethodNv4097SetDepthMask, 0);
+        scene.write(tox2::kMethodNv4097SetColorMask, 0x01010101u);
+        putSurfaceQuad(scene, 16, 48);
+        scene.drawStrip(4);
+        const StencilRender result = renderStencilScene(ctx, scene);
+        CHECK(result.stats.draws == 1 && result.stats.draws_skipped == 0);
+        CHECK(result.pixel(2, 2) == kBlack);
+        expectNoRendererNotes();
+        return result.pixel(32, 32);
+    };
+
+    constexpr std::uint32_t kRed = 0xFFFF0000, kGreen = 0xFF00FF00;
+    // The register is written: the second write lands for a positive value and is skipped for a negative one.
+    CHECK(render(1.0f, 63) == kGreen);
+    CHECK(render(-1.0f, 63) == kRed);
+    // The MOV has a temp, so RPCS3's rule writes the temp and leaves the register at zero: never greater.
+    CHECK(render(1.0f, 0) == kRed);
+    CHECK(render(-1.0f, 0) == kRed);
+    tox2::rsxUnimplementedReset();
+}
+
 // ---- Surface resize ----
 
 constexpr std::uint32_t kResizeClear = 0xFF102030;
@@ -2853,6 +2923,7 @@ int main() {
     testRendererDepthTexture(*ctx);
     testRendererStencil(*ctx);
     testRendererUserClip(*ctx);
+    testRendererConditionCode(*ctx);
     testRendererSurfaceResize(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 

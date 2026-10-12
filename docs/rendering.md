@@ -117,15 +117,32 @@ transform and the varying outputs.
 - **Opcodes.** Vector: MOV, MUL, ADD, MAD, DP3, DPH, DP4, DST, MIN, MAX, SLT, SGE, FRC, FLR, SEQ, SFL,
   SGT, SLE, SNE, STR and SSG. Scalar: MOV, RCP, RCC, RSQ, EXP, LOG, LIT, LG2, EX2, SIN and COS, and the
   flow-control opcodes below. Not translated, and the draw is skipped and counted: ARL and relative
-  constant addressing, TXL, the condition code registers (a condition other than "always", or a
-  write that only updates a condition code), BRA (its target comes from the address register) and
-  PSH and POP.
+  constant addressing, TXL, BRA (its target comes from the address register) and PSH and POP.
+- **Condition codes.** Two condition registers, `cc_0` and `cc_1` (instruction bit 25 selects the register
+  for both the test and the update), are `vec4` locals that start at zero and are declared only when a
+  program uses them. They follow RPCS3's `VertexProgramDecompiler` (`SetDST`, `GetDST`):
+  - *Destination.* The register is a fallback destination of one instruction part, the vector and the
+    scalar part being decided separately. A part that has a temp, or that owns the output register
+    (instruction bit 30 names the owner), writes those and never the register, whatever the update bits say.
+    A part with neither writes the register when the instruction has no output at all and update bit 14 or
+    bit 29 is set (either one), or when the output belongs to the other part (the update bits are not read).
+    Otherwise it writes nothing and is not reported. The value is the part's result after saturation, in
+    the part's write-mask lanes.
+  - *Conditional writes.* With the test bit (13) set and a condition of 1 to 6 (`<`, `==`, `<=`, `>`, `!=`,
+    `>=` against zero), destination lane `l` is replaced only where the compare of condition register
+    component `swizzle[l]` holds, as `dest.L = mix(dest.L, value.L, compare.L)`. The register update is
+    conditional the same way. Bit 13 clear or condition 7 ("always") writes unconditionally, and condition
+    0 ("never") drops the whole instruction, register update included, whatever bit 13 says.
+  - *Order.* The vector part is emitted first and the scalar part after it, each testing the register where
+    it is emitted, so a scalar part sees the register the vector part of the same instruction just updated.
+    A branch in the scalar slot is emitted after both parts.
 - **Flow control.** BRB and BRI branch, CAL, CLI and CLB call, and RET returns. The target is a 10-bit
   instruction index; the boolean index (0 to 31) and the branch sense of BRB and CLB share the bits
   of source 2, as in RPCS3's `RSXVertexProgram.h`. BRB and CLB read bit `n` of the branch bits and take
   the jump when the bit is set if the instruction's sense bit is set, and when it is clear otherwise.
   BRI, CAL, CLI and RET are translated when their condition is "always" (a condition of "never"
-  skips them); any other condition tests a condition register and is reported as not translated.
+  skips them); any other condition tests a condition register and is reported as `state vp branch condition
+  other than always`, which is not translated yet.
   BRB and BRI are translated outside subroutines only; one inside a subroutine is reported.
   The vector operation of an instruction that carries a branch still runs first.
 - **Structure of the output.** A program without flow control is emitted as straight-line code, as
