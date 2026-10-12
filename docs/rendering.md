@@ -78,7 +78,9 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   state; pipelines are cached by what is baked into them.
 - **Readback** is gated. Copying the display buffer back to the host costs 8 MiB per flip at 1080p,
   so a live run does it only for flips that are dumped (`--dump-frames`). `tox2_rsxreplay` always
-  reads the last flip back.
+  reads the last flip back. The readback is the display target's image, so at a [resolution
+  scale](#resolution-scale) N above 1 it is N times the guest size in each direction (dumps, requested
+  dumps, `readDisplay` and the replay PNG alike), and its size and PNG encoding cost grow with N squared.
 - **Shader translation** (`vp_translator.cpp`, `fp_translator.cpp`). Vertex and fragment programs
   are translated from RSX microcode to GLSL 4.50 and compiled with shaderc (the SDK's static
   library) to SPIR-V 1.6 for Vulkan 1.3, without optimisation. The result is cached on disk in
@@ -115,10 +117,12 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   `<category> <key>`. The stop census prints them as a `census: rsx unimplemented N kinds`
   section, most frequent first (omitted when empty). It is the work list for later scenes: a draw
   that depends on one of them is skipped or drawn incompletely, and the `skipped` count in the
-  `rsx` section says which. A warm 260 s run of the game lists three kinds, `state antialiasing 0x3`,
-  `texture layout render target alias of another size` (both are the documented anti-aliasing approximation,
-  see [Render targets](#render-targets)) and `state zpass report constant`, and skips no draw. Stencil, user
-  clip planes, surface resizing and vertex program condition codes no longer appear.
+  `rsx` section says which. A warm 260 s run of the game lists one kind, `state zpass report constant`, and
+  skips no draw. Stencil, user clip planes, surface resizing, vertex program condition codes and the
+  anti-aliased surfaces (`state antialiasing 0x3`, `texture layout render target alias of another size`) no
+  longer appear. The [resolution scale](#resolution-scale) adds kinds that appear only above scale 1 or at the
+  device's image size limit, and [anti-aliased surfaces](#anti-aliased-surfaces) add the coverage controls
+  the renderer does not model.
 
 ### Vertex programs
 
@@ -261,10 +265,108 @@ A texture at a known surface is read from the GPU image, not from guest memory:
   colour target is then created empty, a depth surface reads the placeholder).
 
 A texture and its surface of different sizes are sampled with the texture's normalized coordinates and counted as
-`texture layout render target alias of another size`. The game's anti-aliased surfaces (`state antialiasing 0x3`)
-are twice as wide in memory as their clip rectangle, so the texture that reads one is twice as wide as the
-surface; the renderer draws them without anti-aliasing, so the same normalized coordinates land on the same
-picture up to the filtering across the missing samples. The count marks that approximation, not a failure.
+`texture layout render target alias of another size`. The sizes compared are the texture's and the surface's memory
+layout (see [Anti-aliased surfaces](#anti-aliased-surfaces)), so a texture that reads an anti-aliased surface as
+the wide image it is in memory is not counted. What remains is an approximation (a texture that covers part of a
+surface or is another size); the game's frames do not count it.
+
+#### Resolution scale
+
+`--resolution-scale N` (`tox2_game` and `tox2_rsxreplay`; a whole number from 1 to 4, default 1) and the
+overlay's Settings control `Internal resolution scale` (see [Debug overlay](runtime.md#debug-overlay)) render
+every colour and depth target at N times its guest size. The frame builder and the capture format know nothing
+about it, so any capture replays at any scale.
+
+- **Sizes.** A target has a layout size (the guest memory layout: the clip rectangle times the samples per pixel
+  of an anti-aliased surface), a scale (image pixels per layout pixel) and an image size (layout times scale).
+  The cache identity is the memory location, the offset, the kind (colour or depth), the layout size and the
+  format; the scale is the renderer's choice and not part of it.
+- **Passes.** The vertex shader still divides by the guest clip size, so only the Vulkan viewport carries
+  pixels: viewport, scissor, clear rectangles and the render area are multiplied by the pass's pixel scale (the
+  target's scale times the samples per pixel). Clears, masked clears, scissors, render target textures,
+  feedback copies, depth read as A8R8G8B8, inherit copies and the present blit all follow, so the window shows
+  a sharper picture of the same frame. A texture that aliases a target is sampled with normalized coordinates
+  (or unnormalized ones divided by the texture's guest size), so an image of any size is read at the same
+  place; the A8R8G8B8 image made from a depth target has the depth image's size.
+- **Changing the scale.** The overlay's choice is a request that the overlay hands back to the renderer at
+  the next flip, and the renderer applies it between frames, right after that flip. Targets are not touched then. When a draw
+  or clear binds a target whose scale is no longer the current one, the renderer replaces it with a new image
+  at the current scale and fills it from the old one with a whole-image `vkCmdBlitImage`: NEAREST when
+  enlarging (replicating texels is exact), LINEAR when shrinking a colour target (an exact 2:1 is a box
+  filter), NEAREST for float and depth targets. A format without blit support keeps its initial contents and is
+  counted (`state rescale of a colour target unavailable`, `state rescale of a depth target unavailable`). The
+  new target starts without its A8R8G8B8 depth copy and sampled views, which are made again on demand. A target
+  that is only sampled or flipped keeps its old scale until it is bound again; every read path uses the
+  target's own image size, so a mix of scales is harmless.
+- **Size limit.** A target whose layout times the scale would exceed the device's largest image is made at the
+  largest scale that fits and counted (`state surface too large for the resolution scale`). A draw whose colour
+  and depth attachments then have different scales is skipped (unless it neither tests nor writes depth, in
+  which case it runs without the depth attachment) and a clear of such a pair is not recorded; both are counted
+  as `state attachments at different resolution scales`. Copying the overlap of an old surface into a resized
+  one needs the same scale; across two scales the copy is skipped and counted (`state surface resize across
+  resolution scales`).
+- **Readback and comparisons.** Dumps, `readDisplay` and the replay PNG are at image size, so a scaled run's
+  dump shows the scaled picture and the flip path needs no extra pass. `tox2_rsxreplay --compare` box-averages a
+  frame that is a whole multiple of the reference down to its size first, and the render tests do the same
+  (`downsampleBox`, `downsampleBoxBgra`). A flip of a buffer that was never a render target reads back black at
+  the flip size times the scale.
+- **Points and lines.** Point sprites follow the vertical pixel scale: the vertex shader multiplies
+  `gl_PointSize` by the `w` lane of the viewport scale uniform, which the renderer sets to that scale (the lane
+  is unused by the RSX). That needs the device feature `largePoints`, which the context enables when present;
+  without it `gl_PointSize` is clamped to 1 and a point draw that should be larger is counted as `state point
+  size unavailable`. This also makes a point of SET_POINT_SIZE above 1 that large at scale 1. Lines stay one
+  image pixel wide at any scale (SET_LINE_WIDTH is not decoded, and wide lines are not enabled), so they are
+  thinner than the guest's at scales above 1. No frame of the game draws points or lines.
+- **Not modelled.** Fragment inputs that depend on the pixel position (WPOS, derivatives) are not translated;
+  they would have to be divided by the pass's pixel scale, and so would a polygon offset slope. Nothing writes
+  surfaces back to guest memory.
+- **Cost.** Memory grows with N squared: a 1280x720 colour target is 3.7 MB at scale 1 and 59 MB at scale 4, and
+  there are many targets, depth copies and feedback images. An allocation failure stops the renderer.
+
+#### Anti-aliased surfaces
+
+The AA field (bits 12 to 15) of SET_SURFACE_FORMAT selects a sample layout while the clip rectangle stays in
+pixels. Mode 0 is one sample, mode 3 (RPCS3's `diagonal_centered_2`) stores two samples per pixel side by side,
+so the surface is 2W x H in memory, and modes 4 and 5 (`square_centered_4`, `square_rotated_4`) store 2x2
+samples, 2W x 2H. The pitch covers the expanded row, and colour and depth share the field. The hardware shades
+once per pixel and stores the colour in each covered sample; nothing resolves the surface for display, and the
+game resolves it itself by sampling it as a 2W x H texture with a linear filter. The exact sample positions are
+not known here (two on a diagonal for mode 3). SET_ANTI_ALIASING_CONTROL (method 0x1D7C) holds the multisample
+enable (bit 0), alpha to coverage (bit 4), alpha to one (bit 8) and the sample mask (bits 16 to 31); the decoder
+reads all of them. RPCS3 sizes such surfaces by `width * samples` when it matches textures to them
+(`Common/surface_store.h`); its "Auto" mode renders into a multisampled image and rewrites the samples into the
+PS3 layout when the surface is read as a texture (`VK/VKResolveHelper.*`), as far as these notes recall; the
+details were not checked.
+
+The game uses one pair: a 1280x720 A8R8G8B8 colour surface and its Z24S8 depth surface in mode 3 with the
+control word 0xFFFF0001 (multisampling on, no alpha to coverage, no alpha to one, full mask), cleared once per
+frame and drawn by the 3D passes. A later resolve pass samples the colour surface as a 2560x720 texture, and
+the depth surface is read as a 2560x720 A8R8G8B8 texture inside and after the pass.
+
+The renderer draws such a surface in its memory layout: a single-sample image with one image pixel per stored
+sample (2560x720 at scale 1), with a pixel scale of 2 by 1 times the resolution scale. The clip rectangle, the
+viewport and the scissor grow by the samples per pixel, and the depth surface gets the same layout. The game's
+resolve then reads every sample exactly where the RSX stores it, so near-vertical edges come out smoothed; the
+2x2 modes are drawn the same way (2x2 supersampling) but the game does not use them. Textures, inherit copies,
+feedback copies and the depth conversion need nothing special because the memory layout is the image layout,
+and an anti-aliased binding of a W x H clip and a plain binding of 2W x H at the same address are the same
+image. Other values of the AA field are counted (`state antialiasing 0x<n>`) and drawn with one sample per
+pixel.
+
+Differences from the hardware:
+
+- Shading runs once per sample instead of once per pixel, so texture detail is slightly sharper after the
+  game's resolve (interior texels are sampled at two positions and the mip level comes from per-sample
+  derivatives), with faint vertical streaks in textured areas.
+- The two samples sit at (0.25, 0.5) and (0.75, 0.5) of the pixel instead of on a diagonal, so the smoothing is
+  horizontal only.
+- A draw with the multisample enable bit clear is supersampled too (the game has none).
+- Alpha to coverage, alpha to one and a sample mask other than 0xFFFF are decoded but do not change the
+  rendering. They are counted when a draw uses them on an anti-aliased surface (`state alpha to coverage`,
+  `state alpha to one`, `state sample mask 0x<mask>`); the game writes none of them.
+
+Real 2-sample multisampling with a pass that writes the samples into the wide layout before the surface is read
+is planned.
 
 #### Stencil
 
@@ -344,8 +446,9 @@ Differences from RPCS3:
   typeless transfer; here other depth formats are counted, and the other two cases cannot arise (see above).
 - RPCS3 samples guest memory at each write and drops an inheritance that guest writes made stale; a guest write
   between two bindings is not detected here.
-- A surface first drawn at its clip size and then bound at twice the width (the anti-aliased layouts) gets an
-  unscaled top-left copy, part of the anti-aliasing approximation described above.
+- The layout overlap is what is copied, so the game's anti-aliased depth surface (2560x720 in memory) that is
+  later bound plain at 1280x720 with the same pitch keeps its left half of each row. A copy needs the two
+  targets to have the same [resolution scale](#resolution-scale).
 
 ### Textures
 
@@ -488,7 +591,7 @@ no renderer and no window. Captures are derived from the game, so they are git-i
 
 ```sh
 tox2_rsxreplay CAPTURE [--out DIR] [--compare PNG [--max-diff N] [--max-mean X] [--max-differing P]]
-                      [--no-validation] [--shader-cache DIR]
+                      [--resolution-scale N] [--no-validation] [--shader-cache DIR]
 ```
 
 | Option | Meaning |
@@ -499,6 +602,7 @@ tox2_rsxreplay CAPTURE [--out DIR] [--compare PNG [--max-diff N] [--max-mean X] 
 | `--max-diff N` | With `--compare`: fail when the largest per-channel difference exceeds `N`. |
 | `--max-mean X` | With `--compare`: fail when the mean per-channel difference exceeds `X`. |
 | `--max-differing P` | With `--compare`: fail when more than `P` percent of the pixels differ (by more than 2 in any channel). |
+| `--resolution-scale N` | Render every target at `N` times its guest size (1 to 4, default 1; see [Resolution scale](#resolution-scale)). The PNG is `N` times the guest size, and the summary line ends with `resolution scale N` when `N` is above 1. |
 | `--no-validation` | Do not enable the Vulkan validation layer, which is on by default. |
 | `--shader-cache DIR` | SPIR-V cache directory. Without it nothing is cached. |
 
