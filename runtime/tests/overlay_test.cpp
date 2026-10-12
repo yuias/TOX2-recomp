@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <string>
 
 #ifndef NOMINMAX
@@ -250,6 +251,144 @@ void testPanels() {
     // No providers at all: every section falls back to its placeholder.
     tox2::OverlayState empty_state;
     CHECK(drawFrames(empty_state, tox2::OverlaySources{}));
+}
+
+// Drives the real Settings panel in a private ImGui context with simulated mouse input. An item is found by
+// moving the pointer down the window until ImGui reports it hovered and enabled.
+class SettingsProbe {
+public:
+    SettingsProbe(tox2::OverlayState& state, const tox2::OverlaySources& sources) : state_(state), sources_(sources) {
+        context_ = ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO();
+        io.IniFilename = nullptr;
+        io.LogFilename = nullptr;
+        io.Fonts->Build();
+        io.DisplaySize = ImVec2(1280.0f, 720.0f);
+        frame();
+        frame();
+        window_ = ImGui::FindWindowByName("tox2");
+        CHECK(window_ != nullptr);
+        if (window_ == nullptr) return;
+        const std::optional<ImVec2> header = findHovered(window_->GetID("Settings"), 60.0f, 10.0f, 720.0f);
+        CHECK(header.has_value());
+        if (header) click(*header);
+        // The window sized itself to the closed sections; give the opened one room.
+        ImGui::SetWindowSize(window_, ImVec2(440.0f, 700.0f));
+        frame();
+        frame();
+    }
+
+    ~SettingsProbe() { ImGui::DestroyContext(context_); }
+
+    SettingsProbe(const SettingsProbe&) = delete;
+    SettingsProbe& operator=(const SettingsProbe&) = delete;
+
+    void frame() {
+        ImGui::GetIO().DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        tox2::drawOverlayWindow(state_, sources_);
+        ImGui::Render();
+    }
+
+    // The pointer position over the item with this id, or nothing.
+    std::optional<ImVec2> findHovered(ImGuiID id, float x, float y_begin, float y_end) {
+        for (float y = y_begin; y < y_end; y += 2.0f) {
+            ImGui::GetIO().AddMousePosEvent(x, y);
+            frame();
+            frame();
+            const ImGuiContext& g = *ImGui::GetCurrentContext();
+            if (g.HoveredId == id && !g.HoveredIdIsDisabled) return ImVec2(x, y);
+        }
+        return std::nullopt;
+    }
+
+    void click(ImVec2 at) {
+        ImGuiIO& io = ImGui::GetIO();
+        io.AddMousePosEvent(at.x, at.y);
+        frame();
+        io.AddMouseButtonEvent(0, true);
+        frame();
+        frame();
+        io.AddMouseButtonEvent(0, false);
+        frame();
+        frame();
+    }
+
+    ImGuiWindow* window() const { return window_; }
+
+private:
+    tox2::OverlayState& state_;
+    const tox2::OverlaySources& sources_;
+    ImGuiContext* context_ = nullptr;
+    ImGuiWindow* window_ = nullptr;
+};
+
+void testResolutionScalePanel() {
+    const tox2::OverlaySources sources = makeFakeSources();
+    constexpr float kProbeX = 60.0f;
+    constexpr float kWindowBottom = 720.0f;
+
+    {
+        // No scale reported: the combo is disabled and nothing can be requested.
+        tox2::OverlayState state;
+        SettingsProbe probe(state, sources);
+        if (probe.window() != nullptr) {
+            const ImGuiID id = probe.window()->GetID("Internal resolution scale");
+            CHECK(!probe.findHovered(id, kProbeX, 10.0f, kWindowBottom));
+        }
+        CHECK(state.resolution_scale_request == 0);
+    }
+
+    {
+        // The combo is enabled, so it sits outside the group of unimplemented settings.
+        tox2::OverlayState state;
+        state.resolution_scale = 2;
+        SettingsProbe probe(state, sources);
+        if (probe.window() == nullptr) return;
+        const ImGuiID id = probe.window()->GetID("Internal resolution scale");
+        const std::optional<ImVec2> combo = probe.findHovered(id, kProbeX, 10.0f, kWindowBottom);
+        CHECK(combo.has_value());
+        if (!combo) return;
+        CHECK(state.resolution_scale_request == 0);
+
+        probe.click(*combo);
+        ImGuiContext& g = *ImGui::GetCurrentContext();
+        CHECK(g.OpenPopupStack.Size == 1);
+        if (g.OpenPopupStack.Size != 1 || g.OpenPopupStack[0].Window == nullptr) return;
+        ImGuiWindow* popup = g.OpenPopupStack[0].Window;
+        const ImGuiID entry = popup->GetID("3x");
+        const std::optional<ImVec2> three =
+                probe.findHovered(entry, popup->Pos.x + 10.0f, popup->Pos.y, popup->Pos.y + popup->Size.y);
+        CHECK(three.has_value());
+        if (!three) return;
+        probe.click(*three);
+        CHECK(state.resolution_scale_request == 3);
+        // The request is taken once; the renderer reports the scale it applied on a later flip.
+        const tox2::PresentOverlayRequests requests = tox2::takePresentRequests(state);
+        CHECK(requests.resolution_scale == 3);
+        CHECK(state.resolution_scale_request == 0);
+    }
+}
+
+void testPresentRequests() {
+    tox2::OverlayState state;
+    state.dump_requested = true;
+    state.resolution_scale_request = 3;
+    tox2::PresentOverlayRequests requests = tox2::takePresentRequests(state);
+    CHECK(requests.dump_display);
+    CHECK(requests.resolution_scale == 3);
+    CHECK(!state.dump_requested);
+    CHECK(state.resolution_scale_request == 0);
+
+    requests = tox2::takePresentRequests(state);
+    CHECK(!requests.dump_display);
+    CHECK(requests.resolution_scale == 0);
+
+    // The reported scale is a status, not a request, so taking requests leaves it alone.
+    state.resolution_scale = 2;
+    requests = tox2::takePresentRequests(state);
+    CHECK(requests.resolution_scale == 0);
+    CHECK(state.resolution_scale == 2);
 }
 
 void testRuntimeSources() {
@@ -638,6 +777,8 @@ int main() {
     testDrawDeltas();
     testRefresh();
     testPanels();
+    testPresentRequests();
+    testResolutionScalePanel();
     testRuntimeSources();
 
     tox2::VkContextOptions options;

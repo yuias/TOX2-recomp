@@ -105,4 +105,13 @@ void OverlayState::refresh(const OverlaySources& sources, FrameStatsHistory::Clo
     }
 }
 
+PresentOverlayRequests takePresentRequests(OverlayState& state) {
+    PresentOverlayRequests requests;
+    requests.dump_display = state.dump_requested;
+    requests.resolution_scale = state.resolution_scale_request;
+    state.dump_requested = false;
+    state.resolution_scale_request = 0;
+    return requests;
+}
+
 }  // namespace tox2

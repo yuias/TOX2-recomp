@@ -97,11 +97,8 @@ PresentOverlayRequests DebugOverlay::onFlip(const PresentFrameInfo& info) {
     if (info.stats != nullptr) state_.frames.onFlip(*info.stats, FrameStatsHistory::Clock::now());
     state_.dumps = info.dumps;
     state_.last_dump = info.last_requested_dump;
-
-    PresentOverlayRequests requests;
-    requests.dump_display = state_.dump_requested;
-    state_.dump_requested = false;
-    return requests;
+    state_.resolution_scale = info.resolution_scale;
+    return takePresentRequests(state_);
 }
 
 void DebugOverlay::fail(const char* what) {

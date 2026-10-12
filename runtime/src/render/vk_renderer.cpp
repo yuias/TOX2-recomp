@@ -1828,9 +1828,12 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     dump_this_flip_ = dump_requested_;
     dump_requested_ = false;
     // Asked before the readback decision so a request made for this very flip is honoured.
-    if (presenter_ != nullptr && overlay_ != nullptr &&
-        overlay_->onFlip(PresentFrameInfo{&stats_, dumper_->counts(), last_requested_dump_}).dump_display) {
-        dump_this_flip_ = true;
+    std::uint32_t requested_scale = 0;
+    if (presenter_ != nullptr && overlay_ != nullptr) {
+        const PresentOverlayRequests requests =
+                overlay_->onFlip(PresentFrameInfo{&stats_, dumper_->counts(), last_requested_dump_, resolution_scale_});
+        if (requests.dump_display) dump_this_flip_ = true;
+        requested_scale = requests.resolution_scale;
     }
     const bool read_back = options_.readback_all || dumpDue() || dump_this_flip_;
     display_copied_ = false;
@@ -1871,6 +1874,9 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     if (!valid()) return;
     if (presenter_ != nullptr) recordPresentBlit(slot, display_black_ ? nullptr : it->second.get());
     if (submitFrame()) has_flip_ = true;
+    // Applied only now: this flip, its readback and the present blit were all recorded at the old scale, and
+    // targets rescale lazily when the next frame binds them.
+    if (requested_scale != 0 && valid()) setResolutionScale(requested_scale);
 }
 
 // Acquires a swapchain image and records the copy of the display buffer into it (a black frame when

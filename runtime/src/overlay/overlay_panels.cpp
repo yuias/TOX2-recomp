@@ -10,6 +10,7 @@
 #include "audio/audio_engine.h"
 #include "audio/audio_output.h"
 #include "imgui.h"
+#include "render/render_scale.h"
 
 namespace tox2 {
 
@@ -62,6 +63,26 @@ void drawStats(const OverlayState& state) {
     ImGui::Text("output fill %.0f frames (target %llu)", audio.mean_fill_frames, asUll(kFillTargetFrames));
 }
 
+// The renderer applies the choice after the flip that reports it, so the combo shows the pending request until
+// the next flip reports the new scale back.
+void drawResolutionScale(OverlayState& state) {
+    // 0 means the renderer has not reported a scale (no renderer behind the overlay).
+    ImGui::BeginDisabled(state.resolution_scale == 0);
+    const std::uint32_t shown =
+            state.resolution_scale_request != 0 ? state.resolution_scale_request : state.resolution_scale;
+    char preview[16] = "n/a";
+    if (shown != 0) std::snprintf(preview, sizeof(preview), "%ux", shown);
+    if (ImGui::BeginCombo("Internal resolution scale", preview)) {
+        for (std::uint32_t scale = 1; scale <= kMaxResolutionScale; ++scale) {
+            char label[16];
+            std::snprintf(label, sizeof(label), "%ux", scale);
+            if (ImGui::Selectable(label, scale == shown) && scale != shown) state.resolution_scale_request = scale;
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+}
+
 void drawSettings(OverlayState& state, const OverlaySources& sources) {
     ImGui::BeginDisabled(!sources.set_flip_limit);
     bool flip_limit = state.flip_limit;
@@ -85,14 +106,14 @@ void drawSettings(OverlayState& state, const OverlaySources& sources) {
     }
     ImGui::EndDisabled();
 
+    drawResolutionScale(state);
+
     // Not wired to anything yet; shown so the layout of the finished panel is visible.
     ImGui::SeparatorText("(not implemented)");
     ImGui::BeginDisabled();
     int anisotropy = 1;
-    float resolution_scale = 1.0f;
     float volume = 1.0f;
     ImGui::SliderInt("Anisotropic filtering", &anisotropy, 1, 16, "%dx");
-    ImGui::SliderFloat("Internal resolution scale", &resolution_scale, 0.5f, 4.0f, "%.2fx");
     ImGui::SliderFloat("Volume", &volume, 0.0f, 1.0f, "%.2f");
     ImGui::EndDisabled();
 }

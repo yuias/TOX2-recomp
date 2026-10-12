@@ -16,6 +16,7 @@
 
 #include "core/log.h"
 #include "render/frame_dump.h"
+#include "render/present_overlay.h"
 #include "render/vk_renderer.h"
 #include "rsx/rsx_thread.h"
 
@@ -101,7 +102,9 @@ struct OverlayState {
     LogLevel log_level = LogLevel::Info;
     DumpCounts dumps;
     std::filesystem::path last_dump;
-    bool dump_requested = false;  // set by the panel, taken by DebugOverlay::onFlip
+    bool dump_requested = false;                 // set by the panel, taken by DebugOverlay::onFlip
+    std::uint32_t resolution_scale = 0;          // last value the renderer reported; 0 = unknown
+    std::uint32_t resolution_scale_request = 0;  // set by the panel, taken by DebugOverlay::onFlip; 0 = none
 
     // Calls the providers: audio at most every 250 ms, unimplemented every 500 ms, the rest every call.
     // The audio and unimplemented snapshots take locks or copy maps, which a per-frame call would not need.
@@ -111,5 +114,8 @@ private:
     std::optional<FrameStatsHistory::Clock::time_point> audio_time_;
     std::optional<FrameStatsHistory::Clock::time_point> unimplemented_time_;
 };
+
+// Moves the requests the panels made since the last flip into the reply for the renderer and clears them.
+PresentOverlayRequests takePresentRequests(OverlayState& state);
 
 }  // namespace tox2
