@@ -57,6 +57,7 @@ struct RendererStats {
     std::uint64_t feedback_copies = 0;    // render target copies made for draws that sample their own target
     std::uint64_t depth_conversions = 0;  // depth surfaces rewritten as A8R8G8B8 texels for a draw that reads them
     std::uint64_t surface_inherits = 0;   // copies of an old target's contents into a resized one
+    std::uint64_t layout_copies = 0;      // multisampled targets copied into their memory layout for a read
 };
 
 // Single-threaded: execute, readDisplay and stats are called from one thread. The renderer never
@@ -151,19 +152,29 @@ private:
     void inheritContents(const std::shared_ptr<RenderTarget>& previous, RenderTarget& target);
     void touch(const std::shared_ptr<RenderTarget>& target);
     void transition(RenderTarget& target, VkImageLayout layout);
+    void transitionImage(VkImage image, VkImageAspectFlags aspect, VkImageLayout& current, VkImageLayout layout);
+    void transitionSidecar(RenderTarget& target, VkImageLayout layout);
+
+    // Anti-aliased surfaces in Msaa mode (see the multisampled sidecar of RenderTarget).
+    bool multisampledPass(const RsxSurface& surface) const;
+    bool ensureMultisample(RenderTarget& target);
+    bool syncLayout(RenderTarget& target);
+    bool beginLayoutPass(RenderTarget& target, bool writes, bool overwrites_all);
+    void beginSidecarPass(RenderTarget& target, bool writes, bool overwrites_all);
 
     // Host-visible memory of the current frame slot for vertex, index and uniform data, valid until the
     // slot's fence has signaled. False (and fail()) when the allocation fails.
     bool allocUpload(std::size_t size, UploadRef& out);
     bool ensurePlaceholder();
-    bool prepareTextures(const RsxDraw& draw, const DrawShaders& shaders, RenderTarget& color,
+    bool prepareTextures(const RsxDraw& draw, const DrawShaders& shaders, RenderTarget& color, bool multisampled,
                          VkDescriptorImageInfo (&infos)[kFpTextureUnitCount], float (&scales)[kFpTextureUnitCount][4]);
     bool vertexFormatSupported(VkFormat format);
     bool blendSupported(VkFormat format);
     std::shared_ptr<TextureImage> depthAsArgb(RenderTarget& depth);
 
     void recordClear(const RsxClear& clear);
-    void recordMaskedColorClear(const RsxClear& clear, RenderTarget& color, std::uint32_t color_bits);
+    void recordMaskedColorClear(const RsxClear& clear, RenderTarget& color, std::uint32_t color_bits,
+                                bool multisampled);
     void recordDraw(const RsxDraw& draw);
     void recordFlip(const RsxFlip& flip);
     void recordPresentBlit(FrameSlot& slot, RenderTarget* source);

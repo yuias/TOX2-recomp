@@ -168,6 +168,34 @@ struct RsxRenderer::RenderTarget {
     std::uint64_t write_serial = 0;
     std::uint64_t argb_serial = ~0ull;
 
+    // The 2-sample image an anti-aliased pass (mode 3, AaMode::Msaa) draws into. The single-sample image above stays
+    // the guest memory layout (two samples of a pixel side by side) that every read uses; the sidecar is copied into
+    // it by syncLayout when something reads it. Same format, at the clip size times the scale.
+    struct MultisampleImage {
+        VkContext* context = nullptr;
+        VkImage image = VK_NULL_HANDLE;
+        VmaAllocation allocation = nullptr;
+        VkImageView view = VK_NULL_HANDLE;  // attachment view; also the sampler2DMS view of a colour target
+        // Depth targets only: single-aspect views for sampler2DMS / usampler2DMS (depthAsArgb).
+        VkImageView depth_view = VK_NULL_HANDLE;
+        VkImageView stencil_view = VK_NULL_HANDLE;
+        VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        ~MultisampleImage() {
+            if (depth_view != VK_NULL_HANDLE) vkDestroyImageView(context->device(), depth_view, nullptr);
+            if (stencil_view != VK_NULL_HANDLE) vkDestroyImageView(context->device(), stencil_view, nullptr);
+            if (view != VK_NULL_HANDLE) vkDestroyImageView(context->device(), view, nullptr);
+            if (image != VK_NULL_HANDLE) vmaDestroyImage(context->allocator(), image, allocation);
+        }
+    };
+    std::unique_ptr<MultisampleImage> msaa;
+    bool layout_stale = false;    // msaa holds writes the layout image lacks
+    bool msaa_stale = false;      // the layout image holds writes msaa lacks
+    bool layout_written = false;  // the layout image was written after its initial clear
+
+    // Extent of the image a pass over this target draws into.
+    std::uint32_t passWidth(bool multisampled) const { return multisampled ? layout_width / 2 * scale : image_width; }
+    std::uint32_t passHeight(bool multisampled) const { return multisampled ? layout_height * scale : image_height; }
+
     RenderTarget() = default;
     RenderTarget(const RenderTarget&) = delete;
     RenderTarget& operator=(const RenderTarget&) = delete;
@@ -386,25 +414,34 @@ void RsxRenderer::touch(const std::shared_ptr<RenderTarget>& target) {
 // Conservative full barrier, also recorded before every draw and clear that begins a rendering instance
 // (even when the layout does not change, so successive passes over one target are ordered). Draws are
 // few enough per frame that tighter stages are not needed yet.
-void RsxRenderer::transition(RenderTarget& target, VkImageLayout layout) {
+void RsxRenderer::transitionImage(VkImage image, VkImageAspectFlags aspect, VkImageLayout& current,
+                                  VkImageLayout layout) {
     VkImageMemoryBarrier2 barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
     barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     barrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
-    barrier.oldLayout = target.layout;
+    barrier.oldLayout = current;
     barrier.newLayout = layout;
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = target.image;
-    barrier.subresourceRange = {target.aspect, 0, 1, 0, 1};
+    barrier.image = image;
+    barrier.subresourceRange = {aspect, 0, 1, 0, 1};
     VkDependencyInfo dependency{};
     dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dependency.imageMemoryBarrierCount = 1;
     dependency.pImageMemoryBarriers = &barrier;
     vkCmdPipelineBarrier2(slots_[current_slot_]->cmd, &dependency);
-    target.layout = layout;
+    current = layout;
+}
+
+void RsxRenderer::transition(RenderTarget& target, VkImageLayout layout) {
+    transitionImage(target.image, target.aspect, target.layout, layout);
+}
+
+void RsxRenderer::transitionSidecar(RenderTarget& target, VkImageLayout layout) {
+    transitionImage(target.msaa->image, target.aspect, target.msaa->layout, layout);
 }
 
 namespace {
@@ -419,8 +456,10 @@ std::uint32_t layoutHeight(const RsxSurface& surface) {
     return surface.height * std::max<std::uint32_t>(surface.samples_y, 1);
 }
 
-// Image pixels per clip pixel of a pass over `surface` drawn into a target of the given scale.
-PixelScale pixelScaleOf(const RsxSurface& surface, std::uint32_t scale) {
+// Image pixels per clip pixel of a pass over `surface` drawn into a target of the given scale. A multisampled pass
+// draws into the 2-sample image at the clip size, one pixel per clip pixel.
+PixelScale pixelScaleOf(const RsxSurface& surface, std::uint32_t scale, bool multisampled) {
+    if (multisampled) return {scale, scale};
     return {scale * std::max<std::uint32_t>(surface.samples_x, 1),
             scale * std::max<std::uint32_t>(surface.samples_y, 1)};
 }
@@ -530,6 +569,184 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth,
     return target;
 }
 
+// The anti-aliased surface of mode 3 (two samples side by side) is drawn into a 2-sample image in Msaa mode; modes 4
+// and 5 (2x2 layouts) stay on the single-sample layout image.
+bool RsxRenderer::multisampledPass(const RsxSurface& surface) const {
+    return aa_mode_ == AaMode::Msaa && surface.samples_x == 2 && surface.samples_y == 1;
+}
+
+// Creates the 2-sample sidecar of a mode-3 target on first use, cleared to the values createTarget gives a new
+// target. Records outside any rendering instance.
+bool RsxRenderer::ensureMultisample(RenderTarget& target) {
+    if (target.msaa) return true;
+    auto sidecar = std::make_unique<RenderTarget::MultisampleImage>();
+    sidecar->context = &context_;
+
+    VkImageCreateInfo image_info{};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = target.format;
+    image_info.extent = {target.passWidth(true), target.passHeight(true), 1};
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_2_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage =
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+            (target.depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo alloc_info{};
+    alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    alloc_info.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+    if (vmaCreateImage(context_.allocator(), &image_info, &alloc_info, &sidecar->image, &sidecar->allocation,
+                       nullptr) != VK_SUCCESS) {
+        sidecar->image = VK_NULL_HANDLE;
+        fail("vmaCreateImage failed for a multisampled render target");
+        return false;
+    }
+    VkImageViewCreateInfo view_info{};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = sidecar->image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = target.format;
+    view_info.subresourceRange = {target.aspect, 0, 1, 0, 1};
+    if (vkCreateImageView(context_.device(), &view_info, nullptr, &sidecar->view) != VK_SUCCESS) {
+        sidecar->view = VK_NULL_HANDLE;
+        fail("vkCreateImageView failed for a multisampled render target");
+        return false;
+    }
+    if (target.depth && formatHasStencil(target.format)) {
+        const auto aspectView = [&](VkImageAspectFlags aspect, VkImageView& out) {
+            view_info.subresourceRange = {aspect, 0, 1, 0, 1};
+            if (vkCreateImageView(context_.device(), &view_info, nullptr, &out) != VK_SUCCESS) {
+                out = VK_NULL_HANDLE;
+                fail("vkCreateImageView failed for a multisampled depth view");
+                return false;
+            }
+            return true;
+        };
+        if (!aspectView(VK_IMAGE_ASPECT_DEPTH_BIT, sidecar->depth_view) ||
+            !aspectView(VK_IMAGE_ASPECT_STENCIL_BIT, sidecar->stencil_view)) {
+            return false;
+        }
+    }
+    target.msaa = std::move(sidecar);
+    // The layout image may already hold guest data the sidecar does not; a pass that does not replace all of it is
+    // counted (beginSidecarPass).
+    target.msaa_stale = target.layout_written;
+
+    transitionSidecar(target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
+    const VkImageSubresourceRange range = {target.aspect, 0, 1, 0, 1};
+    if (target.depth) {
+        VkClearDepthStencilValue value{};
+        value.depth = 1.0f;
+        value.stencil = 0xFF;
+        vkCmdClearDepthStencilImage(cmd, target.msaa->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value, 1, &range);
+    } else {
+        VkClearColorValue value{};
+        value.float32[3] = 1.0f;
+        vkCmdClearColorImage(cmd, target.msaa->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value, 1, &range);
+    }
+    return true;
+}
+
+// Writes the layout image of a target from its 2-sample sidecar when the sidecar holds newer data: layout texel
+// (x, y) takes sample kLayoutColumnSample[x & 1] of pixel (x >> 1, y) (render_scale.h layoutSource). Records outside
+// any rendering instance. False only on a Vulkan failure. The depth copy is not available yet: it is counted and
+// the layout image stays as it is.
+bool RsxRenderer::syncLayout(RenderTarget& target) {
+    if (!target.msaa || !target.layout_stale) return true;
+    if (target.depth) {
+        rsxNoteUnimplemented("state", "depth layout copy unavailable");
+        return true;
+    }
+    if (!ensurePlaceholder() || !valid()) return false;
+    const VkPipeline pipeline = pipelines_->layoutColorPipeline(target.format);
+    if (pipeline == VK_NULL_HANDLE) {
+        fail(pipelines_->error());
+        return false;
+    }
+
+    const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
+    transitionSidecar(target, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    transition(target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+    VkRenderingAttachmentInfo attachment{};
+    attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    attachment.imageView = target.view;
+    attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;  // every texel is written
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo rendering{};
+    rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    rendering.renderArea = {{0, 0}, {target.image_width, target.image_height}};
+    rendering.layerCount = 1;
+    rendering.colorAttachmentCount = 1;
+    rendering.pColorAttachments = &attachment;
+
+    const VkViewport viewport = {
+            0.0f, 0.0f, static_cast<float>(target.image_width), static_cast<float>(target.image_height), 0.0f, 1.0f};
+    const VkRect2D scissor = {{0, 0}, {target.image_width, target.image_height}};
+    const VkDescriptorImageInfo info = {placeholder_sampler_, target.msaa->view,
+                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &info;
+    LayoutPassConstants constants{};
+    constants.column_sample[0] = static_cast<std::int32_t>(kLayoutColumnSample[0]);
+    constants.column_sample[1] = static_cast<std::int32_t>(kLayoutColumnSample[1]);
+    constants.stencil_bit = -1;
+
+    vkCmdBeginRendering(cmd, &rendering);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_->layoutPassLayout(), 0, 1, &write);
+    vkCmdPushConstants(cmd, pipelines_->layoutPassLayout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(constants),
+                       &constants);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+
+    target.layout_stale = false;
+    target.layout_written = true;
+    stats_.layout_copies++;
+    return true;
+}
+
+// A single-sample pass is about to use the layout image of `target`: brings it up to date with the sidecar first
+// (unless the pass replaces all of it), and records that the sidecar is behind when the pass writes.
+bool RsxRenderer::beginLayoutPass(RenderTarget& target, bool writes, bool overwrites_all) {
+    if (target.msaa && target.layout_stale) {
+        if (overwrites_all) {
+            target.layout_stale = false;
+        } else if (!syncLayout(target)) {
+            return false;
+        }
+    }
+    if (writes) {
+        target.layout_written = true;
+        if (target.msaa) target.msaa_stale = true;
+    }
+    return true;
+}
+
+// A multisampled pass is about to use the sidecar of `target`. The layout image is never copied back into the
+// sidecar: when it holds newer data than the sidecar and the pass does not replace all of it, the pass draws over
+// the older sidecar contents and is counted.
+void RsxRenderer::beginSidecarPass(RenderTarget& target, bool writes, bool overwrites_all) {
+    if (overwrites_all) {
+        target.msaa_stale = false;
+    } else if (target.msaa_stale) {
+        rsxNoteUnimplemented("state", "anti-aliased pass over layout data");
+        target.msaa_stale = false;
+    }
+    if (writes) target.layout_stale = true;
+}
+
 namespace {
 
 // Formats whose texels can be copied bit for bit: equal formats, and the two 32-bit colour formats (the
@@ -606,6 +823,7 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::rescaleTarget(const std:
     const bool filter = target->scale < previous->scale && previous->format == VK_FORMAT_B8G8R8A8_UNORM &&
                         (format_props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
     touch(previous);
+    if (!syncLayout(*previous)) return nullptr;
     transition(*previous, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     transition(*target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);  // orders the blit after the initial clear
     VkImageBlit region{};
@@ -617,6 +835,7 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::rescaleTarget(const std:
                             static_cast<std::int32_t>(target->image_height), 1};
     vkCmdBlitImage(slots_[current_slot_]->cmd, previous->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target->image,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+    target->layout_written = true;
     return target;
 }
 
@@ -644,6 +863,7 @@ void RsxRenderer::inheritContents(const std::shared_ptr<RenderTarget>& previous,
     }
 
     touch(previous);  // it may not have been used in this frame slot yet, and the copy reads it until the fence
+    if (!syncLayout(*previous)) return;
     transition(*previous, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     transition(target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);  // orders the copy after the initial clear
     VkImageCopy region{};
@@ -654,6 +874,7 @@ void RsxRenderer::inheritContents(const std::shared_ptr<RenderTarget>& previous,
                      std::min(previous->layout_height, target.layout_height) * target.scale, 1};
     vkCmdCopyImage(slots_[current_slot_]->cmd, previous->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.image,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    target.layout_written = true;
     stats_.surface_inherits++;
 }
 
@@ -844,11 +1065,16 @@ bool RsxRenderer::blendSupported(VkFormat format) {
 // same draw is not read while it is written. The pass runs outside any rendering instance. The image is kept
 // with the target and made again only after the depth was cleared or drawn to. A surface without stencil (Z16)
 // has no A8R8G8B8 form. Returns null, with a counted reason, when there is no image to sample.
+//
+// When the 2-sample depth holds writes the layout image lacks, the words are built straight from it (layoutSource
+// picks the sample of every layout texel), so reads of an anti-aliased surface never wait for a layout copy of the
+// stencil.
 std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
     if (!formatHasStencil(depth.format) || !depth.sampled) {
         rsxNoteUnimplemented("texture format", "A8R8G8B8 read of a surface without Z24S8");
         return nullptr;
     }
+    const bool from_sidecar = depth.msaa && depth.layout_stale;
     if (depth.argb && depth.argb_serial == depth.write_serial) return depth.argb;
 
     if (!depth.argb) {
@@ -860,7 +1086,7 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
         if (!depth.argb) return nullptr;
     }
     const auto aspectView = [&](VkImageAspectFlags aspect, VkImageView& view) {
-        if (view != VK_NULL_HANDLE) return true;
+        if (from_sidecar || view != VK_NULL_HANDLE) return true;
         VkImageViewCreateInfo view_info{};
         view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         view_info.image = depth.image;
@@ -883,14 +1109,18 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
         fail(textures_->error());
         return nullptr;
     }
-    const VkPipeline pipeline = pipelines_->depthConvertPipeline(false);
+    const VkPipeline pipeline = pipelines_->depthConvertPipeline(from_sidecar);
     if (pipeline == VK_NULL_HANDLE || target_view == VK_NULL_HANDLE) {
         if (!pipelines_->valid()) fail(pipelines_->error());
         return nullptr;
     }
 
     const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
-    transition(depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    if (from_sidecar) {
+        transitionSidecar(depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    } else {
+        transition(depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    }
     const auto colorBarrier = [&](VkImageLayout from, VkImageLayout to, VkPipelineStageFlags2 dst_stage,
                                   VkAccessFlags2 dst_access) {
         VkImageMemoryBarrier2 barrier{};
@@ -931,9 +1161,15 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
     const VkViewport viewport = {
             0.0f, 0.0f, static_cast<float>(depth.image_width), static_cast<float>(depth.image_height), 0.0f, 1.0f};
     const VkRect2D scissor = {{0, 0}, {depth.image_width, depth.image_height}};
+    const VkImageView depth_view = from_sidecar ? depth.msaa->depth_view : depth.depth_view;
+    const VkImageView stencil_view = from_sidecar ? depth.msaa->stencil_view : depth.stencil_view;
     const VkDescriptorImageInfo infos[2] = {
-            {placeholder_sampler_, depth.depth_view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL},
-            {placeholder_sampler_, depth.stencil_view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL}};
+            {placeholder_sampler_, depth_view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL},
+            {placeholder_sampler_, stencil_view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL}};
+    LayoutPassConstants constants{};
+    constants.column_sample[0] = static_cast<std::int32_t>(kLayoutColumnSample[0]);
+    constants.column_sample[1] = static_cast<std::int32_t>(kLayoutColumnSample[1]);
+    constants.stencil_bit = -1;
     VkWriteDescriptorSet writes[2]{};
     for (std::uint32_t i = 0; i < 2; i++) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -948,6 +1184,8 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
     vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_->layoutPassLayout(), 0, 2, writes);
+    vkCmdPushConstants(cmd, pipelines_->layoutPassLayout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(constants),
+                       &constants);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
     colorBarrier(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -971,7 +1209,7 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
 // barriers (`VK/VKDraw.cpp` `validate_image_layout_for_read_access`); the extension is not enabled here
 // and GENERAL leaves reads of pixels still in flight undefined, so the copy is used.
 bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shaders, RenderTarget& color,
-                                  VkDescriptorImageInfo (&infos)[kFpTextureUnitCount],
+                                  bool multisampled, VkDescriptorImageInfo (&infos)[kFpTextureUnitCount],
                                   float (&scales)[kFpTextureUnitCount][4]) {
     FrameSlot& slot = *slots_[current_slot_];
     const VkCommandBuffer cmd = slot.cmd;
@@ -1088,7 +1326,9 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
             }
             sampled_format = wanted;
 
-            if (target.get() == &color) {
+            // A multisampled draw renders into the sidecar, so it can sample the layout image of its own target
+            // directly once that is up to date.
+            if (target.get() == &color && !multisampled) {
                 // The copy is a B8G8R8A8 image; there is none for a float target.
                 if (wanted != VK_FORMAT_B8G8R8A8_UNORM) {
                     rsxNoteUnimplemented("texture", "placeholder: feedback copy unavailable");
@@ -1111,6 +1351,7 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                 }
                 view = textures_->view(*feedback_copy, texture->remap);
             } else {
+                if (!syncLayout(*target)) return false;
                 transition(*target, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 const std::uint32_t remap = texture->remap & 0xFFFF;
                 // A float target is read as (x, x, x, x), so its own view (red only) is not the identity one.
@@ -1269,14 +1510,16 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     // The render area is the smaller of the attachments; the scissor is clipped to it, and an empty
     // rectangle draws nothing (counted in `draws`, not skipped).
     const RsxRasterState& raster = draw.raster;
-    std::uint32_t area_width = color->image_width, area_height = color->image_height;
+    const bool multisampled = multisampledPass(draw.surfaces.color);
+    std::uint32_t area_width = color->passWidth(multisampled), area_height = color->passHeight(multisampled);
     if (depth) {
-        area_width = std::min(area_width, depth->image_width);
-        area_height = std::min(area_height, depth->image_height);
+        area_width = std::min(area_width, depth->passWidth(multisampled));
+        area_height = std::min(area_height, depth->passHeight(multisampled));
     }
-    // An anti-aliased surface is drawn at its sample layout: one image pixel per sample, so the clip rectangle,
-    // viewport and scissor grow by the samples per pixel as well.
-    const PixelScale pixel_scale = pixelScaleOf(draw.surfaces.color, color->scale);
+    // A single-sample anti-aliased surface is drawn at its sample layout: one image pixel per sample, so the clip
+    // rectangle, viewport and scissor grow by the samples per pixel as well. A multisampled pass draws at the clip
+    // size.
+    const PixelScale pixel_scale = pixelScaleOf(draw.surfaces.color, color->scale, multisampled);
     // The coverage controls only act on a multisampled layout and are not modelled; the game writes none of them.
     if (draw.surfaces.color.samples_x > 1 || draw.surfaces.color.samples_y > 1) {
         if (raster.alpha_to_coverage) rsxNoteUnimplemented("state", "alpha to coverage");
@@ -1329,6 +1572,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     key.color_format = color->format;
     key.depth_format = depth ? depth->format : VK_FORMAT_UNDEFINED;
     key.topology_class = topology_class;
+    key.samples = multisampled ? VK_SAMPLE_COUNT_2_BIT : VK_SAMPLE_COUNT_1_BIT;
     VkBuffer vertex_buffers[kPipelineVertexSlots] = {};
     VkDeviceSize vertex_offsets[kPipelineVertexSlots] = {};
 
@@ -1420,11 +1664,31 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         return;
     }
 
+    // The depth surface is used when the draw tests, writes or reads stencil; the writes are what leave the other
+    // image of a multisampled target behind.
+    const bool depth_written = depth && rsxZetaWriteEnabled(raster, draw.surfaces.depth_format);
+    const bool depth_used = depth && (raster.depth_test || raster.stencil_test || depth_written);
+    const bool color_written = key.color_mask != 0;
+    if (multisampled) {
+        if (!ensureMultisample(*color) || (depth && !ensureMultisample(*depth))) return;
+    } else {
+        if (!beginLayoutPass(*color, color_written, false) ||
+            (depth_used && !beginLayoutPass(*depth, depth_written, false))) {
+            return;
+        }
+    }
+
     // Textures are prepared before the rendering instance begins: uploads, copies and layout changes
     // cannot be recorded inside it.
     VkDescriptorImageInfo image_infos[kFpTextureUnitCount];
     float texture_scale[kFpTextureUnitCount][4];
-    if (!prepareTextures(draw, shaders, *color, image_infos, texture_scale)) return;
+    if (!prepareTextures(draw, shaders, *color, multisampled, image_infos, texture_scale)) return;
+    // After the textures: a draw that samples its own target copies the sidecar into the layout image first, which
+    // must not count as this draw's write.
+    if (multisampled) {
+        beginSidecarPass(*color, color_written, false);
+        if (depth_used) beginSidecarPass(*depth, depth_written, false);
+    }
 
     // Uniform data: vertex constants, fragment constants, the per-draw block shared by both stages.
     constexpr std::size_t kVpConstantBytes = kRsxVpConstantCount * 16;
@@ -1485,22 +1749,25 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     std::memcpy(draw_block.data + kFpDrawBlockOffset, &fp, sizeof(fp));
 
     const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
-    transition(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    if (depth) {
-        transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-        if (rsxZetaWriteEnabled(raster, draw.surfaces.depth_format)) depth->write_serial++;
+    if (multisampled) {
+        transitionSidecar(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        if (depth) transitionSidecar(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    } else {
+        transition(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        if (depth) transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     }
+    if (depth_written) depth->write_serial++;
 
     VkRenderingAttachmentInfo color_attachment{};
     color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    color_attachment.imageView = color->view;
+    color_attachment.imageView = multisampled ? color->msaa->view : color->view;
     color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     VkRenderingAttachmentInfo depth_attachment{};
     if (depth) {
         depth_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        depth_attachment.imageView = depth->view;
+        depth_attachment.imageView = multisampled ? depth->msaa->view : depth->view;
         depth_attachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -1653,41 +1920,62 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
         rsxNoteUnimplemented("state", "attachments at different resolution scales");
         return;
     }
+    // The surface fields of the AA mode are shared by the colour and the depth surface.
+    const bool multisampled = multisampledPass(color ? clear.surfaces.color : clear.surfaces.depth);
     if (color && color_bits != kColorBits) {
-        recordMaskedColorClear(clear, *color, color_bits);
+        recordMaskedColorClear(clear, *color, color_bits, multisampled);
         color.reset();
     }
     if (!valid()) return;
     if (!color && !depth) return;
     if (depth) depth->write_serial++;
 
+    if (multisampled) {
+        if ((color && !ensureMultisample(*color)) || (depth && !ensureMultisample(*depth))) return;
+        if (color) beginSidecarPass(*color, true, color_overwritten);
+        if (depth) beginSidecarPass(*depth, true, depth_overwritten);
+    } else {
+        if ((color && !beginLayoutPass(*color, true, color_overwritten)) ||
+            (depth && !beginLayoutPass(*depth, true, depth_overwritten))) {
+            return;
+        }
+    }
+
     const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
-    std::uint32_t area_width = color ? color->image_width : depth->image_width;
-    std::uint32_t area_height = color ? color->image_height : depth->image_height;
+    std::uint32_t area_width = color ? color->passWidth(multisampled) : depth->passWidth(multisampled);
+    std::uint32_t area_height = color ? color->passHeight(multisampled) : depth->passHeight(multisampled);
     if (color && depth) {
-        area_width = std::min(color->image_width, depth->image_width);
-        area_height = std::min(color->image_height, depth->image_height);
+        area_width = std::min(color->passWidth(multisampled), depth->passWidth(multisampled));
+        area_height = std::min(color->passHeight(multisampled), depth->passHeight(multisampled));
     }
     // The colour and depth targets share a scale here (checked above); a depth-only clear uses the depth one. The
     // clear rectangle is in clip pixels and grows by the samples per pixel of the surface layout.
-    const PixelScale pixel_scale =
-            color ? pixelScaleOf(clear.surfaces.color, color->scale) : pixelScaleOf(clear.surfaces.depth, depth->scale);
+    const PixelScale pixel_scale = color ? pixelScaleOf(clear.surfaces.color, color->scale, multisampled)
+                                         : pixelScaleOf(clear.surfaces.depth, depth->scale, multisampled);
 
     VkRenderingAttachmentInfo color_attachment{};
     VkRenderingAttachmentInfo depth_attachment{};
     VkRenderingAttachmentInfo stencil_attachment{};
     if (color) {
-        transition(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        if (multisampled) {
+            transitionSidecar(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        } else {
+            transition(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        }
         color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        color_attachment.imageView = color->view;
+        color_attachment.imageView = multisampled ? color->msaa->view : color->view;
         color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     }
     if (depth) {
-        transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        if (multisampled) {
+            transitionSidecar(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        } else {
+            transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        }
         depth_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        depth_attachment.imageView = depth->view;
+        depth_attachment.imageView = multisampled ? depth->msaa->view : depth->view;
         depth_attachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -1754,34 +2042,48 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
 // A clear that touches only some color channels: a full-target triangle clipped to the clear rectangle,
 // writing the clear colour through the channel mask (RPCS3 `VK/VKGSRender.cpp` `VKGSRender::clear_surface`
 // falls back to `attachment_clear_pass` for a partial mask).
-void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& color, std::uint32_t color_bits) {
+void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& color, std::uint32_t color_bits,
+                                         bool multisampled) {
     VkColorComponentFlags mask = 0;
     if ((color_bits & kRsxClearRed) != 0) mask |= VK_COLOR_COMPONENT_R_BIT;
     if ((color_bits & kRsxClearGreen) != 0) mask |= VK_COLOR_COMPONENT_G_BIT;
     if ((color_bits & kRsxClearBlue) != 0) mask |= VK_COLOR_COMPONENT_B_BIT;
     if ((color_bits & kRsxClearAlpha) != 0) mask |= VK_COLOR_COMPONENT_A_BIT;
-    const VkPipeline pipeline = pipelines_->maskedClearPipeline(color.format, mask, VK_SAMPLE_COUNT_1_BIT);
+    const VkPipeline pipeline = pipelines_->maskedClearPipeline(
+            color.format, mask, multisampled ? VK_SAMPLE_COUNT_2_BIT : VK_SAMPLE_COUNT_1_BIT);
     if (pipeline == VK_NULL_HANDLE) {
         fail(pipelines_->error());
         return;
     }
 
+    const std::uint32_t width = color.passWidth(multisampled), height = color.passHeight(multisampled);
     const ImageRect clear_rect =
             scaleRect(clear.scissor[0], clear.scissor[1], clear.scissor[2], clear.scissor[3],
-                      pixelScaleOf(clear.surfaces.color, color.scale), color.image_width, color.image_height);
+                      pixelScaleOf(clear.surfaces.color, color.scale, multisampled), width, height);
     if (clear_rect.width == 0 || clear_rect.height == 0) return;
 
+    if (multisampled) {
+        if (!ensureMultisample(color)) return;
+        beginSidecarPass(color, true, false);
+    } else if (!beginLayoutPass(color, true, false)) {
+        return;
+    }
+
     const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
-    transition(color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    if (multisampled) {
+        transitionSidecar(color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    } else {
+        transition(color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
     VkRenderingAttachmentInfo attachment{};
     attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    attachment.imageView = color.view;
+    attachment.imageView = multisampled ? color.msaa->view : color.view;
     attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     VkRenderingInfo rendering{};
     rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-    rendering.renderArea = {{0, 0}, {color.image_width, color.image_height}};
+    rendering.renderArea = {{0, 0}, {width, height}};
     rendering.layerCount = 1;
     rendering.colorAttachmentCount = 1;
     rendering.pColorAttachments = &attachment;
@@ -1790,8 +2092,7 @@ void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& co
     const float value[4] = {static_cast<float>((argb >> 16) & 0xFF) / 255.0f,
                             static_cast<float>((argb >> 8) & 0xFF) / 255.0f, static_cast<float>(argb & 0xFF) / 255.0f,
                             static_cast<float>(argb >> 24) / 255.0f};
-    const VkViewport viewport = {
-            0.0f, 0.0f, static_cast<float>(color.image_width), static_cast<float>(color.image_height), 0.0f, 1.0f};
+    const VkViewport viewport = {0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
     const VkRect2D scissor = {{static_cast<std::int32_t>(clear_rect.x), static_cast<std::int32_t>(clear_rect.y)},
                               {clear_rect.width, clear_rect.height}};
 
@@ -1862,6 +2163,7 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     } else {
         const std::shared_ptr<RenderTarget> target = it->second;
         touch(target);
+        if (!syncLayout(*target)) return;
         display_width_ = target->image_width;
         display_height_ = target->image_height;
         if (read_back && ensureReadback(slot, static_cast<VkDeviceSize>(display_width_) * display_height_ * 4)) {

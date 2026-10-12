@@ -3650,6 +3650,8 @@ std::vector<std::uint8_t> makeAntiAliasedCapture(std::uint32_t aa_mode, bool res
     return scene.finish();
 }
 
+// The 45 degree hypotenuse is parallel to the diagonal of the 2-sample pattern, so this scene only shows partial pixels
+// when it is supersampled; the 2-sample path is tested by testRendererMsaaLayout.
 void testRendererAntiAliasedSurface(tox2::VkContext& ctx) {
     using namespace tox2::rsx_synthetic;
     tox2::rsxUnimplementedReset();
@@ -3682,7 +3684,7 @@ void testRendererAntiAliasedSurface(tox2::VkContext& ctx) {
         replaySynthetic(file);
         CHECK(unimplementedCount("state antialiasing 0x3") == 0);
 
-        const ScaledFrame aa = renderAtScale(ctx, {file}, scale);
+        const ScaledFrame aa = renderAtScale(ctx, {file}, scale, 0, 0, tox2::AaMode::Supersample);
         CHECK(aa.ok && aa.width == kAaSize && aa.height == kAaSize && aa.image_width == kAaSize * scale);
         if (!aa.ok) continue;
         // The surface is drawn in its layout, so the resolve texture is the same size and nothing is approximated.
@@ -3710,6 +3712,352 @@ void testRendererAntiAliasedSurface(tox2::VkContext& ctx) {
         if (edges < 8) std::fprintf(stderr, "anti-aliased surface at scale %u: %u edge pixels\n", scale, edges);
         CHECK(edges >= 8);
     }
+    tox2::rsxUnimplementedReset();
+}
+
+// ---- Multisampled anti-aliased surfaces ----
+
+// Where the red rectangle drawn into the 2-sample surface lies, in guest pixels. The right and bottom edges fall
+// between the two samples of a pixel, so both are anti-aliased, and no edge passes within 0.05 of a sample position.
+constexpr float kMsRectLeft = 4.0f;
+constexpr float kMsRectTop = 4.0f;
+constexpr float kMsRectRight = 20.3f;
+constexpr float kMsRectBottom = 12.3f;
+
+enum class MsaaRead {
+    Texels,      // the surface as a 64x32 NEAREST texture into a 64x32 display: one display texel per layout texel
+    Linear,      // the game's resolve: a LINEAR read into a display of the clip size
+    SelfSample,  // a pass into the surface samples it (at layout column 2x + 1), then the Texels read
+};
+
+void setViewportHalfSize(tox2::rsx_synthetic::SceneBuilder& scene, float half_width, float half_height) {
+    const float scale[4] = {half_width, half_height, 0.5f, 0.0f};
+    const float offset[4] = {half_width, half_height, 0.5f, 0.0f};
+    for (std::uint32_t i = 0; i < 4; i++) {
+        scene.write(tox2::kMethodNv4097SetViewportScale + i * 4, std::bit_cast<std::uint32_t>(scale[i]));
+        scene.write(tox2::kMethodNv4097SetViewportOffset + i * 4, std::bit_cast<std::uint32_t>(offset[i]));
+    }
+}
+
+// A textured full-target quad: positions (-1..1), texture coordinates u0..u1 across and 0..1 down.
+void putTexturedFullQuad(tox2::rsx_synthetic::SceneBuilder& scene, float u0, float u1) {
+    using namespace tox2::rsx_synthetic;
+    const float quad[4][4] = {{-1, -1, u0, 0}, {1, -1, u1, 0}, {-1, 1, u0, 1}, {1, 1, u1, 1}};  // x, y, u, v
+    for (std::uint32_t v = 0; v < 4; v++) {
+        scene.memory().putFloat(1, kPositionsOffset + v * 12, quad[v][0]);
+        scene.memory().putFloat(1, kPositionsOffset + v * 12 + 4, quad[v][1]);
+        scene.memory().putFloat(1, kPositionsOffset + v * 12 + 8, 0.0f);
+        scene.memory().putFloat(1, kTexCoordsOffset + v * 8, quad[v][2]);
+        scene.memory().putFloat(1, kTexCoordsOffset + v * 8 + 4, quad[v][3]);
+    }
+}
+
+// Unit 0 reads `offset` as an A8R8G8B8 texture of `width` x kAaSize (the 2W layout of the AA surface by default).
+void setUpTexturedDraw(tox2::rsx_synthetic::SceneBuilder& scene, std::uint32_t filter, std::uint32_t offset = kAaOffset,
+                       std::uint32_t width = kAaSize * 2) {
+    using namespace tox2::rsx_synthetic;
+    scene.bindTexture(offset, width, kAaSize);
+    scene.write(tox2::kMethodNv4097SetTextureFilter, (filter << 16) | (filter << 24));
+    scene.write(tox2::kMethodNv4097SetVertexAttribOutputMask, 1u << 14);  // TEX0
+    scene.write(tox2::kMethodNv4097SetShaderControl, 0x400);              // color from H0
+    scene.write(tox2::kMethodNv4097SetTexCoordControl, 1);                // 2D coordinate
+    scene.setFloatAttrib(8, 2, kTexCoordsOffset);
+    scene.setPrograms(texturedPrograms());
+}
+
+// Draws the red rectangle (kMsRect*) into the surface bound now, a kAaSize square, at depth 0.5.
+void drawMsaaRect(tox2::rsx_synthetic::SceneBuilder& scene) {
+    using namespace tox2::rsx_synthetic;
+    setQuadRenderState(scene, kAaSize / 2.0f);
+    scene.setFloatAttrib(0, 3, kPositionsOffset);
+    scene.setColorAttrib(3, kColorsOffset);
+    scene.setPrograms(quadPrograms());
+    const auto ndc = [](float v) { return v / (kAaSize / 2.0f) - 1.0f; };
+    const float xs[2] = {ndc(kMsRectLeft), ndc(kMsRectRight)};
+    const float ys[2] = {ndc(kMsRectTop), ndc(kMsRectBottom)};
+    for (std::uint32_t v = 0; v < 4; v++) {  // strip order: left/right, then top/bottom
+        scene.memory().putFloat(1, kPositionsOffset + v * 12, xs[v & 1]);
+        scene.memory().putFloat(1, kPositionsOffset + v * 12 + 4, ys[v >> 1]);
+        scene.memory().putFloat(1, kPositionsOffset + v * 12 + 8, 0.0f);
+        scene.memory().putWord(1, kColorsOffset + v * 4, 0xFFFF0000);  // red
+    }
+    scene.drawStrip(4);
+}
+
+// A 32x32 mode-3 surface cleared black with a red rectangle (kMsRect*) drawn into it, then read the way `read` says.
+std::vector<std::uint8_t> makeMsaaLayoutCapture(MsaaRead read) {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    scene.setSurface(3, kAaSize, kAaOffset);
+    scene.clear(0xFF000000);
+    drawMsaaRect(scene);
+
+    if (read == MsaaRead::SelfSample) {
+        // The pixel centre falls on the boundary between layout texels 2X and 2X + 1; the u range is shifted by an
+        // eighth of a pixel, which moves the lookup into texel 2X + 1 (by 0.25 texel at scale 1 and 0.5 at scale 2).
+        scene.setSurface(3, kAaSize, kAaOffset);
+        setQuadRenderState(scene, kAaSize / 2.0f);
+        putTexturedFullQuad(scene, 0.125f / kAaSize, 1.0f + 0.125f / kAaSize);
+        setUpTexturedDraw(scene, 1);
+        scene.drawStrip(4);
+    }
+
+    if (read == MsaaRead::Linear) {
+        scene.setSurface(0, kAaSize, kSurfaceOffset);
+        scene.clear(0xFF000000);
+        setViewportHalfSize(scene, kAaSize / 2.0f, kAaSize / 2.0f);
+        putTexturedFullQuad(scene, 0.0f, 1.0f);
+        setUpTexturedDraw(scene, 2);  // LINEAR
+    } else {
+        scene.setSurface(0, kAaSize * 2, kSurfaceOffset, kAaSize);
+        scene.clear(0xFF000000);
+        setViewportHalfSize(scene, kAaSize, kAaSize / 2.0f);
+        putTexturedFullQuad(scene, 0.0f, 1.0f);
+        setUpTexturedDraw(scene, 1);  // NEAREST
+    }
+    scene.drawStrip(4);
+    return scene.finish();
+}
+
+// Whether layout texel (x, y) of the rectangle's surface is red at resolution scale `scale`: sample
+// kLayoutColumnSample[x & 1] of multisampled pixel (x >> 1, y) lies inside the rectangle. The standard 2x positions
+// (y down) are sample 0 at (0.75, 0.75) and sample 1 at (0.25, 0.25).
+bool msaaTexelCovered(std::uint32_t x, std::uint32_t y, std::uint32_t scale) {
+    const tox2::LayoutSource source = tox2::layoutSource(x, y);
+    const float position = source.sample == 0 ? 0.75f : 0.25f;
+    const float guest_x = (static_cast<float>(source.x) + position) / static_cast<float>(scale);
+    const float guest_y = (static_cast<float>(source.y) + position) / static_cast<float>(scale);
+    return guest_x >= kMsRectLeft && guest_x < kMsRectRight && guest_y >= kMsRectTop && guest_y < kMsRectBottom;
+}
+
+// A mode-3 surface drawn as 2 samples and read through its layout: the layout holds sample kLayoutColumnSample[x & 1]
+// of pixel x / 2 at texel x, at every resolution scale, and edges are anti-aliased along both axes.
+void testRendererMsaaLayout(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    if (!ctx.twoSampleSupportGap().empty()) {
+        std::printf("multisampled layout: skipped (%s)\n", ctx.twoSampleSupportGap().c_str());
+        return;
+    }
+    if (ctx.deviceProperties().limits.standardSampleLocations == VK_FALSE) {
+        std::printf("multisampled layout: skipped (no standard sample locations)\n");
+        return;
+    }
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    constexpr std::uint32_t kRed = 0xFFFF0000, kBlack = 0xFF000000;
+
+    for (const std::uint32_t scale : {1u, 2u}) {
+        // The surface read texel by texel.
+        {
+            const ScaledFrame frame =
+                    renderAtScale(ctx, {makeMsaaLayoutCapture(MsaaRead::Texels)}, scale, 1, 0, tox2::AaMode::Msaa);
+            CHECK(frame.ok && frame.width == 2 * kAaSize * scale && frame.height == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t mismatches = 0, red = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    const std::uint32_t expected = msaaTexelCovered(x, y, scale) ? kRed : kBlack;
+                    red += expected == kRed;
+                    if (pixelArgb(frame.bgra, frame.width, x, y) != expected) mismatches++;
+                }
+            }
+            if (mismatches != 0)
+                std::fprintf(stderr, "multisampled layout at scale %u: %u texels differ\n", scale, mismatches);
+            CHECK(mismatches == 0 && red > 0);
+
+            // Along the bottom edge the upper sample is inside and the lower one outside, which a surface shaded per
+            // layout texel cannot produce: the two texels of a pixel differ.
+            std::uint32_t vertical_pairs = 0;
+            const std::uint32_t edge_row = static_cast<std::uint32_t>(kMsRectBottom * static_cast<float>(scale));
+            for (std::uint32_t x = 0; x + 1 < frame.width; x += 2) {
+                vertical_pairs += pixelArgb(frame.bgra, frame.width, x, edge_row) == kRed &&
+                                  pixelArgb(frame.bgra, frame.width, x + 1, edge_row) == kBlack;
+            }
+            CHECK(vertical_pairs >= 1);
+
+            CHECK(frame.stats.layout_copies >= 1 && frame.stats.draws_skipped == 0);
+            CHECK(frame.notes.empty());
+        }
+
+        // The resolve of the game: a LINEAR read of the layout averages the two samples of each pixel.
+        {
+            const ScaledFrame frame =
+                    renderAtScale(ctx, {makeMsaaLayoutCapture(MsaaRead::Linear)}, scale, 1, 0, tox2::AaMode::Msaa);
+            CHECK(frame.ok && frame.width == kAaSize * scale && frame.height == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t partial = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    const std::uint32_t argb = pixelArgb(frame.bgra, frame.width, x, y);
+                    const std::uint32_t value = (argb >> 16) & 0xFF;
+                    partial += value > 0 && value < 255 && (argb & 0xFFFF) == 0;
+                }
+            }
+            if (partial < 16)
+                std::fprintf(stderr, "multisampled resolve at scale %u: %u partial pixels\n", scale, partial);
+            CHECK(partial >= 16);
+            CHECK(frame.notes.empty());
+        }
+
+        // A pass that samples the surface it draws into: the layout is brought up to date and read directly (no
+        // scratch copy), the pass shades once per pixel and writes the shade to both samples.
+        {
+            const ScaledFrame frame =
+                    renderAtScale(ctx, {makeMsaaLayoutCapture(MsaaRead::SelfSample)}, scale, 1, 0, tox2::AaMode::Msaa);
+            CHECK(frame.ok && frame.width == 2 * kAaSize * scale && frame.height == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t mismatches = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    // Both texels of a pixel hold what texel 2X + 1 held before the pass.
+                    const std::uint32_t expected = msaaTexelCovered(x | 1, y, scale) ? kRed : kBlack;
+                    if (pixelArgb(frame.bgra, frame.width, x, y) != expected) mismatches++;
+                }
+            }
+            if (mismatches != 0)
+                std::fprintf(stderr, "multisampled self-sample at scale %u: %u texels differ\n", scale, mismatches);
+            CHECK(mismatches == 0);
+            CHECK(frame.stats.draws == 3 && frame.stats.draws_skipped == 0);
+            CHECK(frame.stats.feedback_copies == 0 && frame.stats.layout_copies >= 2);
+            CHECK(frame.notes.empty());
+        }
+    }
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
+// ---- Depth of a multisampled surface read as A8R8G8B8 ----
+
+constexpr std::uint32_t kMsStencil = 0x5A;
+constexpr std::uint32_t kMsDepthOffset = kAaOffset + 0x10000;  // SceneBuilder::setSurface
+
+enum class MsaaDepthRead {
+    Texels,      // the depth as a 64x32 NEAREST texture into a 64x32 display
+    EdgeEffect,  // a pass into the AA colour samples the depth over the clip, then the colour is read texel by texel
+    Reference,   // the same rectangle into a plain 32x32 surface, whose depth is read as a 32x32 texture
+};
+
+// Depth test ALWAYS with depth write and stencil REPLACE of kMsStencil when `on`; all three off otherwise.
+void setMsaaDepthState(tox2::rsx_synthetic::SceneBuilder& scene, bool on) {
+    scene.write(tox2::kMethodNv4097SetDepthTestEnable, on ? 1 : 0);
+    scene.write(tox2::kMethodNv4097SetDepthFunc, kCmpAlways);
+    scene.write(tox2::kMethodNv4097SetDepthMask, on ? 1 : 0);
+    scene.write(tox2::kMethodNv4097SetStencilTestEnable, on ? 1 : 0);
+    if (on) writeStencilFace(scene, false, stencilFace(kCmpAlways, kMsStencil, kOpReplace));
+}
+
+// The red rectangle at depth 0.5 with stencil kMsStencil, drawn into the 2-sample surface (or, for Reference, a
+// plain one), then the depth read the way `read` says.
+std::vector<std::uint8_t> makeMsaaDepthCapture(MsaaDepthRead read) {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    const bool plain = read == MsaaDepthRead::Reference;
+    scene.setSurface(plain ? 0 : 3, kAaSize, kAaOffset);
+    scene.clear(0xFF000000);
+    setMsaaDepthState(scene, true);
+    drawMsaaRect(scene);
+    setMsaaDepthState(scene, false);
+
+    if (read == MsaaDepthRead::EdgeEffect) {
+        // The edge effect of the game: a pass into the AA colour with the AA depth attached samples the depth. It
+        // shades once per pixel, so pixel X reads layout column 2X + 1 (the u range is shifted by an eighth of a
+        // pixel, off the boundary between columns 2X and 2X + 1) and writes that one shade into both samples.
+        scene.setSurface(3, kAaSize, kAaOffset);
+        setQuadRenderState(scene, kAaSize / 2.0f);
+        putTexturedFullQuad(scene, 0.125f / kAaSize, 1.0f + 0.125f / kAaSize);
+        setUpTexturedDraw(scene, 1, kMsDepthOffset);
+        scene.drawStrip(4);
+    }
+
+    if (plain) {
+        scene.setSurface(0, kAaSize, kSurfaceOffset);
+        scene.clear(0xFF000000);
+        setViewportHalfSize(scene, kAaSize / 2.0f, kAaSize / 2.0f);
+        putTexturedFullQuad(scene, 0.0f, 1.0f);
+        setUpTexturedDraw(scene, 1, kMsDepthOffset, kAaSize);
+    } else {
+        scene.setSurface(0, kAaSize * 2, kSurfaceOffset, kAaSize);
+        scene.clear(0xFF000000);
+        setViewportHalfSize(scene, kAaSize, kAaSize / 2.0f);
+        putTexturedFullQuad(scene, 0.0f, 1.0f);
+        setUpTexturedDraw(scene, 1, read == MsaaDepthRead::Texels ? kMsDepthOffset : kAaOffset);
+    }
+    scene.drawStrip(4);
+    return scene.finish();
+}
+
+// The depth of a mode-3 surface read as A8R8G8B8 (the game's edge effect and F_X32 conversions) holds, per layout
+// texel, the word of the sample the layout takes there, converted without a layout copy of the depth.
+void testRendererMsaaDepthAsArgb(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    if (!ctx.twoSampleSupportGap().empty()) {
+        std::printf("multisampled depth as A8R8G8B8: skipped (%s)\n", ctx.twoSampleSupportGap().c_str());
+        return;
+    }
+    if (ctx.deviceProperties().limits.standardSampleLocations == VK_FALSE) {
+        std::printf("multisampled depth as A8R8G8B8: skipped (no standard sample locations)\n");
+        return;
+    }
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+
+    for (const std::uint32_t scale : {1u, 2u}) {
+        // Both words come from a plain surface: 0.5 sits on a 24-bit rounding boundary, and the cleared depth 1.0
+        // reads as the conversion shader gives it (its float rounding carries into the top byte), not as 0xFFFFFF00.
+        const ScaledFrame reference =
+                renderAtScale(ctx, {makeMsaaDepthCapture(MsaaDepthRead::Reference)}, scale, 1, 0, tox2::AaMode::Msaa);
+        CHECK(reference.ok && reference.width == kAaSize * scale);
+        if (!reference.ok) continue;
+        const std::uint32_t covered_word = pixelArgb(reference.bgra, reference.width, 10 * scale, 8 * scale);
+        const std::uint32_t uncovered_word = pixelArgb(reference.bgra, reference.width, 0, 0);
+        CHECK((covered_word & 0xFF) == kMsStencil && (uncovered_word & 0xFF) == 0 && covered_word != uncovered_word);
+        CHECK(reference.notes.empty());
+
+        const auto expectedWord = [&](std::uint32_t x, std::uint32_t y) {
+            return msaaTexelCovered(x, y, scale) ? covered_word : uncovered_word;
+        };
+
+        // Every layout texel of the depth.
+        {
+            const ScaledFrame frame =
+                    renderAtScale(ctx, {makeMsaaDepthCapture(MsaaDepthRead::Texels)}, scale, 1, 0, tox2::AaMode::Msaa);
+            CHECK(frame.ok && frame.width == 2 * kAaSize * scale && frame.height == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t mismatches = 0, covered = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    covered += msaaTexelCovered(x, y, scale);
+                    if (pixelArgb(frame.bgra, frame.width, x, y) != expectedWord(x, y)) mismatches++;
+                }
+            }
+            if (mismatches != 0)
+                std::fprintf(stderr, "multisampled depth at scale %u: %u texels differ\n", scale, mismatches);
+            CHECK(mismatches == 0 && covered > 0);
+            CHECK(frame.stats.depth_conversions >= 1 && frame.stats.draws_skipped == 0);
+            CHECK(frame.notes.empty());
+        }
+
+        // The edge effect: both texels of pixel X hold the word of layout column 2X + 1.
+        {
+            const ScaledFrame frame = renderAtScale(ctx, {makeMsaaDepthCapture(MsaaDepthRead::EdgeEffect)}, scale, 1, 0,
+                                                    tox2::AaMode::Msaa);
+            CHECK(frame.ok && frame.width == 2 * kAaSize * scale && frame.height == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t mismatches = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    if (pixelArgb(frame.bgra, frame.width, x, y) != expectedWord(x | 1, y)) mismatches++;
+                }
+            }
+            if (mismatches != 0)
+                std::fprintf(stderr, "multisampled depth edge effect at scale %u: %u texels differ\n", scale,
+                             mismatches);
+            CHECK(mismatches == 0);
+            CHECK(frame.stats.depth_conversions >= 1 && frame.stats.draws_skipped == 0);
+            CHECK(frame.notes.empty());
+        }
+    }
+    CHECK(ctx.validationErrorCount() == errors_before);
     tox2::rsxUnimplementedReset();
 }
 
@@ -3940,6 +4288,8 @@ int main() {
     testRendererScaledTargetsAsTextures(*ctx);
     testRendererScaleChange(*ctx);
     testRendererAntiAliasedSurface(*ctx);
+    testRendererMsaaLayout(*ctx);
+    testRendererMsaaDepthAsArgb(*ctx);
     testRendererPointSize(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 

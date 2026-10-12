@@ -84,13 +84,15 @@ public:
 
     // A8R8G8B8 color target with Z24S8, clip and scissor covering all of it. `aa_mode` is the AA field of the
     // surface format (0, or 3 for two samples per pixel side by side, 4 and 5 for 2x2): the clip stays `size`
-    // pixels while the pitches cover the expanded row of the sample layout, as the SDK sets them.
+    // pixels while the pitches cover the expanded row of the sample layout, as the SDK sets them. A `height` of 0
+    // makes the clip square; a `pitch` of 0 is size x samples x 4.
     void setSurface(std::uint32_t aa_mode = 0, std::uint32_t size = kSurfaceSize,
-                    std::uint32_t color_offset = kSurfaceOffset) {
+                    std::uint32_t color_offset = kSurfaceOffset, std::uint32_t height = 0, std::uint32_t pitch = 0) {
         const std::uint32_t samples_x = aa_mode == 3 || aa_mode == 4 || aa_mode == 5 ? 2 : 1;
-        const std::uint32_t pitch = size * samples_x * 4;
+        if (height == 0) height = size;
+        if (pitch == 0) pitch = size * samples_x * 4;
         write(kMethodNv4097SetSurfaceClipHorizontal, size << 16);
-        write(kMethodNv4097SetSurfaceClipVertical, size << 16);
+        write(kMethodNv4097SetSurfaceClipVertical, height << 16);
         write(kMethodNv4097SetSurfaceFormat, 8u | (2u << 5) | (1u << 8) | (aa_mode << 12));
         write(kMethodNv4097SetSurfacePitchA, pitch);
         write(kMethodNv4097SetSurfaceColorAOffset, color_offset);
@@ -98,7 +100,7 @@ public:
         write(kMethodNv4097SetSurfacePitchZ, pitch);
         write(kMethodNv4097SetSurfaceColorTarget, 1);
         write(kMethodNv4097SetScissorHorizontal, size << 16);
-        write(kMethodNv4097SetScissorVertical, size << 16);
+        write(kMethodNv4097SetScissorVertical, height << 16);
     }
 
     void clear(std::uint32_t color_argb) {
