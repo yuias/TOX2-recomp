@@ -51,6 +51,11 @@ bool downsampleBoxBgra(std::span<const std::uint8_t> in, std::uint32_t width, st
                        std::uint32_t factor_x, std::uint32_t factor_y, std::vector<std::uint8_t>& out,
                        std::string& error);
 
+// Copies the width x height rectangle at (x, y) of `in` into `out`. False with a reason when the rectangle is empty or
+// not inside `in`.
+bool cropRgb(const RgbImage& in, std::uint32_t x, std::uint32_t y, std::uint32_t width, std::uint32_t height,
+             RgbImage& out, std::string& error);
+
 // One display readback waiting to become `path`.
 struct DumpFrame {
     std::filesystem::path path;

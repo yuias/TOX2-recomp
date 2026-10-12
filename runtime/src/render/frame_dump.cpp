@@ -1,5 +1,6 @@
 #include "render/frame_dump.h"
 
+#include <algorithm>
 #include <csetjmp>
 #include <cstdint>
 #include <cstdio>
@@ -297,6 +298,27 @@ bool downsampleBoxBgra(std::span<const std::uint8_t> in, std::uint32_t width, st
                        std::uint32_t factor_x, std::uint32_t factor_y, std::vector<std::uint8_t>& out,
                        std::string& error) {
     return downsampleChannels(in, width, height, 4, factor_x, factor_y, out, error);
+}
+
+bool cropRgb(const RgbImage& in, std::uint32_t x, std::uint32_t y, std::uint32_t width, std::uint32_t height,
+             RgbImage& out, std::string& error) {
+    // 64-bit sums, so a huge origin cannot wrap around the bounds test.
+    if (width == 0 || height == 0 || static_cast<std::uint64_t>(x) + width > in.width ||
+        static_cast<std::uint64_t>(y) + height > in.height) {
+        error = std::format("rectangle {}x{}+{}+{} is empty or outside the {}x{} image", width, height, x, y, in.width,
+                            in.height);
+        return false;
+    }
+    // Built apart from `out`, which may be `in`.
+    std::vector<std::uint8_t> rgb(static_cast<std::size_t>(width) * height * 3);
+    for (std::uint32_t row = 0; row < height; row++) {
+        const std::uint8_t* src = in.rgb.data() + (static_cast<std::size_t>(y + row) * in.width + x) * 3;
+        std::copy_n(src, static_cast<std::size_t>(width) * 3, rgb.data() + static_cast<std::size_t>(row) * width * 3);
+    }
+    out.width = width;
+    out.height = height;
+    out.rgb = std::move(rgb);
+    return true;
 }
 
 namespace {

@@ -3,6 +3,7 @@
 // frame as a PNG and prints the summary line, the unimplemented census section and the validation result.
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -14,6 +15,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <variant>
 #include <vector>
 
@@ -33,12 +35,15 @@ namespace {
 
 void printUsage() {
     std::fputs(
-            "usage: tox2_rsxreplay CAPTURE [--out DIR] [--compare PNG [--max-diff N] [--max-mean X] [--max-differing P]]\n"
+            "usage: tox2_rsxreplay CAPTURE [--out DIR]\n"
+            "                      [--compare PNG [--compare-rect X,Y,W,H] [--max-diff N] [--max-mean X]\n"
+            "                       [--max-differing P]]\n"
             "                      [--resolution-scale N] [--no-validation] [--shader-cache DIR]\n"
             "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture\n"
             "  --out DIR           write the displayed frame as DIR/<capture name>.png\n"
             "  --compare PNG       diff the displayed frame against PNG (box-downsampled first when it is a whole\n"
             "                      multiple of the PNG's size)\n"
+            "  --compare-rect X,Y,W,H  with --compare: diff only this rectangle, in the PNG's pixels\n"
             "  --max-diff N        with --compare: fail when the largest channel difference exceeds N\n"
             "  --max-mean X        with --compare: fail when the mean difference exceeds X\n"
             "  --max-differing P   with --compare: fail when more than P percent of the pixels differ\n"
@@ -47,6 +52,21 @@ void printUsage() {
             "  --no-validation     do not enable the Vulkan validation layer\n"
             "  --shader-cache DIR  directory of the on-disk SPIR-V cache\n",
             stderr);
+}
+
+// "X,Y,W,H": four unsigned decimal numbers, W and H above 0. Whether the rectangle fits the image is cropRgb's check.
+bool parseRect(std::string_view text, std::uint32_t (&rect)[4]) {
+    for (int i = 0; i < 4; i++) {
+        const std::size_t end = text.find(',');
+        if ((i < 3) != (end != std::string_view::npos)) return false;
+        const std::string_view field = text.substr(0, end);
+        std::uint32_t value = 0;
+        const auto [ptr, ec] = std::from_chars(field.data(), field.data() + field.size(), value);
+        if (field.empty() || ec != std::errc() || ptr != field.data() + field.size()) return false;
+        rect[i] = value;
+        text = end == std::string_view::npos ? std::string_view() : text.substr(end + 1);
+    }
+    return rect[2] > 0 && rect[3] > 0;
 }
 
 const char* primitiveName(tox2::RsxPrimitive primitive) {
@@ -111,7 +131,8 @@ void printDraw(const tox2::RsxDraw& draw, std::span<const tox2::RsxSurface> surf
                                  : target.depth_format == tox2::RsxDepthFormat::Z16 ? "Z16"
                                                                                     : "?";
         std::printf(" depth=%s@%#x dpitch=%#x", depth_name, target.depth.offset, target.depth.pitch);
-        std::printf(" zt=%d zw=%d", draw.raster.depth_test ? 1 : 0, draw.raster.depth_write ? 1 : 0);
+        std::printf(" zt=%d zw=%d st=%d", draw.raster.depth_test ? 1 : 0, draw.raster.depth_write ? 1 : 0,
+                    draw.raster.stencil_test ? 1 : 0);
     }
     for (const tox2::RsxTextureDesc& texture : draw.textures) {
         if (texture.rt_alias >= 0 && static_cast<std::size_t>(texture.rt_alias) < surfaces.size()) {
@@ -146,6 +167,8 @@ int main(int argc, char** argv) {
     std::string shader_cache;
     bool validation = true;
     std::uint32_t resolution_scale = 1;
+    std::uint32_t rect[4] = {};  // --compare-rect: x, y, width, height
+    bool has_rect = false;
     // Thresholds of --compare; a NaN limit is not checked.
     double max_diff = std::nan(""), max_mean = std::nan(""), max_differing = std::nan("");
     for (int i = 1; i < argc; i++) {
@@ -164,6 +187,15 @@ int main(int argc, char** argv) {
                 return 2;
             }
             resolution_scale = static_cast<std::uint32_t>(value);
+            i++;
+            continue;
+        }
+        if (arg == "--compare-rect") {
+            if (i + 1 >= argc || !parseRect(argv[i + 1], rect)) {
+                std::fputs("error: --compare-rect takes X,Y,W,H, four whole numbers with W and H above 0\n", stderr);
+                return 2;
+            }
+            has_rect = true;
             i++;
             continue;
         }
@@ -194,7 +226,7 @@ int main(int argc, char** argv) {
         capture_path = std::string(arg);
     }
     const bool has_threshold = !std::isnan(max_diff) || !std::isnan(max_mean) || !std::isnan(max_differing);
-    if (capture_path.empty() || (has_threshold && compare_path.empty())) {
+    if (capture_path.empty() || ((has_threshold || has_rect) && compare_path.empty())) {
         printUsage();
         return 2;
     }
@@ -277,20 +309,33 @@ int main(int argc, char** argv) {
                         factor_x = image.width / reference.width;
                         factor_y = image.height / reference.height;
                     }
+                    tox2::RgbImage reduced;
                     if (compared && (factor_x > 1 || factor_y > 1)) {
-                        tox2::RgbImage reduced;
-                        compared = tox2::downsampleBox(image, factor_x, factor_y, reduced, error) &&
-                                   tox2::diffImages(reduced, reference, diff, error);
+                        compared = tox2::downsampleBox(image, factor_x, factor_y, reduced, error);
+                    }
+                    const tox2::RgbImage& shown = factor_x > 1 || factor_y > 1 ? reduced : image;
+                    if (compared && has_rect) {
+                        // The rectangle is in reference pixels, so it is cut after the downsample.
+                        tox2::RgbImage shown_rect;
+                        tox2::RgbImage reference_rect;
+                        compared =
+                                tox2::cropRgb(shown, rect[0], rect[1], rect[2], rect[3], shown_rect, error) &&
+                                tox2::cropRgb(reference, rect[0], rect[1], rect[2], rect[3], reference_rect, error) &&
+                                tox2::diffImages(shown_rect, reference_rect, diff, error);
                     } else if (compared) {
-                        compared = tox2::diffImages(image, reference, diff, error);
+                        compared = tox2::diffImages(shown, reference, diff, error);
                     }
                     if (compared) {
-                        char text[160];
+                        char text[200];
                         std::snprintf(text, sizeof(text), "; diff max %u mean %.3f differing %.3f%%", diff.max,
                                       diff.mean, diff.differing_percent);
                         if (factor_x > 1 || factor_y > 1) {
                             std::snprintf(text + std::strlen(text), sizeof(text) - std::strlen(text),
                                           "; downsampled %ux%u", factor_x, factor_y);
+                        }
+                        if (has_rect) {
+                            std::snprintf(text + std::strlen(text), sizeof(text) - std::strlen(text),
+                                          "; rect %ux%u+%u+%u", rect[2], rect[3], rect[0], rect[1]);
                         }
                         diff_text = text;
                         const auto exceeded = [](double value, double limit) {

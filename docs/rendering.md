@@ -590,7 +590,8 @@ no renderer and no window. Captures are derived from the game, so they are git-i
 `tox2_rsxreplay` replays a capture through the frame builder and the renderer without the game:
 
 ```sh
-tox2_rsxreplay CAPTURE [--out DIR] [--compare PNG [--max-diff N] [--max-mean X] [--max-differing P]]
+tox2_rsxreplay CAPTURE [--out DIR]
+                      [--compare PNG [--compare-rect X,Y,W,H] [--max-diff N] [--max-mean X] [--max-differing P]]
                       [--resolution-scale N] [--no-validation] [--shader-cache DIR]
 ```
 
@@ -599,6 +600,7 @@ tox2_rsxreplay CAPTURE [--out DIR] [--compare PNG [--max-diff N] [--max-mean X] 
 | `CAPTURE` | A `.tox2cap` file. |
 | `--out DIR` | Write the displayed frame of the last flip as `DIR/<capture name>.png`. |
 | `--compare PNG` | Compare that frame with a reference image. The sizes must match, except that a frame whose width and height are whole multiples of the reference's is box-averaged down to it first (the summary line then ends with `; downsampled <fx>x<fy>`). |
+| `--compare-rect X,Y,W,H` | With `--compare`: diff only the `W` x `H` rectangle at `(X, Y)`, in the reference's pixels (the rectangle is cut from both images after the downsample, and the summary line gets `; rect <W>x<H>+<X>+<Y>`). A malformed value is a usage error; a rectangle that is empty or outside the image is an error (exit code 1). |
 | `--max-diff N` | With `--compare`: fail when the largest per-channel difference exceeds `N`. |
 | `--max-mean X` | With `--compare`: fail when the mean per-channel difference exceeds `X`. |
 | `--max-differing P` | With `--compare`: fail when more than `P` percent of the pixels differ (by more than 2 in any channel). |
@@ -607,8 +609,8 @@ tox2_rsxreplay CAPTURE [--out DIR] [--compare PNG [--max-diff N] [--max-mean X] 
 | `--shader-cache DIR` | SPIR-V cache directory. Without it nothing is cached. |
 
 The thresholds are optional and unchecked unless given, and they need `--compare`. The tool prints
-the commands the frame builder produced (`clear`, `draw` with its colour and depth target and, for each
-texture, the render target it aliases or the format and mip count of its bytes, `flip`), then a summary line
+the commands the frame builder produced (`clear`, `draw` with its colour and depth target (with `zt=`, `zw=` and
+`st=` for its depth test, depth write and stencil test) and, for each texture, the render target it aliases or the format and mip count of its bytes, `flip`), then a summary line
 `replay: N commands, N draws, N skipped` (with the diff figures when comparing), the
 `rsx unimplemented` section (`census: rsx unimplemented 0 kinds` when it is empty), the path of
 the PNG, and `validation: active|inactive|disabled, N errors`. The exit code is 1 when a

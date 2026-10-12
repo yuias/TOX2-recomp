@@ -375,6 +375,39 @@ void testFrameDump() {
         CHECK(!tox2::downsampleBox(rgb, 3, 1, rgb_out, error));
     }
 
+    // Cropping: a 4x3 image whose pixel (x, y) is {10 * y + x, 100 + 10 * y + x, 200 + 10 * y + x}.
+    {
+        tox2::RgbImage grid;
+        grid.width = 4;
+        grid.height = 3;
+        for (std::uint32_t y = 0; y < 3; y++) {
+            for (std::uint32_t x = 0; x < 4; x++) {
+                const std::uint8_t base = static_cast<std::uint8_t>(10 * y + x);
+                grid.rgb.insert(grid.rgb.end(),
+                                {base, static_cast<std::uint8_t>(100 + base), static_cast<std::uint8_t>(200 + base)});
+            }
+        }
+        tox2::RgbImage cropped;
+        CHECK(tox2::cropRgb(grid, 1, 1, 2, 2, cropped, error));
+        CHECK(cropped.width == 2 && cropped.height == 2);
+        CHECK(cropped.rgb == std::vector<std::uint8_t>({11, 111, 211, 12, 112, 212, 21, 121, 221, 22, 122, 222}));
+        // The whole image, and the last pixel alone, are inside.
+        CHECK(tox2::cropRgb(grid, 0, 0, 4, 3, cropped, error) && cropped.rgb == grid.rgb);
+        CHECK(tox2::cropRgb(grid, 3, 2, 1, 1, cropped, error) &&
+              cropped.rgb == std::vector<std::uint8_t>({23, 123, 223}));
+        // Cropping in place works.
+        tox2::RgbImage in_place = grid;
+        CHECK(tox2::cropRgb(in_place, 2, 0, 2, 1, in_place, error) &&
+              in_place.rgb == std::vector<std::uint8_t>({2, 102, 202, 3, 103, 203}));
+        const tox2::RgbImage before = cropped;
+        CHECK(!tox2::cropRgb(grid, 0, 0, 0, 2, cropped, error));
+        CHECK(!tox2::cropRgb(grid, 0, 0, 2, 0, cropped, error));
+        CHECK(!tox2::cropRgb(grid, 3, 0, 2, 1, cropped, error));
+        CHECK(!tox2::cropRgb(grid, 0, 2, 1, 2, cropped, error));
+        CHECK(!tox2::cropRgb(grid, 0xFFFFFFFFu, 0, 2, 1, cropped, error));
+        CHECK(!error.empty() && cropped.rgb == before.rgb);
+    }
+
     // The dump worker writes the same bytes as converting and encoding on the calling thread.
     {
         constexpr std::uint32_t kW = 7;
