@@ -47,6 +47,8 @@
 #include "media/atrac_decoder.h"
 #include "media/ffmpeg_codecs.h"
 #include "media/movie_decoder.h"
+#include "overlay/debug_overlay.h"
+#include "overlay/overlay_sources.h"
 #include "render/vk_context.h"
 #include "render/vk_renderer.h"
 #include "render/vk_window.h"
@@ -100,19 +102,23 @@ bool padUsesGamepad(std::string_view pad) { return pad == "gamepad" || pad == "k
 // counters are published for the census, which reads them from another one.
 class VulkanExecutor final : public tox2::RsxExecutor {
 public:
-    // `presenter` may be null (no window).
+    // `presenter` and `overlay` may be null (no window).
     VulkanExecutor(std::unique_ptr<tox2::VkContext> context, std::unique_ptr<tox2::Presenter> presenter,
-                   const tox2::RenderOptions& options)
+                   std::unique_ptr<tox2::DebugOverlay> overlay, const tox2::RenderOptions& options)
         : context_(std::move(context)),
           presenter_(std::move(presenter)),
+          overlay_(std::move(overlay)),
           renderer_(std::make_unique<tox2::RsxRenderer>(*context_, options)) {
         renderer_->setPresenter(presenter_.get());
+        renderer_->setPresentOverlay(overlay_.get());
     }
 
     ~VulkanExecutor() override {
-        // The renderer and the swapchain go before the device they were created from.
+        // The renderer and the swapchain go before the device they were created from. The presenter's
+        // destructor joins the window thread, which calls into the overlay, so the overlay outlives it.
         renderer_.reset();
         presenter_.reset();
+        overlay_.reset();
         context_.reset();
     }
 
@@ -163,6 +169,7 @@ public:
 private:
     std::unique_ptr<tox2::VkContext> context_;
     std::unique_ptr<tox2::Presenter> presenter_;
+    std::unique_ptr<tox2::DebugOverlay> overlay_;
     std::unique_ptr<tox2::RsxRenderer> renderer_;
     std::atomic<std::uint64_t> draws_{0}, skipped_{0}, clears_{0}, flips_{0};
     std::atomic<bool> failed_{false};
@@ -189,9 +196,18 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const Options& opt, std:
     render_options.dump_every = opt.dump_frames_every;
     render_options.shader_cache = opt.shader_cache.empty() ? std::filesystem::path("generated") / "shader_cache"
                                                            : std::filesystem::path(opt.shader_cache);
+    // Requested PNG dumps follow --dump-frames so they land next to the periodic ones.
+    if (!opt.dump_frames.empty()) render_options.requested_dump_dir = opt.dump_frames;
+    // Declared before the presenter so that on every return path the presenter (and its window thread, which
+    // calls into the overlay) is destroyed first. Only created with a window.
+    std::unique_ptr<tox2::DebugOverlay> overlay;
     std::unique_ptr<tox2::Presenter> presenter;
     if (opt.window) {
+        overlay = std::make_unique<tox2::DebugOverlay>(*context, tox2::makeRuntimeOverlaySources());
         tox2::PresenterOptions presenter_options;
+        presenter_options.on_message = [overlay = overlay.get()](const tox2::WindowMessage& message) {
+            return overlay->onWindowMessage(message);
+        };
         presenter_options.frame_slots = tox2::RsxRenderer::kFramesInFlight;
         presenter_options.on_close = [] {
             tox2::stopProcess(tox2::ExitCode::ProcessExit, "tox2: stop: window closed");
@@ -216,8 +232,10 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const Options& opt, std:
             error = "window: " + error;
             return nullptr;
         }
+        overlay->attachWindow(presenter->nativeWindowHandle());
     }
-    auto executor = std::make_unique<VulkanExecutor>(std::move(context), std::move(presenter), render_options);
+    auto executor = std::make_unique<VulkanExecutor>(std::move(context), std::move(presenter), std::move(overlay),
+                                                     render_options);
     if (!executor->valid()) {
         error = executor->error();
         return nullptr;

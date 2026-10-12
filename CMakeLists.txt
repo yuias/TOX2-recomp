@@ -55,7 +55,7 @@ tox2_overlay_add()
 if(TARGET tox2_game)
   # tox2_media supplies the FFmpeg codec factory that game_main installs for the cellSail movies; the
   # FFmpeg DLLs it loads at run time are copied next to the executable by tox2_ffmpeg_runtime.
-  target_link_libraries(tox2_game PRIVATE tox2_render tox2_media)
+  target_link_libraries(tox2_game PRIVATE tox2_render tox2_overlay tox2_media)
   add_dependencies(tox2_game tox2_ffmpeg_runtime)
 endif()
 
