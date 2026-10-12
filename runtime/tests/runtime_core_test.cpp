@@ -3253,6 +3253,125 @@ void testCellGame() {
     stdfs::remove_all(root, ec);
 }
 
+void testCellRtc() {
+    tox2::resetCensus();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t tick = scratch, local = scratch + 0x10, date = scratch + 0x20;
+
+    enum Import : std::uint32_t { SetTick, GetCurrentTick, GetDayOfWeek, ConvertUtcToLocalTime, ImportCount };
+    const Tox2ImportInfo imports[] = {
+            {0x00800000, 0x99b13034, "cellRtc", "cellRtcSetTick"},
+            {0x00800010, 0x9dafc0d9, "cellRtc", "cellRtcGetCurrentTick"},
+            {0x00800020, 0xc2d8cf95, "cellRtc", "cellRtcGetDayOfWeek"},
+            {0x00800030, 0xc48d5002, "cellRtc", "cellRtcConvertUtcToLocalTime"},
+    };
+    tox2::installImports(imports, ImportCount);
+    auto ctx = std::make_unique<Tox2PpuContext>();
+    auto call = [&](Import which, std::uint64_t a, std::uint64_t b = 0, std::uint64_t c = 0) {
+        ctx->gpr[3] = a;
+        ctx->gpr[4] = b;
+        ctx->gpr[5] = c;
+        tox2HleCall(ctx.get(), base, which);
+        return static_cast<std::uint32_t>(ctx->gpr[3]);
+    };
+    constexpr std::uint32_t kInvalidPointer = 0x80010602;
+    constexpr std::uint64_t kUnixEpoch = 62135596800000000ull;
+    const std::uint32_t unmapped = 0x70000000;
+    CHECK(!p.memory.isCommitted(unmapped, 16));
+
+    // GetCurrentTick: host UTC time on the 0001-01-01 epoch.
+    const auto host_now = [] {
+        const auto since = std::chrono::system_clock::now().time_since_epoch();
+        return kUnixEpoch +
+               static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(since).count());
+    };
+    const std::uint64_t before = host_now();
+    CHECK(call(GetCurrentTick, tick) == 0);
+    const std::uint64_t after = host_now();
+    CHECK(tox2Read64(base, tick) >= before && tox2Read64(base, tick) <= after + 1000000);
+    CHECK(call(GetCurrentTick, 0) == kInvalidPointer);
+    CHECK(call(GetCurrentTick, unmapped) == kInvalidPointer);
+
+    // ConvertUtcToLocalTime adds the offset in minutes, in either direction.
+    const std::uint64_t utc = 63000000000000000ull;
+    tox2Write64(base, tick, utc);
+    tox2::setRtcLocalOffsetMinutes(540);  // UTC+9
+    CHECK(call(ConvertUtcToLocalTime, tick, local) == 0);
+    CHECK(tox2Read64(base, local) == utc + 540ull * 60 * 1000000);
+    tox2::setRtcLocalOffsetMinutes(-330);
+    CHECK(call(ConvertUtcToLocalTime, tick, tick) == 0);  // in place
+    CHECK(tox2Read64(base, tick) == utc - 330ull * 60 * 1000000);
+    tox2::setRtcLocalOffsetMinutes(std::nullopt);  // the host time zone: whole minutes, within a day
+    tox2Write64(base, tick, utc);
+    CHECK(call(ConvertUtcToLocalTime, tick, local) == 0);
+    const auto host_delta = static_cast<std::int64_t>(tox2Read64(base, local) - utc);
+    CHECK(host_delta % (60 * 1000000) == 0 && host_delta > -24ll * 3600 * 1000000 &&
+          host_delta < 24ll * 3600 * 1000000);
+    tox2Write64(base, local, 0x1122334455667788ull);
+    CHECK(call(ConvertUtcToLocalTime, 0, local) == kInvalidPointer);
+    CHECK(call(ConvertUtcToLocalTime, tick, 0) == kInvalidPointer);
+    CHECK(call(ConvertUtcToLocalTime, unmapped, local) == kInvalidPointer);
+    CHECK(call(ConvertUtcToLocalTime, tick, unmapped) == kInvalidPointer);
+    CHECK(tox2Read64(base, local) == 0x1122334455667788ull);  // untouched on error
+
+    // SetTick: 2026-10-12 12:34:56.789 UTC is 1791808496 s after 1970-01-01.
+    const std::uint64_t known = (kUnixEpoch / 1000000 + 1791808496ull) * 1000000 + 789000;
+    tox2Write64(base, tick, known);
+    CHECK(call(SetTick, date, tick) == 0);
+    CHECK(tox2Read16(base, date) == 2026 && tox2Read16(base, date + 2) == 10 && tox2Read16(base, date + 4) == 12);
+    CHECK(tox2Read16(base, date + 6) == 12 && tox2Read16(base, date + 8) == 34 && tox2Read16(base, date + 10) == 56);
+    CHECK(tox2Read32(base, date + 12) == 789000);
+    CHECK(call(GetDayOfWeek, 2026, 10, 12) == 1);  // a Monday
+
+    // Edges: the epoch, the Unix epoch, a leap day and the last representable second of 9999.
+    struct Case {
+        std::uint64_t tick;
+        std::uint16_t year, month, day, hour, minute, second;
+        std::uint32_t micro;
+    };
+    const Case cases[] = {
+            {0, 1, 1, 1, 0, 0, 0, 0},
+            {kUnixEpoch, 1970, 1, 1, 0, 0, 0, 0},
+            {63082281600000000ull, 2000, 1, 1, 0, 0, 0, 0},
+            {63082281600000000ull + (31 + 28) * 86400ull * 1000000, 2000, 2, 29, 0, 0, 0, 0},
+            {63082281600000000ull + 366 * 86400ull * 1000000 - 1, 2000, 12, 31, 23, 59, 59, 999999},
+            {66238041599999999ull, 2099, 12, 31, 23, 59, 59, 999999},
+            {kUnixEpoch + 951782400ull * 1000000, 2000, 2, 29, 0, 0, 0, 0},
+            {kUnixEpoch + 4107542399ull * 1000000, 2100, 2, 28, 23, 59, 59, 0},  // 2100 is not a leap year
+            {315537897599999999ull, 9999, 12, 31, 23, 59, 59, 999999},
+    };
+    for (const Case& c : cases) {
+        tox2Write64(base, tick, c.tick);
+        CHECK(call(SetTick, date, tick) == 0);
+        CHECK(tox2Read16(base, date) == c.year && tox2Read16(base, date + 2) == c.month &&
+              tox2Read16(base, date + 4) == c.day && tox2Read16(base, date + 6) == c.hour &&
+              tox2Read16(base, date + 8) == c.minute && tox2Read16(base, date + 10) == c.second &&
+              tox2Read32(base, date + 12) == c.micro);
+    }
+    CHECK(call(SetTick, 0, tick) == kInvalidPointer);
+    CHECK(call(SetTick, date, 0) == kInvalidPointer);
+    CHECK(call(SetTick, unmapped, tick) == kInvalidPointer);
+    CHECK(call(SetTick, date, unmapped) == kInvalidPointer);
+
+    // GetDayOfWeek: 0 = Sunday; January and February use the previous year.
+    CHECK(call(GetDayOfWeek, 1, 1, 1) == 1);       // 0001-01-01 is a Monday
+    CHECK(call(GetDayOfWeek, 1970, 1, 1) == 4);    // Thursday
+    CHECK(call(GetDayOfWeek, 2000, 1, 1) == 6);    // Saturday
+    CHECK(call(GetDayOfWeek, 2000, 2, 29) == 2);   // Tuesday
+    CHECK(call(GetDayOfWeek, 2000, 3, 1) == 3);    // Wednesday
+    CHECK(call(GetDayOfWeek, 2024, 2, 29) == 4);   // Thursday
+    CHECK(call(GetDayOfWeek, 2023, 12, 31) == 0);  // Sunday
+    CHECK(call(GetDayOfWeek, 2100, 3, 1) == 1);    // Monday
+    CHECK(call(GetDayOfWeek, 9999, 12, 31) == 5);  // Friday
+
+    tox2::installImports(nullptr, 0);
+    p.main.free(scratch);
+}
+
 void testCellFs() {
     namespace stdfs = std::filesystem;
     std::vector<std::string> lines;
@@ -11130,6 +11249,7 @@ int main(int argc, char** argv) {
     testCellGcmSys();
     testParamSfo();
     testCellGame();
+    testCellRtc();
     testCellFs();
     testVfsConfig();
     testSceNpAndTrophy();

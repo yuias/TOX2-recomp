@@ -42,6 +42,13 @@ std::span<const HleEntry> cellGameHandlers();
 // Forgets the outstanding cellGameDataCheck state. Intended for tests.
 void resetCellGame();
 
+// Handlers of the cellRtc imports: GetCurrentTick, ConvertUtcToLocalTime, SetTick and GetDayOfWeek.
+std::span<const HleEntry> cellRtcHandlers();
+
+// Replaces the host time zone as the offset (minutes east of UTC, daylight saving included) that
+// cellRtcConvertUtcToLocalTime adds; nullopt restores the host time zone. Intended for tests.
+void setRtcLocalOffsetMinutes(std::optional<std::int32_t> minutes);
+
 // Handlers of the sceNp module.
 std::span<const HleEntry> sceNpHandlers();
 

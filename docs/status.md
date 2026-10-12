@@ -18,8 +18,8 @@ its executable.
 The run below was made with the build of commit `e013aa8`. `libsre.prx` of firmware 4.93 is part of the program (see
 [SPU usage](spu.md#where-the-spurs-code-lives)). `tox2_game` loads `libsre.reloc.elf` at `0x011d0000`,
 registers its 352 functions for dispatch and binds all 30 `cellSpurs` imports of the game to libsre's
-exported functions. Of the game's 173 imports, 120 have a handler, 30 are bound to libsre and 23 get the
-default handler. The load log says `tox2: hle: 173 imports, 120 with handlers, 30 bound to libsre`, and
+exported functions. Of the game's 173 imports, 127 have a handler, 30 are bound to libsre and 16 get the
+default handler. The load log says `tox2: hle: 173 imports, 127 with handlers, 30 bound to libsre`, and
 `tox2: hle: libsre: 32 imports, 30 with handlers` for libsre's own imports. It also checks the 16 emitted
 SPU images against guest memory (`tox2: spu: 16 images ok`).
 
@@ -64,7 +64,8 @@ census: spu 5 threads, 87070 dispatches, 0 unknown targets
 
 The counts differ from run to run. The default-handled system call was `sys_spu_thread_bind_queue`
 (the game's sound engine; it has a handler now); the seven default-handled imports are `cellRtcGetCurrentTick`,
-`cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`.
+`cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`
+(the two `cellRtc` imports have handlers now).
 
 A run with `--seconds 180` also ends at the watchdog (`tox2: stop: watchdog 180 s`). Its SPU census is
 `census: spu 5 threads, 174337514 dispatches, 0 unknown targets`. Before the jump table at `0x0092d178`
@@ -238,9 +239,9 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   committed function database holds 29,196 functions, and the emitter reports no unhandled
   instruction form.
 - The executable imports 173 functions from 17 modules, all with known names. The runtime has a
-  handler for 120 of them and binds the 30 `cellSpurs` functions to libsre (`tox2: hle: 173 imports,
-  120 with handlers, 30 bound to libsre`); the other 23 get the default handler (see
-  [Runtime internals](runtime.md#default-handlers)). Among them are the four `cellRtc` and the four
+  handler for 127 of them and binds the 30 `cellSpurs` functions to libsre (`tox2: hle: 173 imports,
+  127 with handlers, 30 bound to libsre`); the other 16 get the default handler (see
+  [Runtime internals](runtime.md#default-handlers)). Among them are the four
   `cellScreenShotUtility` functions.
 - It embeds 8 SPU images and has 267 system call sites; the probe leaves 4 of them unresolved.
 - The game issues 67 system call numbers. The runtime has a handler for the semaphore, memory
@@ -280,8 +281,8 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   The census at the end of a run lists what the game called and what the default handler served.
   The census of a run from before the sound engine thread started listed one system call
   (`sys_spu_thread_bind_queue`, since implemented) and seven imports (`cellRtcGetCurrentTick`,
-  `cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`),
-  which are still default-handled.
+  `cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`);
+  the two `cellRtc` imports have handlers now, the others are still default-handled.
 - Graphics: only what the inherited fake RSX and renderer implement. Whatever the renderer meets and
   cannot handle is listed in the `rsx unimplemented` census (see
   [Rendering](rendering.md#rendering)). Known gaps are the ZPASS report values (the constant 0 is

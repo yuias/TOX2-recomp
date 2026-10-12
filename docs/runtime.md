@@ -20,7 +20,7 @@ A run starts with the load log, for example (TOX2 values):
 [host] tox2: spu: 16 images ok
 [host] tox2: dispatch: 29369 entries, span 0x00010200..0x00c9098c
 [host] tox2: dispatch: 384 entries, span 0x011d0000..0x011edafc
-[host] tox2: hle: 173 imports, 120 with handlers, 30 bound to libsre
+[host] tox2: hle: 173 imports, 127 with handlers, 30 bound to libsre
 [host] tox2: hle: libsre: 32 imports, 30 with handlers
 [host] tox2: loaded EBOOT.elf: entry 0x00010240 toc 0x010b6330 opd 0x0105ddb8 ... image end 0x011d0000
 [host] tox2: sha256 a1d8a56ce1d6300bff704a43218f1b8b87c80c1e1342929a266e58af4e5891e9
@@ -336,9 +336,9 @@ an SPU ELF32 in guest memory and `sys_spu_image_close` frees it.
 ## Implemented imports
 
 Imports are matched to handlers by module and FNID. The executable of this game has 173 imports from
-17 modules. 120 of them have a handler and 30 (all of `cellSpurs`) are bound to functions that libsre
-exports (the load log says `tox2: hle: 173 imports, 120 with handlers, 30 bound to libsre`). The other
-23 are served by the [default handler](#default-handlers). Behaviour follows
+17 modules. 127 of them have a handler and 30 (all of `cellSpurs`) are bound to functions that libsre
+exports (the load log says `tox2: hle: 173 imports, 127 with handlers, 30 bound to libsre`). The other
+16 are served by the [default handler](#default-handlers). Behaviour follows
 the RPCS3 function of the same name (`Emu/Cell/Modules/`); each handler file lists its deviations in
 its header comment. `cellAudio` and `cellAtrac` were implemented from a written description of
 RPCS3's behaviour, not from its code (see [Audio](audio.md#clean-room)).
@@ -358,10 +358,10 @@ FNID match, not that the behaviour suits this game.
 | `sys_fs` | 7 / 7 | `cellFsOpen`, `cellFsClose`, `cellFsStat`, `cellFsFstat`, `cellFsRead`, `cellFsLseek`, `cellFsWrite` (the last three call the lv2 handlers of `sys_fs_read`, `_lseek` and `_write`, so offsets and counts stay 64-bit) | |
 | `sys_io` | 6 / 6 | `cellPadInit`, `cellPadEnd`, `cellPadSetPortSetting`, `cellPadGetData`, `cellPadGetInfo2`, `cellPadSetActDirect` | |
 | `cellAudio` | 10 / 10 | `Init`, `Quit`, `PortOpen`, `PortStart`, `PortStop`, `PortClose`, `GetPortConfig`, `SetNotifyEventQueue`, `RemoveNotifyEventQueue`, `SetPortLevel` (the level of an open port, taken from `f1`; a negative level or NaN is `CELL_AUDIO_ERROR_PARAM`); the ports and the 8-block ring live in guest memory and a host clock drives the game's mixer; see [Audio](audio.md) | |
-| `cellAtrac` | 12 / 15 | `SetDataAndGetMemSize`, `DeleteDecoder`, `Decode`, the stream calls (`GetStreamDataInfo`, `AddStreamData`), the loop and info calls, `GetMaxSample`, `GetChannel` and the second-buffer calls; ATRAC3plus is decoded through FFmpeg; see [Audio](audio.md#cellatrac) | `cellAtracCreateDecoderExt`, `cellAtracGetInternalErrorInfo`, `cellAtracGetVacantSize` |
+| `cellAtrac` | 15 / 15 | `SetDataAndGetMemSize`, `DeleteDecoder`, `Decode`, the stream calls (`GetStreamDataInfo`, `AddStreamData`), the loop and info calls, `GetMaxSample`, `GetChannel`, the second-buffer calls, `CreateDecoderExt`, `GetInternalErrorInfo` and `GetVacantSize`; ATRAC3plus is decoded through FFmpeg; see [Audio](audio.md#cellatrac) | |
 | `sceNp` | 3 / 5 | `sceNpInit`, `sceNpTerm`, `sceNpDrmIsAvailable` | `sceNpManagerGetStatus`, `sceNpManagerGetContentRatingFlag` |
 | `sceNpTrophy` | 9 / 10 | `sceNpTrophyInit`, `_Term`, `CreateContext`, `DestroyContext`, `CreateHandle`, `DestroyHandle`, `RegisterContext`, `GetRequiredDiskSpace`, `UnlockTrophy` | `sceNpTrophyAbortHandle` |
-| `cellRtc` | 0 / 4 | | `cellRtcGetCurrentTick`, `cellRtcConvertUtcToLocalTime`, `cellRtcSetTick`, `cellRtcGetDayOfWeek` |
+| `cellRtc` | 4 / 4 | `cellRtcGetCurrentTick` (the host UTC clock as microseconds since 0001-01-01), `cellRtcConvertUtcToLocalTime` (adds the host time zone offset, daylight saving included), `cellRtcSetTick` (tick to date and time) and `cellRtcGetDayOfWeek` (0 = Sunday); the pointers must be committed guest memory, otherwise `CELL_RTC_ERROR_INVALID_POINTER` | |
 | `cellSysutilAvconfExt` | 1 / 1 | `cellVideoOutSetGamma` (accepts 0.8 to 1.8 from `f1` on the primary output, otherwise an illegal parameter or an unsupported video out; the gamma is not applied) | |
 | `cellScreenShotUtility` | 0 / 4 | | all four |
 | `sceNpCommerce2` | 0 / 2 | | both |
@@ -624,8 +624,8 @@ the handler, not facts: a register left over from an earlier call can look like 
 
 In the earlier runs of this game, before libsre was loaded, the default handlers served 24 imports and
 no system call. The current run (see [SPU usage](spu.md#what-the-current-run-reaches)) default-handles
-seven imports (an earlier build also default-handled the system call `sys_spu_thread_bind_queue`, 193): `cellRtcGetCurrentTick`,
-`cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`. An earlier
+five imports (an earlier build also default-handled the system call `sys_spu_thread_bind_queue`, 193, and `cellRtcGetCurrentTick` and
+`cellRtcConvertUtcToLocalTime`): four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`. An earlier
 stop, a write to address 0 in fn `0x008a090c` on the GCM interrupt thread, followed the
 default-handled `cellGcmGetLabelAddress`, which returned 0 instead of a label address; with a
 handler for it the thread no longer faults. A later stop, the game's own `abort()`, followed the

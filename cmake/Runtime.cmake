@@ -105,6 +105,7 @@ function(tox2_runtime_add_core)
     runtime/src/hle/cell_pad.cpp
     runtime/src/hle/cell_pamf.cpp
     runtime/src/hle/cell_png_dec.cpp
+    runtime/src/hle/cell_rtc.cpp
     runtime/src/hle/cell_sail_adapters.cpp
     runtime/src/hle/cell_sail_player.cpp
     runtime/src/hle/cell_save_data.cpp

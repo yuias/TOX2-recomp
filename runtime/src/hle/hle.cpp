@@ -57,13 +57,14 @@ using BindingMap = std::map<std::pair<std::string, std::uint32_t>, Binding>;
 // Every module's handler list. No static self-registration: archive members are not pulled in by
 // static initialisers, so each module is named here.
 using HandlerList = std::span<const HleEntry> (*)();
-constexpr std::array<HandlerList, 18> kRegistries{
+constexpr std::array<HandlerList, 19> kRegistries{
         sysPrxForUserHandlers, sysPrxForUserLibcHandlers, cellSysmoduleHandlers,
         cellGcmSysHandlers,    cellGameHandlers,          cellFsHandlers,
         sceNpHandlers,         sceNpTrophyHandlers,       cellSysutilHandlers,
         cellMsgDialogHandlers, cellSaveDataHandlers,      cellPadHandlers,
         cellPngDecHandlers,    cellSailPlayerHandlers,    cellSailAdapterHandlers,
-        cellPamfHandlers,      cellAtracHandlers,         cellAudioHandlers};
+        cellPamfHandlers,      cellAtracHandlers,         cellAudioHandlers,
+        cellRtcHandlers};
 
 // Written by installImports before any guest thread starts; the call counters are updated under
 // the guest lock.
