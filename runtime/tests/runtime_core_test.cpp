@@ -37,6 +37,7 @@
 #include "core/latency_stats.h"
 #include "core/log.h"
 #include "core/param_sfo.h"
+#include "core/perf_log.h"
 #include "core/reservation.h"
 #include "core/threads.h"
 #include "core/timer_resolution.h"
@@ -11207,6 +11208,35 @@ void testGuestLockFifo() {
     CHECK(!lock.hasWaiters());
 }
 
+// startPerfLog is once per process, so this is the only test that starts it.
+void testPerfLine() {
+    CHECK(tox2::formatPerfLine(212.04, "x") == "tox2: perf: t 212.0 s: x");
+
+    // The perf thread outlives this function, so the counters are shared with it.
+    const auto calls = std::make_shared<std::atomic<int>>(0);
+    const auto empty_calls = std::make_shared<std::atomic<int>>(0);
+    const auto ignored = std::make_shared<std::atomic<int>>(0);
+    tox2::startPerfLog({[calls] {
+                            ++*calls;
+                            return std::string("body");
+                        },
+                        [empty_calls] {
+                            ++*empty_calls;
+                            return std::string();
+                        }},
+                       std::chrono::milliseconds(200));
+    // A second start must not add a thread or change the interval.
+    tox2::startPerfLog({[ignored] {
+                           ++*ignored;
+                           return std::string("late");
+                       }},
+                       std::chrono::milliseconds(10));
+    std::this_thread::sleep_for(std::chrono::milliseconds(3500));
+    CHECK(calls->load() >= 3);
+    CHECK(calls->load() <= 18);
+    CHECK(ignored->load() == 0);
+}
+
 // Waits and holds are attributed to the class of the thread that waited or held.
 void testGuestLockStats() {
     constexpr auto kRsx = tox2::GuestLockClass::Rsx;
@@ -11847,6 +11877,7 @@ int main(int argc, char** argv) {
     testTimerResolution();
     testGuestLockFifo();
     testGuestLockStats();
+    testPerfLine();
     testReservationAndDcbz();
     testGuestStackWalk();
     testFaultChild();

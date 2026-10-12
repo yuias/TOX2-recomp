@@ -8,6 +8,7 @@
 #include <expected>
 #include <filesystem>
 #include <format>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -30,6 +31,7 @@
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/param_sfo.h"
+#include "core/perf_log.h"
 #include "core/threads.h"
 #include "core/timer_resolution.h"
 #include "tox2/ppu_context.h"
@@ -54,6 +56,7 @@
 #include "render/vk_renderer.h"
 #include "render/vk_window.h"
 #include "rsx/rsx_thread.h"
+#include "spu/spu_census.h"
 #include "spu/spu_thread.h"
 
 namespace {
@@ -597,6 +600,84 @@ std::vector<std::string> audioCensusLines() {
     return lines;
 }
 
+// Interval deltas for the once-per-second perf line; each source keeps its previous snapshot because the perf thread
+// is the only caller.
+tox2::PerfSource audioPerfSource() {
+    return [prev = tox2::CellAudioStats{}, prev_flips = std::uint64_t{0}]() mutable -> std::string {
+        if (tox2::audioEngineStats().output.empty()) return {};  // cellAudioInit has not run
+        const tox2::CellAudioStats now = tox2::cellAudioPorts().stats();
+        const std::uint64_t flips = tox2::rsxCensusSnapshot().flips;
+        std::string body = std::format("audio flips {} periods {} unwritten {} (runs {})", flips - prev_flips,
+                                       now.periods - prev.periods, now.unwritten_blocks - prev.unwritten_blocks,
+                                       now.unwritten_runs - prev.unwritten_runs);
+        prev = now;
+        prev_flips = flips;
+        return body;
+    };
+}
+
+bool isAudioPathClass(tox2::GuestLockClass cls) {
+    return cls == tox2::GuestLockClass::Audio || cls == tox2::GuestLockClass::Spu ||
+           cls == tox2::GuestLockClass::PpuHigh;
+}
+
+tox2::PerfSource lockPerfSource() {
+    return [prev = tox2::GuestLockStats{}]() mutable -> std::string {
+        const tox2::GuestLockStats now = tox2::guestLock().stats();
+        std::string body;
+        for (std::size_t i = 0; i < tox2::kGuestLockClassCount; i++) {
+            const auto cls = static_cast<tox2::GuestLockClass>(i);
+            const tox2::GuestLockClassStats& a = now.classes[i];
+            const tox2::GuestLockClassStats& b = prev.classes[i];
+            const tox2::LatencySnapshot wait = a.wait.since(b.wait);
+            if (wait.count == 0) continue;
+            const tox2::LatencySnapshot hold = a.hold.since(b.hold);
+            body += std::format("{}{} {} hold p99 {:.2f} max {:.2f}", body.empty() ? "lock " : " | ",
+                                tox2::guestLockClassName(cls), tox2::formatLatency(wait, tox2::kGuestLockWaitOverUs),
+                                static_cast<double>(hold.percentileUs(0.99)) / 1000.0,
+                                static_cast<double>(hold.max_us) / 1000.0);
+            if (!isAudioPathClass(cls)) continue;
+            // Mean queue length over the contended acquisitions only, the same denominator as the census.
+            const std::uint64_t contended = a.contended - b.contended;
+            const double ahead =
+                    contended != 0 ? static_cast<double>(a.ahead_sum - b.ahead_sum) / static_cast<double>(contended)
+                                   : 0.0;
+            body += std::format(" ahead avg {:.1f}", ahead);
+            bool first = true;
+            for (std::size_t holder = 0; holder < tox2::kGuestLockClassCount; holder++) {
+                const std::uint64_t us = a.waited_behind_us[holder] - b.waited_behind_us[holder];
+                if (us == 0) continue;
+                body += std::format("{} {} {:.2f}", first ? " behind" : "",
+                                    tox2::guestLockClassName(static_cast<tox2::GuestLockClass>(holder)),
+                                    static_cast<double>(us) / 1000.0);
+                first = false;
+            }
+            if (!first) body += " ms";
+        }
+        prev = now;
+        return body;
+    };
+}
+
+tox2::PerfSource spuPerfSource() {
+    return [prev = std::map<std::uint32_t, tox2::SpuReceiveRow>{}]() mutable -> std::string {
+        std::string body;
+        for (const tox2::SpuReceiveRow& row : tox2::spuReceiveSnapshot()) {
+            const tox2::SpuReceiveRow& before = prev[row.id];
+            const tox2::LatencySnapshot busy = row.busy.since(before.busy);
+            const tox2::LatencySnapshot wait = row.wait.since(before.wait);
+            if (busy.count != 0 || wait.count != 0) {
+                body += std::format("{}spu {:#010x} {} busy {}; wait p99 {:.2f} max {:.2f}", body.empty() ? "" : " | ",
+                                    row.id, row.name, tox2::formatLatency(busy, tox2::kSpuReceiveOverUs),
+                                    static_cast<double>(wait.percentileUs(0.99)) / 1000.0,
+                                    static_cast<double>(wait.max_us) / 1000.0);
+            }
+            prev[row.id] = row;
+        }
+        return body;
+    };
+}
+
 void configureAudio(const Options& opt) {
     tox2::AudioEngineConfig config;
     // Only the wasapi choice builds a device output, so a run without it never touches COM.
@@ -665,6 +746,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "error: cannot open log file %s\n", opt.log_file.c_str());
         return static_cast<int>(tox2::ExitCode::Usage);
     }
+
+    tox2::startPerfLog({audioPerfSource(), lockPerfSource(), spuPerfSource()});
 
     // Precedence: command-line options, then the configuration file, then the defaults.
     std::optional<tox2::VfsConfigFile> vfs_file;
