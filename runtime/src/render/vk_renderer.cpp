@@ -16,6 +16,7 @@
 #include "core/log.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
+#include "render/render_scale.h"
 #include "render/shader_compiler.h"
 #include "render/vertex_convert.h"
 #include "render/vk_textures.h"
@@ -146,8 +147,10 @@ struct RsxRenderer::RenderTarget {
     VkImageView view = VK_NULL_HANDLE;
     VkFormat format = VK_FORMAT_UNDEFINED;
     VkImageAspectFlags aspect = 0;
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
+    // Guest memory layout in pixels, the size the cache identifies a target by and texture sizes are compared with.
+    std::uint32_t layout_width = 0, layout_height = 0;
+    std::uint32_t scale = 1;                          // image pixels per layout pixel
+    std::uint32_t image_width = 0, image_height = 0;  // layout size x scale: the VkImage extent
     std::uint32_t pitch = 0;  // the surface's row pitch; a resize only inherits contents across equal pitches
     bool depth = false;
     // Layout at the end of the commands recorded so far (the frame's command buffer is submitted in order).
@@ -400,8 +403,14 @@ void RsxRenderer::transition(RenderTarget& target, VkImageLayout layout) {
 std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth, const RsxSurface& surface,
                                                                      VkFormat format) {
     const VkPhysicalDeviceProperties& props = context_.deviceProperties();
-    if (surface.width == 0 || surface.height == 0 || surface.width > props.limits.maxImageDimension2D ||
-        surface.height > props.limits.maxImageDimension2D) {
+    // The anti-aliased layouts (samples per pixel) are not rendered yet, so the layout is the clip size.
+    const std::uint32_t layout_width = surface.width;
+    const std::uint32_t layout_height = surface.height;
+    const std::uint32_t scale = 1;
+    const std::uint64_t image_width = std::uint64_t{layout_width} * scale;
+    const std::uint64_t image_height = std::uint64_t{layout_height} * scale;
+    if (layout_width == 0 || layout_height == 0 || image_width > props.limits.maxImageDimension2D ||
+        image_height > props.limits.maxImageDimension2D) {
         rsxNoteUnimplemented("state", std::format("surface size {}x{}", surface.width, surface.height));
         return nullptr;
     }
@@ -419,8 +428,11 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth,
     target->sampled = sampled;
     target->format = format;
     target->aspect = depth ? depthAspect(format) : VK_IMAGE_ASPECT_COLOR_BIT;
-    target->width = surface.width;
-    target->height = surface.height;
+    target->layout_width = layout_width;
+    target->layout_height = layout_height;
+    target->scale = scale;
+    target->image_width = static_cast<std::uint32_t>(image_width);
+    target->image_height = static_cast<std::uint32_t>(image_height);
     target->pitch = surface.pitch;
     target->depth = depth;
 
@@ -428,7 +440,7 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth,
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     image_info.imageType = VK_IMAGE_TYPE_2D;
     image_info.format = format;
-    image_info.extent = {surface.width, surface.height, 1};
+    image_info.extent = {target->image_width, target->image_height, 1};
     image_info.mipLevels = 1;
     image_info.arrayLayers = 1;
     image_info.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -498,7 +510,9 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::acquire(TargetMap& map, 
     std::shared_ptr<RenderTarget> previous;
     if (it != map.end()) {
         const std::shared_ptr<RenderTarget>& existing = it->second;
-        if (existing->width == surface.width && existing->height == surface.height && existing->format == format) {
+        // The identity is the layout size: the scale is the renderer's choice, not part of the guest memory.
+        if (existing->layout_width == surface.width && existing->layout_height == surface.height &&
+            existing->format == format) {
             touch(existing);
             return existing;
         }
@@ -536,7 +550,9 @@ void RsxRenderer::inheritContents(const std::shared_ptr<RenderTarget>& previous,
     VkImageCopy region{};
     region.srcSubresource = {previous->aspect, 0, 0, 1};
     region.dstSubresource = {target.aspect, 0, 0, 1};
-    region.extent = {std::min(previous->width, target.width), std::min(previous->height, target.height), 1};
+    // The layout overlap at the common scale; the two targets have the same scale until it can vary.
+    region.extent = {std::min(previous->layout_width, target.layout_width) * target.scale,
+                     std::min(previous->layout_height, target.layout_height) * target.scale, 1};
     vkCmdCopyImage(slots_[current_slot_]->cmd, previous->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.image,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
     stats_.surface_inherits++;
@@ -737,7 +753,7 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
     if (depth.argb && depth.argb_serial == depth.write_serial) return depth.argb;
 
     if (!depth.argb) {
-        depth.argb = textures_->renderable(depth.width, depth.height);
+        depth.argb = textures_->renderable(depth.image_width, depth.image_height);
         if (!textures_->valid()) {
             fail(textures_->error());
             return nullptr;
@@ -808,14 +824,14 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
     attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     VkRenderingInfo rendering{};
     rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-    rendering.renderArea = {{0, 0}, {depth.width, depth.height}};
+    rendering.renderArea = {{0, 0}, {depth.image_width, depth.image_height}};
     rendering.layerCount = 1;
     rendering.colorAttachmentCount = 1;
     rendering.pColorAttachments = &attachment;
 
-    const VkViewport viewport = {0.0f, 0.0f, static_cast<float>(depth.width), static_cast<float>(depth.height),
-                                 0.0f, 1.0f};
-    const VkRect2D scissor = {{0, 0}, {depth.width, depth.height}};
+    const VkViewport viewport = {
+            0.0f, 0.0f, static_cast<float>(depth.image_width), static_cast<float>(depth.image_height), 0.0f, 1.0f};
+    const VkRect2D scissor = {{0, 0}, {depth.image_width, depth.image_height}};
     const VkDescriptorImageInfo infos[2] = {
             {placeholder_sampler_, depth.depth_view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL},
             {placeholder_sampler_, depth.stencil_view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL}};
@@ -914,7 +930,7 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
             }
             const std::shared_ptr<RenderTarget> target = found->second;
             touch(target);
-            if (target->width != texture->width || target->height != texture->height) {
+            if (target->layout_width != texture->width || target->layout_height != texture->height) {
                 rsxNoteUnimplemented("texture layout", "render target alias of another size");
             }
             const std::shared_ptr<TextureImage> converted = depthAsArgb(*target);
@@ -949,7 +965,7 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                     rsxNoteUnimplemented("texture layout", "render target alias of another format");
                     continue;
                 }
-                if (target->width != texture->width || target->height != texture->height) {
+                if (target->layout_width != texture->width || target->layout_height != texture->height) {
                     rsxNoteUnimplemented("texture layout", "render target alias of another size");
                 }
             } else {
@@ -978,7 +994,7 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                     continue;
                 }
                 if (!feedback_copy) {
-                    feedback_copy = textures_->scratch(target->width, target->height);
+                    feedback_copy = textures_->scratch(target->image_width, target->image_height);
                     if (!textures_->valid()) {
                         fail(textures_->error());
                         return false;
@@ -1143,16 +1159,16 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     // The render area is the smaller of the attachments; the scissor is clipped to it, and an empty
     // rectangle draws nothing (counted in `draws`, not skipped).
     const RsxRasterState& raster = draw.raster;
-    std::uint32_t area_width = color->width, area_height = color->height;
+    std::uint32_t area_width = color->image_width, area_height = color->image_height;
     if (depth) {
-        area_width = std::min(area_width, depth->width);
-        area_height = std::min(area_height, depth->height);
+        area_width = std::min(area_width, depth->image_width);
+        area_height = std::min(area_height, depth->image_height);
     }
-    const std::uint32_t scissor_x = std::min(raster.scissor_x, area_width);
-    const std::uint32_t scissor_y = std::min(raster.scissor_y, area_height);
-    const std::uint32_t scissor_w = std::min(raster.scissor_w, area_width - scissor_x);
-    const std::uint32_t scissor_h = std::min(raster.scissor_h, area_height - scissor_y);
-    if (scissor_w == 0 || scissor_h == 0) {
+    // The AA sample factors join the scale here once the anti-aliased layouts are rendered.
+    const PixelScale pixel_scale = {color->scale, color->scale};
+    const ImageRect scissor_rect = scaleRect(raster.scissor_x, raster.scissor_y, raster.scissor_w, raster.scissor_h,
+                                             pixel_scale, area_width, area_height);
+    if (scissor_rect.width == 0 || scissor_rect.height == 0) {
         stats_.draws++;
         return;
     }
@@ -1376,10 +1392,14 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     vkCmdBeginRendering(cmd, &rendering);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-    const VkViewport viewport = {
-            0.0f, 0.0f, static_cast<float>(draw.surfaces.clip_w), static_cast<float>(draw.surfaces.clip_h), 0.0f, 1.0f};
-    const VkRect2D scissor = {{static_cast<std::int32_t>(scissor_x), static_cast<std::int32_t>(scissor_y)},
-                              {scissor_w, scissor_h}};
+    const VkViewport viewport = {0.0f,
+                                 0.0f,
+                                 static_cast<float>(draw.surfaces.clip_w * pixel_scale.x),
+                                 static_cast<float>(draw.surfaces.clip_h * pixel_scale.y),
+                                 0.0f,
+                                 1.0f};
+    const VkRect2D scissor = {{static_cast<std::int32_t>(scissor_rect.x), static_cast<std::int32_t>(scissor_rect.y)},
+                              {scissor_rect.width, scissor_rect.height}};
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
     constexpr std::uint32_t kCullFront = 0x404, kCullBack = 0x405, kFrontFaceCw = 0x900;
@@ -1511,12 +1531,16 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
     if (depth) depth->write_serial++;
 
     const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
-    std::uint32_t area_width = color ? color->width : depth->width;
-    std::uint32_t area_height = color ? color->height : depth->height;
+    std::uint32_t area_width = color ? color->image_width : depth->image_width;
+    std::uint32_t area_height = color ? color->image_height : depth->image_height;
     if (color && depth) {
-        area_width = std::min(color->width, depth->width);
-        area_height = std::min(color->height, depth->height);
+        area_width = std::min(color->image_width, depth->image_width);
+        area_height = std::min(color->image_height, depth->image_height);
     }
+    // From the target that sets the rectangle's scale: the colour one, or the depth one for a depth-only clear.
+    // The AA sample factors join the scale here once the anti-aliased layouts are rendered.
+    const std::uint32_t target_scale = color ? color->scale : depth->scale;
+    const PixelScale pixel_scale = {target_scale, target_scale};
 
     VkRenderingAttachmentInfo color_attachment{};
     VkRenderingAttachmentInfo depth_attachment{};
@@ -1582,11 +1606,11 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
 
     // The builder clipped the rectangle to the clip size, which is also the target size; the clamp only
     // guards the attachment bounds.
-    const std::uint32_t x = std::min(clear.scissor[0], area_width);
-    const std::uint32_t y = std::min(clear.scissor[1], area_height);
+    const ImageRect clear_rect = scaleRect(clear.scissor[0], clear.scissor[1], clear.scissor[2], clear.scissor[3],
+                                           pixel_scale, area_width, area_height);
     VkClearRect rect{};
-    rect.rect.offset = {static_cast<std::int32_t>(x), static_cast<std::int32_t>(y)};
-    rect.rect.extent = {std::min(clear.scissor[2], area_width - x), std::min(clear.scissor[3], area_height - y)};
+    rect.rect.offset = {static_cast<std::int32_t>(clear_rect.x), static_cast<std::int32_t>(clear_rect.y)};
+    rect.rect.extent = {clear_rect.width, clear_rect.height};
     rect.layerCount = 1;
 
     vkCmdBeginRendering(cmd, &rendering);
@@ -1611,11 +1635,9 @@ void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& co
         return;
     }
 
-    const std::uint32_t x = std::min(clear.scissor[0], color.width);
-    const std::uint32_t y = std::min(clear.scissor[1], color.height);
-    const std::uint32_t w = std::min(clear.scissor[2], color.width - x);
-    const std::uint32_t h = std::min(clear.scissor[3], color.height - y);
-    if (w == 0 || h == 0) return;
+    const ImageRect clear_rect = scaleRect(clear.scissor[0], clear.scissor[1], clear.scissor[2], clear.scissor[3],
+                                           PixelScale{color.scale, color.scale}, color.image_width, color.image_height);
+    if (clear_rect.width == 0 || clear_rect.height == 0) return;
 
     const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
     transition(color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -1627,7 +1649,7 @@ void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& co
     attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     VkRenderingInfo rendering{};
     rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-    rendering.renderArea = {{0, 0}, {color.width, color.height}};
+    rendering.renderArea = {{0, 0}, {color.image_width, color.image_height}};
     rendering.layerCount = 1;
     rendering.colorAttachmentCount = 1;
     rendering.pColorAttachments = &attachment;
@@ -1636,9 +1658,10 @@ void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& co
     const float value[4] = {static_cast<float>((argb >> 16) & 0xFF) / 255.0f,
                             static_cast<float>((argb >> 8) & 0xFF) / 255.0f, static_cast<float>(argb & 0xFF) / 255.0f,
                             static_cast<float>(argb >> 24) / 255.0f};
-    const VkViewport viewport = {0.0f, 0.0f, static_cast<float>(color.width), static_cast<float>(color.height),
-                                 0.0f, 1.0f};
-    const VkRect2D scissor = {{static_cast<std::int32_t>(x), static_cast<std::int32_t>(y)}, {w, h}};
+    const VkViewport viewport = {
+            0.0f, 0.0f, static_cast<float>(color.image_width), static_cast<float>(color.image_height), 0.0f, 1.0f};
+    const VkRect2D scissor = {{static_cast<std::int32_t>(clear_rect.x), static_cast<std::int32_t>(clear_rect.y)},
+                              {clear_rect.width, clear_rect.height}};
 
     vkCmdBeginRendering(cmd, &rendering);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -1704,8 +1727,8 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     } else {
         const std::shared_ptr<RenderTarget> target = it->second;
         touch(target);
-        display_width_ = target->width;
-        display_height_ = target->height;
+        display_width_ = target->image_width;
+        display_height_ = target->image_height;
         if (read_back && ensureReadback(slot, static_cast<VkDeviceSize>(display_width_) * display_height_ * 4)) {
             display_copied_ = true;
             transition(*target, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -1780,7 +1803,8 @@ void RsxRenderer::recordPresentBlit(FrameSlot& slot, RenderTarget* source) {
         transition(*source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         VkImageBlit region{};
         region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        region.srcOffsets[1] = {static_cast<std::int32_t>(source->width), static_cast<std::int32_t>(source->height), 1};
+        region.srcOffsets[1] = {static_cast<std::int32_t>(source->image_width),
+                                static_cast<std::int32_t>(source->image_height), 1};
         region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         region.dstOffsets[0] = {rect.x, rect.y, 0};
         region.dstOffsets[1] = {rect.x + static_cast<std::int32_t>(rect.width),

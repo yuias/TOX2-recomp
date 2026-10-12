@@ -18,6 +18,7 @@
 
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
+#include "render/render_scale.h"
 #include "render/shader_compiler.h"
 #include "render/vertex_convert.h"
 #include "render/vk_context.h"
@@ -2249,6 +2250,52 @@ void testAntiAliasDecode() {
     tox2::rsxUnimplementedReset();
 }
 
+// At scale 1 scaleRect is the clamp the renderer applied to scissors and clear rectangles before the
+// resolution scale existed; larger scales multiply the guest rectangle and clamp it to the image area.
+void testScaleRect() {
+    const auto oldClamp = [](std::uint32_t x, std::uint32_t y, std::uint32_t w, std::uint32_t h, std::uint32_t limit_w,
+                             std::uint32_t limit_h) {
+        tox2::ImageRect rect;
+        rect.x = std::min(x, limit_w);
+        rect.y = std::min(y, limit_h);
+        rect.width = std::min(w, limit_w - rect.x);
+        rect.height = std::min(h, limit_h - rect.y);
+        return rect;
+    };
+    const auto same = [](const tox2::ImageRect& a, const tox2::ImageRect& b) {
+        return a.x == b.x && a.y == b.y && a.width == b.width && a.height == b.height;
+    };
+    constexpr std::uint32_t kMax = 0xFFFFFFFFu;
+    const std::uint32_t values[] = {0, 1, 7, 64, 100, 1279, 1280, 1281, 4096, kMax};
+    for (const std::uint32_t x : values) {
+        for (const std::uint32_t w : values) {
+            const tox2::ImageRect got = tox2::scaleRect(x, x, w, w, {1, 1}, 1280, 720);
+            CHECK(same(got, oldClamp(x, x, w, w, 1280, 720)));
+        }
+    }
+
+    // Inside, crossing the edge, starting outside, zero size, at scale 1.
+    CHECK(same(tox2::scaleRect(10, 20, 30, 40, {1, 1}, 100, 100), {10, 20, 30, 40}));
+    CHECK(same(tox2::scaleRect(80, 90, 50, 50, {1, 1}, 100, 100), {80, 90, 20, 10}));
+    CHECK(same(tox2::scaleRect(150, 120, 10, 10, {1, 1}, 100, 100), {100, 100, 0, 0}));
+    CHECK(same(tox2::scaleRect(10, 10, 0, 0, {1, 1}, 100, 100), {10, 10, 0, 0}));
+
+    // Scales 2 and 3 on the same cases; the limits are image pixels.
+    CHECK(same(tox2::scaleRect(10, 20, 30, 40, {2, 2}, 200, 200), {20, 40, 60, 80}));
+    CHECK(same(tox2::scaleRect(10, 20, 30, 40, {3, 3}, 300, 300), {30, 60, 90, 120}));
+    CHECK(same(tox2::scaleRect(80, 90, 50, 50, {2, 2}, 200, 200), {160, 180, 40, 20}));
+    CHECK(same(tox2::scaleRect(80, 90, 50, 50, {3, 3}, 300, 300), {240, 270, 60, 30}));
+    CHECK(same(tox2::scaleRect(150, 120, 10, 10, {2, 2}, 200, 200), {200, 200, 0, 0}));
+    CHECK(same(tox2::scaleRect(10, 10, 0, 0, {3, 3}, 300, 300), {30, 30, 0, 0}));
+    // The factors are per axis (an anti-aliased layout is wider than tall).
+    CHECK(same(tox2::scaleRect(5, 5, 10, 10, {2, 1}, 100, 100), {10, 5, 20, 10}));
+
+    // Products that exceed 32 bits clamp instead of wrapping.
+    CHECK(same(tox2::scaleRect(kMax, kMax, kMax, kMax, {4, 4}, 1280, 720), {1280, 720, 0, 0}));
+    CHECK(same(tox2::scaleRect(0, 0, 0x80000000u, 0x80000000u, {4, 4}, 1280, 720), {0, 0, 1280, 720}));
+    CHECK(same(tox2::scaleRect(0x40000000u, 1, 0x40000000u, 1, {4, 4}, 1280, 720), {1280, 4, 0, 4}));
+}
+
 // A raster state with the stencil test on and the depth test and write off; `front` and `back` give the write
 // mask and the ZPASS op (REPLACE or KEEP, the other ops stay KEEP) of each face.
 struct ZetaFace {
@@ -3088,6 +3135,7 @@ int main() {
     testStencilDecode();
     testUserClipDecode();
     testAntiAliasDecode();
+    testScaleRect();
     testZetaWriteRule();
     testVertexConvert();
 
