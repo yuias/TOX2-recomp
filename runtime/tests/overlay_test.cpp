@@ -541,6 +541,21 @@ void drawTwice(tox2::VkContext& ctx, OffscreenTarget& target) {
     CHECK(!target.anyLit(1270, 710, 1270, 710));
 }
 
+tox2::DebugOverlay* g_forward_overlay = nullptr;
+WNDPROC g_forward_previous = nullptr;
+int g_forwarded_capture_changes = 0;
+
+// Routes messages to the overlay first, as the game window's procedure does.
+LRESULT CALLBACK forwardingProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (g_forward_overlay != nullptr) {
+        if (message == WM_CAPTURECHANGED) g_forwarded_capture_changes++;
+        const tox2::MessageRoute route = g_forward_overlay->onWindowMessage(
+                {hwnd, message, static_cast<std::uint64_t>(wparam), static_cast<std::int64_t>(lparam)});
+        if (route.handled) return static_cast<LRESULT>(route.result);
+    }
+    return CallWindowProcW(g_forward_previous, hwnd, message, wparam, lparam);
+}
+
 // Feeds the overlay Win32 input through a hidden window: the message hook has to reach the ImGui context
 // that record() created, with the real backend initialised for that window.
 void testWin32Input(tox2::VkContext& ctx, OffscreenTarget& target) {
@@ -580,6 +595,21 @@ void testWin32Input(tox2::VkContext& ctx, OffscreenTarget& target) {
         stats.flips = 4;
         CHECK(target.drawOnce(overlay, stats));
         CHECK(ImGui::GetIO().WantCaptureMouse);
+
+        // A click goes through the window procedure like in the game. The button-up makes the handler call
+        // ReleaseCapture, which sends WM_CAPTURECHANGED to the same window procedure before the handler returns.
+        g_forward_overlay = &overlay;
+        const LONG_PTR previous = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&forwardingProc));
+        g_forward_previous = reinterpret_cast<WNDPROC>(previous);
+        SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, (15 << 16) | 20);
+        CHECK(GetCapture() == hwnd);
+        SendMessageW(hwnd, WM_LBUTTONUP, 0, (15 << 16) | 20);
+        CHECK(GetCapture() == nullptr);
+        CHECK(g_forwarded_capture_changes > 0);
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous);
+        g_forward_overlay = nullptr;
+        stats.flips = 5;
+        CHECK(target.drawOnce(overlay, stats));
     }
     DestroyWindow(hwnd);
 }

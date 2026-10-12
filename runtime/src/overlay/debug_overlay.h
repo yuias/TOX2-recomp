@@ -53,7 +53,9 @@ private:
     OverlaySources sources_;
     OverlayState state_;  // renderer's thread only
 
-    std::mutex mutex_;  // the ImGui context; see the file comment
+    // The ImGui context; see the file comment. Recursive because the Win32 handler re-enters the window
+    // procedure on the same thread: ReleaseCapture sends WM_CAPTURECHANGED before it returns.
+    std::recursive_mutex mutex_;
     std::atomic<bool> visible_{false};
     std::atomic<bool> failed_{false};
     std::atomic<bool> initialized_{false};  // set under mutex_ once the backends are up
