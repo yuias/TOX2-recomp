@@ -106,7 +106,7 @@ additionally need `TOX2_GHIDRA_JSON`, the path of an export written by `ghidra-e
 are skipped without it. The tests never run Ghidra themselves. The tests of `recover` and
 `emit` that use the real executable also need `TOX2_EBOOT_ELF`; they read the committed
 `config/ghidra_summary.json` and `config/functions.json`. The `emit` tests assert the
-counts in [Emitting C](emitter.md) (29,196 functions, 173 import trampolines, 478 switches) and
+counts in [Emitting C](emitter.md) (29,196 functions, 173 import trampolines, 480 switches) and
 that no word is unhandled. The `recover` tests check, among other things, that the two TOCs are
 found and that the switch at `0x0081a10c`, which belongs to the second TOC, is resolved.
 

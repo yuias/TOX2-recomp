@@ -261,6 +261,44 @@ class EntryBranchShapeTest(unittest.TestCase):
         fx, _, _ = rel_fixture(code, 5)
         self.assertEqual(fx.reason(), "no_bound")
 
+    def test_index_copied_after_the_compare(self):
+        # The index is a clrldi copy of the compared register, made after the compare.
+        code = [asm.cmplwi(1, 26, 8), asm.clrldi(4, 26, 32), 0, asm.blr()]
+        code[2] = asm.ble(1, BASE + 8, pc(code))
+        code += spine(asm.sldi(9, 4, 2))
+        self.check(code, 9)
+
+    def test_compared_register_changed_before_the_index_copy_is_rejected(self):
+        code = [asm.cmplwi(1, 26, 8), asm.addi(26, 26, 1), asm.clrldi(4, 26, 32), 0, asm.blr()]
+        code[3] = asm.ble(1, BASE + 12, pc(code))
+        code += spine(asm.sldi(9, 4, 2))
+        fx, _, _ = rel_fixture(code, 9)
+        self.assertEqual(fx.reason(), "no_bound")
+
+    def compare_block_code(self, filler, between=()):
+        # mr r29,r5; beq L; <filler>; blr; L: cmplwi r5,12; ble <table block>; blr; table block.
+        code = [asm.mr(29, 5), *between, 0, filler, asm.blr()]
+        cmp_addr = pc(code)
+        code[1 + len(between)] = asm.bc(12, 4 * 7 + 2, BASE + 4 * (1 + len(between)), cmp_addr)
+        code += [asm.cmplwi(0, 5, 12), 0, asm.blr()]
+        code[-2] = asm.ble(0, cmp_addr + 4, pc(code))
+        return code + spine(asm.rldic(9, 29, 2, 30))
+
+    def test_compare_block_entered_by_one_branch(self):
+        self.check(self.compare_block_code(asm.li(3, -1)), 13)
+
+    def test_compare_block_entered_by_two_branches_is_rejected(self):
+        # The second branch lands on the compare from a path that skipped the copy.
+        code = self.compare_block_code(asm.li(3, -1))
+        code[2] = asm.b(BASE + 8, BASE + 4 * 4)
+        fx, _, _ = rel_fixture(code, 13)
+        self.assertEqual(fx.reason(), "no_bound")
+
+    def test_index_source_rewritten_before_the_entry_branch_is_rejected(self):
+        code = self.compare_block_code(asm.li(3, -1), between=(asm.li(5, 0),))
+        fx, _, _ = rel_fixture(code, 13)
+        self.assertEqual(fx.reason(), "no_bound")
+
     def test_conflicting_entry_bounds(self):
         code = [asm.cmplwi(7, 9, 4), 0, asm.cmplwi(6, 9, 6), 0, asm.blr()]
         end = pc(code)

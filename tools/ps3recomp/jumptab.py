@@ -33,6 +33,7 @@ _ENTRY_COMPARE_LIMIT = 32
 
 _LOAD_INDEXED = frozenset({"lwzx", "lwax"})
 _COMPARES = frozenset({"cmp", "cmpi", "cmpl", "cmpli"})
+_DIRECT_KINDS = frozenset({"jump", "cond_jump", "call", "cond_call"})
 
 
 @dataclass(frozen=True)
@@ -186,22 +187,47 @@ def _unsigned_compare(image: CodeImage, insn: Insn, toc: int | None,
 
 
 class _EntryBranches:
-    """Lazy map: target -> addresses of `ble` instructions (BO=4, bit GT) jumping there."""
+    """Lazy maps: `ble` sources by target, and every direct branch (with its kind) by target."""
 
     def __init__(self, image: CodeImage):
         self._image = image
-        self._by_target: dict[int, list[int]] | None = None
+        self._ble: dict[int, list[int]] | None = None
+        self._direct: dict[int, list[tuple[int, str]]] = {}
+
+    def _build(self) -> None:
+        self._ble = {}
+        for insn in self._image.insns:
+            if insn.spec is None:
+                continue
+            flow = flow_of(insn)
+            if flow.target is None or flow.kind not in _DIRECT_KINDS:
+                continue
+            self._direct.setdefault(flow.target, []).append((insn.addr, flow.kind))
+            if (insn.spec.name == "bc" and insn.field("BO") & 0x1E == 4
+                    and insn.field("BI") % 4 == 1 and flow.kind == "cond_jump"):
+                self._ble.setdefault(flow.target, []).append(insn.addr)
 
     def to(self, target: int) -> list[int]:
-        if self._by_target is None:
-            self._by_target = {}
-            for insn in self._image.insns:
-                if (insn.spec is not None and insn.spec.name == "bc"
-                        and insn.field("BO") & 0x1E == 4 and insn.field("BI") % 4 == 1):
-                    flow = flow_of(insn)
-                    if flow.kind == "cond_jump":
-                        self._by_target.setdefault(flow.target, []).append(insn.addr)
-        return self._by_target.get(target, [])
+        """Addresses of the `ble` instructions (BO=4, bit GT) jumping to `target`."""
+        if self._ble is None:
+            self._build()
+        return self._ble.get(target, [])
+
+    def sole_branch_in(self, start: int) -> int | None:
+        """The one jump or conditional jump that enters `start`, when nothing else does.
+
+        Entry means every way into the word: the word before it must not fall through, and
+        no call or second branch may target it. Otherwise None.
+        """
+        if self._ble is None:
+            self._build()
+        before = start - 4
+        if not self._image.contains(before) or flow_of(self._image.insn(before)).falls_through:
+            return None
+        sources = self._direct.get(start, [])
+        if len(sources) != 1 or sources[0][1] not in ("jump", "cond_jump"):
+            return None
+        return sources[0][0]
 
 
 def _bound_by_walk(image: CodeImage, branch: int, spine_start: int, index_src: int,
@@ -245,7 +271,7 @@ def _bound_by_entry(image: CodeImage, spine_start: int, index_src: int, enter: _
                 flow_of(image.insn(a)).kind != "seq" for a in range(target, spine_start, 4)):
             continue
         for addr in enter.to(target):
-            count = _entry_compare(image, addr, index_src, toc, read_mem)
+            count = _entry_compare(image, addr, index_src, enter, toc, read_mem)
             if count is not None:
                 counts.add(count)
     if len(counts) > 1:
@@ -253,13 +279,24 @@ def _bound_by_entry(image: CodeImage, spine_start: int, index_src: int, enter: _
     return counts.pop() if counts else None
 
 
-def _entry_compare(image: CodeImage, ble_addr: int, index_src: int, toc, read_mem) -> int | None:
+def _entry_compare(image: CodeImage, ble_addr: int, index_src: int, enter: _EntryBranches, toc,
+                   read_mem) -> int | None:
+    """Bound of the `cmpli crN,rZ,K` that a `ble crN` guards, when rZ holds the table index.
+
+    The index register is followed back from the `ble` to the compare through the copies made
+    in between (the compiler may widen the index after testing it), then `_same_value` pairs it
+    with the compared register.
+    """
     crf = image.insn(ble_addr).field("BI") // 4
-    passed: list[Insn] = []
+    cur = index_src
     for insn in walk_back(image, ble_addr, _ENTRY_COMPARE_LIMIT):
         found = _compare_crf(insn)
         if found is None:
-            passed.append(insn)
+            if cur in written_gprs(insn):
+                src = _copy_source(insn, True)
+                if src is None:
+                    return None
+                cur = src
             continue
         if found != crf:
             continue
@@ -267,12 +304,47 @@ def _entry_compare(image: CodeImage, ble_addr: int, index_src: int, toc, read_me
         if operands is None:
             return None
         rz, k = operands
-        if index_src not in _chain(image, insn.addr, rz):
-            return None
-        if any(rz in written_gprs(p) for p in passed):
+        if not _same_value(image, insn.addr, cur, rz, enter):
             return None
         return k + 1
     return None
+
+
+def _same_value(image: CodeImage, addr: int, a: int, b: int, enter: _EntryBranches) -> bool:
+    """True when registers `a` and `b` hold the same value before `addr`.
+
+    Both are followed backwards through copies (mr/extsw/clrlwi/clrldi); a write that is not a
+    copy ends the search with False. If the walk reaches a barrier, it continues once from the
+    only branch into the block, so a compare block entered by a single `beq` can see the
+    prologue copies before that branch. The whole search is bounded by `_ENTRY_COMPARE_LIMIT`.
+    """
+    budget = _ENTRY_COMPARE_LIMIT
+    last = addr
+    for hop in range(2):
+        if a == b:
+            return True
+        walked = 0
+        for insn in walk_back(image, addr, budget):
+            walked += 1
+            last = insn.addr
+            written = written_gprs(insn)
+            for reg in (a, b):
+                if reg in written and _copy_source(insn, True) is None:
+                    return False
+            if a in written:
+                a = _copy_source(insn, True)
+            if b in written:
+                b = _copy_source(insn, True)
+            if a == b:
+                return True
+        budget -= walked
+        if hop or budget <= 0:
+            return False
+        # The branch only transfers control, so the registers are unchanged across it.
+        addr = enter.sole_branch_in(last)
+        if addr is None:
+            return False
+    return False
 
 
 def _split_add(image: CodeImage, add: Insn, toc, read_mem) -> tuple[Insn, int]:

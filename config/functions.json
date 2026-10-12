@@ -3139,7 +3139,7 @@
 {"entry": "0x00183848", "name": null, "sources": ["ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x00183848", "0x0018397c"]]},
 {"entry": "0x0018397c", "name": null, "sources": ["bl", "ghidra", "opd"], "ranges": [["0x0018397c", "0x00185ae8"], ["0x00185d0c", "0x00185d70"], ["0x00185e4c", "0x00185ef4"]]},
 {"entry": "0x00185f1c", "name": null, "sources": ["bl", "ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x00185f1c", "0x00186540"]]},
-{"entry": "0x00186540", "name": null, "sources": ["bl", "ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x00186540", "0x00186a24"], ["0x00186a58", "0x00186d20"], ["0x00187800", "0x00187acc"]]},
+{"entry": "0x00186540", "name": null, "sources": ["bl", "ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x00186540", "0x00186a24"], ["0x00186a58", "0x00187acc"]]},
 {"entry": "0x00187acc", "name": null, "sources": ["bl", "ghidra", "opd"], "ranges": [["0x00187acc", "0x00188a28"]]},
 {"entry": "0x00188a44", "name": null, "sources": ["ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x00188a44", "0x0018930c"]]},
 {"entry": "0x0018966c", "name": null, "sources": ["ghidra", "opd"], "ranges": [["0x0018966c", "0x001898f0"], ["0x00189994", "0x001899ec"], ["0x00189a18", "0x00189a70"]]},
@@ -4699,7 +4699,7 @@
 {"entry": "0x002584f0", "name": null, "sources": ["ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x002584f0", "0x00258578"], ["0x0025859c", "0x002586a8"]]},
 {"entry": "0x002586a8", "name": null, "sources": ["bl", "ghidra", "opd"], "ranges": [["0x002586a8", "0x00258974"], ["0x00258998", "0x00258bc8"]]},
 {"entry": "0x00258bc8", "name": null, "sources": ["bl", "ghidra", "opd"], "ranges": [["0x00258bc8", "0x00259990"], ["0x002599c0", "0x00259a0c"], ["0x00259a20", "0x00259f80"]]},
-{"entry": "0x00259fbc", "name": null, "sources": ["bl", "ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x00259fbc", "0x0025a1e0"]]},
+{"entry": "0x00259fbc", "name": null, "sources": ["bl", "ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x00259fbc", "0x0025a1e0"], ["0x0025a204", "0x0025a260"]]},
 {"entry": "0x0025a260", "name": null, "sources": ["bl", "ghidra", "ghidra_data_ref", "opd"], "ranges": [["0x0025a260", "0x0025a3f4"]]},
 {"entry": "0x0025a3f8", "name": null, "sources": ["bl", "ghidra", "opd"], "ranges": [["0x0025a3f8", "0x0025a3fc"]]},
 {"entry": "0x0025a3fc", "name": null, "sources": ["ghidra", "opd"], "ranges": [["0x0025a3fc", "0x0025a4c4"]]},
@@ -29457,6 +29457,7 @@
 {"branch": "0x0016a534", "table": "0x0016a538", "kind": "rel32", "count": 7, "targets": ["0x0016a5d4", "0x0016a5d4", "0x0016a900", "0x0016aad4", "0x0016aaec", "0x0016aaec", "0x0016ad40"]},
 {"branch": "0x0016b194", "table": "0x0016b198", "kind": "rel32", "count": 6, "targets": ["0x0016b1b8", "0x0016b200", "0x0016b64c", "0x0016b810", "0x0016c234", "0x0016c274"]},
 {"branch": "0x0016f02c", "table": "0x0016f030", "kind": "rel32", "count": 7, "targets": ["0x0016f2d4", "0x0016f2d4", "0x0016f564", "0x0016f960", "0x0016f708", "0x0016f708", "0x0016f94c"]},
+{"branch": "0x00186a20", "table": "0x00186a24", "kind": "rel32", "count": 13, "targets": ["0x00186730", "0x00186730", "0x00186d20", "0x00186e7c", "0x00186fd8", "0x00187134", "0x00187290", "0x001873ec", "0x00187548", "0x00187548", "0x00187548", "0x001876a4", "0x001876a4"]},
 {"branch": "0x001a189c", "table": "0x001a18a0", "kind": "rel32", "count": 32, "targets": ["0x001a1998", "0x001a1a10", "0x001a2804", "0x001a2698", "0x001a257c", "0x001a2520", "0x001a2494", "0x001a242c", "0x001a23c0", "0x001a2364", "0x001a286c", "0x001a2854", "0x001a2a0c", "0x001a22cc", "0x001a2244", "0x001a21f0", "0x001a2198", "0x001a2144", "0x001a1f98", "0x001a1f24", "0x001a20d4", "0x001a1ed4", "0x001a1e9c", "0x001a1ddc", "0x001a1d40", "0x001a1d00", "0x001a1cc0", "0x001a1998", "0x001a1a64", "0x001a1998", "0x001a1aa0", "0x001a1a44"]},
 {"branch": "0x001a2d7c", "table": "0x001a2d80", "kind": "rel32", "count": 32, "targets": ["0x001a2e88", "0x001a2edc", "0x001a3cec", "0x001a3b80", "0x001a3a64", "0x001a3a08", "0x001a2e00", "0x001a39a0", "0x001a3934", "0x001a38d8", "0x001a3738", "0x001a3720", "0x001a36ac", "0x001a3614", "0x001a35bc", "0x001a3530", "0x001a34d8", "0x001a3484", "0x001a32d8", "0x001a3264", "0x001a3414", "0x001a3214", "0x001a31dc", "0x001a311c", "0x001a3080", "0x001a3040", "0x001a3000", "0x001a2e88", "0x001a2fc4", "0x001a2e88", "0x001a2f30", "0x001a2f10"]},
 {"branch": "0x001ae964", "table": "0x001ae968", "kind": "rel32", "count": 41, "targets": ["0x001aeb04", "0x001aeb60", "0x001aeb60", "0x001aebdc", "0x001aebdc", "0x001aedbc", "0x001aee24", "0x001aee24", "0x001aeaac", "0x001aefc4", "0x001af088", "0x001af088", "0x001af0dc", "0x001af0f8", "0x001af0f8", "0x001af0f8", "0x001af0f8", "0x001af0f8", "0x001af0f8", "0x001af0f8", "0x001af0f8", "0x001af0f8", "0x001af144", "0x001af144", "0x001af2c0", "0x001af2c0", "0x001af1dc", "0x001af244", "0x001af244", "0x001af244", "0x001aeb0c", "0x001aeb0c", "0x001aeb0c", "0x001aeb0c", "0x001aeb0c", "0x001aeb0c", "0x001aeb0c", "0x001aeb0c", "0x001aeb0c", "0x001aeb0c", "0x001aeb0c"]},
@@ -29483,6 +29484,7 @@
 {"branch": "0x0025842c", "table": "0x00258430", "kind": "rel32", "count": 9, "targets": ["0x00258470", "0x002584e0", "0x002584d0", "0x002584c0", "0x002584b0", "0x002584a0", "0x00258490", "0x00258480", "0x00258454"]},
 {"branch": "0x00258574", "table": "0x00258578", "kind": "rel32", "count": 9, "targets": ["0x002585e8", "0x00258690", "0x00258678", "0x00258660", "0x00258648", "0x00258630", "0x00258618", "0x00258600", "0x0025859c"]},
 {"branch": "0x00258970", "table": "0x00258974", "kind": "rel32", "count": 9, "targets": ["0x00258a0c", "0x00258a24", "0x00258a3c", "0x00258a54", "0x00258a6c", "0x00258a84", "0x00258a9c", "0x00258ab4", "0x00258acc"]},
+{"branch": "0x0025a1dc", "table": "0x0025a1e0", "kind": "rel32", "count": 9, "targets": ["0x0025a204", "0x0025a20c", "0x0025a214", "0x0025a21c", "0x0025a224", "0x0025a22c", "0x0025a234", "0x0025a23c", "0x0025a244"]},
 {"branch": "0x002997f0", "table": "0x002997f4", "kind": "rel32", "count": 10, "targets": ["0x0029987c", "0x002998a0", "0x0029981c", "0x00299ac0", "0x00299e14", "0x00299ea0", "0x00299d88", "0x00299da0", "0x00299db8", "0x00299dd0"]},
 {"branch": "0x002ae9fc", "table": "0x002aea00", "kind": "rel32", "count": 7, "targets": ["0x002aeaa4", "0x002aebdc", "0x002aec44", "0x002aecb0", "0x002aed24", "0x002aea1c", "0x002aed90"]},
 {"branch": "0x002e0cf8", "table": "0x002e0cfc", "kind": "rel32", "count": 5, "targets": ["0x002e0e4c", "0x002e0d10", "0x002e0f18", "0x002e0eec", "0x002e0e78"]},
@@ -29890,8 +29892,5 @@
 {"branch": "0x00c3fc48", "table": "0x00c3fc4c", "kind": "rel32", "count": 7, "targets": ["0x00c40194", "0x00c3f160", "0x00c402d8", "0x00c40390", "0x00c3f160", "0x00c404e8", "0x00c40b00"]},
 {"branch": "0x00c42790", "table": "0x00c42794", "kind": "rel32", "count": 23, "targets": ["0x00c428a0", "0x00c429ec", "0x00c429e0", "0x00c429d4", "0x00c429c8", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42754", "0x00c42a1c", "0x00c429f8", "0x00c4299c", "0x00c42954", "0x00c428f8"]}
 ],
-"unresolved_indirect": [
-{"addr": "0x00186a20", "function": "0x00186540", "reason": "no_bound"},
-{"addr": "0x0025a1dc", "function": "0x00259fbc", "reason": "no_bound"}
-]
+"unresolved_indirect": []
 }

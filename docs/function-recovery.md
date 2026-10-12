@@ -39,6 +39,14 @@ python tools/ps3tool.py recover        <elf> -o config/functions.json
   resolves a jump table. When the TOCs that yield a table disagree, the table from the TOC of
   the owning function's descriptor (the nearest descriptor start at or below the site) is
   used; if that does not single one out, the site is listed as `ambiguous_toc`.
+  The entry count of a switch comes from its bound compare (`cmplwi crN,rZ,K`). When no
+  `bgt` or `bge` leaves the table path, a `ble crN` that is the only way into the table block
+  is used instead. The index register is followed from that `ble` back to the compare through
+  the copies made in between (`mr`, `extsw`, `clrlwi`, `clrldi`), and the compare counts only
+  if the compared register holds the same value, found by following both registers back
+  through copies. If the compare block follows a `blr` or `b` and a single jump is the only
+  way into it, the search continues once from that jump, which covers a copy made in the
+  prologue.
 - `--no-ghidra` runs `recover` without a summary, from the ELF's own seeds only. Without
   it, a missing default summary is an error that points at `ghidra-summary` and
   `--no-ghidra`.
@@ -98,18 +106,18 @@ the current tools; `config/functions.json` comes out byte-identical, in about 27
   and the entry point.
 - 173 import thunks, no slot mismatches, none that no `bl` reaches.
 - Two TOCs in the descriptors: `0x010b6330` (the entry TOC) and `0x010c62d0`. `.opd` holds
-  descriptors of both, interleaved. Jump tables: 512 `bctr` sites, 510 resolved (10,022 targets,
-  3,889 distinct), 2 unresolved (both `no_bound`).
-- Code range `0x00010200..0x00c8f408`; 3,024,489 of 3,275,906 `.text` words are owned (92.3%).
-  The 251,417 uncovered words are mostly code that no seed reaches (240,103 words in 4,728
-  runs); 9,362 are jump tables.
+  descriptors of both, interleaved. Jump tables: 512 `bctr` sites, 512 resolved (10,044 targets,
+  3,907 distinct), none unresolved.
+- Code range `0x00010200..0x00c8f408`; 3,025,208 of 3,275,906 `.text` words are owned (92.3%).
+  The 250,698 uncovered words are mostly code that no seed reaches (239,407 words in 4,727
+  runs); 9,384 are jump tables.
 - 267 `sc` sites, 266 with a resolved syscall number, 1 unresolved.
 - `functions.json` is 3.8 MB and `ghidra_summary.json` is 6.7 MB.
 
-With `--no-ghidra` the same executable gives the same 29,196 functions, 510 of 512 jump tables and
+With `--no-ghidra` the same executable gives the same 29,196 functions, all 512 jump tables and
 266 of 267 syscall numbers: the descriptors and `bl` targets already find every start. The
-difference is in the classification of uncovered words (1,431 words of data instead of 1,445, and
-240,117 words of code instead of 240,103), because Ghidra's data ranges are missing. The
+difference is in the classification of uncovered words (1,386 words of data instead of 1,400, and
+239,421 words of code instead of 239,407), because Ghidra's data ranges are missing. The
 function database differs in `input.ghidra_summary_sha256` and in the sources it records.
 
 ## On libsre

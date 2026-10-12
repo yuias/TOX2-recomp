@@ -443,7 +443,6 @@ Open issues:
   `first image libsre_taskset2_exit at ls 0x10000..0x10670`, no unknown target, and the opening scenes
   (the event fight, the bedroom, a choice screen with L1 and R1 answers) are rendered. The exit code plugin
   has not been loaded in that run.
-- Two PPU jump tables stay unresolved (`0x00186a20`, `0x0025a1dc`); no run has reached one.
 - The reservation race window above is documented, not closed.
 
 ## Entry points
