@@ -78,8 +78,10 @@ std::string unimplementedSection() {
 
 void printClear(const tox2::RsxClear& clear) {
     const tox2::RsxSurface& color = clear.surfaces.color;
-    std::printf("clear mask=%#x color=0x%08x %ux%u@0x%x\n", clear.mask, clear.color_argb, color.width, color.height,
+    std::printf("clear mask=%#x color=0x%08x %ux%u@0x%x", clear.mask, clear.color_argb, color.width, color.height,
                 color.offset);
+    if (clear.surfaces.aa_mode != 0) std::printf(" aa=%u", clear.surfaces.aa_mode);
+    std::printf("\n");
 }
 
 const char* surfaceFormatName(tox2::RsxColorFormat format) {
@@ -95,21 +97,26 @@ void printDraw(const tox2::RsxDraw& draw, std::span<const tox2::RsxSurface> surf
                 static_cast<unsigned long long>(draw.vp_hash), static_cast<unsigned long long>(draw.fp_hash));
     const tox2::RsxSurfaceState& target = draw.surfaces;
     if (target.has_color) {
-        std::printf(" color=%ux%u@%#x:%s", target.color.width, target.color.height, target.color.offset,
-                    surfaceFormatName(target.color.format));
+        std::printf(" color=%ux%u@%#x:%s pitch=%#x", target.color.width, target.color.height, target.color.offset,
+                    surfaceFormatName(target.color.format), target.color.pitch);
+        if (target.aa_mode != 0) std::printf(" aa=%u msaa=%d", target.aa_mode, draw.raster.msaa ? 1 : 0);
     }
     if (target.depth_format != tox2::RsxDepthFormat::None) {
         const char* depth_name = target.depth_format == tox2::RsxDepthFormat::Z24S8 ? "Z24S8"
                                  : target.depth_format == tox2::RsxDepthFormat::Z16 ? "Z16"
                                                                                     : "?";
-        std::printf(" depth=%s@%#x", depth_name, target.depth.offset);
+        std::printf(" depth=%s@%#x dpitch=%#x", depth_name, target.depth.offset, target.depth.pitch);
     }
     for (const tox2::RsxTextureDesc& texture : draw.textures) {
         if (texture.rt_alias >= 0 && static_cast<std::size_t>(texture.rt_alias) < surfaces.size()) {
             const tox2::RsxSurface& surface = surfaces[static_cast<std::size_t>(texture.rt_alias)];
-            std::printf(" tex%u=alias:%d(%ux%u as %ux%u %s)", texture.unit, texture.rt_alias, surface.width,
-                        surface.height, texture.width, texture.height,
-                        tox2::rsxTextureFormatName(texture.format).c_str());
+            // The surface size comes from the capture's known-surface table and can be stale, so the address the
+            // texture reads, its pitch and its sampling state are printed as well.
+            std::printf(" tex%u=alias:%d(%ux%u as %ux%u %s @%u:%#x pitch=%#x norm=%d filter=%u/%u)", texture.unit,
+                        texture.rt_alias, surface.width, surface.height, texture.width, texture.height,
+                        tox2::rsxTextureFormatName(texture.format).c_str(), texture.location, texture.offset,
+                        texture.pitch, texture.normalized ? 1 : 0, tox2::rsxTextureMinFilter(texture.filter),
+                        tox2::rsxTextureMagFilter(texture.filter));
         } else {
             const tox2::RsxTextureKind kind = tox2::rsxTextureKind(texture);
             const std::string shape = kind == tox2::RsxTextureKind::Tex3D  ? std::format("x{} 3D", texture.depth)

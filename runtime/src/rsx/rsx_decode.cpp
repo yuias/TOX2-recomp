@@ -227,6 +227,11 @@ RsxSurfaceState decodeSurfaceState(const RsxRegisters& regs) {
         noteState(type == 2 ? std::string("swizzled surface") : std::format("surface type {:#x}", type));
     }
     if (antialias != 0) noteState(std::format("antialiasing {:#x}", antialias));
+    s.aa_mode = static_cast<std::uint8_t>(antialias);
+    // Mode 3 stores two samples side by side, modes 4 and 5 a 2x2 block per pixel. Unknown modes keep one sample
+    // per pixel; they are already counted above.
+    const std::uint8_t samples_x = antialias == 3 || antialias == 4 || antialias == 5 ? 2 : 1;
+    const std::uint8_t samples_y = antialias == 4 || antialias == 5 ? 2 : 1;
 
     std::uint32_t color_offset_method = kMethodNv4097SetSurfaceColorAOffset;
     std::uint32_t color_pitch_method = kMethodNv4097SetSurfacePitchA;
@@ -256,6 +261,8 @@ RsxSurfaceState decodeSurfaceState(const RsxRegisters& regs) {
         s.color.pitch = regs.reg(color_pitch_method);
         s.color.width = s.clip_w;
         s.color.height = s.clip_h;
+        s.color.samples_x = samples_x;
+        s.color.samples_y = samples_y;
         if (color_code == kRsxSurfaceColorA8R8G8B8) {
             s.color.format = RsxColorFormat::A8R8G8B8;
         } else if (color_code == kRsxSurfaceColorFX32) {
@@ -283,6 +290,8 @@ RsxSurfaceState decodeSurfaceState(const RsxRegisters& regs) {
         s.depth.pitch = regs.reg(kMethodNv4097SetSurfacePitchZ);
         s.depth.width = s.clip_w;
         s.depth.height = s.clip_h;
+        s.depth.samples_x = samples_x;
+        s.depth.samples_y = samples_y;
         s.depth.depth_format = s.depth_format;
     }
     return s;
@@ -290,7 +299,7 @@ RsxSurfaceState decodeSurfaceState(const RsxRegisters& regs) {
 
 // RPCS3 `rsx_decode.h` registers_decoder for SET_BLEND_*, SET_COLOR_MASK, SET_ALPHA_*, SET_DEPTH_*,
 // SET_CULL_FACE*, SET_FRONT_FACE, SET_SHADE_MODE, SET_VIEWPORT_*, SET_SCISSOR_*, SET_SHADER_WINDOW,
-// SET_CLIP_MIN / SET_CLIP_MAX (float bit patterns) and SET_POINT_SIZE.
+// SET_CLIP_MIN / SET_CLIP_MAX (float bit patterns), SET_POINT_SIZE and SET_ANTI_ALIASING_CONTROL.
 RsxRasterState decodeRasterState(const RsxRegisters& regs) {
     RsxRasterState r;
     r.blend = regs.reg(kMethodNv4097SetBlendEnable) != 0;
@@ -320,6 +329,12 @@ RsxRasterState decodeRasterState(const RsxRegisters& regs) {
     r.clip_max = asFloat(regs.reg(kMethodNv4097SetClipMax));
     r.point_size = asFloat(regs.reg(kMethodNv4097SetPointSize));
     r.two_sided_lighting = regs.reg(kMethodNv4097SetTwoSideLightEn) != 0;
+
+    const std::uint32_t aa_control = regs.reg(kMethodNv4097SetAntiAliasingControl);
+    r.msaa = (aa_control & 0x1) != 0;
+    r.alpha_to_coverage = (aa_control & 0x10) != 0;
+    r.alpha_to_one = (aa_control & 0x100) != 0;
+    r.sample_mask = static_cast<std::uint16_t>(aa_control >> 16);
 
     for (std::uint32_t i = 0; i < 4; i++) {
         r.viewport_scale[i] = asFloat(regs.reg(kMethodNv4097SetViewportScale + i * 4));

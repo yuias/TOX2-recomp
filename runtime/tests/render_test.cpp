@@ -2179,6 +2179,44 @@ void testUserClipDecode() {
     tox2::rsxUnimplementedReset();
 }
 
+// The AA field of SET_SURFACE_FORMAT selects the samples per pixel of the colour and depth layouts, and
+// SET_ANTI_ALIASING_CONTROL decodes into the raster state.
+void testAntiAliasDecode() {
+    auto regs = std::make_unique<tox2::RsxRegisters>();
+    regs->reset();
+    regs->apply(tox2::kMethodNv4097SetSurfaceClipHorizontal, 64u << 16);
+    regs->apply(tox2::kMethodNv4097SetSurfaceClipVertical, 32u << 16);
+    regs->apply(tox2::kMethodNv4097SetSurfaceColorTarget, 1);  // target A
+
+    const auto decodeMode = [&](std::uint32_t mode) {
+        regs->apply(tox2::kMethodNv4097SetSurfaceFormat, 8u | (2u << 5) | (1u << 8) | (mode << 12));
+        return tox2::decodeSurfaceState(*regs);
+    };
+    const struct {
+        std::uint32_t mode;
+        std::uint8_t samples_x, samples_y;
+    } cases[] = {{0, 1, 1}, {3, 2, 1}, {4, 2, 2}, {5, 2, 2}, {1, 1, 1}};
+    for (const auto& c : cases) {
+        const tox2::RsxSurfaceState state = decodeMode(c.mode);
+        CHECK(state.aa_mode == c.mode);
+        CHECK(state.color.samples_x == c.samples_x && state.color.samples_y == c.samples_y);
+        CHECK(state.depth.samples_x == c.samples_x && state.depth.samples_y == c.samples_y);
+        // The clip size stays in pixels.
+        CHECK(state.color.width == 64 && state.color.height == 32 && state.depth.width == 64);
+    }
+
+    regs->apply(tox2::kMethodNv4097SetAntiAliasingControl, 0xFFFF0001);
+    tox2::RsxRasterState raster = tox2::decodeRasterState(*regs);
+    CHECK(raster.msaa && !raster.alpha_to_coverage && !raster.alpha_to_one && raster.sample_mask == 0xFFFF);
+    regs->apply(tox2::kMethodNv4097SetAntiAliasingControl, 0xFFFF0000);
+    raster = tox2::decodeRasterState(*regs);
+    CHECK(!raster.msaa && raster.sample_mask == 0xFFFF);
+    regs->apply(tox2::kMethodNv4097SetAntiAliasingControl, 0x00A50111);
+    raster = tox2::decodeRasterState(*regs);
+    CHECK(raster.msaa && raster.alpha_to_coverage && raster.alpha_to_one && raster.sample_mask == 0x00A5);
+    tox2::rsxUnimplementedReset();
+}
+
 // A raster state with the stencil test on and the depth test and write off; `front` and `back` give the write
 // mask and the ZPASS op (REPLACE or KEEP, the other ops stay KEEP) of each face.
 struct ZetaFace {
@@ -3017,6 +3055,7 @@ int main() {
     testPartialStencilNote();
     testStencilDecode();
     testUserClipDecode();
+    testAntiAliasDecode();
     testZetaWriteRule();
     testVertexConvert();
 

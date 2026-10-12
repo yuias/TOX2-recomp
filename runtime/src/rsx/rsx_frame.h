@@ -34,6 +34,10 @@ struct RsxSurface {  // location 0 = local, 1 = main
     // None for a color surface. A known depth surface is registered with its depth format and no color format
     // (format stays Unsupported), so a texture at its address can tell the two kinds apart.
     RsxDepthFormat depth_format = RsxDepthFormat::None;
+    // Samples per pixel along each axis of the surface's memory layout, from the AA field of SET_SURFACE_FORMAT:
+    // 1x1 (mode 0), 2x1 (mode 3), 2x2 (modes 4 and 5). Other modes are counted and stay 1x1. width/height remain
+    // the clip size in pixels, so the layout is width * samples_x by height * samples_y.
+    std::uint8_t samples_x = 1, samples_y = 1;
 };
 
 struct RsxSurfaceState {
@@ -42,6 +46,7 @@ struct RsxSurfaceState {
     RsxSurface depth;
     RsxDepthFormat depth_format = RsxDepthFormat::None;
     std::uint32_t clip_x = 0, clip_y = 0, clip_w = 0, clip_h = 0;
+    std::uint8_t aa_mode = 0;  // raw AA field (SET_SURFACE_FORMAT bits 12..15)
 };
 
 struct RsxVertexAttrib {
@@ -101,6 +106,10 @@ struct RsxRasterState {
     // The decoder counts any other nibble and the vertex shader treats it as off.
     std::uint32_t user_clip = 0;
     std::uint32_t scissor_x = 0, scissor_y = 0, scissor_w = 0, scissor_h = 0, window_origin = 0, pixel_center = 0;
+    // SET_ANTI_ALIASING_CONTROL: bit 0 enable, bit 4 alpha to coverage, bit 8 alpha to one, bits 16..31 sample
+    // mask. Decoded only; the renderer does not model them.
+    bool msaa = false, alpha_to_coverage = false, alpha_to_one = false;
+    std::uint16_t sample_mask = 0xFFFF;
 };
 
 struct RsxClear {
