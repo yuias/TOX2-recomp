@@ -653,62 +653,109 @@ bool RsxRenderer::ensureMultisample(RenderTarget& target) {
 
 // Writes the layout image of a target from its 2-sample sidecar when the sidecar holds newer data: layout texel
 // (x, y) takes sample kLayoutColumnSample[x & 1] of pixel (x >> 1, y) (render_scale.h layoutSource). Records outside
-// any rendering instance. False only on a Vulkan failure. The depth copy is not available yet: it is counted and
-// the layout image stays as it is.
+// any rendering instance. False only on a Vulkan failure.
+//
+// A depth target takes one instance: a pass that writes the depth through gl_FragDepth, then (Z24S8) eight passes that
+// rebuild the stencil one bit at a time, because a shader cannot write the stencil without an extension.
 bool RsxRenderer::syncLayout(RenderTarget& target) {
     if (!target.msaa || !target.layout_stale) return true;
-    if (target.depth) {
-        rsxNoteUnimplemented("state", "depth layout copy unavailable");
-        return true;
-    }
     if (!ensurePlaceholder() || !valid()) return false;
-    const VkPipeline pipeline = pipelines_->layoutColorPipeline(target.format);
+    const bool has_stencil = target.depth && formatHasStencil(target.format);
+    const VkPipeline pipeline = target.depth ? pipelines_->layoutDepthPipeline(target.format)
+                                             : pipelines_->layoutColorPipeline(target.format);
     if (pipeline == VK_NULL_HANDLE) {
         fail(pipelines_->error());
         return false;
     }
 
     const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
-    transitionSidecar(target, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    transition(target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    const VkImageLayout read_layout =
+            target.depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    const VkImageLayout write_layout =
+            target.depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    transitionSidecar(target, read_layout);
+    transition(target, write_layout);
 
+    // Every texel is written; the stencil starts at 0 and gains the bits the stencil passes set.
     VkRenderingAttachmentInfo attachment{};
     attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     attachment.imageView = target.view;
-    attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;  // every texel is written
+    attachment.imageLayout = write_layout;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingAttachmentInfo stencil_attachment = attachment;
+    stencil_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    stencil_attachment.clearValue.depthStencil = {0.0f, 0};
     VkRenderingInfo rendering{};
     rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     rendering.renderArea = {{0, 0}, {target.image_width, target.image_height}};
     rendering.layerCount = 1;
-    rendering.colorAttachmentCount = 1;
-    rendering.pColorAttachments = &attachment;
+    if (target.depth) {
+        rendering.pDepthAttachment = &attachment;
+        rendering.pStencilAttachment = has_stencil ? &stencil_attachment : nullptr;
+    } else {
+        rendering.colorAttachmentCount = 1;
+        rendering.pColorAttachments = &attachment;
+    }
 
     const VkViewport viewport = {
             0.0f, 0.0f, static_cast<float>(target.image_width), static_cast<float>(target.image_height), 0.0f, 1.0f};
     const VkRect2D scissor = {{0, 0}, {target.image_width, target.image_height}};
-    const VkDescriptorImageInfo info = {placeholder_sampler_, target.msaa->view,
-                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstBinding = 0;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &info;
+    const VkImageView first_view = has_stencil ? target.msaa->depth_view : target.msaa->view;
+    const VkDescriptorImageInfo infos[2] = {{placeholder_sampler_, first_view, read_layout},
+                                            {placeholder_sampler_, target.msaa->stencil_view, read_layout}};
+    VkWriteDescriptorSet writes[2]{};
+    for (std::uint32_t i = 0; i < 2; i++) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].pImageInfo = &infos[i];
+    }
     LayoutPassConstants constants{};
     constants.column_sample[0] = static_cast<std::int32_t>(kLayoutColumnSample[0]);
     constants.column_sample[1] = static_cast<std::int32_t>(kLayoutColumnSample[1]);
     constants.stencil_bit = -1;
+    const auto draw = [&] {
+        vkCmdPushConstants(cmd, pipelines_->layoutPassLayout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(constants),
+                           &constants);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+    };
 
     vkCmdBeginRendering(cmd, &rendering);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
-    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_->layoutPassLayout(), 0, 1, &write);
-    vkCmdPushConstants(cmd, pipelines_->layoutPassLayout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(constants),
-                       &constants);
-    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_->layoutPassLayout(), 0,
+                              has_stencil ? 2 : 1, writes);
+    if (target.depth) {
+        // The depth pass: depth test ALWAYS with writes on, stencil test off. Stencil op, masks and reference are set
+        // here once for the bit passes, which only toggle the write mask.
+        vkCmdSetDepthTestEnable(cmd, VK_TRUE);
+        vkCmdSetDepthWriteEnable(cmd, VK_TRUE);
+        vkCmdSetDepthCompareOp(cmd, VK_COMPARE_OP_ALWAYS);
+        vkCmdSetStencilTestEnable(cmd, VK_FALSE);
+        vkCmdSetStencilOp(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE,
+                          VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS);
+        vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xFF);
+        vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xFF);
+        vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xFF);
+        draw();
+        if (has_stencil) {
+            // Bit b: the shader discards the fragments whose stencil sample has the bit clear, the others write
+            // reference 0xFF through the one-bit write mask.
+            vkCmdSetDepthTestEnable(cmd, VK_FALSE);
+            vkCmdSetDepthWriteEnable(cmd, VK_FALSE);
+            vkCmdSetStencilTestEnable(cmd, VK_TRUE);
+            for (std::int32_t bit = 0; bit < 8; bit++) {
+                vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 1u << bit);
+                constants.stencil_bit = bit;
+                draw();
+            }
+        }
+    } else {
+        draw();
+    }
     vkCmdEndRendering(cmd);
 
     target.layout_stale = false;

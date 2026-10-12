@@ -3937,24 +3937,24 @@ enum class MsaaDepthRead {
     Reference,   // the same rectangle into a plain 32x32 surface, whose depth is read as a 32x32 texture
 };
 
-// Depth test ALWAYS with depth write and stencil REPLACE of kMsStencil when `on`; all three off otherwise.
-void setMsaaDepthState(tox2::rsx_synthetic::SceneBuilder& scene, bool on) {
+// Depth test ALWAYS with depth write and stencil REPLACE of `stencil` when `on`; all three off otherwise.
+void setMsaaDepthState(tox2::rsx_synthetic::SceneBuilder& scene, bool on, std::uint32_t stencil = kMsStencil) {
     scene.write(tox2::kMethodNv4097SetDepthTestEnable, on ? 1 : 0);
     scene.write(tox2::kMethodNv4097SetDepthFunc, kCmpAlways);
     scene.write(tox2::kMethodNv4097SetDepthMask, on ? 1 : 0);
     scene.write(tox2::kMethodNv4097SetStencilTestEnable, on ? 1 : 0);
-    if (on) writeStencilFace(scene, false, stencilFace(kCmpAlways, kMsStencil, kOpReplace));
+    if (on) writeStencilFace(scene, false, stencilFace(kCmpAlways, stencil, kOpReplace));
 }
 
-// The red rectangle at depth 0.5 with stencil kMsStencil, drawn into the 2-sample surface (or, for Reference, a
+// The red rectangle at depth 0.5 with stencil `stencil`, drawn into the 2-sample surface (or, for Reference, a
 // plain one), then the depth read the way `read` says.
-std::vector<std::uint8_t> makeMsaaDepthCapture(MsaaDepthRead read) {
+std::vector<std::uint8_t> makeMsaaDepthCapture(MsaaDepthRead read, std::uint32_t stencil = kMsStencil) {
     using namespace tox2::rsx_synthetic;
     SceneBuilder scene;
     const bool plain = read == MsaaDepthRead::Reference;
     scene.setSurface(plain ? 0 : 3, kAaSize, kAaOffset);
     scene.clear(0xFF000000);
-    setMsaaDepthState(scene, true);
+    setMsaaDepthState(scene, true, stencil);
     drawMsaaRect(scene);
     setMsaaDepthState(scene, false);
 
@@ -4055,6 +4055,227 @@ void testRendererMsaaDepthAsArgb(tox2::VkContext& ctx) {
             CHECK(mismatches == 0);
             CHECK(frame.stats.depth_conversions >= 1 && frame.stats.draws_skipped == 0);
             CHECK(frame.notes.empty());
+        }
+    }
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
+// ---- Layout copies of a multisampled surface for inherit, rescale and single-sample passes ----
+
+constexpr std::uint32_t kMsInheritStencil = 0xA5;  // bits 0, 2, 5 and 7: every pass of the stencil copy is exercised
+
+enum class MsaaInherit {
+    PlainSquare,       // the pair rebound as plain 32x32 surfaces (inherit), the depth read as 32x32
+    PlainSquareColor,  // the same inherit, the colour read as 32x32
+    PlainWide,    // the pair rebound as plain 64x32 surfaces (the same memory, no inherit), the depth read as 64x32
+    RescaleAa,    // second frame of the rescale case: the AA pair bound again by a draw
+    RescaleWide,  // second frame of the rescale case: the pair bound as plain 64x32 surfaces, the depth read
+};
+
+// A draw that writes no colour and tests depth without writing it, so only the binding of the surfaces matters. With
+// `registers_depth` the test never passes and the depth write is on: nothing changes, but the frame builder then knows
+// the depth as a render target in a frame that has not drawn to it before (it registers a surface a draw can write).
+void drawWithoutWrites(tox2::rsx_synthetic::SceneBuilder& scene, bool registers_depth = false) {
+    scene.write(tox2::kMethodNv4097SetColorMask, 0);
+    scene.write(tox2::kMethodNv4097SetDepthTestEnable, 1);
+    scene.write(tox2::kMethodNv4097SetDepthFunc, registers_depth ? kCmpNever : kCmpAlways);
+    scene.write(tox2::kMethodNv4097SetDepthMask, registers_depth ? 1 : 0);
+    scene.write(tox2::kMethodNv4097SetStencilTestEnable, 0);
+    drawMsaaRect(scene);
+    scene.write(tox2::kMethodNv4097SetColorMask, 0x01010101u);
+    setMsaaDepthState(scene, false);
+}
+
+// The rectangle scene of makeMsaaDepthCapture with stencil kMsInheritStencil in the 2-sample surface (omitted for the
+// second frame of the rescale case), then the rebinding and the read that `kind` says. The rebinding keeps the rows of
+// the 2W x H layout, pitch 2 x kAaSize x 4.
+std::vector<std::uint8_t> makeMsaaInheritCapture(MsaaInherit kind) {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    const bool second_frame = kind == MsaaInherit::RescaleAa || kind == MsaaInherit::RescaleWide;
+    if (!second_frame) {
+        scene.setSurface(3, kAaSize, kAaOffset);
+        scene.clear(0xFF000000);
+        setMsaaDepthState(scene, true, kMsInheritStencil);
+        drawMsaaRect(scene);
+        setMsaaDepthState(scene, false);
+    }
+    if (kind == MsaaInherit::RescaleAa) {
+        scene.setSurface(3, kAaSize, kAaOffset);
+        drawMsaaRect(scene);
+        return scene.finish();
+    }
+
+    const bool wide = kind == MsaaInherit::PlainWide || kind == MsaaInherit::RescaleWide;
+    scene.setSurface(0, wide ? kAaSize * 2 : kAaSize, kAaOffset, kAaSize, kAaSize * 2 * 4);
+    drawWithoutWrites(scene, second_frame);
+
+    const std::uint32_t read_width = wide ? kAaSize * 2 : kAaSize;
+    scene.setSurface(0, read_width, kSurfaceOffset, kAaSize);
+    scene.clear(0xFF000000);
+    setViewportHalfSize(scene, read_width / 2.0f, kAaSize / 2.0f);
+    putTexturedFullQuad(scene, 0.0f, 1.0f);
+    setUpTexturedDraw(scene, 1, kind == MsaaInherit::PlainSquareColor ? kAaOffset : kMsDepthOffset, read_width);
+    scene.drawStrip(4);
+    return scene.finish();
+}
+
+// A mode-3 surface drawn as 2 samples and then bound as a plain surface: the layout copy of the depth and stencil
+// feeds the inherited contents of a smaller plain surface, a single-sample pass over the same memory, and the
+// rescale of the target.
+void testRendererMsaaInherit(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    if (!ctx.twoSampleSupportGap().empty()) {
+        std::printf("multisampled inherit: skipped (%s)\n", ctx.twoSampleSupportGap().c_str());
+        return;
+    }
+    if (ctx.deviceProperties().limits.standardSampleLocations == VK_FALSE) {
+        std::printf("multisampled inherit: skipped (no standard sample locations)\n");
+        return;
+    }
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    constexpr std::uint32_t kRed = 0xFFFF0000, kBlack = 0xFF000000;
+
+    // The depth words come from a plain surface with the same rectangle, depth and stencil (see the depth test).
+    struct Words {
+        std::uint32_t covered = 0, uncovered = 0;
+    };
+    const auto referenceWords = [&](std::uint32_t scale, Words& words) {
+        const ScaledFrame reference =
+                renderAtScale(ctx, {makeMsaaDepthCapture(MsaaDepthRead::Reference, kMsInheritStencil)}, scale, 1, 0,
+                              tox2::AaMode::Msaa);
+        CHECK(reference.ok && reference.width == kAaSize * scale);
+        if (!reference.ok) return false;
+        words.covered = pixelArgb(reference.bgra, reference.width, 10 * scale, 8 * scale);
+        words.uncovered = pixelArgb(reference.bgra, reference.width, 0, 0);
+        CHECK((words.covered & 0xFF) == kMsInheritStencil && (words.uncovered & 0xFF) == 0 &&
+              words.covered != words.uncovered);
+        return true;
+    };
+
+    for (const std::uint32_t scale : {1u, 2u}) {
+        Words words;
+        if (!referenceWords(scale, words)) continue;
+        const auto expectedWord = [&](std::uint32_t x, std::uint32_t y) {
+            return msaaTexelCovered(x, y, scale) ? words.covered : words.uncovered;
+        };
+
+        // Inherit: the left half of the layout (texels X < 32 s) lands in the plain 32x32 surfaces.
+        {
+            const ScaledFrame frame = renderAtScale(ctx, {makeMsaaInheritCapture(MsaaInherit::PlainSquare)}, scale, 1,
+                                                    0, tox2::AaMode::Msaa);
+            CHECK(frame.ok && frame.width == kAaSize * scale && frame.height == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t mismatches = 0, covered = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    covered += msaaTexelCovered(x, y, scale);
+                    if (pixelArgb(frame.bgra, frame.width, x, y) != expectedWord(x, y)) mismatches++;
+                }
+            }
+            if (mismatches != 0)
+                std::fprintf(stderr, "inherited multisampled depth at scale %u: %u texels differ\n", scale, mismatches);
+            CHECK(mismatches == 0 && covered > 0);
+            CHECK(frame.stats.surface_inherits >= 2 && frame.stats.layout_copies >= 2);
+            CHECK(frame.stats.draws_skipped == 0 && frame.notes.empty());
+        }
+        {
+            const ScaledFrame frame = renderAtScale(ctx, {makeMsaaInheritCapture(MsaaInherit::PlainSquareColor)}, scale,
+                                                    1, 0, tox2::AaMode::Msaa);
+            CHECK(frame.ok && frame.width == kAaSize * scale && frame.height == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t mismatches = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    const std::uint32_t expected = msaaTexelCovered(x, y, scale) ? kRed : kBlack;
+                    if (pixelArgb(frame.bgra, frame.width, x, y) != expected) mismatches++;
+                }
+            }
+            if (mismatches != 0)
+                std::fprintf(stderr, "inherited multisampled colour at scale %u: %u texels differ\n", scale,
+                             mismatches);
+            CHECK(mismatches == 0);
+            CHECK(frame.stats.surface_inherits >= 2 && frame.stats.layout_copies >= 2);
+            CHECK(frame.stats.draws_skipped == 0 && frame.notes.empty());
+        }
+
+        // A single-sample pass over the same memory as a plain 2W x H surface finds the sidecar newer than the
+        // layout image and copies the depth first: the whole layout is read back.
+        {
+            const ScaledFrame frame = renderAtScale(ctx, {makeMsaaInheritCapture(MsaaInherit::PlainWide)}, scale, 1, 0,
+                                                    tox2::AaMode::Msaa);
+            CHECK(frame.ok && frame.width == 2 * kAaSize * scale && frame.height == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t mismatches = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    if (pixelArgb(frame.bgra, frame.width, x, y) != expectedWord(x, y)) mismatches++;
+                }
+            }
+            if (mismatches != 0)
+                std::fprintf(stderr, "multisampled depth under a single-sample pass at scale %u: %u texels differ\n",
+                             scale, mismatches);
+            CHECK(mismatches == 0);
+            CHECK(frame.stats.surface_inherits == 0 && frame.stats.layout_copies >= 2);
+            CHECK(frame.stats.draws_skipped == 0 && frame.notes.empty());
+        }
+    }
+
+    // Rescale: the scale changes between the frames, and binding the targets again copies the sidecars into the
+    // layout images before the blit.
+    Words words;
+    if (referenceWords(1, words)) {
+        const auto runTwoFrames = [&](MsaaInherit second, std::vector<std::uint8_t>* image, std::uint32_t& width,
+                                      std::uint32_t& height, std::uint64_t& copies,
+                                      std::vector<std::pair<std::string, std::uint64_t>>& notes) {
+            tox2::RsxRenderer renderer(ctx, readbackAllOptions(1, tox2::AaMode::Msaa));
+            CHECK(renderer.valid());
+            std::vector<tox2::RsxCommand> first =
+                    replaySynthetic(makeMsaaDepthCapture(MsaaDepthRead::Texels, kMsInheritStencil));
+            std::vector<tox2::RsxCommand> rest = replaySynthetic(makeMsaaInheritCapture(second));
+            tox2::rsxUnimplementedReset();
+            renderer.execute(first);
+            const std::uint64_t before = renderer.stats().layout_copies;
+            CHECK(renderer.setResolutionScale(2));
+            tox2::rsxUnimplementedReset();
+            renderer.execute(rest);
+            CHECK(renderer.valid());
+            copies = renderer.stats().layout_copies - before;
+            notes = tox2::rsxUnimplementedSnapshot();
+            if (image != nullptr) CHECK(renderer.readDisplay(*image, width, height));
+        };
+
+        std::uint32_t width = 0, height = 0;
+        std::uint64_t copies = 0;
+        std::vector<std::pair<std::string, std::uint64_t>> notes;
+        // Bound again as the AA pair by a draw that is not a full clear: both sidecars are synced for the blit, and the
+        // new sidecars are behind the rescaled layout images.
+        runTwoFrames(MsaaInherit::RescaleAa, nullptr, width, height, copies, notes);
+        CHECK(copies >= 2);
+        CHECK(!notes.empty());
+        for (const auto& [name, count] : notes) {
+            if (name != "state anti-aliased pass over layout data")
+                std::fprintf(stderr, "unexpected note %s\n", name.c_str());
+            CHECK(name == "state anti-aliased pass over layout data");
+        }
+
+        // Bound as a plain 64x32 pair: the rescaled depth holds each scale-1 word twice across and down.
+        std::vector<std::uint8_t> bgra;
+        runTwoFrames(MsaaInherit::RescaleWide, &bgra, width, height, copies, notes);
+        CHECK(copies >= 2 && notes.empty());
+        CHECK(width == 2 * kAaSize * 2 && height == kAaSize * 2);
+        if (width == 2 * kAaSize * 2 && height == kAaSize * 2) {
+            std::uint32_t mismatches = 0;
+            for (std::uint32_t y = 0; y < height; y++) {
+                for (std::uint32_t x = 0; x < width; x++) {
+                    const std::uint32_t expected = msaaTexelCovered(x / 2, y / 2, 1) ? words.covered : words.uncovered;
+                    if (pixelArgb(bgra, width, x, y) != expected) mismatches++;
+                }
+            }
+            if (mismatches != 0) std::fprintf(stderr, "rescaled multisampled depth: %u texels differ\n", mismatches);
+            CHECK(mismatches == 0);
         }
     }
     CHECK(ctx.validationErrorCount() == errors_before);
@@ -4290,6 +4511,7 @@ int main() {
     testRendererAntiAliasedSurface(*ctx);
     testRendererMsaaLayout(*ctx);
     testRendererMsaaDepthAsArgb(*ctx);
+    testRendererMsaaInherit(*ctx);
     testRendererPointSize(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
