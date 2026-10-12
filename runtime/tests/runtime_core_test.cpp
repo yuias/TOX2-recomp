@@ -33,6 +33,7 @@
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/host_functions.h"
+#include "core/latency_stats.h"
 #include "core/log.h"
 #include "core/param_sfo.h"
 #include "core/reservation.h"
@@ -1004,6 +1005,112 @@ void testCensusRenderSuffix() {
     CHECK(census.find("census: rsx 10 headers, 0 distinct methods, 2 flips, rendered 7 draws, skipped 3\n") !=
           std::string::npos);
     tox2::resetCensus();
+}
+
+void testLatencyStats() {
+    // Bucket layout: 0 alone, four per octave from 1 us, one bucket for 2^27 us and above.
+    CHECK(tox2::latencyBucketIndex(0) == 0);
+    CHECK(tox2::latencyBucketIndex(1) == 1);
+    CHECK(tox2::latencyBucketIndex(2) == 5);
+    CHECK(tox2::latencyBucketIndex(1000) == 40 && tox2::latencyBucketUpperUs(40) == 1024);
+    CHECK(tox2::latencyBucketIndex(1023) == 40 && tox2::latencyBucketIndex(1024) == 41);
+    CHECK(tox2::latencyBucketUpperUs(0) == 0 && tox2::latencyBucketUpperUs(1) == 2);
+    CHECK(tox2::latencyBucketIndex(70'000'000) == 105);  // last octave, 2^26 <= v < 2^27
+    CHECK(tox2::latencyBucketIndex((1ull << 27) - 1) == tox2::kLatencyBuckets - 2);
+    CHECK(tox2::latencyBucketIndex(1ull << 27) == tox2::kLatencyBuckets - 1);
+    CHECK(tox2::latencyBucketIndex(~0ull) == tox2::kLatencyBuckets - 1);
+    // From 4 us up every bucket holds whole values: the one below its upper bound is in it, the bound is in the next.
+    bool monotonic = true;
+    for (std::size_t i = 9; i + 1 < tox2::kLatencyBuckets; i++) {
+        const std::uint64_t upper = tox2::latencyBucketUpperUs(i);
+        monotonic = monotonic && upper > tox2::latencyBucketUpperUs(i - 1);
+        monotonic = monotonic && tox2::latencyBucketIndex(upper - 1) == i && tox2::latencyBucketIndex(upper) == i + 1;
+    }
+    CHECK(monotonic);
+
+    tox2::LatencyStats stats(1000);
+    CHECK(stats.overUs() == 1000);
+    tox2::LatencySnapshot empty = stats.snapshot();
+    CHECK(empty.count == 0 && empty.meanUs() == 0.0 && empty.percentileUs(0.99) == 0);
+    for (int i = 0; i < 99; i++) stats.record(100);
+    stats.record(10'000);
+    tox2::LatencySnapshot s = stats.snapshot();
+    CHECK(s.count == 100 && s.sum_us == 19'900 && s.max_us == 10'000 && s.over == 1);
+    CHECK(s.meanUs() == 199.0);
+    CHECK(s.percentileUs(0.99) >= 100 && s.percentileUs(0.99) <= 125);
+    CHECK(s.percentileUs(1.0) == 10'000);  // the top rank sits in the 10 ms bucket and is capped at max
+    CHECK(s.buckets[tox2::latencyBucketIndex(100)] == 99 && s.buckets[tox2::latencyBucketIndex(10'000)] == 1);
+
+    // A record equal to the threshold is not over; zero and the top bucket count.
+    tox2::LatencyStats edge(5);
+    edge.record(0);
+    edge.record(5);
+    edge.record(6);
+    edge.record(70'000'000);
+    edge.record(1ull << 28);
+    const tox2::LatencySnapshot e = edge.snapshot();
+    CHECK(e.count == 5 && e.over == 3 && e.max_us == (1ull << 28));
+    CHECK(e.buckets[0] == 1 && e.buckets[tox2::kLatencyBuckets - 1] == 1 && e.buckets[105] == 1);
+    CHECK(e.percentileUs(1.0) == (1ull << 28));  // the top bucket reports max_us
+
+    // since(): the difference, with the maximum bounded by the highest bucket of the interval.
+    tox2::LatencyStats ivl(1000);
+    ivl.record(50);
+    ivl.record(5'000);
+    const tox2::LatencySnapshot first = ivl.snapshot();
+    ivl.record(200);
+    ivl.record(210);
+    ivl.record(2'000);
+    const tox2::LatencySnapshot second = ivl.snapshot();
+    const tox2::LatencySnapshot d = second.since(first);
+    CHECK(d.count == 3 && d.sum_us == 2'410 && d.over == 1);
+    CHECK(second.max_us == 5'000);
+    CHECK(d.max_us == tox2::latencyBucketUpperUs(tox2::latencyBucketIndex(2'000)) && d.max_us >= 2'000);
+    CHECK(d.max_us < 5'000);
+    CHECK(d.buckets[tox2::latencyBucketIndex(50)] == 0 && d.buckets[tox2::latencyBucketIndex(200)] == 2);
+    const tox2::LatencySnapshot none = second.since(second);
+    CHECK(none.count == 0 && none.max_us == 0 && none.percentileUs(0.5) == 0);
+
+    // merge(): sums, and the larger maximum.
+    tox2::LatencySnapshot merged = first;
+    merged.merge(d);
+    CHECK(merged.count == 5 && merged.sum_us == 7'460 && merged.over == 2 && merged.max_us == 5'000);
+    CHECK(merged.buckets[tox2::latencyBucketIndex(200)] == 2 && merged.buckets[tox2::latencyBucketIndex(50)] == 1);
+    tox2::LatencySnapshot low;
+    low.merge(d);
+    CHECK(low.max_us == d.max_us);
+
+    // Format: milliseconds with two decimals and the threshold in the label.
+    tox2::LatencyStats fixed(1000);
+    for (int i = 0; i < 1222; i++) fixed.record(750);
+    for (int i = 0; i < 12; i++) fixed.record(3100);
+    const std::string line = tox2::formatLatency(fixed.snapshot(), fixed.overUs());
+    CHECK(line == "n 1234 avg 0.77 p99 0.77 max 3.10 ms >1.00ms 12");
+    if (line != "n 1234 avg 0.77 p99 0.77 max 3.10 ms >1.00ms 12")
+        std::fprintf(stderr, "latency was: %s\n", line.c_str());
+    CHECK(tox2::formatLatency({}, 5333) == "n 0 avg 0.00 p99 0.00 max 0.00 ms >5.33ms 0");
+
+    // elapsedUs never goes negative.
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(tox2::elapsedUs(t0, t0 + std::chrono::microseconds(1500)) == 1500);
+    CHECK(tox2::elapsedUs(t0 + std::chrono::microseconds(5), t0) == 0);
+
+    // Concurrent recording loses nothing.
+    tox2::LatencyStats shared(100);
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 4; t++) {
+        threads.emplace_back([&shared, t] {
+            for (std::uint64_t i = 0; i < 100'000; i++) shared.record(i % 200 + static_cast<std::uint64_t>(t));
+        });
+    }
+    for (auto& th : threads) th.join();
+    const tox2::LatencySnapshot c = shared.snapshot();
+    std::uint64_t bucket_total = 0;
+    for (std::uint64_t n : c.buckets) bucket_total += n;
+    CHECK(c.count == 400'000 && bucket_total == 400'000);
+    CHECK(c.max_us == 199 + 3);
+    CHECK(c.sum_us == 4ull * 500 * (199 * 200 / 2) + 100'000ull * (0 + 1 + 2 + 3));
+    CHECK(c.over > 0);
 }
 
 void testDisableFrameBuilder() {
@@ -11581,6 +11688,7 @@ int main(int argc, char** argv) {
     testDispatchSpans();
     testCensus();
     testCensusRenderSuffix();
+    testLatencyStats();
     testDisableFrameBuilder();
     testSyscalls();
     testHle();

@@ -89,6 +89,7 @@ function(tox2_runtime_add_core)
     runtime/src/core/fatal.cpp
     runtime/src/core/guest_dump.cpp
     runtime/src/core/guest_memory.cpp
+    runtime/src/core/latency_stats.cpp
     runtime/src/core/log.cpp
     runtime/src/core/param_sfo.cpp
     runtime/src/core/reservation.cpp
