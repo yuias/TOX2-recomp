@@ -107,7 +107,10 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   `<category> <key>`. The stop census prints them as a `census: rsx unimplemented N kinds`
   section, most frequent first (omitted when empty). It is the work list for later scenes: a draw
   that depends on one of them is skipped or drawn incompletely, and the `skipped` count in the
-  `rsx` section says which.
+  `rsx` section says which. A warm 260 s run of the game lists three kinds, `state antialiasing 0x3`,
+  `texture layout render target alias of another size` (both are the documented anti-aliasing approximation,
+  see [Render targets](#render-targets)) and `state zpass report constant`, and skips no draw. Stencil, user
+  clip planes, surface resizing and vertex program condition codes no longer appear.
 
 ### Vertex programs
 
@@ -142,7 +145,9 @@ transform and the varying outputs.
   the jump when the bit is set if the instruction's sense bit is set, and when it is clear otherwise.
   BRI, CAL, CLI and RET are translated when their condition is "always" (a condition of "never"
   skips them); any other condition tests a condition register and is reported as `state vp branch condition
-  other than always`, which is not translated yet.
+  other than always`, and the draw is skipped. Conditional branches are not translated because no vertex
+  program that a 260 s game run reaches uses them; the condition registers above are only used by data
+  writes.
   BRB and BRI are translated outside subroutines only; one inside a subroutine is reported.
   The vector operation of an instruction that carries a branch still runs first.
 - **Structure of the output.** A program without flow control is emitted as straight-line code, as

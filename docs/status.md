@@ -212,8 +212,9 @@ These exist and are generic, but were written for and checked against the earlie
   bits register; see [Vertex programs](rendering.md#vertex-programs)). The frame's last draw is a
   full-screen pass that samples the scene target; the unit-12 texture that every draw of the frame
   binds (a swizzled 256x16 A8R8G8B8) read the placeholder, which made the whole image magenta. What
-  the census still lists for it (`render target alias of another size`, `user clip`, `antialiasing 0x3`,
-  `stencil test`, `surface resize`) does not put a placeholder on screen. A
+  the census still lists for it (`render target alias of another size` and `antialiasing 0x3`; the stencil
+  test, user clip planes and surface resizing it used to list are implemented since) does not put a
+  placeholder on screen. A
   capture made before this change lacks the swizzled and mipmapped texture bytes (the builder did not
   read them), so a replay of it counts `capture missing range` and shows the same image as before.
   The captures never write the branch bits register, so every draw in them ran with the bits at 0.
@@ -284,8 +285,10 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
 - Graphics: only what the inherited fake RSX and renderer implement. Whatever the renderer meets and
   cannot handle is listed in the `rsx unimplemented` census (see
   [Rendering](rendering.md#rendering)). Known gaps are the ZPASS report values (the constant 0 is
-  written, no occlusion query runs) and user clip planes (the vertex translator does not write the
-  clip distances). The 30 s headless run counts 6.9 million FIFO headers, 238 distinct methods and 8,208 flips in the
+  written, no occlusion query runs), the approximated anti-aliased surfaces (`state antialiasing 0x3`) and
+  the conditional branches of vertex programs (no program of a 260 s game run uses them). A warm 260 s run
+  lists only `state antialiasing 0x3`, `texture layout render target alias of another size` and
+  `state zpass report constant`, with no skipped draw. The 30 s headless run counts 6.9 million FIFO headers, 238 distinct methods and 8,208 flips in the
   fake RSX. With `--dump-frames` the dumped frames of the first 30 s are the plain grey loading screen.
 - Audio: WASAPI is the only device output, in shared mode on the default device. The output is
   stereo (an 8-channel port is reduced to its front pair), and there is no volume setting or device
