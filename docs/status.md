@@ -286,9 +286,12 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   cannot handle is listed in the `rsx unimplemented` census (see
   [Rendering](rendering.md#rendering)). Known gaps are the ZPASS report values (the constant 0 is
   written, no occlusion query runs) and the conditional branches of vertex programs (no program of a 260 s
-  game run uses them). The anti-aliased surfaces are drawn in their memory layout, so the game's resolve pass
-  smooths their edges (see [Rendering](rendering.md#anti-aliased-surfaces) for how the shading differs from the
-  hardware). A warm 260 s run lists only `state zpass report constant`, with no skipped draw. The 30 s headless run counts 6.9 million FIFO headers, 238 distinct methods and 8,208 flips in the
+  game run uses them). The anti-aliased surfaces are drawn into 2-sample multisampled images by default (`--aa-mode msaa`)
+  and copied into their memory layout when something reads them, so the game's resolve pass averages the two
+  samples of a pixel; `--aa-mode supersample` draws them per sample in the layout instead (see
+  [Rendering](rendering.md#anti-aliased-surfaces) for how both differ from the hardware: its sample positions
+  are not known, and the standard Vulkan ones are used). A warm 260 s run lists only `state zpass report constant`,
+  with no skipped draw. The 30 s headless run counts 6.9 million FIFO headers, 238 distinct methods and 8,208 flips in the
   fake RSX. With `--dump-frames` the dumped frames of the first 30 s are the plain grey loading screen.
 - Audio: WASAPI is the only device output, in shared mode on the default device. The output is
   stereo (an 8-channel port is reduced to its front pair), and there is no volume setting or device

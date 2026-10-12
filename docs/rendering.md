@@ -122,7 +122,9 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   anti-aliased surfaces (`state antialiasing 0x3`, `texture layout render target alias of another size`) no
   longer appear. The [resolution scale](#resolution-scale) adds kinds that appear only above scale 1 or at the
   device's image size limit, and [anti-aliased surfaces](#anti-aliased-surfaces) add the coverage controls
-  the renderer does not model.
+  the renderer does not model, a multisampled pass over newer layout data (`state anti-aliased pass over layout
+  data`) and, on a device without 2-sample support, the fallback to supersampling (`state 2-sample multisampling
+  unavailable`). The game's frames count none of the last two.
 
 ### Vertex programs
 
@@ -283,11 +285,13 @@ about it, so any capture replays at any scale.
   format; the scale is the renderer's choice and not part of it.
 - **Passes.** The vertex shader still divides by the guest clip size, so only the Vulkan viewport carries
   pixels: viewport, scissor, clear rectangles and the render area are multiplied by the pass's pixel scale (the
-  target's scale times the samples per pixel). Clears, masked clears, scissors, render target textures,
+  target's scale times the samples per pixel; the scale alone for a multisampled pass, whose image is the clip
+  size). Clears, masked clears, scissors, render target textures,
   feedback copies, depth read as A8R8G8B8, inherit copies and the present blit all follow, so the window shows
   a sharper picture of the same frame. A texture that aliases a target is sampled with normalized coordinates
   (or unnormalized ones divided by the texture's guest size), so an image of any size is read at the same
-  place; the A8R8G8B8 image made from a depth target has the depth image's size.
+  place; the A8R8G8B8 image made from a depth target has the size of the depth target's layout image (layout times
+  scale).
 - **Changing the scale.** The overlay's choice is a request that the overlay hands back to the renderer at
   the next flip, and the renderer applies it between frames, right after that flip. Targets are not touched then. When a draw
   or clear binds a target whose scale is no longer the current one, the renderer replaces it with a new image
@@ -330,8 +334,9 @@ pixels. Mode 0 is one sample, mode 3 (RPCS3's `diagonal_centered_2`) stores two 
 so the surface is 2W x H in memory, and modes 4 and 5 (`square_centered_4`, `square_rotated_4`) store 2x2
 samples, 2W x 2H. The pitch covers the expanded row, and colour and depth share the field. The hardware shades
 once per pixel and stores the colour in each covered sample; nothing resolves the surface for display, and the
-game resolves it itself by sampling it as a 2W x H texture with a linear filter. The exact sample positions are
-not known here (two on a diagonal for mode 3). SET_ANTI_ALIASING_CONTROL (method 0x1D7C) holds the multisample
+game resolves it itself by sampling it as a 2W x H texture with a linear filter. The exact sample positions, and
+which of the two samples the hardware stores in the left column, are not known here (two on a diagonal through
+the pixel centre for mode 3; the renderer assumes +-1/4 pixel on both axes). SET_ANTI_ALIASING_CONTROL (method 0x1D7C) holds the multisample
 enable (bit 0), alpha to coverage (bit 4), alpha to one (bit 8) and the sample mask (bits 16 to 31); the decoder
 reads all of them. RPCS3 sizes such surfaces by `width * samples` when it matches textures to them
 (`Common/surface_store.h`); its "Auto" mode renders into a multisampled image and rewrites the samples into the
@@ -343,30 +348,68 @@ control word 0xFFFF0001 (multisampling on, no alpha to coverage, no alpha to one
 frame and drawn by the 3D passes. A later resolve pass samples the colour surface as a 2560x720 texture, and
 the depth surface is read as a 2560x720 A8R8G8B8 texture inside and after the pass.
 
-The renderer draws such a surface in its memory layout: a single-sample image with one image pixel per stored
-sample (2560x720 at scale 1), with a pixel scale of 2 by 1 times the resolution scale. The clip rectangle, the
-viewport and the scissor grow by the samples per pixel, and the depth surface gets the same layout. The game's
-resolve then reads every sample exactly where the RSX stores it, so near-vertical edges come out smoothed; the
-2x2 modes are drawn the same way (2x2 supersampling) but the game does not use them. Textures, inherit copies,
-feedback copies and the depth conversion need nothing special because the memory layout is the image layout,
-and an anti-aliased binding of a W x H clip and a plain binding of 2W x H at the same address are the same
-image. Other values of the AA field are counted (`state antialiasing 0x<n>`) and drawn with one sample per
-pixel.
+The renderer has two ways to draw such a surface, chosen by `--aa-mode` (see
+[Capture and replay](#capture-and-replay) and the overlay's Settings, [Debug overlay](runtime.md#debug-overlay)).
+Both apply to mode 3, the only one the game uses; the 2x2 modes (4 and 5) are always drawn as supersampled
+single-sample images, 2W x 2H in memory. Other values of the AA field are counted (`state antialiasing 0x<n>`) and
+drawn with one sample per pixel.
+
+- **`supersample`.** The surface is a single-sample image in its memory layout, with one image pixel per stored
+  sample (2560x720 at scale 1) and a pixel scale of 2 by 1 times the resolution scale. The clip rectangle, the
+  viewport and the scissor grow by the samples per pixel, and the depth surface gets the same layout. The game's
+  resolve reads every sample exactly where the RSX stores it, so near-vertical edges come out smoothed. Textures,
+  inherit copies, feedback copies and the depth conversion need nothing special because the memory layout is the
+  image layout, and an anti-aliased binding of a W x H clip and a plain binding of 2W x H at the same address are the
+  same image.
+- **`msaa` (the default).** Colour and depth are also drawn into 2-sample multisampled images of the clip size
+  times the resolution scale, shaded once per pixel with two coverage samples, like the hardware. A target keeps
+  its single-sample memory-layout image as well (its identity, size and every read path are as in `supersample`)
+  and the multisampled image is a sidecar of it. Multisampled passes do not draw into the layout image; it is
+  written from the sidecar by a full-target pass at the moment something reads it, and not before:
+  - a colour target is copied by a draw that fetches each layout texel from the sidecar; a depth target by a
+    depth pass plus, for Z24S8, eight passes that rebuild the stencil one bit at a time with a stencil-test
+    write mask (no extension is needed for either);
+  - the readers are a texture that aliases the surface (including a draw that samples the surface it renders into:
+    it reads the layout image and draws into the sidecar, so it needs no feedback copy), an inherit copy or a
+    rescale blit from it, a flip of it, and a single-sample pass that is about to draw into the same memory (a plain
+    2W x H binding). `RendererStats::layout_copies` counts these copies;
+  - the depth surface read as A8R8G8B8 (the game's edge effect) is converted straight from the multisampled depth
+    and stencil, without the layout copy.
+
+  Texel `(x, y)` of the layout image comes from pixel `(x >> 1, y)` of the sidecar, sample 1 for even `x` and
+  sample 0 for odd `x` (the Vulkan standard 2x positions put sample 1 at (0.25, 0.25) and sample 0 at (0.75, 0.75),
+  so the left column is the left sample; which order the RSX uses is not known). That interleave holds at every
+  resolution scale, which a copy of s x s blocks per sample would not: the game's resolve samples the layout at
+  the boundary between the two texels of one pixel, so with the interleave its linear filter averages the two
+  samples of that pixel, and with blocks it would average two neighbouring sub-pixels of one sample and smooth
+  nothing. The layout image is never copied back into the sidecar. A multisampled pass that starts on a target whose
+  layout image holds newer data (an inherit or a rescale wrote it) and that does not begin with a full clear
+  draws over the older sidecar contents and is counted (`state anti-aliased pass over layout data`); the game's
+  first pass over its surface each frame is the full clear, so its frames do not count it.
+
+  A device without 2-sample support for every framebuffer and sampled-image count of colour, depth and stencil, and
+  for the colour and depth formats the renderer uses, runs in `supersample` instead: one `tox2: render: 2-sample
+  multisampling unavailable (<reason>)` warning and the census kind `state 2-sample multisampling unavailable`.
+  The multisampled images use the standard sample positions, since no position of the hardware is known to
+  match.
 
 Differences from the hardware:
 
-- Shading runs once per sample instead of once per pixel, so texture detail is slightly sharper after the
-  game's resolve (interior texels are sampled at two positions and the mip level comes from per-sample
-  derivatives), with faint vertical streaks in textured areas.
-- The two samples sit at (0.25, 0.5) and (0.75, 0.5) of the pixel instead of on a diagonal, so the smoothing is
-  horizontal only.
-- A draw with the multisample enable bit clear is supersampled too (the game has none).
-- Alpha to coverage, alpha to one and a sample mask other than 0xFFFF are decoded but do not change the
-  rendering. They are counted when a draw uses them on an anti-aliased surface (`state alpha to coverage`,
-  `state alpha to one`, `state sample mask 0x<mask>`); the game writes none of them.
-
-Real 2-sample multisampling with a pass that writes the samples into the wide layout before the surface is read
-is planned.
+- In `supersample` shading runs once per sample instead of once per pixel, so texture detail is slightly sharper
+  after the game's resolve (interior texels are sampled at two positions and the mip level comes from
+  per-sample derivatives), with faint vertical streaks in textured areas, and the two samples sit at (0.25, 0.5)
+  and (0.75, 0.5) of the pixel instead of on a diagonal, so the smoothing is horizontal only. In `msaa` the streaks
+  are gone (in a textured wall of the 3D room capture, 13% of the pixels differed from the one-sample picture by
+  more than 2 in `supersample` and under 0.1% do in `msaa`) and edges are smoothed vertically as well.
+- With a diagonal sample pattern an edge that runs parallel to the diagonal gets no anti-aliasing, because both
+  samples fall on the same side of it. The hardware pattern would behave the same, whichever diagonal it uses;
+  which one that is is not known, and a mirrored choice would smooth the other family of edges. Only the
+  depth reads that sample one layout column (the edge effect) see the column order.
+- The multisample enable bit clear, alpha to coverage, alpha to one and a sample mask other than 0xFFFF are decoded
+  but do not change the rendering (a draw with the enable bit clear is shaded and covered like any other). They are
+  counted when a draw uses them on an anti-aliased surface (`state alpha to coverage`, `state alpha to one`,
+  `state sample mask 0x<mask>`); the game writes none of them.
+- Custom sample positions (`VK_EXT_sample_locations`) are not used.
 
 #### Stencil
 
@@ -448,7 +491,9 @@ Differences from RPCS3:
   between two bindings is not detected here.
 - The layout overlap is what is copied, so the game's anti-aliased depth surface (2560x720 in memory) that is
   later bound plain at 1280x720 with the same pitch keeps its left half of each row. A copy needs the two
-  targets to have the same [resolution scale](#resolution-scale).
+  targets to have the same [resolution scale](#resolution-scale). When the old surface is multisampled, it is
+  first copied into its memory layout (see [Anti-aliased surfaces](#anti-aliased-surfaces)), and that layout is
+  what the new target inherits.
 
 ### Textures
 
