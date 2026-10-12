@@ -152,12 +152,12 @@ void testPutPieces() {
     std::uint8_t src[300];
     for (int i = 0; i < 300; i++) src[i] = static_cast<std::uint8_t>(i * 7 + 3);
 
-    // A range over three lines is written in per-line pieces and bumps each stripe.
+    // A range over three lines is written in per-line pieces and bumps each stripe, but the epoch only once.
     const std::uint64_t epoch_before = table.storeEpoch();
     table.put(mem.base(), 64, src, 288);
     CHECK(std::memcmp(mem.bytes + 64, src, 288) == 0);
     CHECK(mem.bytes[63] == 0 && mem.bytes[352] == 0);
-    CHECK(table.storeEpoch() == epoch_before + 3);
+    CHECK(table.storeEpoch() == epoch_before + 1);
 
     // Small naturally aligned sizes touch exactly their bytes.
     const std::uint8_t one[1] = {0xa5};
@@ -172,6 +172,44 @@ void testPutPieces() {
     CHECK(mem.bytes[402] == 0x12 && mem.bytes[403] == 0x34);
     CHECK(std::memcmp(mem.bytes + 404, four, 4) == 0 && std::memcmp(mem.bytes + 408, eight, 8) == 0);
     CHECK(mem.bytes[412 + 4] == 0);
+}
+
+// One 16 KB MFC PUT spans 128 lines; the epoch and the publish count must move once, not per line.
+void testPutPublishesOnce() {
+    constexpr std::uint32_t kSize = 0x4000;
+    constexpr std::uint32_t kLine100 = 99 * tox2::kReservationLineSize;
+    struct alignas(128) Block {
+        std::uint8_t bytes[kSize] = {};
+    };
+    auto block = std::make_unique<Block>();
+    std::uint8_t* base = block->bytes;
+    const std::vector<std::uint8_t> src(kSize, 0x5a);
+
+    tox2::ReservationTable table;
+    tox2::Reservation res;
+    std::uint8_t ls[128];
+    table.getllar(base, kLine100, ls, res);
+    const std::uint64_t epoch_before = table.storeEpoch();
+    const std::uint64_t publishes_before = table.stats().publishes;
+    table.put(base, 0, src.data(), kSize);
+    CHECK(table.storeEpoch() == epoch_before + 1);
+    CHECK(table.stats().publishes == publishes_before + 1);
+    CHECK(table.lost(base, res));
+    CHECK(std::memcmp(base, src.data(), kSize) == 0);
+
+    // An empty PUT writes nothing and publishes nothing.
+    table.put(base, 0, src.data(), 0);
+    CHECK(table.storeEpoch() == epoch_before + 1);
+    CHECK(table.stats().publishes == publishes_before + 1);
+
+    // The single-line writers publish once each.
+    table.putlluc(base, 0, src.data());
+    CHECK(table.stats().publishes == publishes_before + 2);
+    table.getllar(base, 0, ls, res);
+    std::uint8_t changed[128];
+    std::memset(changed, 0x11, sizeof(changed));
+    CHECK(table.putllc(base, 0, changed, res));
+    CHECK(table.stats().publishes == publishes_before + 3);
 }
 
 // Stripe version of the line that contains `ea`, as a PPU lwarx would record it.
@@ -2998,7 +3036,14 @@ void testSpuCensus() {
         CHECK(f.ppu.call(173, group) == 0);
         CHECK(f.join(group) == 0 && f.cause() == 2 && f.status() == kLvMainStatus);
     }
-    const std::string text = tox2::formatCensus();
+    std::string text = tox2::formatCensus();
+    // The table is process-wide and its totals depend on earlier tests: check the line, then drop it.
+    const std::size_t table_at = text.find("\n  reservation table: ");
+    CHECK(table_at != std::string::npos);
+    if (table_at != std::string::npos) {
+        const std::size_t table_end = text.find('\n', table_at + 1);
+        text.erase(table_at, table_end == std::string::npos ? std::string::npos : table_end - table_at);
+    }
     const std::size_t at = text.find("census: spu");
     const std::string expected =
             "census: spu 1 threads, 2 dispatches, 0 unknown targets\n"
@@ -3028,6 +3073,7 @@ int main(int argc, char** argv) {
     testPlainWriteBeforePutllc();
     testPutInvalidatesReservation();
     testPutPieces();
+    testPutPublishesOnce();
     testStoreConditional();
     testPpuReservationIsLineGranular();
     testIncrementStress();

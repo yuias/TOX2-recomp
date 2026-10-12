@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "core/census.h"
+#include "core/reservation.h"
 #include "core/threads.h"
 #include "spu/spu_channels.h"
 #include "spu/spu_thread.h"
@@ -225,6 +226,9 @@ std::vector<std::string> spuCensusLines() {
     for (const auto& [code, count] : sum.stops) {
         out.push_back(std::format("  stop {:#x}: {}", code, count));
     }
+    const ReservationStats reservation = reservations().stats();
+    out.push_back(
+            std::format("  reservation table: {} publishes, {} notifies", reservation.publishes, reservation.notifies));
     const double seconds = std::max(static_cast<double>(systemTimeUs()) / 1e6, 1e-3);
     for (const SpuReceiveRow& row : spuReceiveSnapshot()) {
         out.push_back(std::format("  thread {:#010x} {} receive {:.1f}/s: busy {}; wait {}", row.id, row.name,

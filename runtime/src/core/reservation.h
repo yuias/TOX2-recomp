@@ -33,6 +33,12 @@ struct Reservation {
 // Why waitStoreEpoch() returned.
 enum class StoreWait { Epoch, Timeout, Halt };
 
+// Cost counters: epoch bumps, and the bumps that found a waiter and notified.
+struct ReservationStats {
+    std::uint64_t publishes = 0;
+    std::uint64_t notifies = 0;
+};
+
 class ReservationTable {
 public:
     ReservationTable();
@@ -60,8 +66,10 @@ public:
 
     // PUT of `size` bytes (1, 2, 4, 8 or a multiple of 16; natural alignment of `base + ea` for the
     // small sizes). Each 128-byte line the range touches is written under its own stripe lock and
-    // invalidates the reservations on it. The range is not atomic as a whole. This is also the
-    // reservation-aware replacement for a plain store of up to 8 bytes: byte-swap the value into `src`.
+    // invalidates the reservations on it. The range is not atomic as a whole. The store epoch moves once, after
+    // the last line, not once per line: every version has moved before the bump, which is all the waiter
+    // protocol needs. This is also the reservation-aware replacement for a plain store of up to 8 bytes:
+    // byte-swap the value into `src`.
     void put(std::uint8_t* base, std::uint32_t ea, const std::uint8_t* src, std::uint32_t size);
 
     // PPU lwarx/ldarx: loads the `size` (4 or 8) bytes at `ea` as a host-order number and returns the
@@ -84,9 +92,10 @@ public:
     // never lost.
     bool lost(const std::uint8_t* base, const Reservation& res) const;
 
-    // Count of version-bumping writes (and wake() calls) so far. Must stay an acquire load: a writer bumps
-    // the stripe version before the epoch, so a waiter that reads the epoch first and lost() second can
-    // never miss a write that the later waitStoreEpoch() would otherwise have reported.
+    // Count of reservation-aware write operations (one PUT counts once, however many lines it spans) and
+    // wake() calls so far. Must stay an acquire load: a writer bumps every stripe version it touches before the epoch,
+    // so a waiter that reads the epoch first and lost() second can never miss a write that the later waitStoreEpoch()
+    // would otherwise have reported.
     std::uint64_t storeEpoch() const { return epoch_.load(std::memory_order_acquire); }
 
     // Blocks until the store epoch differs from `seen`, `timeout` passes, or `*halt` (may be null) is
@@ -104,6 +113,8 @@ public:
     // Bumps the epoch and wakes every waiter without a write.
     void wake() { publish(); }
 
+    ReservationStats stats() const;
+
     // Test seam: `fn(arg)` runs inside putllc() after the snapshot compare and before the chunk stores,
     // which makes the race window deterministic. Set it before any other thread uses the table.
     void setCompareHook(void (*fn)(void*), void* arg) {
@@ -119,6 +130,8 @@ private:
 
     // Spins while the stripe is locked, then locks it; returns the even version it had.
     std::uint64_t lock(std::atomic<std::uint64_t>& s);
+    // Version bump only; the caller publishes once its writes are all done.
+    void unlockVersion(std::atomic<std::uint64_t>& s);
     void unlockWithWrite(std::atomic<std::uint64_t>& s);
     void unlockClean(std::atomic<std::uint64_t>& s);
     // Bumps the epoch and wakes waiters (the version is already updated, see waitStoreEpoch()).
@@ -127,6 +140,8 @@ private:
     std::unique_ptr<std::atomic<std::uint64_t>[]> stripes_;  // bit 0 lock, bits 1..63 version
     std::atomic<std::uint64_t> epoch_{0};
     std::atomic<std::uint32_t> waiters_{0};
+    std::atomic<std::uint64_t> publishes_{0};
+    std::atomic<std::uint64_t> notifies_{0};
     std::mutex wait_mutex_;
     std::condition_variable wait_cv_;
     void (*compare_hook_)(void*) = nullptr;

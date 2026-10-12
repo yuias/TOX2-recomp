@@ -87,8 +87,10 @@ std::uint64_t ReservationTable::lock(std::atomic<std::uint64_t>& s) {
     }
 }
 
+void ReservationTable::unlockVersion(std::atomic<std::uint64_t>& s) { s.fetch_add(1, std::memory_order_seq_cst); }
+
 void ReservationTable::unlockWithWrite(std::atomic<std::uint64_t>& s) {
-    s.fetch_add(1, std::memory_order_seq_cst);
+    unlockVersion(s);
     // The version moves before the epoch, so a waiter that read the old epoch and then found the
     // reservation intact is still woken by this bump.
     publish();
@@ -97,6 +99,7 @@ void ReservationTable::unlockWithWrite(std::atomic<std::uint64_t>& s) {
 void ReservationTable::unlockClean(std::atomic<std::uint64_t>& s) { s.fetch_sub(1, std::memory_order_release); }
 
 void ReservationTable::publish() {
+    publishes_.fetch_add(1, std::memory_order_relaxed);
     epoch_.fetch_add(1, std::memory_order_seq_cst);
     if (waiters_.load(std::memory_order_seq_cst) != 0) {
         // Taking the mutex orders this notify after a waiter that has checked the epoch but not yet
@@ -104,6 +107,7 @@ void ReservationTable::publish() {
         {
             std::lock_guard<std::mutex> guard(wait_mutex_);
         }
+        notifies_.fetch_add(1, std::memory_order_relaxed);
         wait_cv_.notify_all();
     }
 }
@@ -173,17 +177,20 @@ void ReservationTable::putlluc(std::uint8_t* base, std::uint32_t ea, const std::
 }
 
 void ReservationTable::put(std::uint8_t* base, std::uint32_t ea, const std::uint8_t* src, std::uint32_t size) {
+    if (size == 0) return;
     while (size != 0) {
         const std::uint32_t line_end = (ea | (kReservationLineSize - 1)) + 1;  // 0 at the top of the space
         const std::uint32_t piece = line_end == 0 ? size : std::min(size, line_end - ea);
         std::atomic<std::uint64_t>& s = stripe(ea);
         lock(s);
         storeBytes(base + ea, src, piece);
-        unlockWithWrite(s);
+        unlockVersion(s);
         ea += piece;
         src += piece;
         size -= piece;
     }
+    // Every line's version has moved by now, so this one epoch bump still follows each of them.
+    publish();
 }
 
 void ReservationTable::loadReserved(const std::uint8_t* base, std::uint32_t ea, std::uint32_t size,
@@ -268,6 +275,10 @@ StoreWait ReservationTable::waitStoreEpoch(std::uint64_t seen, const std::uint32
     waiters_.fetch_sub(1, std::memory_order_seq_cst);
     if (!woken) return StoreWait::Timeout;
     return haltRequested(halt) ? StoreWait::Halt : StoreWait::Epoch;
+}
+
+ReservationStats ReservationTable::stats() const {
+    return {publishes_.load(std::memory_order_relaxed), notifies_.load(std::memory_order_relaxed)};
 }
 
 ReservationTable& reservations() {
