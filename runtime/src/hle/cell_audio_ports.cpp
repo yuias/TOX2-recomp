@@ -61,6 +61,27 @@ std::uint32_t blockBytes(std::uint64_t channels) {
     return static_cast<std::uint32_t>(std::max<std::uint64_t>(1, channels)) * kCellAudioBlockFrames * kBytesPerSample;
 }
 
+// The marker as it sits in guest memory (big-endian).
+const std::uint32_t kUnwrittenStored = std::byteswap(kUnwrittenSampleBits);
+
+void fillUnwritten(std::uint8_t* at, std::uint32_t bytes) {
+    for (std::uint32_t offset = 0; offset + kBytesPerSample <= bytes; offset += kBytesPerSample) {
+        std::memcpy(at + offset, &kUnwrittenStored, kBytesPerSample);
+    }
+}
+
+// True when every sample still holds the marker bits; one sample the game wrote, in any channel, makes the
+// block written.
+bool isUnwritten(const std::uint8_t* at, std::uint32_t bytes) {
+    std::uint32_t differs = 0;
+    for (std::uint32_t offset = 0; offset + kBytesPerSample <= bytes; offset += kBytesPerSample) {
+        std::uint32_t word;
+        std::memcpy(&word, at + offset, kBytesPerSample);
+        differs |= word ^ kUnwrittenStored;
+    }
+    return differs == 0;
+}
+
 }  // namespace
 
 std::uint32_t CellAudioPorts::init() {
@@ -122,6 +143,8 @@ std::uint32_t CellAudioPorts::portOpen(std::uint8_t* base, std::uint32_t param_a
         port.level = std::bit_cast<float>(tox2Read32(base, param_addr + kParamLevel));
     }
     port.position = 0;
+    port.active = false;
+    port.unwritten_run = 0;
     // The next period gets number period_, so the tags of this port continue from there.
     port.tag = period_;
     port.time_us = last_period_us_;
@@ -161,7 +184,9 @@ std::uint32_t CellAudioPorts::portStart(std::uint8_t* base, std::uint32_t port_n
     if (port.state == PortState::Closed) return kCellAudioErrorPortNotOpen;
     if (port.state == PortState::Started) return kCellAudioErrorPortAlreadyRun;
 
-    std::memset(base + port.addr, 0, port.size);
+    fillUnwritten(base + port.addr, port.size);
+    port.active = false;
+    port.unwritten_run = 0;
     port.state = PortState::Started;
     return kCellOk;
 }
@@ -173,6 +198,8 @@ std::uint32_t CellAudioPorts::portStop(std::uint32_t port_no) {
     if (port.state != PortState::Started) return kCellAudioErrorPortNotRun;
 
     port.state = PortState::Opened;
+    port.active = false;
+    port.unwritten_run = 0;
     return kCellOk;
 }
 
@@ -196,6 +223,8 @@ std::uint32_t CellAudioPorts::portClose(std::uint32_t port_no) {
 
     process().main.free(port.addr);
     port.state = PortState::Closed;
+    port.active = false;
+    port.unwritten_run = 0;
     free_ports_.push_back(port_no);
     return kCellOk;
 }
@@ -300,8 +329,24 @@ void CellAudioPorts::producePeriod(std::uint8_t* base, std::uint64_t now_us, std
         if (port.state != PortState::Started) continue;
 
         mixPort(base, port, out, nonzero);
-        // Zeroed after mixing: a block the game does not rewrite in time plays as silence next time round.
-        std::memset(base + port.addr + port.position * blockBytes(port.channels), 0, blockBytes(port.channels));
+
+        // Refilled with the marker after mixing: a block the game does not rewrite in time plays as silence next
+        // time round (-0.0 mixes as 0), and the next mix can tell it apart from a block of written zeros.
+        std::uint8_t* block = base + port.addr + port.position * blockBytes(port.channels);
+        const std::uint32_t block_bytes = blockBytes(port.channels);
+        const bool unwritten = isUnwritten(block, block_bytes);
+        fillUnwritten(block, block_bytes);
+        if (!unwritten) {
+            port.active = true;
+            port.unwritten_run = 0;
+        } else if (port.active) {
+            unwritten_blocks_.fetch_add(1, std::memory_order_relaxed);
+            if (port.unwritten_run++ == 0) unwritten_runs_.fetch_add(1, std::memory_order_relaxed);
+            // Written only here, under the guest lock, so a plain compare and store is enough.
+            if (port.unwritten_run > longest_unwritten_run_.load(std::memory_order_relaxed)) {
+                longest_unwritten_run_.store(port.unwritten_run, std::memory_order_relaxed);
+            }
+        }
 
         port.tag = period_;
         port.time_us = now_us;
@@ -339,6 +384,9 @@ CellAudioStats CellAudioPorts::stats() const {
     for (std::size_t c = 0; c < kCellAudioMaxChannels; ++c) {
         stats.nonzero_samples[c] = nonzero_samples_[c].load(std::memory_order_relaxed);
     }
+    stats.unwritten_blocks = unwritten_blocks_.load(std::memory_order_relaxed);
+    stats.unwritten_runs = unwritten_runs_.load(std::memory_order_relaxed);
+    stats.longest_unwritten_run = longest_unwritten_run_.load(std::memory_order_relaxed);
     return stats;
 }
 
@@ -356,6 +404,9 @@ void CellAudioPorts::reset() {
     notifies_sent_ = 0;
     notifies_failed_ = 0;
     for (auto& count : nonzero_samples_) count = 0;
+    unwritten_blocks_ = 0;
+    unwritten_runs_ = 0;
+    longest_unwritten_run_ = 0;
 }
 
 CellAudioPorts& cellAudioPorts() {

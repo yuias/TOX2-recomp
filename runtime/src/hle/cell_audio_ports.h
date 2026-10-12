@@ -47,6 +47,11 @@ inline constexpr std::uint64_t kCellAudioPortAttrInitLevel = 0x1000;
 inline constexpr std::uint32_t kCellAudioBlockFrames = 256;
 inline constexpr std::uint64_t kCellAudioPeriodUs = 5333;
 
+// Bits of the sample value that fills a port block after it is mixed and when a port starts. -0.0f mixes as
+// silence, but a game that writes exact zeros (+0.0f) in a quiet passage still differs from a block it never
+// rewrote, which is what the unwritten-block counters need to tell apart.
+inline constexpr std::uint32_t kUnwrittenSampleBits = 0x80000000;
+
 // Each port owns a 16-byte slot of the index area; slot numbers start at 1.
 inline constexpr std::uint32_t kCellAudioIndexAreaBytes = 0x10000;
 inline constexpr std::uint32_t kCellAudioIndexSlotBytes = 16;
@@ -58,6 +63,11 @@ struct CellAudioStats {
     // Non-zero samples per input channel of every mixed port. With the downmix that drops channels
     // 2..7, a non-zero count there is content that does not reach the output.
     std::array<std::uint64_t, kCellAudioMaxChannels> nonzero_samples{};
+    // Blocks the game never rewrote between two mixes of their port (every sample still the marker), counted
+    // only once a port has mixed a written block since it was started.
+    std::uint64_t unwritten_blocks = 0;
+    std::uint64_t unwritten_runs = 0;  // maximal runs of consecutive unwritten blocks of one port
+    std::uint64_t longest_unwritten_run = 0;
 };
 
 class CellAudioPorts {
@@ -81,7 +91,8 @@ public:
     std::uint32_t removeNotifyEventQueue(std::uint64_t key);
 
     // One cellAudio period: mixes the current block of every started port into `out` (interleaved
-    // stereo, summed onto what it holds and clamped to [-1, 1]), zeroes the blocks, advances the read
+    // stereo, summed onto what it holds and clamped to [-1, 1]), refills the blocks with the unwritten
+    // marker (kUnwrittenSampleBits) and counts the ones that still held it, advances the read
     // indices, tags and timestamps, then notifies every registered queue. Does nothing before init()
     // and after quit(). `now_us` is the guest system time at the start of the period.
     void producePeriod(std::uint8_t* base, std::uint64_t now_us, std::span<float> out);
@@ -107,6 +118,9 @@ private:
         std::uint64_t position = 0;  // the block the next period mixes (the published read index)
         std::uint64_t tag = 0;       // period number recorded at the last period the port was started
         std::uint64_t time_us = 0;   // start time of that period
+        // Set by the first mixed block that was not unwritten; start-up blocks before it are not counted.
+        bool active = false;
+        std::uint64_t unwritten_run = 0;  // length of the current run of unwritten blocks
     };
 
     struct Registration {
@@ -137,6 +151,9 @@ private:
     std::atomic<std::uint64_t> notifies_sent_{0};
     std::atomic<std::uint64_t> notifies_failed_{0};
     std::array<std::atomic<std::uint64_t>, kCellAudioMaxChannels> nonzero_samples_{};
+    std::atomic<std::uint64_t> unwritten_blocks_{0};
+    std::atomic<std::uint64_t> unwritten_runs_{0};
+    std::atomic<std::uint64_t> longest_unwritten_run_{0};
 };
 
 // The one cellAudio instance. Under the guest lock, except stats().

@@ -1360,10 +1360,11 @@ void testCellAudioPortOpenAndConfig() {
     CHECK(tox2Read64(base, guest.at(0x80 + 0x10)) == 8);
     CHECK(tox2Read32(base, guest.at(0x80 + 0x18)) == 0x10000);
 
-    // Start zeroes the port memory and marks the port running.
+    // Start fills the port memory with the unwritten marker and marks the port running.
     tox2Write32(base, memory + 0x100, 0x3f800000);
     CHECK(guest.call("cellAudioPortStart", 0) == 0);
-    CHECK(tox2Read32(base, memory + 0x100) == 0);
+    CHECK(tox2Read32(base, memory + 0x100) == tox2::kUnwrittenSampleBits);
+    CHECK(tox2Read32(base, memory + 0xfffc) == tox2::kUnwrittenSampleBits);
     CHECK(guest.call("cellAudioGetPortConfig", 0, guest.at(0x80)) == 0);
     CHECK(tox2Read32(base, guest.at(0x80 + 4)) == 2);
     CHECK(guest.call("cellAudioPortStart", 0) == kAudioAlreadyRun);
@@ -1505,11 +1506,11 @@ void testCellAudioMixing() {
     }
     CHECK(front_intact);
 
-    // The consumed block is zeroed and the index advanced as a big-endian u64.
-    bool zeroed = true;
+    // The consumed block is refilled with the marker and the index advanced as a big-endian u64.
+    bool refilled = true;
     for (std::uint32_t offset = 0; offset < 0x2000; offset += 4)
-        zeroed = zeroed && tox2Read32(base, memory + offset) == 0;
-    CHECK(zeroed);
+        refilled = refilled && tox2Read32(base, memory + offset) == tox2::kUnwrittenSampleBits;
+    CHECK(refilled);
     CHECK(base[cell + 7] == 1 && tox2Read64(base, cell) == 1);
 
     const tox2::CellAudioStats stats = tox2::cellAudioPorts().stats();
@@ -1577,10 +1578,82 @@ void testCellAudioPortLevel() {
     CHECK(guest.setPortLevel(0, 1.0) == kAudioPortNotOpen);
     CHECK(guest.open(0x00, 2, 2, 0, 1.0f, guest.at(0x60)) == 0);
     CHECK(guest.call("cellAudioGetPortConfig", 0, guest.at(0x80)) == 0);
-    CHECK(guest.call("cellAudioPortStart", 0) == 0);  // start zeroes the port memory
+    CHECK(guest.call("cellAudioPortStart", 0) == 0);  // start fills the port memory with the marker
     writeFloat(base, tox2Read32(base, guest.at(0x80 + 0x1c)), 0.5f);
     CHECK(runPeriod(guest, 3000)[0] == 0.5f);
     CHECK(guest.call("cellAudioQuit") == 0);
+}
+
+void testUnwrittenBlocks() {
+    AudioGuest guest;
+    std::uint8_t* base = guest.base();
+    CHECK(guest.initWithoutEngine() == 0);
+
+    CHECK(guest.open(0x00, 8, 8, 0, 1.0f, guest.at(0x60)) == 0);
+    CHECK(guest.call("cellAudioGetPortConfig", 0, guest.at(0x80)) == 0);
+    const std::uint32_t cell = tox2Read32(base, guest.at(0x80));
+    const std::uint32_t memory = tox2Read32(base, guest.at(0x80 + 0x1c));
+    constexpr std::uint32_t kBlockBytes = 8 * 256 * 4;
+    const auto stats = [] { return tox2::cellAudioPorts().stats(); };
+    // The game writes the block at the read index before the period; `value` goes into the samples of the first
+    // `channels` channels of every frame.
+    const auto writeBlock = [&](float value, std::uint32_t channels) {
+        const std::uint32_t block = memory + static_cast<std::uint32_t>(tox2Read64(base, cell)) * kBlockBytes;
+        for (std::uint32_t frame = 0; frame < 256; ++frame) {
+            for (std::uint32_t channel = 0; channel < channels; ++channel) {
+                writeFloat(base, block + (frame * 8 + channel) * 4, value);
+            }
+        }
+    };
+
+    CHECK(guest.call("cellAudioPortStart", 0) == 0);
+
+    // Not active yet: start-up blocks the game has not reached are not drops.
+    runPeriod(guest, 1000);
+    runPeriod(guest, 2000);
+    CHECK(stats().unwritten_blocks == 0 && stats().unwritten_runs == 0 && stats().longest_unwritten_run == 0);
+
+    // W, W, U, W, U, U.
+    std::uint64_t now = 3000;
+    for (const char step : {'W', 'W', 'U', 'W', 'U', 'U'}) {
+        if (step == 'W') writeBlock(0.25f, 8);
+        runPeriod(guest, now);
+        now += 1000;
+    }
+    CHECK(stats().unwritten_blocks == 3);
+    CHECK(stats().unwritten_runs == 2);
+    CHECK(stats().longest_unwritten_run == 2);
+
+    // Channels 0-1 only, and exact zeros: both are blocks the game wrote.
+    writeBlock(0.5f, 2);
+    runPeriod(guest, now);
+    now += 1000;
+    writeBlock(0.0f, 8);
+    runPeriod(guest, now);
+    now += 1000;
+    CHECK(stats().unwritten_blocks == 3 && stats().unwritten_runs == 2 && stats().longest_unwritten_run == 2);
+
+    // A run that continues after written blocks starts a new one.
+    runPeriod(guest, now);
+    now += 1000;
+    CHECK(stats().unwritten_blocks == 4 && stats().unwritten_runs == 3 && stats().longest_unwritten_run == 2);
+
+    // Stop and start make the port inactive again; an unwritten block mixes as silence.
+    CHECK(guest.call("cellAudioPortStop", 0) == 0);
+    CHECK(guest.call("cellAudioPortStart", 0) == 0);
+    for (int i = 0; i < 3; ++i) {
+        const tox2::AudioBlock out = runPeriod(guest, now);
+        now += 1000;
+        CHECK(std::ranges::all_of(out, [](float s) { return s == 0.0f && !std::signbit(s); }));
+    }
+    CHECK(stats().unwritten_blocks == 4 && stats().unwritten_runs == 3);
+
+    // The first written block activates it, and the next miss counts.
+    writeBlock(0.25f, 8);
+    runPeriod(guest, now);
+    now += 1000;
+    runPeriod(guest, now);
+    CHECK(stats().unwritten_blocks == 5 && stats().unwritten_runs == 4 && stats().longest_unwritten_run == 2);
 }
 
 void testCellAudioNotify() {
@@ -2937,6 +3010,7 @@ int main(int argc, char** argv) {
     testCellAudioTagsAndTimestamps();
     testCellAudioMixing();
     testCellAudioPortLevel();
+    testUnwrittenBlocks();
     testCellAudioNotify();
     testCellAudioEngine();
     testAt3ParseStereoWithLoop();

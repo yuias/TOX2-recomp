@@ -583,8 +583,9 @@ std::vector<std::string> audioCensusLines() {
         for (std::size_t c = 0; c < ports.nonzero_samples.size(); ++c) {
             channels += std::format("{}{}:{}", c == 0 ? "" : " ", c, ports.nonzero_samples[c]);
         }
-        lines.push_back(
-                std::format("audio input: {} periods, non-zero samples per channel {}", ports.periods, channels));
+        lines.push_back(std::format(
+                "audio input: {} periods, non-zero samples per channel {}, unwritten blocks {} (runs {}, longest {})",
+                ports.periods, channels, ports.unwritten_blocks, ports.unwritten_runs, ports.longest_unwritten_run));
     }
 
     const tox2::CellAtracStats atrac = tox2::cellAtracStats();
