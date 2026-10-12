@@ -3736,6 +3736,8 @@ enum class MsaaRead {
     Texels,      // the surface as a 64x32 NEAREST texture into a 64x32 display: one display texel per layout texel
     Linear,      // the game's resolve: a LINEAR read into a display of the clip size
     SelfSample,  // a pass into the surface samples it (at layout column 2x + 1), then the Texels read
+    LinearHeld,  // Linear, but the rectangle is a degenerate draw that covers nothing and the surface is not cleared
+    Unread,      // the rectangle only; the display is a cleared plain surface and nothing reads the AA surface
 };
 
 void setViewportHalfSize(tox2::rsx_synthetic::SceneBuilder& scene, float half_width, float half_height) {
@@ -3773,15 +3775,16 @@ void setUpTexturedDraw(tox2::rsx_synthetic::SceneBuilder& scene, std::uint32_t f
     scene.setPrograms(texturedPrograms());
 }
 
-// Draws the red rectangle (kMsRect*) into the surface bound now, a kAaSize square, at depth 0.5.
-void drawMsaaRect(tox2::rsx_synthetic::SceneBuilder& scene) {
+// Draws the red rectangle (kMsRect*) into the surface bound now, a kAaSize square, at depth 0.5. A `degenerate`
+// rectangle has no width: the draw is recorded (and registers the surface with the frame builder) but writes nothing.
+void drawMsaaRect(tox2::rsx_synthetic::SceneBuilder& scene, bool degenerate = false) {
     using namespace tox2::rsx_synthetic;
     setQuadRenderState(scene, kAaSize / 2.0f);
     scene.setFloatAttrib(0, 3, kPositionsOffset);
     scene.setColorAttrib(3, kColorsOffset);
     scene.setPrograms(quadPrograms());
     const auto ndc = [](float v) { return v / (kAaSize / 2.0f) - 1.0f; };
-    const float xs[2] = {ndc(kMsRectLeft), ndc(kMsRectRight)};
+    const float xs[2] = {ndc(kMsRectLeft), degenerate ? ndc(kMsRectLeft) : ndc(kMsRectRight)};
     const float ys[2] = {ndc(kMsRectTop), ndc(kMsRectBottom)};
     for (std::uint32_t v = 0; v < 4; v++) {  // strip order: left/right, then top/bottom
         scene.memory().putFloat(1, kPositionsOffset + v * 12, xs[v & 1]);
@@ -3797,8 +3800,14 @@ std::vector<std::uint8_t> makeMsaaLayoutCapture(MsaaRead read) {
     using namespace tox2::rsx_synthetic;
     SceneBuilder scene;
     scene.setSurface(3, kAaSize, kAaOffset);
-    scene.clear(0xFF000000);
-    drawMsaaRect(scene);
+    if (read != MsaaRead::LinearHeld) scene.clear(0xFF000000);
+    drawMsaaRect(scene, read == MsaaRead::LinearHeld);
+
+    if (read == MsaaRead::Unread) {
+        scene.setSurface(0, kAaSize, kSurfaceOffset);
+        scene.clear(0xFF000000);
+        return scene.finish();
+    }
 
     if (read == MsaaRead::SelfSample) {
         // The pixel centre falls on the boundary between layout texels 2X and 2X + 1; the u range is shifted by an
@@ -3810,7 +3819,7 @@ std::vector<std::uint8_t> makeMsaaLayoutCapture(MsaaRead read) {
         scene.drawStrip(4);
     }
 
-    if (read == MsaaRead::Linear) {
+    if (read == MsaaRead::Linear || read == MsaaRead::LinearHeld) {
         scene.setSurface(0, kAaSize, kSurfaceOffset);
         scene.clear(0xFF000000);
         setViewportHalfSize(scene, kAaSize / 2.0f, kAaSize / 2.0f);
@@ -3928,6 +3937,122 @@ void testRendererMsaaLayout(tox2::VkContext& ctx) {
             CHECK(frame.stats.draws == 3 && frame.stats.draws_skipped == 0);
             CHECK(frame.stats.feedback_copies == 0 && frame.stats.layout_copies >= 2);
             CHECK(frame.notes.empty());
+        }
+    }
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
+// ---- Switching the anti-aliasing mode at run time ----
+
+// The raw display (image size) after each frame of a sequence on one renderer.
+struct RawDisplay {
+    std::vector<std::uint8_t> bgra;
+    std::uint32_t width = 0, height = 0;
+};
+
+RawDisplay runFrame(tox2::RsxRenderer& renderer, std::vector<tox2::RsxCommand> commands) {
+    RawDisplay display;
+    renderer.execute(commands);
+    CHECK(renderer.valid());
+    CHECK(renderer.readDisplay(display.bgra, display.width, display.height));
+    return display;
+}
+
+bool sameDisplay(const RawDisplay& a, const RawDisplay& b) {
+    return a.width == b.width && a.height == b.height && !a.bgra.empty() && a.bgra == b.bgra;
+}
+
+// A renderer's mode follows setAaMode, and the picture follows the mode without any target being touched at the
+// switch: a read finds the memory layout brought up to date from the 2-sample image, and a full clear makes the old
+// contents of either representation irrelevant.
+void testRendererAaModeSwitch(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::rsxUnimplementedReset();
+    {
+        tox2::RsxRenderer renderer(ctx, readbackAllOptions(1, tox2::AaMode::Supersample));
+        CHECK(renderer.valid() && renderer.aaMode() == tox2::AaMode::Supersample);
+        CHECK(renderer.setAaMode(tox2::AaMode::Msaa) == renderer.msaaAvailable());
+        CHECK(renderer.aaMode() == (renderer.msaaAvailable() ? tox2::AaMode::Msaa : tox2::AaMode::Supersample));
+        CHECK(renderer.setAaMode(tox2::AaMode::Supersample) && renderer.aaMode() == tox2::AaMode::Supersample);
+    }
+    if (!ctx.twoSampleSupportGap().empty()) {
+        std::printf("anti-aliasing mode switch: skipped (%s)\n", ctx.twoSampleSupportGap().c_str());
+        return;
+    }
+    if (ctx.deviceProperties().limits.standardSampleLocations == VK_FALSE) {
+        std::printf("anti-aliasing mode switch: skipped (no standard sample locations)\n");
+        return;
+    }
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+
+    for (const std::uint32_t scale : {1u, 2u}) {
+        // The references: one frame of the scene on a fresh renderer in each mode.
+        const auto reference = [&](tox2::AaMode mode) {
+            RawDisplay display;
+            const ScaledFrame frame = renderAtScale(ctx, {makeMsaaLayoutCapture(MsaaRead::Linear)}, scale, 1, 0, mode);
+            CHECK(frame.ok && frame.notes.empty());
+            display.bgra = frame.bgra;
+            display.width = frame.width;
+            display.height = frame.height;
+            return display;
+        };
+        const RawDisplay msaa_reference = reference(tox2::AaMode::Msaa);
+        const RawDisplay super_reference = reference(tox2::AaMode::Supersample);
+        CHECK(!msaa_reference.bgra.empty() && !super_reference.bgra.empty());
+        // The modes must be told apart by the picture, or the equalities below would prove nothing.
+        CHECK(!sameDisplay(msaa_reference, super_reference));
+
+        const std::vector<tox2::RsxCommand> drawn = replaySynthetic(makeMsaaLayoutCapture(MsaaRead::Linear));
+        const std::vector<tox2::RsxCommand> held = replaySynthetic(makeMsaaLayoutCapture(MsaaRead::LinearHeld));
+        const std::vector<tox2::RsxCommand> unread = replaySynthetic(makeMsaaLayoutCapture(MsaaRead::Unread));
+        tox2::rsxUnimplementedReset();
+
+        // The full sequence: msaa, supersample read, supersample redraw after a full clear, msaa again.
+        {
+            tox2::RsxRenderer renderer(ctx, readbackAllOptions(scale, tox2::AaMode::Msaa));
+            CHECK(renderer.valid() && renderer.aaMode() == tox2::AaMode::Msaa);
+
+            const RawDisplay first = runFrame(renderer, drawn);
+            CHECK(sameDisplay(first, msaa_reference));
+
+            CHECK(renderer.setAaMode(tox2::AaMode::Supersample) && renderer.aaMode() == tox2::AaMode::Supersample);
+            const RawDisplay second = runFrame(renderer, held);
+            CHECK(sameDisplay(second, first));
+
+            const RawDisplay third = runFrame(renderer, drawn);
+            CHECK(sameDisplay(third, super_reference));
+
+            CHECK(renderer.setAaMode(tox2::AaMode::Msaa) && renderer.aaMode() == tox2::AaMode::Msaa);
+            const RawDisplay fourth = runFrame(renderer, drawn);
+            CHECK(sameDisplay(fourth, first));
+
+            CHECK(renderer.stats().draws_skipped == 0);
+            CHECK(tox2::rsxUnimplementedSnapshot().empty());
+        }
+
+        // The layout is stale at the switch (nothing read the surface in msaa mode): the first supersample pass over
+        // the surface copies it, so the picture is the msaa one; going back without a clear draws over layout data that
+        // the sidecar lacks, which is counted, and the picture is still the same.
+        {
+            tox2::rsxUnimplementedReset();
+            tox2::RsxRenderer renderer(ctx, readbackAllOptions(scale, tox2::AaMode::Msaa));
+            CHECK(renderer.valid());
+            runFrame(renderer, unread);
+            CHECK(renderer.stats().layout_copies == 0);
+
+            CHECK(renderer.setAaMode(tox2::AaMode::Supersample));
+            const RawDisplay synced = runFrame(renderer, held);
+            CHECK(sameDisplay(synced, msaa_reference));
+            CHECK(renderer.stats().layout_copies >= 1);
+            CHECK(tox2::rsxUnimplementedSnapshot().empty());
+
+            CHECK(renderer.setAaMode(tox2::AaMode::Msaa));
+            const RawDisplay back = runFrame(renderer, held);
+            CHECK(sameDisplay(back, msaa_reference));
+            const auto notes = tox2::rsxUnimplementedSnapshot();
+            CHECK(notes.size() == 1 && notes[0].first == "state anti-aliased pass over layout data");
+            CHECK(renderer.stats().draws_skipped == 0);
         }
     }
     CHECK(ctx.validationErrorCount() == errors_before);
@@ -4518,6 +4643,7 @@ int main() {
     testRendererScaleChange(*ctx);
     testRendererAntiAliasedSurface(*ctx);
     testRendererMsaaLayout(*ctx);
+    testRendererAaModeSwitch(*ctx);
     testRendererMsaaDepthAsArgb(*ctx);
     testRendererMsaaInherit(*ctx);
     testRendererPointSize(*ctx);

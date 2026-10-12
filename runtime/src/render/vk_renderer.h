@@ -98,6 +98,12 @@ public:
     // copy at the new scale (see acquire), so the picture changes at the next flip that draws. Renderer thread.
     bool setResolutionScale(std::uint32_t scale);
 
+    // Changes how the next pass over an anti-aliased surface is drawn; false and no change for Msaa when the device
+    // lacks 2-sample support. No target is touched: a read brings the memory layout up to date from the 2-sample image
+    // (syncLayout), and a pass that finds the other representation newer and does not replace all of it is counted
+    // (see beginSidecarPass). Renderer thread, between commands.
+    bool setAaMode(AaMode mode);
+
     // Frames written, failed or dropped by the dump worker so far (dump_dir and requested dumps). Any thread.
     DumpCounts dumpCounts() const;
     // Waits until the dumps queued so far are written, at most `timeout`; returns how many are still

@@ -472,6 +472,12 @@ bool RsxRenderer::setResolutionScale(std::uint32_t scale) {
     return true;
 }
 
+bool RsxRenderer::setAaMode(AaMode mode) {
+    if (mode == AaMode::Msaa && !msaaAvailable()) return false;
+    aa_mode_ = mode;
+    return true;
+}
+
 // The scale a target of this layout gets now: the renderer's scale, or the largest one that fits the device's image
 // size. Callers have checked the layout against that size.
 std::uint32_t RsxRenderer::targetScale(std::uint32_t layout_width, std::uint32_t layout_height) const {
@@ -2191,11 +2197,13 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     dump_requested_ = false;
     // Asked before the readback decision so a request made for this very flip is honoured.
     std::uint32_t requested_scale = 0;
+    std::optional<AaMode> requested_aa_mode;
     if (presenter_ != nullptr && overlay_ != nullptr) {
-        const PresentOverlayRequests requests =
-                overlay_->onFlip(PresentFrameInfo{&stats_, dumper_->counts(), last_requested_dump_, resolution_scale_});
+        const PresentOverlayRequests requests = overlay_->onFlip(PresentFrameInfo{
+                &stats_, dumper_->counts(), last_requested_dump_, resolution_scale_, aa_mode_, msaaAvailable()});
         if (requests.dump_display) dump_this_flip_ = true;
         requested_scale = requests.resolution_scale;
+        requested_aa_mode = requests.aa_mode;
     }
     const bool read_back = options_.readback_all || dumpDue() || dump_this_flip_;
     display_copied_ = false;
@@ -2238,8 +2246,10 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     if (presenter_ != nullptr) recordPresentBlit(slot, display_black_ ? nullptr : it->second.get());
     if (submitFrame()) has_flip_ = true;
     // Applied only now: this flip, its readback and the present blit were all recorded at the old scale, and
-    // targets rescale lazily when the next frame binds them.
+    // targets rescale lazily when the next frame binds them. The mode follows the same rule so a frame is never
+    // recorded in both.
     if (requested_scale != 0 && valid()) setResolutionScale(requested_scale);
+    if (requested_aa_mode && valid()) setAaMode(*requested_aa_mode);
 }
 
 // Acquires a swapchain image and records the copy of the display buffer into it (a black frame when
