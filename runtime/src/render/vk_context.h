@@ -41,6 +41,8 @@ public:
     bool hasTextureBC() const { return has_texture_bc_; }
     // True when the device was created with shaderClipDistance (gl_ClipDistance in the vertex shader).
     bool hasClipDistance() const { return has_clip_distance_; }
+    // True when the device was created with largePoints (gl_PointSize above 1).
+    bool hasLargePoints() const { return has_large_points_; }
     // D24_UNORM_S8_UINT when usable as an attachment, else D32_SFLOAT_S8_UINT (one of the two is
     // mandatory for Vulkan implementations).
     VkFormat depthStencilFormat() const {
@@ -66,6 +68,7 @@ private:
     bool has_d24s8_ = false;
     bool has_texture_bc_ = false;
     bool has_clip_distance_ = false;
+    bool has_large_points_ = false;
     std::atomic<std::uint32_t> validation_errors_{0};
 };
 

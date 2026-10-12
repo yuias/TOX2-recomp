@@ -25,7 +25,7 @@ inline constexpr std::uint32_t kVpConstantsBinding = 0;  // UBO: vec4 c[kRsxVpCo
 inline constexpr std::uint32_t kVpDrawBinding = 2;       // UBO: VpDrawUniforms, std140
 
 // Per-draw values read by the vertex stage (std140; mirrored in the GLSL block `VpDraw`).
-//   offset  0  vec4  viewport_scale   raw RSX viewport scale (x, y, z; w unused)
+//   offset  0  vec4  viewport_scale   raw RSX viewport scale (x, y, z); w is the point size scale
 //   offset 16  vec4  viewport_offset  raw RSX viewport offset (x, y, z; w unused)
 //   offset 32  vec4  clip_params      (surface clip width, clip height, depth clip min, depth clip max)
 //   offset 48  uint  output_mask      SET_VERTEX_ATTRIB_OUTPUT_MASK register value

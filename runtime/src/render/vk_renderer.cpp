@@ -1446,6 +1446,13 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     vp.output_mask = draw.vp_output_mask;
     vp.branch_bits = draw.vp_branch_bits;
     vp.point_size = raster.point_size > 0.0f ? raster.point_size : 1.0f;
+    // Points follow the vertical pixel scale (square points on a non-square sample layout); the vertex shader
+    // multiplies gl_PointSize by this lane.
+    vp.viewport_scale[3] = static_cast<float>(pixel_scale.y);
+    if (draw.primitive == RsxPrimitive::Points && !context_.hasLargePoints() &&
+        vp.point_size * vp.viewport_scale[3] > 1.0f) {
+        rsxNoteUnimplemented("state", "point size unavailable");
+    }
     vp.user_clip = raster.user_clip;
     // The program only writes clip distances on a device with shaderClipDistance. The renderer does not know
     // which slots the program writes, so this can count a draw whose planes have no source.

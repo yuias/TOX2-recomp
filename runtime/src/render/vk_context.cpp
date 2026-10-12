@@ -264,6 +264,9 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
     enabled_features.textureCompressionBC = ctx->has_texture_bc_ ? VK_TRUE : VK_FALSE;
     ctx->has_clip_distance_ = supported_features.shaderClipDistance == VK_TRUE;
     enabled_features.shaderClipDistance = ctx->has_clip_distance_ ? VK_TRUE : VK_FALSE;
+    // Without largePoints gl_PointSize is clamped to 1, so points shrink as the resolution scale grows.
+    ctx->has_large_points_ = supported_features.largePoints == VK_TRUE;
+    enabled_features.largePoints = ctx->has_large_points_ ? VK_TRUE : VK_FALSE;
 
     const float priority = 1.0f;
     VkDeviceQueueCreateInfo queue_info{};

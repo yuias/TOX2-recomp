@@ -3535,6 +3535,76 @@ void testRendererAntiAliasedSurface(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// ---- Point size ----
+
+// One red point at the centre of the 64x64 surface (a pixel corner), SET_POINT_SIZE `size`.
+std::vector<std::uint8_t> makePointCapture(float size) {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    scene.setSurface();
+    scene.clear(0xFF000000);
+    setQuadRenderState(scene);
+    scene.setFloatAttrib(0, 3, kPositionsOffset);
+    scene.setColorAttrib(3, kColorsOffset);
+    scene.setPrograms(quadPrograms());
+    for (std::uint32_t c = 0; c < 3; c++) scene.memory().putFloat(1, kPositionsOffset + c * 4, 0.0f);
+    scene.memory().putWord(1, kColorsOffset, 0xFFFF0000);
+    scene.write(tox2::kMethodNv4097SetPointSize, std::bit_cast<std::uint32_t>(size));
+    scene.write(tox2::kMethodNv4097SetBeginEnd, static_cast<std::uint32_t>(tox2::RsxPrimitive::Points));
+    scene.write(tox2::kMethodNv4097DrawArrays, 0);
+    scene.write(tox2::kMethodNv4097SetBeginEnd, 0);
+    return scene.finish();
+}
+
+// A point of size 4 covers the 4x4 block around the surface centre at scale 1, where gl_PointSize used to be clamped
+// to one pixel, and the same block after the box downsample at scales 2 and 3 (the size follows the scale).
+void testRendererPointSize(tox2::VkContext& ctx) {
+    tox2::rsxUnimplementedReset();
+    if (!ctx.hasLargePoints()) {
+        std::printf("skipping the point size test: the device has no large points\n");
+        const ScaledFrame frame = renderAtScale(ctx, {makePointCapture(4.0f)}, 2);
+        CHECK(frame.ok && unimplementedCount("state point size unavailable") >= 1);
+        tox2::rsxUnimplementedReset();
+        return;
+    }
+
+    for (const std::uint32_t scale : {1u, 2u, 3u}) {
+        const ScaledFrame frame = renderAtScale(ctx, {makePointCapture(4.0f)}, scale);
+        CHECK(frame.ok && frame.width == 64 && frame.height == 64);
+        if (!frame.ok) continue;
+        std::uint32_t red = 0;
+        bool block = true;
+        for (std::uint32_t y = 0; y < frame.height; y++) {
+            for (std::uint32_t x = 0; x < frame.width; x++) {
+                const std::uint32_t argb = pixelArgb(frame.bgra, frame.width, x, y);
+                const bool inside = x >= 30 && x < 34 && y >= 30 && y < 34;
+                if (argb == 0xFFFF0000) red++;
+                block = block && argb == (inside ? 0xFFFF0000u : kBlack);
+            }
+        }
+        if (!block) std::fprintf(stderr, "point of size 4 at scale %u: %u red pixels\n", scale, red);
+        CHECK(block && red == 16);
+        CHECK(frame.stats.draws == 1 && frame.stats.draws_skipped == 0 && frame.notes.empty());
+    }
+
+    // Size 1 stays one guest pixel; an unset (zero) size is treated as 1 as before.
+    for (const float size : {1.0f, 0.0f}) {
+        const ScaledFrame frame = renderAtScale(ctx, {makePointCapture(size)}, 2);
+        CHECK(frame.ok && frame.stats.draws == 1);
+        if (!frame.ok) continue;
+        std::uint32_t lit = 0;
+        for (std::uint32_t y = 0; y < frame.height; y++) {
+            for (std::uint32_t x = 0; x < frame.width; x++) {
+                if (pixelArgb(frame.bgra, frame.width, x, y) != kBlack) lit++;
+            }
+        }
+        // A guest pixel wide point centred on a pixel corner lights the 2x2 image pixels around it at scale 2, one
+        // in each of the four guest pixels around the corner.
+        CHECK(lit == 4);
+    }
+    tox2::rsxUnimplementedReset();
+}
+
 bool sameRect(const tox2::PixelRect& rect, std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
     return rect.x == x && rect.y == y && rect.width == width && rect.height == height;
 }
@@ -3659,10 +3729,11 @@ int main() {
     }
 
     const std::uint32_t api = ctx->deviceProperties().apiVersion;
-    std::printf("device: %s (Vulkan %u.%u.%u), D24S8 %s, clip distance %s, validation %s\n", ctx->deviceName().data(),
-                VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api), VK_API_VERSION_PATCH(api),
-                ctx->hasD24S8() ? "supported" : "unsupported (D32S8 fallback)",
-                ctx->hasClipDistance() ? "supported" : "unsupported", ctx->validationEnabled() ? "active" : "inactive");
+    std::printf("device: %s (Vulkan %u.%u.%u), D24S8 %s, clip distance %s, large points %s, validation %s\n",
+                ctx->deviceName().data(), VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api),
+                VK_API_VERSION_PATCH(api), ctx->hasD24S8() ? "supported" : "unsupported (D32S8 fallback)",
+                ctx->hasClipDistance() ? "supported" : "unsupported",
+                ctx->hasLargePoints() ? "supported" : "unsupported", ctx->validationEnabled() ? "active" : "inactive");
     CHECK(layer == ctx->validationEnabled());
 
     testClearAndReadback(*ctx);
@@ -3686,6 +3757,7 @@ int main() {
     testRendererScaledTargetsAsTextures(*ctx);
     testRendererScaleChange(*ctx);
     testRendererAntiAliasedSurface(*ctx);
+    testRendererPointSize(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
     ctx.reset();

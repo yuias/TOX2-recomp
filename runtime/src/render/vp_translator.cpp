@@ -673,10 +673,12 @@ std::string Translator::assemble() const {
     glsl += std::format("  var_back_diffuse = {};\n", exported(3, kMaskFrontDiffuse | kMaskBackDiffuse));
     glsl += std::format("  var_back_specular = {};\n", exported(4, kMaskFrontSpecular | kMaskBackSpecular));
     glsl += std::format("  var_fog = {};\n", exported(5, kMaskFog, "x"));
+    // viewport_scale.w carries the renderer's image pixels per clip pixel (the raw RSX lane is unused), so a point
+    // keeps its size relative to the picture at any resolution scale.
     glsl += std::format(
-            "  gl_PointSize = {};\n",
+            "  gl_PointSize = {} * draw.viewport_scale.w;\n",
             (slots_written_ & (1u << 6)) != 0
-                    ? std::format("(draw.output_mask & {}u) != 0u ? out_6.x : draw.point_size", kMaskPointSize)
+                    ? std::format("((draw.output_mask & {}u) != 0u ? out_6.x : draw.point_size)", kMaskPointSize)
                     : std::string("draw.point_size"));
 
     if (clipPlanesEmitted()) {

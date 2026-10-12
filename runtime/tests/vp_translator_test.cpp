@@ -394,7 +394,7 @@ void testUnwrittenOutputsAreDefault() {
     CHECK(result.ok);
     CHECK(contains(result.glsl, "  var_front_diffuse = vec4(0.0, 0.0, 0.0, 1.0);\n"));
     CHECK(contains(result.glsl, "  var_tex0 = vec4(0.0, 0.0, 0.0, 1.0);\n"));
-    CHECK(contains(result.glsl, "  gl_PointSize = draw.point_size;\n"));
+    CHECK(contains(result.glsl, "  gl_PointSize = draw.point_size * draw.viewport_scale.w;\n"));
 
     // No position write: the body is disabled and the position is (0, 0, 0, 1).
     Asm color;
