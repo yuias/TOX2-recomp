@@ -19,6 +19,7 @@
 
 #include "core/census.h"
 #include "render/frame_dump.h"
+#include "render/render_scale.h"
 #include "render/vk_context.h"
 #include "render/vk_renderer.h"
 #include "rsx/rsx_capture.h"
@@ -33,7 +34,7 @@ namespace {
 void printUsage() {
     std::fputs(
             "usage: tox2_rsxreplay CAPTURE [--out DIR] [--compare PNG [--max-diff N] [--max-mean X] [--max-differing P]]\n"
-            "                      [--no-validation] [--shader-cache DIR]\n"
+            "                      [--resolution-scale N] [--no-validation] [--shader-cache DIR]\n"
             "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture\n"
             "  --out DIR           write the displayed frame as DIR/<capture name>.png\n"
             "  --compare PNG       diff the displayed frame against PNG (box-downsampled first when it is a whole\n"
@@ -41,6 +42,8 @@ void printUsage() {
             "  --max-diff N        with --compare: fail when the largest channel difference exceeds N\n"
             "  --max-mean X        with --compare: fail when the mean difference exceeds X\n"
             "  --max-differing P   with --compare: fail when more than P percent of the pixels differ\n"
+            "  --resolution-scale N  render every target at N times its guest size (1..4, default 1); the PNG is\n"
+            "                      written at that size\n"
             "  --no-validation     do not enable the Vulkan validation layer\n"
             "  --shader-cache DIR  directory of the on-disk SPIR-V cache\n",
             stderr);
@@ -141,12 +144,26 @@ int main(int argc, char** argv) {
     std::string compare_path;
     std::string shader_cache;
     bool validation = true;
+    std::uint32_t resolution_scale = 1;
     // Thresholds of --compare; a NaN limit is not checked.
     double max_diff = std::nan(""), max_mean = std::nan(""), max_differing = std::nan("");
     for (int i = 1; i < argc; i++) {
         const std::string_view arg = argv[i];
         if (arg == "--no-validation") {
             validation = false;
+            continue;
+        }
+        if (arg == "--resolution-scale") {
+            char* end = nullptr;
+            const long value = i + 1 < argc ? std::strtol(argv[i + 1], &end, 10) : 0;
+            if (i + 1 >= argc || end == argv[i + 1] || *end != '\0' || value < 1 ||
+                value > static_cast<long>(tox2::kMaxResolutionScale)) {
+                std::fprintf(stderr, "error: --resolution-scale takes a whole number from 1 to %u\n",
+                             tox2::kMaxResolutionScale);
+                return 2;
+            }
+            resolution_scale = static_cast<std::uint32_t>(value);
+            i++;
             continue;
         }
         if (arg == "--max-diff" || arg == "--max-mean" || arg == "--max-differing") {
@@ -223,6 +240,7 @@ int main(int argc, char** argv) {
     if (context) {
         tox2::RenderOptions render_options;
         render_options.shader_cache = shader_cache;
+        render_options.resolution_scale = resolution_scale;
         render_options.readback_all = true;  // the replay reads the display after its last flip
         {
             tox2::RsxRenderer renderer(*context, render_options);
@@ -299,7 +317,9 @@ int main(int argc, char** argv) {
         validation_errors = context->validationErrorCount();
     }
 
-    std::printf("replay: %zu commands, %zu draws, %zu skipped%s\n", commands.size(), draws, skipped, diff_text.c_str());
+    const std::string scale_text = resolution_scale > 1 ? std::format(", resolution scale {}", resolution_scale) : "";
+    std::printf("replay: %zu commands, %zu draws, %zu skipped%s%s\n", commands.size(), draws, skipped,
+                scale_text.c_str(), diff_text.c_str());
     // The game's census omits an empty section; a replay says so explicitly.
     const std::string section = unimplementedSection();
     std::printf("%s\n", section.empty() ? "census: rsx unimplemented 0 kinds" : section.c_str());

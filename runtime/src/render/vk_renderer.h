@@ -35,8 +35,13 @@ struct RenderOptions {
     // Also holds the driver's pipeline cache (pipelines.bin) when set.
     std::filesystem::path shader_cache;
     // Copy the display buffer back at every flip so readDisplay works after each one (replay, tests). The
-    // copy is 8 MiB at 1080p, so a live run leaves this off and only reads back the flips that are dumped.
+    // copy is 8 MiB at 1080p and grows with the square of the resolution scale, so a live run leaves this off
+    // and only reads back the flips that are dumped.
     bool readback_all = false;
+    // Image pixels per guest pixel of every colour and depth target, 1..kMaxResolutionScale. Anything else
+    // makes the renderer invalid. A target too large for the device at this scale is created at the largest
+    // scale that fits (and counted).
+    std::uint32_t resolution_scale = 1;
 };
 
 struct RendererStats {
@@ -67,13 +72,16 @@ public:
     // Records into the frame's command buffer; a flip submits it.
     void execute(std::span<RsxCommand> commands);
 
-    // BGRA8 rows of the display buffer of the last flip (waits for the GPU). A flip whose buffer is
-    // not a known render target reads back as opaque black at the flip's size. False (outputs untouched)
+    // BGRA8 rows of the display buffer of the last flip (waits for the GPU), at image size: the guest size times
+    // the resolution scale the target was created at. A flip whose buffer is not a known render target reads
+    // back as opaque black at the flip's size times the resolution scale. False (outputs untouched)
     // before any flip, and when the last flip was gated off: without `readback_all` the pixels are only
     // copied for flips that are dumped, and a dump due at that flip reads them itself.
     bool readDisplay(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height);
 
     const RendererStats& stats() const { return stats_; }
+
+    std::uint32_t resolutionScale() const { return resolution_scale_; }
 
     // Frames written, failed or dropped by the dump worker so far (dump_dir and requested dumps). Any thread.
     DumpCounts dumpCounts() const;
@@ -150,6 +158,7 @@ private:
     RenderOptions options_;
     std::string error_;
     RendererStats stats_;
+    std::uint32_t resolution_scale_ = 1;
     // Always created: its worker thread only starts with the first submitted frame.
     std::unique_ptr<FrameDumper> dumper_;
     bool dump_requested_ = false;  // requestDisplayDump() was called and no flip has taken it yet

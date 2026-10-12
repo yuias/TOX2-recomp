@@ -217,6 +217,11 @@ struct RsxRenderer::FrameSlot {
 RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(context), options_(std::move(options)) {
     if (!options_.shader_cache.empty()) setShaderCacheDir(options_.shader_cache);
     dumper_ = std::make_unique<FrameDumper>();
+    if (options_.resolution_scale < 1 || options_.resolution_scale > kMaxResolutionScale) {
+        fail(std::format("resolution scale {} is outside 1..{}", options_.resolution_scale, kMaxResolutionScale));
+        return;
+    }
+    resolution_scale_ = options_.resolution_scale;
     pipelines_ = std::make_unique<DrawPipelines>(context_, options_.shader_cache.empty()
                                                                    ? std::filesystem::path()
                                                                    : options_.shader_cache / "pipelines.bin");
@@ -406,14 +411,17 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth,
     // The anti-aliased layouts (samples per pixel) are not rendered yet, so the layout is the clip size.
     const std::uint32_t layout_width = surface.width;
     const std::uint32_t layout_height = surface.height;
-    const std::uint32_t scale = 1;
-    const std::uint64_t image_width = std::uint64_t{layout_width} * scale;
-    const std::uint64_t image_height = std::uint64_t{layout_height} * scale;
-    if (layout_width == 0 || layout_height == 0 || image_width > props.limits.maxImageDimension2D ||
-        image_height > props.limits.maxImageDimension2D) {
+    const std::uint32_t max_dimension = props.limits.maxImageDimension2D;
+    if (layout_width == 0 || layout_height == 0 || layout_width > max_dimension || layout_height > max_dimension) {
         rsxNoteUnimplemented("state", std::format("surface size {}x{}", surface.width, surface.height));
         return nullptr;
     }
+    // A target that would exceed the device's image size at the current scale is made at the largest scale that
+    // fits; a draw or clear then refuses to mix it with an attachment of another scale.
+    const std::uint32_t scale = std::min(resolution_scale_, max_dimension / std::max(layout_width, layout_height));
+    if (scale < resolution_scale_) rsxNoteUnimplemented("state", "surface too large for the resolution scale");
+    const std::uint32_t image_width = layout_width * scale;
+    const std::uint32_t image_height = layout_height * scale;
 
     VkFormatProperties format_props{};
     vkGetPhysicalDeviceFormatProperties(context_.physicalDevice(), format, &format_props);
@@ -431,8 +439,8 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth,
     target->layout_width = layout_width;
     target->layout_height = layout_height;
     target->scale = scale;
-    target->image_width = static_cast<std::uint32_t>(image_width);
-    target->image_height = static_cast<std::uint32_t>(image_height);
+    target->image_width = image_width;
+    target->image_height = image_height;
     target->pitch = surface.pitch;
     target->depth = depth;
 
@@ -527,7 +535,7 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::acquire(TargetMap& map, 
     return target;
 }
 
-// Copies the overlap (origin (0, 0), unscaled) of the previous target at the same address into a target that
+// Copies the overlap (origin (0, 0), in layout pixels) of the previous target at the same address into a target that
 // was just created, so a resized surface keeps what was drawn. Differences from RPCS3: it copies lazily at
 // the first barrier that needs the data, this copy is recorded at once; the parts of a larger old surface
 // outside the new extent are dropped; other bytes per pixel, other depth formats and colour/depth pairs are
@@ -544,13 +552,19 @@ void RsxRenderer::inheritContents(const std::shared_ptr<RenderTarget>& previous,
         return;
     }
 
+    // Only the size-limit fallback gives two targets different scales; a copy would need a resampling pass.
+    if (previous->scale != target.scale) {
+        rsxNoteUnimplemented("state", "surface resize across resolution scales");
+        return;
+    }
+
     touch(previous);  // it may not have been used in this frame slot yet, and the copy reads it until the fence
     transition(*previous, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     transition(target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);  // orders the copy after the initial clear
     VkImageCopy region{};
     region.srcSubresource = {previous->aspect, 0, 0, 1};
     region.dstSubresource = {target.aspect, 0, 0, 1};
-    // The layout overlap at the common scale; the two targets have the same scale until it can vary.
+    // The layout overlap at the common scale.
     region.extent = {std::min(previous->layout_width, target.layout_width) * target.scale,
                      std::min(previous->layout_height, target.layout_height) * target.scale, 1};
     vkCmdCopyImage(slots_[current_slot_]->cmd, previous->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.image,
@@ -1131,9 +1145,18 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     // target rather than as a missing one.
     std::shared_ptr<RenderTarget> color;
     if (draw.surfaces.has_color) color = acquireColor(draw.surfaces.color, false);
-    const std::shared_ptr<RenderTarget> depth = acquireDepth(draw.surfaces, false);
+    std::shared_ptr<RenderTarget> depth = acquireDepth(draw.surfaces, false);
     if (!valid()) return;
     if (!color) return skip("state", "draw without color target");
+    // One viewport and scissor serve both attachments, so they must have been made at the same scale. The game
+    // binds a depth surface to most post-processing and UI draws that neither test, write nor use stencil;
+    // such a draw does not need it, so it runs without the attachment instead of being dropped.
+    if (depth && depth->scale != color->scale) {
+        const bool depth_used = draw.raster.depth_test || draw.raster.stencil_test ||
+                                rsxZetaWriteEnabled(draw.raster, draw.surfaces.depth_format);
+        if (depth_used) return skip("state", "attachments at different resolution scales");
+        depth.reset();
+    }
     if (draw.surfaces.clip_w == 0 || draw.surfaces.clip_h == 0) return skip("state", "draw with empty surface clip");
 
     VkPrimitiveTopology topology{}, topology_class{};
@@ -1517,16 +1540,22 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
     const bool depth_overwritten = depth_full_aspect && covers(depth_surface, color_surface, color_in_area);
 
     std::shared_ptr<RenderTarget> color;
-    if (clears_color) {
-        color = acquireColor(clear.surfaces.color, color_overwritten);
-        if (color && color_bits != kColorBits) {
-            recordMaskedColorClear(clear, *color, color_bits);
-            color.reset();
-        }
-    }
+    if (clears_color) color = acquireColor(clear.surfaces.color, color_overwritten);
     if (!valid()) return;
     std::shared_ptr<RenderTarget> depth;
     if (clears_depth) depth = acquireDepth(clear.surfaces, depth_overwritten);
+    if (!valid()) return;
+    // One clear rectangle serves both attachments, so they must have been made at the same scale. Checked
+    // before the masked clear so the whole clear is dropped, not half of it.
+    if (color && depth && color->scale != depth->scale) {
+        rsxNoteUnimplemented("state", "attachments at different resolution scales");
+        return;
+    }
+    if (color && color_bits != kColorBits) {
+        recordMaskedColorClear(clear, *color, color_bits);
+        color.reset();
+    }
+    if (!valid()) return;
     if (!color && !depth) return;
     if (depth) depth->write_serial++;
 
@@ -1537,7 +1566,7 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
         area_width = std::min(color->image_width, depth->image_width);
         area_height = std::min(color->image_height, depth->image_height);
     }
-    // From the target that sets the rectangle's scale: the colour one, or the depth one for a depth-only clear.
+    // The colour and depth targets share a scale here (checked above); a depth-only clear uses the depth one.
     // The AA sample factors join the scale here once the anti-aliased layouts are rendered.
     const std::uint32_t target_scale = color ? color->scale : depth->scale;
     const PixelScale pixel_scale = {target_scale, target_scale};
@@ -1721,8 +1750,8 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     display_black_ = it == color_targets_.end() || it->second->format != VK_FORMAT_B8G8R8A8_UNORM;
     if (display_black_) {
         rsxNoteUnimplemented("state", "flip of non-render-target");
-        display_width_ = flip.width;
-        display_height_ = flip.height;
+        display_width_ = flip.width * resolution_scale_;
+        display_height_ = flip.height * resolution_scale_;
         display_copied_ = read_back;
     } else {
         const std::shared_ptr<RenderTarget> target = it->second;

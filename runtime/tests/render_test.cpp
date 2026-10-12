@@ -435,9 +435,10 @@ void testFrameDump() {
     std::filesystem::remove_all(dir, ec);
 }
 
-tox2::RenderOptions readbackAllOptions() {
+tox2::RenderOptions readbackAllOptions(std::uint32_t resolution_scale = 1) {
     tox2::RenderOptions options;
     options.readback_all = true;
+    options.resolution_scale = resolution_scale;
     return options;
 }
 
@@ -1274,11 +1275,13 @@ struct TextureOptions {
     std::uint32_t remap = 0xAAE4;
     std::uint32_t wrap = 1;  // WRAP in S and T
     std::uint32_t border = 0;
-    float coord_scale = 1.0f;   // texture coordinates run 0..coord_scale over the quad
-    std::uint32_t pitch = 0;    // Memory scene: row pitch in bytes (0: no padding); padding holds junk
-    bool unnormalized = false;  // _UN format: coordinates are in texels
-    std::uint32_t dxt = 0;      // Memory scene: base format 0x86/0x87/0x88 for a 4x4 block-compressed texture
-    bool zero_height = false;   // Memory scene: the image rect says 0 rows, so no bytes are copied
+    float coord_scale = 1.0f;                  // texture coordinates run 0..coord_scale over the quad
+    std::uint32_t pitch = 0;                   // Memory scene: row pitch in bytes (0: no padding); padding holds junk
+    bool unnormalized = false;                 // _UN format: coordinates are in texels
+    std::uint32_t display_clear = 0xFF000000;  // Alias scene: what the display target is cleared to
+    bool split_alias = false;                  // Alias scene: the left half of the aliased target gets kAliasSplitColor
+    std::uint32_t dxt = 0;     // Memory scene: base format 0x86/0x87/0x88 for a 4x4 block-compressed texture
+    bool zero_height = false;  // Memory scene: the image rect says 0 rows, so no bytes are copied
     // Chain scene: the swizzled layout (else linear with a 32-byte pitch), and the min filter, NEAREST_NEAREST
     // by default; 1 is NEAREST, which samples level 0 only.
     bool swizzled = false;
@@ -1312,6 +1315,7 @@ void putChainTexture(tox2::rsx_synthetic::SyntheticMemory& memory, bool swizzled
 
 constexpr std::uint32_t kAliasOffset = 0x50000;
 constexpr std::uint32_t kAliasColor = 0xFF336699;
+constexpr std::uint32_t kAliasSplitColor = 0xFF99CC33;
 
 // A quad covering pixels 16..48 whose corners carry the texture coordinates (0, 0), (1, 0), (0, 1), (1, 1)
 // times coord_scale, in strip order top left, top right, bottom left, bottom right.
@@ -1322,9 +1326,15 @@ std::vector<std::uint8_t> makeTexturedCapture(const TextureOptions& options) {
     if (options.scene == TextureScene::Alias) {
         scene.write(tox2::kMethodNv4097SetSurfaceColorAOffset, kAliasOffset);
         scene.clear(kAliasColor);
+        if (options.split_alias) {
+            scene.write(tox2::kMethodNv4097SetScissorHorizontal, (kSurfaceSize / 2) << 16);
+            scene.write(tox2::kMethodNv4097SetColorClearValue, kAliasSplitColor);
+            scene.write(tox2::kMethodNv4097ClearSurface, 0xF0);
+            scene.write(tox2::kMethodNv4097SetScissorHorizontal, kSurfaceSize << 16);
+        }
         scene.write(tox2::kMethodNv4097SetSurfaceColorAOffset, kSurfaceOffset);
-        scene.clear(0xFF000000);
-        scene.bindTexture(kAliasOffset, kSurfaceSize, kSurfaceSize);
+        scene.clear(options.display_clear);
+        scene.bindTexture(kAliasOffset, kSurfaceSize, kSurfaceSize, 0, options.unnormalized ? 0x40u : 0u);
     } else if (options.scene == TextureScene::Feedback) {
         scene.clear(kAliasColor);
         scene.bindTexture(kSurfaceOffset, kSurfaceSize, kSurfaceSize);
@@ -2490,7 +2500,11 @@ struct StencilRender {
     std::vector<std::uint8_t> bgra;
     std::uint32_t width = 0, height = 0;
     tox2::RendererStats stats;
-    std::uint32_t pixel(std::uint32_t x, std::uint32_t y) const { return pixelArgb(bgra, width, x, y); }
+    std::uint32_t scale = 1;  // the renderer's resolution scale; width and height are in image pixels
+    // The pixel at guest position (x, y): the centre of its block of image pixels.
+    std::uint32_t pixel(std::uint32_t x, std::uint32_t y) const {
+        return pixelArgb(bgra, width, x * scale + scale / 2, y * scale + scale / 2);
+    }
 };
 
 // A fresh renderer per scene so the statistics belong to it; the census holds the renderer's notes afterwards.
@@ -2888,14 +2902,16 @@ void colorDraw(tox2::rsx_synthetic::SceneBuilder& scene) {
 }
 
 // The scene on a fresh renderer (so the statistics belong to it) with the display of any size.
-StencilRender renderResizeScene(tox2::VkContext& ctx, tox2::rsx_synthetic::SceneBuilder& scene) {
-    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+StencilRender renderResizeScene(tox2::VkContext& ctx, tox2::rsx_synthetic::SceneBuilder& scene,
+                                std::uint32_t scale = 1) {
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions(scale));
     CHECK(renderer.valid());
     std::vector<tox2::RsxCommand> commands = replaySynthetic(scene.finish());
     tox2::rsxUnimplementedReset();
     renderer.execute(commands);
     CHECK(renderer.valid());
     StencilRender result;
+    result.scale = scale;
     CHECK(renderer.readDisplay(result.bgra, result.width, result.height));
     result.stats = renderer.stats();
     if (result.bgra.size() != static_cast<std::size_t>(result.width) * result.height * 4) result.bgra.clear();
@@ -2905,7 +2921,7 @@ StencilRender renderResizeScene(tox2::VkContext& ctx, tox2::rsx_synthetic::Scene
 // A target bound again at the same address with another size keeps the overlap of the old one when the pitch
 // and the format allow it, unless the first command on it overwrites everything; a target seen for the first
 // time starts as opaque black.
-void testRendererSurfaceResize(tox2::VkContext& ctx) {
+void testRendererSurfaceResize(tox2::VkContext& ctx, std::uint32_t scale = 1) {
     using namespace tox2::rsx_synthetic;
     tox2::rsxUnimplementedReset();
 
@@ -2916,8 +2932,8 @@ void testRendererSurfaceResize(tox2::VkContext& ctx) {
         colorDraw(scene);
         rebindSurface(scene, 32, kSurfacePitch);
         bindingDraw(scene);
-        const StencilRender render = renderResizeScene(ctx, scene);
-        CHECK(render.width == 32 && render.height == 32 && !render.bgra.empty());
+        const StencilRender render = renderResizeScene(ctx, scene, scale);
+        CHECK(render.width == 32 * scale && render.height == 32 * scale && !render.bgra.empty());
         if (!render.bgra.empty()) {
             CHECK(render.pixel(20, 20) == kQuadRed);
             CHECK(render.pixel(28, 28) == kQuadRed);
@@ -2937,8 +2953,8 @@ void testRendererSurfaceResize(tox2::VkContext& ctx) {
         rebindSurface(scene, 32, kSurfacePitch);
         scene.write(tox2::kMethodNv4097SetColorClearValue, 0xFF405060);
         scene.write(tox2::kMethodNv4097ClearSurface, 0xF0);
-        const StencilRender render = renderResizeScene(ctx, scene);
-        CHECK(render.width == 32 && render.height == 32 && !render.bgra.empty());
+        const StencilRender render = renderResizeScene(ctx, scene, scale);
+        CHECK(render.width == 32 * scale && render.height == 32 * scale && !render.bgra.empty());
         if (!render.bgra.empty()) {
             CHECK(render.pixel(20, 20) == 0xFF405060);
             CHECK(render.pixel(2, 2) == 0xFF405060);
@@ -2954,8 +2970,8 @@ void testRendererSurfaceResize(tox2::VkContext& ctx) {
         colorDraw(scene);
         rebindSurface(scene, 32, kSurfacePitch * 2);
         bindingDraw(scene);
-        const StencilRender render = renderResizeScene(ctx, scene);
-        CHECK(render.width == 32 && render.height == 32 && !render.bgra.empty());
+        const StencilRender render = renderResizeScene(ctx, scene, scale);
+        CHECK(render.width == 32 * scale && render.height == 32 * scale && !render.bgra.empty());
         if (!render.bgra.empty()) {
             CHECK(render.pixel(20, 20) == kBlack);
             CHECK(render.pixel(2, 2) == kBlack);
@@ -2976,8 +2992,8 @@ void testRendererSurfaceResize(tox2::VkContext& ctx) {
         scene.setColorAttrib(3, kColorsOffset);
         scene.setPrograms(quadPrograms());
         bindingDraw(scene);
-        const StencilRender render = renderResizeScene(ctx, scene);
-        CHECK(render.width == 64 && render.height == 64 && !render.bgra.empty());
+        const StencilRender render = renderResizeScene(ctx, scene, scale);
+        CHECK(render.width == 64 * scale && render.height == 64 * scale && !render.bgra.empty());
         if (!render.bgra.empty()) {
             CHECK(render.pixel(20, 20) == kBlack);
             CHECK(render.pixel(2, 2) == kBlack);
@@ -2994,7 +3010,7 @@ void testRendererSurfaceResize(tox2::VkContext& ctx) {
         rebindSurface(scene, 32, kSurfacePitch);
         scene.write(tox2::kMethodNv4097SetStencilMask, stencil_mask);
         scene.write(tox2::kMethodNv4097ClearSurface, 0x03);
-        const StencilRender render = renderResizeScene(ctx, scene);
+        const StencilRender render = renderResizeScene(ctx, scene, scale);
         CHECK(render.stats.surface_inherits == (stencil_mask == 0xFF ? 0u : 1u));
         expectNoRendererNotes();
     }
@@ -3005,7 +3021,7 @@ void testRendererSurfaceResize(tox2::VkContext& ctx) {
         beginResizeScene(scene, 2);
         scene.write(tox2::kMethodNv4097SetSurfaceFormat, 8u | (1u << 5) | (1u << 8));
         bindingDraw(scene);
-        const StencilRender render = renderResizeScene(ctx, scene);
+        const StencilRender render = renderResizeScene(ctx, scene, scale);
         CHECK(render.stats.surface_inherits == 0 && render.stats.draws_skipped == 0);
         CHECK(unimplementedCount("state surface resize to an incompatible format") == 1);
         CHECK(tox2::rsxUnimplementedSnapshot().size() == 1);
@@ -3018,11 +3034,284 @@ void testRendererSurfaceResize(tox2::VkContext& ctx) {
         colorDraw(scene);
         scene.write(tox2::kMethodNv4097SetSurfaceFormat, 13u | (1u << 8));
         bindingDraw(scene);
-        const StencilRender render = renderResizeScene(ctx, scene);
+        const StencilRender render = renderResizeScene(ctx, scene, scale);
         CHECK(render.stats.surface_inherits == 1 && render.stats.draws_skipped == 0);
         CHECK(unimplementedCount("state surface resize with another pitch") == 0);
         CHECK(unimplementedCount("state surface resize to an incompatible format") == 0);
     }
+    tox2::rsxUnimplementedReset();
+}
+
+// ---- Resolution scale ----
+
+// The last display of a run on a fresh renderer, box-downsampled to the guest size, with the figures a scale must
+// not change.
+struct ScaledFrame {
+    std::vector<std::uint8_t> bgra;
+    std::uint32_t width = 0, height = 0;              // guest size
+    std::uint32_t image_width = 0, image_height = 0;  // as read back
+    tox2::RendererStats stats;
+    std::vector<std::pair<std::string, std::uint64_t>> notes;
+    bool ok = false;
+};
+
+// Runs the captures in order (one flip each) at `scale`. `reduce` is the factor to downsample the display by,
+// normally the scale itself.
+ScaledFrame renderAtScale(tox2::VkContext& ctx, const std::vector<std::vector<std::uint8_t>>& files,
+                          std::uint32_t scale, std::uint32_t reduce = 0, std::size_t drop_first_commands = 0) {
+    if (reduce == 0) reduce = scale;
+    ScaledFrame frame;
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions(scale));
+    CHECK(renderer.valid() && renderer.resolutionScale() == scale);
+    std::vector<std::vector<tox2::RsxCommand>> frames;
+    for (const std::vector<std::uint8_t>& file : files) frames.push_back(replaySynthetic(file));
+    // Commands the renderer never sees, while the frame builder has already resolved what they drew.
+    if (!frames.empty() && frames[0].size() >= drop_first_commands) {
+        frames[0].erase(frames[0].begin(), frames[0].begin() + static_cast<std::ptrdiff_t>(drop_first_commands));
+    }
+    tox2::rsxUnimplementedReset();
+    for (std::vector<tox2::RsxCommand>& commands : frames) renderer.execute(commands);
+    CHECK(renderer.valid());
+    std::vector<std::uint8_t> image;
+    if (!renderer.readDisplay(image, frame.image_width, frame.image_height)) {
+        CHECK(false);
+        return frame;
+    }
+    std::string error;
+    const bool reduced =
+            tox2::downsampleBoxBgra(image, frame.image_width, frame.image_height, reduce, reduce, frame.bgra, error);
+    if (!reduced) std::fprintf(stderr, "downsample failed: %s\n", error.c_str());
+    CHECK(reduced);
+    frame.width = frame.image_width / reduce;
+    frame.height = frame.image_height / reduce;
+    frame.stats = renderer.stats();
+    frame.notes = tox2::rsxUnimplementedSnapshot();
+    frame.ok = reduced;
+    return frame;
+}
+
+bool sameStats(const tox2::RendererStats& a, const tox2::RendererStats& b) {
+    return a.clears == b.clears && a.draws == b.draws && a.draws_skipped == b.draws_skipped && a.flips == b.flips &&
+           a.feedback_copies == b.feedback_copies && a.depth_conversions == b.depth_conversions &&
+           a.surface_inherits == b.surface_inherits;
+}
+
+// Renders the captures at scales 1, 2 and 3. The scaled displays are 2x and 3x the guest size, their box
+// downsample matches the scale-1 display within `tolerance` per channel (alpha included), and the statistics and
+// the census are the same. Returns the scale-1 frame for probes.
+ScaledFrame expectScaleInvariant(tox2::VkContext& ctx, const char* name,
+                                 const std::vector<std::vector<std::uint8_t>>& files, int tolerance,
+                                 std::size_t drop_first_commands = 0) {
+    const ScaledFrame base = renderAtScale(ctx, files, 1, 0, drop_first_commands);
+    CHECK(base.ok);
+    for (const std::uint32_t scale : {2u, 3u}) {
+        const ScaledFrame scaled = renderAtScale(ctx, files, scale, 0, drop_first_commands);
+        CHECK(scaled.ok && base.ok);
+        if (!scaled.ok || !base.ok) continue;
+        CHECK(scaled.image_width == base.image_width * scale && scaled.image_height == base.image_height * scale);
+        if (scaled.bgra.size() != base.bgra.size()) {
+            CHECK(false);
+            continue;
+        }
+        int max_diff = 0;
+        for (std::size_t i = 0; i < base.bgra.size(); i++) {
+            max_diff = std::max(max_diff, std::abs(static_cast<int>(base.bgra[i]) - static_cast<int>(scaled.bgra[i])));
+        }
+        if (max_diff > tolerance) {
+            std::fprintf(stderr, "%s at scale %u: max channel difference %d (limit %d)\n", name, scale, max_diff,
+                         tolerance);
+        }
+        CHECK(max_diff <= tolerance);
+        CHECK(sameStats(scaled.stats, base.stats));
+        CHECK(scaled.notes == base.notes);
+    }
+    return base;
+}
+
+// A depth-only clear of a rectangle (to 0.25) under a depth-tested quad at depth 0.5: the quad shows everywhere but
+// in that rectangle.
+std::vector<std::uint8_t> makeDepthOnlyClearCapture() {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    beginStencilScene(scene, 0);
+    scene.write(tox2::kMethodNv4097SetScissorHorizontal, 24u | (16u << 16));
+    scene.write(tox2::kMethodNv4097SetScissorVertical, 24u | (16u << 16));
+    scene.write(tox2::kMethodNv4097SetZstencilClearValue, 0x40000000u);
+    scene.write(tox2::kMethodNv4097ClearSurface, 0x01);
+    scene.write(tox2::kMethodNv4097SetScissorHorizontal, kSurfaceSize << 16);
+    scene.write(tox2::kMethodNv4097SetScissorVertical, kSurfaceSize << 16);
+    scene.write(tox2::kMethodNv4097SetDepthTestEnable, 1);
+    scene.write(tox2::kMethodNv4097SetDepthFunc, 0x201);  // LESS
+    scene.write(tox2::kMethodNv4097SetColorMask, 0x01010101u);
+    putSurfaceQuad(scene, 16, 48);
+    scene.drawStrip(4);
+    return scene.finish();
+}
+
+// A surface of `width` x 2 pixels, cleared: the clear covers the whole target and is followed by a flip.
+std::vector<std::uint8_t> makeWideSurfaceCapture(std::uint32_t width, std::uint32_t color) {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    scene.setSurface();
+    scene.write(tox2::kMethodNv4097SetSurfaceClipHorizontal, width << 16);
+    scene.write(tox2::kMethodNv4097SetSurfaceClipVertical, 2u << 16);
+    scene.write(tox2::kMethodNv4097SetSurfacePitchA, width * 4);
+    scene.write(tox2::kMethodNv4097SetSurfacePitchZ, width * 4);
+    scene.write(tox2::kMethodNv4097SetScissorHorizontal, width << 16);
+    scene.write(tox2::kMethodNv4097SetScissorVertical, 2u << 16);
+    scene.clear(color);
+    return scene.finish();
+}
+
+// A surface wider than the device allows at the requested scale is made at the largest scale that fits (here the
+// colour and depth targets have the same size, so they share it), and the fallback is counted.
+void checkSurfaceTooLarge(tox2::VkContext& ctx, std::uint32_t scale, std::uint32_t width) {
+    const std::uint32_t max_dimension = ctx.deviceProperties().limits.maxImageDimension2D;
+    if (width > 0xFFFF || width > max_dimension) {
+        std::printf("skipping the size limit case for scale %u: the device limit is %u\n", scale, max_dimension);
+        return;
+    }
+    const std::uint32_t fitted = std::min(scale, max_dimension / width);
+    CHECK(fitted >= 1 && fitted < scale);
+    // The readback is at the scale the target was made at, so the display is reduced by that factor.
+    const ScaledFrame frame = renderAtScale(ctx, {makeWideSurfaceCapture(width, 0xFF102030)}, scale, fitted);
+    CHECK(frame.ok);
+    if (!frame.ok) return;
+    CHECK(frame.image_width == width * fitted && frame.image_height == 2 * fitted);
+    CHECK(frame.width == width && frame.height == 2 && pixelArgb(frame.bgra, frame.width, width - 1, 1) == 0xFF102030);
+    CHECK(unimplementedCount("state surface too large for the resolution scale") >= 1);
+    CHECK(unimplementedCount(std::format("state surface size {}x2", width)) == 0);
+    CHECK(frame.stats.clears == 1 && frame.stats.draws_skipped == 0);
+}
+
+void testRendererScaledPlain(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::rsxUnimplementedReset();
+
+    // The scale is validated at construction.
+    for (const std::uint32_t bad : {0u, tox2::kMaxResolutionScale + 1}) {
+        tox2::RsxRenderer renderer(ctx, readbackAllOptions(bad));
+        CHECK(!renderer.valid() && renderer.error().find("resolution scale") != std::string::npos);
+    }
+    for (std::uint32_t scale = 1; scale <= tox2::kMaxResolutionScale; scale++) {
+        tox2::RsxRenderer renderer(ctx, readbackAllOptions(scale));
+        CHECK(renderer.valid() && renderer.resolutionScale() == scale);
+    }
+
+    constexpr std::uint32_t kA = 0xFF102030;
+    constexpr std::uint32_t kB = 0xFF405060;
+
+    // Flat and half-transparent clears.
+    ScaledFrame frame = expectScaleInvariant(ctx, "clear", {makeClearCapture(kA)}, 0);
+    CHECK(frame.ok && frame.width == 64 && pixelArgb(frame.bgra, frame.width, 10, 10) == kA);
+    frame = expectScaleInvariant(ctx, "half-transparent clear", {makeClearCapture(0x80FF0000)}, 0);
+    CHECK(frame.ok && pixelArgb(frame.bgra, frame.width, 10, 10) == 0x80FF0000);
+
+    // A clear inside a rectangle, a partial colour mask over everything, and alpha alone inside a rectangle.
+    frame = expectScaleInvariant(ctx, "scissored clear", {makeScissoredClearCapture(kA, kB, 0xF3, 8, 16, 16, 8)}, 0);
+    CHECK(frame.ok && pixelArgb(frame.bgra, frame.width, 8, 16) == kB &&
+          pixelArgb(frame.bgra, frame.width, 7, 16) == kA);
+    frame = expectScaleInvariant(ctx, "masked clear", {makeScissoredClearCapture(kA, kB, 0x30, 0, 0, 64, 64)}, 0);
+    CHECK(frame.ok && pixelArgb(frame.bgra, frame.width, 10, 10) == 0xFF405030);
+    frame = expectScaleInvariant(ctx, "masked clear in a rectangle",
+                                 {makeScissoredClearCapture(kA, 0x80405060, 0x80, 8, 16, 16, 8)}, 0);
+    CHECK(frame.ok && pixelArgb(frame.bgra, frame.width, 8, 16) == 0x80102030 &&
+          pixelArgb(frame.bgra, frame.width, 7, 16) == kA);
+
+    // A vertex-colour quad: each sample is rounded to 8 bits before the downsample.
+    frame = expectScaleInvariant(ctx, "vertex-colour quad", {makeRenderedQuadCapture({})}, 2);
+    checkQuadPixels(frame.bgra, frame.width, frame.height);
+
+    // A 2x2 NEAREST texture, whose texel edges fall on pixel edges: four different colours, none black.
+    frame = expectScaleInvariant(ctx, "textured quad", {makeTexturedCapture({})}, 0);
+    if (frame.ok) {
+        const std::uint32_t probes[4] = {
+                pixelArgb(frame.bgra, frame.width, 24, 24), pixelArgb(frame.bgra, frame.width, 40, 24),
+                pixelArgb(frame.bgra, frame.width, 24, 40), pixelArgb(frame.bgra, frame.width, 40, 40)};
+        for (std::uint32_t i = 0; i < 4; i++) {
+            CHECK(probes[i] != kBlack);
+            for (std::uint32_t j = i + 1; j < 4; j++) CHECK(probes[i] != probes[j]);
+        }
+    }
+
+    // A float surface read back through an X32_FLOAT texture.
+    frame = expectScaleInvariant(ctx, "float surface", {makeFloatSurfaceCapture()}, 0);
+    CHECK(frame.ok && pixelArgb(frame.bgra, frame.width, 24, 32) == 0x40404040);
+
+    // A depth-only clear: the depth target alone sets the rectangle's scale.
+    frame = expectScaleInvariant(ctx, "depth-only clear", {makeDepthOnlyClearCapture()}, 0);
+    CHECK(frame.ok && pixelArgb(frame.bgra, frame.width, 20, 20) == kQuadRed &&
+          pixelArgb(frame.bgra, frame.width, 32, 32) == kBlack);
+
+    // A flip of a buffer that was never a render target is black at the flip's size times the scale.
+    {
+        tox2::RsxRenderer renderer(ctx, readbackAllOptions(3));
+        std::vector<tox2::RsxCommand> flip_only;
+        tox2::RsxFlip flip;
+        flip.offset = 0x40000;
+        flip.width = 8;
+        flip.height = 4;
+        flip_only.emplace_back(flip);
+        renderer.execute(flip_only);
+        std::vector<std::uint8_t> bgra;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        CHECK(renderer.readDisplay(bgra, width, height) && width == 24 && height == 12);
+        CHECK(displayIsUniform(bgra, width, height, {0, 0, 0, 0xFF}));
+    }
+
+    // Two sizes of surface that do not fit at the requested scale.
+    const std::uint32_t max_dimension = ctx.deviceProperties().limits.maxImageDimension2D;
+    checkSurfaceTooLarge(ctx, 2, max_dimension / 2 + 1);
+    checkSurfaceTooLarge(ctx, 4, max_dimension / 3 + 1);
+    tox2::rsxUnimplementedReset();
+}
+
+// Targets read as textures, at scales 2 and 3 against scale 1.
+void testRendererScaledTargetsAsTextures(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::rsxUnimplementedReset();
+
+    // A render target sampled by a second pass; its left half differs, so a wrong scale of the lookup shows.
+    TextureOptions alias;
+    alias.scene = TextureScene::Alias;
+    alias.split_alias = true;
+    ScaledFrame frame = expectScaleInvariant(ctx, "target alias", {makeTexturedCapture(alias)}, 0);
+    CHECK(frame.ok && pixelArgb(frame.bgra, frame.width, 20, 32) == kAliasSplitColor &&
+          pixelArgb(frame.bgra, frame.width, 44, 32) == kAliasColor);
+
+    // The same read with texel coordinates: the texture scale is the guest size, not the image size.
+    TextureOptions unnormalized = alias;
+    unnormalized.unnormalized = true;
+    unnormalized.coord_scale = 64.0f;
+    frame = expectScaleInvariant(ctx, "unnormalized target alias", {makeTexturedCapture(unnormalized)}, 0);
+    CHECK(frame.ok && pixelArgb(frame.bgra, frame.width, 20, 32) == kAliasSplitColor &&
+          pixelArgb(frame.bgra, frame.width, 44, 32) == kAliasColor);
+
+    // A draw that samples its own target goes through the feedback copy.
+    TextureOptions feedback;
+    feedback.scene = TextureScene::Feedback;
+    frame = expectScaleInvariant(ctx, "feedback copy", {makeTexturedCapture(feedback)}, 0);
+    CHECK(frame.ok && frame.stats.feedback_copies == 1);
+
+    // A target the renderer never saw drawn (its clear is dropped here) is created at the current scale and reads
+    // as opaque black over the display's own clear colour.
+    TextureOptions unknown = alias;
+    unknown.split_alias = false;
+    unknown.display_clear = kAliasColor;
+    frame = expectScaleInvariant(ctx, "alias of an unknown target", {makeTexturedCapture(unknown)}, 0, 1);
+    CHECK(frame.ok && pixelArgb(frame.bgra, frame.width, 32, 32) == kBlack &&
+          pixelArgb(frame.bgra, frame.width, 2, 2) == kAliasColor);
+    CHECK(frame.ok && unimplementedCount("texture alias of unknown render target") == 1);
+
+    // Depth cleared, then read as A8R8G8B8, including after a second clear.
+    frame = expectScaleInvariant(ctx, "depth as A8R8G8B8", {makeDepthTextureCapture()}, 0);
+    CHECK(frame.ok && frame.stats.depth_conversions == 2);
+    CHECK(frame.ok && depthWordNear(pixelArgb(frame.bgra, frame.width, 32, 32), kDepthSecond, kStencilSecond));
+
+    // The resize scenes (inherit copies, pitch and format rules) with the expectations of the scale-1 test.
+    testRendererSurfaceResize(ctx, 2);
+    testRendererSurfaceResize(ctx, 3);
     tox2::rsxUnimplementedReset();
 }
 
@@ -3173,6 +3462,8 @@ int main() {
     testRendererUserClip(*ctx);
     testRendererConditionCode(*ctx);
     testRendererSurfaceResize(*ctx);
+    testRendererScaledPlain(*ctx);
+    testRendererScaledTargetsAsTextures(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
     ctx.reset();
