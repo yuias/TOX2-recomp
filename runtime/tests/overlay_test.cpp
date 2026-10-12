@@ -22,6 +22,8 @@
 #include "overlay/debug_overlay.h"
 #include "overlay/overlay_model.h"
 #include "overlay/overlay_panels.h"
+#include "overlay/overlay_sources.h"
+#include "rsx/rsx_unimplemented.h"
 
 namespace {
 
@@ -248,6 +250,44 @@ void testPanels() {
     // No providers at all: every section falls back to its placeholder.
     tox2::OverlayState empty_state;
     CHECK(drawFrames(empty_state, tox2::OverlaySources{}));
+}
+
+void testRuntimeSources() {
+    const tox2::OverlaySources sources = tox2::makeRuntimeOverlaySources();
+    CHECK(sources.audio && sources.unimplemented && sources.unimplemented_dropped && sources.flip_limit &&
+          sources.set_flip_limit && sources.log_level && sources.set_log_level && sources.request_capture &&
+          sources.capture_status);
+    if (!(sources.audio && sources.unimplemented && sources.unimplemented_dropped && sources.flip_limit &&
+          sources.set_flip_limit && sources.log_level && sources.set_log_level && sources.request_capture &&
+          sources.capture_status)) {
+        return;
+    }
+
+    const bool limit = sources.flip_limit();
+    sources.set_flip_limit(!limit);
+    CHECK(sources.flip_limit() == !limit);
+    sources.set_flip_limit(limit);
+    CHECK(sources.flip_limit() == limit);
+
+    tox2::rsxUnimplementedReset();
+    tox2::rsxNoteUnimplemented("state", "overlay test");
+    const auto counts = sources.unimplemented();
+    CHECK(counts.size() == 1 && counts[0].first == "state overlay test" && counts[0].second == 1);
+    CHECK(sources.unimplemented_dropped() == 0);
+    tox2::rsxUnimplementedReset();
+
+    // No audio engine and no RSX thread run in this process.
+    CHECK(sources.audio().output.empty());
+    CHECK(!sources.capture_status().available);
+    CHECK(!sources.request_capture());
+
+    const tox2::LogLevel level = sources.log_level();
+    sources.set_log_level(tox2::LogLevel::Warn);
+    CHECK(sources.log_level() == tox2::LogLevel::Warn);
+    sources.set_log_level(tox2::LogLevel::Debug);
+    CHECK(sources.log_level() == tox2::LogLevel::Debug);
+    sources.set_log_level(level);
+    CHECK(sources.log_level() == level);
 }
 
 // Raw Win32 key message values, so the test needs no windows.h.
@@ -568,6 +608,7 @@ int main() {
     testDrawDeltas();
     testRefresh();
     testPanels();
+    testRuntimeSources();
 
     tox2::VkContextOptions options;
     options.validation = true;
