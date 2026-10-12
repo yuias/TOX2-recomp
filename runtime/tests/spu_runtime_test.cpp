@@ -19,6 +19,7 @@
 #include "core/census.h"
 #include "core/fatal.h"
 #include "core/guest_memory.h"
+#include "core/host_priority.h"
 #include "core/log.h"
 #include "core/reservation.h"
 #include "core/threads.h"
@@ -2447,11 +2448,11 @@ struct Lv2Fixture {
     }
 
     // `type` 0 is a group with a scheduler context, which the blocking receive needs.
-    std::uint32_t makeGroup(std::uint32_t num, std::uint32_t type = 0x18) {
+    std::uint32_t makeGroup(std::uint32_t num, std::uint32_t type = 0x18, std::uint32_t priority = 250) {
         tox2Write32(base, scratch + kLvGroupAttr, 8);
         tox2Write32(base, scratch + kLvGroupAttr + 4, scratch + kLvNames);
         tox2Write32(base, scratch + kLvGroupAttr + 8, type);
-        CHECK(ppu.call(170, scratch + kLvIdOut, num, 250, scratch + kLvGroupAttr) == 0);
+        CHECK(ppu.call(170, scratch + kLvIdOut, num, priority, scratch + kLvGroupAttr) == 0);
         groups.push_back(tox2Read32(base, scratch + kLvIdOut));
         return groups.back();
     }
@@ -2610,6 +2611,29 @@ void testLv2GroupExit() {
     // The thread that was blocked in RdInMbox was halted by the group exit.
     std::lock_guard<tox2::GuestLock> lock(tox2::guestLock());
     CHECK(tox2::spuThreadById(waiting)->state() == tox2::SpuState::Finished);
+}
+
+// Host priority of an SPU group's threads: only a group with a scheduler context and a priority number of 31 or
+// less is raised.
+void testLv2HostPriority() {
+    const auto priorityOf = [](std::uint32_t type, std::uint32_t lv2_priority) {
+        Lv2Fixture f;
+        const std::uint32_t group = f.makeGroup(1, type, lv2_priority);
+        const std::uint32_t thread = f.makeThread(group, 0, kLvWaitMbox);
+        CHECK(f.ppu.call(173, group) == 0);
+        CHECK(f.waitUntilBlocked(thread, "RdInMbox"));
+        std::lock_guard<tox2::GuestLock> lock(tox2::guestLock());
+        return tox2::spuThreadById(thread)->hostPriority();
+    };
+    CHECK(priorityOf(0, 16) == THREAD_PRIORITY_HIGHEST);
+    CHECK(priorityOf(0, 31) == THREAD_PRIORITY_HIGHEST);
+    CHECK(priorityOf(0, 100) == THREAD_PRIORITY_NORMAL);
+    // No scheduler context: the priority number is not even range-checked.
+    CHECK(priorityOf(0x18, 16) == THREAD_PRIORITY_NORMAL);
+
+    tox2::setHostPrioritiesEnabled(false);
+    CHECK(priorityOf(0, 16) == THREAD_PRIORITY_NORMAL);
+    tox2::setHostPrioritiesEnabled(true);
 }
 
 void testLv2Terminate() {
@@ -3264,6 +3288,7 @@ int main(int argc, char** argv) {
     testChanStopChildren();
     testLv2GroupRun();
     testLv2GroupExit();
+    testLv2HostPriority();
     testLv2Terminate();
     testLv2JoinBeforeStart();
     testLv2Mailbox();

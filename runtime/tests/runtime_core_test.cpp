@@ -34,6 +34,7 @@
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/host_functions.h"
+#include "core/host_priority.h"
 #include "core/latency_stats.h"
 #include "core/log.h"
 #include "core/param_sfo.h"
@@ -11372,6 +11373,26 @@ void testTimerResolution() {
     if (!fast) std::fprintf(stderr, "1 ms sleep median %.2f ms\n", ms[ms.size() / 2]);
 }
 
+// A fresh thread per call: the priority belongs to the thread, and the test thread must stay at normal.
+int appliedPriority(tox2::HostThreadRole role) {
+    int priority = -100;
+    std::thread([&] { priority = tox2::applyHostThreadPriority(role); }).join();
+    return priority;
+}
+
+void testHostPriority() {
+    CHECK(tox2::hostPrioritiesEnabled());
+    CHECK(appliedPriority(tox2::HostThreadRole::AudioEngine) == THREAD_PRIORITY_TIME_CRITICAL);
+    CHECK(appliedPriority(tox2::HostThreadRole::HighPrioritySpu) == THREAD_PRIORITY_HIGHEST);
+
+    tox2::setHostPrioritiesEnabled(false);
+    CHECK(!tox2::hostPrioritiesEnabled());
+    CHECK(appliedPriority(tox2::HostThreadRole::AudioEngine) == THREAD_PRIORITY_NORMAL);
+    CHECK(appliedPriority(tox2::HostThreadRole::HighPrioritySpu) == THREAD_PRIORITY_NORMAL);
+    tox2::setHostPrioritiesEnabled(true);
+    CHECK(GetThreadPriority(GetCurrentThread()) == THREAD_PRIORITY_NORMAL);
+}
+
 void testReservationAndDcbz() {
     std::unique_ptr<tox2::GuestMemory> memory(newMemory());
     std::uint8_t* base = memory->base();
@@ -11875,6 +11896,7 @@ int main(int argc, char** argv) {
     testJudgeThreads();
     testTimebase();
     testTimerResolution();
+    testHostPriority();
     testGuestLockFifo();
     testGuestLockStats();
     testPerfLine();

@@ -29,6 +29,7 @@
 #include "core/fatal.h"
 #include "core/guest_dump.h"
 #include "core/guest_memory.h"
+#include "core/host_priority.h"
 #include "core/log.h"
 #include "core/param_sfo.h"
 #include "core/perf_log.h"
@@ -90,6 +91,7 @@ struct Options {
     bool vk_validation = false;
     bool no_window = false;
     bool frame_limit = true;  // --frame-limit 60 (default) or off
+    bool host_priorities = true;  // --host-priorities on (default) or off
     bool window = false;      // settled after all arguments
     bool pad_probe = false;
     std::string dump_frames;
@@ -287,7 +289,7 @@ void printUsage() {
             "                [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]\n"
             "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
             "                [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]\n"
-            "                [--frame-limit 60|off]\n"
+            "                [--frame-limit 60|off] [--host-priorities on|off]\n"
             "                [--dump-guest ADDR:SIZE:FILE]...\n",
             stderr);
 }
@@ -439,6 +441,14 @@ bool parseArgs(int argc, char** argv, Options& opt) {
                 return false;
             }
             opt.frame_limit = name == "60";
+        } else if (arg == "--host-priorities") {
+            std::string name;
+            if (!value(name)) return false;
+            if (name != "on" && name != "off") {
+                std::fprintf(stderr, "error: --host-priorities needs on or off\n");
+                return false;
+            }
+            opt.host_priorities = name == "on";
         } else if (arg == "--shader-cache") {
             if (!value(opt.shader_cache)) return false;
         } else if (arg == "--vk-validation") {
@@ -788,6 +798,7 @@ int main(int argc, char** argv) {
 
     loadGameParamSfo();
     tox2::setRsxFlipLimit(opt.frame_limit);
+    tox2::setHostPrioritiesEnabled(opt.host_priorities);
     if (!opt.rsx_census.empty()) tox2::setRsxArgCensusFile(opt.rsx_census);
     if (!opt.rsx_capture_frames.empty()) {
         tox2::setRsxCaptureFrames(opt.rsx_capture_frames, std::filesystem::path("generated") / "rsx" / "captures");

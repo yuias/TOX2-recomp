@@ -12,7 +12,7 @@ tox2_game [--game-dir DIR] [--vfs-config FILE] [--elf PATH] [--libsre PATH] [--h
          [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]
          [--dump-frames DIR] [--dump-frames-every K]
          [--shader-cache DIR] [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]
-         [--frame-limit 60|off]
+         [--frame-limit 60|off] [--host-priorities on|off]
 ```
 
 `tox2_game` loads the decrypted `EBOOT.elf` into a 4 GiB guest address space, sets up the main PPU
@@ -93,6 +93,7 @@ the window cannot be created, the RSX thread logs the reason and the game goes o
 | `--load-only` | Load and verify the executable and libsre, print the load summary and exit with 0 without running any guest code. |
 | `--png-dump DIR` | Write every image `cellPngDec` decodes to `DIR/png_<n>.png` (8-bit RGBA, at most 64), to check what the guest was given. `DIR` is created. |
 | `--dump-guest ADDR:SIZE:FILE` | Write `SIZE` bytes of guest memory from `ADDR` to `FILE` when the run stops, and log their SHA-256. Repeatable. `ADDR` and `SIZE` are decimal or `0x` hex; `SIZE` is at least 1 and `ADDR + SIZE` must stay within 4 GiB, and `FILE` is the rest of the argument after the second colon. The dump runs on every stop path (exit code, watchdog, stall, fatal stop), in the order given and before the census, so it shows the memory as the run left it while other threads may still run. `FILE` is truncated. |
+| `--host-priorities on\|off` | Raise the host priority of the threads that feed the audio output (default `on`): the audio engine thread to `THREAD_PRIORITY_TIME_CRITICAL`, and the host threads of an SPU thread group that has a scheduler context and an lv2 priority of 31 or less (the game's sound-processing group) to `THREAD_PRIORITY_HIGHEST`. All of them sleep or block while they wait. The RSX thread and the PPU threads stay at normal priority. `off` leaves every thread at normal priority. Any other value is a usage error. |
 
 The dump writes one line per option: `tox2: dump: 0x<addr>..0x<end> -> <file> sha256 <hex>`, followed by
 ` bytes <xx> <xx> ...` (the bytes in hex) when `SIZE` is 16 or less. A range that is not entirely committed

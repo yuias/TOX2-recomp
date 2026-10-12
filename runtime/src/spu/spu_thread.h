@@ -86,6 +86,12 @@ public:
     // Mailboxes, events, decrementer and the MFC (spu_channels.h).
     SpuChannels& channels() { return *channels_; }
 
+    // Raises the host thread to HighPrioritySpu (core/host_priority.h) when it starts; call before start().
+    void setRaiseHostPriority(bool raise) { raise_host_priority_ = raise; }
+    // The host thread's priority as it settled at the top of threadMain; THREAD_PRIORITY_NORMAL (0) until then
+    // and for a thread that was not raised.
+    int hostPriority() const { return host_priority_.load(std::memory_order_acquire); }
+
     // Starts the host thread at `entry_ls`. False when it was started already.
     bool start(std::uint32_t entry_ls);
     // Waits for the host thread (a no-op when none runs).
@@ -192,6 +198,8 @@ private:
     std::uint32_t record_count_ = 0;  // guarded by record_mutex_
     std::mutex record_mutex_;
 
+    bool raise_host_priority_ = false;  // set before start(), read by the host thread
+    std::atomic<int> host_priority_{0};
     std::atomic<SpuState> state_{SpuState::Created};
     std::atomic<const char*> blocked_in_{nullptr};
     std::atomic<bool> indefinite_{false};

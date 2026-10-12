@@ -7,6 +7,7 @@
 
 #include "core/fatal.h"
 #include "core/guest_memory.h"
+#include "core/host_priority.h"
 #include "core/log.h"
 #include "core/reservation.h"
 #include "core/threads.h"
@@ -89,6 +90,11 @@ void SpuThread::requestHalt() {
 }
 
 void SpuThread::threadMain(std::uint32_t entry_ls) {
+    // First, so the whole run is raised. Every wait this thread makes blocks (channels, reservation table, guest
+    // lock); the reservation stripe lock is a bounded spin that ends in a sleep.
+    if (raise_host_priority_) {
+        host_priority_.store(applyHostThreadPriority(HostThreadRole::HighPrioritySpu), std::memory_order_release);
+    }
     reserveFaultStack();
     setGuestLockClass(GuestLockClass::Spu);
     t_current = this;

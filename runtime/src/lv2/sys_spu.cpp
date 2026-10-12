@@ -59,6 +59,9 @@ constexpr std::uint32_t kGroupTypeSystem = 0x20;
 constexpr std::uint32_t kGroupTypeNoScheduler = 0x08;
 constexpr std::int32_t kMinPriority = 16;
 constexpr std::int32_t kMaxPriority = 255;
+// Groups with a scheduler context at this lv2 priority or a smaller number (higher priority) get raised host
+// threads: bnusCore is 16, atrac 100 and SPURS 250.
+constexpr std::int32_t kRaisedSpuGroupPriority = 31;
 
 // Event types of sys_spu_thread_group_connect_event.
 constexpr std::uint32_t kEventRun = 1;
@@ -847,7 +850,11 @@ void sysSpuThreadGroupStart(Tox2PpuContext* ctx, std::uint8_t* base) {
                 tracked ? tracked->image->name : "untracked", thread.entry);
     }
     // Started only after every line is out: a thread may end the process at once.
-    for (SpuThreadRecord& thread : group->threads) thread.cpu->start(thread.entry);
+    const bool raise = (group->type & kGroupTypeNoScheduler) == 0 && group->priority <= kRaisedSpuGroupPriority;
+    for (SpuThreadRecord& thread : group->threads) {
+        thread.cpu->setRaiseHostPriority(raise);
+        thread.cpu->start(thread.entry);
+    }
     setResultCode(ctx, kCellOk);
 }
 
