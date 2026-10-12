@@ -854,12 +854,13 @@ tox2::rsx_synthetic::Programs quadPrograms() {
     return programs;
 }
 
-void setQuadRenderState(tox2::rsx_synthetic::SceneBuilder& scene) {
-    constexpr float kScale[4] = {32.0f, 32.0f, 0.5f, 0.0f};
-    constexpr float kOffset[4] = {32.0f, 32.0f, 0.5f, 0.0f};
+// The viewport covers a square surface of 2 * `half_size` pixels (the 64x64 default surface).
+void setQuadRenderState(tox2::rsx_synthetic::SceneBuilder& scene, float half_size = 32.0f) {
+    const float scale[4] = {half_size, half_size, 0.5f, 0.0f};
+    const float offset[4] = {half_size, half_size, 0.5f, 0.0f};
     for (std::uint32_t i = 0; i < 4; i++) {
-        scene.write(tox2::kMethodNv4097SetViewportScale + i * 4, std::bit_cast<std::uint32_t>(kScale[i]));
-        scene.write(tox2::kMethodNv4097SetViewportOffset + i * 4, std::bit_cast<std::uint32_t>(kOffset[i]));
+        scene.write(tox2::kMethodNv4097SetViewportScale + i * 4, std::bit_cast<std::uint32_t>(scale[i]));
+        scene.write(tox2::kMethodNv4097SetViewportOffset + i * 4, std::bit_cast<std::uint32_t>(offset[i]));
     }
     scene.write(tox2::kMethodNv4097SetVertexAttribOutputMask, 0x1);  // front diffuse only
     scene.write(tox2::kMethodNv4097SetShaderControl, 0x40);          // color from R0
@@ -2225,6 +2226,7 @@ void testUserClipDecode() {
 // The AA field of SET_SURFACE_FORMAT selects the samples per pixel of the colour and depth layouts, and
 // SET_ANTI_ALIASING_CONTROL decodes into the raster state.
 void testAntiAliasDecode() {
+    tox2::rsxUnimplementedReset();
     auto regs = std::make_unique<tox2::RsxRegisters>();
     regs->reset();
     regs->apply(tox2::kMethodNv4097SetSurfaceClipHorizontal, 64u << 16);
@@ -2247,6 +2249,11 @@ void testAntiAliasDecode() {
         // The clip size stays in pixels.
         CHECK(state.color.width == 64 && state.color.height == 32 && state.depth.width == 64);
     }
+
+    // The modes the renderer draws are not counted; the others are.
+    CHECK(unimplementedCount("state antialiasing 0x1") == 1);
+    CHECK(unimplementedCount("state antialiasing 0x3") == 0 && unimplementedCount("state antialiasing 0x4") == 0 &&
+          unimplementedCount("state antialiasing 0x5") == 0);
 
     regs->apply(tox2::kMethodNv4097SetAntiAliasingControl, 0xFFFF0001);
     tox2::RsxRasterState raster = tox2::decodeRasterState(*regs);
@@ -3315,6 +3322,117 @@ void testRendererScaledTargetsAsTextures(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// ---- Anti-aliased surface layouts ----
+
+constexpr std::uint32_t kAaSize = 32;  // clip of the anti-aliased surface; its layout is 64x32
+constexpr std::uint32_t kAaOffset = 0x40000;
+
+// A red triangle with a 45 degree hypotenuse on black, drawn into a kAaSize x kAaSize surface in the AA layout
+// `aa_mode` (mode 0: a plain surface at the display offset). With `resolve` a second pass reads the surface the
+// way the game does, as a 2W x H linear texture with a LINEAR filter, into a plain target at the display offset.
+std::vector<std::uint8_t> makeAntiAliasedCapture(std::uint32_t aa_mode, bool resolve) {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    scene.setSurface(aa_mode, kAaSize, resolve ? kAaOffset : kSurfaceOffset);
+    scene.clear(0xFF000000);
+    setQuadRenderState(scene, kAaSize / 2.0f);
+    scene.setFloatAttrib(0, 3, kPositionsOffset);
+    scene.setColorAttrib(3, kColorsOffset);
+    scene.setPrograms(quadPrograms());
+    constexpr float kCorners[3][2] = {{-0.75f, -0.75f}, {0.75f, -0.75f}, {-0.75f, 0.75f}};
+    for (std::uint32_t v = 0; v < 3; v++) {
+        scene.memory().putFloat(1, kPositionsOffset + v * 12, kCorners[v][0]);
+        scene.memory().putFloat(1, kPositionsOffset + v * 12 + 4, kCorners[v][1]);
+        scene.memory().putFloat(1, kPositionsOffset + v * 12 + 8, 0.0f);
+        scene.memory().putWord(1, kColorsOffset + v * 4, 0xFFFF0000);  // red
+    }
+    scene.drawStrip(3);
+    if (!resolve) return scene.finish();
+
+    scene.setSurface(0, kAaSize, kSurfaceOffset);
+    scene.clear(0xFF000000);
+    constexpr float kQuad[4][4] = {{-1, -1, 0, 0}, {1, -1, 1, 0}, {-1, 1, 0, 1}, {1, 1, 1, 1}};  // x, y, u, v
+    for (std::uint32_t v = 0; v < 4; v++) {
+        scene.memory().putFloat(1, kPositionsOffset + v * 12, kQuad[v][0]);
+        scene.memory().putFloat(1, kPositionsOffset + v * 12 + 4, kQuad[v][1]);
+        scene.memory().putFloat(1, kPositionsOffset + v * 12 + 8, 0.0f);
+        scene.memory().putFloat(1, kTexCoordsOffset + v * 8, kQuad[v][2]);
+        scene.memory().putFloat(1, kTexCoordsOffset + v * 8 + 4, kQuad[v][3]);
+    }
+    scene.bindTexture(kAaOffset, kAaSize * 2, kAaSize);
+    scene.write(tox2::kMethodNv4097SetTextureFilter, (2u << 16) | (2u << 24));  // LINEAR
+    scene.write(tox2::kMethodNv4097SetVertexAttribOutputMask, 1u << 14);        // TEX0
+    scene.write(tox2::kMethodNv4097SetShaderControl, 0x400);                    // color from H0
+    scene.write(tox2::kMethodNv4097SetTexCoordControl, 1);                      // 2D coordinate
+    scene.setFloatAttrib(8, 2, kTexCoordsOffset);
+    scene.setPrograms(texturedPrograms());
+    scene.drawStrip(4);
+    return scene.finish();
+}
+
+void testRendererAntiAliasedSurface(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::rsxUnimplementedReset();
+
+    // The plain render of the same triangle is the reference: pure red and black, no partial pixels.
+    const ScaledFrame plain = renderAtScale(ctx, {makeAntiAliasedCapture(0, false)}, 1);
+    CHECK(plain.ok && plain.width == kAaSize && plain.height == kAaSize);
+    if (!plain.ok) return;
+    const auto redOf = [](const ScaledFrame& frame, std::uint32_t x, std::uint32_t y) {
+        return (pixelArgb(frame.bgra, frame.width, x, y) >> 16) & 0xFF;
+    };
+    const auto countEdges = [&](const ScaledFrame& frame) {
+        std::uint32_t edges = 0;
+        for (std::uint32_t y = 0; y < frame.height; y++) {
+            for (std::uint32_t x = 0; x < frame.width; x++) {
+                const std::uint32_t argb = pixelArgb(frame.bgra, frame.width, x, y);
+                const std::uint32_t red = (argb >> 16) & 0xFF;
+                if (red > 0 && red < 255 && (argb & 0xFFFF) == 0) edges++;
+            }
+        }
+        return edges;
+    };
+    CHECK(countEdges(plain) == 0);
+    CHECK(redOf(plain, 8, 20) == 255 && redOf(plain, 24, 8) == 0);
+
+    for (const std::uint32_t scale : {1u, 2u}) {
+        // The frame builder counted no anti-aliasing mode for the layout.
+        const std::vector<std::uint8_t> file = makeAntiAliasedCapture(3, true);
+        tox2::rsxUnimplementedReset();
+        replaySynthetic(file);
+        CHECK(unimplementedCount("state antialiasing 0x3") == 0);
+
+        const ScaledFrame aa = renderAtScale(ctx, {file}, scale);
+        CHECK(aa.ok && aa.width == kAaSize && aa.height == kAaSize && aa.image_width == kAaSize * scale);
+        if (!aa.ok) continue;
+        // The surface is drawn in its layout, so the resolve texture is the same size and nothing is approximated.
+        CHECK(aa.notes.empty());
+        CHECK(aa.stats.draws == 2 && aa.stats.draws_skipped == 0);
+
+        // Away from the edges the resolve equals the plain render, and the diagonal has partial pixels.
+        std::uint32_t compared = 0;
+        for (std::uint32_t y = 1; y + 1 < kAaSize; y++) {
+            for (std::uint32_t x = 1; x + 1 < kAaSize; x++) {
+                bool interior = true;
+                for (std::uint32_t dy = 0; dy < 3; dy++) {
+                    for (std::uint32_t dx = 0; dx < 3; dx++) {
+                        interior = interior && pixelArgb(plain.bgra, plain.width, x + dx - 1, y + dy - 1) ==
+                                                       pixelArgb(plain.bgra, plain.width, x, y);
+                    }
+                }
+                if (!interior) continue;
+                compared++;
+                CHECK(pixelArgb(aa.bgra, aa.width, x, y) == pixelArgb(plain.bgra, plain.width, x, y));
+            }
+        }
+        CHECK(compared > 400);
+        const std::uint32_t edges = countEdges(aa);
+        if (edges < 8) std::fprintf(stderr, "anti-aliased surface at scale %u: %u edge pixels\n", scale, edges);
+        CHECK(edges >= 8);
+    }
+    tox2::rsxUnimplementedReset();
+}
+
 bool sameRect(const tox2::PixelRect& rect, std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
     return rect.x == x && rect.y == y && rect.width == width && rect.height == height;
 }
@@ -3464,6 +3582,7 @@ int main() {
     testRendererSurfaceResize(*ctx);
     testRendererScaledPlain(*ctx);
     testRendererScaledTargetsAsTextures(*ctx);
+    testRendererAntiAliasedSurface(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
     ctx.reset();

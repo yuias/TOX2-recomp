@@ -226,10 +226,12 @@ RsxSurfaceState decodeSurfaceState(const RsxRegisters& regs) {
     if (type != kSurfaceTypeLinear) {
         noteState(type == 2 ? std::string("swizzled surface") : std::format("surface type {:#x}", type));
     }
-    if (antialias != 0) noteState(std::format("antialiasing {:#x}", antialias));
     s.aa_mode = static_cast<std::uint8_t>(antialias);
-    // Mode 3 stores two samples side by side, modes 4 and 5 a 2x2 block per pixel. Unknown modes keep one sample
-    // per pixel; they are already counted above.
+    // Mode 3 stores two samples side by side, modes 4 and 5 a 2x2 block per pixel (the renderer draws that layout).
+    // Other modes keep one sample per pixel and are counted.
+    if (antialias != 0 && antialias != 3 && antialias != 4 && antialias != 5) {
+        noteState(std::format("antialiasing {:#x}", antialias));
+    }
     const std::uint8_t samples_x = antialias == 3 || antialias == 4 || antialias == 5 ? 2 : 1;
     const std::uint8_t samples_y = antialias == 4 || antialias == 5 ? 2 : 1;
 

@@ -209,12 +209,13 @@ std::int32_t RsxFrameBuilder::noteSurface(const RsxSurface& surface) {
     }
     // The renderer keeps the surface contents on the GPU and guest memory stays as it was, but a texture
     // that overlaps the surface is then read again, as the RSX would see the pixels written to it.
+    // The pitch covers the expanded row of an anti-aliased layout, and the surface holds samples_y rows per pixel row.
     if (surface.pitch == 0 || surface.height == 0) {
         textures_.beginEpoch();
     } else {
         textures_.noteWrite(surface.location, surface.offset,
                             static_cast<std::uint64_t>(surface.offset) +
-                                    static_cast<std::uint64_t>(surface.pitch) * surface.height);
+                                    static_cast<std::uint64_t>(surface.pitch) * surface.height * surface.samples_y);
     }
     const std::int32_t index = findSurface(surface.location, surface.offset);
     if (index >= 0) {

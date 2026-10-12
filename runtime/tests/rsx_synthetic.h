@@ -82,18 +82,23 @@ public:
         writer_->onWrite(method, value);
     }
 
-    // A8R8G8B8 color target with Z24S8, clip and scissor covering all of it.
-    void setSurface() {
-        write(kMethodNv4097SetSurfaceClipHorizontal, kSurfaceSize << 16);
-        write(kMethodNv4097SetSurfaceClipVertical, kSurfaceSize << 16);
-        write(kMethodNv4097SetSurfaceFormat, 8u | (2u << 5) | (1u << 8));
-        write(kMethodNv4097SetSurfacePitchA, kSurfacePitch);
-        write(kMethodNv4097SetSurfaceColorAOffset, kSurfaceOffset);
-        write(kMethodNv4097SetSurfaceZetaOffset, kSurfaceOffset + 0x10000);
-        write(kMethodNv4097SetSurfacePitchZ, kSurfacePitch);
+    // A8R8G8B8 color target with Z24S8, clip and scissor covering all of it. `aa_mode` is the AA field of the
+    // surface format (0, or 3 for two samples per pixel side by side, 4 and 5 for 2x2): the clip stays `size`
+    // pixels while the pitches cover the expanded row of the sample layout, as the SDK sets them.
+    void setSurface(std::uint32_t aa_mode = 0, std::uint32_t size = kSurfaceSize,
+                    std::uint32_t color_offset = kSurfaceOffset) {
+        const std::uint32_t samples_x = aa_mode == 3 || aa_mode == 4 || aa_mode == 5 ? 2 : 1;
+        const std::uint32_t pitch = size * samples_x * 4;
+        write(kMethodNv4097SetSurfaceClipHorizontal, size << 16);
+        write(kMethodNv4097SetSurfaceClipVertical, size << 16);
+        write(kMethodNv4097SetSurfaceFormat, 8u | (2u << 5) | (1u << 8) | (aa_mode << 12));
+        write(kMethodNv4097SetSurfacePitchA, pitch);
+        write(kMethodNv4097SetSurfaceColorAOffset, color_offset);
+        write(kMethodNv4097SetSurfaceZetaOffset, color_offset + 0x10000);
+        write(kMethodNv4097SetSurfacePitchZ, pitch);
         write(kMethodNv4097SetSurfaceColorTarget, 1);
-        write(kMethodNv4097SetScissorHorizontal, kSurfaceSize << 16);
-        write(kMethodNv4097SetScissorVertical, kSurfaceSize << 16);
+        write(kMethodNv4097SetScissorHorizontal, size << 16);
+        write(kMethodNv4097SetScissorVertical, size << 16);
     }
 
     void clear(std::uint32_t color_argb) {

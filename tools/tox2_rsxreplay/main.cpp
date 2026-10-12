@@ -111,6 +111,7 @@ void printDraw(const tox2::RsxDraw& draw, std::span<const tox2::RsxSurface> surf
                                  : target.depth_format == tox2::RsxDepthFormat::Z16 ? "Z16"
                                                                                     : "?";
         std::printf(" depth=%s@%#x dpitch=%#x", depth_name, target.depth.offset, target.depth.pitch);
+        std::printf(" zt=%d zw=%d", draw.raster.depth_test ? 1 : 0, draw.raster.depth_write ? 1 : 0);
     }
     for (const tox2::RsxTextureDesc& texture : draw.textures) {
         if (texture.rt_alias >= 0 && static_cast<std::size_t>(texture.rt_alias) < surfaces.size()) {

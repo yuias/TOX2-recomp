@@ -400,6 +400,26 @@ void RsxRenderer::transition(RenderTarget& target, VkImageLayout layout) {
     target.layout = layout;
 }
 
+namespace {
+
+// Guest memory layout of a surface: the clip size times the samples per pixel of its anti-aliased layout. The RSX
+// stores every sample, so a surface in mode 3 is twice as wide as its clip and one in modes 4 and 5 twice as
+// wide and tall. A missing sample count (0) counts as one.
+std::uint32_t layoutWidth(const RsxSurface& surface) {
+    return surface.width * std::max<std::uint32_t>(surface.samples_x, 1);
+}
+std::uint32_t layoutHeight(const RsxSurface& surface) {
+    return surface.height * std::max<std::uint32_t>(surface.samples_y, 1);
+}
+
+// Image pixels per clip pixel of a pass over `surface` drawn into a target of the given scale.
+PixelScale pixelScaleOf(const RsxSurface& surface, std::uint32_t scale) {
+    return {scale * std::max<std::uint32_t>(surface.samples_x, 1),
+            scale * std::max<std::uint32_t>(surface.samples_y, 1)};
+}
+
+}  // namespace
+
 // A target the cache has not seen holds no guest data (nothing is loaded from guest memory), so it
 // starts defined instead of undefined: color is opaque black (0, 0, 0, 1), depth is 1.0 with stencil 0xFF.
 // These are RPCS3's values for a surface with nothing inherited and "read color/depth buffers" off
@@ -408,12 +428,11 @@ void RsxRenderer::transition(RenderTarget& target, VkImageLayout layout) {
 std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth, const RsxSurface& surface,
                                                                      VkFormat format) {
     const VkPhysicalDeviceProperties& props = context_.deviceProperties();
-    // The anti-aliased layouts (samples per pixel) are not rendered yet, so the layout is the clip size.
-    const std::uint32_t layout_width = surface.width;
-    const std::uint32_t layout_height = surface.height;
+    const std::uint32_t layout_width = layoutWidth(surface);
+    const std::uint32_t layout_height = layoutHeight(surface);
     const std::uint32_t max_dimension = props.limits.maxImageDimension2D;
     if (layout_width == 0 || layout_height == 0 || layout_width > max_dimension || layout_height > max_dimension) {
-        rsxNoteUnimplemented("state", std::format("surface size {}x{}", surface.width, surface.height));
+        rsxNoteUnimplemented("state", std::format("surface size {}x{}", layout_width, layout_height));
         return nullptr;
     }
     // A target that would exceed the device's image size at the current scale is made at the largest scale that
@@ -518,8 +537,9 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::acquire(TargetMap& map, 
     std::shared_ptr<RenderTarget> previous;
     if (it != map.end()) {
         const std::shared_ptr<RenderTarget>& existing = it->second;
-        // The identity is the layout size: the scale is the renderer's choice, not part of the guest memory.
-        if (existing->layout_width == surface.width && existing->layout_height == surface.height &&
+        // The identity is the layout size: the scale is the renderer's choice, not part of the guest memory. An
+        // anti-aliased binding of a W x H clip and a plain binding of 2W x H are the same memory and the same image.
+        if (existing->layout_width == layoutWidth(surface) && existing->layout_height == layoutHeight(surface) &&
             existing->format == format) {
             touch(existing);
             return existing;
@@ -944,6 +964,8 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
             }
             const std::shared_ptr<RenderTarget> target = found->second;
             touch(target);
+            // The layout includes the samples of an anti-aliased surface, so the game's 2W x H read of a W x H
+            // clip matches; only a texture that is not an AA layout of the target stays an approximation.
             if (target->layout_width != texture->width || target->layout_height != texture->height) {
                 rsxNoteUnimplemented("texture layout", "render target alias of another size");
             }
@@ -1187,8 +1209,16 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         area_width = std::min(area_width, depth->image_width);
         area_height = std::min(area_height, depth->image_height);
     }
-    // The AA sample factors join the scale here once the anti-aliased layouts are rendered.
-    const PixelScale pixel_scale = {color->scale, color->scale};
+    // An anti-aliased surface is drawn at its sample layout: one image pixel per sample, so the clip rectangle,
+    // viewport and scissor grow by the samples per pixel as well.
+    const PixelScale pixel_scale = pixelScaleOf(draw.surfaces.color, color->scale);
+    // The coverage controls only act on a multisampled layout and are not modelled; the game writes none of them.
+    if (draw.surfaces.color.samples_x > 1 || draw.surfaces.color.samples_y > 1) {
+        if (raster.alpha_to_coverage) rsxNoteUnimplemented("state", "alpha to coverage");
+        if (raster.alpha_to_one) rsxNoteUnimplemented("state", "alpha to one");
+        if (raster.sample_mask != 0xFFFF)
+            rsxNoteUnimplemented("state", std::format("sample mask {:#x}", raster.sample_mask));
+    }
     const ImageRect scissor_rect = scaleRect(raster.scissor_x, raster.scissor_y, raster.scissor_w, raster.scissor_h,
                                              pixel_scale, area_width, area_height);
     if (scissor_rect.width == 0 || scissor_rect.height == 0) {
@@ -1566,10 +1596,10 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
         area_width = std::min(color->image_width, depth->image_width);
         area_height = std::min(color->image_height, depth->image_height);
     }
-    // The colour and depth targets share a scale here (checked above); a depth-only clear uses the depth one.
-    // The AA sample factors join the scale here once the anti-aliased layouts are rendered.
-    const std::uint32_t target_scale = color ? color->scale : depth->scale;
-    const PixelScale pixel_scale = {target_scale, target_scale};
+    // The colour and depth targets share a scale here (checked above); a depth-only clear uses the depth one. The
+    // clear rectangle is in clip pixels and grows by the samples per pixel of the surface layout.
+    const PixelScale pixel_scale =
+            color ? pixelScaleOf(clear.surfaces.color, color->scale) : pixelScaleOf(clear.surfaces.depth, depth->scale);
 
     VkRenderingAttachmentInfo color_attachment{};
     VkRenderingAttachmentInfo depth_attachment{};
@@ -1664,8 +1694,9 @@ void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& co
         return;
     }
 
-    const ImageRect clear_rect = scaleRect(clear.scissor[0], clear.scissor[1], clear.scissor[2], clear.scissor[3],
-                                           PixelScale{color.scale, color.scale}, color.image_width, color.image_height);
+    const ImageRect clear_rect =
+            scaleRect(clear.scissor[0], clear.scissor[1], clear.scissor[2], clear.scissor[3],
+                      pixelScaleOf(clear.surfaces.color, color.scale), color.image_width, color.image_height);
     if (clear_rect.width == 0 || clear_rect.height == 0) return;
 
     const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
