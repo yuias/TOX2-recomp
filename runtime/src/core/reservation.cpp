@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cstring>
 #include <thread>
 
@@ -30,11 +31,16 @@ std::uint64_t readBuffer(const std::uint8_t* p) {
     return value;
 }
 
+// A stripe is held for a few hundred nanoseconds, so a short spin is the right wait. A holder that was
+// preempted is another matter: yield() only gives way to threads that are ready on this processor, and a
+// raised SPU thread (host_priority.h) could keep the holder from running, so a long wait ends in a sleep.
 void spinOnce(std::uint32_t& spins) {
     if (++spins < 64) {
         _mm_pause();
-    } else {
+    } else if (spins < 64 + 64) {
         std::this_thread::yield();
+    } else {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
