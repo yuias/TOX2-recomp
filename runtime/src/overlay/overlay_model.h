@@ -1,0 +1,115 @@
+#pragma once
+
+// Data behind the debug overlay: frame statistics history and the cached values of the run-time
+// providers. No ImGui and no Vulkan, so it is unit-testable and the panels only format what is here.
+
+#include <array>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "core/log.h"
+#include "render/frame_dump.h"
+#include "render/vk_renderer.h"
+#include "rsx/rsx_thread.h"
+
+namespace tox2 {
+
+struct OverlayAudioStats {
+    std::string output;  // empty before cellAudioInit
+    std::uint64_t blocks = 0;
+    std::uint64_t skipped_blocks = 0;
+    std::uint64_t blocks_dropped = 0;
+    std::uint64_t underrun_frames = 0;
+    double max_producer_ms = 0.0;
+    double clock_ppm = 0.0;
+    double mean_fill_frames = 0.0;
+    std::uint64_t periods = 0;  // cellAudio
+    std::uint64_t notifies_failed = 0;
+};
+
+// Every member may be empty: the panel then shows "n/a" or disables the control. The providers are
+// called on the renderer's thread and must be safe from any thread.
+struct OverlaySources {
+    std::function<OverlayAudioStats()> audio;
+    std::function<std::vector<std::pair<std::string, std::uint64_t>>()> unimplemented;
+    std::function<std::uint64_t()> unimplemented_dropped;
+    std::function<bool()> flip_limit;
+    std::function<void(bool)> set_flip_limit;
+    std::function<LogLevel()> log_level;
+    std::function<void(LogLevel)> set_log_level;
+    std::function<bool()> request_capture;
+    std::function<RsxCaptureStatus()> capture_status;
+};
+
+class FrameStatsHistory {
+public:
+    using Clock = std::chrono::steady_clock;
+    static constexpr std::size_t kSamples = 240;
+
+    void onFlip(const RendererStats& stats, Clock::time_point now);
+
+    std::uint64_t flip() const { return flip_; }                     // stats.flips at the last onFlip
+    std::uint64_t drawsLastFlip() const { return draws_last_; }      // delta to the previous onFlip (first: all so far)
+    std::uint64_t skippedLastFlip() const { return skipped_last_; }  // same rule for draws_skipped
+    std::uint64_t skippedTotal() const { return skipped_total_; }
+
+    // (k - 1) / (newest - oldest) over the k flips in (now - 1 s, now]; 0 when k < 2.
+    double flipsPerSecond(Clock::time_point now) const;
+
+    // Ring of intervals between consecutive onFlip calls in ms, laid out for
+    // ImGui::PlotLines(values_offset): the oldest sample is at frameTimeOffset().
+    const std::array<float, kSamples>& frameTimesMs() const { return frame_times_ms_; }
+    std::size_t frameTimeOffset() const { return frame_time_count_ < kSamples ? 0 : frame_time_head_; }
+    std::size_t frameTimeCount() const { return frame_time_count_; }
+    float maxFrameTimeMs() const;
+
+private:
+    std::uint64_t flip_ = 0;
+    std::uint64_t draws_last_ = 0;
+    std::uint64_t skipped_last_ = 0;
+    std::uint64_t skipped_total_ = 0;
+    std::uint64_t prev_draws_ = 0;
+    std::uint64_t prev_skipped_ = 0;
+
+    std::array<float, kSamples> frame_times_ms_{};
+    std::size_t frame_time_head_ = 0;  // next slot to write
+    std::size_t frame_time_count_ = 0;
+
+    // Flip times of the same ring shape; the one-second window of flipsPerSecond reads these.
+    std::array<Clock::time_point, kSamples> flip_times_{};
+    std::size_t flip_time_head_ = 0;
+    std::size_t flip_time_count_ = 0;
+};
+
+// Touched by the renderer's thread only.
+struct OverlayState {
+    FrameStatsHistory frames;
+    OverlayAudioStats audio;
+    double skipped_per_s = 0.0;          // audio skipped_blocks rate between two audio refreshes
+    double underrun_frames_per_s = 0.0;  // audio underrun_frames rate, same interval
+    std::vector<std::pair<std::string, std::uint64_t>> unimplemented;
+    std::uint64_t unimplemented_dropped = 0;
+    RsxCaptureStatus capture;
+    bool flip_limit = true;
+    LogLevel log_level = LogLevel::Info;
+    DumpCounts dumps;
+    std::filesystem::path last_dump;
+    bool dump_requested = false;  // set by the panel, taken by DebugOverlay::onFlip
+
+    // Calls the providers: audio at most every 250 ms, unimplemented every 500 ms, the rest every call.
+    // The audio and unimplemented snapshots take locks or copy maps, which a per-frame call would not need.
+    void refresh(const OverlaySources& sources, FrameStatsHistory::Clock::time_point now);
+
+private:
+    std::optional<FrameStatsHistory::Clock::time_point> audio_time_;
+    std::optional<FrameStatsHistory::Clock::time_point> unimplemented_time_;
+};
+
+}  // namespace tox2
