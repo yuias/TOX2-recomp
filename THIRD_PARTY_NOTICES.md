@@ -111,3 +111,43 @@ libssh, theora, vpx, webp, zmq, lv2, libvpl, OpenAL, liboapv, opencore-amr (narr
 wideband), openh264, openjpeg, openmpt, schannel, SDL2, snappy, soxr, srt, svtav1, twolame, uavs3d,
 VA-API, VapourSynth, vvenc, zimg and zvbi. This project uses only the H.264 and ATRAC3plus decoders
 and the colour conversion of `libswscale`.
+
+## Dear ImGui
+
+The in-window debug overlay (`F1`, see [Debug overlay](docs/runtime.md#debug-overlay)) is drawn with
+Dear ImGui, <https://github.com/ocornut/imgui>. It is a git submodule (`externals/imgui`) and is
+built from source as a static library into `tox2_game` and the overlay tests: the core files plus
+the Win32 and Vulkan backends, without the demo window. The Vulkan backend loads its entry points
+through volk. The overlay uses ImGui's built-in default font, so no font file is involved.
+
+| | |
+| --- | --- |
+| Version | Dear ImGui 1.91.9b (tag `v1.91.9b`, commit `f5befd2d29e66809cd1110a152e375a7f1981f06`) |
+| Source | <https://github.com/ocornut/imgui/tree/v1.91.9b> |
+| Licence | MIT License, Copyright (c) 2014-2025 Omar Cornut |
+
+The licence text is also in `externals/imgui/LICENSE.txt`:
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2014-2025 Omar Cornut
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

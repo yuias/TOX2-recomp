@@ -147,6 +147,12 @@ place on AZERTY and QWERTZ keyboards:
 | `W` / `E` / `R` / `U` | L1 / L2 / R1 / R2 |
 | `1` / `3` (main row) | L3 / R3 |
 | `V` / `C` | Start / Select |
+| `F1` | Show or hide the debug overlay (not a pad button) |
+
+While the overlay has the keyboard focus (after a click on one of its text boxes), key presses go to
+the overlay and not to the pad; click outside the overlay to give the keys back to the game. The
+overlay shows the flip rate, the draw and audio counters, the run-time switches, the capture
+buttons and the `rsx unimplemented` counts; see [Debug overlay](docs/runtime.md#debug-overlay).
 
 If keys do nothing, click the window to give it keyboard focus. The input code is unchanged from the
 project this one was derived from, and it has not been tried with this game.

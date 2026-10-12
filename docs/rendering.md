@@ -105,6 +105,10 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   presenting runs outside the guest lock. The limiter paces the flips before they reach the swapchain, so a
   display that refreshes faster than 60 Hz does not speed the game up; with `--frame-limit off` the display's
   refresh paces the RSX thread instead. Without a window nothing waits for a vertical blank in the renderer.
+  The [debug overlay](runtime.md#debug-overlay) is drawn on the swapchain image after that blit, in a
+  separate pass before the image is presented. It is not drawn into the render target, so it never
+  appears in `--dump-frames` files, requested PNG dumps, the display readback or captures, and it only
+  redraws when a flip completes.
 - **`rsx unimplemented` census.** The decoders, the frame builder and the renderer count what they
   meet but cannot handle yet (surface, depth and texture formats, texture layouts, vertex types,
   primitives, vertex and fragment opcodes, blend modes, other state and unknown methods) under

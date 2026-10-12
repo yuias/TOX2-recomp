@@ -10,7 +10,9 @@
 | `externals/libpng`, `externals/zlib` | libpng (v1.6.59) and zlib (v1.3.2) submodules, the PNG codec behind `cellPngDec` |
 | `externals/yyjson` | yyjson submodule (0.13.0, built as a static library), used only to parse the VFS configuration |
 | `externals/Vulkan-Headers`, `externals/volk`, `externals/VulkanMemoryAllocator` | Vulkan headers, the run-time loader and the memory allocator of the renderer |
-| `runtime/src/render/` | The renderer (`tox2_render`): Vulkan context, render targets, textures, pipelines, window and swapchain, vertex program and fragment program translators, shader compiler and cache, PNG output; see [Rendering](rendering.md#rendering) |
+| `externals/imgui` | Dear ImGui submodule (v1.91.9b, built as a static library from the core files and the Win32 and Vulkan backends, no demo window), used only by the debug overlay |
+| `runtime/src/render/` | The renderer (`tox2_render`): Vulkan context, render targets, textures, pipelines, window and swapchain, the hook that lets the overlay draw into the swapchain image, vertex program and fragment program translators, shader compiler and cache, PNG output; see [Rendering](rendering.md#rendering) |
+| `runtime/src/overlay/`, `cmake/Overlay.cmake` | The debug overlay (`tox2_overlay`): the numbers it shows (no ImGui), the panels, the connections to the runtime and the ImGui backends that draw it over the presented image, plus the `imgui` and `tox2_overlay_tests` targets; see [Debug overlay](runtime.md#debug-overlay) |
 | `runtime/src/media/` | ATRAC3plus support and the inherited movie code: the AT3 file parser and the ATRAC frame-decoder interface, the PAMF header parser and MPEG-PS demuxer and the host movie player (all in the runtime core), and the FFmpeg loader with the ATRAC3plus and movie decoders (`tox2_media`). The PAMF and movie code is built but unused by this game; see [Movies](movies.md) and [Audio](audio.md#cellatrac) |
 | `tools/fetch-ffmpeg.ps1`, `cmake/ffmpeg.cmake`, `cmake/Media.cmake` | FFmpeg fetch script and pin, and the media targets |
 | `tools/tox2_rsxreplay/` | `tox2_rsxreplay`, which replays an RSX capture without the game; see [Capture and replay](rendering.md#capture-and-replay) |
@@ -46,7 +48,7 @@
 | `runtime/src/core/elf_loader.*`, `dispatch.*` | The executable and PRX loaders, and the dispatch tables with one span per loaded image |
 | `runtime/src/spu/` | The SPU runtime in the runtime core: SPU threads and the dispatcher, the MFC, channels and mailboxes, and the SPU census; see [SPU usage](spu.md) |
 | `docs/` | Development documentation |
-| `LICENSE`, `THIRD_PARTY_NOTICES.md` | Licence of this project (0BSD) and notices of third-party components (FFmpeg, GameInput, the RPCS3 key files) |
+| `LICENSE`, `THIRD_PARTY_NOTICES.md` | Licence of this project (0BSD) and notices of third-party components (FFmpeg, GameInput, the RPCS3 key files, Dear ImGui) |
 | `generated/` | Tool output, including `generated/ppu` from `emit` (git-ignored) |
 | `generated/ppu/libsre/` | The C code of libsre from `emit --symbol-prefix libsre`, with every file and symbol prefixed `libsre` (git-ignored); see [A PRX module](emitter.md#a-prx-module-libsre) |
 | `generated/ppu/spu/` | The C code of the SPU images from `spu-emit`, with the dispatch tables (git-ignored); see [SPU images](emitter.md#spu-images) |

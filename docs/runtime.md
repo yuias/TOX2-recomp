@@ -494,9 +494,11 @@ selection, Steam, the GameInput runtime, log lines and tools) are described in [
 | Script | `runtime/src/input/pad_script.*` | The script parser and the player thread |
 | Gamepad | `runtime/src/input/gamepad_*`, `gameinput_backend.*` | Backend interface, GameInput backend, mapping, selection, the gamepad thread and `--pad-probe`; see [Input](input.md#design) |
 | Window | `runtime/src/render/vk_window.*` | Key and focus messages from the window thread; turns the IME off for the window |
+| Overlay | `runtime/src/overlay/debug_overlay.*` | The `F1` toggle and the message hook that decides which key presses the [debug overlay](#debug-overlay) withholds from the pad |
 
-The renderer library does not depend on `input/`: the window reports raw scan codes through
-callbacks, and `game_main.cpp` connects them to the state.
+The renderer library does not depend on `input/` or on the overlay: the window reports raw scan codes
+and, through `PresenterOptions::on_message`, raw window messages through callbacks, and `game_main.cpp`
+connects them to the state and to the overlay.
 
 ### Threading
 
@@ -526,6 +528,11 @@ nothing joins them, because the process ends with `std::_Exit`.
   without focus). Script buttons are a separate source and stay; the gamepad thread releases its own
   source when the process loses the foreground window. `Alt` combinations still reach the
   default window procedure, so `Alt+F4` closes the window.
+- `F1` (scan code `0x3B`) is not in the pad map: it toggles the [debug overlay](#debug-overlay) and
+  never reaches the pad, with any `--pad` value. While the overlay is shown and ImGui wants the
+  keyboard (a text box is active), key presses (`WM_KEYDOWN`, `WM_SYSKEYDOWN`) are withheld from the
+  pad. Key-ups are always delivered, so a key that went down before the overlay took the keyboard is
+  still released.
 - The press mode that the game sets with `cellPadSetPortSetting` decides whether `cellPad` copies
   the pressure words to the game; this game sets 0x6 (press and sensor on) on ports 0 to 6
   (`tox2: pad: port 0 setting 0x6 (press on, sensor on)`), after `cellPadInit` with a maximum of 7
@@ -618,6 +625,56 @@ is covered by `runtime_core` (`testPadButtons`, `testKeyboardPadScanCodes`, `tes
 `testGamepadSourceState`, `testGamepadPadProvider`, `testGamepadCellPad`), the rest of the gamepad
 code by `input_core` and `input_gameinput` (see [Tests](tests.md)), and the key message conversion
 by `render_core` (`testKeyMessages`).
+
+## Debug overlay
+
+With the window open, `F1` shows or hides a [Dear ImGui](https://github.com/ocornut/imgui) window
+titled `tox2` over the presented image, at the top left. It has four collapsible sections:
+
+| Section | Contents |
+| --- | --- |
+| Stats | The flip number (the `frame_<N>.png` and `--rsx-capture N` numbering), flips per second over the last second, draws and skipped draws of the last flip, the total of skipped draws and a graph of the last 240 flip intervals. Below, the audio counters of the engine and `cellAudio`: the output, the longest producer time against the 5.333 ms block period and its margin, blocks, periods, failed notifies, skipped periods (with a rate), underrun frames (with a rate), dropped blocks, the clock correction in ppm and the mean output fill against its target. Before `cellAudioInit` the audio part says `n/a (audio not started)` |
+| Settings | The flip limiter (the `--frame-limit` switch, changeable at run time) and the log level (the lowest level that is logged; the same filter as `--log-level`). Anisotropic filtering, internal resolution scale and volume are disabled placeholders marked `(not implemented)` |
+| Capture | `Capture next flip` and `Dump next flip as PNG`, each with the state of its last request, and the dump counts (written, failed, skipped) |
+| RSX unimplemented | The live `rsx unimplemented` counts (see [Rendering](rendering.md#rendering)) as a table of count and kind, with a text filter, and the number of kinds dropped because the table was full |
+
+`Capture next flip` records the first whole frame that starts after the click, which is typically
+flip N+2 when the click happens while flip N is displayed, and writes it as
+`generated/rsx/captures/frame_<N>.tox2cap` like `--rsx-capture`. The button is disabled while a
+request is pending or recording, and when no frame builder runs. The panel shows `pending`,
+`recording frame N`, then `frame N -> <path>` or `frame N failed: <reason>`.
+`Dump next flip as PNG` writes the next completed flip as `frame_<N>.png` into the `--dump-frames`
+directory, or `generated/frames` without that option; a flip that `--dump-frames-every` dumps anyway
+is written once.
+
+The overlay is drawn on the swapchain image after the letterboxed blit, so it is never part of
+`--dump-frames` files, requested dumps, `readDisplay` or captures (see
+[Rendering](rendering.md#rendering)). It redraws only when the game flips: during a stall without
+flips (a load, for example) it freezes and takes no input. Without the window (`--no-window`,
+`--render none`) there is no overlay and `F1` does nothing.
+
+Design notes:
+
+- The code is the `tox2_overlay` library in `runtime/src/overlay/`; `tox2_render` does not depend on
+  it. `overlay_model.*` holds the numbers (no ImGui), `overlay_panels.*` the ImGui window,
+  `overlay_sources.*` the connections to the runtime (audio engine and `cellAudio` counters, the
+  `rsx unimplemented` snapshot, the flip limiter, the capture request and status, the log level) and
+  `debug_overlay.*` the Vulkan and Win32 backends. The overlay only reads atomics and locked
+  snapshots and never touches guest memory.
+- ImGui is initialised on the first show, not at start-up, on the RSX thread: the log gets
+  `tox2: overlay: ready (imgui 1.91.9b, scale N)` (info) and the font upload costs a one-time hitch.
+  `scale` is the DPI scale of the window at that moment and is not updated later. If the setup fails,
+  one `tox2: overlay: ... failed, overlay disabled` warning is logged and the game goes on without
+  the overlay.
+- One global ImGui context is guarded by a mutex. The window thread feeds it the mouse and key
+  messages (the Win32 backend calls `SetCapture` and `GetKeyState`, which only work on the thread that
+  owns the window); the RSX thread holds the mutex while it builds and records a frame, and never
+  across a swapchain call. `ImGui_ImplWin32_NewFrame` is not used, because its key workaround reads
+  `GetKeyState` on the calling thread. Hiding the overlay sends ImGui a focus-lost event so that held
+  keys and buttons are dropped, and showing it again sends a focus-gained event: ImGui 1.91.9b keeps
+  clearing its input while it believes the application has no focus.
+- The overlay window has no `imgui.ini`, no docking, no gamepad navigation and does not change the
+  mouse cursor.
 
 ## PNG decoding
 
