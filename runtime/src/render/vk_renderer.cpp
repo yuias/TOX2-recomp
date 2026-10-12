@@ -213,7 +213,7 @@ struct RsxRenderer::FrameSlot {
 
 RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(context), options_(std::move(options)) {
     if (!options_.shader_cache.empty()) setShaderCacheDir(options_.shader_cache);
-    if (!options_.dump_dir.empty()) dumper_ = std::make_unique<FrameDumper>();
+    dumper_ = std::make_unique<FrameDumper>();
     pipelines_ = std::make_unique<DrawPipelines>(context_, options_.shader_cache.empty()
                                                                    ? std::filesystem::path()
                                                                    : options_.shader_cache / "pipelines.bin");
@@ -1677,14 +1677,21 @@ bool RsxRenderer::ensureReadback(FrameSlot& slot, VkDeviceSize size) {
 }
 
 // The display buffer is the color target at (location 0, offset). When the flip is read back (every flip
-// with readback_all, otherwise only a dumped one) its pixels are copied into the slot's readback buffer
-// here, inside the frame's command buffer, so readDisplay needs no further GPU work. A buffer that was
-// never a render target reads back as black.
+// with readback_all, otherwise only a dumped or requested one) its pixels are copied into the slot's
+// readback buffer here, inside the frame's command buffer, so readDisplay needs no further GPU work. A
+// buffer that was never a render target reads back as black.
 void RsxRenderer::recordFlip(const RsxFlip& flip) {
     stats_.flips++;
     textures_->trim();
     FrameSlot& slot = *slots_[current_slot_];
-    const bool read_back = options_.readback_all || dumpDue();
+    dump_this_flip_ = dump_requested_;
+    dump_requested_ = false;
+    // Asked before the readback decision so a request made for this very flip is honoured.
+    if (presenter_ != nullptr && overlay_ != nullptr &&
+        overlay_->onFlip(PresentFrameInfo{&stats_, dumper_->counts(), last_requested_dump_}).dump_display) {
+        dump_this_flip_ = true;
+    }
+    const bool read_back = options_.readback_all || dumpDue() || dump_this_flip_;
     display_copied_ = false;
     const auto it = color_targets_.find(TargetKey{0, flip.offset});
     // Only an A8R8G8B8 target can be shown; any other format reads back as black.
@@ -1781,6 +1788,18 @@ void RsxRenderer::recordPresentBlit(FrameSlot& slot, RenderTarget* source) {
         vkCmdBlitImage(cmd, source->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.image,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_LINEAR);
     }
+    if (overlay_ != nullptr && dst.view != VK_NULL_HANDLE && overlay_->wantsDraw()) {
+        // The overlay draws over the blit with LOAD, so the transfer writes must be visible to the
+        // attachment read and write.
+        barrierTo(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kTransfer,
+                  VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                  VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        overlay_->record(cmd, dst);
+        barrierTo(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_NONE, 0);
+        return;
+    }
     barrierTo(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, kTransfer,
               VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_NONE, 0);
 }
@@ -1794,7 +1813,13 @@ void RsxRenderer::execute(std::span<RsxCommand> commands) {
             recordDraw(*draw);
         } else {
             recordFlip(std::get<RsxFlip>(command));
-            if (valid() && dumpDue()) dumpDisplay();
+            if (valid() && (dumpDue() || dump_this_flip_)) {
+                const bool requested = dump_this_flip_;
+                // A flip that --dump-frames writes anyway is not written a second time.
+                const std::filesystem::path& dir = dumpDue() ? options_.dump_dir : options_.requested_dump_dir;
+                const std::filesystem::path path = dir / std::format("frame_{:06}.png", stats_.flips);
+                if (dumpDisplay(path) && requested) last_requested_dump_ = path;
+            }
         }
         if (!valid()) return;
     }
@@ -1806,29 +1831,27 @@ bool RsxRenderer::dumpDue() const {
 }
 
 // Only the readback happens on the calling (RSX) thread; the dump worker converts, encodes and writes. A
-// full queue drops the frame instead of making the flip wait.
-void RsxRenderer::dumpDisplay() {
+// full queue drops the frame instead of making the flip wait. True when the frame was queued.
+bool RsxRenderer::dumpDisplay(const std::filesystem::path& path) {
     if (!dumper_->hasRoom()) {
         dumper_->countSkipped();
         logOnce(LogLevel::Warn, "render-dump-skipped", "tox2: render: dump skipped (queue full) at flip {}",
                 stats_.flips);
-        return;
+        return false;
     }
     DumpFrame frame;
     frame.bgra = dumper_->takeBuffer();
     if (!readDisplay(frame.bgra, frame.width, frame.height)) {
         dumper_->recycleBuffer(std::move(frame.bgra));
-        return;
+        return false;
     }
-    frame.path = options_.dump_dir / std::format("frame_{:06}.png", stats_.flips);
-    dumper_->submit(std::move(frame));
+    frame.path = path;
+    return dumper_->submit(std::move(frame));
 }
 
-DumpCounts RsxRenderer::dumpCounts() const { return dumper_ ? dumper_->counts() : DumpCounts{}; }
+DumpCounts RsxRenderer::dumpCounts() const { return dumper_->counts(); }
 
-std::uint64_t RsxRenderer::flushDumps(std::chrono::milliseconds timeout) {
-    return dumper_ ? dumper_->flush(timeout) : 0;
-}
+std::uint64_t RsxRenderer::flushDumps(std::chrono::milliseconds timeout) { return dumper_->flush(timeout); }
 
 bool RsxRenderer::savePipelineCache() { return pipelines_ && pipelines_->savePipelineCache(); }
 

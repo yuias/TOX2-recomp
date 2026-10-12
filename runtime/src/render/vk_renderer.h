@@ -16,6 +16,7 @@
 
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
+#include "render/present_overlay.h"
 #include "render/vk_context.h"
 #include "render/vk_pipelines.h"
 #include "render/vk_textures.h"
@@ -29,6 +30,8 @@ struct RenderOptions {
     // empty directory disables dumping.
     std::filesystem::path dump_dir;
     std::uint32_t dump_every = 1;
+    // Where requestDisplayDump() writes `frame_<flip number>.png`, unless dump_dir already dumps that flip.
+    std::filesystem::path requested_dump_dir = "generated/frames";
     // Also holds the driver's pipeline cache (pipelines.bin) when set.
     std::filesystem::path shader_cache;
     // Copy the display buffer back at every flip so readDisplay works after each one (replay, tests). The
@@ -72,8 +75,7 @@ public:
 
     const RendererStats& stats() const { return stats_; }
 
-    // Frames written, failed or dropped by the dump worker so far (all zero without a dump directory).
-    // Any thread.
+    // Frames written, failed or dropped by the dump worker so far (dump_dir and requested dumps). Any thread.
     DumpCounts dumpCounts() const;
     // Waits until the dumps queued so far are written, at most `timeout`; returns how many are still
     // pending (0 when all are done). Any thread.
@@ -82,6 +84,14 @@ public:
     bool savePipelineCache();
     // Any thread.
     PipelineCacheStats pipelineCacheStats() const;
+
+    // The next flip is read back and written as `frame_<flip number>.png`: into dump_dir when that flip is
+    // dumped anyway (one file, no duplicate), else into requested_dump_dir. Renderer thread.
+    void requestDisplayDump() { dump_requested_ = true; }
+
+    // Drawn over the presented image after the blit; only used while a presenter is set. Not owned; call
+    // before the first flip.
+    void setPresentOverlay(PresentOverlay* overlay) { overlay_ = overlay; }
 
     // Every flip is also blitted to the presenter's next swapchain image (letterboxed 16:9) and presented.
     // Not owned; null (the default) presents nothing. Call before the first flip.
@@ -134,13 +144,17 @@ private:
     void recordPresentBlit(FrameSlot& slot, RenderTarget* source);
     bool ensureReadback(FrameSlot& slot, VkDeviceSize size);
     bool dumpDue() const;
-    void dumpDisplay();
+    bool dumpDisplay(const std::filesystem::path& path);
 
     VkContext& context_;
     RenderOptions options_;
     std::string error_;
     RendererStats stats_;
-    std::unique_ptr<FrameDumper> dumper_;  // null without a dump directory
+    // Always created: its worker thread only starts with the first submitted frame.
+    std::unique_ptr<FrameDumper> dumper_;
+    bool dump_requested_ = false;  // requestDisplayDump() was called and no flip has taken it yet
+    bool dump_this_flip_ = false;  // the flip being recorded was requested
+    std::filesystem::path last_requested_dump_;
 
     // Color and depth targets live in separate maps: a surface of each kind may share an offset.
     TargetMap color_targets_;
@@ -169,6 +183,7 @@ private:
     Presenter* presenter_ = nullptr;
     Presenter::Target present_target_;  // acquired for the frame being recorded
     bool present_pending_ = false;      // present_target_ is valid and its submit has not been queued yet
+    PresentOverlay* overlay_ = nullptr;
 
     bool has_flip_ = false;
     bool display_black_ = false;
