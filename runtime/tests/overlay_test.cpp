@@ -188,6 +188,25 @@ tox2::OverlaySources makeFakeSources() {
         stats.output = "fake";
         stats.max_producer_ms = 1.5;
         stats.mean_fill_frames = 1500.0;
+        stats.unwritten_blocks = 7;
+        stats.unwritten_runs = 3;
+        tox2::OverlaySpuRow spu;
+        spu.name = "bnusCoreMain";
+        spu.receives = 100;
+        spu.busy_mean_ms = 2.0;
+        spu.busy_p99_ms = 5.1;
+        spu.busy_max_ms = 6.6;
+        spu.busy_over = 4;
+        stats.spu.push_back(spu);
+        tox2::OverlayLockRow lock;
+        lock.name = "audio";
+        lock.acquisitions = 182;
+        lock.wait_p99_ms = 0.12;
+        lock.wait_max_ms = 1.9;
+        lock.wait_over = 2;
+        stats.locks.push_back(lock);
+        lock.name = "ppu";
+        stats.locks.push_back(lock);
         return stats;
     };
     sources.unimplemented = [] { return std::vector<std::pair<std::string, std::uint64_t>>{{"state: x", 2}}; };
@@ -251,6 +270,75 @@ void testPanels() {
     // No providers at all: every section falls back to its placeholder.
     tox2::OverlayState empty_state;
     CHECK(drawFrames(empty_state, tox2::OverlaySources{}));
+
+    // The engine runs but no SPU thread has received and no lock was taken: the new rows stay out.
+    tox2::OverlaySources bare_sources = makeFakeSources();
+    bare_sources.audio = [] {
+        tox2::OverlayAudioStats stats;
+        stats.output = "fake";
+        return stats;
+    };
+    tox2::OverlayState bare_state;
+    bare_state.refresh(bare_sources, at(1.0));
+    CHECK(bare_state.audio.spu.empty() && bare_state.audio.locks.empty() && bare_state.lock_rates.empty());
+    CHECK(drawFrames(bare_state, bare_sources));
+
+    // Rates arrive one refresh late; the rows must draw before and after that without a mismatch.
+    tox2::OverlayState rate_state;
+    rate_state.refresh(sources, at(1.0));
+    CHECK(rate_state.lock_rates.size() == rate_state.audio.locks.size());
+    rate_state.refresh(sources, at(1.5));
+    CHECK(drawFrames(rate_state, sources));
+}
+
+void testUnwrittenRates() {
+    std::uint64_t unwritten = 10;
+    std::uint64_t acquisitions = 1000;
+    std::uint64_t over = 4;
+    bool with_ppu = false;
+
+    tox2::OverlaySources sources;
+    sources.audio = [&] {
+        tox2::OverlayAudioStats stats;
+        stats.output = "fake";
+        stats.unwritten_blocks = unwritten;
+        tox2::OverlayLockRow audio_row;
+        audio_row.name = "audio";
+        audio_row.acquisitions = acquisitions;
+        audio_row.wait_over = over;
+        if (with_ppu) {
+            // A class that appears later shifts the rows; the rates still follow the names.
+            tox2::OverlayLockRow ppu;
+            ppu.name = "ppu";
+            ppu.acquisitions = 500;
+            stats.locks.push_back(ppu);
+        }
+        stats.locks.push_back(audio_row);
+        return stats;
+    };
+
+    tox2::OverlayState state;
+    state.refresh(sources, at(0.0));
+    CHECK(state.unwritten_per_s == 0.0);
+    CHECK(state.lock_rates.size() == 1 && state.lock_rates[0].acquisitions_per_s == 0.0);
+
+    unwritten = 13;
+    acquisitions = 1500;
+    over = 5;
+    with_ppu = true;
+    state.refresh(sources, at(0.5));
+    CHECK(std::fabs(state.unwritten_per_s - 6.0) < 1e-6);
+    CHECK(state.lock_rates.size() == 2);
+    if (state.lock_rates.size() == 2) {
+        CHECK(state.lock_rates[0].acquisitions_per_s == 0.0);  // ppu: no earlier row to diff against
+        CHECK(std::fabs(state.lock_rates[1].acquisitions_per_s - 1000.0) < 1e-6);
+        CHECK(std::fabs(state.lock_rates[1].wait_over_per_s - 2.0) < 1e-6);
+    }
+
+    // A counter that went backwards (source restarted) reads as no change.
+    unwritten = 2;
+    state.refresh(sources, at(1.0));
+    CHECK(state.unwritten_per_s == 0.0);
 }
 
 // Drives the real Settings panel in a private ImGui context with simulated mouse input. An item is found by
@@ -844,6 +932,7 @@ int main() {
     testDrawDeltas();
     testRefresh();
     testPanels();
+    testUnwrittenRates();
     testPresentRequests();
     testResolutionScalePanel();
     testAntiAliasingPanel();

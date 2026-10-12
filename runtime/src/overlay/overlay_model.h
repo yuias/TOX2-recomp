@@ -22,6 +22,23 @@
 
 namespace tox2 {
 
+// Receive timing of one SPU thread that blocks on events (see SpuThread::receiveBusy), lifetime values.
+struct OverlaySpuRow {
+    std::string name;
+    std::uint64_t receives = 0;
+    double busy_mean_ms = 0.0, busy_p99_ms = 0.0, busy_max_ms = 0.0;
+    std::uint64_t busy_over = 0;  // busy times above one cellAudio period
+};
+
+// Guest lock acquisitions of one caller class, lifetime values. The holder attribution is left out: it sums over
+// all waiters, so it is not a time.
+struct OverlayLockRow {
+    std::string name;
+    std::uint64_t acquisitions = 0;
+    double wait_p99_ms = 0.0, wait_max_ms = 0.0;
+    std::uint64_t wait_over = 0;  // waits above kGuestLockWaitOverUs
+};
+
 struct OverlayAudioStats {
     std::string output;  // empty before cellAudioInit
     std::uint64_t blocks = 0;
@@ -33,6 +50,16 @@ struct OverlayAudioStats {
     double mean_fill_frames = 0.0;
     std::uint64_t periods = 0;  // cellAudio
     std::uint64_t notifies_failed = 0;
+    std::uint64_t unwritten_blocks = 0;  // port blocks the game never rewrote
+    std::uint64_t unwritten_runs = 0;
+    std::vector<OverlaySpuRow> spu;
+    std::vector<OverlayLockRow> locks;  // classes with at least one acquisition
+};
+
+// Rates of one OverlayLockRow between two audio refreshes.
+struct OverlayLockRate {
+    double acquisitions_per_s = 0.0;
+    double wait_over_per_s = 0.0;
 };
 
 // Every member may be empty: the panel then shows "n/a" or disables the control. The providers are
@@ -93,8 +120,10 @@ private:
 struct OverlayState {
     FrameStatsHistory frames;
     OverlayAudioStats audio;
-    double skipped_per_s = 0.0;          // audio skipped_blocks rate between two audio refreshes
-    double underrun_frames_per_s = 0.0;  // audio underrun_frames rate, same interval
+    double skipped_per_s = 0.0;               // audio skipped_blocks rate between two audio refreshes
+    double underrun_frames_per_s = 0.0;       // audio underrun_frames rate, same interval
+    double unwritten_per_s = 0.0;             // audio unwritten_blocks rate, same interval
+    std::vector<OverlayLockRate> lock_rates;  // one per audio.locks entry
     std::vector<std::pair<std::string, std::uint64_t>> unimplemented;
     std::uint64_t unimplemented_dropped = 0;
     RsxCaptureStatus capture;

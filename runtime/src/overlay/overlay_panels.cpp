@@ -10,6 +10,7 @@
 
 #include "audio/audio_engine.h"
 #include "audio/audio_output.h"
+#include "core/threads.h"
 #include "imgui.h"
 #include "render/render_scale.h"
 
@@ -23,12 +24,45 @@ constexpr float kMinWindowWidth = 440.0f;  // the window grows with its content;
 constexpr float kMaxWindowWidth = 720.0f;  // a long path or kind name wraps or clips instead of stretching it
 constexpr float kFrameGraphHeight = 60.0f;
 constexpr float kMinGraphMaxMs = 33.4f;  // keeps a steady 60 Hz line in the lower half of the graph
+constexpr double kUsPerMs = 1000.0;
 
 constexpr std::array<const char*, 5> kLogLevelNames = {"trace", "debug", "info", "warn", "error"};
 
 unsigned long long asUll(std::uint64_t value) { return static_cast<unsigned long long>(value); }
 
 double toMs(std::chrono::nanoseconds duration) { return std::chrono::duration<double, std::milli>(duration).count(); }
+
+// Lifetime wait figures per caller class; the rates come from the last two audio refreshes.
+void drawGuestLockTable(const OverlayState& state) {
+    const OverlayAudioStats& audio = state.audio;
+    if (audio.locks.empty()) return;
+    ImGui::TextUnformatted("guest lock");
+    if (!ImGui::BeginTable("##guest_lock", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) return;
+    char over_label[24];
+    std::snprintf(over_label, sizeof(over_label), ">%.0f ms /s", static_cast<double>(kGuestLockWaitOverUs) / kUsPerMs);
+    ImGui::TableSetupColumn("class");
+    ImGui::TableSetupColumn("/s");
+    ImGui::TableSetupColumn("wait p99 ms");
+    ImGui::TableSetupColumn("wait max ms");
+    ImGui::TableSetupColumn(over_label);
+    ImGui::TableHeadersRow();
+    for (std::size_t i = 0; i < audio.locks.size(); ++i) {
+        const OverlayLockRow& row = audio.locks[i];
+        const OverlayLockRate rate = i < state.lock_rates.size() ? state.lock_rates[i] : OverlayLockRate{};
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextUnformatted(row.name.c_str());
+        ImGui::TableSetColumnIndex(1);
+        ImGui::Text("%.0f", rate.acquisitions_per_s);
+        ImGui::TableSetColumnIndex(2);
+        ImGui::Text("%.2f", row.wait_p99_ms);
+        ImGui::TableSetColumnIndex(3);
+        ImGui::Text("%.2f", row.wait_max_ms);
+        ImGui::TableSetColumnIndex(4);
+        ImGui::Text("%.2f", rate.wait_over_per_s);
+    }
+    ImGui::EndTable();
+}
 
 void drawStats(const OverlayState& state) {
     const FrameStatsHistory& frames = state.frames;
@@ -63,6 +97,13 @@ void drawStats(const OverlayState& state) {
     ImGui::Text("dropped blocks %llu", asUll(audio.blocks_dropped));
     ImGui::Text("clock correction %+.1f ppm", audio.clock_ppm);
     ImGui::Text("output fill %.0f frames (target %llu)", audio.mean_fill_frames, asUll(kFillTargetFrames));
+    ImGui::Text("unwritten blocks %llu (%.2f/s, runs %llu)", asUll(audio.unwritten_blocks), state.unwritten_per_s,
+                asUll(audio.unwritten_runs));
+    for (const OverlaySpuRow& spu : audio.spu) {
+        ImGui::Text("spu %s busy %.2f/%.2f/%.2f ms, >%.2f ms %llu", spu.name.c_str(), spu.busy_mean_ms, spu.busy_p99_ms,
+                    spu.busy_max_ms, period_ms, asUll(spu.busy_over));
+    }
+    drawGuestLockTable(state);
 }
 
 // The renderer applies the choice after the flip that reports it, so the combo shows the pending request until

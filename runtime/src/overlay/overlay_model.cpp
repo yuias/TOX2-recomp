@@ -71,12 +71,24 @@ float FrameStatsHistory::maxFrameTimeMs() const {
 void OverlayState::refresh(const OverlaySources& sources, FrameStatsHistory::Clock::time_point now) {
     if (sources.audio && due(audio_time_, now, kAudioRefreshInterval)) {
         const OverlayAudioStats next = sources.audio();
-        if (audio_time_) {
-            const double seconds = std::chrono::duration<double>(now - *audio_time_).count();
-            if (seconds > 0.0) {
-                skipped_per_s = static_cast<double>(deltaOf(next.skipped_blocks, audio.skipped_blocks)) / seconds;
-                underrun_frames_per_s =
-                        static_cast<double>(deltaOf(next.underrun_frames, audio.underrun_frames)) / seconds;
+        const double seconds = audio_time_ ? std::chrono::duration<double>(now - *audio_time_).count() : 0.0;
+        if (seconds > 0.0) {
+            skipped_per_s = static_cast<double>(deltaOf(next.skipped_blocks, audio.skipped_blocks)) / seconds;
+            underrun_frames_per_s = static_cast<double>(deltaOf(next.underrun_frames, audio.underrun_frames)) / seconds;
+            unwritten_per_s = static_cast<double>(deltaOf(next.unwritten_blocks, audio.unwritten_blocks)) / seconds;
+        }
+        // Rows are matched by class name: a class appears with its first acquisition, so indices can shift.
+        lock_rates.assign(next.locks.size(), OverlayLockRate{});
+        if (seconds > 0.0) {
+            for (std::size_t i = 0; i < next.locks.size(); ++i) {
+                const auto before =
+                        std::find_if(audio.locks.begin(), audio.locks.end(),
+                                     [&](const OverlayLockRow& row) { return row.name == next.locks[i].name; });
+                if (before == audio.locks.end()) continue;
+                lock_rates[i].acquisitions_per_s =
+                        static_cast<double>(deltaOf(next.locks[i].acquisitions, before->acquisitions)) / seconds;
+                lock_rates[i].wait_over_per_s =
+                        static_cast<double>(deltaOf(next.locks[i].wait_over, before->wait_over)) / seconds;
             }
         }
         audio = next;
