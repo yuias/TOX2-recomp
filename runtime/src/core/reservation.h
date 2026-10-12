@@ -10,6 +10,7 @@
 // and host plain writes are not instrumented: they change neither the stripe version nor the store
 // epoch. The consequences are documented at putllc() and waitStoreEpoch().
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -32,6 +33,12 @@ struct Reservation {
 
 // Why waitStoreEpoch() returned.
 enum class StoreWait { Epoch, Timeout, Halt };
+
+// Passed as `watch_line` by a waiter that wants every store epoch change. Line addresses are 128-aligned, so
+// this value never names a line.
+inline constexpr std::uint32_t kWatchAnyLine = 0xFFFFFFFF;
+// Waiters that name a line take one of these slots; the rest count as wildcards.
+inline constexpr std::uint32_t kWatchSlots = 16;
 
 // Cost counters: epoch bumps, and the bumps that found a waiter and notified.
 struct ReservationStats {
@@ -105,13 +112,20 @@ public:
     // Waiter protocol, in this order: `seen = storeEpoch()`, then `lost()`, then `waitStoreEpoch(seen, ...)`.
     // Reading the epoch after lost() can sleep through a write that landed in between.
     //
+    // Watch line: a waiter whose only interest is the reservation on one line passes that line's address as
+    // `watch_line`. A writer then wakes it only when it wrote a line of the same stripe (the granularity of
+    // lost()). Writes elsewhere still move the epoch but leave it asleep, so anything else that has to end its
+    // wait (mailbox, halt) must go through wake(). kWatchAnyLine, or a table with all kWatchSlots taken, makes
+    // the waiter a wildcard that every epoch change wakes.
+    //
     // Halt: the setter must store the flag atomically (the waiter reads it with an acquire load) and only
     // then call wake(), or the waiter notices it only at its timeout.
     StoreWait waitStoreEpoch(std::uint64_t seen, const std::uint32_t* halt,
-                             std::chrono::microseconds timeout = std::chrono::milliseconds(1));
+                             std::chrono::microseconds timeout = std::chrono::milliseconds(1),
+                             std::uint32_t watch_line = kWatchAnyLine);
 
-    // Bumps the epoch and wakes every waiter without a write.
-    void wake() { publish(); }
+    // Bumps the epoch and wakes every waiter without a write, whatever line it watches.
+    void wake();
 
     ReservationStats stats() const;
 
@@ -132,14 +146,21 @@ private:
     std::uint64_t lock(std::atomic<std::uint64_t>& s);
     // Version bump only; the caller publishes once its writes are all done.
     void unlockVersion(std::atomic<std::uint64_t>& s);
-    void unlockWithWrite(std::atomic<std::uint64_t>& s);
+    void unlockWithWrite(std::atomic<std::uint64_t>& s, std::uint32_t line);
     void unlockClean(std::atomic<std::uint64_t>& s);
-    // Bumps the epoch and wakes waiters (the version is already updated, see waitStoreEpoch()).
-    void publish();
+    // Bumps the epoch and wakes the waiters that watch a stripe of the inclusive line range (the versions are
+    // already updated, see waitStoreEpoch()).
+    void publish(std::uint32_t first_line, std::uint32_t last_line);
+    // Takes the wait mutex so that a waiter between its check and its sleep is ordered before the notify.
+    void notifyWaiters();
+    // Whether a waiter would have to be woken by a write to the lines [first_line, last_line].
+    bool hasWatcher(std::uint32_t first_line, std::uint32_t last_line) const;
 
     std::unique_ptr<std::atomic<std::uint64_t>[]> stripes_;  // bit 0 lock, bits 1..63 version
     std::atomic<std::uint64_t> epoch_{0};
-    std::atomic<std::uint32_t> waiters_{0};
+    // Stripe (+ 1) of the line each line-watching waiter named; 0 is a free slot.
+    std::array<std::atomic<std::uint32_t>, kWatchSlots> watch_{};
+    std::atomic<std::uint32_t> wildcard_waiters_{0};
     std::atomic<std::uint64_t> publishes_{0};
     std::atomic<std::uint64_t> notifies_{0};
     std::mutex wait_mutex_;

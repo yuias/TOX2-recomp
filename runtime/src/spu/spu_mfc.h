@@ -113,6 +113,8 @@ public:
     // changed since. It stays true until the next atomic command clears or replaces the reservation.
     // Waiters follow the order in core/reservation.h: storeEpoch(), then this, then waitStoreEpoch().
     bool hasReservation() const { return reservation_.valid; }
+    // Guest address of the reserved line; meaningful while hasReservation().
+    std::uint32_t reservationLine() const { return reservation_.line; }
     bool reservationLost() const { return reservations().lost(base_, reservation_); }
     const Reservation& reservation() const { return reservation_; }
 

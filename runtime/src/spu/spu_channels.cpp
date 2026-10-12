@@ -184,7 +184,8 @@ bool SpuChannels::readEventStat(std::uint32_t site, std::uint32_t* value) {
                 const auto left = std::chrono::duration_cast<microseconds>(dec_when - Clock::now());
                 timeout = std::clamp(left, microseconds(0), timeout);
             }
-            reservations().waitStoreEpoch(seen, &thread_.context().halt, timeout);
+            // Only a write to the reserved line matters here; the mailbox push and the halt wake the table.
+            reservations().waitStoreEpoch(seen, &thread_.context().halt, timeout, mfc_.reservationLine());
             continue;
         }
         std::unique_lock lock(mutex_);

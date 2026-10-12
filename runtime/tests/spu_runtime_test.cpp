@@ -2,6 +2,7 @@
 // same base + ea convention; the lv2 group tests use the process's guest memory and the syscall table.
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -514,6 +515,155 @@ void testWaitersAreNotLost() {
     abort = true;
     writer.join();
     CHECK(!timed_out);
+}
+
+// A waiter that names a line is only woken by writes to that line's stripe, a wildcard by every epoch change, and
+// everybody by wake(). The timeouts are long so that a missed wake-up shows as a Timeout result.
+void testUnrelatedPutDoesNotNotify() {
+    // kWatched and kSameStripe are one stripe count of lines apart, so they share a stripe.
+    constexpr std::uint32_t kWatched = 0x1000;
+    constexpr std::uint32_t kUnrelated = 0x8000;
+    constexpr std::uint32_t kSameStripe = kWatched + tox2::kReservationStripeCount * tox2::kReservationLineSize;
+    struct alignas(128) Block {
+        std::uint8_t bytes[kSameStripe + tox2::kReservationLineSize] = {};
+    };
+    auto block = std::make_unique<Block>();
+    std::uint8_t* base = block->bytes;
+    const std::vector<std::uint8_t> src(0x1000, 0x5a);
+
+    tox2::ReservationTable table;
+    constexpr int kPending = -1;
+    // Waits on its own thread; `result` holds the StoreWait once it returns.
+    struct Waiter {
+        std::atomic<int> result{kPending};
+        std::thread thread;
+    };
+    const auto start = [&](Waiter& w, std::uint64_t seen, std::uint32_t line, const std::uint32_t* halt = nullptr) {
+        w.thread = std::thread([&table, &w, seen, line, halt] {
+            w.result.store(static_cast<int>(table.waitStoreEpoch(seen, halt, milliseconds(3000), line)));
+        });
+    };
+    const auto settle = [] { std::this_thread::sleep_for(milliseconds(100)); };
+
+    // Writes elsewhere move the epoch and leave the notify counter alone; a write to the line wakes the waiter.
+    {
+        Waiter w;
+        start(w, table.storeEpoch(), kWatched);
+        settle();
+        const std::uint64_t notifies_before = table.stats().notifies;
+        for (int i = 0; i < 1000; i++) table.put(base, kUnrelated, src.data(), 16);
+        CHECK(table.stats().notifies == notifies_before);
+        CHECK(w.result.load() == kPending);
+        const auto put_at = Clock::now();
+        table.put(base, kWatched, src.data(), 16);
+        w.thread.join();
+        CHECK(w.result.load() == static_cast<int>(tox2::StoreWait::Epoch));
+        CHECK(Clock::now() - put_at < milliseconds(100));
+        CHECK(table.stats().notifies == notifies_before + 1);
+    }
+
+    // A wildcard waiter is woken by a write to any line.
+    {
+        Waiter w;
+        start(w, table.storeEpoch(), tox2::kWatchAnyLine);
+        settle();
+        const std::uint64_t notifies_before = table.stats().notifies;
+        table.put(base, kUnrelated, src.data(), 16);
+        w.thread.join();
+        CHECK(w.result.load() == static_cast<int>(tox2::StoreWait::Epoch));
+        CHECK(table.stats().notifies == notifies_before + 1);
+    }
+
+    // A line that shares the stripe invalidates the reservation (lost()), so it wakes the waiter too.
+    {
+        Waiter w;
+        start(w, table.storeEpoch(), kWatched);
+        settle();
+        table.put(base, kSameStripe, src.data(), 16);
+        w.thread.join();
+        CHECK(w.result.load() == static_cast<int>(tox2::StoreWait::Epoch));
+    }
+
+    // A multi-line PUT wakes the waiters of the lines in the middle and at both ends of its range, and so do the
+    // single-line writers.
+    for (const std::uint32_t line : {0x2000u, 0x2080u, 0x2300u}) {
+        Waiter w;
+        start(w, table.storeEpoch(), line);
+        settle();
+        table.put(base, 0x2000 + 100, src.data(), 0x300);  // lines 0x2000..0x2300
+        w.thread.join();
+        CHECK(w.result.load() == static_cast<int>(tox2::StoreWait::Epoch));
+    }
+    {
+        Waiter w;
+        start(w, table.storeEpoch(), 0x3000);
+        settle();
+        table.put(base, 0x3000 - 16, src.data(), 0x400);  // starts one line below, ends well above
+        w.thread.join();
+        CHECK(w.result.load() == static_cast<int>(tox2::StoreWait::Epoch));
+    }
+    {
+        tox2::Reservation res;
+        std::uint8_t ls[128];
+        table.getllar(base, 0x4000, ls, res);
+        Waiter w;
+        start(w, table.storeEpoch(), 0x4000);
+        settle();
+        std::uint8_t changed[128];
+        std::memset(changed, 0x11, sizeof(changed));
+        CHECK(table.putllc(base, 0x4000, changed, res));
+        w.thread.join();
+        CHECK(w.result.load() == static_cast<int>(tox2::StoreWait::Epoch));
+    }
+    {
+        Waiter w;
+        start(w, table.storeEpoch(), 0x4000);
+        settle();
+        table.putlluc(base, 0x4000, src.data());
+        w.thread.join();
+        CHECK(w.result.load() == static_cast<int>(tox2::StoreWait::Epoch));
+    }
+
+    // wake() ends a line waiter's wait for a halt, and a halt that was set before the wait returns at once.
+    {
+        std::uint32_t halt = 0;
+        Waiter w;
+        start(w, table.storeEpoch(), kWatched, &halt);
+        settle();
+        __atomic_store_n(&halt, 1u, __ATOMIC_RELEASE);
+        table.wake();
+        w.thread.join();
+        CHECK(w.result.load() == static_cast<int>(tox2::StoreWait::Halt));
+        CHECK(table.waitStoreEpoch(table.storeEpoch(), &halt, milliseconds(3000), kWatched) == tox2::StoreWait::Halt);
+    }
+
+    // One more line waiter than slots: the extra one is a wildcard, and every waiter is woken by its own line.
+    {
+        constexpr int kLineWaiters = static_cast<int>(tox2::kWatchSlots);
+        std::array<Waiter, kLineWaiters + 1> waiters;
+        const auto lineOf = [](int i) { return 0x10000 + i * tox2::kReservationLineSize; };
+        const std::uint64_t seen = table.storeEpoch();
+        for (int i = 0; i < kLineWaiters; i++) start(waiters[i], seen, lineOf(i));
+        settle();
+        // Every slot is taken by a different waiter, so nobody hears a write that none of them watch.
+        std::uint64_t notifies_before = table.stats().notifies;
+        table.put(base, kUnrelated, src.data(), 16);
+        CHECK(table.stats().notifies == notifies_before);
+        for (int i = 0; i < kLineWaiters; i++) CHECK(waiters[i].result.load() == kPending);
+
+        // The 17th has no slot left and becomes a wildcard, which hears that write.
+        start(waiters[kLineWaiters], table.storeEpoch(), lineOf(kLineWaiters));
+        settle();
+        notifies_before = table.stats().notifies;
+        table.put(base, kUnrelated, src.data(), 16);
+        CHECK(table.stats().notifies == notifies_before + 1);
+
+        for (int i = 0; i <= kLineWaiters; i++) table.put(base, lineOf(i), src.data(), 16);
+        for (auto& w : waiters) {
+            w.thread.join();
+            CHECK(w.result.load() == static_cast<int>(tox2::StoreWait::Epoch));
+        }
+    }
 }
 
 // A failed store-conditional locks the stripe and restores it unchanged; lost() must not report that as a
@@ -3081,6 +3231,7 @@ int main(int argc, char** argv) {
     testUnchangedChunkSurvivesRace();
     testWaitForStoreEpoch();
     testWaitersAreNotLost();
+    testUnrelatedPutDoesNotNotify();
     testFailedWritersDoNotLoseReservation();
     testGetllarIsNotTorn();
     testSharedTable();
