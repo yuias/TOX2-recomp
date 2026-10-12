@@ -93,6 +93,8 @@ struct Options {
     std::uint32_t dump_frames_every = 1;
     std::uint32_t resolution_scale = 1;
     bool resolution_scale_given = false;
+    tox2::AaMode aa_mode = tox2::AaMode::Msaa;
+    bool aa_mode_given = false;
     std::string shader_cache;
     std::vector<std::uint32_t> rsx_capture_frames;
     std::vector<tox2::GuestDumpSpec> dumps;  // --dump-guest
@@ -198,6 +200,7 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const Options& opt, std:
     render_options.dump_dir = opt.dump_frames;
     render_options.dump_every = opt.dump_frames_every;
     render_options.resolution_scale = opt.resolution_scale;
+    render_options.aa_mode = opt.aa_mode;
     render_options.shader_cache = opt.shader_cache.empty() ? std::filesystem::path("generated") / "shader_cache"
                                                            : std::filesystem::path(opt.shader_cache);
     // Requested PNG dumps follow --dump-frames so they land next to the periodic ones.
@@ -280,7 +283,8 @@ void printUsage() {
             "                [--pad-script FILE] [--pad-probe] [--audio none|wasapi] [--audio-dump FILE]\n"
             "                [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]\n"
             "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
-            "                [--resolution-scale N] [--vk-validation] [--no-window] [--frame-limit 60|off]\n"
+            "                [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]\n"
+            "                [--frame-limit 60|off]\n"
             "                [--dump-guest ADDR:SIZE:FILE]...\n",
             stderr);
 }
@@ -414,6 +418,16 @@ bool parseArgs(int argc, char** argv, Options& opt) {
                 return false;
             }
             opt.resolution_scale_given = true;
+        } else if (arg == "--aa-mode") {
+            std::string text;
+            if (!value(text)) return false;
+            const std::optional<tox2::AaMode> mode = tox2::parseAaMode(text);
+            if (!mode) {
+                std::fprintf(stderr, "error: --aa-mode needs supersample|msaa\n");
+                return false;
+            }
+            opt.aa_mode = *mode;
+            opt.aa_mode_given = true;
         } else if (arg == "--frame-limit") {
             std::string name;
             if (!value(name)) return false;
@@ -458,11 +472,11 @@ bool parseArgs(int argc, char** argv, Options& opt) {
     // overrides that and then conflicts with it. The other options have no effect without a renderer.
     opt.render_vulkan = opt.render_flag.value_or(!opt.dump_frames.empty() || opt.window);
     const bool render_option = !opt.dump_frames.empty() || opt.dump_every_given || !opt.shader_cache.empty() ||
-                               opt.vk_validation || opt.resolution_scale_given;
+                               opt.vk_validation || opt.resolution_scale_given || opt.aa_mode_given;
     if (render_option && !opt.render_vulkan) {
         std::fputs(
-                "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale and --vk-validation "
-                "need --render vulkan\n",
+                "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode and "
+                "--vk-validation need --render vulkan\n",
                 stderr);
         return false;
     }

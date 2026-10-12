@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <format>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -38,7 +39,8 @@ void printUsage() {
             "usage: tox2_rsxreplay CAPTURE [--out DIR]\n"
             "                      [--compare PNG [--compare-rect X,Y,W,H] [--max-diff N] [--max-mean X]\n"
             "                       [--max-differing P]]\n"
-            "                      [--resolution-scale N] [--no-validation] [--shader-cache DIR]\n"
+            "                      [--resolution-scale N] [--aa-mode supersample|msaa] [--no-validation]\n"
+            "                      [--shader-cache DIR]\n"
             "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture\n"
             "  --out DIR           write the displayed frame as DIR/<capture name>.png\n"
             "  --compare PNG       diff the displayed frame against PNG (box-downsampled first when it is a whole\n"
@@ -49,6 +51,9 @@ void printUsage() {
             "  --max-differing P   with --compare: fail when more than P percent of the pixels differ\n"
             "  --resolution-scale N  render every target at N times its guest size (1..4, default 1); the PNG is\n"
             "                      written at that size\n"
+            "  --aa-mode M         how anti-aliased surfaces are drawn: msaa (2-sample multisampling, default) or\n"
+            "                      supersample (one sample per memory-layout pixel); msaa falls back to supersample\n"
+            "                      on a device without 2-sample support\n"
             "  --no-validation     do not enable the Vulkan validation layer\n"
             "  --shader-cache DIR  directory of the on-disk SPIR-V cache\n",
             stderr);
@@ -167,6 +172,7 @@ int main(int argc, char** argv) {
     std::string shader_cache;
     bool validation = true;
     std::uint32_t resolution_scale = 1;
+    tox2::AaMode aa_mode = tox2::AaMode::Msaa;
     std::uint32_t rect[4] = {};  // --compare-rect: x, y, width, height
     bool has_rect = false;
     // Thresholds of --compare; a NaN limit is not checked.
@@ -187,6 +193,16 @@ int main(int argc, char** argv) {
                 return 2;
             }
             resolution_scale = static_cast<std::uint32_t>(value);
+            i++;
+            continue;
+        }
+        if (arg == "--aa-mode") {
+            const std::optional<tox2::AaMode> mode = i + 1 < argc ? tox2::parseAaMode(argv[i + 1]) : std::nullopt;
+            if (!mode) {
+                std::fputs("error: --aa-mode takes supersample|msaa\n", stderr);
+                return 2;
+            }
+            aa_mode = *mode;
             i++;
             continue;
         }
@@ -270,13 +286,16 @@ int main(int argc, char** argv) {
     std::string png_text;
     std::uint32_t validation_errors = 0;
     bool validation_active = false;
+    tox2::AaMode effective_aa_mode = aa_mode;
     if (context) {
         tox2::RenderOptions render_options;
         render_options.shader_cache = shader_cache;
         render_options.resolution_scale = resolution_scale;
+        render_options.aa_mode = aa_mode;
         render_options.readback_all = true;  // the replay reads the display after its last flip
         {
             tox2::RsxRenderer renderer(*context, render_options);
+            effective_aa_mode = renderer.aaMode();
             renderer.execute(commands);
             skipped = renderer.stats().draws_skipped;
 
@@ -364,8 +383,10 @@ int main(int argc, char** argv) {
     }
 
     const std::string scale_text = resolution_scale > 1 ? std::format(", resolution scale {}", resolution_scale) : "";
-    std::printf("replay: %zu commands, %zu draws, %zu skipped%s%s\n", commands.size(), draws, skipped,
-                scale_text.c_str(), diff_text.c_str());
+    // The default (msaa) is not mentioned; a fallback to supersample is, so a log shows which mode drew the frame.
+    const std::string aa_text = effective_aa_mode == tox2::AaMode::Supersample ? ", aa supersample" : "";
+    std::printf("replay: %zu commands, %zu draws, %zu skipped%s%s%s\n", commands.size(), draws, skipped,
+                scale_text.c_str(), aa_text.c_str(), diff_text.c_str());
     // The game's census omits an empty section; a replay says so explicitly.
     const std::string section = unimplementedSection();
     std::printf("%s\n", section.empty() ? "census: rsx unimplemented 0 kinds" : section.c_str());

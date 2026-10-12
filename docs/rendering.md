@@ -592,7 +592,7 @@ no renderer and no window. Captures are derived from the game, so they are git-i
 ```sh
 tox2_rsxreplay CAPTURE [--out DIR]
                       [--compare PNG [--compare-rect X,Y,W,H] [--max-diff N] [--max-mean X] [--max-differing P]]
-                      [--resolution-scale N] [--no-validation] [--shader-cache DIR]
+                      [--resolution-scale N] [--aa-mode supersample|msaa] [--no-validation] [--shader-cache DIR]
 ```
 
 | Option | Meaning |
@@ -605,6 +605,7 @@ tox2_rsxreplay CAPTURE [--out DIR]
 | `--max-mean X` | With `--compare`: fail when the mean per-channel difference exceeds `X`. |
 | `--max-differing P` | With `--compare`: fail when more than `P` percent of the pixels differ (by more than 2 in any channel). |
 | `--resolution-scale N` | Render every target at `N` times its guest size (1 to 4, default 1; see [Resolution scale](#resolution-scale)). The PNG is `N` times the guest size, and the summary line ends with `resolution scale N` when `N` is above 1. |
+| `--aa-mode supersample\|msaa` | How surfaces in the game's anti-aliased mode are rendered (default `msaa`; see [Anti-aliased surfaces](#anti-aliased-surfaces)). `supersample` is the single-sample memory-layout image shaded per sample. `msaa` falls back to it on a device without 2-sample support (`state 2-sample multisampling unavailable` in the census). The summary line gets `, aa supersample` when the effective mode is `supersample`, and nothing for `msaa`. Any other value is a usage error. |
 | `--no-validation` | Do not enable the Vulkan validation layer, which is on by default. |
 | `--shader-cache DIR` | SPIR-V cache directory. Without it nothing is cached. |
 

@@ -11,7 +11,8 @@ tox2_game [--game-dir DIR] [--vfs-config FILE] [--elf PATH] [--libsre PATH] [--h
          [--load-only] [--png-dump DIR] [--dump-guest ADDR:SIZE:FILE]...
          [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]
          [--dump-frames DIR] [--dump-frames-every K]
-         [--shader-cache DIR] [--resolution-scale N] [--vk-validation] [--no-window] [--frame-limit 60|off]
+         [--shader-cache DIR] [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]
+         [--frame-limit 60|off]
 ```
 
 `tox2_game` loads the decrypted `EBOOT.elf` into a 4 GiB guest address space, sets up the main PPU
@@ -57,14 +58,15 @@ prefix (the census lines and the register dump of a fatal stop do not).
 | `--dump-frames-every K` | Dump every `K`-th flip instead of every one (default 1). |
 | `--shader-cache DIR` | Directory of the SPIR-V cache and the pipeline cache `pipelines.bin` (default `generated/shader_cache`). |
 | `--resolution-scale N` | Render every colour and depth target at `N` times its guest size (`N` is a whole number from 1 to 4; default 1), so the picture is `N` times sharper. The window and the `--dump-frames` PNGs are `N` times the guest frame size (2560x1440 at `N` 2 for a 1280x720 game). A target that would exceed the GPU's image size limit is rendered at a smaller scale and counted as `state surface too large for the resolution scale`. Any other value is a usage error. |
+| `--aa-mode supersample\|msaa` | How surfaces in the game's anti-aliased mode are rendered (default `msaa`). `supersample` draws them into a single-sample image in the memory layout, shaded once per sample; `msaa` is the 2-sample multisampled mode. `msaa` falls back to `supersample` (one log line and the census kind `state 2-sample multisampling unavailable`) on a device without 2-sample support. Any other value is a usage error. |
 | `--vk-validation` | Enable the Khronos validation layer. It comes with the Vulkan SDK; if it is not installed, `tox2_game` logs a warning and goes on without it. |
 | `--rsx-capture N[,M...]` | Record the given frames (1-based flip numbers) as `.tox2cap` files. See [Capture and replay](rendering.md#capture-and-replay). The overlay's `Capture next flip` button records one more frame into the same directory, `generated/rsx/captures`, with or without this option. |
 | `--rsx-census FILE` | Count the arguments the game writes to the RSX registers (surface and texture formats, vertex layouts, primitive types, draw sizes, render state, flip and vblank rates) and write them to `FILE` as JSON when the run stops. The fragment and vertex programs the game used are written next to it as `generated/rsx/fp_<hash>.bin` and `vp_<hash>.bin` (relative to the working directory). The directories are created; the file is truncated. |
 | `--frame-limit 60\|off` | Pace the flips. `60` (the default) completes at most 60 flips per second, like RPCS3's default "Auto" frame limit: a flip command that arrives early holds the command FIFO until its time. `off` completes every flip as soon as its command executes, so a headless run flips as fast as the game produces frames. Any other value is a usage error. With the window, the debug overlay can switch the limit on and off while the game runs (`Flip limiter` under Settings); the option sets the value at start-up. See [Fake RSX](rendering.md#fake-rsx). |
 
 The renderer options are a usage error (exit code 2) when the renderer is off. The window and
-`--dump-frames` switch it on; `--dump-frames-every`, `--shader-cache`, `--resolution-scale` and `--vk-validation` need one
-of them or `--render vulkan`; an explicit `--render none` conflicts with all of them.
+`--dump-frames` switch it on; `--dump-frames-every`, `--shader-cache`, `--resolution-scale`, `--aa-mode` and
+`--vk-validation` need one of them or `--render vulkan`; an explicit `--render none` conflicts with all of them.
 `--rsx-capture`, `--rsx-census` and `--frame-limit` do not need the renderer.
 
 Frame dumps are encoded on a worker thread, so dumping does not slow the game down. When the worker
