@@ -9377,6 +9377,59 @@ void testRsxConsumer() {
         emitFlips(4);
         tox2Write32(base, kControl, at);
         CHECK(unlimited.pump(100) == FifoStatus::Idle && unlimited.census().flips == 4);
+
+        // Turning the limiter off while a flip is held releases it: no hold deadline is left, and the next pump
+        // completes everything that was queued without waiting.
+        tox2::RsxConsumer switched(base);
+        switched.setFlipLimit(true);
+        emitFlips(4);
+        tox2Write32(base, kControl, at);
+        CHECK(switched.pump(100) == FifoStatus::Waiting && switched.census().flips == 1);
+        CHECK(switched.flipHoldDeadline().has_value());
+        switched.setFlipLimit(false);
+        CHECK(!switched.flipHoldDeadline() && switched.hasWork(at));
+        CHECK(switched.pump(100) == FifoStatus::Idle && switched.census().flips == 4);
+    }
+
+    // A capture requested at run time records the first whole frame that starts after the request, with no
+    // frame listed. The request before flip command 1 therefore yields frame 2 (flip 1 is already reached when
+    // the frame builder sees the write).
+    {
+        tox2Write32(base, kControl + 4, at);
+        tox2::RsxConsumer plain(base);
+        CHECK(!plain.requestCapture() && !plain.captureRequestPending() && !plain.frameBuilderLive());
+
+        tox2::RsxConsumer requesting(base);
+        requesting.enableFrameBuilder();
+        CHECK(requesting.frameBuilderLive() && !requesting.captureRequestPending());
+        CHECK(requesting.requestCapture() && requesting.captureRequestPending());
+        emit(tox2::kMethodGcmFlipCommand, {1});
+        emit(tox2::kMethodGcmFlipCommand, {1});
+        tox2Write32(base, kControl, at);
+        CHECK(requesting.pump(100) == FifoStatus::Idle && requesting.census().flips == 2);
+        std::vector<tox2::RsxConsumer::FinishedCapture> done = requesting.takeCaptures();
+        CHECK(done.size() == 1 && done[0].frame == 2 && done[0].requested);
+        CHECK(!requesting.captureRequestPending() && requesting.requestedRecording() == 2);
+        requesting.finishRequestedRecording(7);  // another frame's: ignored
+        CHECK(requesting.requestedRecording() == 2);
+        requesting.finishRequestedRecording(2);
+        CHECK(requesting.requestedRecording() == 0);
+
+        // Nothing more is recorded for later flips.
+        emit(tox2::kMethodGcmFlipCommand, {1});
+        tox2Write32(base, kControl, at);
+        CHECK(requesting.pump(100) == FifoStatus::Idle && requesting.census().flips == 3);
+        CHECK(requesting.takeCaptures().empty() && !requesting.captureRequestPending());
+    }
+
+    // The process-wide limiter switch is readable and writable without a running RSX thread.
+    {
+        CHECK(tox2::rsxFlipLimit());
+        tox2::setRsxFlipLimit(false);
+        CHECK(!tox2::rsxFlipLimit());
+        tox2::setRsxFlipLimit(true);
+        CHECK(tox2::rsxFlipLimit());
+        CHECK(!tox2::requestRsxCapture() && !tox2::rsxCaptureStatus().available);
     }
 
     // The census section is printed only while a provider is registered.

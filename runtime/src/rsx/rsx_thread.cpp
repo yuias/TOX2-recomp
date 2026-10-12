@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -147,8 +148,10 @@ bool RsxConsumer::write(std::uint32_t method, std::uint32_t value) {
         }
         // Only a completed flip command gets here. The next frame starts from the state this flip left,
         // which includes its context reset and this write.
-        if (method == kMethodGcmFlipCommand && capture_ == nullptr && captureWanted(flips_reached_ + 1)) {
-            startCapture(static_cast<std::uint32_t>(flips_reached_ + 1));
+        if (method == kMethodGcmFlipCommand && capture_ == nullptr) {
+            const auto next = static_cast<std::uint32_t>(flips_reached_ + 1);
+            const bool requested = capture_requested_.load(std::memory_order_acquire);
+            if (requested || captureWanted(next)) startCapture(next, requested);
         }
     }
     return true;
@@ -170,10 +173,13 @@ void RsxConsumer::enableFrameBuilder() {
     recording_view_ = std::make_unique<RsxRecordingMemoryView>(*memory_view_);
     builder_ = std::make_unique<RsxFrameBuilder>(*recording_view_);
     builder_->setDeferDrawEnd(true);
+    builder_live_.store(true, std::memory_order_release);
 }
 
 void RsxConsumer::disableFrameBuilder() {
     if (builder_ == nullptr || capture_ != nullptr || !capture_frames_.empty() || flips_reached_ != 0) return;
+    builder_live_.store(false, std::memory_order_release);
+    capture_requested_.store(false, std::memory_order_release);
     builder_.reset();
     recording_view_.reset();
     memory_view_.reset();
@@ -192,10 +198,29 @@ bool RsxConsumer::captureWanted(std::uint32_t frame) const {
     return std::binary_search(capture_frames_.begin(), capture_frames_.end(), frame);
 }
 
-void RsxConsumer::startCapture(std::uint32_t frame) {
+void RsxConsumer::startCapture(std::uint32_t frame, bool requested) {
     capture_frame_ = frame;
+    capture_is_requested_ = requested;
     capture_ = std::make_unique<RsxCaptureWriter>(frame - 1, *regs_, builder_->knownSurfaces());
     recording_view_->setWriter(capture_.get());
+    if (requested) {
+        // Recording first, then the request cleared, so an observer never sees neither. Only this thread
+        // clears the request; one made meanwhile is served by this capture too.
+        requested_recording_.store(frame, std::memory_order_release);
+        capture_requested_.store(false, std::memory_order_release);
+    }
+}
+
+bool RsxConsumer::requestCapture() {
+    if (!builder_live_.load(std::memory_order_acquire)) return false;
+    capture_requested_.store(true, std::memory_order_release);
+    return true;
+}
+
+void RsxConsumer::finishRequestedRecording(std::uint32_t frame) {
+    // Compare first: a newer requested capture may have started while this one's file was written.
+    std::uint32_t expected = frame;
+    requested_recording_.compare_exchange_strong(expected, 0, std::memory_order_release, std::memory_order_relaxed);
 }
 
 void RsxConsumer::finishCapture(std::uint32_t buffer) {
@@ -205,6 +230,7 @@ void RsxConsumer::finishCapture(std::uint32_t buffer) {
     done.frame = capture_frame_;
     done.writes = capture_->writeCount();
     done.ranges = capture_->rangeCount();
+    done.requested = capture_is_requested_;
     done.file = capture_->finish(state.display, state.display_count);
     finished_captures_.push_back(std::move(done));
     recording_view_->setWriter(nullptr);
@@ -420,7 +446,7 @@ void RsxConsumer::getReport(std::uint32_t value) {
 }
 
 bool RsxConsumer::flipDue() {
-    if (!flip_limit_ || !flip_deadline_ || Clock::now() >= *flip_deadline_) {
+    if (!flip_limit_.load(std::memory_order_relaxed) || !flip_deadline_ || Clock::now() >= *flip_deadline_) {
         flip_waiting_ = false;
         return true;
     }
@@ -431,7 +457,7 @@ bool RsxConsumer::flipDue() {
 // RPCS3's default "Auto" frame limit (`handle_emu_flip`): the RSX thread sleeps until a target time that moves on
 // by one period per flip, measured from the previous target. It does not catch up after a late flip.
 void RsxConsumer::advanceFlipDeadline() {
-    if (!flip_limit_) return;
+    if (!flip_limit_.load(std::memory_order_relaxed)) return;
     const Clock::time_point now = Clock::now();
     Clock::time_point next = flip_deadline_ ? *flip_deadline_ + kRsxFlipPeriod : now + kRsxFlipPeriod;
     if (next <= now) next = now + kRsxFlipPeriod;
@@ -573,10 +599,17 @@ RsxUnimplementedCensus unimplementedCensus() { return {rsxUnimplementedSnapshot(
 
 RsxCommandSink g_command_sink;
 bool g_frame_builder_enabled = false;
-bool g_flip_limit = true;
+// Read by any thread through rsxFlipLimit(); the live consumer is told as well, see startRsxThread().
+std::atomic<bool> g_flip_limit{true};
+// Set once by startRsxThread, never cleared (the consumer is leaked). Sequentially consistent on purpose: it
+// pairs with g_flip_limit so that a limiter change racing the thread start is seen by at least one side.
+std::atomic<RsxConsumer*> g_live_consumer{nullptr};
 std::vector<std::uint32_t> g_capture_frames;
-std::filesystem::path g_capture_dir;
+std::filesystem::path g_capture_dir = std::filesystem::path("generated") / "rsx" / "captures";
 std::atomic<std::uint32_t> g_captures_written{0};
+// The file result of the last requested capture; the UI thread reads it while the RSX thread writes it.
+std::mutex g_capture_status_mutex;
+RsxCaptureStatus g_capture_last;
 
 // Runs once on the stop path, after the text census.
 void onStop() {
@@ -619,17 +652,30 @@ void dispatchCommands(RsxConsumer* consumer, RsxExecutor* executor, std::vector<
 }
 
 // File I/O stays out of the guest lock; a failed write is reported and the run goes on.
-void writeCaptures(const std::vector<RsxConsumer::FinishedCapture>& captures) {
+void writeCaptures(RsxConsumer* consumer, const std::vector<RsxConsumer::FinishedCapture>& captures) {
     for (const RsxConsumer::FinishedCapture& capture : captures) {
         const std::filesystem::path path = g_capture_dir / std::format("frame_{}.tox2cap", capture.frame);
         std::string error;
-        if (!writeCaptureFile(path, capture.file, error)) {
+        const bool written = writeCaptureFile(path, capture.file, error);
+        if (!written) {
             logWarn("tox2: rsx: capture of frame {} failed: {}", capture.frame, error);
-            continue;
+        } else {
+            // The stop line compares this with the --rsx-capture list, so a requested capture only counts when
+            // it is also listed.
+            if (std::binary_search(g_capture_frames.begin(), g_capture_frames.end(), capture.frame)) {
+                g_captures_written.fetch_add(1);
+            }
+            logInfo("tox2: rsx: captured frame {} -> {} ({} bytes, {} writes, {} ranges)", capture.frame,
+                    path.generic_string(), capture.file.size(), capture.writes, capture.ranges);
         }
-        g_captures_written.fetch_add(1);
-        logInfo("tox2: rsx: captured frame {} -> {} ({} bytes, {} writes, {} ranges)", capture.frame,
-                path.generic_string(), capture.file.size(), capture.writes, capture.ranges);
+        if (!capture.requested) continue;
+        {
+            std::lock_guard<std::mutex> lock(g_capture_status_mutex);
+            g_capture_last.last_frame = capture.frame;
+            g_capture_last.last_path = written ? path.generic_string() : std::string();
+            g_capture_last.last_error = written ? std::string() : error;
+        }
+        consumer->finishRequestedRecording(capture.frame);
     }
 }
 
@@ -709,7 +755,7 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
             commands = consumer->takeCommands();
             captures = consumer->takeCaptures();
             dispatchCommands(consumer, executor.get(), std::move(commands));
-            if (!captures.empty()) writeCaptures(captures);
+            if (!captures.empty()) writeCaptures(consumer, captures);
         } while (status == FifoStatus::Budget);
     }
 }
@@ -722,7 +768,32 @@ void setRsxCommandSink(RsxCommandSink sink) { g_command_sink = std::move(sink); 
 
 void setRsxFrameBuilderEnabled(bool enabled) { g_frame_builder_enabled = enabled; }
 
-void setRsxFlipLimit(bool enabled) { g_flip_limit = enabled; }
+void setRsxFlipLimit(bool enabled) {
+    g_flip_limit.store(enabled);
+    if (RsxConsumer* consumer = g_live_consumer.load()) consumer->setFlipLimit(enabled);
+}
+
+bool rsxFlipLimit() { return g_flip_limit.load(); }
+
+bool requestRsxCapture() {
+    RsxConsumer* consumer = g_live_consumer.load();
+    return consumer != nullptr && consumer->requestCapture();
+}
+
+RsxCaptureStatus rsxCaptureStatus() {
+    RsxCaptureStatus status;
+    if (const RsxConsumer* consumer = g_live_consumer.load()) {
+        // In this order: the request is cleared only after the recording frame is published.
+        status.available = consumer->frameBuilderLive();
+        status.pending = status.available && consumer->captureRequestPending();
+        status.recording = consumer->requestedRecording();
+    }
+    std::lock_guard<std::mutex> lock(g_capture_status_mutex);
+    status.last_frame = g_capture_last.last_frame;
+    status.last_path = g_capture_last.last_path;
+    status.last_error = g_capture_last.last_error;
+    return status;
+}
 
 void setRsxExecutorFactory(RsxExecutorFactory factory) {
     g_executor_factory = std::move(factory);
@@ -741,7 +812,11 @@ void startRsxThread(std::uint8_t* base) {
     if (g_consumer != nullptr) return;
     // Leaked: the thread runs until the process ends.
     g_consumer = new RsxConsumer(base);
-    g_consumer->setFlipLimit(g_flip_limit);
+    // Published before the limiter is read, so a setRsxFlipLimit() racing this is usually seen by one side.
+    // Both running at the same instant can still leave the consumer one switch behind; the overlay, the only
+    // run-time caller, starts after the first flip.
+    g_live_consumer.store(g_consumer);
+    g_consumer->setFlipLimit(g_flip_limit.load());
     setRsxCensusProvider(&consumerCensus);
     setRsxUnimplementedProvider(&unimplementedCensus, &rsxUnimplementedReset);
     if (!g_arg_census_file.empty()) {
