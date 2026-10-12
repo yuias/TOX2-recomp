@@ -47,15 +47,15 @@ void main() { out_color = clear.color; }
 // RSX reads a Z24S8 word as A8R8G8B8 texel bytes: A = depth bits 23..16, R = 15..8, G = 7..0, B = stencil
 // (the depth sits in the top 24 bits of the big-endian word). This is the layout RPCS3 rebuilds in
 // `RSXFragmentTextureDepthConversion.glsl` (`decode_depth24`, `convert_z24x8_to_rgba8`), with the rounding of
-// `f32_to_unorm24`. The target is B8G8R8A8 and its view is the identity, so the output vector is the (R, G, B, A)
-// of the texel.
+// `f32_to_unorm24`. The clamp keeps depth 1.0 at 0xFFFFFF: 1.0 * 16777215.0 + 0.5 rounds up to 2^24 in float32.
+// The target is B8G8R8A8 and its view is the identity, so the output vector is the (R, G, B, A) of the texel.
 constexpr const char* kDepthConvertFragmentGlsl = R"(#version 450
 layout(set = 0, binding = 0) uniform sampler2D depth_tex;
 layout(set = 0, binding = 1) uniform usampler2D stencil_tex;
 layout(location = 0) out vec4 out_color;
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
-  uint z = uint(floor(texelFetch(depth_tex, p, 0).r * 16777215.0 + 0.5));
+  uint z = min(uint(floor(texelFetch(depth_tex, p, 0).r * 16777215.0 + 0.5)), 0xFFFFFFu);
   uint s = texelFetch(stencil_tex, p, 0).r;
   out_color = vec4(float((z >> 8) & 0xFFu), float(z & 0xFFu), float(s), float(z >> 16)) / 255.0;
 }
@@ -80,7 +80,7 @@ layout(location = 0) out vec4 out_color;
 void main() {
 )";
 constexpr const char* kDepthConvertMsEnd =
-        R"(  uint z = uint(floor(texelFetch(depth_tex, src, sample_index).r * 16777215.0 + 0.5));
+        R"(  uint z = min(uint(floor(texelFetch(depth_tex, src, sample_index).r * 16777215.0 + 0.5)), 0xFFFFFFu);
   uint s = texelFetch(stencil_tex, src, sample_index).r;
   out_color = vec4(float((z >> 8) & 0xFFu), float(z & 0xFFu), float(s), float(z >> 16)) / 255.0;
 }

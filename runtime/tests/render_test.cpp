@@ -2136,6 +2136,7 @@ void testRendererFloatSurface(tox2::VkContext& ctx) {
 // R = 15..8, G = 7..0, B = stencil.
 constexpr std::uint32_t kDepthFirst = 0x123456, kStencilFirst = 0x78;
 constexpr std::uint32_t kDepthSecond = 0x6789A0, kStencilSecond = 0x9A;
+constexpr std::uint32_t kDepthFar = 0xFFFFFF, kStencilFar = 0x3C;  // depth 1.0 must not round up to 2^24
 constexpr std::uint32_t depthWordArgb(std::uint32_t depth, std::uint32_t stencil) {
     return ((depth >> 16) << 24) | (((depth >> 8) & 0xFF) << 16) | ((depth & 0xFF) << 8) | stencil;
 }
@@ -2148,7 +2149,8 @@ bool depthWordNear(std::uint32_t argb, std::uint32_t depth, std::uint32_t stenci
 }
 
 // The depth surface is cleared to the first value, two quads (pixels 16..32 and 32..48) read it as an A8R8G8B8
-// texture, then a clear of depth and stencil alone sets the second value and a small quad (28..36) reads it.
+// texture, then a clear of depth and stencil alone sets the second value and a small quad (28..36) reads it, and a
+// third such clear sets the far plane, read by a quad at 52..60.
 std::vector<std::uint8_t> makeDepthTextureCapture() {
     using namespace tox2::rsx_synthetic;
     SceneBuilder scene;
@@ -2166,6 +2168,10 @@ std::vector<std::uint8_t> makeDepthTextureCapture() {
     scene.write(tox2::kMethodNv4097SetZstencilClearValue, (kDepthSecond << 8) | kStencilSecond);
     scene.write(tox2::kMethodNv4097ClearSurface, 0x03);
     putSurfaceQuad(scene, 28, 36);
+    scene.drawStrip(4);
+    scene.write(tox2::kMethodNv4097SetZstencilClearValue, (kDepthFar << 8) | kStencilFar);
+    scene.write(tox2::kMethodNv4097ClearSurface, 0x03);
+    putSurfaceQuad(scene, 52, 60);
     scene.drawStrip(4);
     return scene.finish();
 }
@@ -2187,10 +2193,11 @@ void testRendererDepthTexture(tox2::VkContext& ctx) {
     CHECK(depthWordNear(pixelArgb(bgra, width, 20, 32), kDepthFirst, kStencilFirst));
     CHECK(depthWordNear(pixelArgb(bgra, width, 44, 32), kDepthFirst, kStencilFirst));
     CHECK(depthWordNear(pixelArgb(bgra, width, 32, 32), kDepthSecond, kStencilSecond));
+    CHECK(pixelArgb(bgra, width, 56, 32) == depthWordArgb(kDepthFar, kStencilFar));
     CHECK(pixelArgb(bgra, width, 2, 2) == 0xFF000000);
-    // The surface is rewritten once for the two draws that read it unchanged, and again after the clear.
-    CHECK(renderer.stats().depth_conversions == 2);
-    CHECK(renderer.stats().draws == 3 && renderer.stats().draws_skipped == 0);
+    // The surface is rewritten once for the two draws that read it unchanged, and again after each clear.
+    CHECK(renderer.stats().depth_conversions == 3);
+    CHECK(renderer.stats().draws == 4 && renderer.stats().draws_skipped == 0);
     for (const auto& [name, count] : tox2::rsxUnimplementedSnapshot()) {
         std::fprintf(stderr, "unimplemented: %s: %llu\n", name.c_str(), static_cast<unsigned long long>(count));
     }
@@ -3489,10 +3496,11 @@ void testRendererScaledTargetsAsTextures(tox2::VkContext& ctx) {
           pixelArgb(frame.bgra, frame.width, 2, 2) == kAliasColor);
     CHECK(frame.ok && unimplementedCount("texture alias of unknown render target") == 1);
 
-    // Depth cleared, then read as A8R8G8B8, including after a second clear.
+    // Depth cleared, then read as A8R8G8B8, including after later clears and at the far plane.
     frame = expectScaleInvariant(ctx, "depth as A8R8G8B8", {makeDepthTextureCapture()}, 0);
-    CHECK(frame.ok && frame.stats.depth_conversions == 2);
+    CHECK(frame.ok && frame.stats.depth_conversions == 3);
     CHECK(frame.ok && depthWordNear(pixelArgb(frame.bgra, frame.width, 32, 32), kDepthSecond, kStencilSecond));
+    CHECK(frame.ok && pixelArgb(frame.bgra, frame.width, 56, 32) == depthWordArgb(kDepthFar, kStencilFar));
 
     // The resize scenes (inherit copies, pitch and format rules) with the expectations of the scale-1 test.
     testRendererSurfaceResize(ctx, 2);
