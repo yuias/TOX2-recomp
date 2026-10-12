@@ -271,9 +271,8 @@ public:
         if (window_ == nullptr) return;
         const std::optional<ImVec2> header = findHovered(window_->GetID("Settings"), 60.0f, 10.0f, 720.0f);
         CHECK(header.has_value());
+        closed_height_ = window_->Size.y;
         if (header) click(*header);
-        // The window sized itself to the closed sections; give the opened one room.
-        ImGui::SetWindowSize(window_, ImVec2(440.0f, 700.0f));
         frame();
         frame();
     }
@@ -315,12 +314,14 @@ public:
     }
 
     ImGuiWindow* window() const { return window_; }
+    float closedHeight() const { return closed_height_; }
 
 private:
     tox2::OverlayState& state_;
     const tox2::OverlaySources& sources_;
     ImGuiContext* context_ = nullptr;
     ImGuiWindow* window_ = nullptr;
+    float closed_height_ = 0.0f;
 };
 
 void testResolutionScalePanel() {
@@ -335,6 +336,9 @@ void testResolutionScalePanel() {
         if (probe.window() != nullptr) {
             const ImGuiID id = probe.window()->GetID("Internal resolution scale");
             CHECK(!probe.findHovered(id, kProbeX, 10.0f, kWindowBottom));
+            // The window followed the section that was opened after its first frames, and nothing is clipped.
+            CHECK(probe.window()->Size.y > probe.closedHeight());
+            CHECK(!probe.window()->ScrollbarY && !probe.window()->ScrollbarX);
         }
         CHECK(state.resolution_scale_request == 0);
     }

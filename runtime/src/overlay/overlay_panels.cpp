@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cfloat>
 #include <cstddef>
 #include <cstdio>
 #include <string>
@@ -18,7 +19,8 @@ namespace {
 
 constexpr float kBaseFontSize = 13.0f;  // the default font size before DPI scaling
 constexpr float kWindowOffset = 10.0f;
-constexpr float kWindowWidth = 440.0f;
+constexpr float kMinWindowWidth = 440.0f;  // the window grows with its content; this keeps its width steady
+constexpr float kMaxWindowWidth = 720.0f;  // a long path or kind name wraps or clips instead of stretching it
 constexpr float kFrameGraphHeight = 60.0f;
 constexpr float kMinGraphMaxMs = 33.4f;  // keeps a steady 60 Hz line in the lower half of the graph
 
@@ -189,9 +191,12 @@ void drawOverlayWindow(OverlayState& state, const OverlaySources& sources) {
     // The font is sized for the monitor DPI when the overlay starts, so its size doubles as the scale.
     const float scale = ImGui::GetFontSize() / kBaseFontSize;
     ImGui::SetNextWindowPos(ImVec2(kWindowOffset * scale, kWindowOffset * scale), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(kWindowWidth * scale, 0.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(kMinWindowWidth * scale, 0.0f),
+                                        ImVec2(kMaxWindowWidth * scale, FLT_MAX));
 
-    if (ImGui::Begin("tox2")) {
+    // The sections open and close, so the size follows the content on every frame instead of only on the first;
+    // otherwise a section opened later is clipped and wide labels are cut off.
+    if (ImGui::Begin("tox2", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::SetNextItemOpen(true, ImGuiCond_FirstUseEver);
         if (ImGui::CollapsingHeader("Stats")) drawStats(state);
         if (ImGui::CollapsingHeader("Settings")) drawSettings(state, sources);
