@@ -105,6 +105,9 @@ struct OverlayState {
     bool dump_requested = false;                 // set by the panel, taken by DebugOverlay::onFlip
     std::uint32_t resolution_scale = 0;          // last value the renderer reported; 0 = unknown
     std::uint32_t resolution_scale_request = 0;  // set by the panel, taken by DebugOverlay::onFlip; 0 = none
+    std::optional<AaMode> aa_mode;               // last effective mode the renderer reported; unset = unknown
+    bool msaa_available = false;                 // last value the renderer reported; AaMode::Msaa is selectable
+    std::optional<AaMode> aa_mode_request;       // set by the panel, taken by DebugOverlay::onFlip; unset = none
 
     // Calls the providers: audio at most every 250 ms, unimplemented every 500 ms, the rest every call.
     // The audio and unimplemented snapshots take locks or copy maps, which a per-frame call would not need.

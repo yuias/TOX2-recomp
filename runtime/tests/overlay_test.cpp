@@ -374,19 +374,82 @@ void testResolutionScalePanel() {
     }
 }
 
+// Draws the open Settings panel with every combination of reported mode and MSAA support; ImGui asserts on a
+// Begin/End mismatch, so reaching the end is the check.
+void testAntiAliasingPanel() {
+    const tox2::OverlaySources sources = makeFakeSources();
+    constexpr float kProbeX = 60.0f;
+    constexpr float kWindowBottom = 720.0f;
+
+    const std::optional<tox2::AaMode> modes[] = {std::nullopt, tox2::AaMode::Supersample, tox2::AaMode::Msaa};
+    for (const std::optional<tox2::AaMode>& mode : modes) {
+        for (const bool msaa_available : {false, true}) {
+            tox2::OverlayState state;
+            state.aa_mode = mode;
+            state.msaa_available = msaa_available;
+            SettingsProbe probe(state, sources);
+            if (probe.window() == nullptr) continue;
+            const ImGuiID id = probe.window()->GetID("Anti-aliasing");
+            const std::optional<ImVec2> combo = probe.findHovered(id, kProbeX, 10.0f, kWindowBottom);
+            // Unknown mode: the combo is disabled.
+            CHECK(combo.has_value() == mode.has_value());
+            CHECK(!probe.window()->ScrollbarY && !probe.window()->ScrollbarX);
+            CHECK(!state.aa_mode_request);
+            if (!combo) continue;
+
+            probe.click(*combo);
+            ImGuiContext& g = *ImGui::GetCurrentContext();
+            CHECK(g.OpenPopupStack.Size == 1);
+            if (g.OpenPopupStack.Size != 1 || g.OpenPopupStack[0].Window == nullptr) continue;
+            ImGuiWindow* popup = g.OpenPopupStack[0].Window;
+            const auto find = [&](const char* label) {
+                return probe.findHovered(popup->GetID(label), popup->Pos.x + 10.0f, popup->Pos.y,
+                                         popup->Pos.y + popup->Size.y);
+            };
+
+            // The current mode is not a change; MSAA cannot be picked when the device lacks it.
+            const std::optional<ImVec2> supersample = find("Supersample");
+            const std::optional<ImVec2> msaa = find("MSAA 2x");
+            CHECK(supersample.has_value());
+            CHECK(msaa.has_value() == msaa_available);
+            // A click closes the popup, so each state makes one.
+            if (mode == tox2::AaMode::Msaa && supersample) {
+                probe.click(*supersample);
+                CHECK(state.aa_mode_request == tox2::AaMode::Supersample);
+            } else if (mode == tox2::AaMode::Supersample && msaa) {
+                probe.click(*msaa);
+                CHECK(state.aa_mode_request == tox2::AaMode::Msaa);
+            } else if (mode == tox2::AaMode::Supersample && supersample) {
+                probe.click(*supersample);
+                CHECK(!state.aa_mode_request);
+            }
+        }
+    }
+}
+
 void testPresentRequests() {
     tox2::OverlayState state;
     state.dump_requested = true;
     state.resolution_scale_request = 3;
+    state.aa_mode_request = tox2::AaMode::Supersample;
     tox2::PresentOverlayRequests requests = tox2::takePresentRequests(state);
     CHECK(requests.dump_display);
     CHECK(requests.resolution_scale == 3);
+    CHECK(requests.aa_mode == tox2::AaMode::Supersample);
     CHECK(!state.dump_requested);
     CHECK(state.resolution_scale_request == 0);
+    CHECK(!state.aa_mode_request);
 
     requests = tox2::takePresentRequests(state);
     CHECK(!requests.dump_display);
     CHECK(requests.resolution_scale == 0);
+    CHECK(!requests.aa_mode);
+
+    // The reported mode is a status, not a request.
+    state.aa_mode = tox2::AaMode::Msaa;
+    requests = tox2::takePresentRequests(state);
+    CHECK(!requests.aa_mode);
+    CHECK(state.aa_mode == tox2::AaMode::Msaa);
 
     // The reported scale is a status, not a request, so taking requests leaves it alone.
     state.resolution_scale = 2;
@@ -783,6 +846,7 @@ int main() {
     testPanels();
     testPresentRequests();
     testResolutionScalePanel();
+    testAntiAliasingPanel();
     testRuntimeSources();
 
     tox2::VkContextOptions options;

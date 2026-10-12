@@ -109,8 +109,10 @@ PresentOverlayRequests takePresentRequests(OverlayState& state) {
     PresentOverlayRequests requests;
     requests.dump_display = state.dump_requested;
     requests.resolution_scale = state.resolution_scale_request;
+    requests.aa_mode = state.aa_mode_request;
     state.dump_requested = false;
     state.resolution_scale_request = 0;
+    state.aa_mode_request.reset();
     return requests;
 }
 

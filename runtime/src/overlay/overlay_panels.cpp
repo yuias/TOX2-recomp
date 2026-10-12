@@ -85,6 +85,25 @@ void drawResolutionScale(OverlayState& state) {
     ImGui::EndDisabled();
 }
 
+const char* aaModeLabel(AaMode mode) { return mode == AaMode::Msaa ? "MSAA 2x" : "Supersample"; }
+
+// Same pending-request display as the scale combo. The mode is unset when no renderer reports it.
+void drawAntiAliasing(OverlayState& state) {
+    ImGui::BeginDisabled(!state.aa_mode.has_value());
+    const std::optional<AaMode> shown = state.aa_mode_request ? state.aa_mode_request : state.aa_mode;
+    if (ImGui::BeginCombo("Anti-aliasing", shown ? aaModeLabel(*shown) : "unknown")) {
+        for (const AaMode mode : {AaMode::Supersample, AaMode::Msaa}) {
+            const bool selectable = mode != AaMode::Msaa || state.msaa_available;
+            ImGui::BeginDisabled(!selectable);
+            if (ImGui::Selectable(aaModeLabel(mode), shown == mode) && shown != mode) state.aa_mode_request = mode;
+            ImGui::EndDisabled();
+        }
+        if (!state.msaa_available) ImGui::TextDisabled("MSAA is unavailable on this device");
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+}
+
 void drawSettings(OverlayState& state, const OverlaySources& sources) {
     ImGui::BeginDisabled(!sources.set_flip_limit);
     bool flip_limit = state.flip_limit;
@@ -109,6 +128,7 @@ void drawSettings(OverlayState& state, const OverlaySources& sources) {
     ImGui::EndDisabled();
 
     drawResolutionScale(state);
+    drawAntiAliasing(state);
 
     // Not wired to anything yet; shown so the layout of the finished panel is visible.
     ImGui::SeparatorText("(not implemented)");

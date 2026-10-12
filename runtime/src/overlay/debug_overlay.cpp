@@ -98,6 +98,8 @@ PresentOverlayRequests DebugOverlay::onFlip(const PresentFrameInfo& info) {
     state_.dumps = info.dumps;
     state_.last_dump = info.last_requested_dump;
     state_.resolution_scale = info.resolution_scale;
+    state_.aa_mode = info.aa_mode;
+    state_.msaa_available = info.msaa_available;
     return takePresentRequests(state_);
 }
 
