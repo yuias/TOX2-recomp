@@ -4,11 +4,13 @@
 // is constructed and hands its counters over when it is destroyed, so the totals survive the fresh objects
 // that lv2 builds at every group start.
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 #include "core/latency_stats.h"
+#include "core/reservation.h"
 
 namespace tox2 {
 
@@ -24,6 +26,18 @@ void spuCensusStarted();
 
 // The lines of the "census: spu" section; empty when no SPU thread started since the last reset.
 std::vector<std::string> spuCensusLines();
+
+// How the SPU waits on the reservation table in SpuChannels::readEventStat ended, process-wide. A reservation lost
+// through a plain PPU store does not move the store epoch, so it shows up as a Timeout that is followed by a lost
+// reservation: that is what `lost_wait` counts (and times, from the start of the wait that timed out). Monotonic;
+// not cleared by the census reset, so take deltas.
+struct SpuReservationWaits {
+    std::uint64_t epoch = 0, timeout = 0, halt = 0;
+    LatencySnapshot lost_wait;  // count = Timeout returns after which the reservation was found lost
+};
+void spuCountReservationWait(StoreWait reason);
+void spuCountLostAfterTimeout(std::chrono::microseconds waited);
+SpuReservationWaits spuReservationWaitSnapshot();
 
 // The blocking-receive timing of one thread (see SpuThread::receiveBusy), summed over its runs.
 struct SpuReceiveRow {

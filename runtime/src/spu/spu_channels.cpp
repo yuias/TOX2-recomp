@@ -6,6 +6,7 @@
 
 #include "core/census.h"
 #include "core/reservation.h"
+#include "spu/spu_census.h"
 
 namespace tox2 {
 namespace {
@@ -151,6 +152,10 @@ bool SpuChannels::readEventStat(std::uint32_t site, std::uint32_t* value) {
     }
     const bool wants_reservation = (mask & spu_event::kLockLineLost) != 0;
     std::optional<BlockedScope> blocked;
+    // Set after a wait that ended by timeout. A reservation found lost right after such a wait was not announced by
+    // the table, which means a plain store broke it.
+    bool after_timeout = false;
+    microseconds timeout_waited{0};
     for (;;) {
         // A mailbox push that lands while this thread waits on the table must wake it. The flag goes up
         // before anything is sampled; the fences pair with the pusher's (a missed wake costs 1 ms).
@@ -160,6 +165,9 @@ bool SpuChannels::readEventStat(std::uint32_t site, std::uint32_t* value) {
         // Order matters (core/reservation.h): epoch first, then the sampling, then the wait.
         const std::uint64_t seen = reservations().storeEpoch();
         const std::uint32_t status = eventStatus() & mask;
+        // The previous pass saw no lost-line event, so the bit is new.
+        if (after_timeout && (status & spu_event::kLockLineLost) != 0) spuCountLostAfterTimeout(timeout_waited);
+        after_timeout = false;
         if (status != 0) {
             table_wait_.store(false, std::memory_order_relaxed);
             *value = status;
@@ -185,7 +193,14 @@ bool SpuChannels::readEventStat(std::uint32_t site, std::uint32_t* value) {
                 timeout = std::clamp(left, microseconds(0), timeout);
             }
             // Only a write to the reserved line matters here; the mailbox push and the halt wake the table.
-            reservations().waitStoreEpoch(seen, &thread_.context().halt, timeout, mfc_.reservationLine());
+            const Clock::time_point wait_start = Clock::now();
+            const StoreWait reason =
+                    reservations().waitStoreEpoch(seen, &thread_.context().halt, timeout, mfc_.reservationLine());
+            spuCountReservationWait(reason);
+            if (reason == StoreWait::Timeout) {
+                after_timeout = true;
+                timeout_waited = std::chrono::duration_cast<microseconds>(Clock::now() - wait_start);
+            }
             continue;
         }
         std::unique_lock lock(mutex_);

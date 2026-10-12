@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <format>
 #include <map>
@@ -89,6 +91,20 @@ Registry& registry() {
     return *r;
 }
 
+// A wait that ends by timeout normally lasts the 1 ms poll; twice that flags a delayed wake-up.
+constexpr std::uint64_t kReservationWaitOverUs = 2000;
+
+struct ReservationWaitCounters {
+    std::atomic<std::uint64_t> epoch{0}, timeout{0}, halt{0};
+    LatencyStats lost_wait{kReservationWaitOverUs};
+};
+
+// Leaked like the registry: SPU threads may still wait while the process shuts down.
+ReservationWaitCounters& reservationWaits() {
+    static ReservationWaitCounters* c = new ReservationWaitCounters;
+    return *c;
+}
+
 // Threads that lv2 numbered keep one row across restarts; threads outside lv2 (id 0) each have their own.
 std::uint64_t keyFor(const SpuThread& thread, std::uint32_t anonymous) {
     return thread.id() != 0 ? thread.id() : (std::uint64_t{1} << 32) + anonymous;
@@ -154,6 +170,29 @@ void spuCensusRemove(SpuThread& thread) {
     if (const std::optional<ThreadRow> row = describeRow(thread)) r.gone[it->key] = *row;
     if (thread.receiveWait().count != 0) r.receive_gone[it->key].add(thread);
     r.live.erase(it);
+}
+
+void spuCountReservationWait(StoreWait reason) {
+    ReservationWaitCounters& c = reservationWaits();
+    switch (reason) {
+        case StoreWait::Epoch: c.epoch.fetch_add(1, std::memory_order_relaxed); break;
+        case StoreWait::Timeout: c.timeout.fetch_add(1, std::memory_order_relaxed); break;
+        case StoreWait::Halt: c.halt.fetch_add(1, std::memory_order_relaxed); break;
+    }
+}
+
+void spuCountLostAfterTimeout(std::chrono::microseconds waited) {
+    reservationWaits().lost_wait.record(static_cast<std::uint64_t>(std::max<std::int64_t>(waited.count(), 0)));
+}
+
+SpuReservationWaits spuReservationWaitSnapshot() {
+    const ReservationWaitCounters& c = reservationWaits();
+    SpuReservationWaits out;
+    out.epoch = c.epoch.load(std::memory_order_relaxed);
+    out.timeout = c.timeout.load(std::memory_order_relaxed);
+    out.halt = c.halt.load(std::memory_order_relaxed);
+    out.lost_wait = c.lost_wait.snapshot();
+    return out;
 }
 
 std::vector<SpuReceiveRow> spuReceiveSnapshot() {
@@ -229,6 +268,10 @@ std::vector<std::string> spuCensusLines() {
     const ReservationStats reservation = reservations().stats();
     out.push_back(
             std::format("  reservation table: {} publishes, {} notifies", reservation.publishes, reservation.notifies));
+    const SpuReservationWaits waits = spuReservationWaitSnapshot();
+    out.push_back(std::format("  reservation waits: epoch {}, timeout {} (lost after timeout {}, wait {}), halt {}",
+                              waits.epoch, waits.timeout, waits.lost_wait.count,
+                              formatLatency(waits.lost_wait, kReservationWaitOverUs), waits.halt));
     const double seconds = std::max(static_cast<double>(systemTimeUs()) / 1e6, 1e-3);
     for (const SpuReceiveRow& row : spuReceiveSnapshot()) {
         out.push_back(std::format("  thread {:#010x} {} receive {:.1f}/s: busy {}; wait {}", row.id, row.name,

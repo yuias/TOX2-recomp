@@ -670,7 +670,8 @@ tox2::PerfSource lockPerfSource() {
 }
 
 tox2::PerfSource spuPerfSource() {
-    return [prev = std::map<std::uint32_t, tox2::SpuReceiveRow>{}]() mutable -> std::string {
+    return [prev = std::map<std::uint32_t, tox2::SpuReceiveRow>{},
+            prev_waits = tox2::SpuReservationWaits{}]() mutable -> std::string {
         std::string body;
         for (const tox2::SpuReceiveRow& row : tox2::spuReceiveSnapshot()) {
             const tox2::SpuReceiveRow& before = prev[row.id];
@@ -684,6 +685,13 @@ tox2::PerfSource spuPerfSource() {
             }
             prev[row.id] = row;
         }
+        const tox2::SpuReservationWaits waits = tox2::spuReservationWaitSnapshot();
+        const std::uint64_t lost = waits.lost_wait.count - prev_waits.lost_wait.count;
+        if (waits.epoch != prev_waits.epoch || waits.timeout != prev_waits.timeout || lost != 0) {
+            body += std::format("{}rsv-wait epoch {} timeout {} lost-after-timeout {}", body.empty() ? "" : " | ",
+                                waits.epoch - prev_waits.epoch, waits.timeout - prev_waits.timeout, lost);
+        }
+        prev_waits = waits;
         return body;
     };
 }

@@ -1965,6 +1965,56 @@ void testChanLockLineLost() {
     }
 }
 
+// A reservation broken by a plain store is noticed only when the wait times out; one broken through the table ends the
+// wait with an epoch change. The counters are process-wide, so each case looks at the change it made.
+void testChanReservationWaitCounts() {
+    // Plain store: Timeout, then lost.
+    {
+        ChanFixture f;
+        CHECK(f.getllar() == 4);
+        CHECK(f.wr(tox2::chan::kWrEventMask, tox2::spu_event::kLockLineLost));
+        CHECK(f.wr(tox2::chan::kWrEventAck, tox2::spu_event::kLockLineLost));
+        const tox2::SpuReservationWaits before = tox2::spuReservationWaitSnapshot();
+        {
+            AsyncRead reader(f, tox2::chan::kRdEventStat);
+            CHECK(waitUntil([&] { return f.blockedIn("RdEventStat"); }));
+            std::this_thread::sleep_for(milliseconds(5));
+            f.otherPlainStore();
+            CHECK(waitUntil([&] { return reader.done.load(); }));
+            CHECK(reader.ok && reader.value == tox2::spu_event::kLockLineLost);
+        }
+        const tox2::SpuReservationWaits after = tox2::spuReservationWaitSnapshot();
+        CHECK(after.lost_wait.count - before.lost_wait.count == 1);
+        // The wait that timed out was timed.
+        CHECK(after.lost_wait.sum_us > before.lost_wait.sum_us);
+        CHECK(after.timeout - before.timeout >= 1);
+        CHECK(after.epoch == before.epoch);
+    }
+    // Table put: the wait ends with an epoch change. A poll timeout can expire between the version bump and the
+    // notify, which shows as a lost-after-timeout instead, so a few tries.
+    {
+        bool epoch_seen = false;
+        for (int attempt = 0; attempt < 8 && !epoch_seen; attempt++) {
+            ChanFixture f;
+            CHECK(f.getllar() == 4);
+            CHECK(f.wr(tox2::chan::kWrEventMask, tox2::spu_event::kLockLineLost));
+            CHECK(f.wr(tox2::chan::kWrEventAck, tox2::spu_event::kLockLineLost));
+            const tox2::SpuReservationWaits before = tox2::spuReservationWaitSnapshot();
+            {
+                AsyncRead reader(f, tox2::chan::kRdEventStat);
+                CHECK(waitUntil([&] { return f.blockedIn("RdEventStat"); }));
+                std::this_thread::sleep_for(milliseconds(5));
+                f.otherPutllc();
+                CHECK(waitUntil([&] { return reader.done.load(); }));
+                CHECK(reader.ok && reader.value == tox2::spu_event::kLockLineLost);
+            }
+            const tox2::SpuReservationWaits after = tox2::spuReservationWaitSnapshot();
+            epoch_seen = after.epoch - before.epoch == 1 && after.lost_wait.count == before.lost_wait.count;
+        }
+        CHECK(epoch_seen);
+    }
+}
+
 // The inbound mailbox can be replaced by one value, whatever it holds.
 void testChanReplaceInMbox() {
     ChanFixture f;
@@ -3211,12 +3261,19 @@ void testSpuCensus() {
         CHECK(f.join(group) == 0 && f.cause() == 2 && f.status() == kLvMainStatus);
     }
     std::string text = tox2::formatCensus();
-    // The table is process-wide and its totals depend on earlier tests: check the line, then drop it.
+    // The table and its wait counters are process-wide and their totals depend on earlier tests: check the two
+    // lines, then drop them.
     const std::size_t table_at = text.find("\n  reservation table: ");
     CHECK(table_at != std::string::npos);
     if (table_at != std::string::npos) {
         const std::size_t table_end = text.find('\n', table_at + 1);
-        text.erase(table_at, table_end == std::string::npos ? std::string::npos : table_end - table_at);
+        const std::size_t waits_at = text.find("\n  reservation waits: epoch ", table_at + 1);
+        CHECK(waits_at == table_end);
+        const std::size_t waits_end = waits_at == std::string::npos ? waits_at : text.find('\n', waits_at + 1);
+        if (waits_at != std::string::npos) {
+            CHECK(text.substr(waits_at, waits_end - waits_at).contains(" (lost after timeout "));
+        }
+        text.erase(table_at, waits_end == std::string::npos ? std::string::npos : waits_end - table_at);
     }
     const std::size_t at = text.find("census: spu");
     const std::string expected =
@@ -3283,6 +3340,7 @@ int main(int argc, char** argv) {
     testChanDecrementer();
     testChanLevelEvents();
     testChanLockLineLost();
+    testChanReservationWaitCounts();
     testChanReplaceInMbox();
     testChanHaltOnCondvar();
     testChanStopChildren();
