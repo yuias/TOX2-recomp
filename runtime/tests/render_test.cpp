@@ -342,6 +342,38 @@ void testFrameDump() {
     CHECK(!tox2::diffImages(image, small, diff, error));
     CHECK(!tox2::readPngRgb(dir / "missing.png", read, error));
 
+    // Box downsampling: a 4x2 image with distinct alpha, so every channel is averaged.
+    {
+        const std::uint8_t src[4 * 2 * 4] = {
+                0,   0,   0,   0,   10, 20, 30, 40, 100, 100, 100, 100, 1, 2, 3, 4,  // row 0
+                255, 255, 255, 255, 11, 22, 33, 44, 101, 102, 103, 104, 2, 2, 2, 2,  // row 1
+        };
+        std::vector<std::uint8_t> out;
+        // (2, 2): blue {0,10,255,11} -> 69 (68.75); green 74.25 -> 74; red 79.5 rounds up to 80; alpha 84.75 -> 85.
+        CHECK(tox2::downsampleBoxBgra(src, 4, 2, 2, 2, out, error));
+        CHECK(out == std::vector<std::uint8_t>({69, 74, 80, 85, 51, 52, 52, 53}));
+        // (2, 1): rows stay separate; {0,10} -> 5, {100,1} -> 51 (50.5 rounds up).
+        CHECK(tox2::downsampleBoxBgra(src, 4, 2, 2, 1, out, error));
+        CHECK(out == std::vector<std::uint8_t>({5, 10, 15, 20, 51, 51, 52, 52, 133, 139, 144, 150, 52, 52, 53, 53}));
+        // (1, 1) copies.
+        CHECK(tox2::downsampleBoxBgra(src, 4, 2, 1, 1, out, error));
+        CHECK(out == std::vector<std::uint8_t>(src, src + sizeof(src)));
+        CHECK(!tox2::downsampleBoxBgra(src, 4, 2, 0, 1, out, error));
+        CHECK(!tox2::downsampleBoxBgra(src, 4, 2, 1, 0, out, error));
+        CHECK(!tox2::downsampleBoxBgra(src, 4, 2, 3, 1, out, error));
+        CHECK(!tox2::downsampleBoxBgra(src, 4, 2, 1, 3, out, error));
+        CHECK(!tox2::downsampleBoxBgra(std::span<const std::uint8_t>(src, 8), 4, 2, 2, 2, out, error));
+
+        const tox2::RgbImage rgb = tox2::rgbFromBgra(src, 4, 2);
+        tox2::RgbImage rgb_out;
+        CHECK(tox2::downsampleBox(rgb, 2, 2, rgb_out, error));
+        CHECK(rgb_out.width == 2 && rgb_out.height == 1);
+        CHECK(rgb_out.rgb == std::vector<std::uint8_t>({80, 74, 69, 52, 52, 51}));
+        CHECK(tox2::downsampleBox(rgb, 1, 1, rgb_out, error) && rgb_out.rgb == rgb.rgb);
+        CHECK(!tox2::downsampleBox(rgb, 0, 2, rgb_out, error));
+        CHECK(!tox2::downsampleBox(rgb, 3, 1, rgb_out, error));
+    }
+
     // The dump worker writes the same bytes as converting and encoding on the calling thread.
     {
         constexpr std::uint32_t kW = 7;

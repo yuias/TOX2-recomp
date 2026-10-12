@@ -42,6 +42,15 @@ struct ImageDiff {
 // False with a reason in `error` when the sizes differ.
 bool diffImages(const RgbImage& a, const RgbImage& b, ImageDiff& diff, std::string& error);
 
+// Averages each factor_x x factor_y block of `in` (rounded to nearest) into `out`. False with a reason when a
+// factor is 0 or the size is not a multiple of the factors.
+bool downsampleBox(const RgbImage& in, std::uint32_t factor_x, std::uint32_t factor_y, RgbImage& out,
+                   std::string& error);
+// The same on readDisplay's BGRA8 rows, all four channels: the render tests compare alpha too.
+bool downsampleBoxBgra(std::span<const std::uint8_t> in, std::uint32_t width, std::uint32_t height,
+                       std::uint32_t factor_x, std::uint32_t factor_y, std::vector<std::uint8_t>& out,
+                       std::string& error);
+
 // One display readback waiting to become `path`.
 struct DumpFrame {
     std::filesystem::path path;

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <memory>
@@ -35,7 +36,8 @@ void printUsage() {
             "                      [--no-validation] [--shader-cache DIR]\n"
             "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture\n"
             "  --out DIR           write the displayed frame as DIR/<capture name>.png\n"
-            "  --compare PNG       diff the displayed frame against PNG\n"
+            "  --compare PNG       diff the displayed frame against PNG (box-downsampled first when it is a whole\n"
+            "                      multiple of the PNG's size)\n"
             "  --max-diff N        with --compare: fail when the largest channel difference exceeds N\n"
             "  --max-mean X        with --compare: fail when the mean difference exceeds X\n"
             "  --max-differing P   with --compare: fail when more than P percent of the pixels differ\n"
@@ -246,11 +248,31 @@ int main(int argc, char** argv) {
                 if (!compare_path.empty()) {
                     tox2::RgbImage reference;
                     tox2::ImageDiff diff;
-                    if (tox2::readPngRgb(compare_path, reference, error) &&
-                        tox2::diffImages(image, reference, diff, error)) {
-                        char text[128];
+                    std::uint32_t factor_x = 1;
+                    std::uint32_t factor_y = 1;
+                    bool compared = tox2::readPngRgb(compare_path, reference, error);
+                    // A frame rendered at a higher resolution scale is brought to the reference's size first;
+                    // any other size mismatch is left to diffImages to report.
+                    if (compared && reference.width != 0 && reference.height != 0 &&
+                        image.width % reference.width == 0 && image.height % reference.height == 0) {
+                        factor_x = image.width / reference.width;
+                        factor_y = image.height / reference.height;
+                    }
+                    if (compared && (factor_x > 1 || factor_y > 1)) {
+                        tox2::RgbImage reduced;
+                        compared = tox2::downsampleBox(image, factor_x, factor_y, reduced, error) &&
+                                   tox2::diffImages(reduced, reference, diff, error);
+                    } else if (compared) {
+                        compared = tox2::diffImages(image, reference, diff, error);
+                    }
+                    if (compared) {
+                        char text[160];
                         std::snprintf(text, sizeof(text), "; diff max %u mean %.3f differing %.3f%%", diff.max,
                                       diff.mean, diff.differing_percent);
+                        if (factor_x > 1 || factor_y > 1) {
+                            std::snprintf(text + std::strlen(text), sizeof(text) - std::strlen(text),
+                                          "; downsampled %ux%u", factor_x, factor_y);
+                        }
                         diff_text = text;
                         const auto exceeded = [](double value, double limit) {
                             return !std::isnan(limit) && value > limit;

@@ -239,6 +239,67 @@ bool diffImages(const RgbImage& a, const RgbImage& b, ImageDiff& diff, std::stri
 }
 
 namespace {
+
+// Shared by the RGB and BGRA entry points; `channels` is the interleaved byte count per pixel. A block sum
+// fits 32 bits for any factor product up to 2^24, far above any real scale.
+bool downsampleChannels(std::span<const std::uint8_t> in, std::uint32_t width, std::uint32_t height,
+                        std::uint32_t channels, std::uint32_t factor_x, std::uint32_t factor_y,
+                        std::vector<std::uint8_t>& out, std::string& error) {
+    if (factor_x == 0 || factor_y == 0) {
+        error = std::format("downsample factor {}x{} is not positive", factor_x, factor_y);
+        return false;
+    }
+    if (width % factor_x != 0 || height % factor_y != 0) {
+        error = std::format("image size {}x{} is not a multiple of the downsample factor {}x{}", width, height,
+                            factor_x, factor_y);
+        return false;
+    }
+    if (in.size() != static_cast<std::size_t>(width) * height * channels) {
+        error = "image data does not match its size";
+        return false;
+    }
+    const std::uint32_t out_w = width / factor_x;
+    const std::uint32_t out_h = height / factor_y;
+    const std::uint64_t block = static_cast<std::uint64_t>(factor_x) * factor_y;
+    std::vector<std::uint8_t> result(static_cast<std::size_t>(out_w) * out_h * channels);
+    for (std::uint32_t y = 0; y < out_h; y++) {
+        for (std::uint32_t x = 0; x < out_w; x++) {
+            for (std::uint32_t c = 0; c < channels; c++) {
+                std::uint64_t sum = 0;
+                for (std::uint32_t by = 0; by < factor_y; by++) {
+                    const std::size_t row = static_cast<std::size_t>(y) * factor_y + by;
+                    for (std::uint32_t bx = 0; bx < factor_x; bx++) {
+                        sum += in[(row * width + static_cast<std::size_t>(x) * factor_x + bx) * channels + c];
+                    }
+                }
+                result[(static_cast<std::size_t>(y) * out_w + x) * channels + c] =
+                        static_cast<std::uint8_t>((sum + block / 2) / block);
+            }
+        }
+    }
+    out = std::move(result);
+    return true;
+}
+
+}  // namespace
+
+bool downsampleBox(const RgbImage& in, std::uint32_t factor_x, std::uint32_t factor_y, RgbImage& out,
+                   std::string& error) {
+    std::vector<std::uint8_t> rgb;
+    if (!downsampleChannels(in.rgb, in.width, in.height, 3, factor_x, factor_y, rgb, error)) return false;
+    out.width = in.width / factor_x;
+    out.height = in.height / factor_y;
+    out.rgb = std::move(rgb);
+    return true;
+}
+
+bool downsampleBoxBgra(std::span<const std::uint8_t> in, std::uint32_t width, std::uint32_t height,
+                       std::uint32_t factor_x, std::uint32_t factor_y, std::vector<std::uint8_t>& out,
+                       std::string& error) {
+    return downsampleChannels(in, width, height, 4, factor_x, factor_y, out, error);
+}
+
+namespace {
 constexpr std::size_t kMaxFreeBuffers = 4;
 }  // namespace
 

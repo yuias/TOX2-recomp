@@ -495,7 +495,7 @@ tox2_rsxreplay CAPTURE [--out DIR] [--compare PNG [--max-diff N] [--max-mean X] 
 | --- | --- |
 | `CAPTURE` | A `.tox2cap` file. |
 | `--out DIR` | Write the displayed frame of the last flip as `DIR/<capture name>.png`. |
-| `--compare PNG` | Compare that frame with a reference image. The sizes must match. |
+| `--compare PNG` | Compare that frame with a reference image. The sizes must match, except that a frame whose width and height are whole multiples of the reference's is box-averaged down to it first (the summary line then ends with `; downsampled <fx>x<fy>`). |
 | `--max-diff N` | With `--compare`: fail when the largest per-channel difference exceeds `N`. |
 | `--max-mean X` | With `--compare`: fail when the mean per-channel difference exceeds `X`. |
 | `--max-differing P` | With `--compare`: fail when more than `P` percent of the pixels differ (by more than 2 in any channel). |
