@@ -34,7 +34,8 @@ function(tox2_overlay_add)
   tox2_overlay_add_imgui()
 
   add_library(tox2_overlay STATIC
-    runtime/src/overlay/overlay_model.cpp)
+    runtime/src/overlay/overlay_model.cpp
+    runtime/src/overlay/overlay_panels.cpp)
   target_compile_options(tox2_overlay PRIVATE -march=x86-64-v3 -Wall -Wextra)
   target_include_directories(tox2_overlay PUBLIC ${CMAKE_SOURCE_DIR}/runtime/src)
   target_link_libraries(tox2_overlay PUBLIC imgui tox2_render)

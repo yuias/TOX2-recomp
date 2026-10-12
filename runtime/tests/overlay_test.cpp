@@ -1,11 +1,14 @@
-// Self-checking tests for the debug overlay library. The model tests need no GPU or window.
+// Self-checking tests for the debug overlay library. The model and panel tests need no GPU or window.
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 
+#include "imgui.h"
+#include "imgui_internal.h"
 #include "overlay/overlay_model.h"
+#include "overlay/overlay_panels.h"
 
 namespace {
 
@@ -162,6 +165,78 @@ void testRefresh() {
     CHECK(state.unimplemented_dropped == 7);
 }
 
+tox2::OverlaySources makeFakeSources() {
+    tox2::OverlaySources sources;
+    sources.audio = [] {
+        tox2::OverlayAudioStats stats;
+        stats.output = "fake";
+        stats.max_producer_ms = 1.5;
+        stats.mean_fill_frames = 1500.0;
+        return stats;
+    };
+    sources.unimplemented = [] { return std::vector<std::pair<std::string, std::uint64_t>>{{"state: x", 2}}; };
+    sources.unimplemented_dropped = [] { return std::uint64_t{1}; };
+    sources.flip_limit = [] { return true; };
+    sources.set_flip_limit = [](bool) {};
+    sources.log_level = [] { return tox2::LogLevel::Info; };
+    sources.set_log_level = [](tox2::LogLevel) {};
+    sources.request_capture = [] { return true; };
+    sources.capture_status = [] {
+        tox2::RsxCaptureStatus status;
+        status.available = true;
+        status.last_frame = 4;
+        status.last_path = "captures/frame_4.tox2cap";
+        return status;
+    };
+    return sources;
+}
+
+// Runs three frames of the overlay window in a private ImGui context and returns whether the last one
+// produced geometry. The Vulkan backend is not involved.
+bool drawFrames(tox2::OverlayState& state, const tox2::OverlaySources& sources) {
+    ImGuiContext* context = ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.LogFilename = nullptr;
+    io.Fonts->Build();
+    io.DisplaySize = ImVec2(1280.0f, 720.0f);
+
+    bool drew = false;
+    for (int i = 0; i < 3; ++i) {
+        io.DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        tox2::drawOverlayWindow(state, sources);
+        ImGui::Render();
+        drew = ImGui::GetDrawData() != nullptr && ImGui::GetDrawData()->TotalVtxCount > 0;
+    }
+    CHECK(ImGui::FindWindowByName("tox2") != nullptr);
+    ImGui::DestroyContext(context);
+    return drew;
+}
+
+void testPanels() {
+    tox2::OverlayState state;
+    tox2::RendererStats stats;
+    for (int i = 0; i < 5; ++i) {
+        stats.flips = static_cast<std::uint64_t>(i + 1);
+        stats.draws = static_cast<std::uint64_t>(10 * (i + 1));
+        stats.draws_skipped = static_cast<std::uint64_t>(i);
+        state.frames.onFlip(stats, at(i / 60.0));
+    }
+    const tox2::OverlaySources sources = makeFakeSources();
+    state.refresh(sources, at(1.0));
+    state.dumps.written = 2;
+    state.last_dump = "frames/frame_000002.png";
+    CHECK(drawFrames(state, sources));
+
+    // The last frame ran through every section with data; clicks are not simulated, so no request is set.
+    CHECK(!state.dump_requested);
+
+    // No providers at all: every section falls back to its placeholder.
+    tox2::OverlayState empty_state;
+    CHECK(drawFrames(empty_state, tox2::OverlaySources{}));
+}
+
 }  // namespace
 
 int main() {
@@ -169,6 +244,7 @@ int main() {
     testRingWraps();
     testDrawDeltas();
     testRefresh();
+    testPanels();
     std::printf("overlay tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }
