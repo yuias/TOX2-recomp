@@ -49,6 +49,7 @@
 #include "media/movie_decoder.h"
 #include "overlay/debug_overlay.h"
 #include "overlay/overlay_sources.h"
+#include "render/render_scale.h"
 #include "render/vk_context.h"
 #include "render/vk_renderer.h"
 #include "render/vk_window.h"
@@ -90,6 +91,8 @@ struct Options {
     bool pad_probe = false;
     std::string dump_frames;
     std::uint32_t dump_frames_every = 1;
+    std::uint32_t resolution_scale = 1;
+    bool resolution_scale_given = false;
     std::string shader_cache;
     std::vector<std::uint32_t> rsx_capture_frames;
     std::vector<tox2::GuestDumpSpec> dumps;  // --dump-guest
@@ -194,6 +197,7 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const Options& opt, std:
     tox2::RenderOptions render_options;
     render_options.dump_dir = opt.dump_frames;
     render_options.dump_every = opt.dump_frames_every;
+    render_options.resolution_scale = opt.resolution_scale;
     render_options.shader_cache = opt.shader_cache.empty() ? std::filesystem::path("generated") / "shader_cache"
                                                            : std::filesystem::path(opt.shader_cache);
     // Requested PNG dumps follow --dump-frames so they land next to the periodic ones.
@@ -276,7 +280,7 @@ void printUsage() {
             "                [--pad-script FILE] [--pad-probe] [--audio none|wasapi] [--audio-dump FILE]\n"
             "                [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]\n"
             "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
-            "                [--vk-validation] [--no-window] [--frame-limit 60|off]\n"
+            "                [--resolution-scale N] [--vk-validation] [--no-window] [--frame-limit 60|off]\n"
             "                [--dump-guest ADDR:SIZE:FILE]...\n",
             stderr);
 }
@@ -399,6 +403,17 @@ bool parseArgs(int argc, char** argv, Options& opt) {
                 return false;
             }
             opt.dump_every_given = true;
+        } else if (arg == "--resolution-scale") {
+            std::string text;
+            if (!value(text)) return false;
+            const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), opt.resolution_scale);
+            if (ec != std::errc{} || end != text.data() + text.size() || opt.resolution_scale < 1 ||
+                opt.resolution_scale > tox2::kMaxResolutionScale) {
+                std::fprintf(stderr, "error: --resolution-scale needs a whole number from 1 to %u\n",
+                             tox2::kMaxResolutionScale);
+                return false;
+            }
+            opt.resolution_scale_given = true;
         } else if (arg == "--frame-limit") {
             std::string name;
             if (!value(name)) return false;
@@ -442,11 +457,12 @@ bool parseArgs(int argc, char** argv, Options& opt) {
     // --dump-frames and the window imply vulkan; an explicit "--render none" (anywhere on the line)
     // overrides that and then conflicts with it. The other options have no effect without a renderer.
     opt.render_vulkan = opt.render_flag.value_or(!opt.dump_frames.empty() || opt.window);
-    const bool render_option =
-            !opt.dump_frames.empty() || opt.dump_every_given || !opt.shader_cache.empty() || opt.vk_validation;
+    const bool render_option = !opt.dump_frames.empty() || opt.dump_every_given || !opt.shader_cache.empty() ||
+                               opt.vk_validation || opt.resolution_scale_given;
     if (render_option && !opt.render_vulkan) {
         std::fputs(
-                "error: --dump-frames, --dump-frames-every, --shader-cache and --vk-validation need --render vulkan\n",
+                "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale and --vk-validation "
+                "need --render vulkan\n",
                 stderr);
         return false;
     }
