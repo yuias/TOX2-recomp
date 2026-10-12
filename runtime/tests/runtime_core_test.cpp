@@ -5620,6 +5620,11 @@ struct SaveScript {
     std::int32_t list_result = 0;
     std::uint32_t list_calls = 0, list_dir_num = 0, list_dir_list_num = 0, focus = 1, fixed_num = 0, fixed_list = 0,
                   new_data = 0, focus_dir = 0;
+    // funcFixed
+    std::int32_t fixed_result = 0;
+    std::uint32_t fixed_name = 0, fixed_option = 0;
+    std::uint32_t fixed_calls = 0, fixed_dir_num = 0, fixed_dir_list_num = 0, fixed_userdata = 0;
+    std::vector<std::string> fixed_listed;
 };
 SaveScript g_save;
 
@@ -5678,6 +5683,25 @@ TOX2_PPU_FUNC(saveListCallback) {
     tox2Write32(base, set + 16, g_save.new_data);
 }
 
+TOX2_PPU_FUNC(saveFixedCallback) {
+    const auto result = static_cast<std::uint32_t>(ctx->gpr[3]);
+    const auto get = static_cast<std::uint32_t>(ctx->gpr[4]);
+    const auto set = static_cast<std::uint32_t>(ctx->gpr[5]);
+    g_save.fixed_calls++;
+    g_save.fixed_dir_num = tox2Read32(base, get);
+    g_save.fixed_dir_list_num = tox2Read32(base, get + 4);
+    g_save.fixed_userdata = tox2Read32(base, result + 16);
+    const std::uint32_t list = tox2Read32(base, get + 8);
+    g_save.fixed_listed.clear();
+    for (std::uint32_t i = 0; i < g_save.fixed_dir_list_num; i++) {
+        g_save.fixed_listed.emplace_back(reinterpret_cast<const char*>(base + list + 48 * i));
+    }
+    tox2Write32(base, result, static_cast<std::uint32_t>(g_save.fixed_result));
+    tox2Write32(base, set, g_save.fixed_name);
+    tox2Write32(base, set + 4, 0);
+    tox2Write32(base, set + 8, g_save.fixed_option);
+}
+
 void testCellSaveData() {
     namespace stdfs = std::filesystem;
     std::vector<std::string> lines;
@@ -5704,18 +5728,31 @@ void testCellSaveData() {
     tox2::configureVfs(root / "game", root / "hdd");
     const stdfs::path saves = root / "hdd" / "dev_hdd0" / "home" / "00000001" / "savedata";
 
-    enum Import : std::uint32_t { AutoLoad, AutoSave, ListLoad, ListSave, Delete, ImportCount };
+    enum Import : std::uint32_t {
+        AutoLoad,
+        AutoSave,
+        ListLoad,
+        ListSave,
+        Delete,
+        ListAutoLoad,
+        FixedLoad,
+        FixedSave,
+        ImportCount
+    };
     const Tox2ImportInfo imports[] = {
             {0x00800000, 0xfbd5c856, "cellSysutil", "cellSaveDataAutoLoad2"},
             {0x00800010, 0x8b7ed64b, "cellSysutil", "cellSaveDataAutoSave2"},
             {0x00800020, 0x1dfbfdd6, "cellSysutil", "cellSaveDataListLoad2"},
             {0x00800030, 0x2de0d663, "cellSysutil", "cellSaveDataListSave2"},
             {0x00800040, 0xedadd797, "cellSysutil", "cellSaveDataDelete2"},
+            {0x00800050, 0x21425307, "cellSysutil", "cellSaveDataListAutoLoad"},
+            {0x00800060, 0x2a8eada2, "cellSysutil", "cellSaveDataFixedLoad2"},
+            {0x00800070, 0x2aae9ef5, "cellSysutil", "cellSaveDataFixedSave2"},
     };
     tox2::installImports(imports, ImportCount);
     auto ctx = std::make_unique<Tox2PpuContext>();
     ctx->gpr[1] = 0x500000;
-    CHECK(p.memory.commit(0x4f0000, 0x10000));
+    CHECK(p.memory.commit(0x4f0000, 0x11000));  // the stack and the caller's parameter save area above r1
     auto call = [&](Import which, std::initializer_list<std::uint64_t> args) {
         int reg = 3;
         for (const std::uint64_t arg : args) ctx->gpr[reg++] = arg;
@@ -5740,6 +5777,7 @@ void testCellSaveData() {
     const std::uint32_t stat_cb = tox2::registerHostFunction("saveStatCallback", saveStatCallback);
     const std::uint32_t file_cb = tox2::registerHostFunction("saveFileCallback", saveFileCallback);
     const std::uint32_t list_cb = tox2::registerHostFunction("saveListCallback", saveListCallback);
+    const std::uint32_t fixed_cb = tox2::registerHostFunction("saveFixedCallback", saveFixedCallback);
     constexpr std::uint32_t kErrCbResult = 0x8002b401, kErrParam = 0x8002b404, kErrFailure = 0x8002b407;
 
     // setBuf: dirListMax 4, fileListMax 8, bufSize 0x2000, buf.
@@ -5936,6 +5974,156 @@ void testCellSaveData() {
     CHECK(call(ListLoad, {0, set_list, set_buf, list_cb, stat_cb, file_cb, 0, 0}) == kErrParam);
     CHECK(call(ListLoad, {0, 0, set_buf, list_cb, stat_cb, file_cb, 0, 0}) == kErrParam);
     CHECK(call(ListLoad, {0, set_list, set_buf, 0, stat_cb, file_cb, 0, 0}) == kErrParam);
+
+    // Fixed operations (ListAutoLoad, FixedSave2, FixedLoad2): the list goes to funcFixed, which names the
+    // save. ListAutoLoad takes its userdata from the caller's stack (the ninth argument).
+    const std::uint32_t fixed_name = scratch + 0x7600, other_name = scratch + 0x7700;
+    tox2Write64(base, 0x500070, 0x4321);
+    auto listAutoLoad = [&](std::uint32_t err_dialog = 0) {
+        return call(ListAutoLoad, {0, err_dialog, set_list, set_buf, fixed_cb, stat_cb, file_cb, 0xffffffff});
+    };
+    auto fixedLoad = [&] { return call(FixedLoad, {0, set_list, set_buf, fixed_cb, stat_cb, file_cb, 0, 0x55}); };
+    auto fixedSave = [&] { return call(FixedSave, {0, set_list, set_buf, fixed_cb, stat_cb, file_cb, 0, 0x55}); };
+    auto fixedListed = [&] {
+        std::string joined;
+        for (const std::string& name : g_save.fixed_listed) joined += (joined.empty() ? "" : ",") + name;
+        return joined;
+    };
+
+    // The game's boot call: no matching save, funcFixed answers ERR_NODATA, errDialog NONE. The result is
+    // CBRESULT without a dialog, and neither funcStat nor funcFile run.
+    put(prefix, "BOOT_SD");
+    tox2Write32(base, set_list, 1);  // SUBTITLE, ASCENT
+    g_save = SaveScript{};
+    g_save.fixed_result = -4;
+    lines.clear();
+    CHECK(listAutoLoad(0) == kErrCbResult);
+    CHECK(g_save.fixed_calls == 1 && g_save.fixed_dir_num == 0 && g_save.fixed_dir_list_num == 0 &&
+          g_save.fixed_userdata == 0x4321 && g_save.stat_calls == 0 && g_save.file_exc.empty());
+    CHECK(logged("prefix 'BOOT_SD'") && logged("there is no save data (no dialog requested)") &&
+          !logged("error dialog"));
+    CHECK(logged("ListAutoLoad returns 0x8002b401"));
+    lines.clear();
+    CHECK(listAutoLoad(1) == kErrCbResult && logged("error dialog (headless, not shown): there is no save data"));
+    g_save.fixed_result = 1;  // OK_LAST ends the call successfully
+    CHECK(listAutoLoad() == 0 && g_save.stat_calls == 0);
+    g_save.fixed_result = 2;  // OK_LAST_NOCONFIRM is no valid funcFixed result
+    CHECK(listAutoLoad() == kErrParam);
+    g_save.fixed_result = 9;
+    CHECK(listAutoLoad() == kErrParam);
+
+    // Argument checks: no funcFixed, no setList, a bad version or errDialog.
+    CHECK(call(ListAutoLoad, {0, 0, set_list, set_buf, 0, stat_cb, file_cb, 0, 0}) == kErrParam);
+    CHECK(call(ListAutoLoad, {0, 0, 0, set_buf, fixed_cb, stat_cb, file_cb, 0, 0}) == kErrParam);
+    CHECK(call(ListAutoLoad, {2, 0, set_list, set_buf, fixed_cb, stat_cb, file_cb, 0, 0}) == kErrParam);
+    CHECK(call(ListAutoLoad, {0, 3, set_list, set_buf, fixed_cb, stat_cb, file_cb, 0, 0}) == kErrParam);
+    CHECK(call(FixedLoad, {0, set_list, set_buf, 0, stat_cb, file_cb, 0, 0}) == kErrParam);
+    CHECK(call(FixedSave, {0, 0, set_buf, fixed_cb, stat_cb, file_cb, 0, 0}) == kErrParam);
+
+    // FixedSave2 creates a save the game names (the list is empty, so the save is new data).
+    put(prefix, "FX_");
+    put(fixed_name, "FX_SAVE01");
+    put(set_param + 128, "M-sub");
+    put(data, "fixed");
+    g_save = SaveScript{};
+    g_save.fixed_name = fixed_name;
+    g_save.set_param = set_param;
+    g_save.file_ops = {{1, 1, 0, 5, 5, data, "NEWF.DAT"}};
+    lines.clear();
+    CHECK(fixedSave() == 0);
+    CHECK(g_save.fixed_calls == 1 && g_save.fixed_dir_num == 0 && g_save.fixed_userdata == 0x55 &&
+          g_save.stat_calls == 1 && g_save.stat_is_new == 1 && g_save.stat_dir == "FX_SAVE01" &&
+          g_save.stat_file_num == 0);
+    CHECK(logged("confirmation for 'FX_SAVE01' counted as YES"));
+    CHECK(text(saves / "FX_SAVE01" / "NEWF.DAT") == "fixed");
+    {
+        const auto sfo = tox2::readParamSfoFile(saves / "FX_SAVE01" / "PARAM.SFO");
+        CHECK(sfo && sfo->strings.at("TITLE") == "My title" && sfo->strings.at("SAVEDATA_DIRECTORY") == "FX_SAVE01");
+    }
+
+    // FixedLoad2 and ListAutoLoad pick the save back: funcStat sees its PARAM.SFO and file list, and a READ
+    // returns the bytes. The list reaches funcFixed with the save in it.
+    g_save = SaveScript{};
+    g_save.fixed_name = fixed_name;
+    g_save.fixed_option = 1;  // NOCONFIRM
+    std::memset(base + data + 0x400, 0, 16);
+    g_save.file_ops = {{0, 1, 0, 5, 16, data + 0x400, "NEWF.DAT"}};
+    lines.clear();
+    CHECK(fixedLoad() == 0);
+    CHECK(fixedListed() == "FX_SAVE01" && g_save.fixed_dir_num == 1 && g_save.fixed_dir_list_num == 1);
+    CHECK(g_save.stat_is_new == 0 && g_save.stat_title == "My title" && g_save.stat_dir == "FX_SAVE01" &&
+          g_save.stat_file_num == 1 && g_save.stat_file_list_num == 1);
+    CHECK(tox2Read32(base, buf) == 1 && tox2Read64(base, buf + 8) == 5);  // the file list: NORMALFILE, 5 bytes
+    CHECK(std::strcmp(reinterpret_cast<const char*>(base + buf + 40), "NEWF.DAT") == 0);
+    CHECK(std::memcmp(base + data + 0x400, "fixed", 6) == 0);
+    CHECK(g_save.file_exc.size() == 2 && g_save.file_exc[1] == 5);
+    CHECK(!logged("counted as YES"));  // NOCONFIRM asks nothing
+    CHECK(text(saves / "FX_SAVE01" / "NEWF.DAT") == "fixed");
+
+    g_save.next_op = 0;
+    g_save.file_exc.clear();
+    std::memset(base + data + 0x400, 0, 16);
+    CHECK(listAutoLoad(2) == 0);
+    CHECK(g_save.fixed_userdata == 0x4321 && g_save.stat_is_new == 0 && g_save.stat_file_num == 1);
+    CHECK(std::memcmp(base + data + 0x400, "fixed", 6) == 0);
+
+    // A name that is not saved is new data: without setParam the call is a parameter error, and OK_LAST in
+    // funcStat ends it without creating anything.
+    put(other_name, "FX_NONE001");
+    g_save = SaveScript{};
+    g_save.fixed_name = other_name;
+    CHECK(fixedLoad() == kErrParam && g_save.stat_is_new == 1);
+    g_save.stat_result = 1;
+    CHECK(fixedLoad() == 0 && !stdfs::exists(saves / "FX_NONE001"));
+    g_save.stat_result = 0;
+    g_save.stat_calls = 0;
+
+    // Errors in funcFixed's answer: no name, a bad name, an empty name, an unknown option.
+    g_save = SaveScript{};
+    CHECK(fixedLoad() == kErrParam && g_save.stat_calls == 0);  // fixedSet->dirName is null
+    put(other_name, "fx_lower");
+    g_save.fixed_name = other_name;
+    CHECK(fixedLoad() == kErrParam && g_save.stat_calls == 0);
+    put(other_name, "");
+    CHECK(fixedLoad() == kErrParam && g_save.stat_calls == 0);
+    g_save.fixed_name = fixed_name;
+    g_save.fixed_option = 5;
+    CHECK(fixedLoad() == kErrParam && g_save.stat_calls == 0);
+    g_save.fixed_option = 0;
+    CHECK(call(FixedLoad, {0, set_list, set_buf, fixed_cb, 0, file_cb, 0, 0}) == kErrParam);  // no funcStat
+
+    // The directory list: prefix filtering, several prefixes and sorting by subtitle.
+    auto saveWith = [&](const char* name, const char* subtitle) {
+        put(other_name, name);
+        put(set_param + 128, subtitle);
+        g_save = SaveScript{};
+        g_save.fixed_name = other_name;
+        g_save.set_param = set_param;
+        g_save.file_ops = {{1, 1, 0, 5, 5, data, "NEWF.DAT"}};
+        return fixedSave();
+    };
+    CHECK(saveWith("FX_SAVE02", "B-sub") == 0);
+    CHECK(saveWith("FX_SAVE03", "A-sub") == 0);
+    CHECK(saveWith("OTHER_01", "Z-sub") == 0);
+    g_save = SaveScript{};
+    g_save.fixed_result = 1;  // only the list matters
+    CHECK(fixedLoad() == 0);
+    CHECK(g_save.fixed_dir_num == 3 && fixedListed() == "FX_SAVE03,FX_SAVE02,FX_SAVE01");  // ASCENT
+    tox2Write32(base, set_list + 4, 0);                                                    // DESCENT
+    CHECK(fixedLoad() == 0 && fixedListed() == "FX_SAVE01,FX_SAVE02,FX_SAVE03");
+    tox2Write32(base, set_list + 4, 1);
+    put(prefix, "FX_SAVE01|OTHER");
+    CHECK(fixedLoad() == 0 && g_save.fixed_dir_num == 2 && fixedListed() == "FX_SAVE01,OTHER_01");
+    put(prefix, "FX_");
+    tox2Write32(base, set_buf, 2);  // dirListMax 2: all three match, two are listed (the first two by name)
+    CHECK(fixedLoad() == 0 && g_save.fixed_dir_num == 3 && g_save.fixed_dir_list_num == 2 &&
+          fixedListed() == "FX_SAVE02,FX_SAVE01");
+    tox2Write32(base, set_buf, 4);
+    put(prefix, "NOTHERE");
+    CHECK(fixedLoad() == 0 && g_save.fixed_dir_num == 0 && g_save.fixed_listed.empty());
+    put(prefix, "");  // an empty prefix is a parameter error
+    CHECK(fixedLoad() == kErrParam);
+    CHECK(ctx->gpr[1] == 0x500000);
 
     // Delete2 has only a selection UI in RPCS3.
     CHECK(call(Delete, {0}) == 1);

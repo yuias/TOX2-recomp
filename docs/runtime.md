@@ -51,7 +51,7 @@ census: hle 129493 calls, 79 distinct, 22 default-handled
   sysPrxForUser::sys_lwmutex_lock: 61939 [impl]
   cellSpurs::cellSpursInitializeWithAttribute: 1 [libsre]
   cellSpurs::cellSpursCreateTask2: 25 [default] ptr r3,r4,r5,r6,r7,r8,r9
-  cellSysutil::cellSaveDataListAutoLoad: 1 [default] ptr r5,r6,r7,r8,r9
+  cellSysutil::cellSaveDataListAutoLoad: 5 [impl]
 census: unknown targets 0 distinct
 census: rsx 939 headers, 172 distinct methods, 5 flips
   interrupt handler calls: vblank 3, flip 5, user 0
@@ -353,7 +353,7 @@ FNID match, not that the behaviour suits this game.
 | `cellSysmodule` | 2 / 2 | `cellSysmoduleLoadModule`, `cellSysmoduleUnloadModule`: every module id succeeds, because the HLE functions are always available | |
 | `cellSpurs` | 30 / 30 bound to libsre | none: all 30 call libsre's recompiled exports (attribute setters, `cellSpursInitializeWithAttribute`, tasksets and tasks, queues, lock-free queues, event flags, join and push calls) | |
 | `cellGcmSys` | 26 / 26 | initialization (`_cellGcmInitBody`), configuration, IO mapping (`cellGcmMapMainMemory`, `cellGcmAddressToOffset`, `cellGcmUnmapEaIoAddress`), display buffers, flip mode, the vblank and flip handlers, tiles and zcull, the control register, the flip commands and the default command buffer sizes; see [Fake RSX](rendering.md#fake-rsx). `cellGcmGetFlipStatus` returns the flip status that `cellGcmResetFlipStatus` (1, waiting) and an executed flip (0, done) leave. `cellGcmGetLabelAddress(index)` returns `0x10300000 + 16 * index` (`index` is a `u8`, so up to `0x10300ff0`), 0 before `_cellGcmInitBody`: the semaphore area that the RSX thread resolves its label offsets against, as for `_cellGcmSetFlipCommandWithWaitLabel`, whose label wait is at offset `16 * index` | |
-| `cellSysutil` | 19 / 23 | the callback pump (`cellSysutilRegisterCallback`, `_CheckCallback`), BGM playback status, enabling and disabling, `cellVideoOutConfigure`, `_GetState`, `_GetResolution` (the pixel size of a resolution id, the same ids that `cellVideoOutConfigure` accepts), `cellAudioOutGetState`, `_GetConfiguration`, `_GetSoundAvailability` (the largest channel count among the modes with that coding type and rate: 2 for LPCM at 48 kHz, 0 otherwise, because the mixer is stereo) and `_Configure` (stores the downmixer, which the state and the configuration then report; a channel count other than 2 or a coding type other than LPCM is `CELL_AUDIO_OUT_ERROR_UNSUPPORTED_SOUND_MODE`, a downmixer above 2 is an illegal parameter), the message dialog (`cellMsgDialogOpen2`, `_Close`, `ProgressBarInc`) and save data (`cellSaveDataListLoad2`, `ListSave2`, `AutoSave2`, `Delete2`) | `cellMsgDialogOpenErrorCode`, `cellSaveDataListAutoLoad`, `cellSaveDataFixedLoad2`, `cellSaveDataFixedSave2` |
+| `cellSysutil` | 22 / 23 | the callback pump (`cellSysutilRegisterCallback`, `_CheckCallback`), BGM playback status, enabling and disabling, `cellVideoOutConfigure`, `_GetState`, `_GetResolution` (the pixel size of a resolution id, the same ids that `cellVideoOutConfigure` accepts), `cellAudioOutGetState`, `_GetConfiguration`, `_GetSoundAvailability` (the largest channel count among the modes with that coding type and rate: 2 for LPCM at 48 kHz, 0 otherwise, because the mixer is stereo) and `_Configure` (stores the downmixer, which the state and the configuration then report; a channel count other than 2 or a coding type other than LPCM is `CELL_AUDIO_OUT_ERROR_UNSUPPORTED_SOUND_MODE`, a downmixer above 2 is an illegal parameter), the message dialog (`cellMsgDialogOpen2`, `_Close`, `ProgressBarInc`) and save data (`cellSaveDataListLoad2`, `ListSave2`, `AutoSave2`, `Delete2`, `ListAutoLoad`, `FixedLoad2`, `FixedSave2`) | `cellMsgDialogOpenErrorCode` |
 | `cellGame` | 5 / 5 | `cellGameBootCheck` (always a disc boot: type `CELL_GAME_GAMETYPE_DISC`, attributes 0, an empty directory name, and the permit that follows returns `/dev_bdvd/PS3_GAME` and its `USRDIR`), `cellGameDataCheck`, `cellGameCreateGameData`, `cellGameContentPermit`, `cellGameContentErrorDialog` | |
 | `sys_fs` | 7 / 7 | `cellFsOpen`, `cellFsClose`, `cellFsStat`, `cellFsFstat`, `cellFsRead`, `cellFsLseek`, `cellFsWrite` (the last three call the lv2 handlers of `sys_fs_read`, `_lseek` and `_write`, so offsets and counts stay 64-bit) | |
 | `sys_io` | 6 / 6 | `cellPadInit`, `cellPadEnd`, `cellPadSetPortSetting`, `cellPadGetData`, `cellPadGetInfo2`, `cellPadSetActDirect` | |
@@ -455,7 +455,12 @@ interface, so each module follows a documented policy that never blocks on a per
   are logged and their error code is returned, without a dialog object. A save list is never
   shown; the entry is the one the game's list callback highlights, with RPCS3's fallbacks, and
   without a choice the call returns `CELL_CANCEL`. `cellSaveDataDelete2` returns `CELL_CANCEL`.
-  Secure files are stored in plain text.
+  `cellSaveDataListAutoLoad`, `FixedLoad2` and `FixedSave2` have no list either: the list of saves
+  that match the prefixes (sorted, as `ListLoad2` sorts it) goes to the game's `funcFixed`, which
+  names the save or ends the call with an error result. The game's boot call answers
+  `CELL_SAVEDATA_ERR_NODATA`, and the handler returns `CELL_SAVEDATA_ERROR_CBRESULT` without a
+  dialog, which the game counts as success. The confirmation that `FixedLoad2` and `FixedSave2` ask
+  for with option NONE counts as yes. Secure files are stored in plain text.
 - **Trophies**: no trophy pack is installed from the network and no notification is shown. The
   pack is read for its trophy list, and the unlock state is kept as a text file in the trophy
   directory under `/dev_hdd0/home/00000001`. The registration status callbacks run inside
@@ -624,8 +629,8 @@ the handler, not facts: a register left over from an earlier call can look like 
 
 In the earlier runs of this game, before libsre was loaded, the default handlers served 24 imports and
 no system call. The current run (see [SPU usage](spu.md#what-the-current-run-reaches)) default-handles
-five imports (an earlier build also default-handled the system call `sys_spu_thread_bind_queue`, 193, and `cellRtcGetCurrentTick` and
-`cellRtcConvertUtcToLocalTime`): four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`. An earlier
+four imports (an earlier build also default-handled the system call `sys_spu_thread_bind_queue`, 193, and `cellRtcGetCurrentTick`,
+`cellRtcConvertUtcToLocalTime` and `cellSaveDataListAutoLoad`): the four `cellScreenShotUtility` functions. An earlier
 stop, a write to address 0 in fn `0x008a090c` on the GCM interrupt thread, followed the
 default-handled `cellGcmGetLabelAddress`, which returned 0 instead of a label address; with a
 handler for it the thread no longer faults. A later stop, the game's own `abort()`, followed the

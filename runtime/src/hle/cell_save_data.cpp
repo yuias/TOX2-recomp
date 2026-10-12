@@ -1,10 +1,17 @@
 // HLE handlers of the cellSaveData imports the game uses (exported by cellSysutil):
-// cellSaveDataAutoLoad2, AutoSave2, ListLoad2, ListSave2 and Delete2. Behaviour follows RPCS3
+// cellSaveDataAutoLoad2, AutoSave2, ListLoad2, ListSave2, Delete2, ListAutoLoad, FixedLoad2 and
+// FixedSave2. Behaviour follows RPCS3
 // `Emu/Cell/Modules/cellSaveData.cpp` (`savedata_op`, `savedata_check_args`, `check_filename`,
 // `select_and_delete`) and `cellSysutil.cpp` (`sysutil_check_name_string`). Handlers run under the
 // guest lock; the callbacks (funcList, funcStat, funcFile) run synchronously on the calling thread
 // through callGuestFunction, as in RPCS3, with their Get/Set/Result structures in one guest scratch
 // block that is allocated on first use and reused (a nested or concurrent call gets BUSY).
+//
+// ListAutoLoad, FixedLoad2 and FixedSave2 share one path: the directory list (setList's prefixes,
+// sorted) is handed to funcFixed, which names the save to use or returns an error result, then funcStat
+// and funcFile run as for the Auto functions. They differ only in their arguments (ListAutoLoad has
+// errDialog and a ninth, stack-passed argument) and in the confirmation RPCS3 shows for Fixed* with
+// option NONE.
 //
 // A save lives in /dev_hdd0/home/00000001/savedata/<dir name>/ with a PARAM.SFO (written through
 // core/param_sfo) next to the files. Files are collected in memory and committed through a
@@ -18,6 +25,8 @@
 //    highlight it (funcList's focus position); ListLoad2 falls back to the newest entry; ListSave2
 //    falls back to the "new data" slot when the game supplied one; without a choice the call
 //    returns CELL_CANCEL, as RPCS3 does without a save dialog. Confirmation prompts count as YES.
+//  - FixedLoad2/FixedSave2 with option NONE ask for a confirmation in RPCS3; it counts as YES. They
+//    always ask for error dialogs (errDialog ALWAYS), like the List functions.
 //  - cellSaveDataDelete2 only opens a selection UI in RPCS3, so it returns CELL_CANCEL.
 //
 // Deviations from RPCS3:
@@ -120,6 +129,8 @@ constexpr std::uint32_t kFileTypeIcon0 = 2;
 constexpr std::uint32_t kFileTypeIcon1 = 3;
 constexpr std::uint32_t kFileTypePic1 = 4;
 constexpr std::uint32_t kFileTypeSnd0 = 5;
+constexpr std::uint32_t kFixedOptionNone = 0;
+constexpr std::uint32_t kFixedOptionNoConfirm = 1;
 constexpr std::uint32_t kAttrNoDuplicate = 1;
 constexpr std::uint32_t kRecreateNo = 0;
 constexpr std::uint32_t kRecreateNoNoBroken = 1;
@@ -159,6 +170,9 @@ constexpr std::uint32_t kListSetFocusDirName = 4;
 constexpr std::uint32_t kListSetFixedListNum = 8;
 constexpr std::uint32_t kListSetFixedList = 12;
 constexpr std::uint32_t kListSetNewData = 16;
+// CellSaveDataFixedSet
+constexpr std::uint32_t kFixedSetDirName = 0;
+constexpr std::uint32_t kFixedSetOption = 8;
 constexpr std::uint32_t kNewDataIconPosition = 0;
 constexpr std::uint32_t kNewDataDirName = 4;
 constexpr std::uint32_t kDirListDirName = 0;
@@ -215,15 +229,19 @@ constexpr std::uint32_t kFileSetSize = 48;
 constexpr std::uint32_t kScratchResult = 0x000;
 constexpr std::uint32_t kScratchListGet = 0x040;
 constexpr std::uint32_t kScratchListSet = 0x0a0;
+constexpr std::uint32_t kScratchFixedSet = 0x0c0;
 constexpr std::uint32_t kScratchStatGet = 0x100;
 constexpr std::uint32_t kScratchStatSet = 0x800;
 constexpr std::uint32_t kScratchFileGet = 0x820;
 constexpr std::uint32_t kScratchFileSet = 0x880;
 constexpr std::uint32_t kScratchUsed = 0x900;
 
+// Offset of the ninth integer argument in the caller's stack frame (PPC64 ELF parameter save area).
+constexpr std::uint32_t kStackArgBase = 0x70;
+
 constexpr std::string_view kSaveRoot = "/dev_hdd0/home/00000001/savedata";
 
-enum class Op { AutoSave, AutoLoad, ListSave, ListLoad };
+enum class Op { AutoSave, AutoLoad, ListSave, ListLoad, ListAutoLoad, FixedSave, FixedLoad };
 
 const char* opName(Op op) {
     switch (op) {
@@ -231,11 +249,18 @@ const char* opName(Op op) {
         case Op::AutoLoad: return "AutoLoad2";
         case Op::ListSave: return "ListSave2";
         case Op::ListLoad: return "ListLoad2";
+        case Op::ListAutoLoad: return "ListAutoLoad";
+        case Op::FixedSave: return "FixedSave2";
+        case Op::FixedLoad: return "FixedLoad2";
     }
     return "?";
 }
 
-bool isListOp(Op op) { return op == Op::ListSave || op == Op::ListLoad; }
+// The operations that pick their save from a directory list (setList) and not from a dirName.
+bool usesSetList(Op op) { return op != Op::AutoSave && op != Op::AutoLoad; }
+
+// The ones where the game names the save in funcFixed; ListSave2/ListLoad2 use funcList.
+bool usesFuncFixed(Op op) { return op == Op::ListAutoLoad || op == Op::FixedSave || op == Op::FixedLoad; }
 
 std::uint32_t g_scratch = 0;
 bool g_busy = false;
@@ -396,7 +421,8 @@ std::optional<SaveEntry> loadEntry(const stdfs::path& root, const std::string& e
 struct OpState {
     Tox2PpuContext* ctx = nullptr;
     std::uint8_t* base = nullptr;
-    std::uint32_t result = 0, list_get = 0, list_set = 0, stat_get = 0, stat_set = 0, file_get = 0, file_set = 0;
+    std::uint32_t result = 0, list_get = 0, list_set = 0, fixed_set = 0, stat_get = 0, stat_set = 0, file_get = 0,
+                  file_set = 0;
 };
 
 std::int32_t read32s(const OpState& s, std::uint32_t addr) {
@@ -445,13 +471,14 @@ std::uint32_t paramError(int number, std::string_view detail = {}) {
     return kErrorParam;
 }
 
-// RPCS3 `savedata_check_args` for the four operations implemented here. 0 or the error number.
+// RPCS3 `savedata_check_args` for the operations implemented here. 0 or the error number.
+// `func_select` is funcList or funcFixed, whichever the operation has.
 int checkArgs(const std::uint8_t* base, Op op, std::uint32_t version, std::uint32_t dir_name, std::uint32_t err_dialog,
-              std::uint32_t set_list, std::uint32_t set_buf, std::uint32_t func_list, std::uint32_t func_stat) {
+              std::uint32_t set_list, std::uint32_t set_buf, std::uint32_t func_select, std::uint32_t func_stat) {
     if (version > 1) return 1;
     if (err_dialog > kErrDialogNoRepeat) return 5;
 
-    if (!isListOp(op)) {
+    if (!usesSetList(op)) {
         if (dir_name == 0) return 2;
         switch (checkNameString(readGuestString(base, dir_name, kDirNameSize), 1, kDirNameSize)) {
             case -1: return 3;
@@ -489,7 +516,7 @@ int checkArgs(const std::uint8_t* base, Op op, std::uint32_t version, std::uint3
     const std::uint32_t dir_list_max = tox2Read32(base, set_buf + kSetBufDirListMax);
     const std::uint32_t file_list_max = tox2Read32(base, set_buf + kSetBufFileListMax);
     const std::uint32_t buf_size = tox2Read32(base, set_buf + kSetBufBufSize);
-    if (isListOp(op)) {
+    if (usesSetList(op)) {
         if (dir_list_max > kDirListMax) return 8;
         if (static_cast<std::uint64_t>(dir_list_max) * kDirListSize > buf_size) return 7;
     }
@@ -498,8 +525,13 @@ int checkArgs(const std::uint8_t* base, Op op, std::uint32_t version, std::uint3
     for (std::uint32_t i = 0; i < 6; i++) {
         if (tox2Read32(base, set_buf + kSetBufReserved + 4 * i) != 0) return 10;
     }
-    if (isListOp(op) && func_list == 0) return 18;
-    if (!isListOp(op) && func_stat == 0) return 20;
+    if (usesFuncFixed(op)) {
+        if (func_select == 0) return 19;
+    } else if (usesSetList(op)) {
+        if (func_select == 0) return 18;
+    } else if (func_stat == 0) {
+        return 20;
+    }
     return 0;
 }
 
@@ -511,16 +543,27 @@ struct ListResult {
     std::string dir_name;
 };
 
-ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_t set_list, std::uint32_t set_buf,
-                       std::uint32_t func_list, const stdfs::path& root) {
+// The directory list as handed to funcList/funcFixed.
+struct DirListing {
+    std::vector<SaveEntry> entries;
+    std::uint32_t dir_num = 0;  // matches, including those beyond dirListMax
+    std::uint32_t buf = 0;
+    std::uint32_t buf_size = 0;
+
+    void clearBuf(std::uint8_t* base) const {
+        if (buf_size != 0) std::memset(base + buf, 0, buf_size);
+    }
+};
+
+// RPCS3's list step up to the callback: matches the prefixes against the save directories, sorts
+// them and writes the dirList and the counts into the guest structures.
+DirListing buildDirListing(OpState& s, Op op, std::uint32_t set_list, std::uint32_t set_buf, const stdfs::path& root) {
     std::uint8_t* base = s.base;
     const std::uint32_t dir_list_max = tox2Read32(base, set_buf + kSetBufDirListMax);
-    const std::uint32_t buf_size = tox2Read32(base, set_buf + kSetBufBufSize);
-    const std::uint32_t buf = tox2Read32(base, set_buf + kSetBufBuf);
-    auto fail = [](std::uint32_t code) { return ListResult{true, code, {}}; };
-    auto clearBuf = [&] {
-        if (buf_size != 0) std::memset(base + buf, 0, buf_size);
-    };
+    DirListing listing;
+    listing.buf_size = tox2Read32(base, set_buf + kSetBufBufSize);
+    listing.buf = tox2Read32(base, set_buf + kSetBufBuf);
+    const std::uint32_t buf = listing.buf;
 
     tox2Write32(base, s.list_get + kListGetDirList, buf);
 
@@ -535,15 +578,14 @@ ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_
             pos = bar + 1;
         }
     }
-    if (prefixes.empty() && op == Op::ListLoad) prefixes = {""};
+    if (prefixes.empty() && (op == Op::ListLoad || op == Op::FixedLoad)) prefixes = {""};
 
-    std::vector<SaveEntry> entries;
-    std::uint32_t dir_num = 0;
+    std::vector<SaveEntry>& entries = listing.entries;
     std::uint32_t dir_list_num = 0;
     for (const std::string& name : listSaveDirs(root)) {
         for (const std::string& prefix : prefixes) {
             if (!name.starts_with(prefix)) continue;
-            if (dir_num++ == 0) clearBuf();
+            if (listing.dir_num++ == 0) listing.clearBuf(base);
             if (dir_list_num < dir_list_max) {
                 dir_list_num++;
                 if (auto entry = loadEntry(root, name)) entries.push_back(std::move(*entry));
@@ -551,7 +593,7 @@ ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_
             break;
         }
     }
-    tox2Write32(base, s.list_get + kListGetDirNum, dir_num);
+    tox2Write32(base, s.list_get + kListGetDirNum, listing.dir_num);
     tox2Write32(base, s.list_get + kListGetDirListNum, dir_list_num);
 
     const std::uint32_t sort_type = tox2Read32(base, set_list + kSetListSortType);
@@ -571,6 +613,55 @@ ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_
         putText(base, item + kDirListDirName, kDirNameSize, entries[i].dir_name);
         putText(base, item + kDirListListParam, kListParamSize, entries[i].list_param);
     }
+    return listing;
+}
+
+// funcFixed step of ListAutoLoad, FixedLoad2 and FixedSave2: the game picks the save (or ends the
+// call). A name that is not in the list is new data, which the stat step finds out for itself.
+ListResult runFixedStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_t set_list, std::uint32_t set_buf,
+                        std::uint32_t func_fixed, const stdfs::path& root) {
+    std::uint8_t* base = s.base;
+    auto fail = [](std::uint32_t code) { return ListResult{true, code, {}}; };
+    const DirListing listing = buildDirListing(s, op, set_list, set_buf, root);
+    logInfo("tox2: savedata: {}: prefix '{}': {} match(es), {} listed, calling funcFixed", opName(op),
+            readGuestString(base, tox2Read32(base, set_list + kSetListPrefix), kPrefixSize), listing.dir_num,
+            listing.entries.size());
+
+    const std::int32_t cb = runCallback(s, func_fixed, s.list_get, s.fixed_set);
+    if (cb != kCbOkNext) {
+        logInfo("tox2: savedata: funcFixed returned result {}", cb);
+        if (cb == kCbOkLast) return fail(kCellOk);
+        return fail(reportCallbackError(s, cb, err_dialog));
+    }
+
+    const std::uint32_t name_addr = tox2Read32(base, s.fixed_set + kFixedSetDirName);
+    if (name_addr == 0) return fail(paramError(26));
+    const std::string name = getText(base, name_addr, kDirNameSize);
+    switch (checkNameString(name, 1, kDirNameSize)) {
+        case -1: return fail(paramError(27));
+        case -2: return fail(paramError(28));
+        default: break;
+    }
+    const std::uint32_t option = tox2Read32(base, s.fixed_set + kFixedSetOption);
+    if (option != kFixedOptionNone && option != kFixedOptionNoConfirm) {
+        return fail(paramError(81, std::format("(option={:#x})", option)));
+    }
+    if (option == kFixedOptionNone && op != Op::ListAutoLoad) {
+        logInfo("tox2: savedata: {}: confirmation for '{}' counted as YES", opName(op), name);
+    }
+
+    if (listing.dir_num != 0) listing.clearBuf(base);  // funcStat gets a clean buffer
+    logInfo("tox2: savedata: {}: funcFixed chose '{}'", opName(op), name);
+    return {false, kCellOk, name};
+}
+
+ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_t set_list, std::uint32_t set_buf,
+                       std::uint32_t func_list, const stdfs::path& root) {
+    std::uint8_t* base = s.base;
+    auto fail = [](std::uint32_t code) { return ListResult{true, code, {}}; };
+    DirListing listing = buildDirListing(s, op, set_list, set_buf, root);
+    std::vector<SaveEntry>& entries = listing.entries;
+    const std::uint32_t dir_num = listing.dir_num;
 
     tox2Write32(base, s.list_set + kListSetFocusPosition, kFocusListHead);
     const std::int32_t cb = runCallback(s, func_list, s.list_get, s.list_set);
@@ -691,7 +782,7 @@ ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_
         return fail(kCancel);
     }
 
-    if (dir_num != 0) clearBuf();  // funcStat gets a clean buffer
+    if (dir_num != 0) listing.clearBuf(base);  // funcStat gets a clean buffer
     if (selected == -1) {
         logInfo("tox2: savedata: {}: new save '{}' chosen", opName(op), new_dir);
         return {false, kCellOk, new_dir};
@@ -745,7 +836,7 @@ bool commitSave(const stdfs::path& root, const std::string& escaped, const FileM
 
 // RPCS3 `savedata_op` for the four operations.
 std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_t dir_name_addr,
-                         std::uint32_t set_list, std::uint32_t set_buf, std::uint32_t func_list,
+                         std::uint32_t set_list, std::uint32_t set_buf, std::uint32_t func_select,
                          std::uint32_t func_stat, std::uint32_t func_file, std::uint32_t userdata) {
     std::uint8_t* base = s.base;
     const stdfs::path root = [] {
@@ -761,8 +852,9 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
     tox2Write32(base, s.result + kResultUserdata, userdata);
 
     SaveEntry save;
-    if (isListOp(op)) {
-        ListResult list = runListStep(s, op, err_dialog, set_list, set_buf, func_list, root);
+    if (usesSetList(op)) {
+        ListResult list = usesFuncFixed(op) ? runFixedStep(s, op, err_dialog, set_list, set_buf, func_select, root)
+                                            : runListStep(s, op, err_dialog, set_list, set_buf, func_select, root);
         if (list.finished) return list.code;
         save.dir_name = std::move(list.dir_name);
     } else {
@@ -1049,16 +1141,18 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
     return savedata_result;
 }
 
-// Shared entry: argument check, busy flag, scratch block, then the operation.
+// Shared entry: argument check, busy flag, scratch block, then the operation. `func_select` is
+// funcList or funcFixed.
 void runOp(Tox2PpuContext* ctx, std::uint8_t* base, Op op, std::uint32_t version, std::uint32_t dir_name,
-           std::uint32_t err_dialog, std::uint32_t set_list, std::uint32_t set_buf, std::uint32_t func_list,
+           std::uint32_t err_dialog, std::uint32_t set_list, std::uint32_t set_buf, std::uint32_t func_select,
            std::uint32_t func_stat, std::uint32_t func_file, std::uint32_t container, std::uint32_t userdata) {
     logInfo("tox2: savedata: cellSaveData{}(version {}, dirName \"{}\", errDialog {}, setBuf {:#x}, "
             "funcStat {:#x}, funcFile {:#x}, container {:#x}, userdata {:#x})",
-            opName(op), version, dir_name != 0 && !isListOp(op) ? getText(base, dir_name, kDirNameSize) : "",
+            opName(op), version, dir_name != 0 && !usesSetList(op) ? getText(base, dir_name, kDirNameSize) : "",
             err_dialog, set_buf, func_stat, func_file, container, userdata);
 
-    if (const int error = checkArgs(base, op, version, dir_name, err_dialog, set_list, set_buf, func_list, func_stat)) {
+    if (const int error =
+                checkArgs(base, op, version, dir_name, err_dialog, set_list, set_buf, func_select, func_stat)) {
         logError("tox2: savedata: {} parameter error {}", opName(op), error);
         ctx->gpr[3] = kErrorParam;
         return;
@@ -1084,12 +1178,13 @@ void runOp(Tox2PpuContext* ctx, std::uint8_t* base, Op op, std::uint32_t version
     state.result = g_scratch + kScratchResult;
     state.list_get = g_scratch + kScratchListGet;
     state.list_set = g_scratch + kScratchListSet;
+    state.fixed_set = g_scratch + kScratchFixedSet;
     state.stat_get = g_scratch + kScratchStatGet;
     state.stat_set = g_scratch + kScratchStatSet;
     state.file_get = g_scratch + kScratchFileGet;
     state.file_set = g_scratch + kScratchFileSet;
     const std::uint32_t code =
-            savedataOp(state, op, err_dialog, dir_name, set_list, set_buf, func_list, func_stat, func_file, userdata);
+            savedataOp(state, op, err_dialog, dir_name, set_list, set_buf, func_select, func_stat, func_file, userdata);
     g_busy = false;
     logInfo("tox2: savedata: {} returns {:#x}", opName(op), code);
     ctx->gpr[3] = code;
@@ -1121,6 +1216,30 @@ void listSave2(Tox2PpuContext* ctx, std::uint8_t* base) {
           argU32(ctx, 4), argU32(ctx, 5), argU32(ctx, 6), argU32(ctx, 7));
 }
 
+// cellSaveDataListAutoLoad(u32 version, u32 errDialog, CellSaveDataSetList* setList,
+//                          CellSaveDataSetBuf* setBuf, funcFixed, funcStat, funcFile, u32 container,
+//                          void* userdata)
+void listAutoLoad(Tox2PpuContext* ctx, std::uint8_t* base) {
+    // The ninth integer argument is in the caller's parameter save area; the slot is a doubleword.
+    const auto userdata =
+            static_cast<std::uint32_t>(tox2Read64(base, static_cast<std::uint32_t>(ctx->gpr[1]) + kStackArgBase));
+    runOp(ctx, base, Op::ListAutoLoad, argU32(ctx, 0), 0, argU32(ctx, 1), argU32(ctx, 2), argU32(ctx, 3),
+          argU32(ctx, 4), argU32(ctx, 5), argU32(ctx, 6), argU32(ctx, 7), userdata);
+}
+
+// cellSaveDataFixedLoad2(u32 version, CellSaveDataSetList* setList, CellSaveDataSetBuf* setBuf,
+//                        funcFixed, funcStat, funcFile, u32 container, void* userdata)
+void fixedLoad2(Tox2PpuContext* ctx, std::uint8_t* base) {
+    runOp(ctx, base, Op::FixedLoad, argU32(ctx, 0), 0, kErrDialogAlways, argU32(ctx, 1), argU32(ctx, 2), argU32(ctx, 3),
+          argU32(ctx, 4), argU32(ctx, 5), argU32(ctx, 6), argU32(ctx, 7));
+}
+
+// cellSaveDataFixedSave2: same parameters as FixedLoad2.
+void fixedSave2(Tox2PpuContext* ctx, std::uint8_t* base) {
+    runOp(ctx, base, Op::FixedSave, argU32(ctx, 0), 0, kErrDialogAlways, argU32(ctx, 1), argU32(ctx, 2), argU32(ctx, 3),
+          argU32(ctx, 4), argU32(ctx, 5), argU32(ctx, 6), argU32(ctx, 7));
+}
+
 // cellSaveDataDelete2(u32 container): RPCS3 `select_and_delete` is a selection UI only.
 void delete2(Tox2PpuContext* ctx, std::uint8_t*) {
     logInfo("tox2: savedata: cellSaveDataDelete2(container {:#x}): no selection UI, cancelling", argU32(ctx, 0));
@@ -1129,6 +1248,9 @@ void delete2(Tox2PpuContext* ctx, std::uint8_t*) {
 
 constexpr HleEntry kHandlers[] = {
         {kModule, 0x1dfbfdd6, "cellSaveDataListLoad2", listLoad2},
+        {kModule, 0x21425307, "cellSaveDataListAutoLoad", listAutoLoad},
+        {kModule, 0x2a8eada2, "cellSaveDataFixedLoad2", fixedLoad2},
+        {kModule, 0x2aae9ef5, "cellSaveDataFixedSave2", fixedSave2},
         {kModule, 0x2de0d663, "cellSaveDataListSave2", listSave2},
         {kModule, 0x8b7ed64b, "cellSaveDataAutoSave2", autoSave2},
         {kModule, 0xedadd797, "cellSaveDataDelete2", delete2},

@@ -109,7 +109,7 @@ void setDialogAnswerDelay(std::chrono::milliseconds delay);
 void resetCellMsgDialog();
 
 // Handlers of the cellSaveData imports (cellSysutil module): AutoLoad2, AutoSave2, ListLoad2,
-// ListSave2 and Delete2.
+// ListSave2, Delete2, ListAutoLoad, FixedLoad2 and FixedSave2.
 std::span<const HleEntry> cellSaveDataHandlers();
 
 // Forgets the busy flag, the NOREPEAT error-dialog memory and the callback scratch block. Intended

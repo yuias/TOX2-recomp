@@ -65,7 +65,7 @@ census: spu 5 threads, 87070 dispatches, 0 unknown targets
 The counts differ from run to run. The default-handled system call was `sys_spu_thread_bind_queue`
 (the game's sound engine; it has a handler now); the seven default-handled imports are `cellRtcGetCurrentTick`,
 `cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`
-(the two `cellRtc` imports have handlers now).
+(the two `cellRtc` imports and `cellSaveDataListAutoLoad` have handlers now).
 
 A run with `--seconds 180` also ends at the watchdog (`tox2: stop: watchdog 180 s`). Its SPU census is
 `census: spu 5 threads, 174337514 dispatches, 0 unknown targets`. Before the jump table at `0x0092d178`
@@ -239,8 +239,8 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   committed function database holds 29,196 functions, and the emitter reports no unhandled
   instruction form.
 - The executable imports 173 functions from 17 modules, all with known names. The runtime has a
-  handler for 127 of them and binds the 30 `cellSpurs` functions to libsre (`tox2: hle: 173 imports,
-  127 with handlers, 30 bound to libsre`); the other 16 get the default handler (see
+  handler for 130 of them and binds the 30 `cellSpurs` functions to libsre (`tox2: hle: 173 imports,
+  130 with handlers, 30 bound to libsre`); the other 13 get the default handler (see
   [Runtime internals](runtime.md#default-handlers)). Among them are the four
   `cellScreenShotUtility` functions.
 - It embeds 8 SPU images and has 267 system call sites; the probe leaves 4 of them unresolved.
@@ -282,7 +282,8 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   The census of a run from before the sound engine thread started listed one system call
   (`sys_spu_thread_bind_queue`, since implemented) and seven imports (`cellRtcGetCurrentTick`,
   `cellRtcConvertUtcToLocalTime`, four `cellScreenShotUtility` functions and `cellSaveDataListAutoLoad`);
-  the two `cellRtc` imports have handlers now, the others are still default-handled.
+  the two `cellRtc` imports and `cellSaveDataListAutoLoad` have handlers now, the four
+  `cellScreenShotUtility` functions are still default-handled.
 - Graphics: only what the inherited fake RSX and renderer implement. Whatever the renderer meets and
   cannot handle is listed in the `rsx unimplemented` census (see
   [Rendering](rendering.md#rendering)). Known gaps are the ZPASS report values (the constant 0 is
