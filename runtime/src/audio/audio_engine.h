@@ -77,6 +77,9 @@ struct AudioEngineStats {
     // Rate of the engine's clock relative to 48 kHz (positive: faster). Zero for an output without a
     // fill level, such as the null output.
     double clock_ppm = 0.0;
+    // Mean output fill in frames over the last controller interval; zero until the first interval ends
+    // and for an output without a fill level.
+    double mean_fill_frames = 0.0;
     AudioOutputStats output_stats;
 };
 AudioEngineStats audioEngineStats();  // any thread

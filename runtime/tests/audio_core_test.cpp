@@ -1176,6 +1176,7 @@ void testEngineFollowsReportedFill() {
         CHECK(waitFor([&] { return tox2::audioEngineStats().clock_ppm != 0.0; }, 5s));
         const double ppm = tox2::audioEngineStats().clock_ppm;
         CHECK(ppm < 0.0 && ppm >= -tox2::kClockMaxPpm);
+        CHECK(tox2::audioEngineStats().mean_fill_frames == 3000.0);
         CHECK(tox2::stopAudioEngineForTest());
     }
     // An output without a fill level keeps the plain clock.
@@ -1186,6 +1187,7 @@ void testEngineFollowsReportedFill() {
         tox2::startAudioEngine(makeProducer(state));
         CHECK(waitFor([&] { return state->calls.load() >= 250; }));
         CHECK(tox2::audioEngineStats().clock_ppm == 0.0);
+        CHECK(tox2::audioEngineStats().mean_fill_frames == 0.0);
         CHECK(tox2::stopAudioEngineForTest());
     }
 }
