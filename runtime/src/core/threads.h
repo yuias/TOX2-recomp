@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -9,11 +10,45 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "core/latency_stats.h"
 #include "tox2/ppu_context.h"
 
 namespace tox2 {
+
+// Who is waiting for or holding the guest lock. Guest threads are Ppu or PpuHigh by their lv2 priority at the time
+// of the call; host threads name themselves once with setGuestLockClass (default Other).
+enum class GuestLockClass : std::uint8_t { Ppu, PpuHigh, Spu, Audio, Rsx, Other };
+inline constexpr std::size_t kGuestLockClassCount = 6;
+inline constexpr std::int32_t kPpuHighPriorityBelow = 100;  // lv2 priority; the game's sound threads use 0
+
+void setGuestLockClass(GuestLockClass cls);  // thread-local; for host threads
+// The explicit class if set, else Ppu/PpuHigh for a guest thread, else Other.
+GuestLockClass currentGuestLockClass();
+std::string_view guestLockClassName(GuestLockClass cls);  // "ppu", "ppu-high", "spu", "audio", "rsx", "other"
+
+// Thresholds of the `over` counts in GuestLockStats.
+inline constexpr std::uint64_t kGuestLockWaitOverUs = 1000;
+inline constexpr std::uint64_t kGuestLockHoldOverUs = 1000;
+inline constexpr std::uint64_t kGuestLockHandoffOverUs = 100;
+
+struct GuestLockClassStats {
+    LatencySnapshot wait;                        // entry -> turn; 0 when uncontended
+    LatencySnapshot hold;                        // turn -> unlock()
+    std::uint64_t contended = 0;                 // acquisitions that had to queue
+    std::uint64_t ahead_sum = 0, ahead_max = 0;  // waiters queued ahead at ticket time (contended acquisitions only)
+    // Approximate attribution: per holder class, the hold time that ended while this class waited (from the holder
+    // classes' cumulative hold sums at ticket time and at turn). Only contended acquisitions add to it.
+    std::array<std::uint64_t, kGuestLockClassCount> waited_behind_us{};
+};
+
+struct GuestLockStats {
+    std::array<GuestLockClassStats, kGuestLockClassCount> classes;
+    LatencySnapshot handoff;                          // unlock() of the previous holder -> turn of a waiting acquirer
+    std::uint64_t wakeups = 0, spurious_wakeups = 0;  // waiter wake-ups, and those that found it was not their turn
+};
 
 // The one lock all guest code runs under. A thread takes it when it starts and gives it up only
 // inside tox2Yield, blockingWait and exitCurrentThread, so guest threads never run in parallel.
@@ -21,6 +56,8 @@ namespace tox2 {
 // lock in FIFO order and set/get_priority only store and return the value. The one exception is the
 // creation rule of sys_ppu_thread_create (startGuestThreadFirst): a new thread with a numerically
 // lower priority than its creator takes the lock before the creator continues.
+//
+// Waits and holds are timed per GuestLockClass; recording takes no lock beyond the one the operation already needs.
 class GuestLock {
 public:
     void lock();
@@ -34,12 +71,33 @@ public:
     }
     bool hasWaiters() const { return waiterCount() > 0; }
 
+    GuestLockStats stats() const;  // any thread
+
 private:
+    struct ClassCounters {
+        LatencyStats wait{kGuestLockWaitOverUs};
+        LatencyStats hold{kGuestLockHoldOverUs};
+        std::atomic<std::uint64_t> contended{0}, ahead_sum{0}, ahead_max{0};
+        std::array<std::atomic<std::uint64_t>, kGuestLockClassCount> waited_behind_us{};
+    };
+
     std::mutex mutex_;
     std::condition_variable turn_;
     std::uint64_t next_ticket_ = 0;              // guarded by mutex_
     std::uint64_t serving_ = 0;                  // guarded by mutex_
     std::atomic<std::uint64_t> outstanding_{0};  // holder plus waiters
+
+    // The holder's own state: written by a thread when it gets its turn and read only by that thread in
+    // unlock(), before the next ticket is served.
+    std::chrono::steady_clock::time_point hold_start_{};
+    GuestLockClass holder_class_ = GuestLockClass::Other;
+    // Written in unlock() under mutex_; waiters diff it between their ticket and their turn.
+    std::chrono::steady_clock::time_point released_at_{};            // guarded by mutex_
+    std::array<std::uint64_t, kGuestLockClassCount> hold_sum_us_{};  // guarded by mutex_
+
+    std::array<ClassCounters, kGuestLockClassCount> classes_;
+    LatencyStats handoff_{kGuestLockHandoffOverUs};
+    std::atomic<std::uint64_t> wakeups_{0}, spurious_wakeups_{0};
 };
 
 GuestLock& guestLock();
@@ -69,8 +127,9 @@ public:
     const std::string& name() const { return name_; }
     // Fully set up by prepareGuestThread; the host thread runs it as it is.
     Tox2PpuContext& context() { return context_; }
-    std::int32_t priority() const { return priority_; }
-    void setPriority(std::int32_t priority) { priority_ = priority; }
+    // Atomic because GuestLock::lock() classifies the caller by it before the caller holds the guest lock.
+    std::int32_t priority() const { return priority_.load(std::memory_order_relaxed); }
+    void setPriority(std::int32_t priority) { priority_.store(priority, std::memory_order_relaxed); }
 
     std::uint32_t stackAddr() const { return stack_addr_; }
     std::uint32_t stackSize() const { return stack_size_; }
@@ -99,7 +158,7 @@ public:
 private:
     std::uint32_t id_;
     std::string name_;
-    std::int32_t priority_;
+    std::atomic<std::int32_t> priority_;
     std::uint32_t stack_addr_, stack_size_, tls_r13_, entry_opd_;
     bool joinable_;
     bool service_;

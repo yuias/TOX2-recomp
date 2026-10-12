@@ -112,6 +112,12 @@ void setSpuCensusProvider(SpuCensusFn fn, CensusResetFn reset);
 using CensusWriterFn = void (*)();
 void setRsxStopWriter(CensusWriterFn fn);
 
+// Lines of the guest lock statistics, printed after the thread section. The first line is the "census: guest lock"
+// header; an empty result omits the section. The provider runs without the census lock and may be called from any
+// thread.
+using GuestLockCensusFn = std::vector<std::string> (*)();
+void setGuestLockCensusProvider(GuestLockCensusFn fn);
+
 // The census as text, one line per element, no trailing newline. Entries are sorted by count
 // (descending) and then by name. In the syscall and HLE headers "default-handled" is the number of
 // distinct entries that used the default handler.

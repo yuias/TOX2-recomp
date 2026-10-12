@@ -1,6 +1,7 @@
 // Self-checking unit tests for the runtime core library. No generated code is involved.
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -11139,6 +11140,7 @@ void testGcmInterruptThread() {
     const tox2::GcmInterruptCounts counts = tox2::gcmInterruptCounts();
     CHECK(counts.vblank == 2 && counts.flip == 0 && counts.user == 2);
     CHECK(tox2::formatCensus().find("_gcm_intr_thread: blocked in gcm interrupt wait [service]") != std::string::npos);
+    CHECK(tox2::formatCensus().find("census: guest lock") != std::string::npos);
 
     tox2::stopGcmInterruptThread();
     CHECK(thread->state() == tox2::ThreadState::Exited);
@@ -11203,6 +11205,91 @@ void testGuestLockFifo() {
 
     CHECK(order == (std::vector<int>{1, 2, 3}));
     CHECK(!lock.hasWaiters());
+}
+
+// Waits and holds are attributed to the class of the thread that waited or held.
+void testGuestLockStats() {
+    constexpr auto kRsx = tox2::GuestLockClass::Rsx;
+    constexpr auto kAudio = tox2::GuestLockClass::Audio;
+    constexpr auto kOther = tox2::GuestLockClass::Other;
+    const auto idx = [](tox2::GuestLockClass cls) { return static_cast<std::size_t>(cls); };
+    CHECK(tox2::guestLockClassName(kRsx) == "rsx" && tox2::guestLockClassName(kAudio) == "audio");
+    CHECK(tox2::guestLockClassName(tox2::GuestLockClass::PpuHigh) == "ppu-high");
+
+    // An Audio thread queues behind an Rsx holder that keeps the lock for 20 ms.
+    {
+        tox2::GuestLock lock;
+        std::atomic<bool> held{false};
+        std::thread holder([&] {
+            tox2::setGuestLockClass(kRsx);
+            lock.lock();
+            held = true;
+            while (!lock.hasWaiters()) std::this_thread::yield();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            lock.unlock();
+        });
+        std::thread waiter([&] {
+            tox2::setGuestLockClass(kAudio);
+            while (!held) std::this_thread::yield();
+            lock.lock();
+            lock.unlock();
+        });
+        holder.join();
+        waiter.join();
+
+        const tox2::GuestLockStats s = lock.stats();
+        const tox2::GuestLockClassStats& audio = s.classes[idx(kAudio)];
+        const tox2::GuestLockClassStats& rsx = s.classes[idx(kRsx)];
+        CHECK(audio.wait.count == 1 && audio.wait.max_us >= 15'000 && audio.wait.max_us <= 60'000);
+        CHECK(audio.wait.over >= 1);
+        CHECK(audio.contended == 1 && audio.ahead_sum == 1 && audio.ahead_max == 1);
+        CHECK(rsx.wait.count == 1 && rsx.wait.max_us == 0 && rsx.contended == 0);
+        CHECK(rsx.hold.count == 1 && rsx.hold.max_us >= 20'000);
+        CHECK(audio.waited_behind_us[idx(kRsx)] >= 15'000);
+        CHECK(audio.waited_behind_us[idx(kAudio)] == 0);
+        CHECK(s.handoff.count == 1);
+        CHECK(s.wakeups >= 1 && s.spurious_wakeups < s.wakeups);
+        CHECK(s.classes[idx(kOther)].wait.count == 0);
+    }
+
+    // A thread that never named itself counts as Other; an uncontended acquisition waits 0.
+    {
+        tox2::GuestLock lock;
+        std::thread t([&] {
+            CHECK(tox2::currentGuestLockClass() == kOther);
+            for (int i = 0; i < 1000; i++) {
+                lock.lock();
+                lock.unlock();
+            }
+        });
+        t.join();
+        const tox2::GuestLockStats s = lock.stats();
+        const tox2::GuestLockClassStats& other = s.classes[idx(kOther)];
+        CHECK(other.wait.count == 1000 && other.wait.sum_us == 0 && other.wait.max_us == 0);
+        CHECK(other.wait.buckets[0] == 1000 && other.hold.count == 1000 && other.contended == 0);
+        CHECK(s.handoff.count == 0 && s.wakeups == 0);
+        CHECK(s.classes[idx(kAudio)].wait.count == 0);
+    }
+
+    // Cost of an uncontended lock + unlock pair, with the statistics on.
+    {
+        tox2::GuestLock lock;
+        constexpr int kRuns = 5;
+        constexpr int kPairs = 1'000'000;
+        std::array<double, kRuns> ns_per_pair{};
+        for (double& ns : ns_per_pair) {
+            const auto start = std::chrono::steady_clock::now();
+            for (int i = 0; i < kPairs; i++) {
+                lock.lock();
+                lock.unlock();
+            }
+            const auto elapsed = std::chrono::steady_clock::now() - start;
+            ns = static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()) / kPairs;
+        }
+        std::ranges::sort(ns_per_pair);
+        std::printf("guest lock uncontended pair: %.0f ns\n", ns_per_pair[kRuns / 2]);
+        CHECK(lock.stats().classes[idx(kOther)].wait.count == static_cast<std::uint64_t>(kRuns) * kPairs);
+    }
 }
 
 void testTimebase() {
@@ -11759,6 +11846,7 @@ int main(int argc, char** argv) {
     testTimebase();
     testTimerResolution();
     testGuestLockFifo();
+    testGuestLockStats();
     testReservationAndDcbz();
     testGuestStackWalk();
     testFaultChild();

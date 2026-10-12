@@ -3,6 +3,7 @@
 #include "core/threads.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <format>
@@ -38,6 +39,8 @@ constexpr std::int64_t kStallMs = 2000;
 constexpr std::chrono::milliseconds kSupervisorPeriod{100};
 
 thread_local GuestThread* t_current = nullptr;
+constexpr std::uint8_t kNoExplicitClass = 0xFF;
+thread_local std::uint8_t t_lock_class = kNoExplicitClass;
 std::atomic<SpuHealthFn> g_spu_health{nullptr};
 
 // Lock order: guest lock, then registry mutex. The census printer runs inside fatal(), possibly
@@ -87,10 +90,46 @@ std::vector<ThreadCensusEntry> threadCensus() {
     return out;
 }
 
+// One header line and one line per class that took the lock; empty until the lock was used.
+std::vector<std::string> guestLockCensus() {
+    const GuestLockStats s = guestLock().stats();
+    std::uint64_t total = 0;
+    for (const GuestLockClassStats& c : s.classes) total += c.wait.count;
+    if (total == 0) return {};
+
+    const double seconds = std::max(static_cast<double>(systemTimeUs()) / 1e6, 1e-3);
+    std::vector<std::string> lines;
+    lines.push_back(std::format("census: guest lock {} acquisitions in {:.1f} s, hand-off {}, wakeups {} ({} spurious)",
+                                total, seconds, formatLatency(s.handoff, kGuestLockHandoffOverUs), s.wakeups,
+                                s.spurious_wakeups));
+    for (std::size_t i = 0; i < kGuestLockClassCount; i++) {
+        const GuestLockClassStats& c = s.classes[i];
+        if (c.wait.count == 0) continue;
+        const double ahead_avg =
+                c.contended != 0 ? static_cast<double>(c.ahead_sum) / static_cast<double>(c.contended) : 0.0;
+        std::string line =
+                std::format("  {}: {:.1f}/s, wait {}, ahead avg {:.1f} max {}, hold {}",
+                            guestLockClassName(static_cast<GuestLockClass>(i)),
+                            static_cast<double>(c.wait.count) / seconds, formatLatency(c.wait, kGuestLockWaitOverUs),
+                            ahead_avg, c.ahead_max, formatLatency(c.hold, kGuestLockHoldOverUs));
+        bool first = true;
+        for (std::size_t holder = 0; holder < kGuestLockClassCount; holder++) {
+            if (c.waited_behind_us[holder] == 0) continue;
+            line += std::format("{} {} {:.1f} ms", first ? ", waited behind" : "",
+                                guestLockClassName(static_cast<GuestLockClass>(holder)),
+                                static_cast<double>(c.waited_behind_us[holder]) / 1000.0);
+            first = false;
+        }
+        lines.push_back(std::move(line));
+    }
+    return lines;
+}
+
 // Cheap and idempotent: repeating it re-registers the census provider after a resetCensus.
 void installThreadHooks() {
     setGuestThreadIdProvider(&currentThreadId);
     setThreadCensusProvider(&threadCensus);
+    setGuestLockCensusProvider(&guestLockCensus);
 }
 
 // RPCS3 fills the lowest and the highest page of every stack allocation with these strings (`vm.cpp`
@@ -138,21 +177,112 @@ unsigned __stdcall guestThreadMain(void* arg) {
 
 }  // namespace
 
+void setGuestLockClass(GuestLockClass cls) { t_lock_class = static_cast<std::uint8_t>(cls); }
+
+GuestLockClass currentGuestLockClass() {
+    if (t_lock_class != kNoExplicitClass) return static_cast<GuestLockClass>(t_lock_class);
+    if (t_current == nullptr) return GuestLockClass::Other;
+    return t_current->priority() < kPpuHighPriorityBelow ? GuestLockClass::PpuHigh : GuestLockClass::Ppu;
+}
+
+std::string_view guestLockClassName(GuestLockClass cls) {
+    switch (cls) {
+        case GuestLockClass::Ppu: return "ppu";
+        case GuestLockClass::PpuHigh: return "ppu-high";
+        case GuestLockClass::Spu: return "spu";
+        case GuestLockClass::Audio: return "audio";
+        case GuestLockClass::Rsx: return "rsx";
+        case GuestLockClass::Other: break;
+    }
+    return "other";
+}
+
 void GuestLock::lock() {
+    const GuestLockClass cls = currentGuestLockClass();
+    ClassCounters& counters = classes_[static_cast<std::size_t>(cls)];
+    // The one clock read of an uncontended acquisition: it is both the entry time and the start of the hold.
+    const auto arrival = std::chrono::steady_clock::now();
     std::unique_lock lock(mutex_);
     const std::uint64_t ticket = next_ticket_++;
     // Counted only once the ticket is taken, so hasWaiters() implies a place in the queue.
     outstanding_.fetch_add(1, std::memory_order_relaxed);
-    turn_.wait(lock, [&] { return serving_ == ticket; });
+    if (serving_ == ticket) {
+        hold_start_ = arrival;
+        holder_class_ = cls;
+        lock.unlock();
+        counters.wait.record(0);
+        return;
+    }
+
+    const std::uint64_t ahead = ticket - serving_;
+    const std::array<std::uint64_t, kGuestLockClassCount> hold_sum_at_ticket = hold_sum_us_;
+    // Every release wakes every waiter, so a wake-up that finds another ticket served is a wasted one.
+    std::uint64_t wakeups = 0;
+    do {
+        turn_.wait(lock);
+        wakeups++;
+    } while (serving_ != ticket);
+    const auto released_at = released_at_;
+    const std::array<std::uint64_t, kGuestLockClassCount> hold_sum_at_turn = hold_sum_us_;
+    // The clock is read after the mutex is released: every waiter was just woken and wants the mutex. The holder
+    // fields need no mutex, since only this thread reads them until its unlock() serves the next ticket.
+    lock.unlock();
+    const auto turn = std::chrono::steady_clock::now();
+    hold_start_ = turn;
+    holder_class_ = cls;
+    const std::uint64_t handoff_us = elapsedUs(released_at, turn);
+
+    counters.wait.record(elapsedUs(arrival, turn));
+    counters.contended.fetch_add(1, std::memory_order_relaxed);
+    counters.ahead_sum.fetch_add(ahead, std::memory_order_relaxed);
+    std::uint64_t seen = counters.ahead_max.load(std::memory_order_relaxed);
+    while (ahead > seen && !counters.ahead_max.compare_exchange_weak(seen, ahead, std::memory_order_relaxed)) {
+    }
+    for (std::size_t i = 0; i < kGuestLockClassCount; i++) {
+        const std::uint64_t behind = hold_sum_at_turn[i] - hold_sum_at_ticket[i];
+        if (behind != 0) counters.waited_behind_us[i].fetch_add(behind, std::memory_order_relaxed);
+    }
+    handoff_.record(handoff_us);
+    wakeups_.fetch_add(wakeups, std::memory_order_relaxed);
+    if (wakeups > 1) spurious_wakeups_.fetch_add(wakeups - 1, std::memory_order_relaxed);
 }
 
 void GuestLock::unlock() {
+    const auto now = std::chrono::steady_clock::now();
+    // Only the holder reads these, and the next holder writes them after this call serves its ticket.
+    const GuestLockClass holder = holder_class_;
+    const std::uint64_t hold_us = elapsedUs(hold_start_, now);
+    // Recorded before the release: a lock that lives on a test's stack must not be touched after a waiter
+    // may have taken it and let the owner destroy it.
+    classes_[static_cast<std::size_t>(holder)].hold.record(hold_us);
     {
         std::lock_guard lock(mutex_);
+        hold_sum_us_[static_cast<std::size_t>(holder)] += hold_us;
+        released_at_ = now;
         serving_++;
         outstanding_.fetch_sub(1, std::memory_order_relaxed);
     }
     turn_.notify_all();
+}
+
+GuestLockStats GuestLock::stats() const {
+    GuestLockStats out;
+    for (std::size_t i = 0; i < kGuestLockClassCount; i++) {
+        const ClassCounters& in = classes_[i];
+        GuestLockClassStats& c = out.classes[i];
+        c.wait = in.wait.snapshot();
+        c.hold = in.hold.snapshot();
+        c.contended = in.contended.load(std::memory_order_relaxed);
+        c.ahead_sum = in.ahead_sum.load(std::memory_order_relaxed);
+        c.ahead_max = in.ahead_max.load(std::memory_order_relaxed);
+        for (std::size_t h = 0; h < kGuestLockClassCount; h++) {
+            c.waited_behind_us[h] = in.waited_behind_us[h].load(std::memory_order_relaxed);
+        }
+    }
+    out.handoff = handoff_.snapshot();
+    out.wakeups = wakeups_.load(std::memory_order_relaxed);
+    out.spurious_wakeups = spurious_wakeups_.load(std::memory_order_relaxed);
+    return out;
 }
 
 GuestLock& guestLock() {
