@@ -5270,22 +5270,23 @@ void testGamepadCellPad() {
 }
 
 struct ScriptEventSpec {
-    int at_ms;
+    int at;  // milliseconds or flips, as the script's clock says
     tox2::PadButtons buttons;
     bool down;
 };
 
-bool scriptEventsAre(const std::string& text, std::initializer_list<ScriptEventSpec> expected) {
+bool scriptEventsAre(const std::string& text, std::initializer_list<ScriptEventSpec> expected,
+                     tox2::PadScriptClock clock = tox2::PadScriptClock::Seconds) {
     const auto parsed = tox2::parsePadScript(text);
     if (!parsed) {
         std::fprintf(stderr, "parse failed: %s\n", parsed.error().c_str());
         return false;
     }
-    if (parsed->size() != expected.size()) return false;
+    if (parsed->clock != clock || parsed->events.size() != expected.size()) return false;
     std::size_t i = 0;
     for (const ScriptEventSpec& want : expected) {
-        const tox2::PadScriptEvent& got = (*parsed)[i++];
-        if (got.at.count() != want.at_ms || got.buttons != want.buttons || got.down != want.down) return false;
+        const tox2::PadScriptEvent& got = parsed->events[i++];
+        if (got.at != want.at || got.buttons != want.buttons || got.down != want.down) return false;
     }
     return true;
 }
@@ -5300,6 +5301,7 @@ void testPadScriptParse() {
     constexpr tox2::PadButtons kStart = tox2::padButtonBit(PadButton::Start);
     constexpr tox2::PadButtons kCross = tox2::padButtonBit(PadButton::Cross);
     constexpr tox2::PadButtons kR1 = tox2::padButtonBit(PadButton::R1);
+    constexpr tox2::PadButtons kCircle = tox2::padButtonBit(PadButton::Circle);
     constexpr int kHold = static_cast<int>(tox2::kPadScriptTapHold.count());
     CHECK(tox2::kPadScriptTapHold > tox2::KeyboardPadState::kMinPressVisible);
 
@@ -5347,6 +5349,40 @@ void testPadScriptParse() {
     // A release of one tap and the press of the next at the same instant also order release first.
     CHECK(scriptEventsAre("1 tap start\n1.15 tap start",
                           {{1000, kStart, true}, {1150, kStart, false}, {1150, kStart, true}, {1300, kStart, false}}));
+
+    // The flip clock: `f<N>` times, a 9 flip tap hold, repeats in flips, and the same sort rules.
+    using tox2::PadScriptClock;
+    constexpr int kHoldFlips = static_cast<int>(tox2::kPadScriptTapHoldFlips);
+    CHECK(kHoldFlips == 9);
+    CHECK(scriptEventsAre("f1200 press circle\nf0 press start\nf1300 release circle",
+                          {{0, kStart, true}, {1200, kCircle, true}, {1300, kCircle, false}}, PadScriptClock::Flips));
+    CHECK(scriptEventsAre("f100 tap cross\nf50 tap start",
+                          {{50, kStart, true},
+                           {50 + kHoldFlips, kStart, false},
+                           {100, kCross, true},
+                           {100 + kHoldFlips, kCross, false}},
+                          PadScriptClock::Flips));
+    CHECK(scriptEventsAre("f10 tap start every f20 until f50",
+                          {{10, kStart, true},
+                           {10 + kHoldFlips, kStart, false},
+                           {30, kStart, true},
+                           {30 + kHoldFlips, kStart, false},
+                           {50, kStart, true},
+                           {50 + kHoldFlips, kStart, false}},
+                          PadScriptClock::Flips));
+    CHECK(scriptEventsAre("f10 tap start every f10 until f10", {{10, kStart, true}, {10 + kHoldFlips, kStart, false}},
+                          PadScriptClock::Flips));
+    // An interval of 10 flips is the shortest that clears the hold; releases still come before presses.
+    CHECK(scriptEventsAre(
+            "f1 tap start every f10 until f11",
+            {{1, kStart, true}, {1 + kHoldFlips, kStart, false}, {11, kStart, true}, {11 + kHoldFlips, kStart, false}},
+            PadScriptClock::Flips));
+    CHECK(scriptEventsAre("f5 press start\nf5 release cross", {{5, kCross, false}, {5, kStart, true}},
+                          PadScriptClock::Flips));
+    CHECK(scriptEventsAre("f100000000 press start", {{100000000, kStart, true}}, PadScriptClock::Flips));
+    // Comments and blank lines do not decide the clock; the first timed line does.
+    CHECK(scriptEventsAre("# f1 is not a time here\n\nf7 press start", {{7, kStart, true}}, PadScriptClock::Flips));
+    CHECK(scriptEventsAre("7 press start # f8", {{7000, kStart, true}}));
 }
 
 void testPadScriptErrors() {
@@ -5378,6 +5414,34 @@ void testPadScriptErrors() {
     CHECK(scriptError("1 tap start every 2 until 5 extra").starts_with("line 1: unexpected \"extra\""));
     CHECK(scriptError("1 tap start every 0.2 until 999999").starts_with("line 1: more than"));
 
+    // Flip times: malformed tokens, bounds, and no mixing with seconds.
+    CHECK(scriptError("f press start") == "line 1: bad time \"f\"");
+    CHECK(scriptError("f1.5 press start") == "line 1: bad time \"f1.5\"");
+    CHECK(scriptError("f-1 press start").starts_with("line 1: bad time"));
+    CHECK(scriptError("fx press start").starts_with("line 1: bad time"));
+    CHECK(scriptError("F1 press start").starts_with("line 1: bad time"));
+    CHECK(scriptError("f100000001 press start").starts_with("line 1: bad time"));
+    CHECK(scriptError("f99999999999999999999 press start").starts_with("line 1: bad time"));
+    CHECK(scriptError("f1 tap start every f9 until f50")
+                  .starts_with("line 1: interval must be longer than the 9 flip"));
+    CHECK(scriptError("f1 tap start every f0 until f50").starts_with("line 1: interval must be longer"));
+    CHECK(scriptError("f1 tap start every f until f50") == "line 1: bad interval \"f\"");
+    CHECK(scriptError("f1 tap start every f1.5 until f50") == "line 1: bad interval \"f1.5\"");
+    CHECK(scriptError("f1 tap start every f10 until f1.5") == "line 1: bad time \"f1.5\"");
+    CHECK(scriptError("f9 tap start every f10 until f1").starts_with("line 1: \"until\" is before"));
+    CHECK(scriptError("f1 tap start every f10").starts_with("line 1: \"every\" needs \"until <time>\""));
+    CHECK(scriptError("f1 tap start every f10 until f100000000").starts_with("line 1: more than"));
+
+    constexpr const char* kMixed = "flip times and second times cannot be mixed";
+    CHECK(scriptError("f1 press start\n\n# c\n2 press start\n") == std::string("line 4: ") + kMixed);
+    CHECK(scriptError("1 press start\n2 press start\nf3 release start") == std::string("line 3: ") + kMixed);
+    CHECK(scriptError("f1 tap start every 2 until f50") == std::string("line 1: ") + kMixed);
+    CHECK(scriptError("1 tap start every f20 until 50") == std::string("line 1: ") + kMixed);
+    CHECK(scriptError("f1 tap start every f20 until 50") == std::string("line 1: ") + kMixed);
+    CHECK(scriptError("1 tap start every 2 until f50") == std::string("line 1: ") + kMixed);
+    // A comment never decides the clock.
+    CHECK(scriptError("# 1 press start\nf1 press start\nf2 release start").empty());
+
     const auto missing = tox2::loadPadScript(std::filesystem::path("no_such_dir") / "no_such_script.txt");
     CHECK(!missing && missing.error().starts_with("cannot open"));
 
@@ -5390,7 +5454,7 @@ void testPadScriptErrors() {
         out << "# test\n2 tap start\n";
     }
     const auto loaded = tox2::loadPadScript(file);
-    CHECK(loaded && loaded->size() == 2 && (*loaded)[0].at.count() == 2000);
+    CHECK(loaded && loaded->events.size() == 2 && loaded->events[0].at == 2000);
     {
         std::ofstream out(file, std::ios::binary);
         out << "1 press start\n2 press bogus\n";
@@ -5409,8 +5473,8 @@ void testPadScriptPlay() {
     constexpr tox2::PadButtons kR1 = tox2::padButtonBit(PadButton::R1);
 
     const auto parsed = tox2::parsePadScript("1 press start\n2 press cross+r1\n3 release start\n4 release cross+r1\n");
-    CHECK(parsed && parsed->size() == 4);
-    if (!parsed || parsed->size() != 4) return;
+    CHECK(parsed && parsed->events.size() == 4 && parsed->clock == tox2::PadScriptClock::Seconds);
+    if (!parsed || parsed->events.size() != 4) return;
 
     std::vector<std::string> lines;
     tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
@@ -5418,8 +5482,10 @@ void testPadScriptPlay() {
     tox2::KeyboardPadState state;
     std::vector<std::int64_t> waits;
     std::vector<tox2::PadButtons> held_before_wait;
-    tox2::playPadScript(*parsed, state, [&](milliseconds at) {
-        waits.push_back(at.count());
+    // No flip runs in this test, so the count stays what earlier tests left.
+    const std::uint64_t flip_count = tox2::rsxFlipCount();
+    tox2::playPadScript(*parsed, state, [&](std::int64_t at) {
+        waits.push_back(at);
         held_before_wait.push_back(state.held());
     });
     tox2::setLogSink({});
@@ -5431,10 +5497,32 @@ void testPadScriptPlay() {
 
     CHECK(lines.size() == 4);
     if (lines.size() == 4) {
-        CHECK(lines[0] == "[host] tox2: pad: script 1.000 s: press start");
-        CHECK(lines[1] == "[host] tox2: pad: script 2.000 s: press r1+cross");
-        CHECK(lines[2] == "[host] tox2: pad: script 3.000 s: release start");
-        CHECK(lines[3] == "[host] tox2: pad: script 4.000 s: release r1+cross");
+        CHECK(lines[0] == "[host] tox2: pad: script 1.000 s: press start (flip " + std::to_string(flip_count) + ")");
+        CHECK(lines[1] == "[host] tox2: pad: script 2.000 s: press r1+cross (flip " + std::to_string(flip_count) + ")");
+        CHECK(lines[2] == "[host] tox2: pad: script 3.000 s: release start (flip " + std::to_string(flip_count) + ")");
+        CHECK(lines[3] ==
+              "[host] tox2: pad: script 4.000 s: release r1+cross (flip " + std::to_string(flip_count) + ")");
+    }
+
+    // A flip script hands the flip numbers to the waiter in order and logs them as flips.
+    const auto flips = tox2::parsePadScript("f1200 press cross+r1\nf1000 tap start\nf1300 release cross+r1\n");
+    CHECK(flips && flips->clock == tox2::PadScriptClock::Flips && flips->events.size() == 4);
+    if (flips && flips->events.size() == 4) {
+        lines.clear();
+        tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+        waits.clear();
+        tox2::KeyboardPadState flip_state;
+        tox2::playPadScript(*flips, flip_state, [&](std::int64_t at) { waits.push_back(at); });
+        tox2::setLogSink({});
+        CHECK((waits == std::vector<std::int64_t>{1000, 1009, 1200, 1300}));
+        CHECK(flip_state.held() == 0);
+        CHECK(lines.size() == 4);
+        if (lines.size() == 4) {
+            CHECK(lines[0] == "[host] tox2: pad: script f1000: press start");
+            CHECK(lines[1] == "[host] tox2: pad: script f1009: release start");
+            CHECK(lines[2] == "[host] tox2: pad: script f1200: press r1+cross");
+            CHECK(lines[3] == "[host] tox2: pad: script f1300: release r1+cross");
+        }
     }
 
     // Script buttons are held in their own source: a keyboard focus loss does not drop them.
@@ -5449,12 +5537,26 @@ void testPadScriptPlay() {
     auto shared = std::make_shared<tox2::KeyboardPadState>();
     tox2::startPadScript({}, shared);  // nothing to play: no thread, no change
     CHECK(shared->held() == 0);
-    tox2::startPadScript({{milliseconds(0), kCross, true}, {milliseconds(20), kStart, true}}, shared);
+    tox2::PadScript timed;
+    timed.events = {{0, kCross, true}, {20, kStart, true}};
+    tox2::startPadScript(timed, shared);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (shared->held() != (kCross | kStart) && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(milliseconds(1));
     }
     CHECK(shared->held() == (kCross | kStart));
+
+    // A flip script waits on the RSX flip count; a time that count has already reached applies at once.
+    auto flip_shared = std::make_shared<tox2::KeyboardPadState>();
+    tox2::PadScript flip_script;
+    flip_script.clock = tox2::PadScriptClock::Flips;
+    flip_script.events = {{0, kCross, true}};
+    tox2::startPadScript(std::move(flip_script), flip_shared);
+    const auto flip_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (flip_shared->held() != kCross && std::chrono::steady_clock::now() < flip_deadline) {
+        std::this_thread::sleep_for(milliseconds(1));
+    }
+    CHECK(flip_shared->held() == kCross);
 }
 
 void testCellMsgDialog() {
@@ -9037,10 +9139,21 @@ void testRsxConsumer() {
     state.flip_status = tox2::kRsxFlipStatusWaiting;
     tox2Write32(base, kLabels + 0x10, 0x1111);
     tox2::setRsxInterruptHook(&recordInterrupt);
+    // The process-wide flip count moves with the flip, and a thread waiting for it wakes up.
+    const std::uint64_t flips_before = tox2::rsxFlipCount();
+    tox2::waitRsxFlipCount(flips_before);  // already reached: returns at once
+    std::atomic<bool> flip_seen{false};
+    std::thread flip_waiter([&] {
+        tox2::waitRsxFlipCount(flips_before + 1);
+        flip_seen = true;
+    });
     emit(tox2::kMethodGcmFlipCommand, {1});
     emit(tox2::kMethodNv4097SetSemaphoreOffset, {0x50});
     emit(tox2::kMethodNv4097TextureReadSemaphoreRelease, {0x55667788});
+    CHECK(!flip_seen);  // nothing has run the flip yet
     CHECK(run() == FifoStatus::Idle && consumer.census().flips == 1);
+    flip_waiter.join();
+    CHECK(flip_seen && tox2::rsxFlipCount() == flips_before + 1);
     CHECK(state.vblank_count == 0 && label(0x50) == 0x55667788);
     CHECK(state.flip_status == tox2::kRsxFlipStatusDone && label(0x10) == 0);
     CHECK(tox2Read32(base, kControl + 4) == at);  // get follows put

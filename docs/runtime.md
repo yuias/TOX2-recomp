@@ -542,19 +542,33 @@ are parsed. `#` starts a comment, blank lines are ignored, tokens are separated 
 <time> tap     <buttons> [every <interval> until <time>]
 ```
 
-- `<time>` and `<interval>` are decimal seconds from the start of the script, with millisecond
-  precision (more decimals are rounded). `<buttons>` are the names `select l3 r3 start up right down
-  left l2 r2 l1 r1 triangle circle cross square`, joined with `+`.
+- `<time>` and `<interval>` are either decimal seconds from the start of the script, with
+  millisecond precision (more decimals are rounded), or `f<N>`, a flip count (`f1200`, decimal
+  digits only). `<buttons>` are the names `select l3 r3 start up right down left l2 r2 l1 r1
+  triangle circle cross square`, joined with `+`.
+- A script uses one clock. The first timed line decides it, and mixing seconds and flips anywhere
+  (times, intervals or `until`) is an error: `line 5: flip times and second times cannot be mixed`.
 - `tap` is a press at `<time>` and a release `kPadScriptTapHold` (150 ms) later, which is longer
-  than the minimum press time. `every <interval> until <time>` repeats it at `<time> + k *
-  <interval>` while that is not after the `until` time; `<interval>` must be longer than the hold.
-  A script has at most 100000 events and times of at most 1000000 s.
+  than the minimum press time; on the flip clock the hold is `kPadScriptTapHoldFlips` (9 flips,
+  150 ms at 60 flips/s). `every <interval> until <time>` repeats it at `<time> + k * <interval>`
+  while that is not after the `until` time; `<interval>` must be longer than the hold. A script has
+  at most 100000 events, times of at most 1000000 s and flip times of at most 100000000.
 - The events are sorted by time (stable); at the same time, releases come before presses.
 - An error names the line (`line 7: unknown button "crosss"`), is printed to stderr and ends the
   start-up with exit code 2.
-- The clock starts right before the main guest thread is booted, so it matches `--seconds` within
-  a few milliseconds. The player thread sleeps until each event, applies it to the `Script` source
-  and logs it.
+- A seconds script starts its clock right before the main guest thread is booted, so it matches
+  `--seconds` within a few milliseconds. The player thread sleeps until each event, applies it to
+  the `Script` source and logs it.
+- A flip script waits for `rsxFlipCount()` (`runtime/src/rsx/rsx_thread.h`), the number of
+  completed RSX flips since the process started, to reach each time. "At `f100`" means after the
+  100th flip: the same number as in `frame_000100.png` of `--dump-frames` and in `--rsx-capture 100`.
+  The flip clock removes the drift that comes from frame rate (a scene that renders below 60 flips
+  per second), but not the one that comes from loading: the game keeps flipping during loads, and
+  their length differs between runs. Three 240 s headless runs of the same route reached one scene
+  at flips 8800 (seconds script), 9000 (flip script) and, in a third run where a load took longer, a
+  menu press came too early and the route changed. A press that must land in a short window is
+  safer with a margin or repeated taps. In a seconds script each log line carries the flip count,
+  so one run's log gives the flip times. The count rises with every flip, also with `--render none`.
 
 No pad script ships with the repository. A script that taps Circle every 2 s from 4 s to 30 s:
 
@@ -570,6 +584,15 @@ A script that holds a direction while it taps a button:
 12   release down
 ```
 
+The same kind of script on the flip clock, which taps Circle every 120 flips from flip 600 to
+flip 3000 and holds Down for 90 flips from flip 3100:
+
+```
+f600 tap circle every f120 until f3000
+f3100 press down
+f3190 release down
+```
+
 ### Log lines
 
 All pad lines start with `tox2: pad:`; the script lines carry the `[host]` prefix. The lines of
@@ -581,7 +604,7 @@ gamepads (`gameinput`, `steam`, `device`, `gamepad`, `probe`) are in [Input](inp
 | `tox2: pad: port N connected` or `disconnected` | info | the first change of a port to that state |
 | `tox2: pad: port N setting 0xS (press on\|off, sensor on\|off)` | info | `cellPadSetPortSetting`, once per port and value |
 | `tox2: pad: <pad>` followed by ` (window)` and ` (script <file name>, <n> events)` as they apply | info | start-up with `--pad keyboard`, `gamepad` or `keyboard+gamepad` (`<pad>` is the value) |
-| `tox2: pad: script <s>.<ms> s: press\|release <buttons>` | info | the player thread, one line per event |
+| `tox2: pad: script <s>.<ms> s: press\|release <buttons> (flip <N>)` or `tox2: pad: script f<N>: press\|release <buttons>` | info | the player thread, one line per event; the form follows the clock of the script. In a seconds script `<N>` is the flip count when the event was applied, so a run's log gives the flip times for a flip script |
 | `tox2: pad: key 0x<scan code> down\|up -> <button>` | debug | a mapped key, window thread; unmapped keys and repeats are not logged |
 
 ### Scripted runs and tests
@@ -591,7 +614,7 @@ should use its own directory and delete it first, never the directory of a norma
 `game_boot`. This repository has no test that runs the game with a pad script. The pad code itself
 is covered by `runtime_core` (`testPadButtons`, `testKeyboardPadScanCodes`, `testKeyboardPadState`,
 `testKeyboardPadProvider`, `testKeyboardPadThreads`, `testPadScriptParse`, `testPadScriptErrors`,
-`testPadScriptPlay`), the gamepad source of the state by `runtime_core` (`testPadStateFromInput`,
+`testPadScriptPlay`; the flip count that a flip script waits on is checked in `testRsxConsumer`), the gamepad source of the state by `runtime_core` (`testPadStateFromInput`,
 `testGamepadSourceState`, `testGamepadPadProvider`, `testGamepadCellPad`), the rest of the gamepad
 code by `input_core` and `input_gameinput` (see [Tests](tests.md)), and the key message conversion
 by `render_core` (`testKeyMessages`).

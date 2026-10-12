@@ -92,6 +92,9 @@ std::string methodName(std::uint32_t method) {
 
 std::atomic<void (*)(RsxInterrupt, std::uint32_t)> g_hook{nullptr};
 
+// Flips completed by any consumer; one process has one RSX thread, so this is the game's flip number.
+std::atomic<std::uint64_t> g_flip_count{0};
+
 void signalInterrupt(RsxInterrupt kind, std::uint32_t arg) {
     if (auto hook = g_hook.load()) hook(kind, arg);
 }
@@ -99,6 +102,12 @@ void signalInterrupt(RsxInterrupt kind, std::uint32_t arg) {
 }  // namespace
 
 void setRsxInterruptHook(void (*hook)(RsxInterrupt kind, std::uint32_t arg)) { g_hook.store(hook); }
+
+std::uint64_t rsxFlipCount() { return g_flip_count.load(std::memory_order_acquire); }
+
+void waitRsxFlipCount(std::uint64_t n) {
+    for (std::uint64_t count = rsxFlipCount(); count < n; count = rsxFlipCount()) g_flip_count.wait(count);
+}
 
 RsxConsumer::RsxConsumer(std::uint8_t* base)
     : base_(base), method_counts_(std::make_unique<std::atomic<std::uint64_t>[]>(kMethodCount)) {
@@ -457,6 +466,10 @@ void RsxConsumer::flip(std::uint32_t buffer) {
     // RPCS3 resets the method registers on every flip; the context DMA objects are the ones that matter.
     resetDmaRegisters();
     signalInterrupt(RsxInterrupt::Flip, 1);
+    // Last, so a waiter that wakes up sees the flip fully done. The count after the Nth flip is N, the same
+    // number that names frame_<N>.png (the renderer's flip count) and selects --rsx-capture N (flips_reached_).
+    g_flip_count.fetch_add(1, std::memory_order_release);
+    g_flip_count.notify_all();
 }
 
 void RsxConsumer::userCommand(std::uint32_t cause) {

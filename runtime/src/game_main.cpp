@@ -70,7 +70,7 @@ struct Options {
     std::string pad_script;
     std::string audio;  // --audio as given; empty until the defaults are settled after all arguments
     std::string audio_dump;
-    std::vector<tox2::PadScriptEvent> pad_script_events;
+    tox2::PadScript pad_script_data;
     // The host pad state, set for every --pad that reads host input (keyboard, gamepad, both). The
     // window thread, the script thread and the gamepad thread each write their own source of it.
     std::shared_ptr<tox2::KeyboardPadState> keyboard;
@@ -344,12 +344,12 @@ bool parseArgs(int argc, char** argv, Options& opt) {
             opt.pad = name;
         } else if (arg == "--pad-script") {
             if (!value(opt.pad_script)) return false;
-            auto events = tox2::loadPadScript(std::filesystem::path(opt.pad_script));
-            if (!events) {
-                std::fprintf(stderr, "error: --pad-script %s: %s\n", opt.pad_script.c_str(), events.error().c_str());
+            auto script = tox2::loadPadScript(std::filesystem::path(opt.pad_script));
+            if (!script) {
+                std::fprintf(stderr, "error: --pad-script %s: %s\n", opt.pad_script.c_str(), script.error().c_str());
                 return false;
             }
-            opt.pad_script_events = std::move(*events);
+            opt.pad_script_data = std::move(*script);
         } else if (arg == "--pad-probe") {
             opt.pad_probe = true;
         } else if (arg == "--audio") {
@@ -786,7 +786,7 @@ int main(int argc, char** argv) {
         if (opt.window) where += " (window)";
         if (!opt.pad_script.empty()) {
             where += std::format(" (script {}, {} events)", std::filesystem::path(opt.pad_script).filename().string(),
-                                 opt.pad_script_events.size());
+                                 opt.pad_script_data.events.size());
         }
         tox2::logInfo("tox2: pad: {}{}", opt.pad, where);
     } else {
@@ -801,8 +801,9 @@ int main(int argc, char** argv) {
     }
 
     // RPCS3 passes this VFS path as argv[0] (`Emu/System.cpp` `Emulator::Load`, "Fake arg").
-    // The script clock starts here so that it matches --seconds within a few milliseconds.
-    if (opt.keyboard && !opt.pad_script.empty()) tox2::startPadScript(opt.pad_script_events, opt.keyboard);
+    // A seconds script starts here so that it matches --seconds within a few milliseconds; a flip script
+    // follows the process-wide flip count.
+    if (opt.keyboard && !opt.pad_script.empty()) tox2::startPadScript(opt.pad_script_data, opt.keyboard);
     // GameInput takes about a second to initialise, so the gamepad thread creates the backend itself.
     // The probe alone (no gamepad in the pad) runs the thread without a state to write.
     if (padUsesGamepad(opt.pad) || opt.pad_probe) {

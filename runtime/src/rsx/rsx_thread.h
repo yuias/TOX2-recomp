@@ -46,6 +46,12 @@ void setRsxInterruptHook(void (*hook)(RsxInterrupt kind, std::uint32_t arg));
 // One VBlank every 1/60 s (RPCS3's default VBlank rate).
 inline constexpr std::uint32_t kRsxVBlankPeriodUs = 16667;
 
+// Flips completed so far by the RSX thread. After the Nth flip it is N, which is the number in
+// `frame_<N>.png` of --dump-frames and the N of --rsx-capture. Any thread.
+std::uint64_t rsxFlipCount();
+// Blocks until rsxFlipCount() >= n; returns at once when it already is. Any thread.
+void waitRsxFlipCount(std::uint64_t n);
+
 // Interval between completed flips while the flip limiter is on: RPCS3's default "Auto" frame limit (60.000 fps).
 inline constexpr std::chrono::nanoseconds kRsxFlipPeriod{1'000'000'000 / 60};
 
