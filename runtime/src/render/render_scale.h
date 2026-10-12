@@ -11,10 +11,25 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
+#include <string_view>
 
 namespace tox2 {
 
 inline constexpr std::uint32_t kMaxResolutionScale = 4;
+
+// How surfaces in AA mode 3 are rendered. Supersample: a single-sample image in the memory layout, shaded per
+// sample. Msaa: a 2-sample image at the clip size, shaded per pixel, copied into the layout when read.
+enum class AaMode : std::uint8_t { Supersample, Msaa };
+
+constexpr std::string_view aaModeName(AaMode mode) { return mode == AaMode::Msaa ? "msaa" : "supersample"; }
+
+// The two names above; nullopt for anything else (the match is exact).
+constexpr std::optional<AaMode> parseAaMode(std::string_view text) {
+    if (text == "supersample") return AaMode::Supersample;
+    if (text == "msaa") return AaMode::Msaa;
+    return std::nullopt;
+}
 
 // Image pixels per clip pixel of one pass: the target's resolution scale times the samples per pixel of the
 // surface's AA layout.

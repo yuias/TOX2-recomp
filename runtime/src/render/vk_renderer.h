@@ -17,6 +17,7 @@
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
 #include "render/present_overlay.h"
+#include "render/render_scale.h"
 #include "render/vk_context.h"
 #include "render/vk_pipelines.h"
 #include "render/vk_textures.h"
@@ -42,6 +43,9 @@ struct RenderOptions {
     // makes the renderer invalid. A target too large for the device at this scale is created at the largest
     // scale that fits (and counted).
     std::uint32_t resolution_scale = 1;
+    // How anti-aliased surfaces are drawn. Msaa falls back to Supersample (and is counted) on a device without
+    // 2-sample support; aaMode() reports the effective mode.
+    AaMode aa_mode = AaMode::Msaa;
 };
 
 struct RendererStats {
@@ -82,6 +86,11 @@ public:
     const RendererStats& stats() const { return stats_; }
 
     std::uint32_t resolutionScale() const { return resolution_scale_; }
+
+    // The effective anti-aliasing mode: the requested one, except Supersample when the device lacks 2 samples.
+    AaMode aaMode() const { return aa_mode_; }
+    // True when the device supports 2-sample colour and depth/stencil surfaces.
+    bool msaaAvailable() const { return context_.twoSampleSupportGap().empty(); }
 
     // Changes the scale of the targets created or bound from now on; false and no change outside
     // 1..kMaxResolutionScale. A target keeps its image until a draw or clear binds it again, then it is replaced by a
@@ -167,6 +176,7 @@ private:
     std::string error_;
     RendererStats stats_;
     std::uint32_t resolution_scale_ = 1;
+    AaMode aa_mode_ = AaMode::Supersample;
     // Always created: its worker thread only starts with the first submitted frame.
     std::unique_ptr<FrameDumper> dumper_;
     bool dump_requested_ = false;  // requestDisplayDump() was called and no flip has taken it yet

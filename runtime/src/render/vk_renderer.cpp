@@ -222,6 +222,13 @@ RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(c
         return;
     }
     resolution_scale_ = options_.resolution_scale;
+    aa_mode_ = options_.aa_mode;
+    if (aa_mode_ == AaMode::Msaa && !msaaAvailable()) {
+        aa_mode_ = AaMode::Supersample;
+        logWarn("tox2: render: 2-sample multisampling unavailable ({}); anti-aliased surfaces are supersampled",
+                context_.twoSampleSupportGap());
+        rsxNoteUnimplemented("state", "2-sample multisampling unavailable");
+    }
     pipelines_ = std::make_unique<DrawPipelines>(context_, options_.shader_cache.empty()
                                                                    ? std::filesystem::path()
                                                                    : options_.shader_cache / "pipelines.bin");

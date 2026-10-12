@@ -49,6 +49,10 @@ public:
         return has_d24s8_ ? VK_FORMAT_D24_UNORM_S8_UINT : VK_FORMAT_D32_SFLOAT_S8_UINT;
     }
 
+    // Empty when 2-sample colour and depth/stencil images can be rendered to and sampled; otherwise the first missing
+    // capability (for example "framebufferStencilSampleCounts lacks 2"). 2 samples is not a guaranteed count.
+    const std::string& twoSampleSupportGap() const { return two_sample_gap_; }
+
     // True when the validation layer was requested, installed and its messenger is active.
     bool validationEnabled() const { return messenger_ != VK_NULL_HANDLE; }
     std::uint32_t validationErrorCount() const { return validation_errors_.load(std::memory_order_relaxed); }
@@ -69,6 +73,7 @@ private:
     bool has_texture_bc_ = false;
     bool has_clip_distance_ = false;
     bool has_large_points_ = false;
+    std::string two_sample_gap_;
     std::atomic<std::uint32_t> validation_errors_{0};
 };
 

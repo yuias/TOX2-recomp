@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -468,11 +469,70 @@ void testFrameDump() {
     std::filesystem::remove_all(dir, ec);
 }
 
-tox2::RenderOptions readbackAllOptions(std::uint32_t resolution_scale = 1) {
+// Needs no Vulkan device.
+void testAaModeNames() {
+    for (const tox2::AaMode mode : {tox2::AaMode::Supersample, tox2::AaMode::Msaa}) {
+        const std::optional<tox2::AaMode> parsed = tox2::parseAaMode(tox2::aaModeName(mode));
+        CHECK(parsed.has_value() && *parsed == mode);
+    }
+    CHECK(tox2::aaModeName(tox2::AaMode::Supersample) == "supersample");
+    CHECK(tox2::aaModeName(tox2::AaMode::Msaa) == "msaa");
+    CHECK(!tox2::parseAaMode("").has_value());
+    CHECK(!tox2::parseAaMode("MSAA2").has_value());
+    CHECK(!tox2::parseAaMode("msaa ").has_value());
+}
+
+// Prints the 2-sample support verdict and checks that an empty gap implies every sample-count limit has 2.
+void testTwoSampleSupport(tox2::VkContext& ctx) {
+    const VkPhysicalDeviceLimits& limits = ctx.deviceProperties().limits;
+    const std::string& gap = ctx.twoSampleSupportGap();
+    if (gap.empty()) {
+        std::printf("2-sample multisampling available, standardSampleLocations %s\n",
+                    limits.standardSampleLocations != VK_FALSE ? "true" : "false");
+    } else {
+        std::printf("2-sample multisampling unavailable (%s), standardSampleLocations %s\n", gap.c_str(),
+                    limits.standardSampleLocations != VK_FALSE ? "true" : "false");
+    }
+    if (gap.empty()) {
+        const VkSampleCountFlags all[] = {
+                limits.framebufferColorSampleCounts,   limits.framebufferDepthSampleCounts,
+                limits.framebufferStencilSampleCounts, limits.sampledImageColorSampleCounts,
+                limits.sampledImageDepthSampleCounts,  limits.sampledImageStencilSampleCounts,
+        };
+        for (const VkSampleCountFlags counts : all) CHECK((counts & VK_SAMPLE_COUNT_2_BIT) != 0);
+    }
+}
+
+tox2::RenderOptions readbackAllOptions(std::uint32_t resolution_scale = 1, tox2::AaMode aa_mode = tox2::AaMode::Msaa) {
     tox2::RenderOptions options;
     options.readback_all = true;
     options.resolution_scale = resolution_scale;
+    options.aa_mode = aa_mode;
     return options;
+}
+
+// The effective anti-aliasing mode follows the request, except that Msaa falls back on a device without 2 samples.
+void testRendererAaMode(tox2::VkContext& ctx) {
+    {
+        tox2::rsxUnimplementedReset();
+        tox2::RsxRenderer renderer(ctx, readbackAllOptions(1, tox2::AaMode::Supersample));
+        CHECK(renderer.valid() && renderer.aaMode() == tox2::AaMode::Supersample);
+        CHECK(unimplementedCount("state 2-sample multisampling unavailable") == 0);
+    }
+    {
+        tox2::rsxUnimplementedReset();
+        tox2::RsxRenderer renderer(ctx, readbackAllOptions(1, tox2::AaMode::Msaa));
+        CHECK(renderer.valid());
+        CHECK(renderer.msaaAvailable() == ctx.twoSampleSupportGap().empty());
+        if (renderer.msaaAvailable()) {
+            CHECK(renderer.aaMode() == tox2::AaMode::Msaa);
+            CHECK(unimplementedCount("state 2-sample multisampling unavailable") == 0);
+        } else {
+            CHECK(renderer.aaMode() == tox2::AaMode::Supersample);
+            CHECK(unimplementedCount("state 2-sample multisampling unavailable") == 1);
+        }
+    }
+    tox2::rsxUnimplementedReset();
 }
 
 // Clear-only captures through the renderer: the display equals the clear color, across more frames
@@ -3098,10 +3158,11 @@ struct ScaledFrame {
 // Runs the captures in order (one flip each) at `scale`. `reduce` is the factor to downsample the display by,
 // normally the scale itself.
 ScaledFrame renderAtScale(tox2::VkContext& ctx, const std::vector<std::vector<std::uint8_t>>& files,
-                          std::uint32_t scale, std::uint32_t reduce = 0, std::size_t drop_first_commands = 0) {
+                          std::uint32_t scale, std::uint32_t reduce = 0, std::size_t drop_first_commands = 0,
+                          tox2::AaMode aa_mode = tox2::AaMode::Msaa) {
     if (reduce == 0) reduce = scale;
     ScaledFrame frame;
-    tox2::RsxRenderer renderer(ctx, readbackAllOptions(scale));
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions(scale, aa_mode));
     CHECK(renderer.valid() && renderer.resolutionScale() == scale);
     std::vector<std::vector<tox2::RsxCommand>> frames;
     for (const std::vector<std::uint8_t>& file : files) frames.push_back(replaySynthetic(file));
@@ -3750,6 +3811,7 @@ int main() {
     testScaleRect();
     testZetaWriteRule();
     testVertexConvert();
+    testAaModeNames();
 
     tox2::VkContextOptions options;
     options.validation = true;
@@ -3770,6 +3832,8 @@ int main() {
     CHECK(layer == ctx->validationEnabled());
 
     testClearAndReadback(*ctx);
+    testTwoSampleSupport(*ctx);
+    testRendererAaMode(*ctx);
     testRendererClear(*ctx);
     testRendererReadbackGate(*ctx);
     testRendererRequestedDump(*ctx);

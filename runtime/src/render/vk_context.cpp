@@ -117,6 +117,57 @@ bool formatUsableAsDepthStencil(VkPhysicalDevice device, VkFormat format) {
     return (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
 }
 
+// Returns an empty string when images of `format` and `usage` can be created with 2 samples, else why not.
+std::string checkTwoSampleImage(VkPhysicalDevice device, VkFormat format, VkImageUsageFlags usage, const char* what) {
+    VkImageFormatProperties props{};
+    const VkResult result = vkGetPhysicalDeviceImageFormatProperties(device, format, VK_IMAGE_TYPE_2D,
+                                                                     VK_IMAGE_TILING_OPTIMAL, usage, 0, &props);
+    if (result != VK_SUCCESS) return std::format("{} images are not supported ({})", what, static_cast<int>(result));
+    if ((props.sampleCounts & VK_SAMPLE_COUNT_2_BIT) == 0) return std::format("{} images lack 2 samples", what);
+    return {};
+}
+
+// Returns an empty string when colour and depth/stencil images can be multisampled with 2 samples and sampled as
+// such. 2 samples is not a guaranteed count, so a missing one is a reason to fall back, not a device error.
+std::string twoSampleGap(VkPhysicalDevice device, const VkPhysicalDeviceLimits& limits, VkFormat depth_stencil_format) {
+    struct Limit {
+        const char* name;
+        VkSampleCountFlags counts;
+    };
+    const Limit limit_list[] = {
+            {"framebufferColorSampleCounts", limits.framebufferColorSampleCounts},
+            {"framebufferDepthSampleCounts", limits.framebufferDepthSampleCounts},
+            {"framebufferStencilSampleCounts", limits.framebufferStencilSampleCounts},
+            {"sampledImageColorSampleCounts", limits.sampledImageColorSampleCounts},
+            {"sampledImageDepthSampleCounts", limits.sampledImageDepthSampleCounts},
+            {"sampledImageStencilSampleCounts", limits.sampledImageStencilSampleCounts},
+    };
+    for (const Limit& limit : limit_list) {
+        if ((limit.counts & VK_SAMPLE_COUNT_2_BIT) == 0) return std::format("{} lacks 2", limit.name);
+    }
+
+    constexpr VkImageUsageFlags kColorUsage =
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    constexpr VkImageUsageFlags kDepthUsage =
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    struct Format {
+        VkFormat format;
+        VkImageUsageFlags usage;
+        const char* name;
+    };
+    const Format format_list[] = {
+            {VK_FORMAT_B8G8R8A8_UNORM, kColorUsage, "B8G8R8A8_UNORM"},
+            {VK_FORMAT_R32_SFLOAT, kColorUsage, "R32_SFLOAT"},
+            {depth_stencil_format, kDepthUsage, "depth/stencil"},
+            {VK_FORMAT_D16_UNORM, kDepthUsage, "D16_UNORM"},
+    };
+    for (const Format& format : format_list) {
+        std::string gap = checkTwoSampleImage(device, format.format, format.usage, format.name);
+        if (!gap.empty()) return gap;
+    }
+    return {};
+}
+
 }  // namespace
 
 VkContext::~VkContext() {
@@ -245,6 +296,7 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
         error = "the device supports neither D24S8 nor D32S8 attachments";
         return nullptr;
     }
+    ctx->two_sample_gap_ = twoSampleGap(chosen.device, ctx->properties_.limits, ctx->depthStencilFormat());
 
     std::vector<const char*> device_exts = {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
     if (options.window) device_exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
