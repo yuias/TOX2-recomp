@@ -83,6 +83,11 @@ public:
 
     std::uint32_t resolutionScale() const { return resolution_scale_; }
 
+    // Changes the scale of the targets created or bound from now on; false and no change outside
+    // 1..kMaxResolutionScale. A target keeps its image until a draw or clear binds it again, then it is replaced by a
+    // copy at the new scale (see acquire), so the picture changes at the next flip that draws. Renderer thread.
+    bool setResolutionScale(std::uint32_t scale);
+
     // Frames written, failed or dropped by the dump worker so far (dump_dir and requested dumps). Any thread.
     DumpCounts dumpCounts() const;
     // Waits until the dumps queued so far are written, at most `timeout`; returns how many are still
@@ -130,7 +135,10 @@ private:
     std::shared_ptr<RenderTarget> acquireDepth(const RsxSurfaceState& surfaces, bool overwrites_all);
     std::shared_ptr<RenderTarget> acquire(TargetMap& map, bool depth, const RsxSurface& surface, VkFormat format,
                                           bool overwrites_all);
-    std::shared_ptr<RenderTarget> createTarget(bool depth, const RsxSurface& surface, VkFormat format);
+    std::shared_ptr<RenderTarget> createTarget(bool depth, std::uint32_t layout_width, std::uint32_t layout_height,
+                                               std::uint32_t pitch, VkFormat format);
+    std::uint32_t targetScale(std::uint32_t layout_width, std::uint32_t layout_height) const;
+    std::shared_ptr<RenderTarget> rescaleTarget(const std::shared_ptr<RenderTarget>& previous);
     void inheritContents(const std::shared_ptr<RenderTarget>& previous, RenderTarget& target);
     void touch(const std::shared_ptr<RenderTarget>& target);
     void transition(RenderTarget& target, VkImageLayout layout);

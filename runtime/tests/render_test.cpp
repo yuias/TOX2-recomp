@@ -3322,6 +3322,108 @@ void testRendererScaledTargetsAsTextures(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// ---- Changing the scale at run time ----
+
+constexpr std::uint32_t kScaleChangeGreen = 0xFF00FF00;  // ARGB of the vertex colour word 0xFF00FF00
+constexpr std::uint32_t kScaleChangeBlue = 0xFF0000FF;
+
+void setQuadColor(tox2::rsx_synthetic::SceneBuilder& scene, std::uint32_t word) {
+    for (std::uint32_t v = 0; v < 4; v++) {
+        scene.memory().putWord(1, tox2::rsx_synthetic::kColorsOffset + v * 4, word);
+    }
+}
+
+// Frame 0 clears to black, draws a flat rectangle over pixels 8..24 and a depth-writing quad (depth 0.5) over 40..56.
+// Frame 1 keeps everything and draws a rectangle over 32..48 under a LESS depth test: it shows left of the depth quad
+// and is rejected where the quad's depth is still there.
+std::vector<std::uint8_t> makeScaleChangeFrame(std::uint32_t frame) {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    if (frame == 0) {
+        beginStencilScene(scene, 0);
+    } else {
+        scene.setSurface();
+        setQuadRenderState(scene);
+        scene.setFloatAttrib(0, 3, kPositionsOffset);
+        scene.setColorAttrib(3, kColorsOffset);
+        scene.setPrograms(quadPrograms());
+    }
+    scene.write(tox2::kMethodNv4097SetColorMask, 0x01010101u);
+    scene.write(tox2::kMethodNv4097SetDepthFunc, 0x201);  // LESS
+    if (frame == 0) {
+        scene.write(tox2::kMethodNv4097SetDepthTestEnable, 0);
+        putSurfaceQuad(scene, 8, 24);
+        scene.drawStrip(4);
+        scene.write(tox2::kMethodNv4097SetDepthTestEnable, 1);
+        scene.write(tox2::kMethodNv4097SetDepthMask, 1);
+        putSurfaceQuad(scene, 40, 56);
+        setQuadColor(scene, kScaleChangeGreen);
+    } else {
+        scene.write(tox2::kMethodNv4097SetDepthTestEnable, 1);
+        scene.write(tox2::kMethodNv4097SetDepthMask, 0);
+        putSurfaceQuad(scene, 32, 48);
+        setQuadColor(scene, kScaleChangeBlue);
+    }
+    scene.drawStrip(4);
+    return scene.finish();
+}
+
+// Two frames on one renderer whose scale is changed from `from` to `to` between them. The second display is `to`
+// times the guest size and its box downsample equals the scale-1 rendering of both frames: the colour contents and
+// the depth buffer both survive the change.
+void expectScaleChange(tox2::VkContext& ctx, const ScaledFrame& reference, std::uint32_t from, std::uint32_t to) {
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions(from));
+    CHECK(renderer.valid());
+    std::vector<tox2::RsxCommand> first = replaySynthetic(makeScaleChangeFrame(0));
+    std::vector<tox2::RsxCommand> second = replaySynthetic(makeScaleChangeFrame(1));
+    tox2::rsxUnimplementedReset();
+
+    std::vector<std::uint8_t> bgra;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    renderer.execute(first);
+    CHECK(renderer.readDisplay(bgra, width, height) && width == 64 * from && height == 64 * from);
+
+    CHECK(renderer.setResolutionScale(to) && renderer.resolutionScale() == to);
+    CHECK(!renderer.setResolutionScale(0) && renderer.resolutionScale() == to);
+    CHECK(!renderer.setResolutionScale(tox2::kMaxResolutionScale + 1) && renderer.resolutionScale() == to);
+    renderer.execute(second);
+    CHECK(renderer.valid());
+    CHECK(renderer.readDisplay(bgra, width, height) && width == 64 * to && height == 64 * to);
+
+    std::vector<std::uint8_t> reduced;
+    std::string error;
+    CHECK(tox2::downsampleBoxBgra(bgra, width, height, to, to, reduced, error));
+    CHECK(reduced.size() == reference.bgra.size());
+    if (reduced.size() != reference.bgra.size()) return;
+    int max_diff = 0;
+    for (std::size_t i = 0; i < reduced.size(); i++) {
+        max_diff = std::max(max_diff, std::abs(static_cast<int>(reduced[i]) - static_cast<int>(reference.bgra[i])));
+    }
+    if (max_diff != 0) std::fprintf(stderr, "scale %u to %u: max channel difference %d\n", from, to, max_diff);
+    CHECK(max_diff == 0);
+    CHECK(sameStats(renderer.stats(), reference.stats));
+    CHECK(tox2::rsxUnimplementedSnapshot() == reference.notes);
+}
+
+void testRendererScaleChange(tox2::VkContext& ctx) {
+    tox2::rsxUnimplementedReset();
+    const ScaledFrame reference = renderAtScale(ctx, {makeScaleChangeFrame(0), makeScaleChangeFrame(1)}, 1);
+    CHECK(reference.ok && reference.width == 64);
+    if (!reference.ok) return;
+    CHECK(pixelArgb(reference.bgra, reference.width, 12, 32) == kQuadRed);
+    CHECK(pixelArgb(reference.bgra, reference.width, 36, 32) == kScaleChangeBlue);
+    CHECK(pixelArgb(reference.bgra, reference.width, 44, 32) == kScaleChangeGreen);
+    CHECK(pixelArgb(reference.bgra, reference.width, 60, 32) == kBlack);
+    CHECK(reference.notes.empty());
+
+    expectScaleChange(ctx, reference, 1, 2);
+    expectScaleChange(ctx, reference, 2, 1);
+    expectScaleChange(ctx, reference, 1, 3);
+    expectScaleChange(ctx, reference, 3, 1);
+    tox2::rsxUnimplementedReset();
+}
+
 // ---- Anti-aliased surface layouts ----
 
 constexpr std::uint32_t kAaSize = 32;  // clip of the anti-aliased surface; its layout is 64x32
@@ -3582,6 +3684,7 @@ int main() {
     testRendererSurfaceResize(*ctx);
     testRendererScaledPlain(*ctx);
     testRendererScaledTargetsAsTextures(*ctx);
+    testRendererScaleChange(*ctx);
     testRendererAntiAliasedSurface(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 

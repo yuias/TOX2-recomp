@@ -420,24 +420,35 @@ PixelScale pixelScaleOf(const RsxSurface& surface, std::uint32_t scale) {
 
 }  // namespace
 
+bool RsxRenderer::setResolutionScale(std::uint32_t scale) {
+    if (scale < 1 || scale > kMaxResolutionScale) return false;
+    resolution_scale_ = scale;
+    return true;
+}
+
+// The scale a target of this layout gets now: the renderer's scale, or the largest one that fits the device's image
+// size. Callers have checked the layout against that size.
+std::uint32_t RsxRenderer::targetScale(std::uint32_t layout_width, std::uint32_t layout_height) const {
+    const std::uint32_t max_dimension = context_.deviceProperties().limits.maxImageDimension2D;
+    return std::min(resolution_scale_, max_dimension / std::max(layout_width, layout_height));
+}
+
 // A target the cache has not seen holds no guest data (nothing is loaded from guest memory), so it
 // starts defined instead of undefined: color is opaque black (0, 0, 0, 1), depth is 1.0 with stencil 0xFF.
 // These are RPCS3's values for a surface with nothing inherited and "read color/depth buffers" off
 // (VK/VKRenderTargets.cpp, rpcs3/Emu/system_config.h), and what a partial clear leaves in the aspect it does
 // not touch (VK/VKGSRender.cpp VKGSRender::clear_surface).
-std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth, const RsxSurface& surface,
+std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth, std::uint32_t layout_width,
+                                                                     std::uint32_t layout_height, std::uint32_t pitch,
                                                                      VkFormat format) {
-    const VkPhysicalDeviceProperties& props = context_.deviceProperties();
-    const std::uint32_t layout_width = layoutWidth(surface);
-    const std::uint32_t layout_height = layoutHeight(surface);
-    const std::uint32_t max_dimension = props.limits.maxImageDimension2D;
+    const std::uint32_t max_dimension = context_.deviceProperties().limits.maxImageDimension2D;
     if (layout_width == 0 || layout_height == 0 || layout_width > max_dimension || layout_height > max_dimension) {
         rsxNoteUnimplemented("state", std::format("surface size {}x{}", layout_width, layout_height));
         return nullptr;
     }
     // A target that would exceed the device's image size at the current scale is made at the largest scale that
     // fits; a draw or clear then refuses to mix it with an attachment of another scale.
-    const std::uint32_t scale = std::min(resolution_scale_, max_dimension / std::max(layout_width, layout_height));
+    const std::uint32_t scale = targetScale(layout_width, layout_height);
     if (scale < resolution_scale_) rsxNoteUnimplemented("state", "surface too large for the resolution scale");
     const std::uint32_t image_width = layout_width * scale;
     const std::uint32_t image_height = layout_height * scale;
@@ -460,7 +471,7 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth,
     target->scale = scale;
     target->image_width = image_width;
     target->image_height = image_height;
-    target->pitch = surface.pitch;
+    target->pitch = pitch;
     target->depth = depth;
 
     VkImageCreateInfo image_info{};
@@ -536,7 +547,15 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::acquire(TargetMap& map, 
     const auto it = map.find(key);
     std::shared_ptr<RenderTarget> previous;
     if (it != map.end()) {
-        const std::shared_ptr<RenderTarget>& existing = it->second;
+        std::shared_ptr<RenderTarget> existing = it->second;
+        // A scale change reaches a target here, when something binds it again; targets only sampled or flipped
+        // keep their image, and every path that reads one uses its own image size.
+        if (existing->scale != targetScale(existing->layout_width, existing->layout_height)) {
+            std::shared_ptr<RenderTarget> rescaled = rescaleTarget(existing);
+            if (!rescaled) return nullptr;
+            it->second = rescaled;
+            existing = std::move(rescaled);
+        }
         // The identity is the layout size: the scale is the renderer's choice, not part of the guest memory. An
         // anti-aliased binding of a W x H clip and a plain binding of 2W x H are the same memory and the same image.
         if (existing->layout_width == layoutWidth(surface) && existing->layout_height == layoutHeight(surface) &&
@@ -547,11 +566,50 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::acquire(TargetMap& map, 
         previous = existing;
         map.erase(it);
     }
-    std::shared_ptr<RenderTarget> target = createTarget(depth, surface, format);
+    std::shared_ptr<RenderTarget> target =
+            createTarget(depth, layoutWidth(surface), layoutHeight(surface), surface.pitch, format);
     if (!target) return nullptr;
     map[key] = target;
     touch(target);
     if (previous && !overwrites_all) inheritContents(previous, *target);
+    return target;
+}
+
+// A copy of `previous` at the scale a target of its layout gets now, filled by a whole-image blit. Enlarging
+// replicates texels (NEAREST is exact); shrinking a colour target filters LINEAR, which for 2:1 averages the
+// 2x2 block. Float and depth data are never filtered. The copy has no depth-as-colour image and no sampled
+// views; they are rebuilt on demand. A format that cannot be blitted leaves the copy at its initial contents
+// and is counted. The caller replaces the cache entry; the old image stays alive for the commands recorded
+// against it.
+std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::rescaleTarget(const std::shared_ptr<RenderTarget>& previous) {
+    std::shared_ptr<RenderTarget> target = createTarget(previous->depth, previous->layout_width,
+                                                        previous->layout_height, previous->pitch, previous->format);
+    if (!target) return nullptr;
+    touch(target);
+
+    VkFormatProperties format_props{};
+    vkGetPhysicalDeviceFormatProperties(context_.physicalDevice(), previous->format, &format_props);
+    constexpr VkFormatFeatureFlags kBlitFeatures = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    if ((format_props.optimalTilingFeatures & kBlitFeatures) != kBlitFeatures) {
+        rsxNoteUnimplemented("state", previous->depth ? "rescale of a depth target unavailable"
+                                                      : "rescale of a colour target unavailable");
+        return target;
+    }
+
+    const bool filter = target->scale < previous->scale && previous->format == VK_FORMAT_B8G8R8A8_UNORM &&
+                        (format_props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+    touch(previous);
+    transition(*previous, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    transition(*target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);  // orders the blit after the initial clear
+    VkImageBlit region{};
+    region.srcSubresource = {previous->aspect, 0, 0, 1};
+    region.srcOffsets[1] = {static_cast<std::int32_t>(previous->image_width),
+                            static_cast<std::int32_t>(previous->image_height), 1};
+    region.dstSubresource = {target->aspect, 0, 0, 1};
+    region.dstOffsets[1] = {static_cast<std::int32_t>(target->image_width),
+                            static_cast<std::int32_t>(target->image_height), 1};
+    vkCmdBlitImage(slots_[current_slot_]->cmd, previous->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target->image,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     return target;
 }
 
