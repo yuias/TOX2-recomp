@@ -31,6 +31,23 @@ constexpr std::optional<AaMode> parseAaMode(std::string_view text) {
     return std::nullopt;
 }
 
+// AA mode 3 stores the two samples of pixel x side by side: layout column 2x + c holds Vulkan sample
+// kLayoutColumnSample[c]. With the standard 2x positions sample 1 sits at (0.25, 0.25) and sample 0 at (0.75, 0.75),
+// so the left column is the left sample (the RSX's own order is not known).
+inline constexpr std::uint32_t kLayoutColumnSample[2] = {1, 0};
+
+// Where layout-image texel (x, y) comes from in the 2-sample image of the same target: pixel (x >> 1, y), sample
+// kLayoutColumnSample[x & 1]. The interleave holds at every resolution scale: the game's resolve samples the layout
+// at the boundary between texels 2X and 2X + 1, which must be the two samples of one pixel for a LINEAR read to
+// average them.
+struct LayoutSource {
+    std::uint32_t x = 0, y = 0, sample = 0;
+};
+
+constexpr LayoutSource layoutSource(std::uint32_t x, std::uint32_t y) {
+    return {x >> 1, y, kLayoutColumnSample[x & 1]};
+}
+
 // Image pixels per clip pixel of one pass: the target's resolution scale times the samples per pixel of the
 // surface's AA layout.
 struct PixelScale {

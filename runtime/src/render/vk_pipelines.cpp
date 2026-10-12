@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iterator>
 #include <system_error>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -25,6 +26,10 @@ namespace {
 constexpr std::uint64_t kClearVertexKey = 0x434C45415256ull;
 constexpr std::uint64_t kClearFragmentKey = 0x434C45415246ull;
 constexpr std::uint64_t kDepthConvertFragmentKey = 0x44455054434Full;
+constexpr std::uint64_t kDepthConvertMsFragmentKey = 0x4445505443534Dull;
+constexpr std::uint64_t kLayoutColorFragmentKey = 0x4C41594F434Full;
+constexpr std::uint64_t kLayoutDepthFragmentKey = 0x4C4159444550ull;
+constexpr std::uint64_t kLayoutDepthStencilFragmentKey = 0x4C4159445354ull;
 
 constexpr const char* kClearVertexGlsl = R"(#version 450
 void main() {
@@ -55,6 +60,64 @@ void main() {
   out_color = vec4(float((z >> 8) & 0xFFu), float(z & 0xFFu), float(s), float(z >> 16)) / 255.0;
 }
 )";
+
+// The copy passes from a 2-sample image into the memory layout share this prologue: fragment (x, y) of the layout
+// image reads pixel (x >> 1, y), sample column_sample[x & 1] (render_scale.h layoutSource). No resolution scale
+// enters: the 2-sample image is half as wide as the layout image at every scale.
+constexpr const char* kLayoutPassPrologue = R"(#version 450
+layout(push_constant) uniform Layout { int column_sample[2]; int stencil_bit; int unused; } pc;
+)";
+
+constexpr const char* kLayoutPassSource = R"(  ivec2 p = ivec2(gl_FragCoord.xy);
+  ivec2 src = ivec2(p.x >> 1, p.y);
+  int sample_index = pc.column_sample[p.x & 1];
+)";
+
+// Same byte packing as kDepthConvertFragmentGlsl, from a 2-sample source.
+constexpr const char* kDepthConvertMsBody = R"(layout(set = 0, binding = 0) uniform sampler2DMS depth_tex;
+layout(set = 0, binding = 1) uniform usampler2DMS stencil_tex;
+layout(location = 0) out vec4 out_color;
+void main() {
+)";
+constexpr const char* kDepthConvertMsEnd =
+        R"(  uint z = uint(floor(texelFetch(depth_tex, src, sample_index).r * 16777215.0 + 0.5));
+  uint s = texelFetch(stencil_tex, src, sample_index).r;
+  out_color = vec4(float((z >> 8) & 0xFFu), float(z & 0xFFu), float(s), float(z >> 16)) / 255.0;
+}
+)";
+
+constexpr const char* kLayoutColorBody = R"(layout(set = 0, binding = 0) uniform sampler2DMS color_tex;
+layout(location = 0) out vec4 out_color;
+void main() {
+)";
+constexpr const char* kLayoutColorEnd = R"(  out_color = texelFetch(color_tex, src, sample_index);
+}
+)";
+
+constexpr const char* kLayoutDepthBody = R"(layout(set = 0, binding = 0) uniform sampler2DMS depth_tex;
+void main() {
+)";
+constexpr const char* kLayoutDepthEnd = R"(  gl_FragDepth = texelFetch(depth_tex, src, sample_index).r;
+}
+)";
+
+// A shader cannot write the stencil value without an extension, so the stencil is rebuilt one bit per draw: with
+// the stencil test set to REPLACE and the write mask of bit b, only the fragments whose sampled stencil has bit b
+// set (the others are discarded) set that bit.
+constexpr const char* kLayoutDepthStencilBody = R"(layout(set = 0, binding = 0) uniform sampler2DMS depth_tex;
+layout(set = 0, binding = 1) uniform usampler2DMS stencil_tex;
+void main() {
+)";
+constexpr const char* kLayoutDepthStencilEnd = R"(  gl_FragDepth = texelFetch(depth_tex, src, sample_index).r;
+  if (pc.stencil_bit >= 0 && ((texelFetch(stencil_tex, src, sample_index).r >> uint(pc.stencil_bit)) & 1u) == 0u) {
+    discard;
+  }
+}
+)";
+
+std::string layoutPassGlsl(const char* body, const char* end) {
+    return std::string(kLayoutPassPrologue) + body + kLayoutPassSource + end;
+}
 
 std::uint64_t mixKey(std::uint64_t hash, std::uint32_t a, std::uint32_t b) {
     std::uint64_t key = hash;
@@ -158,17 +221,23 @@ DrawPipelines::~DrawPipelines() {
     if (cache_ != VK_NULL_HANDLE) vkDestroyPipelineCache(device, cache_, nullptr);
     for (auto& [key, pipeline] : pipelines_) vkDestroyPipeline(device, pipeline, nullptr);
     for (auto& [key, pipeline] : clear_pipelines_) vkDestroyPipeline(device, pipeline, nullptr);
-    if (depth_convert_pipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device, depth_convert_pipeline_, nullptr);
+    for (auto& [key, pipeline] : layout_color_pipelines_) vkDestroyPipeline(device, pipeline, nullptr);
+    for (auto& [key, pipeline] : layout_depth_pipelines_) vkDestroyPipeline(device, pipeline, nullptr);
+    for (const VkPipeline pipeline : depth_convert_pipelines_) {
+        if (pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, pipeline, nullptr);
+    }
     for (auto& [key, program] : vertex_programs_) {
         if (program->module != VK_NULL_HANDLE) vkDestroyShaderModule(device, program->module, nullptr);
     }
     for (auto& [key, program] : fragment_programs_) {
         if (program->module != VK_NULL_HANDLE) vkDestroyShaderModule(device, program->module, nullptr);
     }
-    if (depth_convert_fragment_ != VK_NULL_HANDLE) vkDestroyShaderModule(device, depth_convert_fragment_, nullptr);
-    if (depth_convert_layout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, depth_convert_layout_, nullptr);
-    if (depth_convert_set_layout_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorSetLayout(device, depth_convert_set_layout_, nullptr);
+    for (const VkShaderModule module : layout_shaders_) {
+        if (module != VK_NULL_HANDLE) vkDestroyShaderModule(device, module, nullptr);
+    }
+    if (layout_pass_layout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, layout_pass_layout_, nullptr);
+    if (layout_pass_set_layout_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device, layout_pass_set_layout_, nullptr);
     }
     if (clear_vertex_ != VK_NULL_HANDLE) vkDestroyShaderModule(device, clear_vertex_, nullptr);
     if (clear_fragment_ != VK_NULL_HANDLE) vkDestroyShaderModule(device, clear_fragment_, nullptr);
@@ -407,7 +476,7 @@ VkPipeline DrawPipelines::pipeline(const PipelineKey& key, const DrawShaders& sh
 
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    multisample.rasterizationSamples = key.samples;
 
     VkPipelineDepthStencilStateCreateInfo depth_stencil{};
     depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -496,8 +565,9 @@ bool DrawPipelines::createClearShaders() {
     return true;
 }
 
-VkPipeline DrawPipelines::maskedClearPipeline(VkFormat color_format, VkColorComponentFlags mask) {
-    const std::pair<VkFormat, VkColorComponentFlags> key{color_format, mask};
+VkPipeline DrawPipelines::maskedClearPipeline(VkFormat color_format, VkColorComponentFlags mask,
+                                              VkSampleCountFlagBits samples) {
+    const std::tuple<VkFormat, VkColorComponentFlags, VkSampleCountFlagBits> key{color_format, mask, samples};
     const auto cached = clear_pipelines_.find(key);
     if (cached != clear_pipelines_.end()) return cached->second;
     if (!createClearShaders()) return VK_NULL_HANDLE;
@@ -528,7 +598,7 @@ VkPipeline DrawPipelines::maskedClearPipeline(VkFormat color_format, VkColorComp
     raster.lineWidth = 1.0f;
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    multisample.rasterizationSamples = samples;
     VkPipelineDepthStencilStateCreateInfo depth_stencil{};
     depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     VkPipelineColorBlendAttachmentState attachment{};
@@ -570,19 +640,9 @@ VkPipeline DrawPipelines::maskedClearPipeline(VkFormat color_format, VkColorComp
     return pipeline;
 }
 
-bool DrawPipelines::createDepthConvertObjects() {
-    if (depth_convert_layout_ != VK_NULL_HANDLE) return true;
+bool DrawPipelines::createLayoutPassObjects() {
+    if (layout_pass_layout_ != VK_NULL_HANDLE) return true;
     if (!createClearShaders()) return false;  // the full-target vertex shader is shared
-    auto fragment = compileGlsl(ShaderStage::Fragment, kDepthConvertFragmentGlsl, kDepthConvertFragmentKey);
-    if (!fragment) {
-        fail("the depth conversion shader did not compile: " + fragment.error());
-        return false;
-    }
-    depth_convert_fragment_ = createModule(context_.device(), *fragment);
-    if (depth_convert_fragment_ == VK_NULL_HANDLE) {
-        fail("vkCreateShaderModule failed");
-        return false;
-    }
 
     VkDescriptorSetLayoutBinding bindings[2]{};
     for (std::uint32_t i = 0; i < 2; i++) {
@@ -596,34 +656,78 @@ bool DrawPipelines::createDepthConvertObjects() {
     set_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
     set_info.bindingCount = 2;
     set_info.pBindings = bindings;
-    if (vkCreateDescriptorSetLayout(context_.device(), &set_info, nullptr, &depth_convert_set_layout_) != VK_SUCCESS) {
-        depth_convert_set_layout_ = VK_NULL_HANDLE;
+    if (vkCreateDescriptorSetLayout(context_.device(), &set_info, nullptr, &layout_pass_set_layout_) != VK_SUCCESS) {
+        layout_pass_set_layout_ = VK_NULL_HANDLE;
         fail("vkCreateDescriptorSetLayout failed");
         return false;
     }
+    VkPushConstantRange push{};
+    push.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    push.size = sizeof(LayoutPassConstants);
     VkPipelineLayoutCreateInfo layout_info{};
     layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layout_info.setLayoutCount = 1;
-    layout_info.pSetLayouts = &depth_convert_set_layout_;
-    if (vkCreatePipelineLayout(context_.device(), &layout_info, nullptr, &depth_convert_layout_) != VK_SUCCESS) {
-        depth_convert_layout_ = VK_NULL_HANDLE;
+    layout_info.pSetLayouts = &layout_pass_set_layout_;
+    layout_info.pushConstantRangeCount = 1;
+    layout_info.pPushConstantRanges = &push;
+    if (vkCreatePipelineLayout(context_.device(), &layout_info, nullptr, &layout_pass_layout_) != VK_SUCCESS) {
+        layout_pass_layout_ = VK_NULL_HANDLE;
         fail("vkCreatePipelineLayout failed");
         return false;
     }
     return true;
 }
 
-VkPipeline DrawPipelines::depthConvertPipeline() {
-    if (depth_convert_pipeline_ != VK_NULL_HANDLE) return depth_convert_pipeline_;
-    if (!createDepthConvertObjects()) return VK_NULL_HANDLE;
+VkShaderModule DrawPipelines::layoutShader(LayoutShader which) {
+    VkShaderModule& module = layout_shaders_[static_cast<std::size_t>(which)];
+    if (module != VK_NULL_HANDLE) return module;
 
+    std::string glsl;
+    std::uint64_t key = 0;
+    switch (which) {
+        case LayoutShader::DepthConvert:
+            glsl = kDepthConvertFragmentGlsl;
+            key = kDepthConvertFragmentKey;
+            break;
+        case LayoutShader::DepthConvertMs:
+            glsl = layoutPassGlsl(kDepthConvertMsBody, kDepthConvertMsEnd);
+            key = kDepthConvertMsFragmentKey;
+            break;
+        case LayoutShader::LayoutColor:
+            glsl = layoutPassGlsl(kLayoutColorBody, kLayoutColorEnd);
+            key = kLayoutColorFragmentKey;
+            break;
+        case LayoutShader::LayoutDepth:
+            glsl = layoutPassGlsl(kLayoutDepthBody, kLayoutDepthEnd);
+            key = kLayoutDepthFragmentKey;
+            break;
+        case LayoutShader::LayoutDepthStencil:
+            glsl = layoutPassGlsl(kLayoutDepthStencilBody, kLayoutDepthStencilEnd);
+            key = kLayoutDepthStencilFragmentKey;
+            break;
+    }
+    auto fragment = compileGlsl(ShaderStage::Fragment, glsl, key);
+    if (!fragment) {
+        fail("a layout pass shader did not compile: " + fragment.error());
+        return VK_NULL_HANDLE;
+    }
+    module = createModule(context_.device(), *fragment);
+    if (module == VK_NULL_HANDLE) fail("vkCreateShaderModule failed");
+    return module;
+}
+
+// A full-target triangle (the clear vertex shader) with the given fragment shader and no blending. An undefined
+// colour format means no colour attachment; a depth format makes the depth and stencil state dynamic, so one
+// pipeline serves the depth pass and every stencil bit pass.
+VkPipeline DrawPipelines::createFullTargetPipeline(VkShaderModule fragment, VkFormat color_format,
+                                                   VkFormat depth_format) {
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
     stages[0].module = clear_vertex_;
     stages[0].pName = "main";
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = depth_convert_fragment_;
+    stages[1].module = fragment;
     stages[1].pName = "main";
 
     VkPipelineVertexInputStateCreateInfo vertex_input{};
@@ -646,23 +750,41 @@ VkPipeline DrawPipelines::depthConvertPipeline() {
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
     VkPipelineDepthStencilStateCreateInfo depth_stencil{};
     depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depth_stencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
     VkPipelineColorBlendAttachmentState attachment{};
     attachment.colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    const bool has_color = color_format != VK_FORMAT_UNDEFINED;
     VkPipelineColorBlendStateCreateInfo blend{};
     blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    blend.attachmentCount = 1;
-    blend.pAttachments = &attachment;
-    constexpr VkDynamicState kDynamic[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    blend.attachmentCount = has_color ? 1 : 0;
+    blend.pAttachments = has_color ? &attachment : nullptr;
+
+    constexpr VkDynamicState kColorDynamic[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    constexpr VkDynamicState kDepthDynamic[] = {
+            VK_DYNAMIC_STATE_VIEWPORT,           VK_DYNAMIC_STATE_SCISSOR,
+            VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE,  VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
+            VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,   VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE,
+            VK_DYNAMIC_STATE_STENCIL_OP,         VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
+            VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_STENCIL_REFERENCE};
     VkPipelineDynamicStateCreateInfo dynamic{};
     dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dynamic.dynamicStateCount = static_cast<std::uint32_t>(std::size(kDynamic));
-    dynamic.pDynamicStates = kDynamic;
-    constexpr VkFormat kColorFormat = VK_FORMAT_B8G8R8A8_UNORM;
+    if (depth_format != VK_FORMAT_UNDEFINED) {
+        dynamic.dynamicStateCount = static_cast<std::uint32_t>(std::size(kDepthDynamic));
+        dynamic.pDynamicStates = kDepthDynamic;
+    } else {
+        dynamic.dynamicStateCount = static_cast<std::uint32_t>(std::size(kColorDynamic));
+        dynamic.pDynamicStates = kColorDynamic;
+    }
+
+    const bool has_stencil =
+            depth_format == VK_FORMAT_D24_UNORM_S8_UINT || depth_format == VK_FORMAT_D32_SFLOAT_S8_UINT;
     VkPipelineRenderingCreateInfo rendering{};
     rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    rendering.colorAttachmentCount = 1;
-    rendering.pColorAttachmentFormats = &kColorFormat;
+    rendering.colorAttachmentCount = has_color ? 1 : 0;
+    rendering.pColorAttachmentFormats = has_color ? &color_format : nullptr;
+    rendering.depthAttachmentFormat = depth_format;
+    rendering.stencilAttachmentFormat = has_stencil ? depth_format : VK_FORMAT_UNDEFINED;
 
     VkGraphicsPipelineCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -677,12 +799,49 @@ VkPipeline DrawPipelines::depthConvertPipeline() {
     info.pDepthStencilState = &depth_stencil;
     info.pColorBlendState = &blend;
     info.pDynamicState = &dynamic;
-    info.layout = depth_convert_layout_;
-    if (createPipeline(info, &depth_convert_pipeline_) != VK_SUCCESS) {
-        depth_convert_pipeline_ = VK_NULL_HANDLE;
+    info.layout = layout_pass_layout_;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if (createPipeline(info, &pipeline) != VK_SUCCESS) {
         fail("vkCreateGraphicsPipelines failed");
+        return VK_NULL_HANDLE;
     }
-    return depth_convert_pipeline_;
+    return pipeline;
+}
+
+VkPipeline DrawPipelines::depthConvertPipeline(bool multisampled) {
+    VkPipeline& pipeline = depth_convert_pipelines_[multisampled ? 1 : 0];
+    if (pipeline != VK_NULL_HANDLE) return pipeline;
+    if (!createLayoutPassObjects()) return VK_NULL_HANDLE;
+    const VkShaderModule fragment =
+            layoutShader(multisampled ? LayoutShader::DepthConvertMs : LayoutShader::DepthConvert);
+    if (fragment == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    pipeline = createFullTargetPipeline(fragment, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_UNDEFINED);
+    return pipeline;
+}
+
+VkPipeline DrawPipelines::layoutColorPipeline(VkFormat color_format) {
+    const auto cached = layout_color_pipelines_.find(color_format);
+    if (cached != layout_color_pipelines_.end()) return cached->second;
+    if (!createLayoutPassObjects()) return VK_NULL_HANDLE;
+    const VkShaderModule fragment = layoutShader(LayoutShader::LayoutColor);
+    if (fragment == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    const VkPipeline pipeline = createFullTargetPipeline(fragment, color_format, VK_FORMAT_UNDEFINED);
+    if (pipeline != VK_NULL_HANDLE) layout_color_pipelines_.emplace(color_format, pipeline);
+    return pipeline;
+}
+
+VkPipeline DrawPipelines::layoutDepthPipeline(VkFormat depth_format) {
+    const auto cached = layout_depth_pipelines_.find(depth_format);
+    if (cached != layout_depth_pipelines_.end()) return cached->second;
+    if (!createLayoutPassObjects()) return VK_NULL_HANDLE;
+    const bool has_stencil =
+            depth_format == VK_FORMAT_D24_UNORM_S8_UINT || depth_format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+    const VkShaderModule fragment =
+            layoutShader(has_stencil ? LayoutShader::LayoutDepthStencil : LayoutShader::LayoutDepth);
+    if (fragment == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    const VkPipeline pipeline = createFullTargetPipeline(fragment, VK_FORMAT_UNDEFINED, depth_format);
+    if (pipeline != VK_NULL_HANDLE) layout_depth_pipelines_.emplace(depth_format, pipeline);
+    return pipeline;
 }
 
 }  // namespace tox2

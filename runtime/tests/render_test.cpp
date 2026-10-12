@@ -23,6 +23,7 @@
 #include "render/shader_compiler.h"
 #include "render/vertex_convert.h"
 #include "render/vk_context.h"
+#include "render/vk_pipelines.h"
 #include "render/vk_renderer.h"
 #include "render/vk_window.h"
 #include "rsx/rsx_capture.h"
@@ -482,6 +483,19 @@ void testAaModeNames() {
     CHECK(!tox2::parseAaMode("msaa ").has_value());
 }
 
+// Needs no Vulkan device: texel x of a layout row comes from pixel x / 2, alternating between the two samples.
+void testLayoutSource() {
+    constexpr std::uint32_t kExpectedPixel[8] = {0, 0, 1, 1, 2, 2, 3, 3};
+    constexpr std::uint32_t kExpectedSample[8] = {1, 0, 1, 0, 1, 0, 1, 0};
+    for (std::uint32_t x = 0; x < 8; x++) {
+        const tox2::LayoutSource source = tox2::layoutSource(x, 3);
+        CHECK(source.x == kExpectedPixel[x] && source.y == 3 && source.sample == kExpectedSample[x]);
+    }
+    static_assert(tox2::layoutSource(1, 0).x == 0 && tox2::layoutSource(1, 0).sample == tox2::kLayoutColumnSample[1]);
+    const tox2::LayoutSource wide = tox2::layoutSource(2 * 1280 * 4 - 1, 719);
+    CHECK(wide.x == 1280 * 4 - 1 && wide.y == 719 && wide.sample == tox2::kLayoutColumnSample[1]);
+}
+
 // Prints the 2-sample support verdict and checks that an empty gap implies every sample-count limit has 2.
 void testTwoSampleSupport(tox2::VkContext& ctx) {
     const VkPhysicalDeviceLimits& limits = ctx.deviceProperties().limits;
@@ -501,6 +515,76 @@ void testTwoSampleSupport(tox2::VkContext& ctx) {
         };
         for (const VkSampleCountFlags counts : all) CHECK((counts & VK_SAMPLE_COUNT_2_BIT) != 0);
     }
+}
+
+// The pipelines of the 2-sample passes build without validation errors. Skipped on a device without 2 samples.
+void testLayoutPassPipelines(tox2::VkContext& ctx) {
+    if (!ctx.twoSampleSupportGap().empty()) {
+        std::printf("layout pass pipelines: skipped (%s)\n", ctx.twoSampleSupportGap().c_str());
+        return;
+    }
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    tox2::DrawPipelines pipelines(ctx);
+    CHECK(pipelines.valid());
+
+    CHECK(pipelines.layoutPassLayout() == VK_NULL_HANDLE);  // created with the first layout pass pipeline
+    CHECK(pipelines.depthConvertPipeline(false) != VK_NULL_HANDLE);
+    CHECK(pipelines.layoutPassLayout() != VK_NULL_HANDLE);
+    const VkPipeline convert_ms = pipelines.depthConvertPipeline(true);
+    CHECK(convert_ms != VK_NULL_HANDLE && convert_ms != pipelines.depthConvertPipeline(false));
+    CHECK(pipelines.depthConvertPipeline(true) == convert_ms);
+
+    for (const VkFormat format : {VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R32_SFLOAT}) {
+        const VkPipeline pipeline = pipelines.layoutColorPipeline(format);
+        CHECK(pipeline != VK_NULL_HANDLE && pipelines.layoutColorPipeline(format) == pipeline);
+    }
+    CHECK(pipelines.layoutColorPipeline(VK_FORMAT_B8G8R8A8_UNORM) !=
+          pipelines.layoutColorPipeline(VK_FORMAT_R32_SFLOAT));
+    for (const VkFormat format : {ctx.depthStencilFormat(), VK_FORMAT_D16_UNORM}) {
+        const VkPipeline pipeline = pipelines.layoutDepthPipeline(format);
+        CHECK(pipeline != VK_NULL_HANDLE && pipelines.layoutDepthPipeline(format) == pipeline);
+    }
+
+    // The same program drawn into 1-sample and 2-sample attachments gets two pipelines.
+    std::vector<tox2::RsxCommand> commands = replaySynthetic(tox2::rsx_synthetic::makeQuadCapture());
+    const tox2::RsxDraw* draw = nullptr;
+    for (const tox2::RsxCommand& command : commands) {
+        if (const auto* candidate = std::get_if<tox2::RsxDraw>(&command)) {
+            draw = candidate;
+            break;
+        }
+    }
+    CHECK(draw != nullptr);
+    if (draw != nullptr) {
+        tox2::DrawShaders shaders;
+        CHECK(pipelines.shaders(*draw, shaders));
+        tox2::PipelineKey key;
+        key.vp_hash = draw->vp_hash;
+        key.fp_hash = draw->fp_hash;
+        key.fp_control = draw->fp_control;
+        key.texcoord_control = draw->texcoord_control;
+        key.color_format = VK_FORMAT_B8G8R8A8_UNORM;
+        key.depth_format = ctx.depthStencilFormat();
+        for (std::uint32_t slot = 0; slot < tox2::kPipelineVertexSlots; slot++) {
+            if ((shaders.inputs_used & (1u << slot)) == 0) continue;
+            key.vertex_formats[slot] = VK_FORMAT_R32G32B32A32_SFLOAT;
+            key.vertex_strides[slot] = 16;
+        }
+        const VkPipeline single = pipelines.pipeline(key, shaders);
+        key.samples = VK_SAMPLE_COUNT_2_BIT;
+        const VkPipeline multi = pipelines.pipeline(key, shaders);
+        CHECK(single != VK_NULL_HANDLE && multi != VK_NULL_HANDLE && single != multi);
+    }
+
+    const VkPipeline clear_single = pipelines.maskedClearPipeline(VK_FORMAT_B8G8R8A8_UNORM,
+                                                                  VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT);
+    const VkPipeline clear_multi = pipelines.maskedClearPipeline(
+            VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT, VK_SAMPLE_COUNT_2_BIT);
+    CHECK(clear_single != VK_NULL_HANDLE && clear_multi != VK_NULL_HANDLE && clear_single != clear_multi);
+
+    CHECK(pipelines.valid());
+    CHECK(ctx.validationErrorCount() == errors_before);
 }
 
 tox2::RenderOptions readbackAllOptions(std::uint32_t resolution_scale = 1, tox2::AaMode aa_mode = tox2::AaMode::Msaa) {
@@ -3812,6 +3896,7 @@ int main() {
     testZetaWriteRule();
     testVertexConvert();
     testAaModeNames();
+    testLayoutSource();
 
     tox2::VkContextOptions options;
     options.validation = true;
@@ -3834,6 +3919,7 @@ int main() {
     testClearAndReadback(*ctx);
     testTwoSampleSupport(*ctx);
     testRendererAaMode(*ctx);
+    testLayoutPassPipelines(*ctx);
     testRendererClear(*ctx);
     testRendererReadbackGate(*ctx);
     testRendererRequestedDump(*ctx);

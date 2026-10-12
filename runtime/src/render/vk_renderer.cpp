@@ -883,7 +883,7 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
         fail(textures_->error());
         return nullptr;
     }
-    const VkPipeline pipeline = pipelines_->depthConvertPipeline();
+    const VkPipeline pipeline = pipelines_->depthConvertPipeline(false);
     if (pipeline == VK_NULL_HANDLE || target_view == VK_NULL_HANDLE) {
         if (!pipelines_->valid()) fail(pipelines_->error());
         return nullptr;
@@ -947,7 +947,7 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
-    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_->depthConvertLayout(), 0, 2, writes);
+    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_->layoutPassLayout(), 0, 2, writes);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
     colorBarrier(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -1760,7 +1760,7 @@ void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& co
     if ((color_bits & kRsxClearGreen) != 0) mask |= VK_COLOR_COMPONENT_G_BIT;
     if ((color_bits & kRsxClearBlue) != 0) mask |= VK_COLOR_COMPONENT_B_BIT;
     if ((color_bits & kRsxClearAlpha) != 0) mask |= VK_COLOR_COMPONENT_A_BIT;
-    const VkPipeline pipeline = pipelines_->maskedClearPipeline(color.format, mask);
+    const VkPipeline pipeline = pipelines_->maskedClearPipeline(color.format, mask, VK_SAMPLE_COUNT_1_BIT);
     if (pipeline == VK_NULL_HANDLE) {
         fail(pipelines_->error());
         return;
