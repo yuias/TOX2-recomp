@@ -1,6 +1,7 @@
 // Self-checking unit tests for the SPU runtime pieces. Most tests address plain host buffers through the
 // same base + ea convention; the lv2 group tests use the process's guest memory and the syscall table.
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -24,6 +25,7 @@
 #include "lv2/cell_error.h"
 #include "lv2/sys_spu.h"
 #include "lv2/sys_sync.h"
+#include "spu/spu_census.h"
 #include "spu/spu_channels.h"
 #include "spu/spu_mfc.h"
 #include "spu/spu_thread.h"
@@ -2618,6 +2620,8 @@ void testLv2ReceiveEvent() {
     // SPU number is 1 in a one-thread group, as in the game.
     {
         Lv2Fixture f;
+        // Earlier tests leave receive timing under the same thread id.
+        tox2::resetCensus();
         // The owner callbacks of the SPU host thread take the guest lock as class Spu.
         const auto spu_holds = [] {
             return tox2::guestLock().stats().classes[static_cast<std::size_t>(tox2::GuestLockClass::Spu)].hold.count;
@@ -2636,11 +2640,32 @@ void testLv2ReceiveEvent() {
         // The thread leaves the wait, stores the reply and waits again.
         CHECK(waitUntil([&] { return f.bufWord(thread, 5) == 0x44; }));
         CHECK(f.waitUntilBlocked(thread, "0x110"));
+        std::this_thread::sleep_for(
+                std::chrono::milliseconds(30));  // the third receive waits at least this long for its event
         CHECK(f.ppu.call(138, port, kLvQuit, 0, 0) == 0);
         CHECK(f.join(group) == 0 && f.cause() == 2 && f.status() == 3);
         const std::uint32_t expected[] = {0, 0x11, 0x22, 0x33, 0, 0x44, 0x55, 0x66, 0, kLvQuit, 0, 0};
         for (std::uint32_t i = 0; i < 12; i++) CHECK(f.bufWord(thread, i) == expected[i]);
         CHECK(spu_holds() > spu_holds_before);
+
+        // Three receives replied, so two gaps between a reply and the next arrival were measured.
+        {
+            std::lock_guard<tox2::GuestLock> lock(tox2::guestLock());
+            const tox2::SpuThread* cpu = tox2::spuThreadById(thread);
+            CHECK(cpu->receiveWait().count == 3 && cpu->receiveBusy().count == 2);
+            CHECK(cpu->receiveWait().max_us >= 25000);
+        }
+        const std::vector<tox2::SpuReceiveRow> receive_rows = tox2::spuReceiveSnapshot();
+        CHECK(receive_rows.size() == 1);
+        if (!receive_rows.empty()) {
+            CHECK(receive_rows[0].id == thread && receive_rows[0].name == "lvthread");
+            CHECK(receive_rows[0].wait.count == 3 && receive_rows[0].busy.count == 2);
+            CHECK(receive_rows[0].wait.max_us >= 25000);
+        }
+        const std::vector<std::string> census_lines = tox2::spuCensusLines();
+        CHECK(std::ranges::any_of(census_lines, [](const std::string& line) {
+            return line.contains(" lvthread receive ") && line.contains("busy n 2") && line.contains("wait n 3");
+        }));
         std::lock_guard<tox2::GuestLock> lock(tox2::guestLock());
         CHECK(tox2::spuThreadById(thread)->stopCounts().at(0x110) == 3);
     }

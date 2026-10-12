@@ -58,11 +58,25 @@ struct Live {
     std::uint64_t key;
 };
 
+// Receive timing of one thread key across its runs.
+struct ReceiveTotals {
+    std::string name;
+    LatencySnapshot busy, wait;
+
+    void add(const SpuThread& thread) {
+        name = thread.name();
+        busy.merge(thread.receiveBusy());
+        wait.merge(thread.receiveWait());
+    }
+};
+
 struct Registry {
     std::mutex mutex;
     std::vector<Live> live;
     // Rows of threads whose objects are gone, by key; a live thread with the same key replaces its row.
     std::map<std::uint64_t, ThreadRow> gone;
+    // Unlike `gone`, a live thread adds to these instead of replacing them, so a restarted group keeps its history.
+    std::map<std::uint64_t, ReceiveTotals> receive_gone;
     Totals totals;
     bool any_started = false;
     std::uint32_t next_anonymous = 0;
@@ -102,6 +116,7 @@ void resetSpuCensus() {
     Registry& r = registry();
     std::lock_guard lock(r.mutex);
     r.gone.clear();
+    r.receive_gone.clear();
     r.totals = Totals{};
     r.any_started = false;
 }
@@ -136,7 +151,25 @@ void spuCensusRemove(SpuThread& thread) {
     if (it == r.live.end()) return;
     r.totals.add(thread);
     if (const std::optional<ThreadRow> row = describeRow(thread)) r.gone[it->key] = *row;
+    if (thread.receiveWait().count != 0) r.receive_gone[it->key].add(thread);
     r.live.erase(it);
+}
+
+std::vector<SpuReceiveRow> spuReceiveSnapshot() {
+    Registry& r = registry();
+    std::map<std::uint64_t, ReceiveTotals> by_key;
+    {
+        std::lock_guard lock(r.mutex);
+        by_key = r.receive_gone;
+        for (const Live& l : r.live) {
+            if (l.thread->receiveWait().count != 0) by_key[l.key].add(*l.thread);
+        }
+    }
+    std::vector<SpuReceiveRow> rows;
+    for (auto& [key, totals] : by_key) {
+        rows.push_back({static_cast<std::uint32_t>(key), std::move(totals.name), totals.busy, totals.wait});
+    }
+    return rows;
 }
 
 void spuCensusStarted() {
@@ -191,6 +224,13 @@ std::vector<std::string> spuCensusLines() {
     }
     for (const auto& [code, count] : sum.stops) {
         out.push_back(std::format("  stop {:#x}: {}", code, count));
+    }
+    const double seconds = std::max(static_cast<double>(systemTimeUs()) / 1e6, 1e-3);
+    for (const SpuReceiveRow& row : spuReceiveSnapshot()) {
+        out.push_back(std::format("  thread {:#010x} {} receive {:.1f}/s: busy {}; wait {}", row.id, row.name,
+                                  static_cast<double>(row.wait.count) / seconds,
+                                  formatLatency(row.busy, kSpuReceiveOverUs),
+                                  formatLatency(row.wait, kSpuReceiveOverUs)));
     }
     return out;
 }

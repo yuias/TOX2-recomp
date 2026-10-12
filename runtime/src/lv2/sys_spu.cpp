@@ -317,7 +317,7 @@ void replyReceive(SpuThread& cpu, const SpuQueueWaiter& waiter) {
 // from the thread's bindings by the key in the outbound mailbox, and the answer comes through the inbound
 // mailbox. Only the calling SPU thread waits, where lv2 suspends the whole group; the guest lock is not held
 // while it waits, so terminate and halts still reach it.
-bool receiveEvent(SpuThread& cpu, std::uint32_t site, std::uint32_t code) {
+bool receiveEventBody(SpuThread& cpu, std::uint32_t site, std::uint32_t code) {
     const bool block = code == kStopReceiveEvent;
     std::uint32_t key = 0;
     // The key is always consumed; lv2 leaves it in the mailbox on some paths so that a stopped thread can retry
@@ -373,6 +373,20 @@ bool receiveEvent(SpuThread& cpu, std::uint32_t site, std::uint32_t code) {
     }
     replyReceive(cpu, waiter);
     return true;
+}
+
+// Times the blocking receive only: a 0x111 poll would break the one-event-per-cycle meaning of the busy time.
+bool receiveEvent(SpuThread& cpu, std::uint32_t site, std::uint32_t code) {
+    if (code != kStopReceiveEvent) return receiveEventBody(cpu, site, code);
+    const auto arrival = std::chrono::steady_clock::now();
+    cpu.noteReceiveArrival(arrival);
+    const bool replied = receiveEventBody(cpu, site, code);
+    if (replied) {
+        cpu.noteReceiveReply(arrival, std::chrono::steady_clock::now());
+    } else {
+        cpu.noteReceiveAbort();
+    }
+    return replied;
 }
 
 bool GroupOwner::onStop(SpuThread& cpu, std::uint32_t site, std::uint32_t code) {

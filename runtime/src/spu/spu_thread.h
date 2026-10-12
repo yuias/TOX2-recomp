@@ -19,9 +19,13 @@
 #include <thread>
 #include <vector>
 
+#include "core/latency_stats.h"
 #include "tox2/spu_context.h"
 
 namespace tox2 {
+
+// Threshold of the receive statistics: one cellAudio period.
+inline constexpr std::uint64_t kSpuReceiveOverUs = 5333;
 
 class SpuChannels;
 class SpuThread;
@@ -140,6 +144,21 @@ public:
     void countStop(std::uint32_t code);
     std::map<std::uint32_t, std::uint64_t> stopCounts() const;
 
+    // Timing of the blocking receive (stop 0x110), recorded by this thread's own host thread. busy: from the reply
+    // of one receive to the arrival of the next, the SPU's wall time per event (compare with kSpuReceiveOverUs);
+    // wait: from arrival to reply, the idle time for the event plus the guest-lock wait for the reply.
+    LatencySnapshot receiveBusy() const { return receive_busy_.snapshot(); }
+    LatencySnapshot receiveWait() const { return receive_wait_.snapshot(); }
+    void noteReceiveArrival(std::chrono::steady_clock::time_point arrival) {
+        if (last_receive_return_) receive_busy_.record(elapsedUs(*last_receive_return_, arrival));
+    }
+    void noteReceiveReply(std::chrono::steady_clock::time_point arrival, std::chrono::steady_clock::time_point reply) {
+        receive_wait_.record(elapsedUs(arrival, reply));
+        last_receive_return_ = reply;
+    }
+    // The receive ended without a reply (teardown): the next arrival has no previous reply to measure from.
+    void noteReceiveAbort() { last_receive_return_.reset(); }
+
     // The load record that covers the 16-byte unit of `lsa`, or null when it is untracked.
     const SpuLoadRecord* recordAt(std::uint32_t lsa) const {
         const std::uint16_t tag = tags_[(lsa & (kTox2SpuLsSize - 1u)) / kSpuTagUnit].load(std::memory_order_acquire);
@@ -184,6 +203,10 @@ private:
     std::atomic<std::uint64_t> unknown_targets_{0};
     mutable std::mutex stop_mutex_;
     std::map<std::uint32_t, std::uint64_t> stops_;  // guarded by stop_mutex_
+
+    LatencyStats receive_busy_{kSpuReceiveOverUs};
+    LatencyStats receive_wait_{kSpuReceiveOverUs};
+    std::optional<std::chrono::steady_clock::time_point> last_receive_return_;  // own host thread only
 
     std::thread thread_;
 };

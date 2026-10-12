@@ -4,8 +4,11 @@
 // is constructed and hands its counters over when it is destroyed, so the totals survive the fresh objects
 // that lv2 builds at every group start.
 
+#include <cstdint>
 #include <string>
 #include <vector>
+
+#include "core/latency_stats.h"
 
 namespace tox2 {
 
@@ -21,5 +24,14 @@ void spuCensusStarted();
 
 // The lines of the "census: spu" section; empty when no SPU thread started since the last reset.
 std::vector<std::string> spuCensusLines();
+
+// The blocking-receive timing of one thread (see SpuThread::receiveBusy), summed over its runs.
+struct SpuReceiveRow {
+    std::uint32_t id = 0;
+    std::string name;
+    LatencySnapshot busy, wait;
+};
+// Threads with at least one receive, live and gone, ordered by thread key; any thread may call it.
+std::vector<SpuReceiveRow> spuReceiveSnapshot();
 
 }  // namespace tox2
