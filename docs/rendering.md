@@ -85,7 +85,11 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   `generated/shader_cache` (`--shader-cache DIR` changes it) as
   `<stage>_<program hash>_<GLSL hash>_<translator version>.spv`. A missing or corrupt file is
   recompiled and rewritten, and the translator version in the name keeps SPIR-V from an older
-  translation from being reused. A program with an opcode that is not translated skips its draw
+  translation from being reused. The same directory holds `pipelines.bin`, the driver's pipeline
+  cache data: it is loaded at start-up when its header names this device and driver, and written when
+  the run stops. Many drivers keep a disk cache of their own, so the gain is small there (in a 150 s
+  headless run on an NVIDIA driver, creating 111 pipelines took 95 ms without the file and 13 ms with
+  it). A program with an opcode that is not translated skips its draw
   and is counted. The vertex translator is described in [Vertex programs](#vertex-programs). The fragment translator handles MOV, MUL, ADD, MAD, DP3, DP4, MIN, MAX, the six
   compares (SLT to SEQ), FRC, FLR, RCP, EX2, LG2, DIV, DIVSQ, TEX, TXP and KIL, and ignores NOP and
   the FENCT/FENCB fences. TEX and TXP read two coordinates from a 2D texture and three from a 3D or

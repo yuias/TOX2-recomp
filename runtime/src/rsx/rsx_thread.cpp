@@ -583,6 +583,8 @@ void onStop() {
                 r.clears, r.draws, r.draws_skipped, r.flips, r.frames_dumped, r.dumps_skipped, r.dumps_failed,
                 r.validation ? std::format("{} errors", r.validation_errors) : std::string("off"),
                 r.failed ? ", renderer stopped after an error" : "");
+        logInfo("tox2: render: {} pipelines created in {} ms, {} bytes of pipeline cache reused", r.pipelines_created,
+                r.pipeline_create_us / 1000, r.pipeline_cache_loaded);
         if (unflushed != 0) {
             logWarn("tox2: render: frame dump flush timed out, {} queued frame(s) were not written", unflushed);
         }

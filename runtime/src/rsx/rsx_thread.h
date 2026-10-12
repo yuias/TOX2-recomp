@@ -204,8 +204,11 @@ struct RsxRenderCounts {
     std::uint64_t dumps_skipped = 0;  // dropped because the dump queue was full
     std::uint64_t dumps_failed = 0;
     std::uint32_t validation_errors = 0;
-    bool validation = false;  // the validation layer is active
-    bool failed = false;      // the renderer stopped after an error
+    std::uint64_t pipelines_created = 0;
+    std::uint64_t pipeline_create_us = 0;     // time spent creating them
+    std::uint64_t pipeline_cache_loaded = 0;  // bytes of pipeline cache data reused from an earlier run
+    bool validation = false;                  // the validation layer is active
+    bool failed = false;                      // the renderer stopped after an error
 };
 
 // A renderer owned by the RSX thread: created, used and destroyed there, so a device-bound object never
@@ -217,9 +220,9 @@ public:
     virtual void execute(std::span<RsxCommand> commands) = 0;
     // Any thread.
     virtual RsxRenderCounts counts() const = 0;
-    // Waits up to `timeout` for background output (dumped frames) to reach disk; returns how many items
-    // are still pending (0 when all are done). The stop path calls it because the process ends without
-    // running destructors. Any thread.
+    // Waits up to `timeout` for background output (dumped frames, the pipeline cache) to reach disk; returns
+    // how many dumped frames are still pending (0 when all are done). The stop path calls it because the process ends
+    // without running destructors. Any thread.
     virtual std::uint64_t flushOutput(std::chrono::milliseconds timeout) {
         (void)timeout;
         return 0;

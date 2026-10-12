@@ -29,6 +29,7 @@ struct RenderOptions {
     // empty directory disables dumping.
     std::filesystem::path dump_dir;
     std::uint32_t dump_every = 1;
+    // Also holds the driver's pipeline cache (pipelines.bin) when set.
     std::filesystem::path shader_cache;
     // Copy the display buffer back at every flip so readDisplay works after each one (replay, tests). The
     // copy is 8 MiB at 1080p, so a live run leaves this off and only reads back the flips that are dumped.
@@ -77,6 +78,10 @@ public:
     // Waits until the dumps queued so far are written, at most `timeout`; returns how many are still
     // pending (0 when all are done). Any thread.
     std::uint64_t flushDumps(std::chrono::milliseconds timeout);
+    // Writes the pipeline cache to the shader cache directory; false without one or on failure. Any thread.
+    bool savePipelineCache();
+    // Any thread.
+    PipelineCacheStats pipelineCacheStats() const;
 
     // Every flip is also blitted to the presenter's next swapchain image (letterboxed 16:9) and presented.
     // Not owned; null (the default) presents nothing. Call before the first flip.

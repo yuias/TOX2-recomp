@@ -7,7 +7,9 @@
 // masks, reference, both faces) are dynamic state (Vulkan 1.3 core).
 
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <string>
@@ -57,9 +59,17 @@ struct PipelineKey {
     auto operator<=>(const PipelineKey&) const = default;
 };
 
+struct PipelineCacheStats {
+    std::uint64_t loaded_bytes = 0;  // driver cache data accepted at start-up (0: none or rejected)
+    std::uint64_t created = 0;       // pipelines created in this run
+    std::uint64_t create_us = 0;     // time spent in vkCreateGraphicsPipelines
+};
+
 class DrawPipelines {
 public:
-    explicit DrawPipelines(VkContext& context);
+    // `cache_file` holds the driver's pipeline cache data across runs; empty keeps it in memory only. Data written
+    // by another device or driver is ignored.
+    explicit DrawPipelines(VkContext& context, std::filesystem::path cache_file = {});
     ~DrawPipelines();
     DrawPipelines(const DrawPipelines&) = delete;
     DrawPipelines& operator=(const DrawPipelines&) = delete;
@@ -88,6 +98,13 @@ public:
     VkPipelineLayout depthConvertLayout() const { return depth_convert_layout_; }
     VkPipeline depthConvertPipeline();
 
+    // Writes the pipeline cache data to the cache file (atomically, through a temporary file). Any thread: the
+    // stop path calls it because the process ends without running destructors. False when nothing could be
+    // written.
+    bool savePipelineCache();
+    // Any thread.
+    PipelineCacheStats pipelineCacheStats() const;
+
 private:
     struct Program;
     using FragmentKey = std::tuple<std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t>;
@@ -97,9 +114,15 @@ private:
     bool createClearShaders();
     bool createDepthConvertObjects();
     void fail(std::string message);
+    void loadPipelineCache();
+    VkResult createPipeline(const VkGraphicsPipelineCreateInfo& info, VkPipeline* pipeline);
 
     VkContext& context_;
     std::string error_;
+    std::filesystem::path cache_file_;
+    VkPipelineCache cache_ = VK_NULL_HANDLE;
+    std::uint64_t cache_loaded_bytes_ = 0;
+    std::atomic<std::uint64_t> pipelines_created_{0}, create_us_{0};
     VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout draw_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout clear_layout_ = VK_NULL_HANDLE;

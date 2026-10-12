@@ -1,7 +1,12 @@
 #include "render/vk_pipelines.h"
 
+#include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <format>
+#include <fstream>
+#include <iterator>
+#include <system_error>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -95,8 +100,10 @@ struct DrawPipelines::Program {
     std::vector<std::string> notes;  // counted again by every draw that uses a rejected program
 };
 
-DrawPipelines::DrawPipelines(VkContext& context) : context_(context) {
+DrawPipelines::DrawPipelines(VkContext& context, std::filesystem::path cache_file)
+    : context_(context), cache_file_(std::move(cache_file)) {
     const VkDevice device = context_.device();
+    loadPipelineCache();
 
     VkDescriptorSetLayoutBinding bindings[3 + kFpTextureUnitCount]{};
     for (std::uint32_t i = 0; i < 3; i++) {
@@ -148,6 +155,7 @@ DrawPipelines::DrawPipelines(VkContext& context) : context_(context) {
 
 DrawPipelines::~DrawPipelines() {
     const VkDevice device = context_.device();
+    if (cache_ != VK_NULL_HANDLE) vkDestroyPipelineCache(device, cache_, nullptr);
     for (auto& [key, pipeline] : pipelines_) vkDestroyPipeline(device, pipeline, nullptr);
     for (auto& [key, pipeline] : clear_pipelines_) vkDestroyPipeline(device, pipeline, nullptr);
     if (depth_convert_pipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device, depth_convert_pipeline_, nullptr);
@@ -171,6 +179,80 @@ DrawPipelines::~DrawPipelines() {
 
 void DrawPipelines::fail(std::string message) {
     if (error_.empty()) error_ = std::move(message);
+}
+
+void DrawPipelines::loadPipelineCache() {
+    std::vector<char> data;
+    if (!cache_file_.empty()) {
+        std::ifstream file(cache_file_, std::ios::binary);
+        if (file) data.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    }
+    // Drivers are required to reject foreign data themselves, but some have crashed on it, so the header
+    // (VkPipelineCacheHeaderVersionOne) is checked against this device first.
+    const VkPhysicalDeviceProperties& props = context_.deviceProperties();
+    VkPipelineCacheHeaderVersionOne header{};
+    if (data.size() >= sizeof header) std::memcpy(&header, data.data(), sizeof header);
+    const bool usable = data.size() >= sizeof header && header.headerSize >= sizeof header &&
+                        header.headerVersion == VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
+                        header.vendorID == props.vendorID && header.deviceID == props.deviceID &&
+                        std::memcmp(header.pipelineCacheUUID, props.pipelineCacheUUID, VK_UUID_SIZE) == 0;
+    VkPipelineCacheCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    if (usable) {
+        info.initialDataSize = data.size();
+        info.pInitialData = data.data();
+    }
+    if (vkCreatePipelineCache(context_.device(), &info, nullptr, &cache_) != VK_SUCCESS) {
+        // Not fatal: pipelines are then created without a cache, as before.
+        cache_ = VK_NULL_HANDLE;
+        return;
+    }
+    cache_loaded_bytes_ = info.initialDataSize;
+}
+
+bool DrawPipelines::savePipelineCache() {
+    if (cache_ == VK_NULL_HANDLE || cache_file_.empty()) return false;
+    std::size_t size = 0;
+    if (vkGetPipelineCacheData(context_.device(), cache_, &size, nullptr) != VK_SUCCESS || size == 0) return false;
+    std::vector<char> data(size);
+    // VK_INCOMPLETE is possible when pipelines were added in between; the shorter data is still valid.
+    const VkResult result = vkGetPipelineCacheData(context_.device(), cache_, &size, data.data());
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE) return false;
+    data.resize(size);
+    std::error_code ec;
+    std::filesystem::create_directories(cache_file_.parent_path(), ec);
+    std::filesystem::path temp = cache_file_;
+    temp += ".tmp";
+    {
+        std::ofstream file(temp, std::ios::binary | std::ios::trunc);
+        file.write(data.data(), static_cast<std::streamsize>(data.size()));
+        if (!file) {
+            file.close();
+            std::filesystem::remove(temp, ec);
+            return false;
+        }
+    }
+    std::filesystem::rename(temp, cache_file_, ec);
+    if (ec) {
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+    return true;
+}
+
+PipelineCacheStats DrawPipelines::pipelineCacheStats() const {
+    return {cache_loaded_bytes_, pipelines_created_.load(std::memory_order_relaxed),
+            create_us_.load(std::memory_order_relaxed)};
+}
+
+VkResult DrawPipelines::createPipeline(const VkGraphicsPipelineCreateInfo& info, VkPipeline* pipeline) {
+    const auto start = std::chrono::steady_clock::now();
+    const VkResult result = vkCreateGraphicsPipelines(context_.device(), cache_, 1, &info, nullptr, pipeline);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    create_us_.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count(),
+                         std::memory_order_relaxed);
+    pipelines_created_.fetch_add(1, std::memory_order_relaxed);
+    return result;
 }
 
 const DrawPipelines::Program* DrawPipelines::vertexProgram(const RsxDraw& draw) {
@@ -389,7 +471,7 @@ VkPipeline DrawPipelines::pipeline(const PipelineKey& key, const DrawShaders& sh
     info.pDynamicState = &dynamic;
     info.layout = draw_layout_;
     VkPipeline pipeline = VK_NULL_HANDLE;
-    if (vkCreateGraphicsPipelines(context_.device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+    if (createPipeline(info, &pipeline) != VK_SUCCESS) {
         fail("vkCreateGraphicsPipelines failed");
         return VK_NULL_HANDLE;
     }
@@ -480,7 +562,7 @@ VkPipeline DrawPipelines::maskedClearPipeline(VkFormat color_format, VkColorComp
     info.pDynamicState = &dynamic;
     info.layout = clear_layout_;
     VkPipeline pipeline = VK_NULL_HANDLE;
-    if (vkCreateGraphicsPipelines(context_.device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+    if (createPipeline(info, &pipeline) != VK_SUCCESS) {
         fail("vkCreateGraphicsPipelines failed");
         return VK_NULL_HANDLE;
     }
@@ -596,8 +678,7 @@ VkPipeline DrawPipelines::depthConvertPipeline() {
     info.pColorBlendState = &blend;
     info.pDynamicState = &dynamic;
     info.layout = depth_convert_layout_;
-    if (vkCreateGraphicsPipelines(context_.device(), VK_NULL_HANDLE, 1, &info, nullptr, &depth_convert_pipeline_) !=
-        VK_SUCCESS) {
+    if (createPipeline(info, &depth_convert_pipeline_) != VK_SUCCESS) {
         depth_convert_pipeline_ = VK_NULL_HANDLE;
         fail("vkCreateGraphicsPipelines failed");
     }

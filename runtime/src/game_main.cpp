@@ -148,10 +148,17 @@ public:
         counts.validation = context_->validationEnabled();
         counts.validation_errors = context_->validationErrorCount();
         counts.failed = failed_.load(std::memory_order_relaxed);
+        const tox2::PipelineCacheStats pipelines = renderer_->pipelineCacheStats();
+        counts.pipelines_created = pipelines.created;
+        counts.pipeline_create_us = pipelines.create_us;
+        counts.pipeline_cache_loaded = pipelines.loaded_bytes;
         return counts;
     }
 
-    std::uint64_t flushOutput(std::chrono::milliseconds timeout) override { return renderer_->flushDumps(timeout); }
+    std::uint64_t flushOutput(std::chrono::milliseconds timeout) override {
+        if (!renderer_->savePipelineCache()) tox2::logWarn("tox2: render: pipeline cache not saved");
+        return renderer_->flushDumps(timeout);
+    }
 
 private:
     std::unique_ptr<tox2::VkContext> context_;

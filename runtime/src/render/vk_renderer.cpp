@@ -214,7 +214,9 @@ struct RsxRenderer::FrameSlot {
 RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(context), options_(std::move(options)) {
     if (!options_.shader_cache.empty()) setShaderCacheDir(options_.shader_cache);
     if (!options_.dump_dir.empty()) dumper_ = std::make_unique<FrameDumper>();
-    pipelines_ = std::make_unique<DrawPipelines>(context_);
+    pipelines_ = std::make_unique<DrawPipelines>(context_, options_.shader_cache.empty()
+                                                                   ? std::filesystem::path()
+                                                                   : options_.shader_cache / "pipelines.bin");
     if (!pipelines_->valid()) {
         fail(pipelines_->error());
         return;
@@ -1826,6 +1828,12 @@ DumpCounts RsxRenderer::dumpCounts() const { return dumper_ ? dumper_->counts() 
 
 std::uint64_t RsxRenderer::flushDumps(std::chrono::milliseconds timeout) {
     return dumper_ ? dumper_->flush(timeout) : 0;
+}
+
+bool RsxRenderer::savePipelineCache() { return pipelines_ && pipelines_->savePipelineCache(); }
+
+PipelineCacheStats RsxRenderer::pipelineCacheStats() const {
+    return pipelines_ ? pipelines_->pipelineCacheStats() : PipelineCacheStats{};
 }
 
 bool RsxRenderer::readDisplay(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height) {
