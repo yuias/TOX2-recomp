@@ -109,6 +109,7 @@ private:
 
     explicit Window(const PresenterOptions& options)
         : on_close_(options.on_close),
+          on_message_(options.on_message),
           on_key_(options.on_key),
           on_focus_lost_(options.on_focus_lost),
           client_width_(options.client_width),
@@ -173,6 +174,12 @@ private:
         }
         Window* self = reinterpret_cast<Window*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (self == nullptr) return DefWindowProcW(hwnd, message, wparam, lparam);
+        MessageRoute route;
+        if (self->on_message_) {
+            route = self->on_message_(WindowMessage{hwnd, message, static_cast<std::uint64_t>(wparam),
+                                                    static_cast<std::int64_t>(lparam)});
+            if (route.handled) return static_cast<LRESULT>(route.result);
+        }
         switch (message) {
             case WM_SIZE:
                 // A minimised window reports a 0x0 client area.
@@ -183,7 +190,7 @@ private:
             case WM_KEYUP:
             case WM_SYSKEYDOWN:
             case WM_SYSKEYUP:
-                if (self->on_key_) {
+                if (self->on_key_ && !route.withhold_key) {
                     if (const auto key = keyMessageFromWin32(message, wparam, static_cast<std::uint64_t>(lparam)))
                         self->on_key_(*key);
                 }
@@ -213,6 +220,7 @@ private:
     }
 
     std::function<void()> on_close_;
+    std::function<MessageRoute(const WindowMessage&)> on_message_;
     std::function<void(const KeyMessage&)> on_key_;
     std::function<void()> on_focus_lost_;
     std::uint32_t client_width_;
@@ -284,10 +292,16 @@ Presenter::~Presenter() {
     // The window goes last: the surface refers to it.
 }
 
+void* Presenter::nativeWindowHandle() const { return window_ ? window_->hwnd() : nullptr; }
+
 void Presenter::destroySwapchainResources() {
     const VkDevice device = context_.device();
     for (VkSemaphore semaphore : render_semaphores_) vkDestroySemaphore(device, semaphore, nullptr);
     render_semaphores_.clear();
+    for (VkImageView view : image_views_) {
+        if (view != VK_NULL_HANDLE) vkDestroyImageView(device, view, nullptr);
+    }
+    image_views_.clear();
     images_.clear();
     if (swapchain_ != VK_NULL_HANDLE) vkDestroySwapchainKHR(device, swapchain_, nullptr);
     swapchain_ = VK_NULL_HANDLE;
@@ -376,7 +390,10 @@ bool Presenter::createSwapchain(const VkSurfaceCapabilitiesKHR& caps, VkExtent2D
     info.imageColorSpace = color_space_;
     info.imageExtent = extent;
     info.imageArrayLayers = 1;
-    info.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // The Vulkan spec requires colour-attachment support on surfaces; the overlay renders into the image.
+    // Without it the views stay null and the overlay is skipped.
+    const bool color_attachment = (caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0;
+    info.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | (color_attachment ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : 0);
     info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.preTransform = caps.currentTransform;
     info.compositeAlpha = alpha;
@@ -388,6 +405,10 @@ bool Presenter::createSwapchain(const VkSurfaceCapabilitiesKHR& caps, VkExtent2D
     // The old swapchain is retired whatever the outcome.
     for (VkSemaphore semaphore : render_semaphores_) vkDestroySemaphore(device, semaphore, nullptr);
     render_semaphores_.clear();
+    for (VkImageView view : image_views_) {
+        if (view != VK_NULL_HANDLE) vkDestroyImageView(device, view, nullptr);
+    }
+    image_views_.clear();
     images_.clear();
     if (swapchain_ != VK_NULL_HANDLE) vkDestroySwapchainKHR(device, swapchain_, nullptr);
     swapchain_ = VK_NULL_HANDLE;
@@ -410,6 +431,21 @@ bool Presenter::createSwapchain(const VkSurfaceCapabilitiesKHR& caps, VkExtent2D
     images_.resize(count);
     vkGetSwapchainImagesKHR(device, swapchain_, &count, images_.data());
     images_.resize(count);
+    if (color_attachment) {
+        image_views_.assign(images_.size(), VK_NULL_HANDLE);
+        for (std::size_t i = 0; i < images_.size(); i++) {
+            VkImageViewCreateInfo view_info{};
+            view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            view_info.image = images_[i];
+            view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            view_info.format = format_;
+            view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            if (vkCreateImageView(device, &view_info, nullptr, &image_views_[i]) != VK_SUCCESS) {
+                image_views_[i] = VK_NULL_HANDLE;  // that image is presented without the overlay
+                logOnce(LogLevel::Warn, "window-image-view", "tox2: render: window: vkCreateImageView failed");
+            }
+        }
+    }
     VkSemaphoreCreateInfo semaphore_info{};
     semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     render_semaphores_.assign(images_.size(), VK_NULL_HANDLE);
@@ -457,6 +493,8 @@ bool Presenter::acquire(std::size_t frame_slot, Target& target) {
             acquire_stalled_ = false;
             if (result == VK_SUBOPTIMAL_KHR) needs_recreate_ = true;  // the image is still usable this time
             target.image = images_[index];
+            target.view = index < image_views_.size() ? image_views_[index] : VK_NULL_HANDLE;
+            target.format = format_;
             target.acquire_semaphore = acquire_semaphores_[frame_slot];
             target.render_semaphore = render_semaphores_[index];
             target.index = index;

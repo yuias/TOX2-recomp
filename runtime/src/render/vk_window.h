@@ -40,12 +40,30 @@ struct KeyMessage {
 // scan code (some injected input) falls back to the virtual key in `wparam`.
 std::optional<KeyMessage> keyMessageFromWin32(std::uint32_t message, std::uint64_t wparam, std::uint64_t lparam);
 
+// A raw Win32 message, so this header stays free of windows.h.
+struct WindowMessage {
+    void* hwnd = nullptr;
+    std::uint32_t message = 0;
+    std::uint64_t wparam = 0;
+    std::int64_t lparam = 0;
+};
+
+// What PresenterOptions::on_message decided for one message.
+struct MessageRoute {
+    bool handled = false;  // the window procedure returns `result` at once
+    std::intptr_t result = 0;
+    bool withhold_key = false;  // a key message that on_key does not receive
+};
+
 struct PresenterOptions {
     // Called on the UI thread when the user closes the window. The window is not destroyed by it.
     std::function<void()> on_close;
-    // Both callbacks run on the UI thread inside the window procedure: they must be cheap and must not
-    // block, or the window stops responding.
-    // Called for every key message, including repeats and Alt combinations.
+    // The callbacks below run on the UI thread inside the window procedure: they must be cheap and must
+    // not block, or the window stops responding.
+    // Called first for every message; lets a client (the debug overlay) consume messages or keep key
+    // messages from on_key.
+    std::function<MessageRoute(const WindowMessage&)> on_message;
+    // Called for every key message, including repeats and Alt combinations, unless on_message withheld it.
     std::function<void(const KeyMessage&)> on_key;
     // Called when the window loses keyboard focus (key-up messages are not delivered to it afterwards).
     std::function<void()> on_focus_lost;
@@ -61,6 +79,9 @@ public:
     // `render_semaphore`; `present` then waits on the latter.
     struct Target {
         VkImage image = VK_NULL_HANDLE;
+        // A 2D view of `image` in `format`; null when the surface does not allow colour-attachment usage.
+        VkImageView view = VK_NULL_HANDLE;
+        VkFormat format = VK_FORMAT_UNDEFINED;
         VkSemaphore acquire_semaphore = VK_NULL_HANDLE;
         VkSemaphore render_semaphore = VK_NULL_HANDLE;
         std::uint32_t index = 0;
@@ -86,6 +107,9 @@ public:
 
     // Queues the presentation of an image acquired by `acquire` whose submit has been queued.
     void present(const Target& target);
+
+    // The window's HWND. Any thread; it is valid for the presenter's lifetime.
+    void* nativeWindowHandle() const;
 
 private:
     class Window;
@@ -118,6 +142,7 @@ private:
     int swapchain_failures_ = 0;    // consecutive failed swapchain creations
     bool broken_ = false;           // a failure no retry can fix: acquire reports nothing to present to
     std::vector<VkImage> images_;
+    std::vector<VkImageView> image_views_;         // per swapchain image; empty without colour-attachment usage
     std::vector<VkSemaphore> render_semaphores_;   // per swapchain image
     std::vector<VkSemaphore> acquire_semaphores_;  // per frame slot
 

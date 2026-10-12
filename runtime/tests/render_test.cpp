@@ -2878,6 +2878,33 @@ void testKeyMessages() {
     CHECK(!tox2::keyMessageFromWin32(kKillFocus, 0, 0));
 }
 
+// The presenter's overlay-facing types; no window is opened.
+void testPresenterTypes() {
+    const tox2::MessageRoute none;
+    CHECK(!none.handled && none.result == 0 && !none.withhold_key);
+
+    tox2::PresenterOptions options;
+    CHECK(!options.on_message);
+    int calls = 0;
+    options.on_message = [&calls](const tox2::WindowMessage& message) {
+        calls++;
+        CHECK(message.hwnd == nullptr && message.message == 0x100 && message.wparam == 0x70 && message.lparam == -1);
+        return tox2::MessageRoute{.withhold_key = true};
+    };
+    const tox2::MessageRoute route = options.on_message(tox2::WindowMessage{nullptr, 0x100, 0x70, -1});
+    CHECK(calls == 1 && route.withhold_key && !route.handled && route.result == 0);
+
+    const tox2::WindowMessage blank;
+    CHECK(blank.hwnd == nullptr && blank.message == 0 && blank.wparam == 0 && blank.lparam == 0);
+
+    const tox2::Presenter::Target empty;
+    CHECK(empty.view == VK_NULL_HANDLE && empty.format == VK_FORMAT_UNDEFINED);
+    tox2::Presenter::Target target;
+    target.view = reinterpret_cast<VkImageView>(static_cast<std::uintptr_t>(0x10));
+    target.format = VK_FORMAT_B8G8R8A8_UNORM;
+    CHECK(target.view != VK_NULL_HANDLE && target.format == VK_FORMAT_B8G8R8A8_UNORM);
+}
+
 }  // namespace
 
 int main() {
@@ -2885,6 +2912,7 @@ int main() {
     std::printf("validation layer: %s\n", layer ? "installed" : "not installed");
     testLetterbox();
     testKeyMessages();
+    testPresenterTypes();
     testShaderCompiler();
     testTextureMapping();
     testFrameDump();
