@@ -2618,6 +2618,11 @@ void testLv2ReceiveEvent() {
     // SPU number is 1 in a one-thread group, as in the game.
     {
         Lv2Fixture f;
+        // The owner callbacks of the SPU host thread take the guest lock as class Spu.
+        const auto spu_holds = [] {
+            return tox2::guestLock().stats().classes[static_cast<std::size_t>(tox2::GuestLockClass::Spu)].hold.count;
+        };
+        const std::uint64_t spu_holds_before = spu_holds();
         const std::uint32_t group = f.makeGroup(1, 0);
         const std::uint32_t thread = f.makeThread(group, 1, kLvReceive, kLvQueueKey);
         const std::uint32_t queue = f.makeQueue(8, 2);
@@ -2635,6 +2640,7 @@ void testLv2ReceiveEvent() {
         CHECK(f.join(group) == 0 && f.cause() == 2 && f.status() == 3);
         const std::uint32_t expected[] = {0, 0x11, 0x22, 0x33, 0, 0x44, 0x55, 0x66, 0, kLvQuit, 0, 0};
         for (std::uint32_t i = 0; i < 12; i++) CHECK(f.bufWord(thread, i) == expected[i]);
+        CHECK(spu_holds() > spu_holds_before);
         std::lock_guard<tox2::GuestLock> lock(tox2::guestLock());
         CHECK(tox2::spuThreadById(thread)->stopCounts().at(0x110) == 3);
     }

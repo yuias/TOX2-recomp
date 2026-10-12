@@ -34,6 +34,7 @@ constexpr char kModule[] = "cellAudio";
 // through the global and checks it under the guest lock: one call that was already under way can
 // still arrive after cellAudioQuit.
 void produceBlock(std::span<float> block) {
+    setGuestLockClass(GuestLockClass::Audio);
     std::lock_guard<GuestLock> lock(guestLock());
     const std::uint64_t now_us = systemTimeUs();
     cellAudioPorts().producePeriod(process().memory.base(), now_us, block);

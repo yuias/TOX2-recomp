@@ -9,6 +9,7 @@
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/reservation.h"
+#include "core/threads.h"
 #include "spu/spu_census.h"
 #include "spu/spu_channels.h"
 
@@ -89,6 +90,7 @@ void SpuThread::requestHalt() {
 
 void SpuThread::threadMain(std::uint32_t entry_ls) {
     reserveFaultStack();
+    setGuestLockClass(GuestLockClass::Spu);
     t_current = this;
     // The identity of the host thread, for log lines and for a fatal stop raised anywhere on it.
     setLogSpuThread(id_);

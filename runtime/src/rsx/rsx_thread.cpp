@@ -684,6 +684,7 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
     constexpr auto kPeriod = std::chrono::microseconds(kRsxVBlankPeriodUs);
     constexpr auto kPollInterval = std::chrono::milliseconds(1);
     Sleeper sleeper;
+    setGuestLockClass(GuestLockClass::Rsx);
 
     // The device and renderer belong to this thread. They are created before the first command is
     // consumed, so a failure can still drop the frame builder.
