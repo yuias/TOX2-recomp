@@ -11,6 +11,15 @@ topic (`tox2: fs: ...`, `tox2: game: ...`, `tox2: pad: ...`); the census lines a
 of a fatal stop have no such prefix. Output from the guest itself (`sys_tty_write`) goes to stdout,
 unprefixed (the game's own assertion text appears there).
 
+With `--log-level debug`, a host thread logs `tox2: perf: t <s> s: <body>` lines once per second
+(`runtime/src/core/perf_log.*`; `t` is the guest system time in seconds). Three sources write them, each with the
+changes over the last second: `audio` (flips, `cellAudio` periods and unwritten port blocks), `lock` (the guest
+lock's wait and hold per class, and for the audio-path classes the queue length and the holders they waited
+behind) and `spu` (the receive timing of each SPU thread that blocks in `stop 0x110` and how the reservation
+waits ended). A source with nothing to say in that second writes no line. Their fields are listed under
+[Audio](audio.md#log-lines); one second of the three lines puts a missed audio block next to the lock waits and
+the sound engine's processing time of the same second.
+
 A run starts with the load log, for example (TOX2 values):
 
 ```
@@ -84,7 +93,22 @@ initialised `cellAudio`, a `census: audio` section gives the audio engine, mixer
 and channel reads of all SPU threads and gives one line per thread and per image that ran (see
 [SPU usage](spu.md#log-lines-and-census) and the run quoted under
 [What the current run reaches](spu.md#what-the-current-run-reaches)).
-Thread states are `running`, `blocked in <what>` or `exited`. The first call of each syscall and
+Thread states are `running`, `blocked in <what>` or `exited`. A `census: guest lock` section follows the
+thread lines once the lock was used:
+
+```
+census: guest lock 3781234 acquisitions in 60.0 s, hand-off n 1480 avg 0.01 p99 0.02 max 0.31 ms >0.10ms 4, wakeups 2210 (131 spurious)
+  ppu: 46800.0/s, wait n 2808000 avg 0.02 p99 0.11 max 3.10 ms >1.00ms 12, ahead avg 1.3 max 5, hold n 2808000 avg 0.01 p99 0.04 max 1054.00 ms >1.00ms 1, waited behind rsx 120.0 ms ppu 80.0 ms
+  rsx: 14600.0/s, wait ...
+```
+
+(Invented numbers, for the shape.) The header gives the acquisitions since the start, the hand-off statistics and
+the wake-ups. Each class line gives its acquisitions per second, the wait statistics, the queue length ahead of a
+contended acquisition, the hold statistics and, as ms summed over the waiters, the holder classes its waits were
+spent behind (see [Threads](#threads)). A statistics group is `n <count> avg <x> p99 <x> max <x> ms >T <count>`:
+milliseconds, and the number of values above the threshold (1 ms for waits and holds, 0.1 ms for hand-offs).
+The `census: spu` section has the reservation-table and per-thread receive lines described under
+[SPU usage](spu.md#log-lines-and-census). The first call of each syscall and
 each import also logs `tox2: first sc <number> <name>` or `tox2: first hle <module>::<name>` while
 the game runs; these lines are the progress markers that `game_boot` checks (see
 [Tests](tests.md#the-game_boot-test)).
@@ -181,6 +205,19 @@ therefore pumps the command buffer in slices of 128 words and leaves the lock on
 game stops before it starts a mixer, so the figures come from the earlier game). It
 also leaves the lock after each draw end and copies the draw's guest bytes without it; the game only
 reuses that memory after a later label, report or flip, which the RSX thread writes after the copy.
+
+The guest lock keeps statistics, always on (`GuestLock::stats()`, `runtime/src/core/threads.*`; the cost of an
+uncontended lock and unlock pair is about 56 ns). Each acquisition is attributed to a class: `ppu` and `ppu-high`
+for guest threads (lv2 priority below 100 is `ppu-high`; the game's sound threads use 0), and for host threads
+the class they name themselves with `setGuestLockClass`: `rsx` (the RSX consumer), `audio` (the audio engine's
+producer call), `spu` (SPU threads in their lv2 callbacks) and `other` for the rest. Per class the lock records
+the wait (ticket taken to turn, 0 when uncontended), the hold, how many waiters were queued ahead on contended
+acquisitions, and, per holder class, the hold time that ended while the class waited. It also records the
+hand-off time from an unlock to the turn of the next waiter and the wake-ups that found it was not their turn:
+the lock is a ticket lock with one condition variable, so every waiter wakes on every hand-off. In runs of this game
+these were small enough (6 % of the wake-ups were spurious, a hand-off took under 5 us) that the lock was left as it is; the
+audio-path waits it produced were not the cause of missed audio blocks (see [Audio](audio.md#guest-lock)). Host
+threads that are raised above normal priority are listed under [Audio](audio.md#host-thread-priorities).
 
 Thread ids start at `0x01000000`. lv2 interrupt threads are not implemented; the one interrupt
 thread the game needs is the GCM interrupt thread described under [Fake RSX](rendering.md#fake-rsx).
@@ -633,7 +670,7 @@ titled `tox2` over the presented image, at the top left. It has four collapsible
 
 | Section | Contents |
 | --- | --- |
-| Stats | The flip number (the `frame_<N>.png` and `--rsx-capture N` numbering), flips per second over the last second, draws and skipped draws of the last flip, the total of skipped draws and a graph of the last 240 flip intervals. Below, the audio counters of the engine and `cellAudio`: the output, the longest producer time against the 5.333 ms block period and its margin, blocks, periods, failed notifies, skipped periods (with a rate), underrun frames (with a rate), dropped blocks, the clock correction in ppm and the mean output fill against its target. Before `cellAudioInit` the audio part says `n/a (audio not started)` |
+| Stats | The flip number (the `frame_<N>.png` and `--rsx-capture N` numbering), flips per second over the last second, draws and skipped draws of the last flip, the total of skipped draws and a graph of the last 240 flip intervals. Below, the audio counters of the engine and `cellAudio`: the output, the longest producer time against the 5.333 ms block period and its margin, blocks, periods, failed notifies, skipped periods (with a rate), underrun frames (with a rate), dropped blocks, the clock correction in ppm and the mean output fill against its target, then the unwritten port blocks (total, rate and runs, see [Audio](audio.md#cellaudio)), one row per SPU thread that receives events (`spu <name> busy` mean, 99th percentile and maximum in ms, and the number of intervals over one 5.33 ms period) and a `guest lock` table with one row per caller class (acquisitions per second, wait 99th percentile and maximum in ms, and waits over 1 ms per second). Before `cellAudioInit` the audio part says `n/a (audio not started)` |
 | Settings | The flip limiter (the `--frame-limit` switch, changeable at run time), the log level (the lowest level that is logged; the same filter as `--log-level`) and `Internal resolution scale` (1x to 4x, the run-time form of `--resolution-scale`; disabled when no renderer reports a scale) and `Anti-aliasing` (`Supersample` or `MSAA 2x`, the run-time form of `--aa-mode`; disabled when no renderer reports a mode, and the `MSAA 2x` item is disabled on a device without 2-sample support). A choice is applied by the renderer right after the next flip: the picture sharpens (or softens) from the following frame, and each target is rescaled when it is next drawn to (see [Resolution scale](rendering.md#resolution-scale)). A new anti-aliasing mode takes effect at the next pass over the anti-aliased surface; no target is touched at the switch (see [Anti-aliased surfaces](rendering.md#anti-aliased-surfaces)). Anisotropic filtering and volume are disabled placeholders marked `(not implemented)` |
 | Capture | `Capture next flip` and `Dump next flip as PNG`, each with the state of its last request, and the dump counts (written, failed, skipped) |
 | RSX unimplemented | The live `rsx unimplemented` counts (see [Rendering](rendering.md#rendering)) as a table of count and kind, with a text filter, and the number of kinds dropped because the table was full |

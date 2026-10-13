@@ -105,6 +105,30 @@ vulkan`): it now pumps the command buffer in slices of 128 words and ends a hold
 again behind the other waiters. A pump also stops after each draw end, and the draw's index, vertex
 and texture bytes are copied after the lock is released, so a hold no longer contains a draw's copy.
 
+The lock records how long each kind of caller waits for it and holds it (classes `ppu`, `ppu-high` for guest
+threads of lv2 priority below 100, `spu`, `audio`, `rsx` and `other`), the length of the queue ahead of each
+contended acquisition, which holder classes the waits were spent behind, the hand-off time from one holder to the
+next waiter and the number of wake-ups that found it was not their turn. It prints as the `census: guest lock`
+section, once per second in the `lock` perf line and as a table in the overlay (see [Log lines](#log-lines)). In
+a 400 s scripted run of this game at resolution scale 1 and 3, the lock was not what made the mixer miss a block:
+the wait of the audio, SPU and high-priority guest threads had a 99th percentile of 0.11 to 0.16 ms and a
+maximum under 2 ms, and looked the same in the seconds with a missed block and in the others; a hand-off took
+under 5 us, and a contended acquisition caused about 0.07 spurious wake-ups. The ticket lock is therefore
+unchanged.
+
+### Host thread priorities
+
+The audio engine thread runs at `THREAD_PRIORITY_TIME_CRITICAL` and the host threads of an SPU thread group with a
+scheduler context and an lv2 priority of 31 or less (the game's sound engine `bnusCore`, priority 16; the SPURS
+kernels use 250) at `THREAD_PRIORITY_HIGHEST` (`runtime/src/core/host_priority.*`), so a saturated renderer cannot
+take their time slices. All of them sleep or block while they wait, so the raise cannot starve other threads.
+PPU guest threads stay at normal priority because they run one at a time under the guest lock, and the RSX thread
+stays at normal priority too. `--host-priorities off` (see [Options](runtime-options.md)) leaves every thread
+at normal priority. The first use of each role logs `tox2: host: <role> thread priority <n>` at debug level; a
+refused change logs a warning and the thread keeps its priority. With the lock and reservation changes in place
+the raise made no measurable difference to the number of unwritten blocks; there were fewer guest-lock waits above
+1 ms with it.
+
 Two more timing facts mattered for its sound:
 
 - The earlier game's decode threads polled with 1 ms `sys_timer_usleep` calls. Windows rounds timed waits to
@@ -182,10 +206,19 @@ implemented.
   value, as the game reads it. It holds the block that the next period mixes, so the game's mixer
   writes that block after each notify.
 - **A period** mixes the block at the read index of every started port into the stereo output,
-  scaled by the port level, then zeroes the block (a block the game did not rewrite in time plays as
-  silence, not as a repeat), advances the read index, records the tag and timestamp of the port,
-  clamps the sum to [-1, 1] (a NaN becomes 0) and sends the notify event to every registered
-  queue. Ports that are open but not started contribute nothing and do not advance.
+  scaled by the port level, then refills the block with the unwritten marker (below; a block the game
+  did not rewrite in time plays as silence, not as a repeat), advances the read index, records the tag
+  and timestamp of the port, clamps the sum to [-1, 1] (a NaN becomes 0) and sends the notify event to
+  every registered queue. Ports that are open but not started contribute nothing and do not advance.
+- **Unwritten blocks.** The refill value is a big-endian -0.0f (`80 00 00 00`) in every sample, and
+  `cellAudioPortStart` fills the whole port with it. It mixes as silence, but it differs from the +0.0 the
+  game writes in a quiet passage, so a period can tell a block the game never rewrote from one it wrote as
+  zeros. A block is unwritten when every sample of it still holds the marker; one written sample, in any
+  channel, makes it written (a block written with exactly -0.0 everywhere cannot be told apart from an
+  unwritten one). A port counts unwritten blocks only from its first written block after the start, so the
+  start-up blocks are not counted. The census and the overlay show the number of unwritten blocks, the runs of
+  consecutive ones (a run counts when it starts) and the longest run. This is the measure of an audible
+  drop: one unwritten block is one 5.33 ms silence in the output.
 - **Downmix.** The host output is stereo. An 8-channel port keeps its front left and right
   channels at unity gain and drops the other six, which is the "no downmix" mode that
   `cellAudioOutGetState` reports to the game. A mono port is copied to both sides. The census counts
@@ -325,6 +358,10 @@ Lines start with `tox2: audio:`, `tox2: atrac:`, `tox2: timer:` or `tox2: thread
 | `tox2: timer: the 1 ms resolution request was refused; timed waits use the default tick` | warn | Start-up |
 | `tox2: thread: <id> <name> prio <p> starts before creator <id> prio <q>` | debug | A thread was created with a lower priority number than its creator |
 | `tox2: thread: <id> <name> not queued within 5 ms; creator continues` | info | The new thread did not queue for the guest lock in time |
+| `tox2: host: <audio engine\|high-priority SPU> thread priority <n>` | debug | First use of a host priority role (`<n>` is the Windows thread priority value); a refused change is a warning `tox2: host: cannot raise the <role> thread priority (error <n>)` |
+| `tox2: perf: t <s> s: audio flips <n> periods <n> unwritten <n> (runs <n>)` | debug | Once per second from the first `cellAudioInit`: the deltas over the last second. `t` is the guest system time |
+| `tox2: perf: t <s> s: lock <class> n <n> avg <x> p99 <x> max <x> ms >1.00ms <n> hold p99 <x> max <x> \| <class> ...` | debug | Once per second, for each guest-lock class that took the lock in that second: its wait (count, mean, 99th percentile, maximum in ms and the number of waits above 1 ms), then its hold. The classes `audio`, `spu` and `ppu-high` add `ahead avg <n> behind <class> <ms> ... ms`: the mean queue length of the contended acquisitions and the time the waits were spent behind each holder class (sums over the waiters, so read them as ratios) |
+| `tox2: perf: t <s> s: spu <id> <name> busy n <n> avg <x> p99 <x> max <x> ms >5.33ms <n>; wait p99 <x> max <x> \| rsv-wait epoch <n> timeout <n> lost-after-timeout <n>` | debug | Once per second: per SPU thread that received events, its busy time (reply to the next receive; the last number counts intervals over one 5.33 ms period) and wait time (receive to reply), and how the SPU reservation waits ended (see [SPU usage](spu.md#log-lines-and-census)) |
 
 ## Census
 
@@ -335,7 +372,7 @@ decoder:
 ```
 census: audio
   audio wasapi: 78733 blocks (61204 non-silent), skipped 13, dropped 0, underrun 416 frames, notify 78733 sent 0 failed, max producer 23.77 ms, clock -31 ppm
-  audio input: 78733 periods, non-zero samples per channel 0:8190004 1:8190004 2:0 3:0 4:0 5:0 6:0 7:0
+  audio input: 78733 periods, non-zero samples per channel 0:8190004 1:8190004 2:0 3:0 4:0 5:0 6:0 7:0, unwritten blocks 2 (runs 2, longest 1)
   atrac 6 decoders, 7623 frames decoded (6120 non-silent), 0 errors, 0 without decoder
 ```
 
@@ -343,7 +380,12 @@ census: audio
 many were non-silent, periods skipped, blocks dropped and frames of underrun at the output, notifies
 sent and failed, the longest producer call (it includes the wait for the guest lock; a few ms of
 it at start-up is normal) and the clock correction. `audio input` counts periods and the non-zero
-samples per input channel. The `atrac` line appears when a decoder was created: decoders created,
+samples per input channel, then the [unwritten blocks](#cellaudio) the mixer found: blocks the game did not
+rewrite between two mixes of their port, the runs of them and the longest run. In a 400 s scripted run of
+this game, the count between 200 s and 380 s, the stretch with the most renderer load, fell from 75 at
+resolution scale 1 and 52 at scale 3 to 1 at each scale after the changes to the reservation table (see
+[SPU usage](spu.md#reservations-and-memory-ordering); the host priorities above made no measurable difference);
+the remaining one was at a scene event. The `atrac` line appears when a decoder was created: decoders created,
 frames decoded, how many of them had content above -80 dBFS, frames the decoder rejected and
 frames passed through without a decoder.
 

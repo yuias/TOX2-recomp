@@ -137,6 +137,9 @@ The code is in `runtime/src/spu/` (threads, dispatch, MFC, channels, census), `r
   PPU-side calls that wait for SPU threads (`sys_spu_thread_group_join` and `_terminate`) give the guest
   lock up while they wait. The PPU `sync` instruction is a full host fence, because SPU threads observe
   guest memory while PPU code runs (see [Threads](runtime.md#threads)).
+- The host threads of a group that has a scheduler context and an lv2 priority of 31 or less (`bnusCore`, 16)
+  run at `THREAD_PRIORITY_HIGHEST`; the SPURS kernels (250) and the other groups stay at normal priority (see
+  [Audio](audio.md#host-thread-priorities) and `--host-priorities`).
 - The supervisor counts an SPU thread as running, or as blocked in a channel wait. A run in which every PPU
   thread waits for SPU work is therefore not a stall while an SPU thread runs.
 
@@ -185,9 +188,19 @@ shares a stripe with another one causes at worst a spurious PUTLLC or store-cond
   decides whether to signal a waiting task has the same shape against the SPU pop. Lines that share a stripe can fail a `stwcx.` spuriously; the guest
   retries. Plain PPU stores to other words of the line do not cancel the reservation (see the race window
   below); a plain store to the reserved word itself is still caught by the value compare.
-- A thread waiting in `RdEventStat` for the reservation-lost event (`0x400`) sleeps until a reservation-aware
-  write changes the store epoch or 1 ms passes, then compares the line with the snapshot. A plain PPU
-  store is therefore seen within about 1 ms.
+- **Store epoch.** Every reservation-aware write operation moves a counter, the store epoch, after it has
+  moved the version of every stripe it wrote, and wakes the waiters that need it. An MFC PUT moves the epoch and
+  notifies once, after its last line, however many 128-byte lines it spans (a 16 KiB PUT is 128 lines); PUTLLC,
+  PUTLLUC and a successful store-conditional move it once each. A waiter reads the epoch, then checks
+  its reservation, then sleeps until the epoch differs, so a write that lands in between is not missed.
+- A thread waiting in `RdEventStat` for the reservation-lost event (`0x400`) names the line of its reservation
+  and sleeps until a write to a line of the same stripe (the granularity at which a reservation is lost)
+  changes the epoch, a mailbox push or a halt wakes it, or 1 ms passes; then it compares the line with the
+  snapshot. Writes to other lines move the epoch but do not wake it, which matters because idle SPURS kernels
+  wait this way while reservation-aware writes happen over 100,000 times per second in a busy stretch. Sixteen line-watching
+  waiters are tracked; further ones wait as wildcards that every epoch change wakes. A plain PPU store does not
+  move the epoch, so it is seen at the 1 ms poll, within about 1 ms; the census counts these waits
+  (`reservation waits` below).
 - **Known race window.** PPU plain stores (and host plain writes) are not instrumented. A plain store to
   an 8-byte chunk that a PUTLLC changes, landing after that PUTLLC's snapshot compare and before its chunk
   store (well under a microsecond), is overwritten without the PUTLLC failing. Plain stores before the
@@ -338,6 +351,23 @@ The SPU's own floating-point rules are emitted as written (the full list of devi
   distinct entries; the MFC counters (an extra line for list commands, PUTLLUC and fences when there were
   any); the number of reads of each channel; and the `stop` codes that were seen. The counters add up over
   all SPU threads of the run, also those of an earlier start of a group.
+- Further census lines of that section: `reservation table: N publishes, M notifies` (epoch moves, and the
+  ones that woke a sleeper), `reservation waits: epoch E, timeout T (lost after timeout L, wait <stats>), halt H`
+  (how the `RdEventStat` waits on the table ended; `L` counts timeouts after which the reservation was found
+  lost, which is the signature of a plain PPU store, and its wait statistics start at the beginning of the
+  waiting that timed out), and, per thread that blocked in `stop 0x110`, `thread <id> <name> receive <n>/s:
+  busy <stats>; wait <stats>`. `busy` is the time from the reply of one receive to the arrival of the next, which
+  for the sound engine thread `bnusCoreMain` is its processing time per event and is compared with the
+  5.33 ms audio period; `wait` is the time from the arrival to the reply, the idle time plus the wait for the
+  guest lock. A statistics group reads `n <count> avg <x> p99 <x> max <x> ms >5.33ms <count>`: milliseconds, then the
+  number of values above the threshold of that statistic (5.33 ms for these, 2 ms for the reservation waits).
+  In a 400 s scripted run at resolution scale 1 the busy time of `bnusCoreMain` was 0.80 ms on average with a
+  99th percentile of 3.07 ms and a maximum of 4.38 ms, against 1.22 ms, 5.12 ms and 6.57 ms (33 intervals over
+  5.33 ms) before the reservation changes; every interval over 5.33 ms before them fell in a second with a
+  missed audio block. The sampled share of that thread's time in host synchronisation dropped from 46 % to
+  12 %.
+- With `--log-level debug` the same receive statistics, and `rsv-wait epoch <n> timeout <n> lost-after-timeout
+  <n>`, are logged every second as `tox2: perf:` lines (see [Audio](audio.md#log-lines)).
 
 ## What the current run reaches
 

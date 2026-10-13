@@ -272,6 +272,47 @@ layout (see [Anti-aliased surfaces](#anti-aliased-surfaces)), so a texture that 
 the wide image it is in memory is not counted. What remains is an approximation (a texture that covers part of a
 surface or is another size); the game's frames do not count it.
 
+#### Image reuse
+
+A target is replaced by a new image whenever a pass binds its address with another size or format, and this game
+binds the depth surface at `0x800000` with four different sizes in one frame (1280x720 four times, 640x360 three
+times, 64x64 and the 2560x720 anti-aliased one). A scene of the game created about 12 targets, one sidecar and
+one depth-as-A8R8G8B8 image per flip, 42 MB at scale 1 and 381 MB at scale 3 (18.6 GB/s), and each was a kernel
+allocation. Images that are retired now go to a pool (`runtime/src/render/image_pool.*`) and the next
+creation of the same format, size, sample count and usage takes one from it:
+
+- **What is pooled.** Render-target images, the multisampled sidecars of anti-aliased surfaces and the
+  A8R8G8B8 copy of a depth target (see above). Textures and upload blocks are not (they were created almost never
+  in the measured scenes). A reused image starts in the undefined layout and is cleared like a new one, so the
+  output is the same; all replay captures still match their reference images.
+- **When an image comes back.** A replaced target stays alive until the frame slots that touched it have waited
+  for their fence, and only then is its image given to the pool. With two frames in flight, the images retired
+  while recording a frame come back at the start of the frame after next, so the pool holds about one frame's worth
+  of images in steady state.
+- **Limits.** At most 8 images per key (the largest per-frame count of one key seen is 4), at most 768 MB
+  in total (a frame at scale 3 is 316 to 459 MB; at scale 1 the limit does not bind), and an entry that is not
+  taken within 300 flips (about 6 s) is destroyed, which releases the sizes of a scene that has ended or of
+  an earlier resolution scale. The oldest entry of a key is handed out first, so every entry rotates.
+- **Measured.** In a scripted run of this game at scale 3 (about 53 flips per second), the creations per
+  flip fell from 381 MB to 0.08 MB after the first two log lines, with about 12 target and 1.2 depth-argb hits
+  and 1 sidecar hit per flip, and the whole-run flip rate rose from 48.7 to 53.8 per second. At scale 1 it rose
+  from 50.5 to 52.9 per second (measured with only targets and sidecars pooled).
+
+With `--log-level debug` the renderer logs, every 600 flips, the images created in that interval and the pool
+activity:
+
+```
+tox2: render: last 600 flips: created target 1 (0.0 MB), sidecar 0 (0.0 MB), depth-argb 0 (0.0 MB), texture 0 (0.0 MB), upload-block 0 (0.0 MB); pool hits target 7404, sidecar 600, depth-argb 732; misses no-entry 0, key-cap 0, byte-cap 0, idle 0; discarded key-cap 0, byte-cap 0, idle 0; pooled 301.5 MB
+```
+
+(Invented numbers, for the shape.) The creations of target, sidecar and depth-argb together equal the sum of the four miss counts. A
+miss `no-entry` means no image of that key had been given back and discarded since its last use, as at a scene
+change or while the images of the frame before are still in flight; `key-cap`, `byte-cap` and `idle` mean that an
+image of the key was given back and destroyed by that limit, so the creation is one that a larger limit would
+have saved. `discarded` counts the destroyed images whether or not a creation followed, and `pooled` is the
+size of the pool at the last flip. `RendererStats` carries the same figures (`images_created`,
+`image_bytes_created`, `image_pool_hits`, `image_pool_misses`, `image_pool_bytes`, `image_pool_discards`).
+
 #### Resolution scale
 
 `--resolution-scale N` (`tox2_game` and `tox2_rsxreplay`; a whole number from 1 to 4, default 1) and the
@@ -325,7 +366,8 @@ about it, so any capture replays at any scale.
   they would have to be divided by the pass's pixel scale, and so would a polygon offset slope. Nothing writes
   surfaces back to guest memory.
 - **Cost.** Memory grows with N squared: a 1280x720 colour target is 3.7 MB at scale 1 and 59 MB at scale 4, and
-  there are many targets, depth copies and feedback images. An allocation failure stops the renderer.
+  there are many targets, depth copies and feedback images (retired images are reused, see
+  [Image reuse](#image-reuse)). An allocation failure stops the renderer.
 
 #### Anti-aliased surfaces
 
