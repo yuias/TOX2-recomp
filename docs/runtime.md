@@ -12,13 +12,15 @@ of a fatal stop have no such prefix. Output from the guest itself (`sys_tty_writ
 unprefixed (the game's own assertion text appears there).
 
 With `--log-level debug`, a host thread logs `tox2: perf: t <s> s: <body>` lines once per second
-(`runtime/src/core/perf_log.*`; `t` is the guest system time in seconds). Three sources write them, each with the
-changes over the last second: `audio` (flips, `cellAudio` periods and unwritten port blocks), `lock` (the guest
-lock's wait and hold per class, and for the audio-path classes the queue length and the holders they waited
-behind) and `spu` (the receive timing of each SPU thread that blocks in `stop 0x110` and how the reservation
-waits ended). A source with nothing to say in that second writes no line. Their fields are listed under
-[Audio](audio.md#log-lines); one second of the three lines puts a missed audio block next to the lock waits and
-the sound engine's processing time of the same second.
+(`runtime/src/core/perf_log.*`; `t` is the guest system time in seconds). Five sources write them, each with the
+changes over the last second: `audio` (flips, `cellAudio` periods and unwritten port blocks), `game` (the game's
+frame time, frame interval, frame counter and job counters), `rsx` (where the RSX thread's time went per flip, as
+`rsx busy <x> ms/flip: lock <x> pump <x> build <x> record <x>, idle <x>`; see [Fake RSX](rendering.md#fake-rsx)),
+`lock` (the guest lock's wait and hold per class, and for the audio-path classes the queue length and the holders
+they waited behind) and `spu` (the receive timing of each SPU thread that blocks in `stop 0x110` and how the
+reservation waits ended). A source with nothing to say in that second writes no line. The audio, lock and `spu`
+fields are listed under [Audio](audio.md#log-lines); one second of those lines puts a missed audio block next to
+the lock waits and the sound engine's processing time of the same second.
 
 A run starts with the load log, for example (TOX2 values):
 

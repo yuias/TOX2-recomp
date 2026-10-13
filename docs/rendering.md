@@ -57,6 +57,39 @@ of distinct methods and flips, how often each interrupt handler ran, and the cou
 named when the method has a known name. With the renderer on, it also gives the number of draws
 rendered and skipped.
 
+With the renderer on, the RSX thread builds a draw's command after it has released the guest lock (see
+[Threads](runtime.md#threads)). The builder copies each draw's vertex data in two passes. The first computes the
+guest range of every attribute and the size of the whole copy, so the draw's vertex buffer is sized once. The second
+reads the ranges. Attributes of one location whose ranges overlap or touch, such as the fields of an interleaved
+array, share one copy of the merged range, and each attribute's `data_offset` points into it, so only the bytes some
+attribute reads are copied and each is copied once. The limit on a draw's vertex data (64 MiB) counts the ranges as if
+they were not shared, so the same draws are dropped as without sharing. An attribute that fails the size or address
+check ends the plan: the attributes before it are still read, and an unreadable one among them is the note that is
+counted.
+
+The vectors of a draw (attributes, vertex and index data, textures, program words and constants) are large and
+the same size from frame to frame. After the commands of a pass have been executed and no command sink keeps them,
+the RSX thread gives them back to the builder (`RsxFrameBuilder::recycle`), which keeps the emptied vectors of up to
+64 draws and moves a set into the next draw it builds. A kept vertex buffer that grew past 1 MiB or index buffer that
+grew past 256 KiB is freed instead, so one huge draw does not pin its memory. Texture blobs and constant snapshots are
+released at once, not when the set is used again. The emptied command vector is kept as well.
+
+With `--log-level debug`, the RSX thread reports where its time went once per second, as one of the perf lines (see
+[Logging](runtime.md#logging)): `tox2: perf: t <s> s: rsx busy 6.20 ms/flip: lock 1.80 pump 1.04 build 1.67 record
+1.69, idle 3.90`. The figures are milliseconds per completed flip of that second (the line is left out in a second
+without a flip) and split the thread's wall time by activity. Every moment of its loop is charged to exactly one of
+them:
+
+- `lock`: waiting for the guest lock.
+- `pump`: holding the lock, parsing the FIFO in slices and delivering vblank ticks.
+- `build`: `takeCommands`, which builds the pending draw (the guest-byte copies and the program and texture
+  work) outside the lock.
+- `record`: handing the commands to the renderer (recording and submitting) and writing capture files.
+- `idle`: sleeping between passes. A pass that finds nothing to do counts as idle.
+
+`busy` is `lock`, `pump`, `build` and `record` added together. Busy plus idle is about 1000 ms divided by the
+flips of that second; idle time left in the flip interval means the thread is not what limits the frame rate.
+
 ## Rendering
 
 The renderer is on when `tox2_game` shows its window (the default) or `--dump-frames` is given, and off
@@ -88,6 +121,44 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   Cull mode, depth state, viewport, scissor, topology, blend constants and the whole stencil state (test
   enable, ops, compare mask, write mask and reference, for both faces; see [Stencil](#stencil)) are dynamic
   state; pipelines are cached by what is baked into them.
+- **Consecutive draws share a rendering instance.** A draw leaves its rendering instance open. The next draw
+  with the same colour view, depth view, stencil use and render area records straight into it: no layout
+  transition, no barrier and no `vkCmdBeginRendering`. Draws inside one instance are ordered by rasterization
+  order, which replaces the barrier between them. Every command recorded outside a draw's instance (clears, texture
+  uploads, the copy a draw makes to sample the target it renders to, target creation, resizing and layout syncs,
+  the flip and readback commands) takes the frame's command buffer from one function, `outsideCmd`, which ends the
+  open instance first. A draw with other attachments ends it before its own transitions, and the frame's submit ends
+  it before `vkEndCommandBuffer`. An open instance therefore also means that nothing touched its attachments since
+  the last draw, so they are still in their attachment layouts. `RendererStats::rendering_instances` counts the
+  instances.
+- **Barriers.** A layout transition records a full image barrier (all commands to all commands), except when the
+  image is already in the requested layout and that layout is a read-only one: shader read, depth-stencil read or
+  transfer source. A read after a read has no hazard, and every write to the image needs another layout, whose
+  transition records its own barrier. A transition to the layout the image is in already, for an attachment or a
+  transfer destination, keeps its barrier; it orders successive rendering instances over one attachment. A draw that
+  continues an open instance makes no transition at all. `RendererStats::barriers` counts the barriers recorded and
+  `barriers_skipped` the read-only transitions that needed none.
+- **Dynamic state shadowing.** `recordDraw` remembers the pipeline and the dynamic state it last recorded on the
+  frame's command buffer (viewport, scissor, cull mode, front face, topology, primitive restart, the depth state,
+  the stencil state of both faces and the blend constants) and records a value only when it differs or is unknown;
+  floats are compared bit for bit. Dynamic state belongs to the command buffer, not to the rendering instance, so the
+  shadow outlives instance boundaries. It is cleared when a frame's recording starts and by every other function that
+  binds a pipeline or sets state (the layout pass of a multisampled target, the masked colour clear, the depth
+  conversion and the debug overlay), because a pipeline that does not declare a state as dynamic overwrites it. All
+  draw pipelines declare the same dynamic states, so binding another draw pipeline keeps the rest. Descriptors and
+  vertex and index buffer bindings are recorded for every draw. `RendererStats::state_calls` counts the calls
+  recorded (the pipeline bind included) and `state_calls_skipped` the ones left out.
+- **Vertex constant uploads.** The vertex program constants of a draw are one shared snapshot (see [Vertex
+  programs](#vertex-programs)). The renderer copies it into upload memory once; later draws of the same frame with
+  the same non-zero snapshot id bind that upload instead of allocating and copying another one
+  (`vp_constant_uploads_reused`). The remembered upload is dropped when a frame's recording starts.
+- **Vertex and index conversion.** Guest vertex arrays are converted to host byte order by one loop per component
+  size, component count and padding, which loads and stores whole components or elements (the upload memory may be
+  write-combined, where single-byte stores are slow). Indices are converted and range-checked in one pass
+  (`convertIndicesChecked`): each must lie in the draw's `[min_index, max_index]`, or equal the restart index when
+  the draw uses restart. A draw with an index outside that range is skipped and counted as
+  `state index outside the vertex range`. `RsxDraw::index_data` stays big-endian in the command; the converted indices
+  go straight into the frame's upload buffer.
 - **Readback** is gated. Copying the display buffer back to the host costs 8 MiB per flip at 1080p,
   so a live run does it only for flips that are dumped (`--dump-frames`). `tox2_rsxreplay` always
   reads the last flip back. The readback is the display target's image, so at a [resolution
@@ -220,6 +291,44 @@ transform and the varying outputs.
     a little too much). RPCS3 emits the clip writes anyway on such a device and renders wrongly.
   - A nibble above 2 is not valid. RPCS3 aborts on it; here the plane is disabled and the decoder counts
     `state user clip plane op ?0x<nibble>`.
+- **Program caches.** The frame builder keeps the programs of earlier draws, so a draw that reuses one does not
+  read and hash it again. The result is the same as without the caches, including the census notes.
+  - *Fragment programs.* Entries are keyed by the `SET_SHADER_PROGRAM` value (location and offset), up to 1024; the
+    map is cleared when full (a heavy frame uses about 650 program addresses). An entry holds the big-endian image
+    of the program as hashed, with the inline constant blocks zeroed, the word index of each constant block, the
+    decoded words and the hash. A draw reads as many bytes as the image has in one speculative read
+    (`RsxMemoryView::tryRead`), decodes the constant blocks into `fp_constants`, zeroes them in what it read and
+    compares the rest with the image. Equal bytes are a hit: the draw takes the cached words and hash and skips the
+    word-by-word scan. A missing entry, an unreadable range or different bytes fall back to the scan, and a scan that
+    reaches the end flag stores the entry. A hit is exact because the scan's shape (which blocks are constants, where
+    the end flag is) depends only on the instruction words, and those are the bytes compared; the probe reads only
+    addresses the scan would read for an unchanged program. `tryRead` differs from `read` only in that a view which
+    counts failed reads, such as the replay view's `capture missing range`, does not count it, so the census is
+    the same with and without the cache.
+  - *Vertex programs.* Entries are keyed by the start address, up to 32, most recently used first (the last is
+    dropped when full). An entry holds the words of the store that the flow walk read (from the start to the last
+    reached instruction), the result of the walk (terminated or not, whether a branch target was outside the
+    program), the cut and rebased words with their hash, and the name of the program store when the entry last
+    matched. A draw hits on the first entry with its start address whose store name is the same or whose words equal
+    the live ones; a program uploaded again with the same words gets a new name and still hits through the
+    comparison. A hit repeats the notes of the walk (`unterminated vertex program`, `vertex program branch outside
+    the program`) so the per-draw census counts do not depend on the cache. A hit is exact because the walk reads
+    only instructions from the start to the last reached one, so its result is a function of those words and the
+    start address.
+- **Generation names.** `RsxRegisters` names the current contents of the program store (`vp_ucode`) and the
+  constant store (`vp_constants`) with numbers from a process-wide counter (`vpUcodeGeneration()`,
+  `vpConstantsGeneration()`). Applying a write to a store, or resetting the registers, makes its name unknown (0); the
+  next call to the accessor gives the new contents a new name. Unchanged contents keep their name, and a write
+  counts as a change even when it stores the same value. Two equal non-zero names, from any `RsxRegisters` in the
+  process, mean equal contents, so consumers key caches on them without reading the stores. A copy of the registers
+  keeps the names, since it holds the same contents. Code that writes the stores directly (the capture reader after
+  it fills the registers from the REGS chunk, tests) must call `markVpStoresChanged()`. The names are not part of
+  the capture file.
+- **Constant snapshots.** A draw carries the vertex program constants as `RsxDraw::vp_constants`, a shared
+  snapshot of the whole store, with `vp_constants_id`, the store's name when the snapshot was taken. Draws between
+  two constant writes share one snapshot and one id, instead of each copying the 7.5 KB. When the name changes the
+  builder copies the registers into the same vector if no draw holds it any more, and into a new one otherwise, so
+  a draw still waiting for the renderer keeps the values it saw. A null snapshot reads as all zeros.
 - **Limits.** The census program dumps (`vp_*.bin`) still end at the first end bit, and the translator
   tests that read them use programs without flow control.
 
@@ -491,8 +600,9 @@ reference, compare mask and write mask are the low 8 bits of their registers. Th
   the depth test passes, so the ZPASS op applies.
 - **When the test is off.** The test is applied only to a Z24S8 surface. With the stencil test enabled and a
   Z16 depth surface or no depth surface, the draw runs without it and is counted as
-  `state stencil test without a stencil surface`. Every draw sets all five dynamic stencil states for both
-  faces, also with the test off, so no draw inherits the state of the previous one.
+  `state stencil test without a stencil surface`. Every draw gives all five dynamic stencil states of both
+  faces a value, also with the test off, so no draw inherits the state of the previous one (the call is left out
+  when the command buffer already holds that value, see [Rendering](#rendering)).
 - **Zeta write rule.** A draw writes the depth surface when `(depth test && depth write) || stencil write`
   (RPCS3 `zeta_write_enabled`). A stencil write needs a Z24S8 surface and the stencil test on, and a write
   mask that is not 0 together with at least one op that is not KEEP. The compare function is not consulted,
@@ -693,6 +803,7 @@ no renderer and no window. Captures are derived from the game, so they are git-i
 tox2_rsxreplay CAPTURE [--out DIR]
                       [--compare PNG [--compare-rect X,Y,W,H] [--max-diff N] [--max-mean X] [--max-differing P]]
                       [--resolution-scale N] [--aa-mode supersample|msaa] [--no-validation] [--shader-cache DIR]
+                      [--repeat N] [--quiet]
 ```
 
 | Option | Meaning |
@@ -708,6 +819,8 @@ tox2_rsxreplay CAPTURE [--out DIR]
 | `--aa-mode supersample\|msaa` | How surfaces in the game's anti-aliased mode are rendered (default `msaa`; see [Anti-aliased surfaces](#anti-aliased-surfaces)). `supersample` is the single-sample memory-layout image shaded per sample. `msaa` falls back to it on a device without 2-sample support (`state 2-sample multisampling unavailable` in the census). The summary line gets `, aa supersample` when the effective mode is `supersample`, and nothing for `msaa`. Any other value is a usage error. |
 | `--no-validation` | Do not enable the Vulkan validation layer, which is on by default. |
 | `--shader-cache DIR` | SPIR-V cache directory. Without it nothing is cached. |
+| `--repeat N` | Replay and render the capture `N` times (1 to 100000) and print the median time of each phase (see below). A usage error together with `--out` or `--compare`; exit code 1 without a Vulkan device. |
+| `--quiet` | Do not print the per-command lines (`clear`, `draw`, `flip`); everything else is printed. |
 
 The thresholds are optional and unchecked unless given, and they need `--compare`. The tool prints
 the commands the frame builder produced (`clear`, `draw` with its colour and depth target (with `zt=`, `zw=` and
@@ -718,6 +831,47 @@ the PNG, and `validation: active|inactive|disabled, N errors`. The exit code is 
 threshold is exceeded, a file cannot be read or written, there is no frame to display or the
 validation layer reported an error, and 2 for a usage error. Without a usable Vulkan device it
 still prints the command list and counts every draw as skipped.
+
+`--repeat N` measures the frame builder and the renderer without the game. One process runs the capture `N` times
+with one memory view, one frame builder and one renderer, so the texture cache, the program caches and the pipelines
+are warm, as they are in the game's steady state. An iteration replays the capture's writes into the builder, takes
+the commands, executes them one command at a time and gives them back to the builder (`recycle`). The first
+iteration creates the pipelines and uploads the textures, so it is left out when `N` is 2 or more. Turn the
+validation layer off with `--no-validation` when timing, because it costs CPU for every Vulkan call. The per-command
+lines are not printed; the summary line, the `rsx unimplemented` section and the validation line follow the three
+lines below and describe the last iteration. A later iteration draws over the targets of the one before, so the image
+is not the capture's frame, which is why `--out` and `--compare` are refused. Three lines are printed, here with
+illustrative figures:
+
+```
+timing: frame_9400_room, 30 iterations (first excluded), median ms per iteration: build 6.10 (buildDraw 4.83), recordDraw 5.33, recordClear 0.10, submit 0.41, gpu wait 0.02, total 11.94
+builder: per iteration 627 draws, fp cache 620 hits 7 misses, vp cache 600 hits 27 misses, vertex bytes 1234567 copied (union 1234567)
+render: per iteration 115 barriers (3 skipped), 31 rendering instances, 552 state calls (11988 skipped), 12 vp constant uploads reused; upload memory 0x7 device-local host-visible host-coherent
+```
+
+The `timing` line gives the median over the counted iterations of the time each phase takes:
+
+- `build`: replaying the writes through the register file and the frame builder, and taking the commands. It
+  includes work the game does not pay on its RSX thread (applying the register writes and replaying memory
+  events).
+- `buildDraw`: the part of `build` spent in the builder's per-draw step (copying and converting the draw's guest
+  bytes, textures and programs). This is what the game pays as `build` in its `rsx busy` line, so compare it, not
+  `build`, when judging the builder.
+- `recordDraw`, `recordClear`: the renderer's `execute` for draw commands and for clear commands.
+- `submit`: the renderer's `execute` for flip commands (the present blit and the queue submit).
+- `gpu wait`: time spent in the wait for the frame slot's fence, which is the GPU being behind the CPU. It is taken
+  out of the three phases above.
+- `total`: `build`, `recordDraw`, `recordClear` and `submit` added up (`gpu wait` is not in it).
+
+The `builder` line gives, per iteration, the draws, the hits and misses of the fragment and vertex program caches
+and the vertex bytes copied. The union figure is the size of the union of the attribute ranges per location, counted
+separately from the merge; it equals the bytes copied unless the merge is wrong. The `render` line gives the
+barriers recorded and the transitions that needed none, the rendering instances begun, the state calls recorded and
+skipped, the vertex constant uploads reused (see [Rendering](#rendering)), and the property flags of the memory
+that uploads go to (`device-local`, `host-visible`, `host-coherent`, `host-cached`). Without `host-cached` that
+memory is write-combined, where reads are slow and single-byte stores are slower than whole-element stores.
+Run-to-run spread on one machine was a few percent for `buildDraw` and `total` and up to 7 % for `recordDraw`, so
+a difference smaller than that is noise; compare interleaved runs of the two binaries.
 
 The CTest entry `rsx_replay` runs `tox2_rsxreplay` on `generated/rsx/captures/title.tox2cap` with
 the options pinned in `cmake/rsx_replay.cmake`. The capture name `title` comes from the earlier game
