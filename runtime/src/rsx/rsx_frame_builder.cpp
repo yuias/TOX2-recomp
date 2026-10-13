@@ -1,6 +1,7 @@
 #include "rsx/rsx_frame_builder.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cstring>
@@ -276,30 +277,87 @@ bool RsxFrameBuilder::fillVertices(const RsxRegisters& regs, RsxDraw& draw, std:
                                    std::uint32_t vertex_count) {
     const std::uint32_t base_offset = regs.reg(kMethodNv4097SetVertexDataBaseOffset);
     draw.attribs = decodeVertexAttribs(regs);
-    for (RsxVertexAttrib& attrib : draw.attribs) {
+
+    // Pass 1 places every attribute and sums the sizes, so the vector is sized once. The first attribute that fails
+    // a check ends the plan; pass 2 still reads the ones before it, so an unreadable earlier attribute is the note
+    // that wins, as when each attribute was sized and read in turn.
+    struct Source {
+        std::uint64_t address = 0, length = 0;  // length 0: not copied
+    };
+    std::array<Source, kRsxVertexSlotCount> sources;
+    std::uint64_t total = draw.vertex_data.size();
+    const char* failure = nullptr;
+    std::size_t planned = draw.attribs.size();
+    for (std::size_t i = 0; i < draw.attribs.size(); i++) {
+        RsxVertexAttrib& attrib = draw.attribs[i];
         const std::uint32_t element = elementBytes(attrib.type, attrib.size);
         if (element == 0) continue;
         const std::uint64_t first = attrib.stride == 0 ? 0 : static_cast<std::uint64_t>(vertex_base) * attrib.stride;
         const std::uint64_t length =
                 attrib.stride == 0 ? element : static_cast<std::uint64_t>(vertex_count - 1) * attrib.stride + element;
         const std::uint64_t address = ((base_offset + attrib.offset) & 0xFFFFFFFull) + first;
-        if (draw.vertex_data.size() + length + 3 > kRsxMaxVertexBytes) {
-            noteState("vertex data too large");
-            return false;
+        if (total + length + 3 > kRsxMaxVertexBytes) {
+            failure = "vertex data too large";
+        } else if (address + length > 0xFFFFFFFFull) {
+            failure = "unreadable vertex memory";
         }
-        if (address + length > 0xFFFFFFFFull) {
-            noteState("unreadable vertex memory");
-            return false;
+        if (failure != nullptr) {
+            planned = i;
+            break;
         }
-        draw.vertex_data.resize((draw.vertex_data.size() + 3) & ~std::size_t{3});  // 4-byte aligned slots
-        attrib.data_offset = static_cast<std::uint32_t>(draw.vertex_data.size());
-        draw.vertex_data.resize(draw.vertex_data.size() + length);
-        const std::span<std::uint8_t> out(draw.vertex_data.data() + attrib.data_offset, length);
-        if (!memory_.read(attrib.location, static_cast<std::uint32_t>(address), out)) {
+        total = (total + 3) & ~std::uint64_t{3};  // 4-byte aligned slots
+        attrib.data_offset = static_cast<std::uint32_t>(total);
+        total += length;
+        sources[i] = {address, length};
+    }
+
+    // Bytes read so far and, while timing, how many of them are distinct: attributes of one interleaved array read
+    // overlapping ranges.
+    const auto countBytes = [&](std::size_t read_count) {
+        struct Range {
+            std::uint32_t location;
+            std::uint64_t begin, end;
+        };
+        std::array<Range, kRsxVertexSlotCount> ranges;
+        std::size_t range_count = 0;
+        for (std::size_t i = 0; i < read_count; i++) {
+            if (sources[i].length == 0) continue;
+            stats_.vertex_bytes_copied += sources[i].length;
+            ranges[range_count++] = {draw.attribs[i].location, sources[i].address,
+                                     sources[i].address + sources[i].length};
+        }
+        if (!timing_enabled_ || range_count == 0) return;
+        std::sort(ranges.begin(), ranges.begin() + range_count, [](const Range& a, const Range& b) {
+            return a.location != b.location ? a.location < b.location : a.begin < b.begin;
+        });
+        Range merged = ranges[0];
+        for (std::size_t i = 1; i < range_count; i++) {
+            if (ranges[i].location == merged.location && ranges[i].begin <= merged.end) {
+                merged.end = std::max(merged.end, ranges[i].end);
+                continue;
+            }
+            stats_.vertex_bytes_union += merged.end - merged.begin;
+            merged = ranges[i];
+        }
+        stats_.vertex_bytes_union += merged.end - merged.begin;
+    };
+
+    draw.vertex_data.resize(static_cast<std::size_t>(total));
+    for (std::size_t i = 0; i < planned; i++) {
+        if (sources[i].length == 0) continue;
+        RsxVertexAttrib& attrib = draw.attribs[i];
+        const std::span<std::uint8_t> out(draw.vertex_data.data() + attrib.data_offset, sources[i].length);
+        if (!memory_.read(attrib.location, static_cast<std::uint32_t>(sources[i].address), out)) {
+            countBytes(i);
             noteState("unreadable vertex memory");
             return false;
         }
         attrib.has_data = true;
+    }
+    countBytes(planned);
+    if (failure != nullptr) {
+        noteState(failure);
+        return false;
     }
     draw.default_attribs = decodeDefaultAttribs(regs);
     draw.default_written = regs.vertex_default_written;

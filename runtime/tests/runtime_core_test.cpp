@@ -8817,6 +8817,106 @@ void testSharedVertexConstants() {
     tox2::rsxUnimplementedReset();
 }
 
+// fillVertices sizes the vertex vector once: slot placement, the bytes copied, the notes for each failure order and
+// the copied and union byte counters.
+void testFillVerticesOnePass() {
+    tox2::rsxUnimplementedReset();
+    FakeRsxMemory memory;
+    memory.putWord(0, 0x2000, 0x00010000);
+    for (std::uint32_t i = 0; i < 64; i++) {
+        memory.main[0x1000 + i] = static_cast<std::uint8_t>(i + 1);
+        memory.main[0x2000 + i] = static_cast<std::uint8_t>(0x80 + i);
+        memory.local[0x4000 + i] = static_cast<std::uint8_t>(0xC0 + i);
+    }
+    const auto setAttrib = [](FragmentRig& rig, std::uint32_t slot, std::uint32_t type, std::uint32_t size,
+                              std::uint32_t stride, std::uint32_t location_offset) {
+        rig.write(0x1740 + slot * 4, type | (size << 4) | (stride << 8));
+        rig.write(0x1680 + slot * 4, location_offset);
+    };
+
+    // Three vertices, three attributes: 36 bytes (f x3, stride 12), 10 bytes (ub x2, stride 4, from the other
+    // location) and 3 bytes (ub x1, stride 1, local memory). Slots are 4-byte aligned, so the third starts at 48.
+    {
+        FragmentRig rig(memory);
+        setAttrib(rig, 1, 4, 2, 4, 0x80002000);
+        setAttrib(rig, 2, 4, 1, 1, 0x00004000);
+        const tox2::RsxDraw draw = rig.draw(0x2000);
+        const std::vector<std::uint8_t> expected = {
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11,
+                0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22,
+                0x23, 0x24, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x00, 0x00, 0xC0, 0xC1, 0xC2};
+        CHECK(draw.vertex_data == expected);
+        CHECK(draw.attribs.size() == 3 && draw.attribs[0].data_offset == 0 && draw.attribs[1].data_offset == 36 &&
+              draw.attribs[2].data_offset == 48);
+        CHECK(draw.attribs[0].has_data && draw.attribs[1].has_data && draw.attribs[2].has_data);
+
+        // The union is counted only while timing; the copied figure always.
+        const auto& stats = rig.builder.stats();
+        CHECK(stats.vertex_bytes_copied == 49 && stats.vertex_bytes_union == 0);
+        rig.builder.setTimingEnabled(true);
+        rig.draw(0x2000);
+        CHECK(stats.vertex_bytes_copied == 98 && stats.vertex_bytes_union == 49);
+    }
+
+    // Two attributes of one interleaved array (stride 16, colour at +12) read overlapping ranges: 44 + 36 bytes
+    // copied, 48 distinct.
+    {
+        FragmentRig rig(memory);
+        rig.builder.setTimingEnabled(true);
+        setAttrib(rig, 0, 2, 3, 16, 0x80001000);
+        setAttrib(rig, 1, 4, 4, 16, 0x8000100C);
+        const tox2::RsxDraw draw = rig.draw(0x2000);
+        CHECK(draw.vertex_data.size() == 80 && draw.attribs[1].data_offset == 44);
+        CHECK(draw.vertex_data[0] == 0x01 && draw.vertex_data[44] == 0x0D && draw.vertex_data[79] == 0x30);
+        CHECK(rig.builder.stats().vertex_bytes_copied == 80 && rig.builder.stats().vertex_bytes_union == 48);
+    }
+
+    // Failure orders. Two indices (0 and 0x7FFFF) make 512 K vertices, so a stride-255 array is 133 MB: too large.
+    // Slot 0 has stride 0 and shares one element, so it is small whatever the range.
+    const auto indexedDraw = [&](FragmentRig& rig) {
+        memory.putWord(0, 0x5000, 0);
+        memory.putWord(0, 0x5004, 0x7FFFF);
+        rig.write(0x08E4, 0x2000 | 1);
+        rig.write(0x1808, 5);
+        rig.write(0x181C, 0x5000);
+        rig.write(0x1820, 0);
+        rig.write(0x1824, 1u << 24);
+        rig.write(0x1808, 0);
+        return rig.builder.takeCommands();
+    };
+    const auto notes = [](const char* name) { return unimplementedCount(name); };
+    {
+        // The first attribute is unreadable and the second too large: the unreadable note, once.
+        tox2::rsxUnimplementedReset();
+        FragmentRig rig(memory);
+        setAttrib(rig, 0, 2, 3, 0, 0x80020000);
+        setAttrib(rig, 1, 4, 1, 255, 0x80001000);
+        CHECK(indexedDraw(rig).empty());
+        CHECK(notes("state unreadable vertex memory") == 1 && notes("state vertex data too large") == 0);
+    }
+    {
+        // The first attribute is too large and the second unreadable: the size note, once.
+        tox2::rsxUnimplementedReset();
+        FragmentRig rig(memory);
+        setAttrib(rig, 0, 4, 1, 255, 0x80001000);
+        setAttrib(rig, 1, 2, 3, 0, 0x80020000);
+        CHECK(indexedDraw(rig).empty());
+        CHECK(notes("state vertex data too large") == 1 && notes("state unreadable vertex memory") == 0);
+    }
+    {
+        // A readable first attribute and a too large second: the size note, and the first was read.
+        tox2::rsxUnimplementedReset();
+        FragmentRig rig(memory);
+        rig.builder.setTimingEnabled(true);
+        setAttrib(rig, 0, 2, 3, 0, 0x80001000);
+        setAttrib(rig, 1, 4, 1, 255, 0x80001000);
+        CHECK(indexedDraw(rig).empty());
+        CHECK(notes("state vertex data too large") == 1 && notes("state unreadable vertex memory") == 0);
+        CHECK(rig.builder.stats().vertex_bytes_copied == 12 && rig.builder.stats().vertex_bytes_union == 12);
+    }
+    tox2::rsxUnimplementedReset();
+}
+
 bool sameSurface(const tox2::RsxSurface& a, const tox2::RsxSurface& b) {
     return a.location == b.location && a.offset == b.offset && a.pitch == b.pitch && a.width == b.width &&
            a.height == b.height && a.format == b.format && a.depth_format == b.depth_format;
@@ -12414,6 +12514,7 @@ int main(int argc, char** argv) {
     testFragmentProgramCache();
     testVertexProgramCache();
     testSharedVertexConstants();
+    testFillVerticesOnePass();
     testRsxTextureCache();
     testRsxFloatAndDepthSurfaces();
     testRsxCapture();
