@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -62,16 +63,25 @@ struct GuestLockStats {
 // The one lock all guest code runs under. A thread takes it when it starts and gives it up only
 // inside tox2Yield, blockingWait and exitCurrentThread, so guest threads never run in parallel.
 // Waiters queue in a list of nodes on their own stacks and unlock() hands the lock directly to one of them, waking
-// only that thread. The node is chosen first-come first-served for now. Deferred: lv2 priority scheduling;
-// set/get_priority only store and return the value. The one exception is the creation rule of
-// sys_ppu_thread_create (startGuestThreadFirst): a new thread with a numerically lower priority than its creator
-// takes the lock before the creator continues.
+// only that thread. Host-class waiters (spu, audio, rsx, other) keep their arrival order. PPU waiters fill the "PPU
+// slots" of that order: when the oldest queued entry is a PPU one, the slot goes to the PPU waiter with the lowest
+// lv2 priority number (then the earliest queue order), except that the thread which held the lock last yields the slot
+// to the second best, so the top two ready PPU threads alternate like lv2's two hardware threads (a thread that only
+// let host waiters in, through yieldToHostWaiters, keeps its turn). There is no
+// displacement of the holder and set/get_priority only store and return the value; a waiter uses the priority it had
+// when it queued. The creation rule of sys_ppu_thread_create (startGuestThreadFirst) follows from this: a new thread
+// with a numerically lower priority than its creator takes the lock before the creator continues.
 //
 // Waits and holds are timed per GuestLockClass; recording takes no lock beyond the one the operation already needs.
 class GuestLock {
 public:
     void lock();
     void unlock();
+    // sys_ppu_thread_yield without a switch: when host-class threads wait, hands the lock to the oldest of them and
+    // queues the caller (fresh arrival order, but its own PPU tag and the resume flag), so that it gets the lock back
+    // after the host waiters queued before it and before any PPU waiter it outranks. Returns false and keeps the lock
+    // when no host-class thread waits. Holder only.
+    bool yieldToHostWaiters();
 
     // Number of threads queued behind the holder. Meant to be asked by the holder; a thread counts
     // once its place in the queue is fixed.
@@ -80,6 +90,12 @@ public:
         return n > 0 ? static_cast<std::size_t>(n - 1) : 0;
     }
     bool hasWaiters() const { return waiterCount() > 0; }
+    // Holder only. Exact for the holder: entries leave the queue only when the holder releases, and a waiter that
+    // arrives concurrently is equivalent to one that arrived just after the call.
+    bool hasPpuWaiterAtOrAbove(std::int32_t priority) const {  // priority numerically <=
+        return best_ppu_priority_.load(std::memory_order_relaxed) <= priority;
+    }
+    bool hasHostWaiters() const { return host_waiters_.load(std::memory_order_relaxed) != 0; }
     // Releases so far; a holder that gave the lock up and got it back compares it to see whether anyone ran meanwhile.
     std::uint64_t releaseCount() const { return releases_.load(std::memory_order_relaxed); }
 
@@ -97,13 +113,26 @@ private:
 
     // Under mutex_. The waiter to serve next, nullptr when nobody waits.
     Waiter* chooseNext();
-    void unlink(Waiter* waiter);  // under mutex_
+    // Under mutex_.
+    void unlink(Waiter* waiter);
+    // Under mutex_. Takes the release into the statistics.
+    void noteRelease(std::chrono::steady_clock::time_point now, GuestLockClass holder, std::uint64_t hold_us);
+    // Under mutex_. Unlinks `next`, marks it granted and wakes it; the woken thread sets the holder fields.
+    void grant(Waiter* next);
+    void refreshMirrors();  // under mutex_; recomputes best_ppu_priority_ and host_waiters_ from the list
+    // Under `lock` (a lock on mutex_): links `node`, waits for its grant, releases `lock` and records the wait.
+    void enqueueAndWait(std::unique_lock<std::mutex>& lock, Waiter& node);
 
     std::mutex mutex_;
-    Waiter* head_ = nullptr;                     // guarded by mutex_; arrival order
-    Waiter* tail_ = nullptr;                     // guarded by mutex_
-    bool held_ = false;                          // guarded by mutex_; false implies an empty list
-    std::uint64_t next_seq_ = 0;                 // guarded by mutex_
+    Waiter* head_ = nullptr;               // guarded by mutex_; arrival order
+    Waiter* tail_ = nullptr;               // guarded by mutex_
+    bool held_ = false;                    // guarded by mutex_; false implies an empty list
+    std::uint64_t next_seq_ = 0;           // guarded by mutex_
+    std::uint64_t next_ppu_tag_ = 0;       // guarded by mutex_; lv2 order within a priority
+    std::uint64_t last_ppu_identity_ = 0;  // guarded by mutex_; the PPU thread granted the lock last
+    // Mirrors of the list for the holder, written under mutex_ with a plain load + store.
+    std::atomic<std::int32_t> best_ppu_priority_{std::numeric_limits<std::int32_t>::max()};  // min over queued PPU
+    std::atomic<std::uint32_t> host_waiters_{0};
     std::atomic<std::uint64_t> outstanding_{0};  // holder plus waiters; written under mutex_
     std::atomic<std::uint64_t> releases_{0};
 
@@ -111,6 +140,7 @@ private:
     // unlock(), before the lock is passed on.
     std::chrono::steady_clock::time_point hold_start_{};
     GuestLockClass holder_class_ = GuestLockClass::Other;
+    std::uint64_t holder_ppu_tag_ = 0;  // PPU holder: the tag it was granted or drew; reused by yieldToHostWaiters
     // Written in unlock() under mutex_; waiters diff it between queueing and their turn.
     std::chrono::steady_clock::time_point released_at_{};            // guarded by mutex_
     std::array<std::uint64_t, kGuestLockClassCount> hold_sum_us_{};  // guarded by mutex_
@@ -223,8 +253,11 @@ std::uint32_t createGuestThread(const GuestThreadParams& params);
 // thread. Must be called with the guest lock held.
 [[noreturn]] void exitCurrentThread(std::uint64_t value);
 
-// Hands the guest lock to the threads queued behind the caller and queues behind them. Returns
-// false, doing nothing, when nobody waits. Must be called with the guest lock held.
+// Releases the guest lock and takes it again, so the next waiter by the GuestLock rules runs first. The caller is not
+// queued when that waiter is chosen and queues with a fresh tag afterwards: it cannot win the slot it just gave up, and
+// it goes behind equal-priority waiters. Used for budget expiry and thread creation; a lower-priority PPU waiter can
+// run here when no better one is queued. Returns false, doing nothing, when nobody waits. Must be called with the guest
+// lock held.
 bool yieldGuestLock();
 
 // The game hands frames between its main and render threads by spinning on sys_ppu_thread_yield (and ignores the

@@ -251,12 +251,14 @@ std::string_view guestLockClassName(GuestLockClass cls) {
 
 struct GuestLock::Waiter {
     Waiter* next = nullptr;      // list in arrival order
-    std::uint64_t seq = 0;       // arrival order across all classes
+    std::uint64_t seq = 0;       // arrival order across all classes; for PPU waiters a "slot"
+    std::uint64_t ppu_tag = 0;   // PPU: lv2 order tag, the tie-break within a priority
     std::uint64_t identity = 0;  // host thread identity
     std::chrono::steady_clock::time_point arrival;
     std::int32_t priority = 0;  // PPU: lv2 priority captured at queue time
     GuestLockClass cls = GuestLockClass::Other;
     bool ppu = false;
+    bool resume = false;   // queued by yieldToHostWaiters: its thread held the lock a moment ago and gets it back
     bool granted = false;  // guarded by mutex_
     // Only this waiter waits on it. unlock() notifies it under mutex_: the node is on the waiter's stack, so a waiter
     // that wakes spuriously and sees `granted` must not return, and destroy the node, before the notify.
@@ -268,32 +270,52 @@ void GuestLock::lock() {
     ClassCounters& counters = classes_[static_cast<std::size_t>(cls)];
     // The one clock read of an uncontended acquisition: it is both the entry time and the start of the hold.
     const auto arrival = std::chrono::steady_clock::now();
+    const bool ppu = isPpuClass(cls);
     std::unique_lock lock(mutex_);
-    const std::uint64_t outstanding = outstanding_.load(std::memory_order_relaxed);
     if (!held_) {
         held_ = true;
         // Written only under mutex_, so a plain load + store replaces the locked read-modify-write.
-        outstanding_.store(outstanding + 1, std::memory_order_relaxed);
+        outstanding_.store(outstanding_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         hold_start_ = arrival;
         holder_class_ = cls;
+        if (ppu) {
+            holder_ppu_tag_ = next_ppu_tag_++;
+            last_ppu_identity_ = currentIdentity();
+        }
         lock.unlock();
         counters.wait.record(0);
         return;
     }
 
     Waiter node;
-    node.seq = next_seq_++;
     node.identity = currentIdentity();
     node.arrival = arrival;
     node.cls = cls;
-    node.ppu = isPpuClass(cls);
-    if (node.ppu) node.priority = currentPpuPriority().value_or(kLowestPpuPriority);
+    node.ppu = ppu;
+    if (ppu) {
+        node.priority = currentPpuPriority().value_or(kLowestPpuPriority);
+        node.ppu_tag = next_ppu_tag_++;
+    }
+    enqueueAndWait(lock, node);
+}
+
+void GuestLock::enqueueAndWait(std::unique_lock<std::mutex>& lock, Waiter& node) {
+    ClassCounters& counters = classes_[static_cast<std::size_t>(node.cls)];
+    const std::uint64_t outstanding = outstanding_.load(std::memory_order_relaxed);
+    node.seq = next_seq_++;
     if (tail_ != nullptr) {
         tail_->next = &node;
     } else {
         head_ = &node;
     }
     tail_ = &node;
+    if (node.ppu) {
+        if (node.priority < best_ppu_priority_.load(std::memory_order_relaxed)) {
+            best_ppu_priority_.store(node.priority, std::memory_order_relaxed);
+        }
+    } else {
+        host_waiters_.store(host_waiters_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    }
     // Counted only once the node is linked, so hasWaiters() implies a place in the queue.
     outstanding_.store(outstanding + 1, std::memory_order_relaxed);
 
@@ -312,10 +334,11 @@ void GuestLock::lock() {
     lock.unlock();
     const auto turn = std::chrono::steady_clock::now();
     hold_start_ = turn;
-    holder_class_ = cls;
+    holder_class_ = node.cls;
+    holder_ppu_tag_ = node.ppu_tag;
     const std::uint64_t handoff_us = elapsedUs(released_at, turn);
 
-    counters.wait.record(elapsedUs(arrival, turn));
+    counters.wait.record(elapsedUs(node.arrival, turn));
     counters.contended.fetch_add(1, std::memory_order_relaxed);
     counters.ahead_sum.fetch_add(ahead, std::memory_order_relaxed);
     std::uint64_t seen = counters.ahead_max.load(std::memory_order_relaxed);
@@ -330,7 +353,39 @@ void GuestLock::lock() {
     if (wakeups > 1) spurious_wakeups_.fetch_add(wakeups - 1, std::memory_order_relaxed);
 }
 
-GuestLock::Waiter* GuestLock::chooseNext() { return head_; }
+GuestLock::Waiter* GuestLock::chooseNext() {
+    // Best is the PPU waiter with the lowest priority number, then the lowest tag; `second` is the next one.
+    const auto ranks_before = [](const Waiter* a, const Waiter* b) {
+        return a->priority != b->priority ? a->priority < b->priority : a->ppu_tag < b->ppu_tag;
+    };
+    Waiter *oldest_host = nullptr, *oldest_ppu = nullptr, *best = nullptr, *second = nullptr;
+    for (Waiter* w = head_; w != nullptr; w = w->next) {
+        if (!w->ppu) {
+            if (oldest_host == nullptr) oldest_host = w;  // host entries are in seq order in the list
+            continue;
+        }
+        if (oldest_ppu == nullptr || w->seq < oldest_ppu->seq) oldest_ppu = w;
+        if (best == nullptr || ranks_before(w, best)) {
+            second = best;
+            best = w;
+        } else if (second == nullptr || ranks_before(w, second)) {
+            second = w;
+        }
+    }
+    // Host classes keep their arrival position against the PPU slots.
+    if (oldest_host != nullptr && (oldest_ppu == nullptr || oldest_host->seq < oldest_ppu->seq)) return oldest_host;
+    if (best == nullptr) return nullptr;
+    // lv2's two hardware threads are time-multiplexed on the one lock: the PPU thread that ran last lets the second
+    // best go first, so the top two ready threads alternate and a third-ranked one waits. A resume node belongs to a
+    // cancelled yield and gets its turn back.
+    Waiter* pick = best;
+    if (best->identity == last_ppu_identity_ && !best->resume && second != nullptr) pick = second;
+    // The pick consumes the oldest PPU slot; the waiter it overtook takes over the pick's place in arrival order, so
+    // host waiters keep their position.
+    if (pick != oldest_ppu) oldest_ppu->seq = pick->seq;
+    last_ppu_identity_ = pick->identity;
+    return pick;
+}
 
 void GuestLock::unlink(Waiter* waiter) {
     Waiter* prev = nullptr;
@@ -340,15 +395,21 @@ void GuestLock::unlink(Waiter* waiter) {
     waiter->next = nullptr;
 }
 
-void GuestLock::unlock() {
-    const auto now = std::chrono::steady_clock::now();
-    // Only the holder reads these, and the next holder writes them after this call passes the lock on.
-    const GuestLockClass holder = holder_class_;
-    const std::uint64_t hold_us = elapsedUs(hold_start_, now);
-    // Recorded before the release: a lock that lives on a test's stack must not be touched after a waiter
-    // may have taken it and let the owner destroy it.
-    classes_[static_cast<std::size_t>(holder)].hold.record(hold_us);
-    std::lock_guard lock(mutex_);
+void GuestLock::refreshMirrors() {
+    std::int32_t best = std::numeric_limits<std::int32_t>::max();
+    std::uint32_t hosts = 0;
+    for (const Waiter* w = head_; w != nullptr; w = w->next) {
+        if (w->ppu) {
+            best = std::min(best, w->priority);
+        } else {
+            hosts++;
+        }
+    }
+    best_ppu_priority_.store(best, std::memory_order_relaxed);
+    host_waiters_.store(hosts, std::memory_order_relaxed);
+}
+
+void GuestLock::noteRelease(std::chrono::steady_clock::time_point now, GuestLockClass holder, std::uint64_t hold_us) {
     hold_sum_us_[static_cast<std::size_t>(holder)] += hold_us;
     released_at_ = now;
     if (isPpuClass(holder)) {
@@ -365,14 +426,58 @@ void GuestLock::unlock() {
     }
     releases_.store(releases_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
     outstanding_.store(outstanding_.load(std::memory_order_relaxed) - 1, std::memory_order_relaxed);
+}
+
+void GuestLock::grant(Waiter* next) {
+    unlink(next);
+    next->granted = true;
+    refreshMirrors();
+    next->cv.notify_one();
+}
+
+void GuestLock::unlock() {
+    const auto now = std::chrono::steady_clock::now();
+    // Only the holder reads these, and the next holder writes them after this call passes the lock on.
+    const GuestLockClass holder = holder_class_;
+    const std::uint64_t hold_us = elapsedUs(hold_start_, now);
+    // Recorded before the release: a lock that lives on a test's stack must not be touched after a waiter
+    // may have taken it and let the owner destroy it.
+    classes_[static_cast<std::size_t>(holder)].hold.record(hold_us);
+    std::lock_guard lock(mutex_);
+    noteRelease(now, holder, hold_us);
     Waiter* next = chooseNext();
     if (next == nullptr) {
         held_ = false;
         return;
     }
-    unlink(next);
-    next->granted = true;
-    next->cv.notify_one();
+    grant(next);
+}
+
+bool GuestLock::yieldToHostWaiters() {
+    const GuestLockClass cls = currentGuestLockClass();
+    const auto now = std::chrono::steady_clock::now();
+    std::unique_lock lock(mutex_);
+    if (host_waiters_.load(std::memory_order_relaxed) == 0) return false;
+    const GuestLockClass holder = holder_class_;
+    const std::uint64_t hold_us = elapsedUs(hold_start_, now);
+    classes_[static_cast<std::size_t>(holder)].hold.record(hold_us);
+    noteRelease(now, holder, hold_us);
+    Waiter* oldest_host = head_;
+    while (oldest_host->ppu) oldest_host = oldest_host->next;
+    grant(oldest_host);
+
+    Waiter node;
+    node.identity = currentIdentity();
+    node.arrival = now;
+    node.cls = cls;
+    node.ppu = isPpuClass(cls);
+    node.resume = true;
+    if (node.ppu) {
+        node.priority = currentPpuPriority().value_or(kLowestPpuPriority);
+        node.ppu_tag = holder_ppu_tag_;  // a yield without a switch does not rotate within the priority
+    }
+    enqueueAndWait(lock, node);
+    return true;
 }
 
 GuestLockStats GuestLock::stats() const {

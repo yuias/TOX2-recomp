@@ -12158,6 +12158,170 @@ void testGuestLockPpuOverlap() {
     CHECK(rsx.ppu_hold_overlap_us == 0);
 }
 
+// PPU waiters are served by lv2 priority, host-class waiters keep their arrival position, and the thread that ran last
+// lets the second-best PPU waiter go first. Each case uses its own lock.
+void testGuestLockPpuPriority() {
+    using tox2::GuestLockClass;
+    using Priority = std::optional<std::int32_t>;
+
+    // Threads queue one at a time; each appends its name under the lock it is served by.
+    struct Case {
+        tox2::GuestLock lock;
+        std::vector<std::string> order;  // guarded by `lock`
+        std::vector<std::thread> threads;
+
+        // `while_held` runs while the thread holds the lock, after its name is appended.
+        void add(std::string name, Priority priority, GuestLockClass cls, std::function<void()> while_held = {}) {
+            const std::size_t queued = lock.waiterCount();
+            threads.emplace_back([this, name = std::move(name), priority, cls, while_held = std::move(while_held)] {
+                if (priority.has_value()) {
+                    tox2::setGuestLockPpuPriorityForTesting(priority);
+                } else {
+                    tox2::setGuestLockClass(cls);
+                }
+                lock.lock();
+                order.push_back(name);
+                if (while_held) while_held();
+                lock.unlock();
+                tox2::setGuestLockPpuPriorityForTesting(std::nullopt);
+            });
+            while (lock.waiterCount() <= queued) std::this_thread::yield();
+        }
+        void join() {
+            for (std::thread& t : threads) t.join();
+        }
+    };
+    const auto names = [](std::initializer_list<const char*> list) {
+        return std::vector<std::string>(list.begin(), list.end());
+    };
+
+    // (a) PPU waiters by priority, then queue order.
+    {
+        Case c;
+        c.lock.lock();
+        c.add("1001a", 1001, GuestLockClass::Other);
+        c.add("100", 100, GuestLockClass::Other);
+        c.add("1001b", 1001, GuestLockClass::Other);
+        c.add("0", 0, GuestLockClass::Other);
+        c.lock.unlock();
+        c.join();
+        CHECK(c.order == names({"0", "100", "1001a", "1001b"}));
+    }
+
+    // (b) Host waiters keep their position among the PPU slots.
+    {
+        Case c;
+        c.lock.lock();
+        c.add("Rsx", std::nullopt, GuestLockClass::Rsx);
+        c.add("1001", 1001, GuestLockClass::Other);
+        c.add("Audio", std::nullopt, GuestLockClass::Audio);
+        c.add("100", 100, GuestLockClass::Other);
+        c.lock.unlock();
+        c.join();
+        CHECK(c.order == names({"Rsx", "100", "Audio", "1001"}));
+    }
+
+    // Holder A (1001) gives up the lock and queues again, as a budget expiry does; Rsx is the first waiter and holds
+    // the lock until A has queued. C (1005) is queued last, with B (1001) before it when `with_b`.
+    const auto alternation = [&](bool with_b) {
+        Case c;
+        std::atomic<bool> a_held{false}, a_go{false};
+        std::thread a([&] {
+            tox2::setGuestLockPpuPriorityForTesting(1001);
+            c.lock.lock();
+            a_held = true;
+            while (!a_go) std::this_thread::yield();
+            c.lock.unlock();
+            c.lock.lock();
+            c.order.push_back("A");
+            c.lock.unlock();
+            tox2::setGuestLockPpuPriorityForTesting(std::nullopt);
+        });
+        while (!a_held) std::this_thread::yield();
+        const std::size_t expected = with_b ? 3 : 2;  // A has queued again when Rsx sees this
+        const auto wait_for_a = [&c, expected] {
+            while (c.lock.waiterCount() < expected) std::this_thread::yield();
+        };
+        c.add("Rsx", std::nullopt, GuestLockClass::Rsx, wait_for_a);
+        if (with_b) c.add("B", 1001, GuestLockClass::Other);
+        c.add("C", 1005, GuestLockClass::Other);
+        a_go = true;
+        a.join();
+        c.join();
+        return c.order;
+    };
+    // (c) Rsx, then C, then A: A just held the lock, so the second-best waiter takes the PPU slot.
+    CHECK(alternation(false) == names({"Rsx", "C", "A"}));
+    // (d) With B ready as well, C is ranked third and runs last.
+    CHECK(alternation(true) == names({"Rsx", "B", "A", "C"}));
+
+    // (e) A cancelled yield serves the host waiter and gets the lock back before a lower-ranked PPU thread.
+    {
+        Case c;
+        std::atomic<bool> a_held{false}, a_go{false}, yielded{false};
+        std::thread a([&] {
+            tox2::setGuestLockPpuPriorityForTesting(1001);
+            c.lock.lock();
+            a_held = true;
+            while (!a_go) std::this_thread::yield();
+            yielded = c.lock.yieldToHostWaiters();
+            c.order.push_back("A");
+            c.lock.unlock();
+            tox2::setGuestLockPpuPriorityForTesting(std::nullopt);
+        });
+        while (!a_held) std::this_thread::yield();
+        c.add("C", 1005, GuestLockClass::Other);
+        c.add("Rsx", std::nullopt, GuestLockClass::Rsx);
+        a_go = true;
+        a.join();
+        c.join();
+        CHECK(yielded);
+        CHECK(c.order == names({"Rsx", "A", "C"}));
+    }
+    // Without a host waiter nothing happens.
+    {
+        Case c;
+        std::atomic<bool> a_held{false}, a_go{false}, yielded{true};
+        std::uint64_t releases_before = 0, releases_after = 0;
+        std::thread a([&] {
+            tox2::setGuestLockPpuPriorityForTesting(1001);
+            c.lock.lock();
+            a_held = true;
+            while (!a_go) std::this_thread::yield();
+            releases_before = c.lock.releaseCount();
+            yielded = c.lock.yieldToHostWaiters();
+            releases_after = c.lock.releaseCount();
+            c.order.push_back("A");
+            c.lock.unlock();
+            tox2::setGuestLockPpuPriorityForTesting(std::nullopt);
+        });
+        while (!a_held) std::this_thread::yield();
+        c.add("C", 1005, GuestLockClass::Other);
+        a_go = true;
+        a.join();
+        c.join();
+        CHECK(!yielded);
+        CHECK(releases_after == releases_before);
+        CHECK(c.order == names({"A", "C"}));
+    }
+
+    // (f) The holder-side queries.
+    {
+        Case c;
+        c.lock.lock();
+        CHECK(!c.lock.hasPpuWaiterAtOrAbove(3071) && !c.lock.hasHostWaiters());
+        c.add("1001", 1001, GuestLockClass::Other);
+        c.add("Rsx", std::nullopt, GuestLockClass::Rsx);
+        CHECK(c.lock.hasPpuWaiterAtOrAbove(1001));
+        CHECK(!c.lock.hasPpuWaiterAtOrAbove(1000));
+        CHECK(c.lock.hasHostWaiters());
+        c.lock.unlock();
+        c.join();
+        CHECK(c.order == names({"1001", "Rsx"}));
+        CHECK(!c.lock.hasPpuWaiterAtOrAbove(3071) && !c.lock.hasHostWaiters());
+    }
+}
+
 // Rapid yields reach the backoff and let another host thread take the lock; spaced yields never do.
 void testYieldBackoff() {
     tox2::setYieldBackoffEnabled(true);
@@ -12862,6 +13026,7 @@ int main(int argc, char** argv) {
     testGuestLockStats();
     testGuestLockSingleWake();
     testGuestLockPpuOverlap();
+    testGuestLockPpuPriority();
     testYieldBackoff();
     testPpuYieldStats();
     testPerfLine();
