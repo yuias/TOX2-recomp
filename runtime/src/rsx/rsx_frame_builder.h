@@ -7,6 +7,7 @@
 // `Utils/rsx_utils.h` and `VK/VKVertexBuffers.cpp`; clears follow `VK/VKGSRender.cpp` `clear_surface`.
 
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <unordered_map>
 #include <utility>
@@ -149,6 +150,10 @@ private:
     };
     static constexpr std::size_t kVpCacheEntries = 32;
     std::vector<VpCacheEntry> vp_cache_;  // most recently used first; the last is dropped when full
+
+    // The constant snapshot the latest draws share, and the registers' name of the constants it holds.
+    std::shared_ptr<std::vector<std::uint32_t>> constants_snapshot_;
+    std::uint64_t constants_generation_ = 0;
 
     // The open draw clause between SET_BEGIN_END(prim) and SET_BEGIN_END(0).
     bool in_draw_ = false;

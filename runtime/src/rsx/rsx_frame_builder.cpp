@@ -505,7 +505,20 @@ void RsxFrameBuilder::fillVertexProgram(const RsxRegisters& regs, RsxDraw& draw)
     draw.vp_input_mask = regs.reg(kMethodNv4097SetVertexAttribInputMask);
     draw.vp_output_mask = regs.reg(kMethodNv4097SetVertexAttribOutputMask);
     draw.vp_branch_bits = regs.reg(kMethodNv4097SetTransformBranchBits);
-    draw.vp_constants.assign(regs.vp_constants.begin(), regs.vp_constants.end());
+    // Draws between two constant writes share one snapshot. A snapshot no draw holds any more is rewritten in place
+    // instead of allocating a new 7.5 KB vector.
+    const std::uint64_t constants_generation = regs.vpConstantsGeneration();
+    if (!constants_snapshot_ || constants_generation_ != constants_generation) {
+        if (constants_snapshot_ && constants_snapshot_.use_count() == 1) {
+            constants_snapshot_->assign(regs.vp_constants.begin(), regs.vp_constants.end());
+        } else {
+            constants_snapshot_ =
+                    std::make_shared<std::vector<std::uint32_t>>(regs.vp_constants.begin(), regs.vp_constants.end());
+        }
+        constants_generation_ = constants_generation;
+    }
+    draw.vp_constants = constants_snapshot_;
+    draw.vp_constants_id = constants_generation;
     const std::uint32_t start = regs.vp_start;
     if (start >= kRsxVpInstructionCount) {
         noteState("vertex program start out of range");

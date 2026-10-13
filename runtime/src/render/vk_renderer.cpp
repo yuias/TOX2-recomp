@@ -1875,8 +1875,12 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         !allocUpload(kDrawBlockBytes, draw_block)) {
         return;
     }
-    std::memset(vp_constants.data, 0, kVpConstantBytes);
-    std::memcpy(vp_constants.data, draw.vp_constants.data(), std::min(draw.vp_constants.size() * 4, kVpConstantBytes));
+    const std::size_t vp_constant_bytes =
+            draw.vp_constants ? std::min(draw.vp_constants->size() * 4, kVpConstantBytes) : 0;
+    if (vp_constant_bytes != 0) std::memcpy(vp_constants.data, draw.vp_constants->data(), vp_constant_bytes);
+    if (vp_constant_bytes < kVpConstantBytes) {
+        std::memset(vp_constants.data + vp_constant_bytes, 0, kVpConstantBytes - vp_constant_bytes);
+    }
     std::memset(fp_constants.data, 0, fp_entries * 16);
     for (std::size_t i = 0; i < draw.fp_constants.size(); i++) {
         const std::uint32_t word = fpFixupWord(draw.fp_constants[i]);

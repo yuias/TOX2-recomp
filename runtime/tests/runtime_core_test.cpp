@@ -8237,7 +8237,7 @@ void testRsxFrameBuilder() {
     CHECK(indexed.fp_ucode.size() == 4);
     CHECK(indexed.fp_ucode[0] == 0x00010000 && indexed.fp_hash != 0 && indexed.fp_constants.empty());
     CHECK(indexed.fp_control == 0x40 && indexed.texcoord_control == 2);
-    CHECK(indexed.vp_constants.size() == tox2::kRsxVpConstantCount * 4);
+    CHECK(indexed.vp_constants && indexed.vp_constants->size() == tox2::kRsxVpConstantCount * 4);
     CHECK(unimplementedCount("state unterminated vertex program") == 1);
     CHECK(indexed.attribs[0].has_data);
 
@@ -8767,6 +8767,56 @@ void testVertexProgramCache() {
     tox2::rsxUnimplementedReset();
 }
 
+void testSharedVertexConstants() {
+    tox2::rsxUnimplementedReset();
+    FakeRsxMemory memory;
+    memory.putWord(0, 0x2000, 0x00010000);
+    FragmentRig rig(memory);
+    const auto writeConstant = [&](std::uint32_t slot, std::uint32_t value) {
+        rig.write(tox2::kMethodNv4097SetTransformConstantLoad, slot);
+        rig.write(tox2::kMethodNv4097SetTransformConstant, value);
+    };
+    constexpr std::size_t kWords = tox2::kRsxVpConstantCount * 4;
+
+    // No constant write between two draws: one snapshot, one id.
+    writeConstant(2, 0x111);
+    tox2::RsxDraw first = rig.draw(0x2000);
+    tox2::RsxDraw second = rig.draw(0x2000);
+    CHECK(first.vp_constants && first.vp_constants->size() == kWords && first.vp_constants_id != 0);
+    CHECK(first.vp_constants == second.vp_constants && first.vp_constants_id == second.vp_constants_id);
+    CHECK((*first.vp_constants)[8] == 0x111);
+
+    // A write gives the next draw a new id and snapshot; the earlier snapshots keep their values.
+    writeConstant(2, 0x222);
+    tox2::RsxDraw third = rig.draw(0x2000);
+    CHECK(third.vp_constants_id != first.vp_constants_id && third.vp_constants != first.vp_constants);
+    CHECK((*third.vp_constants)[8] == 0x222 && (*first.vp_constants)[8] == 0x111 && (*second.vp_constants)[8] == 0x111);
+
+    // Equal ids mean equal contents even for another builder fed the same registers.
+    FragmentRig other(memory);
+    other.regs->vp_constants = rig.regs->vp_constants;
+    other.regs->vp_constants_generation = rig.regs->vpConstantsGeneration();
+    CHECK(other.draw(0x2000).vp_constants_id == third.vp_constants_id);
+
+    // A snapshot no draw holds any more is rewritten in place; one a draw still holds is left alone.
+    const auto* held = third.vp_constants.get();
+    third = tox2::RsxDraw{};
+    writeConstant(2, 0x333);
+    tox2::RsxDraw fourth = rig.draw(0x2000);
+    CHECK(fourth.vp_constants.get() == held && (*fourth.vp_constants)[8] == 0x333);
+    writeConstant(2, 0x444);
+    tox2::RsxDraw fifth = rig.draw(0x2000);
+    CHECK(fifth.vp_constants != fourth.vp_constants && (*fifth.vp_constants)[8] == 0x444);
+    CHECK((*fourth.vp_constants)[8] == 0x333);
+
+    // Writes past the end of the store change neither the name nor the snapshot.
+    rig.write(tox2::kMethodNv4097SetTransformConstantLoad, tox2::kRsxVpConstantCount);
+    rig.write(tox2::kMethodNv4097SetTransformConstant, 0xBEEF);
+    tox2::RsxDraw sixth = rig.draw(0x2000);
+    CHECK(sixth.vp_constants == fifth.vp_constants && sixth.vp_constants_id == fifth.vp_constants_id);
+    tox2::rsxUnimplementedReset();
+}
+
 bool sameSurface(const tox2::RsxSurface& a, const tox2::RsxSurface& b) {
     return a.location == b.location && a.offset == b.offset && a.pitch == b.pitch && a.width == b.width &&
            a.height == b.height && a.format == b.format && a.depth_format == b.depth_format;
@@ -8776,6 +8826,12 @@ bool sameSurfaceState(const tox2::RsxSurfaceState& a, const tox2::RsxSurfaceStat
     return sameSurface(a.color, b.color) && a.has_color == b.has_color && sameSurface(a.depth, b.depth) &&
            a.depth_format == b.depth_format && a.clip_x == b.clip_x && a.clip_y == b.clip_y && a.clip_w == b.clip_w &&
            a.clip_h == b.clip_h;
+}
+
+// Compares the snapshots' contents; a null snapshot reads as all zeros, so only null against null is equal there.
+bool sameConstants(const tox2::RsxDraw& a, const tox2::RsxDraw& b) {
+    if (!a.vp_constants || !b.vp_constants) return !a.vp_constants && !b.vp_constants;
+    return *a.vp_constants == *b.vp_constants;
 }
 
 bool sameCommand(const tox2::RsxCommand& left, const tox2::RsxCommand& right) {
@@ -8796,10 +8852,9 @@ bool sameCommand(const tox2::RsxCommand& left, const tox2::RsxCommand& right) {
         a.index_type != b.index_type || a.first != b.first || a.count != b.count || a.min_index != b.min_index ||
         a.attribs.size() != b.attribs.size() || a.textures.size() != b.textures.size() ||
         a.vertex_data != b.vertex_data || a.index_data != b.index_data || a.vp_hash != b.vp_hash ||
-        a.vp_ucode != b.vp_ucode || a.vp_constants != b.vp_constants || a.fp_hash != b.fp_hash ||
-        a.fp_ucode != b.fp_ucode || a.fp_constants != b.fp_constants || a.fp_control != b.fp_control ||
-        a.texcoord_control != b.texcoord_control || a.raster.cull != b.raster.cull ||
-        a.default_attribs != b.default_attribs) {
+        a.vp_ucode != b.vp_ucode || !sameConstants(a, b) || a.fp_hash != b.fp_hash || a.fp_ucode != b.fp_ucode ||
+        a.fp_constants != b.fp_constants || a.fp_control != b.fp_control || a.texcoord_control != b.texcoord_control ||
+        a.raster.cull != b.raster.cull || a.default_attribs != b.default_attribs) {
         return false;
     }
     for (std::size_t i = 0; i < a.textures.size(); i++) {
@@ -12358,6 +12413,7 @@ int main(int argc, char** argv) {
     testRsxFrameBuilder();
     testFragmentProgramCache();
     testVertexProgramCache();
+    testSharedVertexConstants();
     testRsxTextureCache();
     testRsxFloatAndDepthSurfaces();
     testRsxCapture();
