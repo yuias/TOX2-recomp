@@ -168,7 +168,12 @@ public:
 private:
     struct RenderTarget;
     struct FrameSlot;
-    struct UploadRef;
+    // A region of a slot's upload block, already mapped for writing.
+    struct UploadRef {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceSize offset = 0;
+        std::uint8_t* data = nullptr;
+    };
     using TargetKey = std::pair<std::uint32_t, std::uint32_t>;  // location, offset
     using TargetMap = std::map<TargetKey, std::shared_ptr<RenderTarget>>;
 
@@ -265,6 +270,12 @@ private:
     std::array<std::unique_ptr<FrameSlot>, kFramesInFlight> slots_;
     std::size_t current_slot_ = 0;
     bool recording_ = false;
+    // The vertex constant upload of the last draw in this frame, for the next draw with the same constants id.
+    struct VpConstantUpload {
+        std::uint64_t id = 0;
+        UploadRef ref;
+    };
+    VpConstantUpload vp_constant_upload_;
 
     Presenter* presenter_ = nullptr;
     Presenter::Target present_target_;  // acquired for the frame being recorded

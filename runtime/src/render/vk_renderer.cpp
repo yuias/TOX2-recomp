@@ -238,13 +238,6 @@ struct RsxRenderer::RenderTarget {
     }
 };
 
-// A region of a slot's upload block, already mapped for writing.
-struct RsxRenderer::UploadRef {
-    VkBuffer buffer = VK_NULL_HANDLE;
-    VkDeviceSize offset = 0;
-    std::uint8_t* data = nullptr;
-};
-
 struct RsxRenderer::FrameSlot {
     struct UploadBlock {
         VkBuffer buffer = VK_NULL_HANDLE;
@@ -461,6 +454,8 @@ bool RsxRenderer::beginFrame() {
     vkResetFences(device, 1, &slot.fence);
     vkResetCommandPool(device, slot.pool, 0);
     for (FrameSlot::UploadBlock& block : slot.uploads) block.used = 0;
+    // The cached region lives in an upload block that was just recycled (or belongs to the other slot).
+    vp_constant_upload_ = {};
     VkCommandBufferBeginInfo begin{};
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -1871,15 +1866,24 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     UploadRef vp_constants, fp_constants, draw_block;
     const std::size_t fp_entries = std::max<std::size_t>(draw.fp_constants.size() / 4, 1);
     constexpr std::size_t kDrawBlockBytes = kFpDrawBlockOffset + sizeof(FpDrawUniforms);
-    if (!allocUpload(kVpConstantBytes, vp_constants) || !allocUpload(fp_entries * 16, fp_constants) ||
-        !allocUpload(kDrawBlockBytes, draw_block)) {
+    // Draws that saw the same constants (equal non-zero id) bind the upload of the first one in this frame.
+    const bool reuse_vp_constants = draw.vp_constants_id != 0 && vp_constant_upload_.id == draw.vp_constants_id;
+    if (reuse_vp_constants) {
+        vp_constants = vp_constant_upload_.ref;
+    } else if (!allocUpload(kVpConstantBytes, vp_constants)) {
         return;
     }
-    const std::size_t vp_constant_bytes =
-            draw.vp_constants ? std::min(draw.vp_constants->size() * 4, kVpConstantBytes) : 0;
-    if (vp_constant_bytes != 0) std::memcpy(vp_constants.data, draw.vp_constants->data(), vp_constant_bytes);
-    if (vp_constant_bytes < kVpConstantBytes) {
-        std::memset(vp_constants.data + vp_constant_bytes, 0, kVpConstantBytes - vp_constant_bytes);
+    if (!allocUpload(fp_entries * 16, fp_constants) || !allocUpload(kDrawBlockBytes, draw_block)) return;
+    if (reuse_vp_constants) {
+        stats_.vp_constant_uploads_reused++;
+    } else {
+        const std::size_t vp_constant_bytes =
+                draw.vp_constants ? std::min(draw.vp_constants->size() * 4, kVpConstantBytes) : 0;
+        if (vp_constant_bytes != 0) std::memcpy(vp_constants.data, draw.vp_constants->data(), vp_constant_bytes);
+        if (vp_constant_bytes < kVpConstantBytes) {
+            std::memset(vp_constants.data + vp_constant_bytes, 0, kVpConstantBytes - vp_constant_bytes);
+        }
+        if (draw.vp_constants_id != 0) vp_constant_upload_ = {draw.vp_constants_id, vp_constants};
     }
     std::memset(fp_constants.data, 0, fp_entries * 16);
     for (std::size_t i = 0; i < draw.fp_constants.size(); i++) {

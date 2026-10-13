@@ -1362,6 +1362,59 @@ void testRendererBranchBits(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// Draws that carry one non-zero vertex constants id share one upload within a frame; id 0 and different ids
+// upload separately, and a new frame starts without a cached upload.
+void testVertexConstantUploadReuse(tox2::VkContext& ctx) {
+    tox2::rsxUnimplementedReset();
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+    CHECK(renderer.valid());
+
+    // Clear, one quad draw, flip.
+    const std::vector<tox2::RsxCommand> scene = replaySynthetic(makeRenderedQuadCapture(QuadOptions{}));
+    CHECK(scene.size() == 3);
+    if (scene.size() != 3) return;
+    const auto* base = std::get_if<tox2::RsxDraw>(&scene[1]);
+    CHECK(base != nullptr);
+    if (base == nullptr) return;
+
+    // The scene's draw once per id, between the clear and the flip.
+    const auto frame = [&](std::initializer_list<std::uint64_t> ids) {
+        std::vector<tox2::RsxCommand> commands{scene[0]};
+        for (const std::uint64_t id : ids) {
+            tox2::RsxDraw draw = *base;
+            draw.vp_constants_id = id;
+            commands.emplace_back(std::move(draw));
+        }
+        commands.push_back(scene[2]);
+        return commands;
+    };
+    const auto reusedBy = [&](std::initializer_list<std::uint64_t> ids) {
+        std::vector<tox2::RsxCommand> commands = frame(ids);
+        const std::uint64_t before = renderer.stats().vp_constant_uploads_reused;
+        renderer.execute(commands);
+        CHECK(renderer.valid());
+        return renderer.stats().vp_constant_uploads_reused - before;
+    };
+
+    CHECK(reusedBy({7, 7}) == 1);
+    CHECK(reusedBy({7, 7, 7}) == 2);
+    CHECK(reusedBy({7, 8}) == 0);
+    CHECK(reusedBy({0, 0}) == 0);
+    CHECK(reusedBy({7, 8, 7}) == 0);  // only the previous draw's upload is kept
+    // The last draw of the previous frame had this id; its upload memory is recycled.
+    CHECK(reusedBy({7}) == 0);
+    CHECK(reusedBy({7, 7}) == 1);
+    CHECK(renderer.stats().draws_skipped == 0);
+
+    std::vector<std::uint8_t> bgra;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    CHECK(renderer.readDisplay(bgra, width, height));
+    checkQuadPixels(bgra, width, height);
+    CHECK(tox2::rsxUnimplementedSnapshot().empty());
+    tox2::rsxUnimplementedReset();
+}
+
 // ---- Textures ----
 
 // Needs no Vulkan device.
@@ -4874,6 +4927,7 @@ int main() {
     testRendererScissorAndMask(*ctx);
     testRendererQuad(*ctx);
     testRendererBranchBits(*ctx);
+    testVertexConstantUploadReuse(*ctx);
     testRendererTextures(*ctx);
     testRendererVolumeTextures(*ctx);
     testRendererFloatSurface(*ctx);
