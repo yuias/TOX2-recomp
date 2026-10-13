@@ -86,7 +86,7 @@ struct RendererStats {
     std::uint64_t barriers_skipped = 0;             // transitions that needed no barrier
     std::uint64_t rendering_instances = 0;          // vkCmdBeginRendering calls, all paths
     std::uint64_t state_calls = 0;                  // vkCmdSet* and vkCmdBindPipeline calls recorded by recordDraw
-    std::uint64_t state_calls_skipped = 0;          // ... not recorded because the value was already set
+    std::uint64_t state_calls_skipped = 0;          // ... that were not recorded because the value was already set
     std::uint64_t vp_constant_uploads_reused = 0;   // vertex constant uploads shared by draws with equal constants
     VkMemoryPropertyFlags upload_memory_flags = 0;  // of the first upload block (vmaGetAllocationMemoryProperties)
 };
@@ -294,6 +294,31 @@ private:
         bool operator==(const OpenDrawPass&) const = default;
     };
     std::optional<OpenDrawPass> open_pass_;
+
+    // The dynamic state and pipeline recordDraw last recorded on the slot's command buffer. Dynamic state is command
+    // buffer state: it survives the end of a rendering instance, so a draw records only what differs. Every draw
+    // pipeline declares the same dynamic states (DrawPipelines::pipeline), so binding another one keeps them.
+    struct DrawStateShadow {
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkViewport viewport{};
+        VkRect2D scissor{};
+        VkCullModeFlags cull = 0;
+        VkFrontFace front_face{};
+        VkPrimitiveTopology topology{};
+        VkBool32 restart = 0, depth_test = 0, depth_write = 0, stencil_test = 0;
+        VkCompareOp depth_compare{};
+        struct Face {
+            VkStencilOp fail{}, pass{}, depth_fail{};
+            VkCompareOp compare{};
+            std::uint32_t compare_mask = 0, write_mask = 0, reference = 0;
+        } faces[2];
+        float blend_constants[4] = {};
+    };
+    // Empty: the command buffer's state is unknown and the next draw records all of it. Cleared by beginFrame and by
+    // every other site that binds a pipeline or sets state, since a pipeline that does not declare a state as dynamic
+    // overwrites it.
+    std::optional<DrawStateShadow> draw_state_;
+    void invalidateDrawState() { draw_state_.reset(); }
 
     Presenter* presenter_ = nullptr;
     Presenter::Target present_target_;  // acquired for the frame being recorded

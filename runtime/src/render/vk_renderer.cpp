@@ -4,6 +4,7 @@
 #include <cassert>
 #include <bit>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -456,7 +457,8 @@ bool RsxRenderer::beginFrame() {
     for (FrameSlot::UploadBlock& block : slot.uploads) block.used = 0;
     // The cached region lives in an upload block that was just recycled (or belongs to the other slot).
     vp_constant_upload_ = {};
-    open_pass_.reset();  // submitFrame closed it; the reset command pool dropped the recording anyway
+    open_pass_.reset();     // submitFrame closed it; the reset command pool dropped the recording anyway
+    invalidateDrawState();  // a new recording starts with no dynamic state set
     VkCommandBufferBeginInfo begin{};
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -800,6 +802,8 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
         return false;
     }
 
+    // The layout pass binds a pipeline with static state and sets its own viewport and scissor.
+    invalidateDrawState();
     const VkCommandBuffer cmd = outsideCmd();
     const VkImageLayout read_layout =
             target.depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -1307,6 +1311,7 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
     }
 
     const VkCommandBuffer cmd = outsideCmd();
+    invalidateDrawState();  // binds the depth conversion pipeline
     if (from_sidecar) {
         transitionSidecar(depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
     } else {
@@ -2003,8 +2008,26 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         stats_.rendering_instances++;
         open_pass_ = pass;
     }
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    stats_.state_calls++;
+
+    // Dynamic state is command buffer state and outlives rendering instances, so a value is recorded only when the
+    // buffer does not already hold it. Compared bitwise, which also covers floats.
+    const bool state_unknown = !draw_state_;
+    DrawStateShadow& shadow = state_unknown ? draw_state_.emplace() : *draw_state_;
+    const auto update = [&](void* cached, const void* value, std::size_t size) {
+        if (!state_unknown && std::memcmp(cached, value, size) == 0) {
+            stats_.state_calls_skipped++;
+            return false;
+        }
+        std::memcpy(cached, value, size);
+        stats_.state_calls++;
+        return true;
+    };
+    const auto set = [&](auto& cached, const auto& value) {
+        static_assert(sizeof(cached) == sizeof(value));
+        return update(&cached, &value, sizeof(value));
+    };
+
+    if (set(shadow.pipeline, pipeline)) vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
     const VkViewport viewport = {0.0f,
                                  0.0f,
@@ -2014,9 +2037,8 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
                                  1.0f};
     const VkRect2D scissor = {{static_cast<std::int32_t>(scissor_rect.x), static_cast<std::int32_t>(scissor_rect.y)},
                               {scissor_rect.width, scissor_rect.height}};
-    vkCmdSetViewport(cmd, 0, 1, &viewport);
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
-    stats_.state_calls += 2;
+    if (set(shadow.viewport, viewport)) vkCmdSetViewport(cmd, 0, 1, &viewport);
+    if (set(shadow.scissor, scissor)) vkCmdSetScissor(cmd, 0, 1, &scissor);
     constexpr std::uint32_t kCullFront = 0x404, kCullBack = 0x405, kFrontFaceCw = 0x900;
     VkCullModeFlags cull = VK_CULL_MODE_NONE;
     if (raster.cull) {
@@ -2024,37 +2046,52 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
                : raster.cull_face == kCullBack ? VK_CULL_MODE_BACK_BIT
                                                : VK_CULL_MODE_FRONT_AND_BACK;
     }
-    vkCmdSetCullMode(cmd, cull);
-    vkCmdSetFrontFace(cmd,
-                      raster.front_face == kFrontFaceCw ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE);
-    vkCmdSetPrimitiveTopology(cmd, topology);
-    vkCmdSetPrimitiveRestartEnable(cmd, restart ? VK_TRUE : VK_FALSE);
+    if (set(shadow.cull, cull)) vkCmdSetCullMode(cmd, cull);
+    const VkFrontFace front_face =
+            raster.front_face == kFrontFaceCw ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    if (set(shadow.front_face, front_face)) vkCmdSetFrontFace(cmd, front_face);
+    if (set(shadow.topology, topology)) vkCmdSetPrimitiveTopology(cmd, topology);
+    const VkBool32 restart_enable = restart ? VK_TRUE : VK_FALSE;
+    if (set(shadow.restart, restart_enable)) vkCmdSetPrimitiveRestartEnable(cmd, restart_enable);
     const bool depth_test = depth && raster.depth_test;
-    vkCmdSetDepthTestEnable(cmd, depth_test ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthWriteEnable(cmd, depth_test && raster.depth_write ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthCompareOp(cmd, static_cast<VkCompareOp>(raster.depth_func & 7u));
-    stats_.state_calls += 7;  // cull mode, front face, topology, restart, depth test, depth write, depth compare
+    const VkBool32 depth_test_enable = depth_test ? VK_TRUE : VK_FALSE;
+    const VkBool32 depth_write_enable = depth_test && raster.depth_write ? VK_TRUE : VK_FALSE;
+    const VkCompareOp depth_compare = static_cast<VkCompareOp>(raster.depth_func & 7u);
+    if (set(shadow.depth_test, depth_test_enable)) vkCmdSetDepthTestEnable(cmd, depth_test_enable);
+    if (set(shadow.depth_write, depth_write_enable)) vkCmdSetDepthWriteEnable(cmd, depth_write_enable);
+    if (set(shadow.depth_compare, depth_compare)) vkCmdSetDepthCompareOp(cmd, depth_compare);
 
     // The stencil state is set on every draw, with the test off too, so no draw inherits the previous one's.
     // Vulkan has no stencil without the aspect (Z16 or no depth target): the draw runs untested and is counted.
     const bool stencil_test = raster.stencil_test && depth && formatHasStencil(depth->format);
     if (raster.stencil_test && !stencil_test) rsxNoteUnimplemented("state", "stencil test without a stencil surface");
-    vkCmdSetStencilTestEnable(cmd, stencil_test ? VK_TRUE : VK_FALSE);
-    stats_.state_calls++;
+    const VkBool32 stencil_test_enable = stencil_test ? VK_TRUE : VK_FALSE;
+    if (set(shadow.stencil_test, stencil_test_enable)) vkCmdSetStencilTestEnable(cmd, stencil_test_enable);
     const std::pair<VkStencilFaceFlagBits, const RsxStencilFace*> faces[] = {
             {VK_STENCIL_FACE_FRONT_BIT, &raster.stencil_front}, {VK_STENCIL_FACE_BACK_BIT, &raster.stencil_back}};
-    for (const auto& [face_bit, face] : faces) {
-        vkCmdSetStencilOp(cmd, face_bit, stencilOp(face->op_fail), stencilOp(face->op_zpass), stencilOp(face->op_zfail),
-                          static_cast<VkCompareOp>(face->func & 7u));
-        vkCmdSetStencilCompareMask(cmd, face_bit, face->func_mask);
-        vkCmdSetStencilWriteMask(cmd, face_bit, face->write_mask);
-        vkCmdSetStencilReference(cmd, face_bit, face->ref);
-        stats_.state_calls += 4;
+    for (std::size_t i = 0; i < 2; i++) {
+        const auto& [face_bit, face] = faces[i];
+        DrawStateShadow::Face& cached = shadow.faces[i];
+        DrawStateShadow::Face wanted;
+        wanted.fail = stencilOp(face->op_fail);
+        wanted.pass = stencilOp(face->op_zpass);
+        wanted.depth_fail = stencilOp(face->op_zfail);
+        wanted.compare = static_cast<VkCompareOp>(face->func & 7u);
+        wanted.compare_mask = face->func_mask;
+        wanted.write_mask = face->write_mask;
+        wanted.reference = face->ref;
+        // The four stencil op fields are one command, so they change together.
+        if (update(&cached.fail, &wanted.fail, offsetof(DrawStateShadow::Face, compare_mask))) {
+            vkCmdSetStencilOp(cmd, face_bit, wanted.fail, wanted.pass, wanted.depth_fail, wanted.compare);
+        }
+        if (set(cached.compare_mask, wanted.compare_mask))
+            vkCmdSetStencilCompareMask(cmd, face_bit, wanted.compare_mask);
+        if (set(cached.write_mask, wanted.write_mask)) vkCmdSetStencilWriteMask(cmd, face_bit, wanted.write_mask);
+        if (set(cached.reference, wanted.reference)) vkCmdSetStencilReference(cmd, face_bit, wanted.reference);
     }
     float constants[4];
     blendConstants(raster.blend_color, constants);
-    vkCmdSetBlendConstants(cmd, constants);
-    stats_.state_calls++;
+    if (set(shadow.blend_constants, constants)) vkCmdSetBlendConstants(cmd, constants);
 
     for (std::uint32_t slot = 0; slot < kPipelineVertexSlots; slot++) {
         if (vertex_buffers[slot] != VK_NULL_HANDLE)
@@ -2297,6 +2334,7 @@ void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& co
     }
 
     const VkCommandBuffer cmd = outsideCmd();
+    invalidateDrawState();  // binds the masked clear pipeline
     if (multisampled) {
         transitionSidecar(color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     } else {
@@ -2496,6 +2534,7 @@ void RsxRenderer::recordPresentBlit(RenderTarget* source) {
                   VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                   VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
         overlay_->record(cmd, dst);
+        invalidateDrawState();  // the overlay binds its own pipeline and sets state on this command buffer
         barrierTo(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                   VK_PIPELINE_STAGE_2_NONE, 0);

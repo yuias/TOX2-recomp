@@ -4691,6 +4691,103 @@ void testRendererAaModeSwitch(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// Dynamic state a draw has already recorded is not recorded again; anything that binds another pipeline or sets
+// state on the command buffer, and a new frame, makes the next draw record all of it.
+void testDrawStateShadow(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    constexpr std::uint64_t kDrawStateCalls = 20;  // pipeline bind and 19 dynamic state commands
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    TextureOptions alias;
+    alias.scene = TextureScene::Alias;
+    const std::vector<tox2::RsxCommand> scene = replaySynthetic(makeTexturedCapture(alias));
+    CHECK(scene.size() == 4);  // clear of the aliased target, clear of the display, the draw, the flip
+    if (scene.size() != 4 || std::get_if<tox2::RsxDraw>(&scene[2]) == nullptr) return;
+    const tox2::RsxCommand& clear_alias = scene[0];
+    const tox2::RsxCommand& clear_display = scene[1];
+    const tox2::RsxCommand& draw = scene[2];
+    const tox2::RsxCommand& flip = scene[3];
+
+    struct Run {
+        tox2::RendererStats stats;
+        std::vector<std::uint8_t> bgra;
+        std::uint32_t width = 0;
+    };
+    const auto run = [&](const tox2::RenderOptions& options, std::vector<tox2::RsxCommand> commands) {
+        tox2::RsxRenderer renderer(ctx, options);
+        CHECK(renderer.valid());
+        renderer.execute(commands);
+        CHECK(renderer.valid());
+        Run result;
+        std::uint32_t height = 0;
+        CHECK(renderer.readDisplay(result.bgra, result.width, height));
+        result.stats = renderer.stats();
+        CHECK(result.stats.draws_skipped == 0);
+        return result;
+    };
+
+    // Equal draws in one instance: the first records everything, the others nothing.
+    for (const std::size_t count : {1u, 2u, 3u}) {
+        std::vector<tox2::RsxCommand> commands = {clear_alias, clear_display};
+        for (std::size_t i = 0; i < count; i++) commands.push_back(draw);
+        commands.push_back(flip);
+        const Run r = run(readbackAllOptions(), commands);
+        CHECK(r.stats.state_calls == kDrawStateCalls);
+        CHECK(r.stats.state_calls_skipped == kDrawStateCalls * (count - 1));
+        CHECK(pixelArgb(r.bgra, r.width, 32, 32) == kAliasColor && pixelArgb(r.bgra, r.width, 2, 2) == 0xFF000000);
+    }
+
+    // A masked colour clear binds its own pipeline: the next draw records its state again, and the pixels are those
+    // of the draws.
+    {
+        const std::vector<tox2::RsxCommand> masked =
+                replaySynthetic(makeScissoredClearCapture(0xFF000000, 0xFF405060, 0x30, 0, 0, 64, 64));
+        const tox2::RsxClear* masked_clear = nullptr;
+        for (const tox2::RsxCommand& command : masked) {
+            if (const auto* clear = std::get_if<tox2::RsxClear>(&command)) masked_clear = clear;
+        }
+        CHECK(masked_clear != nullptr);
+        if (masked_clear == nullptr) return;
+        const Run split = run(readbackAllOptions(), {clear_alias, clear_display, draw, *masked_clear, draw, flip});
+        CHECK(split.stats.state_calls == 2 * kDrawStateCalls && split.stats.state_calls_skipped == 0);
+        CHECK(pixelArgb(split.bgra, split.width, 32, 32) == kAliasColor);
+        // A plain clear records no pipeline or state, so the second draw skips all of it.
+        const Run plain = run(readbackAllOptions(), {clear_alias, clear_display, draw, clear_display, draw, flip});
+        CHECK(plain.stats.state_calls == kDrawStateCalls && plain.stats.state_calls_skipped == kDrawStateCalls);
+    }
+
+    // The state does not carry over into the next frame's command buffer.
+    {
+        const Run frames = run(readbackAllOptions(), {clear_alias, clear_display, draw, flip, draw, flip});
+        CHECK(frames.stats.state_calls == 2 * kDrawStateCalls && frames.stats.state_calls_skipped == 0);
+        CHECK(pixelArgb(frames.bgra, frames.width, 32, 32) == kAliasColor);
+    }
+
+    // A multisampled surface read by a single-sample pass is synchronised with a pass of its own first.
+    if (ctx.twoSampleSupportGap().empty() && ctx.deviceProperties().limits.standardSampleLocations != VK_FALSE) {
+        const std::vector<tox2::RsxCommand> layout = replaySynthetic(makeMsaaLayoutCapture(MsaaRead::Linear));
+        std::vector<std::size_t> draws;
+        for (std::size_t i = 0; i < layout.size(); i++) {
+            if (std::get_if<tox2::RsxDraw>(&layout[i]) != nullptr) draws.push_back(i);
+        }
+        CHECK(draws.size() == 2);
+        if (draws.size() == 2) {
+            const Run synced = run(readbackAllOptions(1, tox2::AaMode::Msaa), layout);
+            CHECK(synced.stats.layout_copies >= 1);
+            CHECK(synced.stats.state_calls == 2 * kDrawStateCalls && synced.stats.state_calls_skipped == 0);
+            // The read draw again, with the layout up to date: nothing to record.
+            std::vector<tox2::RsxCommand> again = layout;
+            again.insert(again.begin() + static_cast<std::ptrdiff_t>(draws[1]) + 1, layout[draws[1]]);
+            const Run twice = run(readbackAllOptions(1, tox2::AaMode::Msaa), again);
+            CHECK(twice.stats.state_calls == 2 * kDrawStateCalls && twice.stats.state_calls_skipped == kDrawStateCalls);
+            CHECK(twice.bgra == synced.bgra);
+        }
+    }
+    CHECK(tox2::rsxUnimplementedSnapshot().empty());
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
 // ---- Depth of a multisampled surface read as A8R8G8B8 ----
 
 constexpr std::uint32_t kMsStencil = 0x5A;
@@ -5282,6 +5379,7 @@ int main() {
     testRendererScaleChange(*ctx);
     testRendererAntiAliasedSurface(*ctx);
     testRendererMsaaLayout(*ctx);
+    testDrawStateShadow(*ctx);
     testRendererAaModeSwitch(*ctx);
     testRendererMsaaDepthAsArgb(*ctx);
     testRendererMsaaInherit(*ctx);
