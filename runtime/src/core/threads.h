@@ -219,6 +219,17 @@ inline constexpr std::chrono::microseconds kYieldBackoffSleep{100};
 
 // --yield-backoff on|off; on by default.
 void setYieldBackoffEnabled(bool enabled);
+// Outcomes of sys_ppu_thread_yield since start, any thread. Every call counts in `calls` and, if it returned true,
+// in `switched`; a false return without a backoff sleep counts in `kept`. `to_host` is reserved for yields that hand
+// the lock to host-class waiters only and stays 0 until the yield follows lv2 priorities.
+struct PpuYieldStats {
+    std::uint64_t calls = 0;
+    std::uint64_t switched = 0;
+    std::uint64_t to_host = 0;
+    std::uint64_t kept = 0;
+    std::uint64_t backoffs = 0;
+};
+PpuYieldStats ppuYieldStats();
 // Number of backoff sleeps so far, any thread.
 std::uint64_t yieldBackoffCount();
 // sys_ppu_thread_yield: yieldGuestLock() plus the backoff above. Returns what yieldGuestLock() returns, or true when

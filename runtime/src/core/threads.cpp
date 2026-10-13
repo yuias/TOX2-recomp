@@ -52,6 +52,9 @@ struct YieldSpin {
 };
 thread_local YieldSpin t_yield_spin;
 std::atomic<bool> g_yield_backoff{true};
+std::atomic<std::uint64_t> g_yield_calls{0};
+std::atomic<std::uint64_t> g_yield_switched{0};
+std::atomic<std::uint64_t> g_yield_kept{0};
 std::atomic<std::uint64_t> g_yield_backoffs{0};
 
 // Lock order: guest lock, then registry mutex. The census printer runs inside fatal(), possibly
@@ -109,11 +112,13 @@ std::vector<std::string> guestLockCensus() {
     if (total == 0) return {};
 
     const double seconds = std::max(static_cast<double>(systemTimeUs()) / 1e6, 1e-3);
+    const PpuYieldStats yields = ppuYieldStats();
     std::vector<std::string> lines;
     lines.push_back(std::format(
-            "census: guest lock {} acquisitions in {:.1f} s, hand-off {}, wakeups {} ({} spurious), yield backoff {}",
+            "census: guest lock {} acquisitions in {:.1f} s, hand-off {}, wakeups {} ({} spurious), "
+            "yield calls {} ok {} host {} kept {} backoff {}",
             total, seconds, formatLatency(s.handoff, kGuestLockHandoffOverUs), s.wakeups, s.spurious_wakeups,
-            yieldBackoffCount()));
+            yields.calls, yields.switched, yields.to_host, yields.kept, yields.backoffs));
     for (std::size_t i = 0; i < kGuestLockClassCount; i++) {
         const GuestLockClassStats& c = s.classes[i];
         if (c.wait.count == 0) continue;
@@ -133,6 +138,15 @@ std::vector<std::string> guestLockCensus() {
             first = false;
         }
         lines.push_back(std::move(line));
+    }
+    FILETIME created, exited, kernel, user;
+    if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
+        // FILETIME counts 100 ns units.
+        const auto seconds_of = [](const FILETIME& t) {
+            return static_cast<double>((static_cast<std::uint64_t>(t.dwHighDateTime) << 32) | t.dwLowDateTime) / 1e7;
+        };
+        lines.push_back(
+                std::format("census: process cpu user {:.1f} s kernel {:.1f} s", seconds_of(user), seconds_of(kernel)));
     }
     return lines;
 }
@@ -423,33 +437,52 @@ bool yieldGuestLock() {
 
 void setYieldBackoffEnabled(bool enabled) { g_yield_backoff.store(enabled, std::memory_order_relaxed); }
 
-std::uint64_t yieldBackoffCount() { return g_yield_backoffs.load(std::memory_order_relaxed); }
+PpuYieldStats ppuYieldStats() {
+    PpuYieldStats s;
+    s.calls = g_yield_calls.load(std::memory_order_relaxed);
+    s.switched = g_yield_switched.load(std::memory_order_relaxed);
+    s.kept = g_yield_kept.load(std::memory_order_relaxed);
+    s.backoffs = g_yield_backoffs.load(std::memory_order_relaxed);
+    return s;
+}
+
+std::uint64_t yieldBackoffCount() { return ppuYieldStats().backoffs; }
 
 bool yieldGuestLockBackoff() {
-    if (!g_yield_backoff.load(std::memory_order_relaxed)) return yieldGuestLock();
-
-    YieldSpin& spin = t_yield_spin;
-    const auto arrival = std::chrono::steady_clock::now();
-    spin.run = arrival - spin.last_return <= kYieldSpinGap ? spin.run + 1 : 1;
-
+    g_yield_calls.fetch_add(1, std::memory_order_relaxed);
+    bool slept = false;
     bool others_ran;
-    if (spin.run >= kYieldSpinThreshold) {
-        // Restart the count, so a sleep happens once per kYieldSpinThreshold yields and the yields between them
-        // still hand over at full speed.
-        spin.run = 0;
-        GuestLock& lock = guestLock();
-        const std::uint64_t releases_before = lock.releaseCount();
-        lock.unlock();
-        g_yield_backoffs.fetch_add(1, std::memory_order_relaxed);
-        thread_local Sleeper sleeper;
-        sleeper.sleep(kYieldBackoffSleep);
-        lock.lock();
-        // Our own release is one of the counted ones.
-        others_ran = lock.releaseCount() - releases_before > 1;
-    } else {
+    if (!g_yield_backoff.load(std::memory_order_relaxed)) {
         others_ran = yieldGuestLock();
+    } else {
+        YieldSpin& spin = t_yield_spin;
+        const auto arrival = std::chrono::steady_clock::now();
+        spin.run = arrival - spin.last_return <= kYieldSpinGap ? spin.run + 1 : 1;
+
+        if (spin.run >= kYieldSpinThreshold) {
+            // Restart the count, so a sleep happens once per kYieldSpinThreshold yields and the yields between them
+            // still hand over at full speed.
+            spin.run = 0;
+            GuestLock& lock = guestLock();
+            const std::uint64_t releases_before = lock.releaseCount();
+            lock.unlock();
+            g_yield_backoffs.fetch_add(1, std::memory_order_relaxed);
+            thread_local Sleeper sleeper;
+            sleeper.sleep(kYieldBackoffSleep);
+            lock.lock();
+            slept = true;
+            // Our own release is one of the counted ones.
+            others_ran = lock.releaseCount() - releases_before > 1;
+        } else {
+            others_ran = yieldGuestLock();
+        }
+        spin.last_return = std::chrono::steady_clock::now();
     }
-    spin.last_return = std::chrono::steady_clock::now();
+    if (others_ran) {
+        g_yield_switched.fetch_add(1, std::memory_order_relaxed);
+    } else if (!slept) {
+        g_yield_kept.fetch_add(1, std::memory_order_relaxed);
+    }
     return others_ran;
 }
 

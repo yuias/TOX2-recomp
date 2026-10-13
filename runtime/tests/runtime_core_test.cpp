@@ -12163,6 +12163,53 @@ void testYieldBackoff() {
     }
 }
 
+// The yield outcome counters: a yield with nobody queued is kept, one that let a queued thread run is switched.
+void testPpuYieldStats() {
+    tox2::setYieldBackoffEnabled(true);
+    tox2::GuestLock& lock = tox2::guestLock();
+    const tox2::PpuYieldStats before = tox2::ppuYieldStats();
+
+    std::thread holder([&] {
+        lock.lock();
+        for (int i = 0; i < 3; i++) {
+            // Spaced beyond kYieldSpinGap, so none of them counts toward the backoff.
+            const auto until = std::chrono::steady_clock::now() + 2 * tox2::kYieldSpinGap;
+            while (std::chrono::steady_clock::now() < until) {
+            }
+            CHECK(!tox2::yieldGuestLockBackoff());
+        }
+        lock.unlock();
+    });
+    holder.join();
+    const tox2::PpuYieldStats kept = tox2::ppuYieldStats();
+    CHECK(kept.calls - before.calls == 3);
+    CHECK(kept.kept - before.kept == 3);
+    CHECK(kept.switched - before.switched == 0);
+    CHECK(kept.to_host - before.to_host == 0);
+    CHECK(kept.backoffs - before.backoffs == 0);
+
+    std::atomic<bool> waiter_ran{false};
+    std::thread waiter;
+    std::thread yielder([&] {
+        lock.lock();
+        waiter = std::thread([&] {
+            lock.lock();
+            waiter_ran = true;
+            lock.unlock();
+        });
+        while (lock.waiterCount() == 0) std::this_thread::yield();
+        CHECK(tox2::yieldGuestLockBackoff());
+        CHECK(waiter_ran);
+        lock.unlock();
+    });
+    yielder.join();
+    waiter.join();
+    const tox2::PpuYieldStats switched = tox2::ppuYieldStats();
+    CHECK(switched.calls - kept.calls == 1);
+    CHECK(switched.switched - kept.switched == 1);
+    CHECK(switched.kept - kept.kept == 0);
+}
+
 void testTimebase() {
     auto ctx = std::make_unique<Tox2PpuContext>();
     LARGE_INTEGER frequency, t0, t1;
@@ -12747,6 +12794,7 @@ int main(int argc, char** argv) {
     testGuestLockFifo();
     testGuestLockStats();
     testYieldBackoff();
+    testPpuYieldStats();
     testPerfLine();
     testRsxBusyFormat();
     testReservationAndDcbz();

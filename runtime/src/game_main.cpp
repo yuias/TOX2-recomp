@@ -732,7 +732,7 @@ bool isAudioPathClass(tox2::GuestLockClass cls) {
 }
 
 tox2::PerfSource lockPerfSource() {
-    return [prev = tox2::GuestLockStats{}, prev_backoffs = std::uint64_t{0}]() mutable -> std::string {
+    return [prev = tox2::GuestLockStats{}, prev_yields = tox2::PpuYieldStats{}]() mutable -> std::string {
         const tox2::GuestLockStats now = tox2::guestLock().stats();
         std::string body;
         for (std::size_t i = 0; i < tox2::kGuestLockClassCount; i++) {
@@ -764,10 +764,13 @@ tox2::PerfSource lockPerfSource() {
             }
             if (!first) body += " ms";
         }
-        const std::uint64_t backoffs = tox2::yieldBackoffCount();
-        if (backoffs != prev_backoffs) {
-            body += std::format("{}yield backoff {}", body.empty() ? "lock " : " | ", backoffs - prev_backoffs);
-            prev_backoffs = backoffs;
+        const tox2::PpuYieldStats yields = tox2::ppuYieldStats();
+        if (yields.calls != prev_yields.calls) {
+            body += std::format("{}yield calls {} ok {} host {} kept {} backoff {}", body.empty() ? "lock " : " | ",
+                                yields.calls - prev_yields.calls, yields.switched - prev_yields.switched,
+                                yields.to_host - prev_yields.to_host, yields.kept - prev_yields.kept,
+                                yields.backoffs - prev_yields.backoffs);
+            prev_yields = yields;
         }
         prev = now;
         return body;
