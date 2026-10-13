@@ -467,18 +467,23 @@ bool RsxRenderer::beginFrame() {
     return true;
 }
 
+// The command buffer for anything recorded outside a draw's rendering instance. Every such site asks here at the
+// point of recording, so a rendering instance left open across draws can be closed in this one place.
+VkCommandBuffer RsxRenderer::outsideCmd() { return slots_[current_slot_]->cmd; }
+
 bool RsxRenderer::submitFrame() {
     FrameSlot& slot = *slots_[current_slot_];
     for (const FrameSlot::UploadBlock& block : slot.uploads) {
         if (block.used != 0) vmaFlushAllocation(context_.allocator(), block.allocation, 0, block.used);
     }
-    if (vkEndCommandBuffer(slot.cmd) != VK_SUCCESS) {
+    const VkCommandBuffer cmd = outsideCmd();
+    if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         fail("vkEndCommandBuffer failed");
         return false;
     }
     VkCommandBufferSubmitInfo cmd_submit{};
     cmd_submit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-    cmd_submit.commandBuffer = slot.cmd;
+    cmd_submit.commandBuffer = cmd;
     VkSubmitInfo2 submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
     submit.commandBufferInfoCount = 1;
@@ -518,11 +523,18 @@ void RsxRenderer::touch(const std::shared_ptr<RenderTarget>& target) {
     if (std::find(in_use.begin(), in_use.end(), target) == in_use.end()) in_use.push_back(target);
 }
 
-// Conservative full barrier, also recorded before every draw and clear that begins a rendering instance
-// (even when the layout does not change, so successive passes over one target are ordered). Draws are
-// few enough per frame that tighter stages are not needed yet.
+// Conservative full barrier, also recorded before every draw and clear that begins a rendering instance (even when
+// the layout does not change, so successive passes over one attachment or transfer destination are ordered). An
+// image that stays in a read-only layout needs none: a read after a read has no hazard, and every write to the
+// image goes through another layout, whose transition records the barrier. Tighter stages are not needed yet.
 void RsxRenderer::transitionImage(VkImage image, VkImageAspectFlags aspect, VkImageLayout& current,
                                   VkImageLayout layout) {
+    if (current == layout &&
+        (layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
+         layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL || layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)) {
+        stats_.barriers_skipped++;
+        return;
+    }
     VkImageMemoryBarrier2 barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -539,7 +551,7 @@ void RsxRenderer::transitionImage(VkImage image, VkImageAspectFlags aspect, VkIm
     dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dependency.imageMemoryBarrierCount = 1;
     dependency.pImageMemoryBarriers = &barrier;
-    vkCmdPipelineBarrier2(slots_[current_slot_]->cmd, &dependency);
+    vkCmdPipelineBarrier2(outsideCmd(), &dependency);
     stats_.barriers++;
     current = layout;
 }
@@ -666,7 +678,7 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth,
     }
 
     transition(*target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
+    const VkCommandBuffer cmd = outsideCmd();
     const VkImageSubresourceRange range = {target->aspect, 0, 1, 0, 1};
     if (depth) {
         VkClearDepthStencilValue value{};
@@ -747,7 +759,7 @@ bool RsxRenderer::ensureMultisample(RenderTarget& target) {
     target.msaa_stale = target.layout_written;
 
     transitionSidecar(target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
+    const VkCommandBuffer cmd = outsideCmd();
     const VkImageSubresourceRange range = {target.aspect, 0, 1, 0, 1};
     if (target.depth) {
         VkClearDepthStencilValue value{};
@@ -779,7 +791,7 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
         return false;
     }
 
-    const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
+    const VkCommandBuffer cmd = outsideCmd();
     const VkImageLayout read_layout =
             target.depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     const VkImageLayout write_layout =
@@ -992,7 +1004,7 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::rescaleTarget(const std:
     region.dstSubresource = {target->aspect, 0, 0, 1};
     region.dstOffsets[1] = {static_cast<std::int32_t>(target->image_width),
                             static_cast<std::int32_t>(target->image_height), 1};
-    vkCmdBlitImage(slots_[current_slot_]->cmd, previous->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target->image,
+    vkCmdBlitImage(outsideCmd(), previous->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target->image,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     target->layout_written = true;
     return target;
@@ -1031,7 +1043,7 @@ void RsxRenderer::inheritContents(const std::shared_ptr<RenderTarget>& previous,
     // The layout overlap at the common scale.
     region.extent = {std::min(previous->layout_width, target.layout_width) * target.scale,
                      std::min(previous->layout_height, target.layout_height) * target.scale, 1};
-    vkCmdCopyImage(slots_[current_slot_]->cmd, previous->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.image,
+    vkCmdCopyImage(outsideCmd(), previous->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.image,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
     target.layout_written = true;
     stats_.surface_inherits++;
@@ -1160,7 +1172,7 @@ bool RsxRenderer::ensurePlaceholder() {
         return false;
     }
 
-    const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
+    const VkCommandBuffer cmd = outsideCmd();
     const auto barrier = [&](const Placeholder& placeholder, std::uint32_t layers, VkImageLayout from, VkImageLayout to,
                              VkPipelineStageFlags2 stage, VkAccessFlags2 access) {
         VkImageMemoryBarrier2 b{};
@@ -1285,7 +1297,7 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
         return nullptr;
     }
 
-    const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
+    const VkCommandBuffer cmd = outsideCmd();
     if (from_sidecar) {
         transitionSidecar(depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
     } else {
@@ -1383,7 +1395,6 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                                   bool multisampled, VkDescriptorImageInfo (&infos)[kFpTextureUnitCount],
                                   float (&scales)[kFpTextureUnitCount][4]) {
     FrameSlot& slot = *slots_[current_slot_];
-    const VkCommandBuffer cmd = slot.cmd;
     const auto reference = [&](const std::shared_ptr<TextureImage>& image) {
         if (std::find(slot.texture_refs.begin(), slot.texture_refs.end(), image) == slot.texture_refs.end()) {
             slot.texture_refs.push_back(image);
@@ -1517,7 +1528,7 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                     }
                     reference(feedback_copy);
                     transition(*target, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-                    textures_->recordCopy(cmd, *feedback_copy, target->image);
+                    textures_->recordCopy(outsideCmd(), *feedback_copy, target->image);
                     stats_.feedback_copies++;
                 }
                 view = textures_->view(*feedback_copy, texture->remap);
@@ -1582,7 +1593,7 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                 }
                 // The barrier before the copy waits for every earlier use of the image, so draws recorded
                 // before this one still sample the old texels.
-                textures_->recordUpload(cmd, *image, staging.buffer, staging.offset, layout.levels);
+                textures_->recordUpload(outsideCmd(), *image, staging.buffer, staging.offset, layout.levels);
                 image->content_id = texture->content_id;
                 uploaded.push_back(image.get());
                 stats_.texture_uploads++;
@@ -1932,7 +1943,6 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     std::memcpy(draw_block.data, &vp, sizeof(vp));
     std::memcpy(draw_block.data + kFpDrawBlockOffset, &fp, sizeof(fp));
 
-    const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
     if (multisampled) {
         transitionSidecar(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         if (depth) transitionSidecar(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
@@ -1965,6 +1975,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     rendering.pDepthAttachment = depth ? &depth_attachment : nullptr;
     rendering.pStencilAttachment = depth && formatHasStencil(depth->format) ? &depth_attachment : nullptr;
 
+    const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
     vkCmdBeginRendering(cmd, &rendering);
     stats_.rendering_instances++;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -2132,7 +2143,7 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
         }
     }
 
-    const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
+    const VkCommandBuffer cmd = outsideCmd();
     std::uint32_t area_width = color ? color->passWidth(multisampled) : depth->passWidth(multisampled);
     std::uint32_t area_height = color ? color->passHeight(multisampled) : depth->passHeight(multisampled);
     if (color && depth) {
@@ -2261,7 +2272,7 @@ void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& co
         return;
     }
 
-    const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
+    const VkCommandBuffer cmd = outsideCmd();
     if (multisampled) {
         transitionSidecar(color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     } else {
@@ -2372,7 +2383,7 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
             VkBufferImageCopy region{};
             region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             region.imageExtent = {display_width_, display_height_, 1};
-            vkCmdCopyImageToBuffer(slot.cmd, target->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, slot.readback, 1,
+            vkCmdCopyImageToBuffer(outsideCmd(), target->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, slot.readback, 1,
                                    &region);
             VkMemoryBarrier2 host_barrier{};
             host_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
@@ -2384,11 +2395,11 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
             dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
             dependency.memoryBarrierCount = 1;
             dependency.pMemoryBarriers = &host_barrier;
-            vkCmdPipelineBarrier2(slot.cmd, &dependency);
+            vkCmdPipelineBarrier2(outsideCmd(), &dependency);
         }
     }
     if (!valid()) return;
-    if (presenter_ != nullptr) recordPresentBlit(slot, display_black_ ? nullptr : it->second.get());
+    if (presenter_ != nullptr) recordPresentBlit(display_black_ ? nullptr : it->second.get());
     if (submitFrame()) has_flip_ = true;
     // Applied only now: this flip, its readback and the present blit were all recorded at the old scale, and
     // targets rescale lazily when the next frame binds them. The mode follows the same rule so a frame is never
@@ -2400,11 +2411,11 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
 // Acquires a swapchain image and records the copy of the display buffer into it (a black frame when
 // `source` is null). Without an image (minimised window, timeout) nothing is recorded and the frame is
 // submitted as usual. FIFO presentation can make the acquire block; the presenter measures it.
-void RsxRenderer::recordPresentBlit(FrameSlot& slot, RenderTarget* source) {
+void RsxRenderer::recordPresentBlit(RenderTarget* source) {
     if (!presenter_->acquire(current_slot_, present_target_)) return;
     present_pending_ = true;
     const Presenter::Target& dst = present_target_;
-    const VkCommandBuffer cmd = slot.cmd;
+    const VkCommandBuffer cmd = outsideCmd();
 
     VkImageMemoryBarrier2 barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;

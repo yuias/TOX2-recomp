@@ -188,6 +188,9 @@ private:
     bool beginFrame();
     bool waitSlot(FrameSlot& slot);
     bool submitFrame();
+    // The slot's command buffer, for every command recorded outside a draw's rendering instance (the only way to
+    // reach it besides beginFrame and the in-instance part of recordDraw).
+    VkCommandBuffer outsideCmd();
 
     std::shared_ptr<RenderTarget> acquireColor(const RsxSurface& surface, bool overwrites_all);
     std::shared_ptr<RenderTarget> acquireDepth(const RsxSurfaceState& surfaces, bool overwrites_all);
@@ -225,7 +228,7 @@ private:
                                 bool multisampled);
     void recordDraw(const RsxDraw& draw);
     void recordFlip(const RsxFlip& flip);
-    void recordPresentBlit(FrameSlot& slot, RenderTarget* source);
+    void recordPresentBlit(RenderTarget* source);
     bool ensureReadback(FrameSlot& slot, VkDeviceSize size);
     bool dumpDue() const;
     bool dumpDisplay(const std::filesystem::path& path);

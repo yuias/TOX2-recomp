@@ -2170,6 +2170,53 @@ std::vector<std::uint8_t> makeVolumeCapture(const VolumeOptions& options) {
     return scene.finish();
 }
 
+// Draws that sample one render target keep it in shader-read layout: only the first one records a barrier for that
+// image, and the draws' own attachment barriers stay.
+void testReadBarrierSkipped(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::rsxUnimplementedReset();
+    TextureOptions alias;
+    alias.scene = TextureScene::Alias;
+    const std::vector<tox2::RsxCommand> scene = replaySynthetic(makeTexturedCapture(alias));
+    CHECK(scene.size() == 4);  // clear of the aliased target, clear of the display, the draw, the flip
+    if (scene.size() != 4 || std::get_if<tox2::RsxDraw>(&scene[2]) == nullptr) return;
+
+    struct Run {
+        tox2::RendererStats stats;
+        std::vector<std::uint8_t> bgra;
+        std::uint32_t width = 0;
+    };
+    const auto run = [&](std::size_t draws) {
+        tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+        CHECK(renderer.valid());
+        std::vector<tox2::RsxCommand> commands(scene.begin(), scene.begin() + 3);
+        for (std::size_t i = 1; i < draws; i++) commands.push_back(scene[2]);
+        commands.push_back(scene[3]);
+        renderer.execute(commands);
+        CHECK(renderer.valid());
+        Run result;
+        std::uint32_t height = 0;
+        CHECK(renderer.readDisplay(result.bgra, result.width, height));
+        result.stats = renderer.stats();
+        return result;
+    };
+    const Run one = run(1);
+    const Run two = run(2);
+    const Run three = run(3);
+
+    CHECK(one.stats.barriers_skipped == 0);
+    CHECK(two.stats.barriers_skipped == 1 && three.stats.barriers_skipped == 2);
+    // The second draw adds the barriers of its own attachments and none for the sampled image, as the third does.
+    const std::uint64_t per_draw = two.stats.barriers - one.stats.barriers;
+    CHECK(per_draw > 0 && three.stats.barriers - two.stats.barriers == per_draw);
+    for (const Run* r : {&one, &two, &three}) {
+        CHECK(pixelArgb(r->bgra, r->width, 32, 32) == kAliasColor && pixelArgb(r->bgra, r->width, 2, 2) == 0xFF000000);
+        CHECK(r->stats.draws_skipped == 0);
+    }
+    CHECK(tox2::rsxUnimplementedSnapshot().empty());
+    tox2::rsxUnimplementedReset();
+}
+
 void testRendererVolumeTextures(tox2::VkContext& ctx) {
     using namespace tox2::rsx_synthetic;
     tox2::RsxRenderer renderer(ctx, readbackAllOptions());
@@ -5094,6 +5141,7 @@ int main() {
     testRendererBranchBits(*ctx);
     testVertexConstantUploadReuse(*ctx);
     testRendererTextures(*ctx);
+    testReadBarrierSkipped(*ctx);
     testRendererVolumeTextures(*ctx);
     testRendererFloatSurface(*ctx);
     testRendererDepthTexture(*ctx);
