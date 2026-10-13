@@ -262,18 +262,19 @@ bool yieldGuestLock();
 
 // The game hands frames between its main and render threads by spinning on sys_ppu_thread_yield (and ignores the
 // result). On the console the two threads run on separate hardware threads, so the spin costs nothing; here every
-// yield is a guest lock hand-off that taxes the RSX thread, and the spinning thread burns a core. A thread whose yields
+// yield that hands the lock over taxes the RSX thread, and the spinning thread burns a core. A thread whose yields
 // follow each other within kYieldSpinGap is treated as spinning: every kYieldSpinThreshold-th such yield also sleeps
-// for kYieldBackoffSleep without the lock.
+// for kYieldBackoffSleep without the lock, which lets any waiter run, including a lower-priority PPU thread.
 inline constexpr unsigned kYieldSpinThreshold = 64;
 inline constexpr std::chrono::microseconds kYieldSpinGap{50};
 inline constexpr std::chrono::microseconds kYieldBackoffSleep{100};
 
 // --yield-backoff on|off; on by default.
 void setYieldBackoffEnabled(bool enabled);
-// Outcomes of sys_ppu_thread_yield since start, any thread. Every call counts in `calls` and, if it returned true,
-// in `switched`; a false return without a backoff sleep counts in `kept`. `to_host` is reserved for yields that hand
-// the lock to host-class waiters only and stays 0 until the yield follows lv2 priorities.
+// Outcomes of sys_ppu_thread_yield since start, any thread. Every call counts in `calls`. Exactly one of the other
+// outcome fields counts a call that did not sleep: `switched` (returned true: a PPU thread of equal or higher priority
+// was queued and ran), `to_host` (returned false after passing the lock to queued host-class waiters and back), `kept`
+// (returned false, nobody eligible). A call that slept counts in `backoffs` and, if it returned true, in `switched`.
 struct PpuYieldStats {
     std::uint64_t calls = 0;
     std::uint64_t switched = 0;
@@ -284,9 +285,12 @@ struct PpuYieldStats {
 PpuYieldStats ppuYieldStats();
 // Number of backoff sleeps so far, any thread.
 std::uint64_t yieldBackoffCount();
-// sys_ppu_thread_yield: yieldGuestLock() plus the backoff above. Returns what yieldGuestLock() returns, or true when
-// the sleep let another thread take the lock. Must be called with the guest lock held.
-bool yieldGuestLockBackoff();
+// sys_ppu_thread_yield with lv2's result rule: true only when a PPU thread of the same or a higher priority was queued,
+// and then it has run before this returns. A false return still lets queued host-class waiters (RSX, audio, SPU
+// callbacks) take the lock: on the console they run in parallel, so serving them is not a guest switch. A caller that
+// is not a PPU thread counts every PPU waiter as eligible. Includes the backoff above, which is checked first. Must be
+// called with the guest lock held.
+bool yieldPpuThread();
 
 // Bookkeeping around a blocking wait, used by blockingWait. A null thread (host thread) is ignored.
 void blockEnter(GuestThread* thread, const char* what, bool indefinite);

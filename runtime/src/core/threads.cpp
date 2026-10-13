@@ -49,6 +49,9 @@ std::atomic<std::uint64_t> g_next_identity{1};
 
 // Priority of a PPU-class waiter whose thread has none (an explicit Ppu class without a guest thread): the lowest.
 constexpr std::int32_t kLowestPpuPriority = 3071;
+// Yield priority of a caller without one (a host thread in tests): below every lv2 priority, so every PPU waiter is
+// eligible. Not INT32_MAX, which is GuestLock's "no PPU waiter".
+constexpr std::int32_t kHostYieldPriority = 3072;
 
 std::uint64_t currentIdentity() {
     if (t_identity == 0) t_identity = g_next_identity.fetch_add(1, std::memory_order_relaxed);
@@ -68,6 +71,7 @@ thread_local YieldSpin t_yield_spin;
 std::atomic<bool> g_yield_backoff{true};
 std::atomic<std::uint64_t> g_yield_calls{0};
 std::atomic<std::uint64_t> g_yield_switched{0};
+std::atomic<std::uint64_t> g_yield_to_host{0};
 std::atomic<std::uint64_t> g_yield_kept{0};
 std::atomic<std::uint64_t> g_yield_backoffs{0};
 
@@ -631,6 +635,7 @@ PpuYieldStats ppuYieldStats() {
     PpuYieldStats s;
     s.calls = g_yield_calls.load(std::memory_order_relaxed);
     s.switched = g_yield_switched.load(std::memory_order_relaxed);
+    s.to_host = g_yield_to_host.load(std::memory_order_relaxed);
     s.kept = g_yield_kept.load(std::memory_order_relaxed);
     s.backoffs = g_yield_backoffs.load(std::memory_order_relaxed);
     return s;
@@ -638,42 +643,42 @@ PpuYieldStats ppuYieldStats() {
 
 std::uint64_t yieldBackoffCount() { return ppuYieldStats().backoffs; }
 
-bool yieldGuestLockBackoff() {
+bool yieldPpuThread() {
     g_yield_calls.fetch_add(1, std::memory_order_relaxed);
+    GuestLock& lock = guestLock();
+    // Decided at entry: a PPU thread that queues during the yield does not change the result.
+    const bool eligible = lock.hasPpuWaiterAtOrAbove(currentPpuPriority().value_or(kHostYieldPriority));
     bool slept = false;
-    bool others_ran;
-    if (!g_yield_backoff.load(std::memory_order_relaxed)) {
-        others_ran = yieldGuestLock();
-    } else {
+    if (g_yield_backoff.load(std::memory_order_relaxed)) {
         YieldSpin& spin = t_yield_spin;
         const auto arrival = std::chrono::steady_clock::now();
         spin.run = arrival - spin.last_return <= kYieldSpinGap ? spin.run + 1 : 1;
-
         if (spin.run >= kYieldSpinThreshold) {
             // Restart the count, so a sleep happens once per kYieldSpinThreshold yields and the yields between them
             // still hand over at full speed.
             spin.run = 0;
-            GuestLock& lock = guestLock();
-            const std::uint64_t releases_before = lock.releaseCount();
             lock.unlock();
             g_yield_backoffs.fetch_add(1, std::memory_order_relaxed);
             thread_local Sleeper sleeper;
             sleeper.sleep(kYieldBackoffSleep);
             lock.lock();
             slept = true;
-            // Our own release is one of the counted ones.
-            others_ran = lock.releaseCount() - releases_before > 1;
-        } else {
-            others_ran = yieldGuestLock();
         }
-        spin.last_return = std::chrono::steady_clock::now();
     }
-    if (others_ran) {
-        g_yield_switched.fetch_add(1, std::memory_order_relaxed);
-    } else if (!slept) {
-        g_yield_kept.fetch_add(1, std::memory_order_relaxed);
+    if (!slept) {
+        if (eligible) {
+            // The eligible waiter is chosen at this release: it outranks or equals the caller, which is not queued yet.
+            lock.unlock();
+            lock.lock();
+        } else if (lock.yieldToHostWaiters()) {
+            g_yield_to_host.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            g_yield_kept.fetch_add(1, std::memory_order_relaxed);
+        }
     }
-    return others_ran;
+    if (eligible) g_yield_switched.fetch_add(1, std::memory_order_relaxed);
+    if (g_yield_backoff.load(std::memory_order_relaxed)) t_yield_spin.last_return = std::chrono::steady_clock::now();
+    return eligible;
 }
 
 void blockEnter(GuestThread* thread, const char* what, bool indefinite) {

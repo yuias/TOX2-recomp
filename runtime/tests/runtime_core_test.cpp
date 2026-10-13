@@ -12335,7 +12335,7 @@ void testYieldBackoff() {
         std::thread spinner([&] {
             lock.lock();
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            while (!other_ran && std::chrono::steady_clock::now() < deadline) tox2::yieldGuestLockBackoff();
+            while (!other_ran && std::chrono::steady_clock::now() < deadline) tox2::yieldPpuThread();
             lock.unlock();
         });
         std::thread other([&] {
@@ -12355,7 +12355,7 @@ void testYieldBackoff() {
         const std::uint64_t before = tox2::yieldBackoffCount();
         std::thread t([&] {
             lock.lock();
-            for (unsigned i = 0; i < tox2::kYieldSpinThreshold - 1; i++) tox2::yieldGuestLockBackoff();
+            for (unsigned i = 0; i < tox2::kYieldSpinThreshold - 1; i++) tox2::yieldPpuThread();
             lock.unlock();
         });
         t.join();
@@ -12371,7 +12371,7 @@ void testYieldBackoff() {
                 const auto until = std::chrono::steady_clock::now() + 2 * tox2::kYieldSpinGap;
                 while (std::chrono::steady_clock::now() < until) {
                 }
-                CHECK(!tox2::yieldGuestLockBackoff());  // nobody waits
+                CHECK(!tox2::yieldPpuThread());  // nobody waits
             }
             lock.unlock();
         });
@@ -12385,7 +12385,7 @@ void testYieldBackoff() {
         const std::uint64_t before = tox2::yieldBackoffCount();
         std::thread t([&] {
             lock.lock();
-            for (unsigned i = 0; i < 4 * tox2::kYieldSpinThreshold; i++) tox2::yieldGuestLockBackoff();
+            for (unsigned i = 0; i < 4 * tox2::kYieldSpinThreshold; i++) tox2::yieldPpuThread();
             lock.unlock();
         });
         t.join();
@@ -12394,7 +12394,7 @@ void testYieldBackoff() {
     }
 }
 
-// The yield outcome counters: a yield with nobody queued is kept, one that let a queued thread run is switched.
+// The yield outcome counters: a yield with nobody queued is kept, one that let a queued PPU thread run is switched.
 void testPpuYieldStats() {
     tox2::setYieldBackoffEnabled(true);
     tox2::GuestLock& lock = tox2::guestLock();
@@ -12407,7 +12407,7 @@ void testPpuYieldStats() {
             const auto until = std::chrono::steady_clock::now() + 2 * tox2::kYieldSpinGap;
             while (std::chrono::steady_clock::now() < until) {
             }
-            CHECK(!tox2::yieldGuestLockBackoff());
+            CHECK(!tox2::yieldPpuThread());
         }
         lock.unlock();
     });
@@ -12424,12 +12424,16 @@ void testPpuYieldStats() {
     std::thread yielder([&] {
         lock.lock();
         waiter = std::thread([&] {
+            // A PPU waiter: only a PPU thread makes the yield a switch. This host-class yielder counts every one as
+            // eligible.
+            tox2::setGuestLockPpuPriorityForTesting(1001);
             lock.lock();
             waiter_ran = true;
             lock.unlock();
+            tox2::setGuestLockPpuPriorityForTesting(std::nullopt);
         });
         while (lock.waiterCount() == 0) std::this_thread::yield();
-        CHECK(tox2::yieldGuestLockBackoff());
+        CHECK(tox2::yieldPpuThread());
         CHECK(waiter_ran);
         lock.unlock();
     });
@@ -12439,6 +12443,125 @@ void testPpuYieldStats() {
     CHECK(switched.calls - kept.calls == 1);
     CHECK(switched.switched - kept.switched == 1);
     CHECK(switched.kept - kept.kept == 0);
+}
+
+// sys_ppu_thread_yield returns CELL_OK only when a PPU thread of the same or a higher priority was queued; queued
+// host-class waiters are served either way, lower-priority PPU threads are not.
+void testPpuYieldSemantics() {
+    using tox2::GuestLockClass;
+    using Priority = std::optional<std::int32_t>;
+    tox2::setYieldBackoffEnabled(true);
+    tox2::GuestLock& lock = tox2::guestLock();
+
+    struct Spec {
+        Priority priority;  // nullopt: a host-class waiter of class `cls`
+        GuestLockClass cls;
+    };
+    struct Outcome {
+        std::vector<bool> results;
+        std::vector<unsigned> ran_masks;  // bit i: waiter i had run when the yield returned
+        unsigned ran_final = 0;
+        std::uint64_t releases_before = 0, releases_after = 0;
+    };
+
+    // A PPU yielder (test priority 1001) holds the global lock while the waiters queue one at a time, then yields
+    // `yields` times, each spaced by 2 x kYieldSpinGap so the backoff never triggers.
+    const auto run = [&](const std::vector<Spec>& specs, int yields, bool via_syscall) {
+        Outcome out;
+        std::array<std::atomic<bool>, 4> ran{};
+        auto caller = makeCaller(0x01000100);
+        std::atomic<bool> held{false}, go{false};
+        std::thread yielder([&] {
+            tox2::setGuestLockPpuPriorityForTesting(1001);
+            lock.lock();
+            held = true;
+            while (!go) std::this_thread::yield();
+            out.releases_before = lock.releaseCount();
+            for (int i = 0; i < yields; i++) {
+                const auto until = std::chrono::steady_clock::now() + 2 * tox2::kYieldSpinGap;
+                while (std::chrono::steady_clock::now() < until) {
+                }
+                const bool switched = via_syscall ? syscallAs(*caller, 43) == tox2::kCellOk : tox2::yieldPpuThread();
+                out.results.push_back(switched);
+                unsigned mask = 0;
+                for (std::size_t w = 0; w < specs.size(); w++) mask |= ran[w] ? 1u << w : 0u;
+                out.ran_masks.push_back(mask);
+            }
+            out.releases_after = lock.releaseCount();
+            lock.unlock();
+            tox2::setGuestLockPpuPriorityForTesting(std::nullopt);
+        });
+        while (!held) std::this_thread::yield();
+        std::vector<std::thread> waiters;
+        for (std::size_t w = 0; w < specs.size(); w++) {
+            const std::size_t queued = lock.waiterCount();
+            waiters.emplace_back([&, w] {
+                if (specs[w].priority.has_value()) {
+                    tox2::setGuestLockPpuPriorityForTesting(specs[w].priority);
+                } else {
+                    tox2::setGuestLockClass(specs[w].cls);
+                }
+                lock.lock();
+                ran[w] = true;
+                lock.unlock();
+                tox2::setGuestLockPpuPriorityForTesting(std::nullopt);
+            });
+            while (lock.waiterCount() <= queued) std::this_thread::yield();
+        }
+        go = true;
+        yielder.join();
+        for (std::thread& t : waiters) t.join();
+        for (std::size_t w = 0; w < specs.size(); w++) out.ran_final |= ran[w] ? 1u << w : 0u;
+        return out;
+    };
+
+    const tox2::PpuYieldStats before = tox2::ppuYieldStats();
+
+    // (a) An equal-priority PPU thread: the yield switches, and it ran before the yield returned.
+    {
+        const Outcome o = run({{1001, GuestLockClass::Other}}, 1, false);
+        CHECK(o.results == std::vector<bool>({true}));
+        CHECK(o.ran_masks == std::vector<unsigned>({1u}));
+    }
+    // (b) A higher-priority one.
+    {
+        const Outcome o = run({{500, GuestLockClass::Other}}, 1, false);
+        CHECK(o.results == std::vector<bool>({true}));
+        CHECK(o.ran_masks == std::vector<unsigned>({1u}));
+    }
+    // (c) Only a lower-priority PPU thread is queued: every yield keeps the lock and does not release it.
+    {
+        const Outcome o = run({{1005, GuestLockClass::Other}}, 10, false);
+        CHECK(o.results == std::vector<bool>(10, false));
+        CHECK(o.ran_masks == std::vector<unsigned>(10, 0u));
+        CHECK(o.releases_after == o.releases_before);
+        CHECK(o.ran_final == 1u);  // it runs once the yielder unlocks
+    }
+    // (d) A lower-priority PPU thread and then a host-class waiter: the host waiter runs, the PPU thread does not.
+    {
+        const Outcome o = run({{1005, GuestLockClass::Other}, {std::nullopt, GuestLockClass::Rsx}}, 1, false);
+        CHECK(o.results == std::vector<bool>({false}));
+        CHECK(o.ran_masks == std::vector<unsigned>({2u}));
+        CHECK(o.ran_final == 3u);
+    }
+    // (f) The counters.
+    const tox2::PpuYieldStats after = tox2::ppuYieldStats();
+    CHECK(after.calls - before.calls == 13);
+    CHECK(after.switched - before.switched == 2);
+    CHECK(after.kept - before.kept == 10);
+    CHECK(after.to_host - before.to_host == 1);
+    CHECK(after.backoffs - before.backoffs == 0);
+
+    // (e) The syscall returns the same result: CELL_CANCEL (1) in case (c), CELL_OK (0) in case (a).
+    {
+        const Outcome o = run({{1005, GuestLockClass::Other}}, 1, true);
+        CHECK(o.results == std::vector<bool>({false}));
+    }
+    {
+        const Outcome o = run({{1001, GuestLockClass::Other}}, 1, true);
+        CHECK(o.results == std::vector<bool>({true}));
+    }
+    CHECK(lock.waiterCount() == 0);
 }
 
 void testTimebase() {
@@ -13029,6 +13152,7 @@ int main(int argc, char** argv) {
     testGuestLockPpuPriority();
     testYieldBackoff();
     testPpuYieldStats();
+    testPpuYieldSemantics();
     testPerfLine();
     testRsxBusyFormat();
     testReservationAndDcbz();

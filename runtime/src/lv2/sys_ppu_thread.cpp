@@ -117,11 +117,13 @@ void sysPpuThreadExit(Tox2PpuContext* ctx, std::uint8_t* base) {
     exitCurrentThread(ctx->gpr[3]);
 }
 
-// 43 sys_ppu_thread_yield: 0 after a switch to another thread, CELL_CANCEL when none was runnable.
+// 43 sys_ppu_thread_yield: lv2 returns 0 after a switch and CELL_CANCEL otherwise. Here a switch means a queued PPU
+// thread of the same or a higher priority ran; a lower-priority thread never gets time from a yield. Queued host-class
+// waiters (RSX, audio, SPU callbacks) are still served on CELL_CANCEL, as they run in parallel on the console.
 void sysPpuThreadYield(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     ctx->preempt_budget = kTox2PreemptBudget;
-    ctx->gpr[3] = yieldGuestLockBackoff() ? kCellOk : kCellCancel;
+    ctx->gpr[3] = yieldPpuThread() ? kCellOk : kCellCancel;
 }
 
 // 44 sys_ppu_thread_join(u32 thread_id, u64* vptr)
