@@ -710,6 +710,22 @@ tox2::PerfSource gamePerfSource() {
     };
 }
 
+// Where the RSX thread's time goes, per completed flip. Empty in a second without a flip.
+tox2::PerfSource rsxPerfSource() {
+    // The first interval starts when the source is created, not at thread start.
+    return [prev = tox2::rsxThreadTimes(), prev_flips = tox2::rsxFlipCount()]() mutable -> std::string {
+        const tox2::RsxThreadTimes now = tox2::rsxThreadTimes();
+        const std::uint64_t flips = tox2::rsxFlipCount();
+        const tox2::RsxThreadTimes delta{now.idle_us - prev.idle_us, now.lock_wait_us - prev.lock_wait_us,
+                                         now.pump_us - prev.pump_us, now.build_us - prev.build_us,
+                                         now.record_us - prev.record_us};
+        const std::string body = tox2::formatRsxBusy(delta, flips - prev_flips);
+        prev = now;
+        prev_flips = flips;
+        return body;
+    };
+}
+
 bool isAudioPathClass(tox2::GuestLockClass cls) {
     return cls == tox2::GuestLockClass::Audio || cls == tox2::GuestLockClass::Spu ||
            cls == tox2::GuestLockClass::PpuHigh;
@@ -854,7 +870,7 @@ int main(int argc, char** argv) {
         return static_cast<int>(tox2::ExitCode::Usage);
     }
 
-    tox2::startPerfLog({audioPerfSource(), gamePerfSource(), lockPerfSource(), spuPerfSource()});
+    tox2::startPerfLog({audioPerfSource(), gamePerfSource(), rsxPerfSource(), lockPerfSource(), spuPerfSource()});
 
     // Precedence: command-line options, then the configuration file, then the defaults.
     std::optional<tox2::VfsConfigFile> vfs_file;

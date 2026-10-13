@@ -96,6 +96,13 @@ std::atomic<void (*)(RsxInterrupt, std::uint32_t)> g_hook{nullptr};
 // Flips completed by any consumer; one process has one RSX thread, so this is the game's flip number.
 std::atomic<std::uint64_t> g_flip_count{0};
 
+// Kept in nanoseconds: a pass has several phase boundaries, and truncating each interval to microseconds would
+// bias the sums by about half a microsecond per boundary.
+struct ThreadTimesNs {
+    std::atomic<std::uint64_t> idle{0}, lock_wait{0}, pump{0}, build{0}, record{0};
+};
+ThreadTimesNs g_thread_times;
+
 void signalInterrupt(RsxInterrupt kind, std::uint32_t arg) {
     if (auto hook = g_hook.load()) hook(kind, arg);
 }
@@ -108,6 +115,22 @@ std::uint64_t rsxFlipCount() { return g_flip_count.load(std::memory_order_acquir
 
 void waitRsxFlipCount(std::uint64_t n) {
     for (std::uint64_t count = rsxFlipCount(); count < n; count = rsxFlipCount()) g_flip_count.wait(count);
+}
+
+RsxThreadTimes rsxThreadTimes() {
+    const auto us = [](const std::atomic<std::uint64_t>& ns) { return ns.load(std::memory_order_relaxed) / 1000; };
+    return {us(g_thread_times.idle), us(g_thread_times.lock_wait), us(g_thread_times.pump), us(g_thread_times.build),
+            us(g_thread_times.record)};
+}
+
+std::string formatRsxBusy(const RsxThreadTimes& delta, std::uint64_t flips) {
+    if (flips == 0) return {};
+    const double per_flip_ms = 1.0 / (1000.0 * static_cast<double>(flips));
+    const auto ms = [&](std::uint64_t us) { return static_cast<double>(us) * per_flip_ms; };
+    const std::uint64_t busy_us = delta.lock_wait_us + delta.pump_us + delta.build_us + delta.record_us;
+    return std::format("rsx busy {:.2f} ms/flip: lock {:.2f} pump {:.2f} build {:.2f} record {:.2f}, idle {:.2f}",
+                       ms(busy_us), ms(delta.lock_wait_us), ms(delta.pump_us), ms(delta.build_us), ms(delta.record_us),
+                       ms(delta.idle_us));
 }
 
 RsxConsumer::RsxConsumer(std::uint8_t* base)
@@ -730,7 +753,15 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
     // delays work until the next pass.
     std::atomic_ref<std::uint32_t> put_word(*reinterpret_cast<std::uint32_t*>(base + kRsxControlAddr + kControlPut));
 
-    auto next_tick = Clock::now() + kPeriod;
+    auto last_mark = Clock::now();
+    auto next_tick = last_mark + kPeriod;
+    // Charges the time since the previous boundary to `counter`. The boundaries chain, so every moment of the loop
+    // is charged to exactly one activity; a pass that ends in `continue` is all idle.
+    const auto charge = [&](std::atomic<std::uint64_t>& counter, Clock::time_point now) {
+        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - last_mark).count();
+        counter.fetch_add(static_cast<std::uint64_t>(std::max<std::int64_t>(0, ns)), std::memory_order_relaxed);
+        last_mark = now;
+    };
     // True when a vblank is due at `now`; moves the deadline on, without a burst after a long pause.
     const auto tickDue = [&](Clock::time_point now) {
         if (now < next_tick) return false;
@@ -756,6 +787,7 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
         // flip queues the flip handler. The game's frame-interval countdown in the vblank handler is released by
         // the flip handler; reversed, it would see the flip one vblank early and the 30 fps mode would drop to 60.
         const auto woke = Clock::now();
+        charge(g_thread_times.idle, woke);
         const bool tick = tickDue(woke);
         const std::uint32_t put = std::byteswap(put_word.load(std::memory_order_relaxed));
         // Nothing can advance before the deadline or the tick whatever the guest puts, so the lock is not taken
@@ -776,6 +808,7 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
                 // texture bytes takeCommands() then copies without the lock.
                 std::lock_guard<GuestLock> lock(guestLock());
                 const auto hold_start = Clock::now();
+                charge(g_thread_times.lock_wait, hold_start);
                 if (pending_tick) {
                     consumer->vblankTick();
                     pending_tick = false;
@@ -788,10 +821,13 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
                 } while (status == FifoStatus::Budget && !consumer->stopAfterWrite() &&
                          Clock::now() - hold_start < kMaxGuestLockHold);
             }
+            charge(g_thread_times.pump, Clock::now());
             commands = consumer->takeCommands();
+            charge(g_thread_times.build, Clock::now());
             captures = consumer->takeCaptures();
             dispatchCommands(consumer, executor.get(), std::move(commands));
             if (!captures.empty()) writeCaptures(consumer, captures);
+            charge(g_thread_times.record, Clock::now());
         } while (status == FifoStatus::Budget);
     }
 }

@@ -53,6 +53,20 @@ std::uint64_t rsxFlipCount();
 // Blocks until rsxFlipCount() >= n; returns at once when it already is. Any thread.
 void waitRsxFlipCount(std::uint64_t n);
 
+// Wall time of the RSX consumer thread by activity since start, in microseconds. Written by the RSX thread with
+// relaxed atomics; read from any thread.
+struct RsxThreadTimes {
+    std::uint64_t idle_us = 0;       // sleeping between passes
+    std::uint64_t lock_wait_us = 0;  // waiting for the guest lock
+    std::uint64_t pump_us = 0;       // holding it: pump slices and vblank ticks
+    std::uint64_t build_us = 0;      // takeCommands(): the pending draw's copies, outside the lock
+    std::uint64_t record_us = 0;     // dispatchCommands() and capture writes: renderer recording, submit
+};
+RsxThreadTimes rsxThreadTimes();
+// "rsx busy 12.80 ms/flip: lock 2.09 pump 0.79 build 4.83 record 5.09, idle 3.89" from the difference of two
+// snapshots and the flips between them (busy = lock + pump + build + record); empty when flips is 0.
+std::string formatRsxBusy(const RsxThreadTimes& delta, std::uint64_t flips);
+
 // Interval between completed flips in the Hz60 flip limit: RPCS3's default "Auto" frame limit (60.000 fps).
 inline constexpr std::chrono::nanoseconds kRsxFlipPeriod{1'000'000'000 / 60};
 

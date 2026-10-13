@@ -11301,6 +11301,15 @@ void testGuestLockFifo() {
 }
 
 // startPerfLog is once per process, so this is the only test that starts it.
+void testRsxBusyFormat() {
+    CHECK(tox2::formatRsxBusy({3890, 2090, 790, 4830, 5090}, 1) ==
+          "rsx busy 12.80 ms/flip: lock 2.09 pump 0.79 build 4.83 record 5.09, idle 3.89");
+    // The figures are per flip.
+    CHECK(tox2::formatRsxBusy({7780, 4180, 1580, 9660, 10180}, 2) ==
+          "rsx busy 12.80 ms/flip: lock 2.09 pump 0.79 build 4.83 record 5.09, idle 3.89");
+    CHECK(tox2::formatRsxBusy({3890, 2090, 790, 4830, 5090}, 0).empty());
+}
+
 void testPerfLine() {
     CHECK(tox2::formatPerfLine(212.04, "x") == "tox2: perf: t 212.0 s: x");
 
@@ -12064,6 +12073,7 @@ int main(int argc, char** argv) {
     testGuestLockStats();
     testYieldBackoff();
     testPerfLine();
+    testRsxBusyFormat();
     testReservationAndDcbz();
     testGuestStackWalk();
     testFaultChild();
