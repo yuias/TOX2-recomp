@@ -10,7 +10,6 @@
 // method write itself.
 
 #include <array>
-#include <bitset>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -77,6 +76,7 @@ public:
     explicit RsxRecordingMemoryView(RsxMemoryView& inner) : inner_(inner) {}
     void setWriter(RsxCaptureWriter* writer) { writer_ = writer; }
     bool read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override;
+    bool tryRead(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override;
 
 private:
     RsxMemoryView& inner_;
@@ -127,13 +127,19 @@ public:
     // Later bytes replace earlier ones, like the live memory they were read from.
     void add(std::uint32_t location, std::uint32_t offset, std::span<const std::uint8_t> bytes);
     bool read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override;
+    bool tryRead(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override;
 
 private:
+    bool lookup(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) const;
     static constexpr std::uint32_t kPageSize = 4096;
     struct Page {
         std::array<std::uint8_t, kPageSize> data{};
-        std::bitset<kPageSize> valid;
+        std::array<std::uint64_t, kPageSize / 64> valid{};  // bit per byte that the capture recorded
         std::uint32_t valid_count = 0;
+        // Sets the bits of [first, first + count) and returns how many were clear.
+        std::uint32_t mark(std::uint32_t first, std::uint32_t count);
+        // True when every byte of [first, first + count) was recorded.
+        bool covers(std::uint32_t first, std::uint32_t count) const;
     };
     std::array<std::unordered_map<std::uint32_t, std::unique_ptr<Page>>, 2> pages_;
 };

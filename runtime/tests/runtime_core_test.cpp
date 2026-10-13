@@ -8462,6 +8462,143 @@ void testRsxFrameBuilder() {
     tox2::rsxUnimplementedReset();
 }
 
+// Registers and builder with a render target, one vertex attribute and a fragment program pointer, enough to build
+// a draw from whatever the shared memory holds at the program address.
+struct FragmentRig {
+    explicit FragmentRig(tox2::RsxMemoryView& memory) : regs(std::make_unique<tox2::RsxRegisters>()), builder(memory) {
+        regs->reset();
+        write(0x0200, 1280u << 16);
+        write(0x0204, 720u << 16);
+        write(0x0208, 8u | (2u << 5) | (1u << 8));
+        write(0x020C, 0x1400);
+        write(0x0210, 0x100000);
+        write(0x0214, 0x900000);
+        write(0x022C, 0x1400);
+        write(0x0220, 1);
+        write(0x08C0, 1280u << 16);
+        write(0x08C4, 720u << 16);
+        write(0x1740, 2u | (3u << 4) | (12u << 8));
+        write(0x1680, 0x80001000);
+    }
+    void write(std::uint32_t method, std::uint32_t value) {
+        regs->apply(method, value);
+        builder.onWrite(*regs, method, value);
+    }
+    tox2::RsxDraw draw(std::uint32_t program_offset) {
+        write(0x08E4, program_offset | 1);
+        write(0x1808, 5);
+        write(0x1814, 2u << 24);
+        write(0x1808, 0);
+        return std::get<tox2::RsxDraw>(builder.takeCommands().at(0));
+    }
+    std::unique_ptr<tox2::RsxRegisters> regs;
+    tox2::RsxFrameBuilder builder;
+};
+
+// Reads of the fragment program area in local memory (vertex reads are not counted).
+std::size_t programReads(const FakeRsxMemory& memory) {
+    std::size_t total = 0;
+    for (const auto& [where, count] : memory.reads) {
+        if (where.first == 0 && where.second >= 0x2000 && where.second < 0x3000)
+            total += static_cast<std::size_t>(count);
+    }
+    return total;
+}
+
+std::uint64_t hashBigEndian(const std::vector<std::uint32_t>& words) {
+    std::vector<std::uint8_t> bytes;
+    for (const std::uint32_t word : words) {
+        for (int shift = 24; shift >= 0; shift -= 8) bytes.push_back(static_cast<std::uint8_t>(word >> shift));
+    }
+    return tox2::rsxHash64(bytes.data(), bytes.size());
+}
+
+void testFragmentProgramCache() {
+    tox2::rsxUnimplementedReset();
+    FakeRsxMemory memory;
+    for (std::uint32_t i = 0; i < 96; i++) memory.main[0x1000 + i] = static_cast<std::uint8_t>(i);
+    FragmentRig rig(memory);
+
+    // Instruction 0 reads an inline constant (source type 2), instruction 1 has the end flag.
+    const auto putProgram = [&](std::uint32_t constant) {
+        memory.putWord(0, 0x2000, 0);
+        memory.putWord(0, 0x2004, 0x00020000);
+        memory.putWord(0, 0x2008, 0);
+        memory.putWord(0, 0x200C, 0);
+        for (std::uint32_t w = 0; w < 4; w++) memory.putWord(0, 0x2010 + w * 4, constant + w);
+        memory.putWord(0, 0x2020, 0x00010000);
+        memory.putWord(0, 0x2024, 0);
+        memory.putWord(0, 0x2028, 0);
+        memory.putWord(0, 0x202C, 0);
+    };
+    putProgram(0x3F800000);
+    const tox2::RsxDraw first = rig.draw(0x2000);
+    CHECK(first.fp_ucode.size() == 12 && first.fp_constants.size() == 4);
+    CHECK(rig.builder.stats().fp_cache_hits == 0 && rig.builder.stats().fp_cache_misses == 1);
+    CHECK(first.fp_hash == hashBigEndian(first.fp_ucode));
+
+    // The same program with another constant: one read for the whole program, a hit, the new constants.
+    putProgram(0x40000000);
+    const std::size_t reads_before = programReads(memory);
+    const tox2::RsxDraw second = rig.draw(0x2000);
+    CHECK(programReads(memory) - reads_before == 1 && memory.readsAt(0, 0x2000) == 2);
+    CHECK(rig.builder.stats().fp_cache_hits == 1 && rig.builder.stats().fp_cache_misses == 1);
+    CHECK(second.fp_hash == first.fp_hash && second.fp_ucode == first.fp_ucode);
+    CHECK(second.fp_constants == std::vector<std::uint32_t>({0x40000000, 0x40000001, 0x40000002, 0x40000003}));
+    CHECK(second.fp_hash == hashBigEndian(second.fp_ucode));
+
+    // An instruction word rewritten at the same address misses and gives what a fresh builder gives.
+    const auto sameAsFresh = [&](const tox2::RsxDraw& got) {
+        FragmentRig fresh(memory);
+        const tox2::RsxDraw expected = fresh.draw(0x2000);
+        return got.fp_ucode == expected.fp_ucode && got.fp_constants == expected.fp_constants &&
+               got.fp_hash == expected.fp_hash;
+    };
+    memory.putWord(0, 0x2008, 0x1234);
+    const tox2::RsxDraw rewritten = rig.draw(0x2000);
+    CHECK(rig.builder.stats().fp_cache_hits == 1 && rig.builder.stats().fp_cache_misses == 2);
+    CHECK(rewritten.fp_ucode.size() == 12 && rewritten.fp_ucode[2] == 0x1234 && rewritten.fp_hash != first.fp_hash);
+    CHECK(sameAsFresh(rewritten));
+    CHECK(rewritten.fp_hash == hashBigEndian(rewritten.fp_ucode));
+
+    // A shorter program at the same address (end flag in instruction 0) misses; so does the longer one again.
+    memory.putWord(0, 0x2000, 0x00010000);
+    memory.putWord(0, 0x2004, 0);
+    const tox2::RsxDraw shorter = rig.draw(0x2000);
+    CHECK(rig.builder.stats().fp_cache_misses == 3);
+    CHECK(shorter.fp_ucode.size() == 4 && shorter.fp_constants.empty() && sameAsFresh(shorter));
+    memory.putWord(0, 0x2000, 0);
+    memory.putWord(0, 0x2004, 0x00020000);
+    const tox2::RsxDraw longer = rig.draw(0x2000);
+    CHECK(rig.builder.stats().fp_cache_misses == 4);
+    CHECK(longer.fp_ucode == rewritten.fp_ucode && sameAsFresh(longer));
+    CHECK(rig.builder.stats().fp_cache_hits == 1);
+
+    // Many distinct programs flush the cache without changing results; the newest entry is still cached.
+    for (std::uint32_t i = 0; i < 1100; i++) {
+        const std::uint32_t at = 0x3000 + i * 16;
+        memory.putWord(0, at, 0x00010000 + (i << 1));
+        const tox2::RsxDraw many = rig.draw(at);
+        CHECK(many.fp_ucode.size() == 4 && many.fp_ucode[0] == 0x00010000 + (i << 1));
+    }
+    const std::uint64_t hits = rig.builder.stats().fp_cache_hits;
+    rig.draw(0x3000 + 1099 * 16);
+    CHECK(rig.builder.stats().fp_cache_hits == hits + 1);
+
+    // The replay view's speculative read fails quietly; read() still counts the miss.
+    tox2::rsxUnimplementedReset();
+    tox2::ReplayRsxMemoryView view;
+    std::uint8_t probe[8] = {};
+    CHECK(!view.tryRead(0, 0x4000, probe) && unimplementedCount("capture missing range") == 0);
+    CHECK(!view.read(0, 0x4000, probe) && unimplementedCount("capture missing range") == 1);
+    const std::uint8_t stored[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    view.add(0, 0x4000, stored);
+    CHECK(view.tryRead(0, 0x4000, probe) && std::memcmp(probe, stored, 8) == 0);
+    CHECK(!view.tryRead(0, 0x4004, probe) && !view.tryRead(1, 0x4000, probe) && !view.tryRead(2, 0, probe));
+    CHECK(unimplementedCount("capture missing range") == 1);
+    tox2::rsxUnimplementedReset();
+}
+
 bool sameSurface(const tox2::RsxSurface& a, const tox2::RsxSurface& b) {
     return a.location == b.location && a.offset == b.offset && a.pitch == b.pitch && a.width == b.width &&
            a.height == b.height && a.format == b.format && a.depth_format == b.depth_format;
@@ -12049,6 +12186,7 @@ int main(int argc, char** argv) {
     testRsxDecode();
     testRsxTextureLayout();
     testRsxFrameBuilder();
+    testFragmentProgramCache();
     testRsxTextureCache();
     testRsxFloatAndDepthSurfaces();
     testRsxCapture();

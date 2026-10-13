@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <span>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -24,6 +25,11 @@ public:
     virtual ~RsxMemoryView() = default;
     // Copies raw (big-endian) guest bytes; false when any part of the range is not readable.
     virtual bool read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) = 0;
+    // Like read(), for a read whose failure the caller handles (it falls back to a careful path): a view that counts
+    // failed reads, such as the replay view's `capture: missing range`, does not count this one.
+    virtual bool tryRead(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) {
+        return read(location, offset, out);
+    }
 };
 
 // Live view over guest memory. The RSX thread reads through it without the guest lock: like the
@@ -104,6 +110,7 @@ private:
     void fillTextures(const RsxRegisters& regs, RsxDraw& draw);
     void copyTexture(RsxTextureDesc& texture);
     void fillFragmentProgram(const RsxRegisters& regs, RsxDraw& draw);
+    bool matchFragmentProgram(std::uint32_t program, std::uint32_t location, std::uint32_t offset, RsxDraw& draw);
     void fillVertexProgram(const RsxRegisters& regs, RsxDraw& draw);
     std::int32_t noteSurface(const RsxSurface& surface);
     std::int32_t findSurface(std::uint32_t location, std::uint32_t offset) const;
@@ -116,6 +123,19 @@ private:
     std::vector<std::uint8_t> texture_scratch_;  // guest bytes of the texture being checked or converted
     RsxBuilderStats stats_;
     bool timing_enabled_ = false;
+
+    // A fragment program seen before, keyed by the SET_SHADER_PROGRAM value. A draw whose program bytes still match
+    // `bytes` (apart from the inline constants) reuses `ucode` and `hash` and skips the word-by-word scan.
+    struct FpCacheEntry {
+        std::vector<std::uint8_t> bytes;             // big-endian image of RsxDraw::fp_ucode (constant blocks zeroed)
+        std::vector<std::uint32_t> constant_blocks;  // word index of each inline constant block, program order
+        std::vector<std::uint32_t> ucode;            // RsxDraw::fp_ucode
+        std::uint64_t hash = 0;                      // RsxDraw::fp_hash = rsxHash64(bytes)
+    };
+    // Above the ~650 distinct program addresses of a heavy frame; the map is cleared when full.
+    static constexpr std::size_t kFpCacheEntries = 1024;
+    std::unordered_map<std::uint32_t, FpCacheEntry> fp_cache_;
+    std::vector<std::uint8_t> fp_probe_;
 
     // The open draw clause between SET_BEGIN_END(prim) and SET_BEGIN_END(0).
     bool in_draw_ = false;

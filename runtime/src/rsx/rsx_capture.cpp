@@ -1,6 +1,7 @@
 #include "rsx/rsx_capture.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <format>
 #include <fstream>
@@ -160,6 +161,12 @@ RsxCaptureFile RsxCaptureWriter::finish(const std::array<RsxDisplayBuffer, kRsxD
 
 bool RsxRecordingMemoryView::read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) {
     if (!inner_.read(location, offset, out)) return false;
+    if (writer_ != nullptr) writer_->onMemory(location, offset, out);
+    return true;
+}
+
+bool RsxRecordingMemoryView::tryRead(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) {
+    if (!inner_.tryRead(location, offset, out)) return false;
     if (writer_ != nullptr) writer_->onMemory(location, offset, out);
     return true;
 }
@@ -339,6 +346,40 @@ bool RsxCaptureReader::load(const std::filesystem::path& path, std::string& erro
     return parse(std::move(bytes), error);
 }
 
+namespace {
+
+// Mask of the bits [lo, hi) of one 64-bit word, 0 <= lo < hi <= 64.
+std::uint64_t bitRange(std::uint32_t lo, std::uint32_t hi) {
+    const std::uint64_t upper = hi == 64 ? ~0ull : (1ull << hi) - 1;
+    return upper & ~((1ull << lo) - 1);
+}
+
+}  // namespace
+
+std::uint32_t ReplayRsxMemoryView::Page::mark(std::uint32_t first, std::uint32_t count) {
+    std::uint32_t added = 0;
+    for (std::uint32_t pos = first; pos < first + count;) {
+        const std::uint32_t word = pos / 64, lo = pos % 64;
+        const std::uint32_t hi = std::min<std::uint32_t>(64, lo + (first + count - pos));
+        const std::uint64_t mask = bitRange(lo, hi);
+        added += static_cast<std::uint32_t>(std::popcount(mask & ~valid[word]));
+        valid[word] |= mask;
+        pos += hi - lo;
+    }
+    return added;
+}
+
+bool ReplayRsxMemoryView::Page::covers(std::uint32_t first, std::uint32_t count) const {
+    for (std::uint32_t pos = first; pos < first + count;) {
+        const std::uint32_t word = pos / 64, lo = pos % 64;
+        const std::uint32_t hi = std::min<std::uint32_t>(64, lo + (first + count - pos));
+        const std::uint64_t mask = bitRange(lo, hi);
+        if ((valid[word] & mask) != mask) return false;
+        pos += hi - lo;
+    }
+    return true;
+}
+
 void ReplayRsxMemoryView::add(std::uint32_t location, std::uint32_t offset, std::span<const std::uint8_t> bytes) {
     if (location > 1) return;
     auto& pages = pages_[location];
@@ -351,26 +392,15 @@ void ReplayRsxMemoryView::add(std::uint32_t location, std::uint32_t offset, std:
         std::unique_ptr<Page>& page = pages[index];
         if (!page) page = std::make_unique<Page>();
         std::memcpy(page->data.data() + in_page, bytes.data() + done, chunk);
-        if (page->valid_count != kPageSize) {
-            for (std::size_t i = 0; i < chunk; i++) {
-                if (!page->valid[in_page + i]) {
-                    page->valid[in_page + i] = true;
-                    page->valid_count++;
-                }
-            }
-        }
+        if (page->valid_count != kPageSize) page->valid_count += page->mark(in_page, static_cast<std::uint32_t>(chunk));
         done += chunk;
         pos += chunk;
     }
 }
 
-bool ReplayRsxMemoryView::read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) {
+bool ReplayRsxMemoryView::lookup(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) const {
     if (out.empty()) return true;
-    const auto missing = [&]() {
-        rsxNoteUnimplemented("capture", "missing range");
-        return false;
-    };
-    if (location > 1 || static_cast<std::uint64_t>(offset) + out.size() > 0x100000000ull) return missing();
+    if (location > 1 || static_cast<std::uint64_t>(offset) + out.size() > 0x100000000ull) return false;
     const auto& pages = pages_[location];
     std::uint64_t pos = offset;
     std::size_t done = 0;
@@ -379,18 +409,24 @@ bool ReplayRsxMemoryView::read(std::uint32_t location, std::uint32_t offset, std
         const std::uint32_t in_page = static_cast<std::uint32_t>(pos % kPageSize);
         const std::size_t chunk = std::min<std::size_t>(out.size() - done, kPageSize - in_page);
         const auto it = pages.find(index);
-        if (it == pages.end()) return missing();
+        if (it == pages.end()) return false;
         const Page& page = *it->second;
-        if (page.valid_count != kPageSize) {
-            for (std::size_t i = 0; i < chunk; i++) {
-                if (!page.valid[in_page + i]) return missing();
-            }
-        }
+        if (page.valid_count != kPageSize && !page.covers(in_page, static_cast<std::uint32_t>(chunk))) return false;
         std::memcpy(out.data() + done, page.data.data() + in_page, chunk);
         done += chunk;
         pos += chunk;
     }
     return true;
+}
+
+bool ReplayRsxMemoryView::read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) {
+    if (lookup(location, offset, out)) return true;
+    rsxNoteUnimplemented("capture", "missing range");
+    return false;
+}
+
+bool ReplayRsxMemoryView::tryRead(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) {
+    return lookup(location, offset, out);
 }
 
 void replayCapture(const RsxCaptureReader& reader, ReplayRsxMemoryView& memory, RsxFrameBuilder& builder) {

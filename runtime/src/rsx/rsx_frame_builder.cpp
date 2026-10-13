@@ -438,6 +438,12 @@ void RsxFrameBuilder::fillFragmentProgram(const RsxRegisters& regs, RsxDraw& dra
         noteState("fragment program unreadable");
         return;
     }
+    if (matchFragmentProgram(program, location, offset, draw)) {
+        stats_.fp_cache_hits++;
+        return;
+    }
+    stats_.fp_cache_misses++;
+    draw.fp_constants.clear();
     const RsxFpScan scan = scanFragmentProgram([&](std::uint32_t index, std::uint32_t& word) {
         std::uint8_t bytes[4];
         if (!memory_.read(location, offset + index * 4, bytes)) return false;
@@ -448,6 +454,7 @@ void RsxFrameBuilder::fillFragmentProgram(const RsxRegisters& regs, RsxDraw& dra
         noteState("fragment program unreadable");
         return;
     }
+    FpCacheEntry entry;
     draw.fp_ucode.reserve(scan.words.size());
     for (std::size_t p = 0; p + 4 <= scan.words.size();) {
         bool constant = false;
@@ -456,11 +463,42 @@ void RsxFrameBuilder::fillFragmentProgram(const RsxRegisters& regs, RsxDraw& dra
         p += 4;
         if (constant && p + 4 <= scan.words.size()) {
             draw.fp_constants.insert(draw.fp_constants.end(), scan.words.begin() + p, scan.words.begin() + p + 4);
+            entry.constant_blocks.push_back(static_cast<std::uint32_t>(draw.fp_ucode.size()));
             draw.fp_ucode.insert(draw.fp_ucode.end(), 4, 0);
             p += 4;
         }
     }
-    draw.fp_hash = hashWords(draw.fp_ucode);
+    entry.bytes.reserve(draw.fp_ucode.size() * 4);
+    for (const std::uint32_t word : draw.fp_ucode) {
+        for (int shift = 24; shift >= 0; shift -= 8) entry.bytes.push_back(static_cast<std::uint8_t>(word >> shift));
+    }
+    draw.fp_hash = rsxHash64(entry.bytes.data(), entry.bytes.size());
+    entry.ucode = draw.fp_ucode;
+    entry.hash = draw.fp_hash;
+    if (fp_cache_.size() >= kFpCacheEntries) fp_cache_.clear();
+    fp_cache_.insert_or_assign(program, std::move(entry));
+}
+
+// A program is the same when its bytes are, apart from the inline constants: the scan's shape (which blocks are
+// constants, where the end flag is) depends only on the instruction words, and those are the bytes compared. The
+// probe reads only what the scan would read for an unchanged program; a changed one falls back to the scan.
+bool RsxFrameBuilder::matchFragmentProgram(std::uint32_t program, std::uint32_t location, std::uint32_t offset,
+                                           RsxDraw& draw) {
+    const auto it = fp_cache_.find(program);
+    if (it == fp_cache_.end()) return false;
+    const FpCacheEntry& entry = it->second;
+    fp_probe_.resize(entry.bytes.size());
+    if (!memory_.tryRead(location, offset, fp_probe_)) return false;
+    draw.fp_constants.reserve(entry.constant_blocks.size() * 4);
+    for (const std::uint32_t block : entry.constant_blocks) {
+        std::uint8_t* bytes = fp_probe_.data() + static_cast<std::size_t>(block) * 4;
+        for (std::size_t w = 0; w < 4; w++) draw.fp_constants.push_back(readBe32(bytes + w * 4));
+        std::memset(bytes, 0, 16);
+    }
+    if (std::memcmp(fp_probe_.data(), entry.bytes.data(), entry.bytes.size()) != 0) return false;
+    draw.fp_ucode = entry.ucode;
+    draw.fp_hash = entry.hash;
+    return true;
 }
 
 void RsxFrameBuilder::fillVertexProgram(const RsxRegisters& regs, RsxDraw& draw) {
