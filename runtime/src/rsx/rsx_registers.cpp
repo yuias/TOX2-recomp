@@ -1,10 +1,19 @@
 #include "rsx/rsx_registers.h"
 
+#include <atomic>
+
 #include "rsx/fifo_parser.h"
 
 namespace tox2 {
 
 namespace {
+
+// Shared by all RsxRegisters so that names from different instances (a capture's registers and the replay's) never
+// collide. Starts at 1: 0 means "not named yet".
+std::uint64_t nextStoreGeneration() {
+    static std::atomic<std::uint64_t> counter{1};
+    return counter.fetch_add(1, std::memory_order_relaxed);
+}
 
 // Non-zero register defaults: RPCS3 `Emu/RSX/rsx_methods.cpp` `rsx_state::init`, i.e. the state
 // after the commands cellGcmInit injects, plus the init-only SET_SHADER_PROGRAM and
@@ -372,10 +381,26 @@ constexpr RegisterDefault kContextResetValues[] = {
 
 }  // namespace
 
+std::uint64_t RsxRegisters::vpUcodeGeneration() const {
+    if (vp_ucode_generation == 0) vp_ucode_generation = nextStoreGeneration();
+    return vp_ucode_generation;
+}
+
+std::uint64_t RsxRegisters::vpConstantsGeneration() const {
+    if (vp_constants_generation == 0) vp_constants_generation = nextStoreGeneration();
+    return vp_constants_generation;
+}
+
+void RsxRegisters::markVpStoresChanged() {
+    vp_ucode_generation = 0;
+    vp_constants_generation = 0;
+}
+
 void RsxRegisters::reset() {
     regs.fill(0);
     vp_ucode.fill(0);
     vp_constants.fill(0);
+    markVpStoresChanged();
     vp_load = vp_start = constant_load = 0;
     vertex_default_written = 0;
     for (const RegisterDefault& entry : kRegisterDefaults) {
@@ -441,6 +466,7 @@ void RsxRegisters::apply(std::uint32_t method, std::uint32_t value) {
         const std::uint64_t slot = static_cast<std::uint64_t>(vp_load) * 4 + lane;
         if (slot < vp_ucode.size()) {
             vp_ucode[slot] = value;
+            vp_ucode_generation = 0;
             // RPCS3 clips the block at the end of the store, so the load pointer stops there too.
             if (lane == 3) {
                 vp_load++;
@@ -451,7 +477,10 @@ void RsxRegisters::apply(std::uint32_t method, std::uint32_t value) {
                method < kMethodNv4097SetTransformConstant + kRsxTransformWindow * 4) {
         const std::uint32_t index = (method - kMethodNv4097SetTransformConstant) >> 2;
         const std::uint64_t slot = (static_cast<std::uint64_t>(constant_load) + index / 4) * 4 + index % 4;
-        if (slot < vp_constants.size()) vp_constants[slot] = value;
+        if (slot < vp_constants.size()) {
+            vp_constants[slot] = value;
+            vp_constants_generation = 0;
+        }
     }
 }
 

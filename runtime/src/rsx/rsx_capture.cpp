@@ -224,6 +224,7 @@ bool RsxCaptureReader::parse(std::vector<std::uint8_t> bytes, std::string& error
             for (std::uint32_t& word : regs_->regs) word = take();
             for (std::uint32_t& word : regs_->vp_ucode) word = take();
             for (std::uint32_t& word : regs_->vp_constants) word = take();
+            regs_->markVpStoresChanged();
             regs_->vp_load = take();
             regs_->vp_start = take();
             regs_->constant_load = take();

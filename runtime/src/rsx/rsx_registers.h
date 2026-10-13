@@ -39,6 +39,16 @@ struct RsxRegisters {
     // RPCS3 `rsx_state::reset`, run at every flip: overwrites the registers it assigns (zeros included)
     // and leaves all others, the vertex program store and constants, and the load pointers alone.
     void contextReset();
+
+    // Names of the current contents of vp_ucode and vp_constants. Equal non-zero names, from any RsxRegisters in the
+    // process, mean equal contents, so consumers may key caches on them. apply() and reset() set a name to 0 when
+    // they change the store; the accessor names the contents on first use from a process-wide counter. A copy keeps
+    // the names, which stays correct because it holds the same contents. Code that writes vp_ucode or vp_constants
+    // directly must call markVpStoresChanged() afterwards.
+    std::uint64_t vpUcodeGeneration() const;
+    std::uint64_t vpConstantsGeneration() const;
+    void markVpStoresChanged();
+    mutable std::uint64_t vp_ucode_generation = 0, vp_constants_generation = 0;
 };
 
 }  // namespace tox2

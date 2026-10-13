@@ -7498,6 +7498,7 @@ void testRsxRegisters() {
     regs->apply(tox2::kMethodNv4097SetTransformConstantLoad, 6);
     regs->apply(tox2::kMethodNv4097SetTransformConstant, 0x88);
     regs->vp_ucode[0] = 0x77;
+    regs->markVpStoresChanged();
     regs->apply(0x0200, 0x05000500);         // SURFACE_CLIP_HORIZONTAL: reset writes an explicit zero
     regs->apply(0x1738, 9);                  // VERTEX_DATA_BASE_OFFSET: explicit zero
     regs->apply(0x0064, 0x30);               // SEMAPHORE_OFFSET: 0x10 here, 0x30 at init
@@ -7523,6 +7524,58 @@ void testRsxRegisters() {
     command = tox2::RsxClear{};
     CHECK(std::get<tox2::RsxClear>(command).surfaces.color.pitch == 0);
     CHECK(static_cast<int>(tox2::RsxPrimitive::Points) == 1 && static_cast<int>(tox2::RsxPrimitive::Polygon) == 10);
+}
+
+void testRsxRegisterGenerations() {
+    auto regs = std::make_unique<tox2::RsxRegisters>();
+    regs->reset();
+
+    // Names are non-zero, distinct per store, and stable while nothing is written.
+    const std::uint64_t ucode = regs->vpUcodeGeneration(), constants = regs->vpConstantsGeneration();
+    CHECK(ucode != 0 && constants != 0 && ucode != constants);
+    CHECK(regs->vpUcodeGeneration() == ucode && regs->vpConstantsGeneration() == constants);
+    regs->apply(0x0A6C, 0x207);  // plain register: neither store
+    regs->apply(tox2::kMethodNv4097SetTransformProgramLoad, 2);
+    regs->apply(tox2::kMethodNv4097SetTransformProgramStart, 1);
+    regs->apply(tox2::kMethodNv4097SetTransformConstantLoad, 3);
+    CHECK(regs->vpUcodeGeneration() == ucode && regs->vpConstantsGeneration() == constants);
+
+    // Each store is renamed only by its own write.
+    regs->apply(tox2::kMethodNv4097SetTransformConstant, 0x200);
+    const std::uint64_t constants2 = regs->vpConstantsGeneration();
+    CHECK(constants2 != constants && constants2 != 0 && regs->vpUcodeGeneration() == ucode);
+    regs->apply(tox2::kMethodNv4097SetTransformProgram, 0x100);
+    const std::uint64_t ucode2 = regs->vpUcodeGeneration();
+    CHECK(ucode2 != ucode && ucode2 != 0 && regs->vpConstantsGeneration() == constants2);
+
+    // Writes past the end of a store are dropped and change nothing.
+    regs->apply(tox2::kMethodNv4097SetTransformProgramLoad, tox2::kRsxVpInstructionCount);
+    regs->apply(tox2::kMethodNv4097SetTransformProgram, 0xDEAD);
+    regs->apply(tox2::kMethodNv4097SetTransformConstantLoad, tox2::kRsxVpConstantCount);
+    regs->apply(tox2::kMethodNv4097SetTransformConstant, 0xBEEF);
+    CHECK(regs->vpUcodeGeneration() == ucode2 && regs->vpConstantsGeneration() == constants2);
+
+    // A copy holds the same contents under the same names; a write to the copy renames only the copy.
+    regs->apply(tox2::kMethodNv4097SetTransformConstantLoad, 0);
+    regs->apply(tox2::kMethodNv4097SetTransformProgramLoad, 0);
+    const std::uint64_t ucode3 = regs->vpUcodeGeneration(), constants3 = regs->vpConstantsGeneration();
+    auto copy = std::make_unique<tox2::RsxRegisters>(*regs);
+    CHECK(copy->vpUcodeGeneration() == ucode3 && copy->vpConstantsGeneration() == constants3);
+    copy->apply(tox2::kMethodNv4097SetTransformConstant, 0x300);
+    CHECK(copy->vpConstantsGeneration() != constants3 && copy->vpConstantsGeneration() != 0);
+    CHECK(regs->vpConstantsGeneration() == constants3 && copy->vpUcodeGeneration() == ucode3);
+    // A copy taken before the original was ever named gets names of its own, never equal to the original's.
+    auto fresh = std::make_unique<tox2::RsxRegisters>();
+    auto fresh_copy = std::make_unique<tox2::RsxRegisters>(*fresh);
+    CHECK(fresh->vpUcodeGeneration() != fresh_copy->vpUcodeGeneration());
+
+    // reset() and markVpStoresChanged() give both stores new names.
+    regs->reset();
+    const std::uint64_t ucode4 = regs->vpUcodeGeneration(), constants4 = regs->vpConstantsGeneration();
+    CHECK(ucode4 != ucode3 && constants4 != constants3 && ucode4 != 0 && constants4 != 0);
+    regs->vp_ucode[0] = 1;  // a direct write is announced by hand
+    regs->markVpStoresChanged();
+    CHECK(regs->vpUcodeGeneration() != ucode4 && regs->vpConstantsGeneration() != constants4);
 }
 
 std::uint64_t unimplementedCount(const std::string& name) {
@@ -9138,6 +9191,7 @@ void testRsxCapture() {
     // A frame that starts mid-run starts from non-default registers and known surfaces.
     regs->vp_ucode[5] = 0x1234;
     regs->vp_constants[9] = 0xABCD;
+    regs->markVpStoresChanged();
     regs->vp_load = 3;
     regs->vp_start = 4;
     regs->constant_load = 6;
@@ -12183,6 +12237,7 @@ int main(int argc, char** argv) {
     testFifoParser();
     testRsxArgCensus();
     testRsxRegisters();
+    testRsxRegisterGenerations();
     testRsxDecode();
     testRsxTextureLayout();
     testRsxFrameBuilder();
