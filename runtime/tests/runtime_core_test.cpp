@@ -11414,6 +11414,78 @@ void testGuestLockStats() {
     }
 }
 
+// Rapid yields reach the backoff and let another host thread take the lock; spaced yields never do.
+void testYieldBackoff() {
+    tox2::setYieldBackoffEnabled(true);
+    tox2::GuestLock& lock = tox2::guestLock();
+
+    // The other thread queues only once the first backoff sleep is counted, so a yield that handed the lock to it
+    // without the sleep would be a failure of the test.
+    {
+        const std::uint64_t before = tox2::yieldBackoffCount();
+        std::atomic<bool> other_ran{false};
+        std::thread spinner([&] {
+            lock.lock();
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!other_ran && std::chrono::steady_clock::now() < deadline) tox2::yieldGuestLockBackoff();
+            lock.unlock();
+        });
+        std::thread other([&] {
+            while (tox2::yieldBackoffCount() == before) std::this_thread::yield();
+            lock.lock();
+            other_ran = true;
+            lock.unlock();
+        });
+        spinner.join();
+        other.join();
+        CHECK(other_ran);
+        CHECK(tox2::yieldBackoffCount() > before);
+    }
+
+    // Fewer yields than the threshold in a burst never sleep.
+    {
+        const std::uint64_t before = tox2::yieldBackoffCount();
+        std::thread t([&] {
+            lock.lock();
+            for (unsigned i = 0; i < tox2::kYieldSpinThreshold - 1; i++) tox2::yieldGuestLockBackoff();
+            lock.unlock();
+        });
+        t.join();
+        CHECK(tox2::yieldBackoffCount() == before);
+    }
+
+    // Yields spaced further apart than kYieldSpinGap reset the count.
+    {
+        const std::uint64_t before = tox2::yieldBackoffCount();
+        std::thread t([&] {
+            lock.lock();
+            for (unsigned i = 0; i < 3 * tox2::kYieldSpinThreshold; i++) {
+                const auto until = std::chrono::steady_clock::now() + 2 * tox2::kYieldSpinGap;
+                while (std::chrono::steady_clock::now() < until) {
+                }
+                CHECK(!tox2::yieldGuestLockBackoff());  // nobody waits
+            }
+            lock.unlock();
+        });
+        t.join();
+        CHECK(tox2::yieldBackoffCount() == before);
+    }
+
+    // Disabled: any number of rapid yields is the plain yield.
+    {
+        tox2::setYieldBackoffEnabled(false);
+        const std::uint64_t before = tox2::yieldBackoffCount();
+        std::thread t([&] {
+            lock.lock();
+            for (unsigned i = 0; i < 4 * tox2::kYieldSpinThreshold; i++) tox2::yieldGuestLockBackoff();
+            lock.unlock();
+        });
+        t.join();
+        CHECK(tox2::yieldBackoffCount() == before);
+        tox2::setYieldBackoffEnabled(true);
+    }
+}
+
 void testTimebase() {
     auto ctx = std::make_unique<Tox2PpuContext>();
     LARGE_INTEGER frequency, t0, t1;
@@ -11990,6 +12062,7 @@ int main(int argc, char** argv) {
     testHostPriority();
     testGuestLockFifo();
     testGuestLockStats();
+    testYieldBackoff();
     testPerfLine();
     testReservationAndDcbz();
     testGuestStackWalk();

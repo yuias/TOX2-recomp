@@ -70,6 +70,8 @@ public:
         return n > 0 ? static_cast<std::size_t>(n - 1) : 0;
     }
     bool hasWaiters() const { return waiterCount() > 0; }
+    // Releases so far; a holder that gave the lock up and got it back compares it to see whether anyone ran meanwhile.
+    std::uint64_t releaseCount() const { return releases_.load(std::memory_order_relaxed); }
 
     GuestLockStats stats() const;  // any thread
 
@@ -86,6 +88,7 @@ private:
     std::uint64_t next_ticket_ = 0;              // guarded by mutex_
     std::uint64_t serving_ = 0;                  // guarded by mutex_
     std::atomic<std::uint64_t> outstanding_{0};  // holder plus waiters
+    std::atomic<std::uint64_t> releases_{0};
 
     // The holder's own state: written by a thread when it gets its turn and read only by that thread in
     // unlock(), before the next ticket is served.
@@ -204,6 +207,23 @@ std::uint32_t createGuestThread(const GuestThreadParams& params);
 // Hands the guest lock to the threads queued behind the caller and queues behind them. Returns
 // false, doing nothing, when nobody waits. Must be called with the guest lock held.
 bool yieldGuestLock();
+
+// The game hands frames between its main and render threads by spinning on sys_ppu_thread_yield (and ignores the
+// result). On the console the two threads run on separate hardware threads, so the spin costs nothing; here every
+// yield is a guest lock hand-off that taxes the RSX thread, and the spinning thread burns a core. A thread whose yields
+// follow each other within kYieldSpinGap is treated as spinning: every kYieldSpinThreshold-th such yield also sleeps
+// for kYieldBackoffSleep without the lock.
+inline constexpr unsigned kYieldSpinThreshold = 64;
+inline constexpr std::chrono::microseconds kYieldSpinGap{50};
+inline constexpr std::chrono::microseconds kYieldBackoffSleep{100};
+
+// --yield-backoff on|off; on by default.
+void setYieldBackoffEnabled(bool enabled);
+// Number of backoff sleeps so far, any thread.
+std::uint64_t yieldBackoffCount();
+// sys_ppu_thread_yield: yieldGuestLock() plus the backoff above. Returns what yieldGuestLock() returns, or true when
+// the sleep let another thread take the lock. Must be called with the guest lock held.
+bool yieldGuestLockBackoff();
 
 // Bookkeeping around a blocking wait, used by blockingWait. A null thread (host thread) is ignored.
 void blockEnter(GuestThread* thread, const char* what, bool indefinite);

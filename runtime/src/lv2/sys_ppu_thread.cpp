@@ -121,7 +121,7 @@ void sysPpuThreadExit(Tox2PpuContext* ctx, std::uint8_t* base) {
 void sysPpuThreadYield(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     ctx->preempt_budget = kTox2PreemptBudget;
-    ctx->gpr[3] = yieldGuestLock() ? kCellOk : kCellCancel;
+    ctx->gpr[3] = yieldGuestLockBackoff() ? kCellOk : kCellCancel;
 }
 
 // 44 sys_ppu_thread_join(u32 thread_id, u64* vptr)

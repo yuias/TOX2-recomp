@@ -94,6 +94,7 @@ struct Options {
     bool no_window = false;
     tox2::RsxFlipLimit frame_limit = tox2::RsxFlipLimit::Vsync;  // --frame-limit vsync (default), 60 or off
     bool host_priorities = true;                                 // --host-priorities on (default) or off
+    bool yield_backoff = true;                                   // --yield-backoff on (default) or off
     bool window = false;                                         // settled after all arguments
     bool pad_probe = false;
     std::string dump_frames;
@@ -342,7 +343,7 @@ void printUsage() {
             "                [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]\n"
             "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
             "                [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]\n"
-            "                [--frame-limit vsync|60|off] [--host-priorities on|off]\n"
+            "                [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off]\n"
             "                [--dump-guest ADDR:SIZE:FILE]...\n",
             stderr);
 }
@@ -507,6 +508,14 @@ bool parseArgs(int argc, char** argv, Options& opt) {
                 return false;
             }
             opt.host_priorities = name == "on";
+        } else if (arg == "--yield-backoff") {
+            std::string name;
+            if (!value(name)) return false;
+            if (name != "on" && name != "off") {
+                std::fprintf(stderr, "error: --yield-backoff needs on or off\n");
+                return false;
+            }
+            opt.yield_backoff = name == "on";
         } else if (arg == "--shader-cache") {
             if (!value(opt.shader_cache)) return false;
         } else if (arg == "--vk-validation") {
@@ -707,7 +716,7 @@ bool isAudioPathClass(tox2::GuestLockClass cls) {
 }
 
 tox2::PerfSource lockPerfSource() {
-    return [prev = tox2::GuestLockStats{}]() mutable -> std::string {
+    return [prev = tox2::GuestLockStats{}, prev_backoffs = std::uint64_t{0}]() mutable -> std::string {
         const tox2::GuestLockStats now = tox2::guestLock().stats();
         std::string body;
         for (std::size_t i = 0; i < tox2::kGuestLockClassCount; i++) {
@@ -738,6 +747,11 @@ tox2::PerfSource lockPerfSource() {
                 first = false;
             }
             if (!first) body += " ms";
+        }
+        const std::uint64_t backoffs = tox2::yieldBackoffCount();
+        if (backoffs != prev_backoffs) {
+            body += std::format("{}yield backoff {}", body.empty() ? "lock " : " | ", backoffs - prev_backoffs);
+            prev_backoffs = backoffs;
         }
         prev = now;
         return body;
@@ -882,6 +896,7 @@ int main(int argc, char** argv) {
     loadGameParamSfo();
     tox2::setRsxFlipLimit(opt.frame_limit);
     tox2::setHostPrioritiesEnabled(opt.host_priorities);
+    tox2::setYieldBackoffEnabled(opt.yield_backoff);
     if (!opt.rsx_census.empty()) tox2::setRsxArgCensusFile(opt.rsx_census);
     if (!opt.rsx_capture_frames.empty()) {
         tox2::setRsxCaptureFrames(opt.rsx_capture_frames, std::filesystem::path("generated") / "rsx" / "captures");

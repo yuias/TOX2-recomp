@@ -97,7 +97,7 @@ Thread states are `running`, `blocked in <what>` or `exited`. A `census: guest l
 thread lines once the lock was used:
 
 ```
-census: guest lock 3781234 acquisitions in 60.0 s, hand-off n 1480 avg 0.01 p99 0.02 max 0.31 ms >0.10ms 4, wakeups 2210 (131 spurious)
+census: guest lock 3781234 acquisitions in 60.0 s, hand-off n 1480 avg 0.01 p99 0.02 max 0.31 ms >0.10ms 4, wakeups 2210 (131 spurious), yield backoff 0
   ppu: 46800.0/s, wait n 2808000 avg 0.02 p99 0.11 max 3.10 ms >1.00ms 12, ahead avg 1.3 max 5, hold n 2808000 avg 0.01 p99 0.04 max 1054.00 ms >1.00ms 1, waited behind rsx 120.0 ms ppu 80.0 ms
   rsx: 14600.0/s, wait ...
 ```
@@ -183,6 +183,15 @@ debug level, and a new thread that did not queue within 5 ms
 logs `tox2: thread: ... not queued within 5 ms; creator continues` at info level. There is no other
 priority behaviour: no priority-ordered hand-off, no wake order by priority, no preemption, and no
 rescheduling when a priority changes.
+
+`sys_ppu_thread_yield` has a host-side backoff (`yieldGuestLockBackoff`, `--yield-backoff on|off`). The game's
+main thread and render thread hand frames to each other by spinning on lock, check, unlock and yield, and ignore
+the result; on the console they run on separate hardware threads, so the spin is free. Here each yield would be a
+guest lock hand-off that the RSX thread pays for, and the spinning thread would keep a core busy. A thread whose
+yields arrive within 50 us of the previous one's return is spinning; every 64th such yield releases the lock,
+sleeps 100 us with the high-resolution timer (about a millisecond in practice) and takes the lock again. The
+lv2 result is unchanged (`CELL_OK` when another thread ran, else `CELL_CANCEL`). The back-edge preemption
+(`tox2Yield`) and the blocking waits are not affected. The census header and the perf line count the sleeps.
 
 `tox2_game` holds a 1 ms system timer resolution for the whole run (`timeBeginPeriod`,
 `runtime/src/core/timer_resolution.*`). Timed waits (`sys_timer_usleep`, lock and queue time-outs)
