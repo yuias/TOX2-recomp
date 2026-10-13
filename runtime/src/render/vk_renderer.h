@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -189,7 +190,8 @@ private:
     bool waitSlot(FrameSlot& slot);
     bool submitFrame();
     // The slot's command buffer, for every command recorded outside a draw's rendering instance (the only way to
-    // reach it besides beginFrame and the in-instance part of recordDraw).
+    // reach it besides beginFrame and the in-instance part of recordDraw). Ends the draw instance left open by the
+    // last draw, if any.
     VkCommandBuffer outsideCmd();
 
     std::shared_ptr<RenderTarget> acquireColor(const RsxSurface& surface, bool overwrites_all);
@@ -279,6 +281,19 @@ private:
         UploadRef ref;
     };
     VpConstantUpload vp_constant_upload_;
+
+    // The rendering instance the last draw left open on the slot's command buffer. The next draw with the same
+    // attachments records into it. Nothing else records while it is open: every other site gets the command buffer
+    // from outsideCmd(), which ends it, so an open instance also means the attachments are still in their attachment
+    // layouts.
+    struct OpenDrawPass {
+        VkImageView color_view = VK_NULL_HANDLE;
+        VkImageView depth_view = VK_NULL_HANDLE;
+        bool stencil = false;
+        std::uint32_t width = 0, height = 0;  // render area
+        bool operator==(const OpenDrawPass&) const = default;
+    };
+    std::optional<OpenDrawPass> open_pass_;
 
     Presenter* presenter_ = nullptr;
     Presenter::Target present_target_;  // acquired for the frame being recorded

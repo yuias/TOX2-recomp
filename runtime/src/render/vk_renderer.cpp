@@ -456,6 +456,7 @@ bool RsxRenderer::beginFrame() {
     for (FrameSlot::UploadBlock& block : slot.uploads) block.used = 0;
     // The cached region lives in an upload block that was just recycled (or belongs to the other slot).
     vp_constant_upload_ = {};
+    open_pass_.reset();  // submitFrame closed it; the reset command pool dropped the recording anyway
     VkCommandBufferBeginInfo begin{};
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -468,8 +469,15 @@ bool RsxRenderer::beginFrame() {
 }
 
 // The command buffer for anything recorded outside a draw's rendering instance. Every such site asks here at the
-// point of recording, so a rendering instance left open across draws can be closed in this one place.
-VkCommandBuffer RsxRenderer::outsideCmd() { return slots_[current_slot_]->cmd; }
+// point of recording, so the instance a draw left open for the next one is closed in this one place.
+VkCommandBuffer RsxRenderer::outsideCmd() {
+    const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
+    if (open_pass_) {
+        vkCmdEndRendering(cmd);
+        open_pass_.reset();
+    }
+    return cmd;
+}
 
 bool RsxRenderer::submitFrame() {
     FrameSlot& slot = *slots_[current_slot_];
@@ -523,10 +531,11 @@ void RsxRenderer::touch(const std::shared_ptr<RenderTarget>& target) {
     if (std::find(in_use.begin(), in_use.end(), target) == in_use.end()) in_use.push_back(target);
 }
 
-// Conservative full barrier, also recorded before every draw and clear that begins a rendering instance (even when
-// the layout does not change, so successive passes over one attachment or transfer destination are ordered). An
-// image that stays in a read-only layout needs none: a read after a read has no hazard, and every write to the
-// image goes through another layout, whose transition records the barrier. Tighter stages are not needed yet.
+// Conservative full barrier, also recorded before every clear and every draw that begins a rendering instance (even
+// when the layout does not change, so successive instances over one attachment or transfer destination are ordered;
+// draws that continue an open instance are ordered by rasterization order and record none). An image that stays in a
+// read-only layout needs none: a read after a read has no hazard, and every write to the image goes through another
+// layout, whose transition records the barrier. Tighter stages are not needed yet.
 void RsxRenderer::transitionImage(VkImage image, VkImageAspectFlags aspect, VkImageLayout& current,
                                   VkImageLayout layout) {
     if (current == layout &&
@@ -1623,8 +1632,10 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
 }
 
 // Draw path. Everything that records outside a rendering instance (target creation, the placeholder
-// texture, uploads) happens before vkCmdBeginRendering. A draw that cannot be rendered is counted in
-// draws_skipped and, where a reason exists, with rsxNoteUnimplemented.
+// texture, uploads) happens before the draw's own commands and ends the instance a previous draw left open
+// (outsideCmd). The instance is left open at the end of a draw: the next draw with the same attachments and render
+// area records into it, and the next command recorded outside one ends it. A draw that cannot be rendered is counted
+// in draws_skipped and, where a reason exists, with rsxNoteUnimplemented.
 //
 // Facts used, with their sources:
 //  - texture units a draw does not sample get no descriptor; the fragment translator reports the
@@ -1943,41 +1954,55 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     std::memcpy(draw_block.data, &vp, sizeof(vp));
     std::memcpy(draw_block.data + kFpDrawBlockOffset, &fp, sizeof(fp));
 
-    if (multisampled) {
-        transitionSidecar(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-        if (depth) transitionSidecar(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-    } else {
-        transition(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-        if (depth) transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-    }
     if (depth_written) depth->write_serial++;
 
-    VkRenderingAttachmentInfo color_attachment{};
-    color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    color_attachment.imageView = multisampled ? color->msaa->view : color->view;
-    color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    VkRenderingAttachmentInfo depth_attachment{};
-    if (depth) {
-        depth_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        depth_attachment.imageView = multisampled ? depth->msaa->view : depth->view;
-        depth_attachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    }
-    VkRenderingInfo rendering{};
-    rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-    rendering.renderArea = {{0, 0}, {area_width, area_height}};
-    rendering.layerCount = 1;
-    rendering.colorAttachmentCount = 1;
-    rendering.pColorAttachments = &color_attachment;
-    rendering.pDepthAttachment = depth ? &depth_attachment : nullptr;
-    rendering.pStencilAttachment = depth && formatHasStencil(depth->format) ? &depth_attachment : nullptr;
-
+    OpenDrawPass pass;
+    pass.color_view = multisampled ? color->msaa->view : color->view;
+    pass.depth_view = depth ? (multisampled ? depth->msaa->view : depth->view) : VK_NULL_HANDLE;
+    pass.stencil = depth && formatHasStencil(depth->format);
+    pass.width = area_width;
+    pass.height = area_height;
+    // Anything above that recorded outside an instance (texture work, a layout sync, a new target) ended the open one,
+    // so a match means nothing touched the attachments since the last draw: their layouts are unchanged and the
+    // draws are ordered by rasterization order, with no barrier or new instance between them.
+    const bool continues = open_pass_ == pass;
     const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
-    vkCmdBeginRendering(cmd, &rendering);
-    stats_.rendering_instances++;
+    if (!continues) {
+        outsideCmd();  // ends the previous instance, whose attachments differ
+        if (multisampled) {
+            transitionSidecar(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            if (depth) transitionSidecar(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        } else {
+            transition(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            if (depth) transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        }
+
+        VkRenderingAttachmentInfo color_attachment{};
+        color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        color_attachment.imageView = pass.color_view;
+        color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingAttachmentInfo depth_attachment{};
+        if (depth) {
+            depth_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            depth_attachment.imageView = pass.depth_view;
+            depth_attachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        }
+        VkRenderingInfo rendering{};
+        rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+        rendering.renderArea = {{0, 0}, {area_width, area_height}};
+        rendering.layerCount = 1;
+        rendering.colorAttachmentCount = 1;
+        rendering.pColorAttachments = &color_attachment;
+        rendering.pDepthAttachment = depth ? &depth_attachment : nullptr;
+        rendering.pStencilAttachment = pass.stencil ? &depth_attachment : nullptr;
+        vkCmdBeginRendering(cmd, &rendering);
+        stats_.rendering_instances++;
+        open_pass_ = pass;
+    }
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     stats_.state_calls++;
 
@@ -2068,7 +2093,6 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     } else {
         vkCmdDraw(cmd, draw.count, 1, 0, 0);
     }
-    vkCmdEndRendering(cmd);
     stats_.draws++;
 }
 

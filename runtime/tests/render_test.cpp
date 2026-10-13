@@ -2206,12 +2206,136 @@ void testReadBarrierSkipped(tox2::VkContext& ctx) {
 
     CHECK(one.stats.barriers_skipped == 0);
     CHECK(two.stats.barriers_skipped == 1 && three.stats.barriers_skipped == 2);
-    // The second draw adds the barriers of its own attachments and none for the sampled image, as the third does.
-    const std::uint64_t per_draw = two.stats.barriers - one.stats.barriers;
-    CHECK(per_draw > 0 && three.stats.barriers - two.stats.barriers == per_draw);
+    // The later draws continue the first one's rendering instance: no barrier for their attachments, and none for the
+    // sampled image either.
+    CHECK(two.stats.barriers == one.stats.barriers && three.stats.barriers == one.stats.barriers);
     for (const Run* r : {&one, &two, &three}) {
         CHECK(pixelArgb(r->bgra, r->width, 32, 32) == kAliasColor && pixelArgb(r->bgra, r->width, 2, 2) == 0xFF000000);
         CHECK(r->stats.draws_skipped == 0);
+    }
+    CHECK(tox2::rsxUnimplementedSnapshot().empty());
+    tox2::rsxUnimplementedReset();
+}
+
+// Consecutive draws with the same attachments share one rendering instance; anything recorded outside an instance
+// (another target, a clear, a texture upload, a copy of the target the draw samples) ends it first. The instance
+// counts are relative to runs with fewer draws, so they do not depend on how clears are recorded.
+void testDrawPassMerging(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::rsxUnimplementedReset();
+    TextureOptions alias;
+    alias.scene = TextureScene::Alias;
+    const std::vector<tox2::RsxCommand> scene = replaySynthetic(makeTexturedCapture(alias));
+    CHECK(scene.size() == 4);  // clear of the aliased target, clear of the display, the draw, the flip
+    if (scene.size() != 4 || std::get_if<tox2::RsxDraw>(&scene[2]) == nullptr) return;
+    const tox2::RsxCommand& clear_alias = scene[0];
+    const tox2::RsxCommand& clear_display = scene[1];
+    const tox2::RsxCommand& sampling_draw = scene[2];  // draws to the display, samples the aliased target
+    const tox2::RsxCommand& flip = scene[3];
+
+    struct Run {
+        tox2::RendererStats stats;
+        std::vector<std::uint8_t> bgra;
+        std::uint32_t width = 0;
+    };
+    const auto run = [&](const std::vector<tox2::RsxCommand>& commands) {
+        tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+        CHECK(renderer.valid());
+        std::vector<tox2::RsxCommand> copy = commands;
+        renderer.execute(copy);
+        CHECK(renderer.valid());
+        Run result;
+        std::uint32_t height = 0;
+        CHECK(renderer.readDisplay(result.bgra, result.width, height));
+        result.stats = renderer.stats();
+        CHECK(result.stats.draws_skipped == 0);
+        return result;
+    };
+    // The same draw drawing into the aliased target instead of the display.
+    const auto retarget = [](tox2::RsxCommand command) {
+        std::get<tox2::RsxDraw>(command).surfaces.color.offset = kAliasOffset;
+        return command;
+    };
+
+    // Draws to one target add one instance in all, and no barrier after the first.
+    {
+        const auto draws = [&](std::size_t count) {
+            std::vector<tox2::RsxCommand> commands = {clear_alias, clear_display};
+            for (std::size_t i = 0; i < count; i++) commands.push_back(sampling_draw);
+            commands.push_back(flip);
+            return run(commands);
+        };
+        const Run one = draws(1);
+        const Run two = draws(2);
+        const Run three = draws(3);
+        CHECK(two.stats.rendering_instances == one.stats.rendering_instances);
+        CHECK(three.stats.rendering_instances == one.stats.rendering_instances);
+        CHECK(two.stats.barriers == one.stats.barriers && three.stats.barriers == one.stats.barriers);
+        for (const Run* r : {&one, &two, &three}) {
+            CHECK(pixelArgb(r->bgra, r->width, 32, 32) == kAliasColor &&
+                  pixelArgb(r->bgra, r->width, 2, 2) == 0xFF000000);
+        }
+    }
+
+    // A draw to another target is another instance, and so is the draw back to the first one.
+    {
+        const std::vector<tox2::RsxCommand> memory_scene = replaySynthetic(makeTexturedCapture({}));
+        CHECK(memory_scene.size() == 3);  // clear, the draw, the flip
+        if (memory_scene.size() != 3 || std::get_if<tox2::RsxDraw>(&memory_scene[1]) == nullptr) return;
+        const tox2::RsxCommand& draw = memory_scene[1];
+        const tox2::RsxCommand other = retarget(draw);
+        const auto sequence = [&](std::initializer_list<const tox2::RsxCommand*> draws) {
+            std::vector<tox2::RsxCommand> commands = {clear_alias, clear_display};
+            for (const tox2::RsxCommand* d : draws) commands.push_back(*d);
+            commands.push_back(flip);
+            return run(commands);
+        };
+        const Run same = sequence({&draw, &draw});
+        const Run switched = sequence({&draw, &draw, &other});
+        const Run back = sequence({&draw, &other, &draw});
+        CHECK(switched.stats.rendering_instances == same.stats.rendering_instances + 1);
+        CHECK(back.stats.rendering_instances == same.stats.rendering_instances + 2);
+        // The display shows the textured quad of the draws that went to it, whatever the order.
+        for (const Run* r : {&same, &switched, &back}) CHECK(pixelArgb(r->bgra, r->width, 2, 2) != 0);
+        CHECK(switched.bgra == same.bgra && back.bgra == same.bgra);
+    }
+
+    // A clear between two draws to the same target ends the instance.
+    {
+        const Run split = run({clear_alias, clear_display, sampling_draw, clear_display, sampling_draw, flip});
+        const Run merged = run({clear_alias, clear_display, sampling_draw, sampling_draw, flip});
+        CHECK(split.stats.rendering_instances == merged.stats.rendering_instances + 2);
+        CHECK(pixelArgb(split.bgra, split.width, 32, 32) == kAliasColor &&
+              pixelArgb(split.bgra, split.width, 2, 2) == 0xFF000000);
+    }
+
+    // A draw that samples its own target copies it first, which cannot happen inside the instance: each such draw
+    // gets an instance of its own, and the draws after them still read what they wrote.
+    {
+        const tox2::RsxCommand feedback = retarget(sampling_draw);
+        const Run base = run({clear_alias, clear_display, sampling_draw, flip});
+        const Run twice = run({clear_alias, clear_display, feedback, feedback, sampling_draw, flip});
+        CHECK(twice.stats.feedback_copies == 2);
+        CHECK(twice.stats.rendering_instances == base.stats.rendering_instances + 2);
+        CHECK(pixelArgb(twice.bgra, twice.width, 32, 32) == kAliasColor &&
+              pixelArgb(twice.bgra, twice.width, 2, 2) == 0xFF000000);
+    }
+    CHECK(tox2::rsxUnimplementedSnapshot().empty());
+    tox2::rsxUnimplementedReset();
+
+    // A texture upload between two draws to one target ends the instance: the second draw has new texels.
+    {
+        const std::vector<tox2::RsxCommand> changed = replaySynthetic(makeChangedTextureCapture());
+        CHECK(changed.size() == 4);  // clear, two draws, the flip
+        if (changed.size() != 4) return;
+        const Run result = run(changed);
+        CHECK(result.stats.texture_uploads == 2);
+        CHECK(result.stats.rendering_instances ==
+              run({changed[0], changed[1], changed[3]}).stats.rendering_instances + 1);
+        CHECK(pixelArgb(result.bgra, result.width, 10, 24) == 0xFFFF0000 &&
+              pixelArgb(result.bgra, result.width, 22, 40) == 0x80FFFFFF);
+        CHECK(pixelArgb(result.bgra, result.width, 42, 24) == 0xFFFFFF00 &&
+              pixelArgb(result.bgra, result.width, 54, 40) == 0xFF808080);
     }
     CHECK(tox2::rsxUnimplementedSnapshot().empty());
     tox2::rsxUnimplementedReset();
@@ -5142,6 +5266,7 @@ int main() {
     testVertexConstantUploadReuse(*ctx);
     testRendererTextures(*ctx);
     testReadBarrierSkipped(*ctx);
+    testDrawPassMerging(*ctx);
     testRendererVolumeTextures(*ctx);
     testRendererFloatSurface(*ctx);
     testRendererDepthTexture(*ctx);
