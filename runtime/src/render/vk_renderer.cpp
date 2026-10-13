@@ -1,6 +1,7 @@
 #include "render/vk_renderer.h"
 
 #include <algorithm>
+#include <cassert>
 #include <bit>
 #include <cstdint>
 #include <cstring>
@@ -190,11 +191,20 @@ struct RsxRenderer::RenderTarget {
         VkImageView depth_view = VK_NULL_HANDLE;
         VkImageView stencil_view = VK_NULL_HANDLE;
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // The image goes back to the pool: the owner is destroyed only after its slots' fences, so the GPU is done.
+        std::shared_ptr<ImagePool> pool;
+        PooledImageKey pool_key{};
+        std::uint64_t pool_bytes = 0;
         ~MultisampleImage() {
             if (depth_view != VK_NULL_HANDLE) vkDestroyImageView(context->device(), depth_view, nullptr);
             if (stencil_view != VK_NULL_HANDLE) vkDestroyImageView(context->device(), stencil_view, nullptr);
             if (view != VK_NULL_HANDLE) vkDestroyImageView(context->device(), view, nullptr);
-            if (image != VK_NULL_HANDLE) vmaDestroyImage(context->allocator(), image, allocation);
+            if (image == VK_NULL_HANDLE) return;
+            if (pool) {
+                pool->give(pool_key, pool_bytes, image, allocation);
+            } else {
+                vmaDestroyImage(context->allocator(), image, allocation);
+            }
         }
     };
     std::unique_ptr<MultisampleImage> msaa;
@@ -206,6 +216,10 @@ struct RsxRenderer::RenderTarget {
     std::uint32_t passWidth(bool multisampled) const { return multisampled ? layout_width / 2 * scale : image_width; }
     std::uint32_t passHeight(bool multisampled) const { return multisampled ? layout_height * scale : image_height; }
 
+    std::shared_ptr<ImagePool> pool;  // where the image goes when the target is destroyed (see MultisampleImage)
+    PooledImageKey pool_key{};
+    std::uint64_t pool_bytes = 0;
+
     RenderTarget() = default;
     RenderTarget(const RenderTarget&) = delete;
     RenderTarget& operator=(const RenderTarget&) = delete;
@@ -214,7 +228,12 @@ struct RsxRenderer::RenderTarget {
         if (depth_view != VK_NULL_HANDLE) vkDestroyImageView(context->device(), depth_view, nullptr);
         if (stencil_view != VK_NULL_HANDLE) vkDestroyImageView(context->device(), stencil_view, nullptr);
         if (view != VK_NULL_HANDLE) vkDestroyImageView(context->device(), view, nullptr);
-        if (image != VK_NULL_HANDLE) vmaDestroyImage(context->allocator(), image, allocation);
+        if (image == VK_NULL_HANDLE) return;
+        if (pool) {
+            pool->give(pool_key, pool_bytes, image, allocation);
+        } else {
+            vmaDestroyImage(context->allocator(), image, allocation);
+        }
     }
 };
 
@@ -274,6 +293,7 @@ RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(c
         fail(pipelines_->error());
         return;
     }
+    image_pool_ = std::make_shared<ImagePool>(context_);
     textures_ = std::make_unique<TextureCache>(context_);
     const VkDevice device = context_.device();
     for (std::unique_ptr<FrameSlot>& slot_ptr : slots_) {
@@ -343,6 +363,29 @@ void RsxRenderer::noteImageCreated(RenderImageKind kind, std::uint64_t bytes) {
     stats_.image_bytes_created[index] += bytes;
 }
 
+bool RsxRenderer::obtainImage(RenderImageKind kind, const VkImageCreateInfo& info, std::uint64_t bytes,
+                              PooledImageKey& key, VkImage& image, VmaAllocation& allocation) {
+    // The key leaves these out; a caller that varies them would be handed an incompatible image.
+    assert(info.imageType == VK_IMAGE_TYPE_2D && info.flags == 0 && info.mipLevels == 1 && info.arrayLayers == 1 &&
+           info.extent.depth == 1 && info.tiling == VK_IMAGE_TILING_OPTIMAL);
+    key = PooledImageKey{info.format, info.extent.width, info.extent.height, info.samples, info.usage};
+    const ImagePoolResult taken = image_pool_->take(key, image, allocation);
+    if (taken.hit) {
+        stats_.image_pool_hits[static_cast<std::size_t>(kind)]++;
+        return true;
+    }
+    VmaAllocationCreateInfo alloc_info{};
+    alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    alloc_info.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+    if (vmaCreateImage(context_.allocator(), &info, &alloc_info, &image, &allocation, nullptr) != VK_SUCCESS) {
+        image = VK_NULL_HANDLE;
+        return false;
+    }
+    stats_.image_pool_misses[static_cast<std::size_t>(taken.miss)]++;
+    noteImageCreated(kind, bytes);
+    return true;
+}
+
 void RsxRenderer::syncTextureStats() {
     if (!textures_) return;
     const auto index = static_cast<std::size_t>(RenderImageKind::Texture);
@@ -363,13 +406,32 @@ void RsxRenderer::logImageCreations() {
     double megabytes[kRenderImageKindCount];
     for (std::size_t i = 0; i < kRenderImageKindCount; i++)
         delta(static_cast<RenderImageKind>(i), counts[i], megabytes[i]);
+    const auto hits = [&](RenderImageKind kind) {
+        const auto index = static_cast<std::size_t>(kind);
+        return stats_.image_pool_hits[index] - logged_stats_.image_pool_hits[index];
+    };
+    const auto misses = [&](ImagePoolMiss miss) {
+        const auto index = static_cast<std::size_t>(miss);
+        return stats_.image_pool_misses[index] - logged_stats_.image_pool_misses[index];
+    };
+    const ImagePoolDiscards& discards = stats_.image_pool_discards;
+    const ImagePoolDiscards& logged_discards = logged_stats_.image_pool_discards;
     logDebug(
             "tox2: render: last 600 flips: created target {} ({:.1f} MB), sidecar {} ({:.1f} MB), depth-argb {} "
-            "({:.1f} MB), texture {} ({:.1f} MB), upload-block {} ({:.1f} MB)",
+            "({:.1f} MB), texture {} ({:.1f} MB), upload-block {} ({:.1f} MB); pool hits target {}, sidecar {}, "
+            "depth-argb {}; misses no-entry {}, key-cap {}, byte-cap {}, idle {}; discarded key-cap {}, byte-cap {}, "
+            "idle {}; pooled {:.1f} MB",
             counts[0], megabytes[0], counts[1], megabytes[1], counts[2], megabytes[2], counts[3], megabytes[3],
-            counts[4], megabytes[4]);
+            counts[4], megabytes[4], hits(RenderImageKind::Target), hits(RenderImageKind::Sidecar),
+            hits(RenderImageKind::DepthArgb), misses(ImagePoolMiss::NoEntry), misses(ImagePoolMiss::KeyCap),
+            misses(ImagePoolMiss::ByteCap), misses(ImagePoolMiss::Idle), discards.key_cap - logged_discards.key_cap,
+            discards.byte_cap - logged_discards.byte_cap, discards.idle - logged_discards.idle,
+            static_cast<double>(stats_.image_pool_bytes) / (1024.0 * 1024.0));
     logged_stats_.images_created = stats_.images_created;
     logged_stats_.image_bytes_created = stats_.image_bytes_created;
+    logged_stats_.image_pool_hits = stats_.image_pool_hits;
+    logged_stats_.image_pool_misses = stats_.image_pool_misses;
+    logged_stats_.image_pool_discards = stats_.image_pool_discards;
 }
 
 bool RsxRenderer::waitSlot(FrameSlot& slot) {
@@ -582,17 +644,13 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth,
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
     image_info.usage = usage;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VmaAllocationCreateInfo alloc_info{};
-    alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-    alloc_info.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
-    if (vmaCreateImage(context_.allocator(), &image_info, &alloc_info, &target->image, &target->allocation, nullptr) !=
-        VK_SUCCESS) {
-        target->image = VK_NULL_HANDLE;
+    target->pool_bytes = static_cast<std::uint64_t>(image_width) * image_height * targetTexelBytes(format);
+    if (!obtainImage(RenderImageKind::Target, image_info, target->pool_bytes, target->pool_key, target->image,
+                     target->allocation)) {
         fail("vmaCreateImage failed for a render target");
         return nullptr;
     }
-    noteImageCreated(RenderImageKind::Target,
-                     static_cast<std::uint64_t>(image_width) * image_height * targetTexelBytes(format));
+    target->pool = image_pool_;
 
     VkImageViewCreateInfo view_info{};
     view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -648,17 +706,14 @@ bool RsxRenderer::ensureMultisample(RenderTarget& target) {
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
             (target.depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VmaAllocationCreateInfo alloc_info{};
-    alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-    alloc_info.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
-    if (vmaCreateImage(context_.allocator(), &image_info, &alloc_info, &sidecar->image, &sidecar->allocation,
-                       nullptr) != VK_SUCCESS) {
-        sidecar->image = VK_NULL_HANDLE;
+    sidecar->pool_bytes = static_cast<std::uint64_t>(image_info.extent.width) * image_info.extent.height * 2 *
+                          targetTexelBytes(target.format);
+    if (!obtainImage(RenderImageKind::Sidecar, image_info, sidecar->pool_bytes, sidecar->pool_key, sidecar->image,
+                     sidecar->allocation)) {
         fail("vmaCreateImage failed for a multisampled render target");
         return false;
     }
-    noteImageCreated(RenderImageKind::Sidecar, static_cast<std::uint64_t>(image_info.extent.width) *
-                                                       image_info.extent.height * 2 * targetTexelBytes(target.format));
+    sidecar->pool = image_pool_;
     VkImageViewCreateInfo view_info{};
     view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     view_info.image = sidecar->image;
@@ -2243,6 +2298,9 @@ bool RsxRenderer::ensureReadback(FrameSlot& slot, VkDeviceSize size) {
 void RsxRenderer::recordFlip(const RsxFlip& flip) {
     stats_.flips++;
     textures_->trim();
+    image_pool_->trim(stats_.flips);
+    stats_.image_pool_bytes = image_pool_->bytes();
+    stats_.image_pool_discards = image_pool_->discards();
     syncTextureStats();
     if (stats_.flips % kImageLogFlips == 0) logImageCreations();
     FrameSlot& slot = *slots_[current_slot_];

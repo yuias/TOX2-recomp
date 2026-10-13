@@ -2325,28 +2325,73 @@ void testImagePool(tox2::VkContext& ctx) {
     CHECK(ctx.validationErrorCount() == errors_before);
 }
 
+// A mode-3 colour surface bound at 32x32 and then, at the same address, as a plain 64x64 one by colour-only clears,
+// every frame: two targets and one 2-sample sidecar are needed per frame.
+std::vector<std::uint8_t> makeSidecarResizeCapture() {
+    using namespace tox2::rsx_synthetic;
+    constexpr std::uint32_t kOffset = 0x40000;
+    SceneBuilder scene;
+    scene.setSurface(3, 32, kOffset);
+    scene.write(tox2::kMethodNv4097SetColorClearValue, 0xFF000000);
+    scene.write(tox2::kMethodNv4097ClearSurface, 0xF0);
+    scene.setSurface(0, 64, kOffset);
+    scene.write(tox2::kMethodNv4097ClearSurface, 0xF0);
+    return scene.finish();
+}
+
+// Retired images come back after their slot's fence (two frames later), so creations stop growing after the first
+// frames and the pool serves every later request.
 void testRendererImageCreationCounters(tox2::VkContext& ctx) {
     using tox2::RenderImageKind;
-    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
-    CHECK(renderer.valid());
+    constexpr std::uint64_t kFrames = 12, kSteadyFrom = 7;
     const auto target = static_cast<std::size_t>(RenderImageKind::Target);
-    const std::uint64_t texel = ctx.depthStencilFormat() == VK_FORMAT_D32_SFLOAT_S8_UINT ? 8 : 4;
-    constexpr std::uint64_t kFrames = 3;
-    for (std::uint64_t frame = 1; frame <= kFrames; frame++) {
-        std::vector<tox2::RsxCommand> commands = replaySynthetic(makeDepthResizeCapture());
-        tox2::rsxUnimplementedReset();
-        renderer.execute(commands);
+    const auto sidecar = static_cast<std::size_t>(RenderImageKind::Sidecar);
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+
+    const auto run = [&](const std::vector<std::uint8_t>& capture, std::size_t pooled_kind,
+                         std::uint64_t hits_per_frame) {
+        tox2::RsxRenderer renderer(ctx, readbackAllOptions());
         CHECK(renderer.valid());
-        const tox2::RendererStats& stats = renderer.stats();
-        CHECK(stats.images_created[target] == 2 * frame);
-        CHECK(stats.image_bytes_created[target] == frame * (64 * 64 + 128 * 128) * texel);
-        for (std::size_t kind = 0; kind < tox2::kRenderImageKindCount; kind++) {
-            if (kind != target) {
-                CHECK(stats.images_created[kind] == 0 && stats.image_bytes_created[kind] == 0);
+        tox2::RendererStats before_steady;
+        for (std::uint64_t frame = 1; frame <= kFrames; frame++) {
+            std::vector<tox2::RsxCommand> commands = replaySynthetic(capture);
+            tox2::rsxUnimplementedReset();
+            renderer.execute(commands);
+            CHECK(renderer.valid());
+            const tox2::RendererStats& stats = renderer.stats();
+            std::uint64_t misses = 0;
+            for (const std::uint64_t count : stats.image_pool_misses) misses += count;
+            CHECK(misses == stats.images_created[target] + stats.images_created[sidecar]);
+            for (std::size_t kind = 0; kind < tox2::kRenderImageKindCount; kind++) {
+                if (kind != target && kind != sidecar) {
+                    CHECK(stats.images_created[kind] == 0 && stats.image_bytes_created[kind] == 0);
+                    CHECK(stats.image_pool_hits[kind] == 0);
+                }
+            }
+            if (frame == kSteadyFrom) before_steady = stats;
+            if (frame > kSteadyFrom) {
+                // The last 5 frames: nothing new is created and each frame's requests are all hits.
+                CHECK(stats.images_created[pooled_kind] == before_steady.images_created[pooled_kind]);
+                CHECK(stats.image_pool_hits[pooled_kind] ==
+                      before_steady.image_pool_hits[pooled_kind] + hits_per_frame * (frame - kSteadyFrom));
             }
         }
+        CHECK(renderer.stats().flips == kFrames);
+        CHECK(renderer.stats().image_pool_discards.key_cap == 0 && renderer.stats().image_pool_discards.byte_cap == 0);
+        return renderer.stats();
+    };
+
+    const std::uint64_t texel = ctx.depthStencilFormat() == VK_FORMAT_D32_SFLOAT_S8_UINT ? 8 : 4;
+    const tox2::RendererStats depth = run(makeDepthResizeCapture(), target, 2);
+    CHECK(depth.image_bytes_created[target] == depth.images_created[target] / 2 * (64 * 64 + 128 * 128) * texel);
+    CHECK(depth.image_pool_hits[target] + depth.images_created[target] == 2 * kFrames);
+
+    if (ctx.twoSampleSupportGap().empty()) {
+        const tox2::RendererStats msaa = run(makeSidecarResizeCapture(), sidecar, 1);
+        CHECK(msaa.images_created[sidecar] > 0 && msaa.image_pool_hits[sidecar] > 0);
+        CHECK(msaa.image_pool_hits[target] > 0);
     }
-    CHECK(renderer.stats().flips == kFrames);
+    CHECK(ctx.validationErrorCount() == errors_before);
     tox2::rsxUnimplementedReset();
 }
 

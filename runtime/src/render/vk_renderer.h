@@ -16,6 +16,7 @@
 
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
+#include "render/image_pool.h"
 #include "render/present_overlay.h"
 #include "render/render_scale.h"
 #include "render/vk_context.h"
@@ -72,6 +73,12 @@ struct RendererStats {
     // texel size). The Texture entries follow the texture cache as of the end of the last execute() or flip.
     std::array<std::uint64_t, kRenderImageKindCount> images_created{};
     std::array<std::uint64_t, kRenderImageKindCount> image_bytes_created{};
+    // Retired images reused instead of created, by RenderImageKind (only Target and Sidecar are pooled so far).
+    std::array<std::uint64_t, kRenderImageKindCount> image_pool_hits{};
+    // Creations of pooled kinds, by ImagePoolMiss. Their sum equals images_created[Target] + [Sidecar].
+    std::array<std::uint64_t, kImagePoolMissCount> image_pool_misses{};
+    std::uint64_t image_pool_bytes = 0;     // held by the pool at the end of the last flip
+    ImagePoolDiscards image_pool_discards;  // the pool's discards() at the end of the last flip
 };
 
 // Single-threaded: execute, readDisplay and stats are called from one thread. The renderer never
@@ -158,6 +165,10 @@ private:
 
     void fail(std::string message);
     void noteImageCreated(RenderImageKind kind, std::uint64_t bytes);
+    // Takes an image with the parameters of `info` from the pool, or creates it (counting the creation). `key` is
+    // filled either way; false when the allocation fails.
+    bool obtainImage(RenderImageKind kind, const VkImageCreateInfo& info, std::uint64_t bytes, PooledImageKey& key,
+                     VkImage& image, VmaAllocation& allocation);
     void syncTextureStats();
     void logImageCreations();
     bool beginFrame();
@@ -221,6 +232,10 @@ private:
     // Color and depth targets live in separate maps: a surface of each kind may share an offset.
     TargetMap color_targets_;
     TargetMap depth_targets_;
+
+    // Shared with the targets and sidecars it serves, so a target that outlives the renderer can still give its image
+    // back.
+    std::shared_ptr<ImagePool> image_pool_;
 
     std::unique_ptr<DrawPipelines> pipelines_;
     std::unique_ptr<TextureCache> textures_;
