@@ -3,6 +3,7 @@
 // `Emu/Cell/Modules/cellGcmSys.cpp` (function of the same name) and the memory layout of
 // `Emu/Cell/lv2/sys_rsx.cpp`; the state lives in rsx/rsx_state.h. Handlers run under the guest lock.
 
+#include <atomic>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -279,9 +280,12 @@ void gcmSetDisplayBuffer(Tox2PpuContext* ctx, std::uint8_t*) {
     setResultCode(ctx, kCellOk);
 }
 
-// cellGcmSetFlipMode(mode): void. Recorded only; it does not delay flips.
+// cellGcmSetFlipMode(mode): void. Recorded as RPCS3's `requested_vsync`; in the default flip limit (vsync) a flip in
+// VSYNC mode waits for the next vblank tick, in HSYNC mode (or any other flip limit) it does not.
 void gcmSetFlipMode(Tox2PpuContext* ctx, std::uint8_t*) {
-    rsxState().requested_vsync = argU32(ctx, 0) == kRsxDisplayVsync;
+    // Atomic because the RSX thread reads it without the guest lock while a flip waits for a vblank.
+    std::atomic_ref<bool>(rsxState().requested_vsync)
+            .store(argU32(ctx, 0) == kRsxDisplayVsync, std::memory_order_relaxed);
 }
 
 // cellGcmResetFlipStatus(): void

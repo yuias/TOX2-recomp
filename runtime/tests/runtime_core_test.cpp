@@ -9242,8 +9242,9 @@ void testRsxConsumer() {
     emit(tox2::kMethodNv4097GetReport, {0x00000020});
     CHECK(run() == FifoStatus::Idle && tox2Read64(base, report + 0x20) > first);
 
-    // A flip completes where its command executes, with vsync too: it clears the flip label, notifies the
-    // hook, and the writes behind it are consumed before the next VBlank.
+    // With the flip limit off (a new consumer's default) a flip completes where its command executes, in VSYNC flip
+    // mode too: it clears the flip label, notifies the hook, and the writes behind it are consumed before the next
+    // VBlank.
     tox2::RsxState& state = tox2::rsxState();
     state.requested_vsync = true;
     state.flip_status = tox2::kRsxFlipStatusWaiting;
@@ -9279,7 +9280,7 @@ void testRsxConsumer() {
     CHECK(state.vblank_count == 1 && consumer.census().flips == 1);
     CHECK(consumer.pump(100) == FifoStatus::Idle && consumer.takeCommands().empty());
     CHECK((g_interrupts == Interrupts{{tox2::RsxInterrupt::Flip, 1}, {tox2::RsxInterrupt::VBlank, 1}}));
-    // Two flips in a row (hsync) complete in one run as well.
+    // Two flips in a row (HSYNC flip mode) complete in one run as well.
     state.requested_vsync = false;
     emit(tox2::kMethodGcmFlipCommand, {2});
     emit(tox2::kMethodGcmFlipCommand, {2});
@@ -9455,21 +9456,22 @@ void testRsxConsumer() {
         CHECK(capturing.takeCaptures().empty());
     }
 
-    // The flip limiter: the first flip is immediate, every later one waits for a deadline that moves on by one
-    // period per flip, and the parser stays at the held flip meanwhile.
+    // The Hz60 flip limit: the first flip is immediate, every later one waits for a deadline that moves on by one
+    // period per flip, and the parser stays at the held flip meanwhile. The game's flip mode does not matter.
     {
+        state.requested_vsync = true;
         const auto emitFlips = [&](int count) {
             for (int i = 0; i < count; i++) emit(tox2::kMethodGcmFlipCommand, {1});
         };
         tox2Write32(base, kControl + 4, at);
         tox2::RsxConsumer limited(base);
-        limited.setFlipLimit(true);
-        CHECK(!limited.flipHoldDeadline());
+        limited.setFlipLimit(tox2::RsxFlipLimit::Hz60);
+        CHECK(!limited.flipHoldDeadline() && !limited.flipHeldForVblank());
         emitFlips(4);
         tox2Write32(base, kControl, at);
         const auto start = std::chrono::steady_clock::now();
         CHECK(limited.pump(100) == FifoStatus::Waiting && limited.census().flips == 1);
-        CHECK(limited.flipHoldDeadline().has_value() && limited.hasWork(at));
+        CHECK(limited.flipHoldDeadline().has_value() && !limited.flipHeldForVblank() && limited.hasWork(at));
         const std::uint32_t held_get = tox2Read32(base, kControl + 4);
         CHECK(held_get < at);  // get stays at the held flip
         CHECK(!limited.write(tox2::kMethodGcmFlipCommand, 1) && limited.census().flips == 1);
@@ -9491,14 +9493,94 @@ void testRsxConsumer() {
         // Turning the limiter off while a flip is held releases it: no hold deadline is left, and the next pump
         // completes everything that was queued without waiting.
         tox2::RsxConsumer switched(base);
-        switched.setFlipLimit(true);
+        switched.setFlipLimit(tox2::RsxFlipLimit::Hz60);
         emitFlips(4);
         tox2Write32(base, kControl, at);
         CHECK(switched.pump(100) == FifoStatus::Waiting && switched.census().flips == 1);
         CHECK(switched.flipHoldDeadline().has_value());
-        switched.setFlipLimit(false);
+        switched.setFlipLimit(tox2::RsxFlipLimit::Off);
         CHECK(!switched.flipHoldDeadline() && switched.hasWork(at));
         CHECK(switched.pump(100) == FifoStatus::Idle && switched.census().flips == 4);
+
+        // Hz60 with the HSYNC flip mode paces the same way, and Off completes VSYNC flips at once.
+        state.requested_vsync = false;
+        tox2::RsxConsumer hsync_limited(base);
+        hsync_limited.setFlipLimit(tox2::RsxFlipLimit::Hz60);
+        emitFlips(2);
+        tox2Write32(base, kControl, at);
+        CHECK(hsync_limited.pump(100) == FifoStatus::Waiting && hsync_limited.census().flips == 1);
+        CHECK(hsync_limited.flipHoldDeadline().has_value() && !hsync_limited.flipHeldForVblank());
+        state.requested_vsync = true;
+        tox2Write32(base, kControl + 4, at);  // hsync_limited left get at its held flip
+        tox2::RsxConsumer off_vsync(base);
+        off_vsync.setFlipLimit(tox2::RsxFlipLimit::Off);
+        emitFlips(2);
+        tox2Write32(base, kControl, at);
+        CHECK(off_vsync.pump(100) == FifoStatus::Idle && off_vsync.census().flips == 2);
+        CHECK(!off_vsync.flipHeldForVblank());
+    }
+
+    // The Vsync flip limit (RPCS3's "PS3 Native" frame limit): a flip in VSYNC flip mode completes at the first
+    // vblank tick after its command executes, the first flip included, and at most one flip completes per tick.
+    // The tick queues the vblank interrupt before the flip it releases queues the flip interrupt: the game's
+    // vblank handler counts down the frame interval and the flip handler releases the gate it waits on.
+    {
+        const auto emitFlips = [&](int count) {
+            for (int i = 0; i < count; i++) emit(tox2::kMethodGcmFlipCommand, {1});
+        };
+        state.requested_vsync = true;
+        g_interrupts.clear();
+        tox2::setRsxInterruptHook(&recordInterrupt);
+        tox2Write32(base, kControl + 4, at);
+        tox2::RsxConsumer paced(base);
+        paced.setFlipLimit(tox2::RsxFlipLimit::Vsync);
+        CHECK(!paced.flipHeldForVblank());
+        emitFlips(2);
+        tox2Write32(base, kControl, at);
+        CHECK(paced.pump(100) == FifoStatus::Waiting && paced.census().flips == 0);
+        CHECK(paced.flipHeldForVblank() && !paced.flipHoldDeadline() && paced.hasWork(at));
+        CHECK(tox2Read32(base, kControl + 4) < at);  // get stays at the held flip
+        CHECK(paced.pump(100) == FifoStatus::Waiting && paced.census().flips == 0 && g_interrupts.empty());
+        paced.vblankTick();
+        CHECK(!paced.flipHeldForVblank() && paced.hasWork(at));  // the tick ended the hold: pump now
+        CHECK(paced.pump(100) == FifoStatus::Waiting && paced.census().flips == 1);
+        CHECK(paced.flipHeldForVblank());  // the second flip needs a tick of its own
+        CHECK(paced.pump(100) == FifoStatus::Waiting && paced.census().flips == 1);
+        paced.vblankTick();
+        CHECK(paced.pump(100) == FifoStatus::Idle && paced.census().flips == 2 && !paced.flipHeldForVblank());
+        CHECK(!paced.flipHoldDeadline() && tox2Read32(base, kControl + 4) == at);
+        CHECK((g_interrupts == Interrupts{{tox2::RsxInterrupt::VBlank, 1},
+                                          {tox2::RsxInterrupt::Flip, 1},
+                                          {tox2::RsxInterrupt::VBlank, 1},
+                                          {tox2::RsxInterrupt::Flip, 1}}));
+
+        // HSYNC flip mode uses the Hz60 limiter: the first flip is immediate, the second waits for a deadline.
+        state.requested_vsync = false;
+        emitFlips(2);
+        tox2Write32(base, kControl, at);
+        CHECK(paced.pump(100) == FifoStatus::Waiting && paced.census().flips == 3);
+        CHECK(paced.flipHoldDeadline().has_value() && !paced.flipHeldForVblank());
+
+        // A game that switches to HSYNC while a flip waits for a tick releases it to the limiter at once, and the
+        // limit switched to Off releases it without a tick.
+        state.requested_vsync = true;
+        tox2::RsxConsumer switched(base);
+        switched.setFlipLimit(tox2::RsxFlipLimit::Vsync);
+        tox2Write32(base, kControl + 4, at - 4 * 2);
+        CHECK(switched.pump(100) == FifoStatus::Waiting && switched.census().flips == 0);
+        CHECK(switched.flipHeldForVblank());
+        state.requested_vsync = false;
+        CHECK(!switched.flipHeldForVblank() && switched.hasWork(at));
+        CHECK(switched.pump(100) == FifoStatus::Idle && switched.census().flips == 1);
+        state.requested_vsync = true;
+        tox2::RsxConsumer released(base);
+        released.setFlipLimit(tox2::RsxFlipLimit::Vsync);
+        tox2Write32(base, kControl + 4, at - 4 * 2);
+        CHECK(released.pump(100) == FifoStatus::Waiting && released.flipHeldForVblank());
+        released.setFlipLimit(tox2::RsxFlipLimit::Off);
+        CHECK(!released.flipHeldForVblank() && released.hasWork(at));
+        CHECK(released.pump(100) == FifoStatus::Idle && released.census().flips == 1);
+        tox2::setRsxInterruptHook(nullptr);
     }
 
     // A capture requested at run time records the first whole frame that starts after the request, with no
@@ -9532,13 +9614,15 @@ void testRsxConsumer() {
         CHECK(requesting.takeCaptures().empty() && !requesting.captureRequestPending());
     }
 
-    // The process-wide limiter switch is readable and writable without a running RSX thread.
+    // The process-wide flip limit is readable and writable without a running RSX thread; it starts as Vsync.
     {
-        CHECK(tox2::rsxFlipLimit());
-        tox2::setRsxFlipLimit(false);
-        CHECK(!tox2::rsxFlipLimit());
-        tox2::setRsxFlipLimit(true);
-        CHECK(tox2::rsxFlipLimit());
+        CHECK(tox2::rsxFlipLimit() == tox2::RsxFlipLimit::Vsync);
+        tox2::setRsxFlipLimit(tox2::RsxFlipLimit::Off);
+        CHECK(tox2::rsxFlipLimit() == tox2::RsxFlipLimit::Off);
+        tox2::setRsxFlipLimit(tox2::RsxFlipLimit::Hz60);
+        CHECK(tox2::rsxFlipLimit() == tox2::RsxFlipLimit::Hz60);
+        tox2::setRsxFlipLimit(tox2::RsxFlipLimit::Vsync);
+        CHECK(tox2::rsxFlipLimit() == tox2::RsxFlipLimit::Vsync);
         CHECK(!tox2::requestRsxCapture() && !tox2::rsxCaptureStatus().available);
     }
 
@@ -9555,6 +9639,13 @@ void testRsxConsumer() {
     CHECK(tox2::formatCensus().find("census: rsx 120 headers, 3 distinct methods, 3 flips\n"
                                     "  interrupt handler calls: vblank 600, flip 0, user 2\n"
                                     "  method 0x1808: 9\n") != std::string::npos);
+    tox2::setRsxCensusProvider([]() {
+        tox2::RsxCensus census = fakeRsxCensusWithHandlerCalls();
+        census.vblank_coalesced = 4;
+        return census;
+    });
+    CHECK(tox2::formatCensus().find("  interrupt handler calls: vblank 600, flip 0, user 2, coalesced vblanks 4\n") !=
+          std::string::npos);
 
     tox2::setRsxInterruptHook(nullptr);
     tox2::resetRsxState();
@@ -11140,13 +11231,13 @@ void testGcmInterruptThread() {
     for (int i = 0; i < 2500 && thread->state() != tox2::ThreadState::Blocked; i++) pauseUnlocked();
     CHECK(thread->state() == tox2::ThreadState::Blocked);
     const tox2::GcmInterruptCounts counts = tox2::gcmInterruptCounts();
-    CHECK(counts.vblank == 2 && counts.flip == 0 && counts.user == 2);
+    CHECK(counts.vblank == 2 && counts.flip == 0 && counts.user == 2 && counts.vblank_coalesced == 2);
     CHECK(tox2::formatCensus().find("_gcm_intr_thread: blocked in gcm interrupt wait [service]") != std::string::npos);
     CHECK(tox2::formatCensus().find("census: guest lock") != std::string::npos);
 
     tox2::stopGcmInterruptThread();
     CHECK(thread->state() == tox2::ThreadState::Exited);
-    CHECK(tox2::gcmInterruptCounts().vblank == 0);
+    CHECK(tox2::gcmInterruptCounts().vblank == 0 && tox2::gcmInterruptCounts().vblank_coalesced == 0);
 
     tox2RegisterFuncs(nullptr, 0);
     tox2::resetHostFunctions();

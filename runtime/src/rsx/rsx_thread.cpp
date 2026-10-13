@@ -307,11 +307,14 @@ bool RsxConsumer::execute(std::uint32_t method, std::uint32_t value) {
         case kMethodGcmSetUserCommand + 4:  // two registers share the handler
             userCommand(value);
             return true;
-        case kMethodGcmFlipCommand:
-            if (!flipDue()) return false;
+        case kMethodGcmFlipCommand: {
+            bool vblank_paced = false;
+            if (!flipDue(vblank_paced)) return false;
             flip(value);
-            advanceFlipDeadline();
+            // A flip that waited for a vblank has no wall-clock deadline to move on.
+            if (!vblank_paced) advanceFlipDeadline();
             return true;
+        }
         default:
             if (method >= kMethodNv308aColor && method < kMethodNv308aColor + kBlitColorRegisters * 4) {
                 inlineBlitWord(method, value);
@@ -445,8 +448,14 @@ void RsxConsumer::getReport(std::uint32_t value) {
     tox2Write32(base_, ea + 12, 0);
 }
 
-bool RsxConsumer::flipDue() {
-    if (!flip_limit_.load(std::memory_order_relaxed) || !flip_deadline_ || Clock::now() >= *flip_deadline_) {
+bool RsxConsumer::flipDue(bool& vblank_paced) {
+    const RsxFlipLimit limit = flip_limit_.load(std::memory_order_relaxed);
+    // The mode is re-read on every attempt: a switch of the limit or of the game's flip mode ends a hold at once.
+    vblank_paced = limit == RsxFlipLimit::Vsync &&
+                   std::atomic_ref<bool>(rsxState().requested_vsync).load(std::memory_order_relaxed);
+    if (vblank_paced) return vblankFlipDue();
+    vblank_at_flip_.reset();
+    if (limit == RsxFlipLimit::Off || !flip_deadline_ || Clock::now() >= *flip_deadline_) {
         flip_waiting_ = false;
         return true;
     }
@@ -454,10 +463,26 @@ bool RsxConsumer::flipDue() {
     return false;
 }
 
+// RPCS3's "PS3 Native" frame limit (`handle_emu_flip`): the flip records the vblank count where its command first
+// executes and completes once the count has moved on. Unlike RPCS3, which defers the flip and lets the FIFO run on,
+// the parser stays at the command, so a second flip cannot complete in the same vblank interval.
+bool RsxConsumer::vblankFlipDue() {
+    const std::uint64_t vblank_count = rsxState().vblank_count;
+    if (!vblank_at_flip_) {
+        vblank_at_flip_ = vblank_count;
+        flip_waiting_ = true;
+        return false;
+    }
+    if (*vblank_at_flip_ == vblank_count) return false;
+    vblank_at_flip_.reset();
+    flip_waiting_ = false;
+    return true;
+}
+
 // RPCS3's default "Auto" frame limit (`handle_emu_flip`): the RSX thread sleeps until a target time that moves on
 // by one period per flip, measured from the previous target. It does not catch up after a late flip.
 void RsxConsumer::advanceFlipDeadline() {
-    if (!flip_limit_.load(std::memory_order_relaxed)) return;
+    if (flip_limit_.load(std::memory_order_relaxed) == RsxFlipLimit::Off) return;
     const Clock::time_point now = Clock::now();
     Clock::time_point next = flip_deadline_ ? *flip_deadline_ + kRsxFlipPeriod : now + kRsxFlipPeriod;
     if (next <= now) next = now + kRsxFlipPeriod;
@@ -466,10 +491,10 @@ void RsxConsumer::advanceFlipDeadline() {
 
 void RsxConsumer::flip(std::uint32_t buffer) {
     RsxState& state = rsxState();
-    // The command waits in flipDue() until the flip limiter allows it, and then completes where it executes.
-    // It never waits for a VBlank (RPCS3 `flip_command` -> `request_emu_flip` -> `handle_emu_flip`; the VBlank
-    // wait there belongs to the non-default "PS3" frame limit mode). The vsync mode only selects the present
-    // mode of the back end.
+    // The command waits in flipDue() until the flip limit allows it, and then completes where it executes
+    // (RPCS3 `flip_command` -> `request_emu_flip` -> `handle_emu_flip`). In the Vsync limit a flip in the game's
+    // VSYNC flip mode waits for a vblank tick (RPCS3's "PS3 Native" frame limit); otherwise only the wall-clock
+    // limiter applies.
     if (builder_ != nullptr) {
         static constexpr RsxDisplayBuffer kNoBuffer{};
         builder_->onFlip(*regs_, buffer, buffer < kRsxDisplayBufferCount ? state.display[buffer] : kNoBuffer);
@@ -586,6 +611,7 @@ RsxCensus consumerCensus() {
     result.vblank_handler_runs = calls.vblank;
     result.flip_handler_runs = calls.flip;
     result.user_handler_runs = calls.user;
+    result.vblank_coalesced = calls.vblank_coalesced;
     if (const RsxExecutor* executor = g_executor.load(std::memory_order_acquire)) {
         const RsxRenderCounts counts = executor->counts();
         result.rendering = true;
@@ -600,7 +626,7 @@ RsxUnimplementedCensus unimplementedCensus() { return {rsxUnimplementedSnapshot(
 RsxCommandSink g_command_sink;
 bool g_frame_builder_enabled = false;
 // Read by any thread through rsxFlipLimit(); the live consumer is told as well, see startRsxThread().
-std::atomic<bool> g_flip_limit{true};
+std::atomic<RsxFlipLimit> g_flip_limit{RsxFlipLimit::Vsync};
 // Set once by startRsxThread, never cleared (the consumer is leaked). Sequentially consistent on purpose: it
 // pairs with g_flip_limit so that a limiter change racing the thread start is seen by at least one side.
 std::atomic<RsxConsumer*> g_live_consumer{nullptr};
@@ -713,20 +739,29 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
         return true;
     };
     for (;;) {
-        // A flip held by the limiter ends the pump with Waiting and the loop comes back here, outside the guest
-        // lock. The sleep also ends at the flip's deadline, so it completes on time and the vblank ticks still
-        // arrive meanwhile.
+        // A flip held by the limit ends the pump with Waiting and the loop comes back here, outside the guest
+        // lock. A flip held by the Hz60 deadline ends the sleep at that deadline, so it completes on time. A flip
+        // held for a vblank sleeps up to the next tick instead of polling: nothing can advance before it. Either
+        // way the vblank ticks still arrive on time.
         const auto before = Clock::now();
         const std::optional<Clock::time_point> flip_deadline = consumer->flipHoldDeadline();
-        Clock::duration wait = std::min<Clock::duration>(next_tick - before, kPollInterval);
+        const bool flip_vblank_held = consumer->flipHeldForVblank();
+        Clock::duration wait = next_tick - before;
+        if (!flip_vblank_held) wait = std::min<Clock::duration>(wait, kPollInterval);
         if (flip_deadline) wait = std::min(wait, *flip_deadline - before);
         sleeper.sleep(std::chrono::duration_cast<std::chrono::microseconds>(wait));
 
+        // A due tick is never skipped for a held flip. Interrupt order: the tick queues the vblank handler (in
+        // vblankTick(), which also advances the count the held flip waits for) before the pump that completes the
+        // flip queues the flip handler. The game's frame-interval countdown in the vblank handler is released by
+        // the flip handler; reversed, it would see the flip one vblank early and the 30 fps mode would drop to 60.
         const auto woke = Clock::now();
         const bool tick = tickDue(woke);
         const std::uint32_t put = std::byteswap(put_word.load(std::memory_order_relaxed));
-        // Nothing can advance before the deadline whatever the guest puts, so the lock is not taken for it.
-        const bool flip_held = flip_deadline && woke < *flip_deadline;
+        // Nothing can advance before the deadline or the tick whatever the guest puts, so the lock is not taken
+        // for it. flipHeldForVblank() compares with the live count: a tick delivered after the last pump (by the
+        // slice loop below) already ended the hold, and the flip must be pumped now, not one tick later.
+        const bool flip_held = (flip_deadline && woke < *flip_deadline) || consumer->flipHeldForVblank();
         if (!tick && (flip_held || !consumer->hasWork(put))) continue;
 
         bool pending_tick = tick;
@@ -769,12 +804,12 @@ void setRsxCommandSink(RsxCommandSink sink) { g_command_sink = std::move(sink); 
 
 void setRsxFrameBuilderEnabled(bool enabled) { g_frame_builder_enabled = enabled; }
 
-void setRsxFlipLimit(bool enabled) {
-    g_flip_limit.store(enabled);
-    if (RsxConsumer* consumer = g_live_consumer.load()) consumer->setFlipLimit(enabled);
+void setRsxFlipLimit(RsxFlipLimit limit) {
+    g_flip_limit.store(limit);
+    if (RsxConsumer* consumer = g_live_consumer.load()) consumer->setFlipLimit(limit);
 }
 
-bool rsxFlipLimit() { return g_flip_limit.load(); }
+RsxFlipLimit rsxFlipLimit() { return g_flip_limit.load(); }
 
 bool requestRsxCapture() {
     RsxConsumer* consumer = g_live_consumer.load();

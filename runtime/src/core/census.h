@@ -61,6 +61,9 @@ struct RsxCensus {
     std::vector<RsxMethodCount> methods;
     // Guest interrupt handler calls made by the interrupt thread; the line is printed once any ran.
     std::uint64_t vblank_handler_runs = 0, flip_handler_runs = 0, user_handler_runs = 0;
+    // Vblank ticks not delivered because the handler had not run for the previous one; shown with the line above
+    // when not zero.
+    std::uint64_t vblank_coalesced = 0;
     // Set while a renderer executes the commands; the line then ends with its draw counts.
     bool rendering = false;
     std::uint64_t draws_rendered = 0, draws_skipped = 0;

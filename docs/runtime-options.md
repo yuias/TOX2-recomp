@@ -12,7 +12,7 @@ tox2_game [--game-dir DIR] [--vfs-config FILE] [--elf PATH] [--libsre PATH] [--h
          [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]
          [--dump-frames DIR] [--dump-frames-every K]
          [--shader-cache DIR] [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]
-         [--frame-limit 60|off] [--host-priorities on|off]
+         [--frame-limit vsync|60|off] [--host-priorities on|off]
 ```
 
 `tox2_game` loads the decrypted `EBOOT.elf` into a 4 GiB guest address space, sets up the main PPU
@@ -62,7 +62,7 @@ prefix (the census lines and the register dump of a fatal stop do not).
 | `--vk-validation` | Enable the Khronos validation layer. It comes with the Vulkan SDK; if it is not installed, `tox2_game` logs a warning and goes on without it. |
 | `--rsx-capture N[,M...]` | Record the given frames (1-based flip numbers) as `.tox2cap` files. See [Capture and replay](rendering.md#capture-and-replay). The overlay's `Capture next flip` button records one more frame into the same directory, `generated/rsx/captures`, with or without this option. |
 | `--rsx-census FILE` | Count the arguments the game writes to the RSX registers (surface and texture formats, vertex layouts, primitive types, draw sizes, render state, flip and vblank rates) and write them to `FILE` as JSON when the run stops. The fragment and vertex programs the game used are written next to it as `generated/rsx/fp_<hash>.bin` and `vp_<hash>.bin` (relative to the working directory). The directories are created; the file is truncated. |
-| `--frame-limit 60\|off` | Pace the flips. `60` (the default) completes at most 60 flips per second, like RPCS3's default "Auto" frame limit: a flip command that arrives early holds the command FIFO until its time. `off` completes every flip as soon as its command executes, so a headless run flips as fast as the game produces frames. Any other value is a usage error. With the window, the debug overlay can switch the limit on and off while the game runs (`Flip limiter` under Settings); the option sets the value at start-up. See [Fake RSX](rendering.md#fake-rsx). |
+| `--frame-limit vsync\|60\|off` | Pace the flips. `vsync` (the default) follows RPCS3's "PS3 Native" frame limit: a flip that the game made in its VSYNC flip mode (`cellGcmSetFlipMode`, which this game uses) completes at the first vertical blank after its command executes, at most one per vblank, so a game that flips once per two vblanks runs at 30 flips per second. The command holds the command FIFO until then. A flip in the HSYNC flip mode is paced as with `60`. `60` completes at most 60 flips per second whatever the flip mode, like RPCS3's default "Auto" frame limit: a flip command that arrives early holds the command FIFO until its time. `off` completes every flip as soon as its command executes, so a headless run flips as fast as the game produces frames. Any other value is a usage error. With the window, the debug overlay can switch between the three while the game runs (`Flip limiter` under Settings); the option sets the value at start-up. See [Fake RSX](rendering.md#fake-rsx). |
 
 The renderer options are a usage error (exit code 2) when the renderer is off. The window and
 `--dump-frames` switch it on; `--dump-frames-every`, `--shader-cache`, `--resolution-scale`, `--aa-mode` and

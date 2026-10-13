@@ -68,8 +68,8 @@ struct OverlaySources {
     std::function<OverlayAudioStats()> audio;
     std::function<std::vector<std::pair<std::string, std::uint64_t>>()> unimplemented;
     std::function<std::uint64_t()> unimplemented_dropped;
-    std::function<bool()> flip_limit;
-    std::function<void(bool)> set_flip_limit;
+    std::function<RsxFlipLimit()> flip_limit;
+    std::function<void(RsxFlipLimit)> set_flip_limit;
     std::function<LogLevel()> log_level;
     std::function<void(LogLevel)> set_log_level;
     std::function<bool()> request_capture;
@@ -127,7 +127,7 @@ struct OverlayState {
     std::vector<std::pair<std::string, std::uint64_t>> unimplemented;
     std::uint64_t unimplemented_dropped = 0;
     RsxCaptureStatus capture;
-    bool flip_limit = true;
+    RsxFlipLimit flip_limit = RsxFlipLimit::Vsync;
     LogLevel log_level = LogLevel::Info;
     DumpCounts dumps;
     std::filesystem::path last_dump;

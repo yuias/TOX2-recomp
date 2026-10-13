@@ -92,9 +92,9 @@ struct Options {
     bool dump_every_given = false;
     bool vk_validation = false;
     bool no_window = false;
-    bool frame_limit = true;  // --frame-limit 60 (default) or off
-    bool host_priorities = true;  // --host-priorities on (default) or off
-    bool window = false;      // settled after all arguments
+    tox2::RsxFlipLimit frame_limit = tox2::RsxFlipLimit::Vsync;  // --frame-limit vsync (default), 60 or off
+    bool host_priorities = true;                                 // --host-priorities on (default) or off
+    bool window = false;                                         // settled after all arguments
     bool pad_probe = false;
     std::string dump_frames;
     std::uint32_t dump_frames_every = 1;
@@ -342,7 +342,7 @@ void printUsage() {
             "                [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]\n"
             "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
             "                [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]\n"
-            "                [--frame-limit 60|off] [--host-priorities on|off]\n"
+            "                [--frame-limit vsync|60|off] [--host-priorities on|off]\n"
             "                [--dump-guest ADDR:SIZE:FILE]...\n",
             stderr);
 }
@@ -489,11 +489,16 @@ bool parseArgs(int argc, char** argv, Options& opt) {
         } else if (arg == "--frame-limit") {
             std::string name;
             if (!value(name)) return false;
-            if (name != "60" && name != "off") {
-                std::fprintf(stderr, "error: --frame-limit needs 60 or off\n");
+            if (name == "vsync") {
+                opt.frame_limit = tox2::RsxFlipLimit::Vsync;
+            } else if (name == "60") {
+                opt.frame_limit = tox2::RsxFlipLimit::Hz60;
+            } else if (name == "off") {
+                opt.frame_limit = tox2::RsxFlipLimit::Off;
+            } else {
+                std::fprintf(stderr, "error: --frame-limit needs vsync, 60 or off\n");
                 return false;
             }
-            opt.frame_limit = name == "60";
         } else if (arg == "--host-priorities") {
             std::string name;
             if (!value(name)) return false;

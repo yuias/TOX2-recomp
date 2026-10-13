@@ -26,6 +26,7 @@
 #include "rsx/rsx_frame.h"
 #include "rsx/rsx_frame_builder.h"
 #include "rsx/rsx_registers.h"
+#include "rsx/rsx_state.h"
 
 namespace tox2 {
 
@@ -52,8 +53,20 @@ std::uint64_t rsxFlipCount();
 // Blocks until rsxFlipCount() >= n; returns at once when it already is. Any thread.
 void waitRsxFlipCount(std::uint64_t n);
 
-// Interval between completed flips while the flip limiter is on: RPCS3's default "Auto" frame limit (60.000 fps).
+// Interval between completed flips in the Hz60 flip limit: RPCS3's default "Auto" frame limit (60.000 fps).
 inline constexpr std::chrono::nanoseconds kRsxFlipPeriod{1'000'000'000 / 60};
+
+// How completing flip commands are paced.
+enum class RsxFlipLimit {
+    // RPCS3's "PS3 Native" frame limit: a flip in the game's VSYNC flip mode completes at the first vblank tick after
+    // its command executes, at most one per tick, with no wall-clock deadline. A flip in the HSYNC flip mode uses the
+    // Hz60 limiter.
+    Vsync,
+    // RPCS3's default "Auto" frame limit: at most 60 flips per second, whatever the flip mode.
+    Hz60,
+    // Every flip completes where its command executes.
+    Off,
+};
 
 // Register state and effects behind the parser. All members are used under the guest lock except
 // census(), which only touches atomics, and takeCommands()/takeCaptures(), which only touch state the
@@ -81,15 +94,29 @@ public:
     void vblankTick();
 
     using Clock = std::chrono::steady_clock;
-    // With the limiter on, a flip command is refused (the parser keeps it and retries) until the deadline
-    // that advances by kRsxFlipPeriod per completed flip; the first flip is never delayed. Off by default. Any
-    // thread: turning it off releases a held flip on the next pump, turning it on holds the flips after the
-    // next one.
-    void setFlipLimit(bool enabled) { flip_limit_.store(enabled, std::memory_order_relaxed); }
-    // The time the held flip becomes due, while the parser is stopped at one and the limiter is on. The host
+    // How flip commands are paced; a flip command that is not due is refused (the parser keeps it and retries).
+    // Hz60 holds a flip until a deadline that advances by kRsxFlipPeriod per completed flip; the first flip is
+    // never delayed. Vsync holds a flip in VSYNC flip mode (rsxState().requested_vsync) until a vblank tick has
+    // passed since its command first executed, the first flip included; a flip in HSYNC mode follows Hz60. Off by
+    // default. Any thread: the mode is read on every attempt, so switching to Off releases a held flip on the next
+    // pump, and switching to Hz60 or Vsync holds the flips after the next one.
+    void setFlipLimit(RsxFlipLimit limit) { flip_limit_.store(limit, std::memory_order_relaxed); }
+    // The time the held flip becomes due, while the parser is stopped at one held by the Hz60 deadline. The host
     // thread uses it to sleep without the guest lock until then, because nothing can advance before.
     std::optional<Clock::time_point> flipHoldDeadline() const {
-        return flip_waiting_ && flip_limit_.load(std::memory_order_relaxed) ? flip_deadline_ : std::nullopt;
+        return flip_waiting_ && !vblank_at_flip_ && flip_limit_.load(std::memory_order_relaxed) != RsxFlipLimit::Off
+                       ? flip_deadline_
+                       : std::nullopt;
+    }
+    // True while the parser is stopped at a flip that waits for a vblank tick and none has passed yet. Compares
+    // against the live tick count, so a tick delivered after the last pump ends the hold at once: the host thread
+    // must pump again rather than sleep to the next tick. Needs no lock: only vblankTick(), on the same thread,
+    // changes the count. requested_vsync is written by guest threads, so a stale read there delays the end of the
+    // hold by at most one sleep pass (one tick) after the game switches to HSYNC.
+    bool flipHeldForVblank() const {
+        return flip_waiting_ && vblank_at_flip_ && *vblank_at_flip_ == rsxState().vblank_count &&
+               flip_limit_.load(std::memory_order_relaxed) == RsxFlipLimit::Vsync &&
+               std::atomic_ref<bool>(rsxState().requested_vsync).load(std::memory_order_relaxed);
     }
 
     RsxCensus census() const;
@@ -154,8 +181,11 @@ private:
     void getReport(std::uint32_t value);
     // One NV308A_COLOR register write: the word goes to the NV3062 destination surface.
     void inlineBlitWord(std::uint32_t method, std::uint32_t value);
-    // True when a flip command may complete now; otherwise the flip is held.
-    bool flipDue();
+    // True when a flip command may complete now; otherwise the flip is held. `vblank_paced` tells whether the
+    // vblank rule decided it, in which case the wall-clock deadline does not move on.
+    bool flipDue(bool& vblank_paced);
+    // The Vsync limit's part of flipDue(): true once a vblank tick has passed since the first attempt.
+    bool vblankFlipDue();
     void flip(std::uint32_t buffer);
     void advanceFlipDeadline();
     void userCommand(std::uint32_t cause);
@@ -191,9 +221,11 @@ private:
 
     // Written from any thread, read by the pump and the host loop. Relaxed: it guards no other data, and a
     // stale read only moves the switch by one loop pass.
-    std::atomic<bool> flip_limit_{false};
+    std::atomic<RsxFlipLimit> flip_limit_{RsxFlipLimit::Off};
     bool flip_waiting_ = false;  // a flip command was refused and is retried
     std::optional<Clock::time_point> flip_deadline_;
+    // The vblank count when the held flip command first executed; set only while a Vsync hold is in progress.
+    std::optional<std::uint64_t> vblank_at_flip_;
 
     std::atomic<std::uint64_t> headers_{0}, flips_{0}, user_commands_{0};
     std::unique_ptr<std::atomic<std::uint64_t>[]> method_counts_;  // by register offset >> 2
@@ -273,10 +305,10 @@ void setRsxExecutorFactory(RsxExecutorFactory factory);
 // Turns the frame builder on for the consumer startRsxThread creates. Call before startRsxThread.
 void setRsxFrameBuilderEnabled(bool enabled);
 
-// Turns the flip limiter (kRsxFlipPeriod between completed flips) on or off: for the consumer startRsxThread
-// creates, and at run time for the one already running. On by default. Any thread.
-void setRsxFlipLimit(bool enabled);
-bool rsxFlipLimit();
+// Selects how flips are paced (see RsxFlipLimit): for the consumer startRsxThread creates, and at run time for the
+// one already running. Vsync by default. Any thread.
+void setRsxFlipLimit(RsxFlipLimit limit);
+RsxFlipLimit rsxFlipLimit();
 
 // Captures the listed frames (see RsxConsumer::enableCapture) into `<dir>/frame_<N>.tox2cap`, written on
 // the RSX thread after the guest lock is released. Implies the frame builder. Call before startRsxThread.

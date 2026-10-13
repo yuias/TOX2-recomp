@@ -130,7 +130,7 @@ void testRefresh() {
     sources.unimplemented_dropped = [] { return std::uint64_t{7}; };
     sources.flip_limit = [&] {
         ++limit_calls;
-        return false;
+        return tox2::RsxFlipLimit::Off;
     };
     sources.log_level = [] { return tox2::LogLevel::Warn; };
     sources.capture_status = [] {
@@ -141,7 +141,7 @@ void testRefresh() {
     };
 
     tox2::OverlayState state;
-    CHECK(state.flip_limit);
+    CHECK(state.flip_limit == tox2::RsxFlipLimit::Vsync);
     CHECK(state.log_level == tox2::LogLevel::Info);
 
     state.refresh(sources, at(0.0));
@@ -151,7 +151,7 @@ void testRefresh() {
     CHECK(state.skipped_per_s == 0.0);
     CHECK(state.unimplemented.size() == 1 && state.unimplemented[0].second == 2);
     CHECK(state.unimplemented_dropped == 7);
-    CHECK(!state.flip_limit);
+    CHECK(state.flip_limit == tox2::RsxFlipLimit::Off);
     CHECK(state.log_level == tox2::LogLevel::Warn);
     CHECK(state.capture.available && state.capture.last_frame == 9);
 
@@ -211,8 +211,8 @@ tox2::OverlaySources makeFakeSources() {
     };
     sources.unimplemented = [] { return std::vector<std::pair<std::string, std::uint64_t>>{{"state: x", 2}}; };
     sources.unimplemented_dropped = [] { return std::uint64_t{1}; };
-    sources.flip_limit = [] { return true; };
-    sources.set_flip_limit = [](bool) {};
+    sources.flip_limit = [] { return tox2::RsxFlipLimit::Vsync; };
+    sources.set_flip_limit = [](tox2::RsxFlipLimit) {};
     sources.log_level = [] { return tox2::LogLevel::Info; };
     sources.set_log_level = [](tox2::LogLevel) {};
     sources.request_capture = [] { return true; };
@@ -557,9 +557,12 @@ void testRuntimeSources() {
         return;
     }
 
-    const bool limit = sources.flip_limit();
-    sources.set_flip_limit(!limit);
-    CHECK(sources.flip_limit() == !limit);
+    const tox2::RsxFlipLimit limit = sources.flip_limit();
+    for (const tox2::RsxFlipLimit other :
+         {tox2::RsxFlipLimit::Vsync, tox2::RsxFlipLimit::Hz60, tox2::RsxFlipLimit::Off}) {
+        sources.set_flip_limit(other);
+        CHECK(sources.flip_limit() == other);
+    }
     sources.set_flip_limit(limit);
     CHECK(sources.flip_limit() == limit);
 

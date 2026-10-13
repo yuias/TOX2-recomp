@@ -293,6 +293,7 @@ std::string formatCensus() {
         if (rsx.vblank_handler_runs + rsx.flip_handler_runs + rsx.user_handler_runs != 0) {
             out += std::format("\n  interrupt handler calls: vblank {}, flip {}, user {}", rsx.vblank_handler_runs,
                                rsx.flip_handler_runs, rsx.user_handler_runs);
+            if (rsx.vblank_coalesced != 0) out += std::format(", coalesced vblanks {}", rsx.vblank_coalesced);
         }
         for (const RsxMethodCount& m : rsx.methods) {
             out += std::format("\n  method {:#x}{}{}: {}", m.method, m.name.empty() ? "" : " ", m.name, m.count);

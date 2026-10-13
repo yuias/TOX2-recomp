@@ -21,23 +21,35 @@ drawn; with `--render vulkan` the same thread also feeds a renderer (see [Render
   synchronization methods: semaphores and labels, reports and timestamps, `ref`, the flip
   command and the user command. It then publishes `get`. Method semantics follow RPCS3's
   `Emu/RSX/NV47/HW` sources. Every register write is counted for the census, and the thread
-  raises one vertical-blank event every 1/60 s. A flip from the command buffer does not wait for a
-  vertical blank. It is limited to 60 flips per second, like RPCS3's default "Auto" frame limit: the
-  first flip is immediate, and each later flip completes no earlier than a deadline that moves on by
-  exactly 1/60 s per flip. When a flip command arrives before its deadline, the FIFO is held at that
-  command (`get` stays at its header) and nothing behind it runs. A flip that is late does not make up
-  for it: the next deadline is then 1/60 s after that flip. The flip status, the flip handler, the last
-  flip time and the flip label are updated only when the flip completes. The wait happens with the
-  guest lock released, and the RSX thread's sleep ends at the earlier of the deadline and the next
-  vblank, so vblanks are still delivered on time while a flip is held. `--frame-limit off` completes a
-  flip as soon as its command executes. The vblank is due on a 1/60 s deadline that is checked
-  between slices of the command buffer too, so a consumer that is behind (a long draw backlog) still
-  delivers it on time. The game's frame rate is therefore bounded by this limit, whatever the
-  display's refresh rate is; see also [Rendering](#rendering).
+  raises one vertical-blank event every 1/60 s. How a flip from the command buffer is paced depends on
+  `--frame-limit`. In every mode the flip status, the flip handler, the last flip time and the flip
+  label are updated only when the flip completes, and while a flip is held the FIFO stays at that
+  command (`get` stays at its header) and nothing behind it runs.
+  - `vsync` (the default) follows RPCS3's "PS3 Native" frame limit and the game's flip mode
+    (`cellGcmSetFlipMode`). A flip in VSYNC mode, the mode this game sets, completes at the first
+    vblank after its command executes: the command records the vblank count and completes once the
+    count has moved on. The first flip is held too, and at most one flip completes per vblank, so the
+    game runs at 60 flips per second at most, and at 30 when its frame interval is 2, with no
+    wall-clock deadline. At a tick the vblank interrupt is queued before the flip interrupt, as it is
+    on the hardware, because the game's frame-interval countdown in the vblank handler depends on that
+    order. A flip in HSYNC mode is limited as in `60`.
+  - `60` is RPCS3's default "Auto" frame limit and ignores the flip mode: the first flip is
+    immediate, and each later flip completes no earlier than a deadline that moves on by exactly 1/60 s
+    per flip. A flip that is late does not make up for it: the next deadline is then 1/60 s after that
+    flip.
+  - `off` completes a flip as soon as its command executes.
+
+  The wait happens with the guest lock released. The RSX thread sleeps until the flip's deadline or
+  the next vblank, whichever is first, and a flip held for a vblank sleeps until the next one, so
+  vblanks are still delivered on time while a flip is held. The vblank is due on a 1/60 s deadline
+  that is checked between slices of the command buffer too, so a consumer that is behind (a long draw
+  backlog) still delivers it on time. The game's frame rate is therefore bounded by the limit,
+  whatever the display's refresh rate is; see also [Rendering](#rendering).
 - `_gcm_intr_thread` is a guest service thread, created as in RPCS3. The RSX thread queues the
   interrupts and this thread runs the handlers the game registered with
   `cellGcmSetVBlankHandler`, `cellGcmSetFlipHandler` and `cellGcmSetUserHandler`, with the guest
-  lock held. A vblank is not queued while an earlier one is still waiting; flips and user
+  lock held. A vblank is not queued while an earlier one is still waiting (the census adds
+  `coalesced vblanks N` to its interrupt line when that happened); flips and user
   commands are never dropped.
 
 The method census (the `rsx` section of the census) lists the number of FIFO headers, the number
@@ -101,10 +113,11 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   selected by its condition passes. Other opcodes (for example RSQ, DP2, LIT, the pack and
   unpack group and the flow-control opcodes), the WPOS, FOGC and SSA inputs, and the texture
   expand bit are not translated.
-- **Flips and vsync.** A flip is done when the command executes, once the 60 flips per second limit allows it
-  (see [Fake RSX](#fake-rsx)); `--frame-limit off` removes the limit. With the window the displayed buffer is
+- **Flips and vsync.** A flip is done when the command executes, once the flip limit allows it: with the default
+  `--frame-limit vsync` a flip in the game's VSYNC flip mode waits for the next vblank, otherwise the limit is
+  60 flips per second (see [Fake RSX](#fake-rsx)); `--frame-limit off` removes the limit. With the window the displayed buffer is
   also blitted, letterboxed to 16:9, to a swapchain with the FIFO present mode, once per completed flip;
-  presenting runs outside the guest lock. The limiter paces the flips before they reach the swapchain, so a
+  presenting runs outside the guest lock. The limit paces the flips before they reach the swapchain, so a
   display that refreshes faster than 60 Hz does not speed the game up; with `--frame-limit off` the display's
   refresh paces the RSX thread instead. Without a window nothing waits for a vertical blank in the renderer.
   The [debug overlay](runtime.md#debug-overlay) is drawn on the swapchain image after that blit, in a

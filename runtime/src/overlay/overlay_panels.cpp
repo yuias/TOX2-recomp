@@ -145,12 +145,25 @@ void drawAntiAliasing(OverlayState& state) {
     ImGui::EndDisabled();
 }
 
+const char* flipLimitLabel(RsxFlipLimit limit) {
+    switch (limit) {
+        case RsxFlipLimit::Vsync: return "VSync (game flip mode)";
+        case RsxFlipLimit::Hz60: return "60 Hz";
+        case RsxFlipLimit::Off: return "Off";
+    }
+    return "?";
+}
+
 void drawSettings(OverlayState& state, const OverlaySources& sources) {
     ImGui::BeginDisabled(!sources.set_flip_limit);
-    bool flip_limit = state.flip_limit;
-    if (ImGui::Checkbox("Flip limiter", &flip_limit)) {
-        state.flip_limit = flip_limit;
-        sources.set_flip_limit(flip_limit);
+    if (ImGui::BeginCombo("Flip limiter", flipLimitLabel(state.flip_limit))) {
+        for (const RsxFlipLimit limit : {RsxFlipLimit::Vsync, RsxFlipLimit::Hz60, RsxFlipLimit::Off}) {
+            if (ImGui::Selectable(flipLimitLabel(limit), limit == state.flip_limit) && limit != state.flip_limit) {
+                state.flip_limit = limit;
+                sources.set_flip_limit(limit);
+            }
+        }
+        ImGui::EndCombo();
     }
     ImGui::EndDisabled();
 

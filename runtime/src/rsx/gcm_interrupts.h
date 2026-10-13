@@ -13,6 +13,7 @@ namespace tox2 {
 
 struct GcmInterruptCounts {
     std::uint64_t vblank = 0, flip = 0, user = 0;  // handler calls made so far
+    std::uint64_t vblank_coalesced = 0;            // vblank ticks dropped because one was still queued
 };
 
 // Creates `_gcm_intr_thread` (a service thread) and installs the RSX interrupt hook that feeds it.

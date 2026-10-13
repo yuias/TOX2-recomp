@@ -38,6 +38,7 @@ struct InterruptState {
     bool stop = false;
     std::uint32_t thread_id = 0;
     std::atomic<std::uint64_t> calls[3] = {};
+    std::atomic<std::uint64_t> vblank_coalesced{0};  // ticks dropped because a vblank was still queued
 };
 
 InterruptState& interruptState() {
@@ -124,6 +125,7 @@ void postGcmInterrupt(RsxInterrupt kind, std::uint32_t arg) {
     if (kind == RsxInterrupt::VBlank) {
         if (s.vblank_queued) {
             logOnce("gcm-vblank-coalesced", "tox2: gcm: the vblank handler is behind, ticks are being coalesced");
+            s.vblank_coalesced.fetch_add(1, std::memory_order_relaxed);
             return;
         }
         s.vblank_queued = true;
@@ -137,7 +139,8 @@ GcmInterruptCounts gcmInterruptCounts() {
     const auto load = [&](RsxInterrupt kind) {
         return s.calls[static_cast<std::size_t>(kind)].load(std::memory_order_relaxed);
     };
-    return {load(RsxInterrupt::VBlank), load(RsxInterrupt::Flip), load(RsxInterrupt::User)};
+    return {load(RsxInterrupt::VBlank), load(RsxInterrupt::Flip), load(RsxInterrupt::User),
+            s.vblank_coalesced.load(std::memory_order_relaxed)};
 }
 
 void stopGcmInterruptThread() {
@@ -158,6 +161,7 @@ void stopGcmInterruptThread() {
     s.stop = false;
     s.thread_id = 0;
     for (auto& count : s.calls) count.store(0, std::memory_order_relaxed);
+    s.vblank_coalesced.store(0, std::memory_order_relaxed);
 }
 
 }  // namespace tox2
