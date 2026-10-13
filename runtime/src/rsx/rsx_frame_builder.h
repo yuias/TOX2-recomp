@@ -137,6 +137,19 @@ private:
     std::unordered_map<std::uint32_t, FpCacheEntry> fp_cache_;
     std::vector<std::uint8_t> fp_probe_;
 
+    // A vertex program seen before, keyed by its start address. `source` is the store's words that the flow walk
+    // read, [start * 4, (last + 1) * 4); `ucode_generation` is the store's name when the entry last matched.
+    struct VpCacheEntry {
+        std::uint32_t start = 0;
+        std::uint64_t ucode_generation = 0;
+        std::vector<std::uint32_t> source;
+        bool terminated = false, bad_target = false;
+        std::vector<std::uint32_t> ucode;  // RsxDraw::vp_ucode (empty when bad_target)
+        std::uint64_t hash = 0;
+    };
+    static constexpr std::size_t kVpCacheEntries = 32;
+    std::vector<VpCacheEntry> vp_cache_;  // most recently used first; the last is dropped when full
+
     // The open draw clause between SET_BEGIN_END(prim) and SET_BEGIN_END(0).
     bool in_draw_ = false;
     bool skip_draw_ = false;  // BEGIN with a primitive RPCS3 rejects: the clause is ignored up to END

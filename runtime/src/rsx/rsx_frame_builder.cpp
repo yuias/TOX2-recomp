@@ -511,24 +511,61 @@ void RsxFrameBuilder::fillVertexProgram(const RsxRegisters& regs, RsxDraw& draw)
         noteState("vertex program start out of range");
         return;
     }
+    // The flow walk reads only reached instructions, all within [start, flow.last], so a program seen before is the
+    // same while those words are. The store's name decides that without reading it; when the name is new (the
+    // program was uploaded again), the words are compared.
+    const std::uint64_t generation = regs.vpUcodeGeneration();
+    for (std::size_t i = 0; i < vp_cache_.size(); i++) {
+        VpCacheEntry& entry = vp_cache_[i];
+        if (entry.start != start) continue;
+        if (entry.ucode_generation != generation &&
+            std::memcmp(regs.vp_ucode.data() + start * 4, entry.source.data(), entry.source.size() * 4) != 0) {
+            continue;
+        }
+        entry.ucode_generation = generation;
+        std::rotate(vp_cache_.begin(), vp_cache_.begin() + i, vp_cache_.begin() + i + 1);
+        stats_.vp_cache_hits++;
+        // Same notes as the walk below, so the census counts per draw do not depend on the cache.
+        const VpCacheEntry& hit = vp_cache_.front();
+        if (!hit.terminated) noteState("unterminated vertex program");
+        if (hit.bad_target) {
+            noteState("vertex program branch outside the program");
+            return;
+        }
+        draw.vp_ucode = hit.ucode;
+        draw.vp_hash = hit.hash;
+        return;
+    }
+    stats_.vp_cache_misses++;
+
     // The program may extend past its first end bit when branches or calls lead there, and the store
     // can hold stale words in between. Only reached instructions are kept (the rest are zeroed, which
     // decodes as a NOP) so that the hash does not depend on leftovers, and branch targets are rebased
     // to the first instruction so that the same program hashes the same wherever it was loaded.
     const RsxVpFlow flow = analyzeVertexProgramFlow(regs.vp_ucode.data(), kRsxVpInstructionCount, start);
+    VpCacheEntry entry;
+    entry.start = start;
+    entry.ucode_generation = generation;
+    entry.source.assign(regs.vp_ucode.begin() + start * 4, regs.vp_ucode.begin() + (flow.last + 1) * 4);
+    entry.terminated = flow.terminated;
+    entry.bad_target = flow.bad_target;
     if (!flow.terminated) noteState("unterminated vertex program");
     if (flow.bad_target) {
         noteState("vertex program branch outside the program");
-        return;
+    } else {
+        draw.vp_ucode.assign((flow.last - start + 1) * 4, 0);
+        for (std::uint32_t i = start; i <= flow.last; i++) {
+            if (flow.reached[i] == 0) continue;
+            std::uint32_t* out = &draw.vp_ucode[(i - start) * 4];
+            std::copy_n(&regs.vp_ucode[i * 4], 4, out);
+            if (rsxVpHasBranchTarget(rsxVpScaOpcode(out))) rsxVpSetBranchTarget(out, rsxVpBranchTarget(out) - start);
+        }
+        draw.vp_hash = hashWords(draw.vp_ucode);
+        entry.ucode = draw.vp_ucode;
+        entry.hash = draw.vp_hash;
     }
-    draw.vp_ucode.assign((flow.last - start + 1) * 4, 0);
-    for (std::uint32_t i = start; i <= flow.last; i++) {
-        if (flow.reached[i] == 0) continue;
-        std::uint32_t* out = &draw.vp_ucode[(i - start) * 4];
-        std::copy_n(&regs.vp_ucode[i * 4], 4, out);
-        if (rsxVpHasBranchTarget(rsxVpScaOpcode(out))) rsxVpSetBranchTarget(out, rsxVpBranchTarget(out) - start);
-    }
-    draw.vp_hash = hashWords(draw.vp_ucode);
+    if (vp_cache_.size() >= kVpCacheEntries) vp_cache_.pop_back();
+    vp_cache_.insert(vp_cache_.begin(), std::move(entry));
 }
 
 void RsxFrameBuilder::endDraw(const RsxRegisters& regs) {

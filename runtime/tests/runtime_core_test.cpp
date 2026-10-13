@@ -8652,6 +8652,121 @@ void testFragmentProgramCache() {
     tox2::rsxUnimplementedReset();
 }
 
+// Loads `words` (4 per instruction) at instruction `at` and starts the vertex program there.
+void uploadVertexProgram(FragmentRig& rig, std::uint32_t at, const std::vector<std::uint32_t>& words) {
+    rig.write(tox2::kMethodNv4097SetTransformProgramLoad, at);
+    for (std::size_t w = 0; w < words.size(); w++) {
+        rig.write(tox2::kMethodNv4097SetTransformProgram + static_cast<std::uint32_t>(w % 4) * 4, words[w]);
+    }
+    rig.write(tox2::kMethodNv4097SetTransformProgramStart, at);
+}
+
+void testVertexProgramCache() {
+    tox2::rsxUnimplementedReset();
+    FakeRsxMemory memory;
+    for (std::uint32_t i = 0; i < 96; i++) memory.main[0x1000 + i] = static_cast<std::uint8_t>(i);
+    memory.putWord(0, 0x2000, 0x00010000);
+    FragmentRig rig(memory);
+
+    // What a builder with no history makes of the same program.
+    const auto fresh = [&](std::uint32_t at, const std::vector<std::uint32_t>& words) {
+        FragmentRig other(memory);
+        uploadVertexProgram(other, at, words);
+        return other.draw(0x2000);
+    };
+    const auto sameProgram = [](const tox2::RsxDraw& a, const tox2::RsxDraw& b) {
+        return a.vp_ucode == b.vp_ucode && a.vp_hash == b.vp_hash;
+    };
+    const auto& stats = rig.builder.stats();
+
+    // Two instructions, the second with the end bit. Words 2 are payload that does not steer the flow.
+    std::vector<std::uint32_t> program = {0, 0, 0x4000, 0, 0, 0, 0x8000, 1};
+    uploadVertexProgram(rig, 4, program);
+    const tox2::RsxDraw first = rig.draw(0x2000);
+    CHECK(first.vp_ucode == program && first.vp_hash != 0);
+    CHECK(stats.vp_cache_hits == 0 && stats.vp_cache_misses == 1);
+    CHECK(sameProgram(first, fresh(4, program)));
+
+    // The same store again: a hit under the same name.
+    const tox2::RsxDraw second = rig.draw(0x2000);
+    CHECK(stats.vp_cache_hits == 1 && stats.vp_cache_misses == 1 && sameProgram(second, first));
+
+    // The same words uploaded again carry a new name and hit through the comparison.
+    const std::uint64_t name = rig.regs->vpUcodeGeneration();
+    uploadVertexProgram(rig, 4, program);
+    CHECK(rig.regs->vpUcodeGeneration() != name);
+    const tox2::RsxDraw reuploaded = rig.draw(0x2000);
+    CHECK(stats.vp_cache_hits == 2 && stats.vp_cache_misses == 1 && sameProgram(reuploaded, first));
+
+    // A word past the last reached instruction is not part of the program: still a hit.
+    uploadVertexProgram(rig, 6, {0xDEAD0001, 0, 0x4000, 0});
+    rig.write(tox2::kMethodNv4097SetTransformProgramStart, 4);
+    CHECK(sameProgram(rig.draw(0x2000), first) && stats.vp_cache_hits == 3 && stats.vp_cache_misses == 1);
+
+    // A changed reached word misses and gives what a fresh builder gives.
+    program[2] = 0x4001;
+    uploadVertexProgram(rig, 4, program);
+    const tox2::RsxDraw changed = rig.draw(0x2000);
+    CHECK(stats.vp_cache_hits == 3 && stats.vp_cache_misses == 2);
+    CHECK(changed.vp_ucode == program && changed.vp_hash != first.vp_hash && sameProgram(changed, fresh(4, program)));
+
+    // The same words at another start are another entry with the same hash, and both stay cached.
+    uploadVertexProgram(rig, 12, program);
+    const tox2::RsxDraw moved = rig.draw(0x2000);
+    CHECK(stats.vp_cache_misses == 3 && moved.vp_hash == changed.vp_hash && moved.vp_ucode == changed.vp_ucode);
+    rig.write(tox2::kMethodNv4097SetTransformProgramStart, 4);
+    CHECK(sameProgram(rig.draw(0x2000), changed) && stats.vp_cache_hits == 4);
+    rig.write(tox2::kMethodNv4097SetTransformProgramStart, 12);
+    CHECK(sameProgram(rig.draw(0x2000), moved) && stats.vp_cache_hits == 5 && stats.vp_cache_misses == 3);
+
+    // A branchy program (as in the synthetic capture test): a hit gives the rebased words again.
+    const std::vector<std::uint32_t> branchy = {
+            (7u << 10), 0x11u << 27, 2, (1u << 23) | (7u << 29),  // BRB, bit 1, taken when clear, target 23 = start + 3
+            0,          0,           0, 1,                        // end
+            0xDEAD0001, 0x0F000000,  0, 0,                        // stale, never reached
+            0,          0,           0, 1,                        // end
+    };
+    uploadVertexProgram(rig, 20, branchy);
+    const tox2::RsxDraw branchy_first = rig.draw(0x2000);
+    const tox2::RsxDraw branchy_second = rig.draw(0x2000);
+    CHECK(branchy_first.vp_ucode.size() == 16 && branchy_first.vp_ucode[3] == ((1u << 23) | (3u << 29)));
+    CHECK(branchy_first.vp_ucode[8] == 0 && branchy_first.vp_ucode[9] == 0 && branchy_first.vp_ucode[15] == 1);
+    CHECK(stats.vp_cache_misses == 4 && stats.vp_cache_hits == 6 && sameProgram(branchy_second, branchy_first));
+    CHECK(sameProgram(branchy_first, fresh(20, branchy)));
+
+    // Programs that run off the end of the store, or branch out of themselves, repeat their notes on a hit.
+    tox2::rsxUnimplementedReset();
+    const std::vector<std::uint32_t> open_ended = {0, 0, 0x4000, 0};
+    uploadVertexProgram(rig, tox2::kRsxVpInstructionCount - 1, open_ended);
+    const std::uint64_t misses = stats.vp_cache_misses, hits = stats.vp_cache_hits;
+    const tox2::RsxDraw unterminated = rig.draw(0x2000);
+    CHECK(unimplementedCount("state unterminated vertex program") == 1 && stats.vp_cache_misses == misses + 1);
+    const tox2::RsxDraw unterminated_again = rig.draw(0x2000);
+    CHECK(unimplementedCount("state unterminated vertex program") == 2 && stats.vp_cache_hits == hits + 1);
+    CHECK(unterminated.vp_ucode == open_ended && sameProgram(unterminated_again, unterminated));
+    const std::vector<std::uint32_t> outside = {0, 0x11u << 27, 0, 1};  // BRB with target 0, before the entry
+    uploadVertexProgram(rig, 30, outside);
+    const tox2::RsxDraw bad = rig.draw(0x2000);
+    CHECK(bad.vp_ucode.empty() && bad.vp_hash == 0);
+    CHECK(unimplementedCount("state vertex program branch outside the program") == 1);
+    const tox2::RsxDraw bad_again = rig.draw(0x2000);
+    CHECK(bad_again.vp_ucode.empty() && bad_again.vp_hash == 0 && stats.vp_cache_hits == hits + 2);
+    CHECK(unimplementedCount("state vertex program branch outside the program") == 2);
+    CHECK(unimplementedCount("state unterminated vertex program") == 2);
+
+    // More programs than the cache holds: results stay right and the newest is cached.
+    for (std::uint32_t i = 0; i < 40; i++) {
+        const std::vector<std::uint32_t> word = {0, 0, 0x4000 + i * 64, 1};
+        uploadVertexProgram(rig, 100 + i, word);
+        const tox2::RsxDraw many = rig.draw(0x2000);
+        CHECK(many.vp_ucode == word);
+    }
+    const std::uint64_t before = stats.vp_cache_hits;
+    rig.draw(0x2000);
+    CHECK(stats.vp_cache_hits == before + 1);
+    tox2::rsxUnimplementedReset();
+}
+
 bool sameSurface(const tox2::RsxSurface& a, const tox2::RsxSurface& b) {
     return a.location == b.location && a.offset == b.offset && a.pitch == b.pitch && a.width == b.width &&
            a.height == b.height && a.format == b.format && a.depth_format == b.depth_format;
@@ -12242,6 +12357,7 @@ int main(int argc, char** argv) {
     testRsxTextureLayout();
     testRsxFrameBuilder();
     testFragmentProgramCache();
+    testVertexProgramCache();
     testRsxTextureCache();
     testRsxFloatAndDepthSurfaces();
     testRsxCapture();
