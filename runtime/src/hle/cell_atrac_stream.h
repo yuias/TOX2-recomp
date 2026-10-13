@@ -118,6 +118,16 @@ public:
     // The reason of the first rejected frame, once; empty afterwards (the HLE layer logs it per handle).
     std::string takeFirstError() { return std::exchange(first_error_, std::string()); }
 
+    // Host-clock timing of one handle for the debug log: decoding that runs slower than the sample rate
+    // shows up as a wall duration longer than the decoded audio.
+    struct DebugTiming {
+        std::uint64_t created_us = 0;
+        std::uint64_t first_decode_us = 0, last_decode_us = 0;  // successful Decode calls only
+        std::uint64_t samples = 0;                              // per channel, summed over those calls
+        std::uint32_t decodes = 0, starved = 0;
+    };
+    DebugTiming& debugTiming() { return debug_timing_; }
+
 private:
     AtracStream() = default;
 
@@ -154,6 +164,7 @@ private:
     std::vector<float> frame_samples_;
     std::string first_error_;
     bool error_seen_ = false;
+    DebugTiming debug_timing_;
 };
 
 }  // namespace tox2

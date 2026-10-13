@@ -1,6 +1,7 @@
 // tox2_game: loads the decrypted EBOOT.elf and runs it through the generated PPU code.
 
 #include <atomic>
+#include <bit>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
@@ -8,6 +9,7 @@
 #include <expected>
 #include <filesystem>
 #include <format>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -105,6 +107,54 @@ struct Options {
     std::vector<tox2::GuestDumpSpec> dumps;  // --dump-guest
 };
 
+// Guest addresses in the BLJS10188 EBOOT, read only for the per-second perf line.
+// Time block: f32 dt at +0, u64 render hand-off job counters at +0x120/+0x128/+0x130.
+constexpr std::uint32_t kGameTimeBlock = 0x116abd0;
+constexpr std::uint32_t kGameTimeBlockBytes = 0x138;
+constexpr std::uint32_t kGameJobCounters = 0x120;
+// Frame block: u32 frame interval at +0 (1 = 60 fps, 2 = 30 fps), u64 frame counter at +8.
+constexpr std::uint32_t kGameFrameBlock = 0x10cd670;
+constexpr std::uint32_t kGameFrameBlockBytes = 0x10;
+
+// Range of the game's dt over the flips of the last perf interval. Written by the RSX thread, drained by the perf
+// thread; a flip racing the drain lands in either interval.
+class GameDtWindow {
+public:
+    void add(float dt) {
+        float cur = min_.load(std::memory_order_relaxed);
+        while (dt < cur && !min_.compare_exchange_weak(cur, dt, std::memory_order_relaxed)) {
+        }
+        cur = max_.load(std::memory_order_relaxed);
+        while (dt > cur && !max_.compare_exchange_weak(cur, dt, std::memory_order_relaxed)) {
+        }
+    }
+
+    // Returns false when no flip was sampled.
+    bool take(float& min, float& max) {
+        min = min_.exchange(std::numeric_limits<float>::infinity(), std::memory_order_relaxed);
+        max = max_.exchange(-std::numeric_limits<float>::infinity(), std::memory_order_relaxed);
+        return min <= max;
+    }
+
+private:
+    std::atomic<float> min_{std::numeric_limits<float>::infinity()};
+    std::atomic<float> max_{-std::numeric_limits<float>::infinity()};
+};
+
+GameDtWindow& gameDtWindow() {
+    static GameDtWindow window;
+    return window;
+}
+
+// False until the EBOOT is loaded (or when the images differ).
+bool gameTimeMapped() {
+    const tox2::GuestMemory& memory = tox2::process().memory;
+    return memory.isCommitted(kGameTimeBlock, kGameTimeBlockBytes) &&
+           memory.isCommitted(kGameFrameBlock, kGameFrameBlockBytes);
+}
+
+float readGameDt() { return std::bit_cast<float>(tox2Read32(tox2::process().memory.base(), kGameTimeBlock)); }
+
 bool padUsesKeyboard(std::string_view pad) { return pad == "keyboard" || pad == "keyboard+gamepad"; }
 bool padUsesGamepad(std::string_view pad) { return pad == "gamepad" || pad == "keyboard+gamepad"; }
 
@@ -143,6 +193,9 @@ public:
         draws_.store(stats.draws, std::memory_order_relaxed);
         skipped_.store(stats.draws_skipped, std::memory_order_relaxed);
         clears_.store(stats.clears, std::memory_order_relaxed);
+        if (stats.flips != flips_.load(std::memory_order_relaxed) && gameTimeMapped()) {
+            gameDtWindow().add(readGameDt());
+        }
         flips_.store(stats.flips, std::memory_order_relaxed);
         if (!renderer_->valid()) {
             failed_.store(true, std::memory_order_relaxed);
@@ -626,6 +679,23 @@ tox2::PerfSource audioPerfSource() {
     };
 }
 
+// The game's own timing state, for judging whether dt and the render hand-off keep up with the frame interval.
+// Snapshot reads of live guest memory without the guest lock; the values are diagnostic only.
+tox2::PerfSource gamePerfSource() {
+    return []() -> std::string {
+        if (!gameTimeMapped()) return {};
+        const std::uint8_t* base = tox2::process().memory.base();
+        std::string body = std::format("game dt {:.3f} interval {} frame {} jobs {}/{}/{}", readGameDt(),
+                                       tox2Read32(base, kGameFrameBlock), tox2Read64(base, kGameFrameBlock + 8),
+                                       tox2Read64(base, kGameTimeBlock + kGameJobCounters),
+                                       tox2Read64(base, kGameTimeBlock + kGameJobCounters + 8),
+                                       tox2Read64(base, kGameTimeBlock + kGameJobCounters + 0x10));
+        float min = 0.0f, max = 0.0f;
+        if (gameDtWindow().take(min, max)) body += std::format(" dt-at-flips min {:.3f} max {:.3f}", min, max);
+        return body;
+    };
+}
+
 bool isAudioPathClass(tox2::GuestLockClass cls) {
     return cls == tox2::GuestLockClass::Audio || cls == tox2::GuestLockClass::Spu ||
            cls == tox2::GuestLockClass::PpuHigh;
@@ -765,7 +835,7 @@ int main(int argc, char** argv) {
         return static_cast<int>(tox2::ExitCode::Usage);
     }
 
-    tox2::startPerfLog({audioPerfSource(), lockPerfSource(), spuPerfSource()});
+    tox2::startPerfLog({audioPerfSource(), gamePerfSource(), lockPerfSource(), spuPerfSource()});
 
     // Precedence: command-line options, then the configuration file, then the defaults.
     std::optional<tox2::VfsConfigFile> vfs_file;

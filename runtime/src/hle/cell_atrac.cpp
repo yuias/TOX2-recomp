@@ -26,6 +26,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "core/census.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "tox2/ppu_context.h"
@@ -140,6 +141,9 @@ void createDecoderFor(Tox2PpuContext* ctx) {
                 info.loop ? std::format("{}-{}", info.loop->start_sample, info.loop->end_sample) : std::string("none");
         logInfo("tox2: atrac: decoder {:#x}: {} ch {} Hz, {} frames, loop {}, {}", handle, info.channels,
                 info.sample_rate, sound->frames(), loop, sound->memoryMode() ? "all on memory" : "streaming");
+        sound->debugTiming().created_us = systemTimeUs();
+        logDebug("tox2: atrac: create t {} ms handle {:#x} max_sample {}", sound->debugTiming().created_us / 1000,
+                 handle, kAtracMaxSample);
     }
     setResultCode(ctx, result);
 }
@@ -196,7 +200,19 @@ void atracGetInternalErrorInfo(Tox2PpuContext* ctx, std::uint8_t* base) {
 // cellAtracDeleteDecoder(CellAtracHandle* handle)
 void atracDeleteDecoder(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
-    setResultCode(ctx, sounds().erase(argU32(ctx, 0)) != 0 ? kCellOk : kAtracErrorUnsetData);
+    const std::uint32_t handle = argU32(ctx, 0);
+    if (AtracStream* sound = findSound(handle); sound != nullptr && logEnabled(LogLevel::Debug)) {
+        const AtracStream::DebugTiming& timing = sound->debugTiming();
+        const double audio_ms = static_cast<double>(timing.samples) * 1000.0 / std::max(sound->info().sample_rate, 1u);
+        const double wall_ms = static_cast<double>(timing.last_decode_us - timing.first_decode_us) / 1000.0;
+        logDebug(
+                "tox2: atrac: delete t {} ms handle {:#x} samples {} decodes {} starved {} first_decode {} ms "
+                "last_decode {} ms wall {:.1f} ms audio {:.1f} ms ({} Hz)",
+                systemTimeUs() / 1000, handle, timing.samples, timing.decodes, timing.starved,
+                timing.first_decode_us / 1000, timing.last_decode_us / 1000, wall_ms, audio_ms,
+                sound->info().sample_rate);
+    }
+    setResultCode(ctx, sounds().erase(handle) != 0 ? kCellOk : kAtracErrorUnsetData);
 }
 
 // cellAtracDecode(CellAtracHandle* handle, float* out, u32* samples, u32* finish, s32* remain)
@@ -237,9 +253,14 @@ void atracDecode(Tox2PpuContext* ctx, std::uint8_t* base) {
         // The game waits for AddStreamData on this code and retries; success with no samples and
         // finish = 0 would make it queue an empty PCM buffer.
         add(t.starved, 1);
+        sound->debugTiming().starved++;
         setResultCode(ctx, kAtracErrorNodataInBuffer);
         return;
     }
+    AtracStream::DebugTiming& timing = sound->debugTiming();
+    timing.last_decode_us = systemTimeUs();
+    if (timing.decodes++ == 0) timing.first_decode_us = timing.last_decode_us;
+    timing.samples += result->samples;
     if (const std::string reason = sound->takeFirstError(); !reason.empty()) {
         logWarn("tox2: atrac: handle {:#x}: decode error, playing silence for such frames: {}", argU32(ctx, 0), reason);
     }
