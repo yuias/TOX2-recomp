@@ -150,6 +150,9 @@ public:
     // Commands built since the last call, after building a pending draw. Needs no guest lock (only the
     // pump's thread may call it); the draw's copies then run without it.
     std::vector<RsxCommand> takeCommands();
+    // Gives back commands that were executed and are not kept, so their buffers serve the next draws. Same thread
+    // as takeCommands().
+    void recycleCommands(std::vector<RsxCommand>&& commands);
     // Counts the commands by kind for the stop line; any thread.
     void countCommands(const std::vector<RsxCommand>& commands);
     struct CommandCounts {

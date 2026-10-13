@@ -190,8 +190,40 @@ void RsxFrameBuilder::onFlip(const RsxRegisters&, std::uint32_t buffer, const Rs
 
 std::vector<RsxCommand> RsxFrameBuilder::takeCommands() { return std::exchange(commands_, {}); }
 
-// Nothing is kept yet: the commands are released here.
-void RsxFrameBuilder::recycle(std::vector<RsxCommand>&& commands) { commands.clear(); }
+void RsxFrameBuilder::recycle(std::vector<RsxCommand>&& commands) {
+    for (RsxCommand& command : commands) {
+        RsxDraw* draw = std::get_if<RsxDraw>(&command);
+        if (draw == nullptr || spare_draws_.size() >= kRecycledDraws) continue;
+        DrawBuffers& spare = spare_draws_.emplace_back();
+        spare.attribs = std::move(draw->attribs);
+        spare.vertex_data = std::move(draw->vertex_data);
+        spare.index_data = std::move(draw->index_data);
+        spare.textures = std::move(draw->textures);
+        spare.vp_ucode = std::move(draw->vp_ucode);
+        spare.fp_ucode = std::move(draw->fp_ucode);
+        spare.fp_constants = std::move(draw->fp_constants);
+        // Clearing drops the shared texture blobs now, not when the spare is next used.
+        spare.attribs.clear();
+        spare.textures.clear();
+        spare.vp_ucode.clear();
+        spare.fp_ucode.clear();
+        spare.fp_constants.clear();
+        // swap, not `= {}`: that picks the initializer_list overload, which keeps the capacity.
+        if (spare.vertex_data.capacity() > kRecycledVertexBytes) {
+            std::vector<std::uint8_t>().swap(spare.vertex_data);
+        } else {
+            spare.vertex_data.clear();
+        }
+        if (spare.index_data.capacity() > kRecycledIndexBytes) {
+            std::vector<std::uint8_t>().swap(spare.index_data);
+        } else {
+            spare.index_data.clear();
+        }
+    }
+    commands.clear();
+    // takeCommands() leaves commands_ without capacity; hand it the vector that has some.
+    if (commands_.empty() && commands.capacity() > commands_.capacity()) commands_ = std::move(commands);
+}
 
 void RsxFrameBuilder::beginDraw(std::uint32_t primitive) {
     in_draw_ = true;
@@ -752,6 +784,17 @@ void RsxFrameBuilder::buildDraw(const RsxRegisters& regs) {
     stats_.build_draw_calls++;
 
     RsxDraw draw;
+    if (!spare_draws_.empty()) {
+        DrawBuffers& spare = spare_draws_.back();
+        draw.attribs = std::move(spare.attribs);
+        draw.vertex_data = std::move(spare.vertex_data);
+        draw.index_data = std::move(spare.index_data);
+        draw.textures = std::move(spare.textures);
+        draw.vp_ucode = std::move(spare.vp_ucode);
+        draw.fp_ucode = std::move(spare.fp_ucode);
+        draw.fp_constants = std::move(spare.fp_constants);
+        spare_draws_.pop_back();
+    }
     draw.primitive = primitive_;
     draw.indexed = indexed_;
     draw.first = range_.first;

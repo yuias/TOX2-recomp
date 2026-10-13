@@ -71,8 +71,12 @@ public:
     // Moves out what was built since the last call.
     std::vector<RsxCommand> takeCommands();
 
-    // Gives back commands the caller has finished with (after execution), so the builder may reuse their buffers.
+    // Gives back commands the caller has finished with (after execution), so the builder may reuse their buffers:
+    // the vectors of up to kRecycledDraws draws are kept (emptied), and so is the command vector itself.
     void recycle(std::vector<RsxCommand>&& commands);
+
+    // Draw buffer sets waiting to be reused by the next draws.
+    std::size_t spareDraws() const { return spare_draws_.size(); }
 
     // While enabled, buildDraw is timed into stats().build_draw_ns; the clock is not read otherwise.
     void setTimingEnabled(bool enabled) { timing_enabled_ = enabled; }
@@ -124,6 +128,20 @@ private:
     std::vector<std::uint8_t> texture_scratch_;  // guest bytes of the texture being checked or converted
     RsxBuilderStats stats_;
     bool timing_enabled_ = false;
+
+    // The vectors of a finished draw, emptied but with their capacity, so that a steady stream of draws stops
+    // allocating (and page-faulting) the same megabytes every frame. Capacity above the caps is freed so that one huge
+    // draw does not pin its memory.
+    struct DrawBuffers {
+        std::vector<RsxVertexAttrib> attribs;
+        std::vector<std::uint8_t> vertex_data, index_data;
+        std::vector<RsxTextureDesc> textures;
+        std::vector<std::uint32_t> vp_ucode, fp_ucode, fp_constants;
+    };
+    static constexpr std::size_t kRecycledDraws = 64;
+    static constexpr std::size_t kRecycledVertexBytes = 1u << 20;
+    static constexpr std::size_t kRecycledIndexBytes = 256u << 10;
+    std::vector<DrawBuffers> spare_draws_;
 
     // A fragment program seen before, keyed by the SET_SHADER_PROGRAM value. A draw whose program bytes still match
     // `bytes` (apart from the inline constants) reuses `ucode` and `hash` and skips the word-by-word scan.

@@ -268,6 +268,10 @@ std::vector<RsxCommand> RsxConsumer::takeCommands() {
     return builder_->takeCommands();
 }
 
+void RsxConsumer::recycleCommands(std::vector<RsxCommand>&& commands) {
+    if (builder_ != nullptr) builder_->recycle(std::move(commands));
+}
+
 void RsxConsumer::countCommands(const std::vector<RsxCommand>& commands) {
     std::uint64_t clears = 0, draws = 0, flips = 0;
     for (const RsxCommand& command : commands) {
@@ -697,7 +701,11 @@ void dispatchCommands(RsxConsumer* consumer, RsxExecutor* executor, std::vector<
     if (commands.empty()) return;
     consumer->countCommands(commands);
     if (executor != nullptr) executor->execute(commands);
-    if (g_command_sink) g_command_sink(std::move(commands));
+    if (g_command_sink) {
+        g_command_sink(std::move(commands));
+    } else {
+        consumer->recycleCommands(std::move(commands));
+    }
 }
 
 // File I/O stays out of the guest lock; a failed write is reported and the run goes on.

@@ -9094,6 +9094,97 @@ bool sameCommand(const tox2::RsxCommand& left, const tox2::RsxCommand& right) {
     return true;
 }
 
+// Draw vectors handed back with recycle() serve the next draws: same buffers, same contents as a fresh builder's
+// draw, texture blobs released at once, a size cap on the kept capacity and a cap on the number of kept sets.
+void testRecycledDrawBuffers() {
+    tox2::rsxUnimplementedReset();
+    FakeRsxMemory memory;
+    memory.main.resize(2u << 20);
+    for (std::size_t i = 0; i < memory.main.size(); i++) memory.main[i] = static_cast<std::uint8_t>(i * 7 + (i >> 8));
+    for (std::uint32_t i = 0; i < 1024; i++) memory.local[0x3000 + i] = static_cast<std::uint8_t>(i ^ 0x5A);
+    memory.putWord(0, 0x2000, 0x00010000);
+
+    // A rig whose draws sample a linear 4x4 texture (one shared blob in the builder's texture cache).
+    const auto makeRig = [&] {
+        auto rig = std::make_unique<FragmentRig>(memory);
+        rig->write(0x08E4, 0x2000 | 1);
+        rig->write(0x1A00 + 0x20, 0x3000);
+        rig->write(0x1A04 + 0x20, 1u | (2u << 4) | ((0x85u | 0x20u) << 8) | (1u << 16));
+        rig->write(0x1A0C + 0x20, 0x80000000);
+        rig->write(0x1A18 + 0x20, (16u << 16) | 4u);
+        rig->write(0x1840 + 4, 64);
+        return rig;
+    };
+    // A draw of `vertices` vertices (a multiple of 256: one DRAW_ARRAYS write covers 256).
+    const auto drawArrays = [](FragmentRig& rig, std::uint32_t vertices) {
+        rig.write(0x1808, 5);
+        for (std::uint32_t first = 0; first < vertices; first += 256) rig.write(0x1814, first | (255u << 24));
+        rig.write(0x1808, 0);
+    };
+
+    auto rig = makeRig();
+    auto fresh = makeRig();
+    drawArrays(*rig, 1024);
+    drawArrays(*fresh, 1024);
+    std::vector<tox2::RsxCommand> commands = rig->builder.takeCommands();
+    std::vector<tox2::RsxCommand> expected = fresh->builder.takeCommands();
+    CHECK(commands.size() == 1 && expected.size() == 1);
+    const tox2::RsxDraw& first = std::get<tox2::RsxDraw>(commands[0]);
+    CHECK(first.vertex_data.size() == 1024 * 12 && first.textures.size() == 1 && first.textures[0].data);
+    const std::weak_ptr<const std::vector<std::uint8_t>> blob = first.textures[0].data;
+    CHECK(blob.use_count() == 2);  // the texture cache and the draw
+    const std::uint8_t* const vertex_buffer = first.vertex_data.data();
+    const void* const command_storage = commands.data();
+    CHECK(rig->builder.spareDraws() == 0);
+
+    rig->builder.recycle(std::move(commands));
+    CHECK(rig->builder.spareDraws() == 1 && blob.use_count() == 1);
+
+    // The next draw is built in the recycled buffer, in the recycled command vector, and equals a fresh builder's.
+    drawArrays(*rig, 1024);
+    drawArrays(*fresh, 1024);
+    commands = rig->builder.takeCommands();
+    expected = fresh->builder.takeCommands();
+    CHECK(commands.size() == 1 && expected.size() == 1 && commands.data() == command_storage);
+    const tox2::RsxDraw& second = std::get<tox2::RsxDraw>(commands[0]);
+    const tox2::RsxDraw& reference = std::get<tox2::RsxDraw>(expected[0]);
+    CHECK(rig->builder.spareDraws() == 0 && second.vertex_data.data() == vertex_buffer);
+    CHECK(second.vertex_data == reference.vertex_data && second.index_data == reference.index_data);
+    CHECK(second.attribs.size() == reference.attribs.size() && second.attribs[0].data_offset == 0);
+    CHECK(second.fp_ucode == reference.fp_ucode && second.fp_constants == reference.fp_constants &&
+          second.fp_hash == reference.fp_hash);
+    CHECK(second.vp_ucode == reference.vp_ucode && second.vp_hash == reference.vp_hash);
+    CHECK(second.textures.size() == 1 && second.textures[0].unit == 1 && *second.textures[0].data == *blob.lock());
+    CHECK(blob.use_count() == 2);
+    rig->builder.recycle(std::move(commands));
+    CHECK(rig->builder.spareDraws() == 1 && blob.use_count() == 1);
+
+    // A draw with more than 1 MiB of vertex data is built and recycled without changing the number of spares, and
+    // its buffer is not kept: the next small draw gets a vector sized for itself.
+    drawArrays(*rig, 256 * 392);
+    commands = rig->builder.takeCommands();
+    CHECK(commands.size() == 1 && std::get<tox2::RsxDraw>(commands[0]).vertex_data.size() > (1u << 20));
+    rig->builder.recycle(std::move(commands));
+    CHECK(rig->builder.spareDraws() == 1);
+    drawArrays(*rig, 1024);
+    commands = rig->builder.takeCommands();
+    CHECK(commands.size() == 1 && std::get<tox2::RsxDraw>(commands[0]).vertex_data.capacity() <= (1u << 20));
+    rig->builder.recycle(std::move(commands));
+
+    // No more than 64 sets are kept, however many draws come back at once.
+    for (int round = 0; round < 2; round++) {
+        for (int i = 0; i < 70; i++) drawArrays(*rig, 256);
+        commands = rig->builder.takeCommands();
+        CHECK(commands.size() == 70);
+        rig->builder.recycle(std::move(commands));
+        CHECK(rig->builder.spareDraws() == 64);
+    }
+    // Clears and flips come back too; they keep nothing.
+    rig->builder.recycle(std::vector<tox2::RsxCommand>{tox2::RsxFlip{}});
+    CHECK(rig->builder.spareDraws() == 64);
+    tox2::rsxUnimplementedReset();
+}
+
 // F_X32 color surfaces and depth surfaces as render target aliases: decoding, registration in the builder
 // (which draws and clears make a surface known, what a clear of a float surface does), the alias flags of a
 // texture, and the capture round trip of both kinds.
@@ -12632,6 +12723,7 @@ int main(int argc, char** argv) {
     testSharedVertexConstants();
     testFillVerticesOnePass();
     testSharedVertexRanges();
+    testRecycledDrawBuffers();
     testRsxTextureCache();
     testRsxFloatAndDepthSurfaces();
     testRsxCapture();
