@@ -1,5 +1,6 @@
 // Self-checking tests for the Vulkan renderer library. They skip when no Vulkan device exists.
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <chrono>
@@ -13,6 +14,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -989,6 +991,168 @@ void testVertexConvert() {
     CHECK(!tox2::rsxPrimitiveRestartSupported(RsxPrimitive::TriangleStrip, tox2::kRsxIndexTypeU16, 0xFFFFFFFF));
     CHECK(!tox2::rsxPrimitiveRestartSupported(RsxPrimitive::Triangles, tox2::kRsxIndexTypeU32, 0xFFFFFFFF));
     CHECK(!tox2::rsxPrimitiveRestartSupported(RsxPrimitive::TriangleStrip, tox2::kRsxIndexTypeU32, 5));
+}
+
+// The conversion before it was specialised per format, component at a time: the reference the fast loops must match
+// byte for byte.
+std::uint32_t referenceComponentBytes(std::uint8_t type) {
+    switch (type) {
+        case tox2::kVertexTypeFloat: return 4;
+        case tox2::kVertexTypeSnorm16:
+        case tox2::kVertexTypeHalf:
+        case tox2::kVertexTypeSint16: return 2;
+        default: return 1;
+    }
+}
+
+std::uint32_t referencePadded(std::uint8_t type) {
+    switch (type) {
+        case tox2::kVertexTypeHalf: return 0x3C00;
+        case tox2::kVertexTypeSnorm16: return 0x7FFF;
+        case tox2::kVertexTypeSint16: return 1;
+        default: return 0xFF;
+    }
+}
+
+std::uint32_t referenceWiden(const tox2::VertexAttribFormat& format, std::span<const std::uint8_t> src,
+                             std::uint32_t stride, std::uint32_t n, std::span<std::uint8_t> dst) {
+    const std::uint32_t component = referenceComponentBytes(format.type);
+    std::uint32_t written = 0;
+    for (std::uint32_t k = 0; k < n; k++) {
+        const std::uint64_t offset = static_cast<std::uint64_t>(k) * stride;
+        if (offset + format.guest_size > src.size()) break;
+        const std::uint8_t* in = src.data() + offset;
+        float values[4];
+        for (std::uint32_t c = 0; c < 4; c++) {
+            if (c >= format.size) {
+                values[c] = c == 3 ? 1.0f : 0.0f;
+            } else if (component == 2) {
+                values[c] = static_cast<float>(
+                        static_cast<std::int16_t>(static_cast<std::uint16_t>(in[c * 2] << 8 | in[c * 2 + 1])));
+            } else {
+                values[c] = static_cast<float>(in[c]);
+            }
+        }
+        std::memcpy(dst.data() + static_cast<std::size_t>(k) * 16, values, 16);
+        written++;
+    }
+    return written;
+}
+
+std::uint32_t referenceConvert(const tox2::VertexAttribFormat& format, std::span<const std::uint8_t> src,
+                               std::uint32_t stride, std::uint32_t count, std::span<std::uint8_t> dst) {
+    if (format.widen)
+        return referenceWiden(format, src, stride, stride == 0 ? std::min<std::uint32_t>(count, 1) : count, dst);
+    const std::uint32_t component = referenceComponentBytes(format.type);
+    const std::uint32_t out_components = format.host_size / component;
+    const std::uint32_t n = stride == 0 ? std::min<std::uint32_t>(count, 1) : count;
+    std::uint32_t written = 0;
+    for (std::uint32_t k = 0; k < n; k++) {
+        const std::uint64_t offset = static_cast<std::uint64_t>(k) * stride;
+        if (offset + format.guest_size > src.size()) break;
+        const std::uint8_t* in = src.data() + offset;
+        std::uint8_t* out = dst.data() + static_cast<std::size_t>(k) * format.host_size;
+        for (std::uint32_t c = 0; c < out_components; c++) {
+            std::uint8_t* o = out + c * component;
+            if (c >= format.size) {
+                const std::uint32_t value = referencePadded(format.type);
+                if (component == 2) {
+                    o[0] = static_cast<std::uint8_t>(value);
+                    o[1] = static_cast<std::uint8_t>(value >> 8);
+                } else {
+                    o[0] = static_cast<std::uint8_t>(value);
+                }
+                continue;
+            }
+            const std::uint8_t* i = in + c * component;
+            if (component == 4) {
+                o[0] = i[3];
+                o[1] = i[2];
+                o[2] = i[1];
+                o[3] = i[0];
+            } else if (component == 2) {
+                o[0] = i[1];
+                o[1] = i[0];
+            } else {
+                o[0] = i[0];
+            }
+        }
+        written++;
+    }
+    return written;
+}
+
+// A format the way vertexAttribFormat sizes it, also for the types and sizes it refuses.
+tox2::VertexAttribFormat sizedFormat(std::uint8_t type, std::uint8_t size) {
+    tox2::VertexAttribFormat format;
+    format.type = type;
+    format.size = size;
+    format.guest_size = referenceComponentBytes(type) * size;
+    format.host_size = referenceComponentBytes(type) * (size == 3 && type != tox2::kVertexTypeFloat ? 4 : size);
+    if (const auto real = tox2::vertexAttribFormat(type, size)) {
+        CHECK(real->guest_size == format.guest_size && real->host_size == format.host_size);
+        format.format = real->format;
+    }
+    return format;
+}
+
+void testVertexConvertMatchesReference() {
+    std::uint32_t state = 0x12345678u;  // xorshift32, fixed seed
+    auto nextByte = [&state]() {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        return static_cast<std::uint8_t>(state >> 11);
+    };
+
+    std::vector<tox2::VertexAttribFormat> formats;
+    for (std::uint8_t type = 1; type <= 7; type++) {
+        for (std::uint8_t size = 1; size <= 4; size++) {
+            const tox2::VertexAttribFormat format = sizedFormat(type, size);
+            formats.push_back(format);
+            // widenedFormat returns the types it does not widen unchanged; force the flag on every type too, which
+            // a hand-made format may carry.
+            formats.push_back(tox2::widenedFormat(format));
+            tox2::VertexAttribFormat forced = format;
+            forced.widen = true;
+            forced.host_size = 16;
+            formats.push_back(forced);
+        }
+    }
+    // Sizes no real format has, which take the unspecialised path.
+    formats.push_back(tox2::VertexAttribFormat{});
+    tox2::VertexAttribFormat odd = sizedFormat(tox2::kVertexTypeFloat, 3);
+    odd.host_size = 16;
+    formats.push_back(odd);
+
+    const std::uint32_t counts[] = {0, 1, 2, 7, 100};
+    std::size_t cases = 0;
+    for (const tox2::VertexAttribFormat& format : formats) {
+        const std::uint32_t strides[] = {0, format.guest_size, format.guest_size + 1, format.guest_size + 3, 64};
+        for (const std::uint32_t stride : strides) {
+            for (const std::uint32_t count : counts) {
+                const std::uint32_t elements = stride == 0 ? std::min<std::uint32_t>(count, 1) : count;
+                const std::size_t exact =
+                        elements == 0 ? 0 : static_cast<std::size_t>(elements - 1) * stride + format.guest_size;
+                // Exact, one byte short (a missing last element), and empty; the source starts at an odd address.
+                const std::size_t sizes[] = {exact, exact == 0 ? 0 : exact - 1, 0};
+                for (const std::size_t src_size : sizes) {
+                    std::vector<std::uint8_t> backing(src_size + 1);
+                    for (std::uint8_t& b : backing) b = nextByte();
+                    const std::span<const std::uint8_t> src(backing.data() + 1, src_size);
+                    const std::size_t dst_size = static_cast<std::size_t>(count) * std::max(format.host_size, 16u) + 16;
+                    std::vector<std::uint8_t> expected(dst_size, 0xCD);
+                    std::vector<std::uint8_t> actual(dst_size, 0xCD);
+                    const std::uint32_t expected_n = referenceConvert(format, src, stride, count, expected);
+                    const std::uint32_t actual_n = tox2::convertVertexElements(format, src, stride, count, actual);
+                    CHECK(actual_n == expected_n);
+                    CHECK(actual == expected);
+                    cases++;
+                }
+            }
+        }
+    }
+    CHECK(cases > 2000);
 }
 
 // ---- Drawing ----
@@ -4894,6 +5058,7 @@ int main() {
     testScaleRect();
     testZetaWriteRule();
     testVertexConvert();
+    testVertexConvertMatchesReference();
     testAaModeNames();
     testLayoutSource();
 

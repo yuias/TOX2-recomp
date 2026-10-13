@@ -1,7 +1,9 @@
 #include "render/vertex_convert.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
+#include <type_traits>
 
 namespace tox2 {
 namespace {
@@ -87,10 +89,12 @@ VertexAttribFormat widenedFormat(const VertexAttribFormat& format) {
 
 namespace {
 
+static_assert(std::endian::native == std::endian::little, "converted vertex data is written in host byte order");
+
 // Signed 16-bit (big-endian) or unsigned 8-bit components as floats; the components the attribute lacks are
-// 0, 0, 0, 1.
-std::uint32_t widenVertexElements(const VertexAttribFormat& format, std::span<const std::uint8_t> src,
-                                  std::uint32_t stride, std::uint32_t n, std::span<std::uint8_t> dst) {
+// 0, 0, 0, 1. Component-at-a-time loop for formats the specialised loops below do not cover.
+std::uint32_t widenVertexElementsGeneric(const VertexAttribFormat& format, std::span<const std::uint8_t> src,
+                                         std::uint32_t stride, std::uint32_t n, std::span<std::uint8_t> dst) {
     const std::uint32_t component = componentBytes(format.type);
     std::uint32_t written = 0;
     for (std::uint32_t k = 0; k < n; k++) {
@@ -114,15 +118,12 @@ std::uint32_t widenVertexElements(const VertexAttribFormat& format, std::span<co
     return written;
 }
 
-}  // namespace
-
-std::uint32_t convertVertexElements(const VertexAttribFormat& format, std::span<const std::uint8_t> src,
-                                    std::uint32_t stride, std::uint32_t count, std::span<std::uint8_t> dst) {
-    if (format.widen)
-        return widenVertexElements(format, src, stride, stride == 0 ? std::min<std::uint32_t>(count, 1) : count, dst);
+// Byte-at-a-time loop for formats whose sizes the specialised loops below do not cover (none that
+// vertexAttribFormat returns).
+std::uint32_t convertVertexElementsGeneric(const VertexAttribFormat& format, std::span<const std::uint8_t> src,
+                                           std::uint32_t stride, std::uint32_t n, std::span<std::uint8_t> dst) {
     const std::uint32_t component = componentBytes(format.type);
     const std::uint32_t out_components = format.host_size / component;
-    const std::uint32_t n = stride == 0 ? std::min<std::uint32_t>(count, 1) : count;
     std::uint32_t written = 0;
     for (std::uint32_t k = 0; k < n; k++) {
         const std::uint64_t offset = static_cast<std::uint64_t>(k) * stride;
@@ -157,6 +158,167 @@ std::uint32_t convertVertexElements(const VertexAttribFormat& format, std::span<
         written++;
     }
     return written;
+}
+
+// Elements, at most n, that fit in a source of src_bytes. Element k ends at k * stride + guest_bytes, so the ones
+// that fit are a prefix and the loops need no per-element bounds check.
+std::uint32_t fittingElements(std::size_t src_bytes, std::uint32_t guest_bytes, std::uint32_t stride, std::uint32_t n) {
+    if (src_bytes < guest_bytes) return 0;
+    if (stride == 0) return n;
+    return static_cast<std::uint32_t>(std::min<std::uint64_t>(n, (src_bytes - guest_bytes) / stride + 1));
+}
+
+template <typename T>
+T loadComponent(const std::uint8_t* p) {
+    T value;
+    std::memcpy(&value, p, sizeof(T));
+    return value;
+}
+
+template <typename T>
+void storeComponent(std::uint8_t* p, T value) {
+    std::memcpy(p, &value, sizeof(T));
+}
+
+// Components of Component bytes: Guest of them in the guest element, Host in the converted one (Guest or, for a
+// three-component 8-bit or 16-bit type, 4 with Pad as the last). Components wider than a byte are byte-swapped.
+// The converted element is built in a local buffer and stored whole: the upload memory is write-combined and
+// single-byte writes to it are slow.
+template <std::uint32_t Component, std::uint32_t Guest, std::uint32_t Host, std::uint32_t Pad>
+std::uint32_t convertPacked(std::span<const std::uint8_t> src, std::uint32_t stride, std::uint32_t n,
+                            std::span<std::uint8_t> dst) {
+    using T = std::conditional_t<Component == 4, std::uint32_t,
+                                 std::conditional_t<Component == 2, std::uint16_t, std::uint8_t>>;
+    constexpr std::uint32_t kGuestBytes = Component * Guest;
+    constexpr std::uint32_t kHostBytes = Component * Host;
+    const std::uint32_t m = fittingElements(src.size(), kGuestBytes, stride, n);
+    const std::uint8_t* in = src.data();
+    std::uint8_t* out = dst.data();
+
+    if constexpr (Host == Guest) {
+        // Tightly packed elements without padding are one run of components.
+        if (stride == kGuestBytes) {
+            if constexpr (Component == 1) {
+                if (m != 0) std::memcpy(out, in, static_cast<std::size_t>(m) * kGuestBytes);
+            } else {
+                const std::size_t total = static_cast<std::size_t>(m) * Guest;
+                for (std::size_t i = 0; i < total; i++) {
+                    storeComponent<T>(out + i * sizeof(T), std::byteswap(loadComponent<T>(in + i * sizeof(T))));
+                }
+            }
+            return m;
+        }
+    }
+
+    for (std::uint32_t k = 0; k < m; k++) {
+        const std::uint8_t* element = in + static_cast<std::size_t>(k) * stride;
+        T values[Host];
+        for (std::uint32_t c = 0; c < Guest; c++) {
+            const T raw = loadComponent<T>(element + c * sizeof(T));
+            values[c] = Component == 1 ? raw : std::byteswap(raw);
+        }
+        for (std::uint32_t c = Guest; c < Host; c++) values[c] = static_cast<T>(Pad);
+        std::memcpy(out + static_cast<std::size_t>(k) * kHostBytes, values, kHostBytes);
+    }
+    return m;
+}
+
+using ConvertFn = std::uint32_t (*)(std::span<const std::uint8_t>, std::uint32_t, std::uint32_t,
+                                    std::span<std::uint8_t>);
+
+template <std::uint32_t Component>
+ConvertFn unpaddedBySize(std::uint32_t size) {
+    switch (size) {
+        case 1: return &convertPacked<Component, 1, 1, 0>;
+        case 2: return &convertPacked<Component, 2, 2, 0>;
+        case 3: return &convertPacked<Component, 3, 3, 0>;
+        case 4: return &convertPacked<Component, 4, 4, 0>;
+        default: return nullptr;
+    }
+}
+
+// The specialised loop for a format whose sizes follow vertexAttribFormat, or null.
+ConvertFn selectPacked(const VertexAttribFormat& format) {
+    const std::uint32_t component = componentBytes(format.type);
+    if (format.size < 1 || format.size > 4 || format.guest_size != component * format.size ||
+        format.host_size % component != 0) {
+        return nullptr;
+    }
+    const std::uint32_t host = format.host_size / component;
+    if (host == format.size) {
+        switch (component) {
+            case 4: return unpaddedBySize<4>(format.size);
+            case 2: return unpaddedBySize<2>(format.size);
+            default: return unpaddedBySize<1>(format.size);
+        }
+    }
+    // Only a three-component 8-bit or 16-bit attribute is padded, to four components.
+    if (format.size != 3 || host != 4) return nullptr;
+    const std::uint32_t pad = paddedWComponent(format.type);
+    if (component == 2) {
+        switch (pad) {
+            case 0x3C00: return &convertPacked<2, 3, 4, 0x3C00>;
+            case 0x7FFF: return &convertPacked<2, 3, 4, 0x7FFF>;
+            case 1: return &convertPacked<2, 3, 4, 1>;
+            default: return nullptr;
+        }
+    }
+    return component == 1 && pad == 0xFF ? &convertPacked<1, 3, 4, 0xFF> : nullptr;
+}
+
+// Signed 16-bit (Component 2) or unsigned 8-bit (Component 1) components as floats, Guest of them stored and
+// the rest 0, 0, 0, 1.
+template <std::uint32_t Component, std::uint32_t Guest>
+std::uint32_t widenPacked(std::span<const std::uint8_t> src, std::uint32_t stride, std::uint32_t n,
+                          std::span<std::uint8_t> dst) {
+    using T = std::conditional_t<Component == 2, std::int16_t, std::uint8_t>;
+    const std::uint32_t m = fittingElements(src.size(), Component * Guest, stride, n);
+    for (std::uint32_t k = 0; k < m; k++) {
+        const std::uint8_t* element = src.data() + static_cast<std::size_t>(k) * stride;
+        float values[4];
+        for (std::uint32_t c = 0; c < 4; c++) {
+            if (c < Guest) {
+                T raw = loadComponent<T>(element + c * sizeof(T));
+                if constexpr (Component == 2) raw = std::byteswap(raw);
+                values[c] = static_cast<float>(raw);
+            } else {
+                values[c] = c == 3 ? 1.0f : 0.0f;
+            }
+        }
+        std::memcpy(dst.data() + static_cast<std::size_t>(k) * 16, values, 16);
+    }
+    return m;
+}
+
+template <std::uint32_t Component>
+ConvertFn widenBySize(std::uint32_t size) {
+    switch (size) {
+        case 1: return &widenPacked<Component, 1>;
+        case 2: return &widenPacked<Component, 2>;
+        case 3: return &widenPacked<Component, 3>;
+        case 4: return &widenPacked<Component, 4>;
+        default: return nullptr;
+    }
+}
+
+ConvertFn selectWiden(const VertexAttribFormat& format) {
+    const std::uint32_t component = componentBytes(format.type);
+    if (format.size < 1 || format.size > 4 || format.guest_size != component * format.size) return nullptr;
+    if (component == 2) return widenBySize<2>(format.size);
+    return component == 1 ? widenBySize<1>(format.size) : nullptr;
+}
+
+}  // namespace
+
+std::uint32_t convertVertexElements(const VertexAttribFormat& format, std::span<const std::uint8_t> src,
+                                    std::uint32_t stride, std::uint32_t count, std::span<std::uint8_t> dst) {
+    const std::uint32_t n = stride == 0 ? std::min<std::uint32_t>(count, 1) : count;
+    if (format.widen) {
+        if (const ConvertFn convert = selectWiden(format)) return convert(src, stride, n, dst);
+        return widenVertexElementsGeneric(format, src, stride, n, dst);
+    }
+    if (const ConvertFn convert = selectPacked(format)) return convert(src, stride, n, dst);
+    return convertVertexElementsGeneric(format, src, stride, n, dst);
 }
 
 std::uint32_t vertexElementsAvailable(const VertexAttribFormat& format, std::uint32_t stride, std::size_t bytes) {
