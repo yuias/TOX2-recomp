@@ -19,6 +19,7 @@
 
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
+#include "render/image_pool.h"
 #include "render/render_scale.h"
 #include "render/shader_compiler.h"
 #include "render/vertex_convert.h"
@@ -2216,6 +2217,112 @@ std::vector<std::uint8_t> makeDepthResizeCapture() {
     scene.setSurface(0, 128);
     scene.write(tox2::kMethodNv4097ClearSurface, 0x03);
     return scene.finish();
+}
+
+// ImagePool: FIFO reuse, the per-key and byte caps, the idle trim and the reasons a take misses.
+void testImagePool(tox2::VkContext& ctx) {
+    using tox2::ImagePoolMiss;
+    using tox2::PooledImageKey;
+    constexpr std::uint64_t kBytes = 1024;
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+
+    struct Made {
+        VkImage image = VK_NULL_HANDLE;
+        VmaAllocation allocation = nullptr;
+    };
+    auto makeKey = [](std::uint32_t width) {
+        return PooledImageKey{VK_FORMAT_B8G8R8A8_UNORM, width, 4, VK_SAMPLE_COUNT_1_BIT,
+                              VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+    };
+    auto make = [&](const PooledImageKey& key) {
+        VkImageCreateInfo image_info{};
+        image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_info.imageType = VK_IMAGE_TYPE_2D;
+        image_info.format = key.format;
+        image_info.extent = {key.width, key.height, 1};
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = 1;
+        image_info.samples = key.samples;
+        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_info.usage = key.usage;
+        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VmaAllocationCreateInfo alloc_info{};
+        alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        Made made;
+        CHECK(vmaCreateImage(ctx.allocator(), &image_info, &alloc_info, &made.image, &made.allocation, nullptr) ==
+              VK_SUCCESS);
+        return made;
+    };
+
+    tox2::ImagePool pool(ctx, tox2::ImagePoolLimits{2, 3 * kBytes, 5});
+    const PooledImageKey key_a = makeKey(4);
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+
+    // An empty pool: nothing was ever given.
+    tox2::ImagePoolResult result = pool.take(key_a, image, allocation);
+    CHECK(!result.hit && result.miss == ImagePoolMiss::NoEntry);
+
+    // Three gives of one key under a cap of two: the first is destroyed, the rest leave oldest first.
+    const Made a1 = make(key_a), a2 = make(key_a), a3 = make(key_a);
+    pool.give(key_a, kBytes, a1.image, a1.allocation);
+    pool.give(key_a, kBytes, a2.image, a2.allocation);
+    pool.give(key_a, kBytes, a3.image, a3.allocation);
+    CHECK(pool.discards().key_cap == 1 && pool.discards().byte_cap == 0 && pool.discards().idle == 0);
+    CHECK(pool.entries() == 2 && pool.bytes() == 2 * kBytes);
+    result = pool.take(key_a, image, allocation);
+    CHECK(result.hit && image == a2.image && allocation == a2.allocation);
+    result = pool.take(key_a, image, allocation);
+    CHECK(result.hit && image == a3.image);
+    result = pool.take(key_a, image, allocation);
+    CHECK(!result.hit && result.miss == ImagePoolMiss::KeyCap);
+    result = pool.take(key_a, image, allocation);
+    CHECK(!result.hit && result.miss == ImagePoolMiss::NoEntry);
+    CHECK(pool.entries() == 0 && pool.bytes() == 0);
+    vmaDestroyImage(ctx.allocator(), a2.image, a2.allocation);
+    vmaDestroyImage(ctx.allocator(), a3.image, a3.allocation);
+
+    // Four keys of one image each against a budget of three: the oldest (B) goes.
+    const PooledImageKey key_b = makeKey(5), key_c = makeKey(6), key_d = makeKey(7), key_e = makeKey(8);
+    const PooledImageKey keys[] = {key_b, key_c, key_d, key_e};
+    Made made[4];
+    for (int i = 0; i < 4; i++) {
+        made[i] = make(keys[i]);
+        pool.give(keys[i], kBytes, made[i].image, made[i].allocation);
+    }
+    CHECK(pool.discards().byte_cap == 1 && pool.discards().key_cap == 1);
+    CHECK(pool.entries() == 3 && pool.bytes() == 3 * kBytes);
+    result = pool.take(key_b, image, allocation);
+    CHECK(!result.hit && result.miss == ImagePoolMiss::ByteCap);
+    result = pool.take(key_c, image, allocation);
+    CHECK(result.hit && image == made[1].image);
+    // Put it back: the pool holds D, E, C again, stamped with the flip of the last trim.
+    pool.give(key_c, kBytes, made[1].image, made[1].allocation);
+    CHECK(pool.entries() == 3);
+
+    // Entries given at flip 0 are kept through flip 5 and destroyed at flip 6.
+    pool.trim(0);
+    pool.trim(5);
+    CHECK(pool.entries() == 3);
+    pool.trim(6);
+    CHECK(pool.entries() == 0 && pool.bytes() == 0);
+    CHECK(pool.discards().idle == 3);
+    result = pool.take(key_d, image, allocation);
+    CHECK(!result.hit && result.miss == ImagePoolMiss::Idle);
+    result = pool.take(key_d, image, allocation);
+    CHECK(!result.hit && result.miss == ImagePoolMiss::NoEntry);
+
+    // An image larger than the whole budget is not kept and does not evict the others.
+    const Made kept = make(key_a);
+    pool.give(key_a, kBytes, kept.image, kept.allocation);
+    const Made huge = make(key_b);
+    pool.give(key_b, 4 * kBytes, huge.image, huge.allocation);
+    CHECK(pool.entries() == 1 && pool.bytes() == kBytes && pool.discards().byte_cap == 2);
+    result = pool.take(key_b, image, allocation);
+    CHECK(!result.hit && result.miss == ImagePoolMiss::ByteCap);
+
+    // The destructor destroys what is left (a leak would show in the allocator on context teardown).
+    CHECK(ctx.validationErrorCount() == errors_before);
 }
 
 void testRendererImageCreationCounters(tox2::VkContext& ctx) {
@@ -4672,6 +4779,7 @@ int main() {
     testRendererVolumeTextures(*ctx);
     testRendererFloatSurface(*ctx);
     testRendererDepthTexture(*ctx);
+    testImagePool(*ctx);
     testRendererImageCreationCounters(*ctx);
     testRendererStencil(*ctx);
     testRendererUserClip(*ctx);
