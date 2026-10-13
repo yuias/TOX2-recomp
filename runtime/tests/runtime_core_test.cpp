@@ -12091,6 +12091,73 @@ void testGuestLockStats() {
     }
 }
 
+// A release wakes only the waiter it serves, not every waiter.
+void testGuestLockSingleWake() {
+    tox2::GuestLock lock;
+    std::vector<int> order;  // guarded by `lock`
+
+    lock.lock();
+    std::vector<std::thread> threads;
+    for (int id = 1; id <= 3; id++) {
+        threads.emplace_back([&lock, &order, id] {
+            lock.lock();
+            order.push_back(id);
+            lock.unlock();
+        });
+        while (lock.waiterCount() < static_cast<std::size_t>(id)) {
+            std::this_thread::yield();
+        }
+    }
+    lock.unlock();
+    for (std::thread& t : threads) t.join();
+
+    CHECK(order == (std::vector<int>{1, 2, 3}));
+    const tox2::GuestLockStats s = lock.stats();
+    CHECK(s.wakeups <= 4);
+    CHECK(s.spurious_wakeups <= 1);
+    CHECK(!lock.hasWaiters());
+}
+
+// The overlap is the part of a PPU hold during which another PPU-class thread was queued; a host-class waiter does
+// not count.
+void testGuestLockPpuOverlap() {
+    const auto run = [](tox2::GuestLockClass waiter_class, std::optional<std::int32_t> waiter_priority) {
+        tox2::GuestLock lock;
+        std::atomic<bool> held{false};
+        std::thread holder([&] {
+            tox2::setGuestLockPpuPriorityForTesting(1001);
+            lock.lock();
+            held = true;
+            while (!lock.hasWaiters()) std::this_thread::yield();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            lock.unlock();
+            tox2::setGuestLockPpuPriorityForTesting(std::nullopt);
+        });
+        std::thread waiter([&] {
+            if (waiter_priority.has_value()) {
+                tox2::setGuestLockPpuPriorityForTesting(waiter_priority);
+            } else {
+                tox2::setGuestLockClass(waiter_class);
+            }
+            while (!held) std::this_thread::yield();
+            lock.lock();
+            lock.unlock();
+            tox2::setGuestLockPpuPriorityForTesting(std::nullopt);
+        });
+        holder.join();
+        waiter.join();
+        return lock.stats();
+    };
+
+    const tox2::GuestLockStats ppu = run(tox2::GuestLockClass::Other, 1005);
+    CHECK(ppu.ppu_hold_overlap_us >= 15'000);
+    CHECK(ppu.ppu_hold_us >= ppu.ppu_hold_overlap_us);
+
+    const tox2::GuestLockStats rsx = run(tox2::GuestLockClass::Rsx, std::nullopt);
+    CHECK(rsx.ppu_hold_us >= 20'000);
+    CHECK(rsx.ppu_hold_overlap_us == 0);
+}
+
 // Rapid yields reach the backoff and let another host thread take the lock; spaced yields never do.
 void testYieldBackoff() {
     tox2::setYieldBackoffEnabled(true);
@@ -12793,6 +12860,8 @@ int main(int argc, char** argv) {
     testHostPriority();
     testGuestLockFifo();
     testGuestLockStats();
+    testGuestLockSingleWake();
+    testGuestLockPpuOverlap();
     testYieldBackoff();
     testPpuYieldStats();
     testPerfLine();

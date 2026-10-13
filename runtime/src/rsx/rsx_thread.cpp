@@ -810,7 +810,7 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
             std::vector<RsxCommand> commands;
             std::vector<RsxConsumer::FinishedCapture> captures;
             {
-                // The guest lock is a FIFO ticket lock shared with the audio engine and every guest thread.
+                // The guest lock is a FIFO queue shared with the audio engine and every guest thread.
                 // Pumping in small slices and leaving once the hold budget is spent lets the waiters in between;
                 // the loop re-queues for the rest. A pump also stops after each draw end, whose vertex and
                 // texture bytes takeCommands() then copies without the lock.
