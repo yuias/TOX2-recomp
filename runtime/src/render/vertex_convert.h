@@ -66,4 +66,10 @@ bool indexRange(bool is_u16, std::span<const std::uint8_t> src, std::uint32_t co
 bool indicesInRange(bool is_u16, std::span<const std::uint8_t> src, std::uint32_t count, std::uint32_t min_index,
                     std::uint32_t max_index, bool restart, std::uint32_t restart_index);
 
+// convertIndices and indicesInRange in one pass: writes count native-order indices to dst and returns what
+// indicesInRange would (dst content is unspecified when false). False too when dst is shorter than count indices.
+bool convertIndicesChecked(bool is_u16, std::span<const std::uint8_t> src, std::uint32_t count, std::uint32_t min_index,
+                           std::uint32_t max_index, bool restart, std::uint32_t restart_index,
+                           std::span<std::uint8_t> dst);
+
 }  // namespace tox2

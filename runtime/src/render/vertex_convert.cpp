@@ -370,4 +370,53 @@ bool indicesInRange(bool is_u16, std::span<const std::uint8_t> src, std::uint32_
     return true;
 }
 
+namespace {
+
+std::uint32_t loadBe16(const std::uint8_t* p) { return static_cast<std::uint32_t>(p[0]) << 8 | p[1]; }
+
+std::uint32_t loadBe32(const std::uint8_t* p) {
+    return static_cast<std::uint32_t>(p[0]) << 24 | static_cast<std::uint32_t>(p[1]) << 16 |
+           static_cast<std::uint32_t>(p[2]) << 8 | p[3];
+}
+
+// One tight loop per index size and restart setting. The range test accumulates into a flag instead of returning, so
+// the loop has no early exit and the compiler can vectorise it; the caller discards dst when the flag is set.
+template <typename Index, bool kRestart>
+bool convertIndicesLoop(const std::uint8_t* src, std::uint32_t count, std::uint32_t min_index, std::uint32_t max_index,
+                        std::uint32_t restart_index, std::uint8_t* dst) {
+    bool outside = false;
+    for (std::uint32_t i = 0; i < count; i++) {
+        const std::uint8_t* in = src + static_cast<std::size_t>(i) * sizeof(Index);
+        const std::uint32_t index = sizeof(Index) == 2 ? loadBe16(in) : loadBe32(in);
+        const Index native = static_cast<Index>(index);
+        std::memcpy(dst + static_cast<std::size_t>(i) * sizeof(Index), &native, sizeof(Index));
+        const bool bad = index < min_index || index > max_index;
+        outside |= kRestart ? (bad && index != restart_index) : bad;
+    }
+    return !outside;
+}
+
+}  // namespace
+
+bool convertIndicesChecked(bool is_u16, std::span<const std::uint8_t> src, std::uint32_t count, std::uint32_t min_index,
+                           std::uint32_t max_index, bool restart, std::uint32_t restart_index,
+                           std::span<std::uint8_t> dst) {
+    const std::size_t bytes = static_cast<std::size_t>(count) * (is_u16 ? 2 : 4);
+    if (src.size() < bytes || dst.size() < bytes) return false;
+    if (is_u16) {
+        // A u16 index never equals a wider restart value.
+        if (restart && restart_index <= 0xFFFF) {
+            return convertIndicesLoop<std::uint16_t, true>(src.data(), count, min_index, max_index, restart_index,
+                                                           dst.data());
+        }
+        return convertIndicesLoop<std::uint16_t, false>(src.data(), count, min_index, max_index, restart_index,
+                                                        dst.data());
+    }
+    if (restart) {
+        return convertIndicesLoop<std::uint32_t, true>(src.data(), count, min_index, max_index, restart_index,
+                                                       dst.data());
+    }
+    return convertIndicesLoop<std::uint32_t, false>(src.data(), count, min_index, max_index, restart_index, dst.data());
+}
+
 }  // namespace tox2

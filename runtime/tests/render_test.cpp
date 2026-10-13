@@ -14,6 +14,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <system_error>
@@ -1096,6 +1097,71 @@ tox2::VertexAttribFormat sizedFormat(std::uint8_t type, std::uint8_t size) {
     return format;
 }
 
+// The one-pass conversion agrees with the separate conversion and range check on random data, with and without a
+// restart value, and notices an out-of-range index at either end.
+void testConvertIndicesChecked() {
+    std::mt19937 rng(0x1D1CE5);
+    constexpr std::uint32_t kLow = 100, kHigh = 5000;
+    constexpr std::uint32_t kCount = 257;  // not a multiple of any vector width
+    for (const bool is_u16 : {true, false}) {
+        for (const bool restart : {false, true}) {
+            const std::uint32_t size = is_u16 ? 2 : 4;
+            const std::uint32_t restart_index = is_u16 ? 0xFFFF : 0xFFFFFFFF;
+            std::vector<std::uint32_t> values(kCount);
+            for (std::uint32_t& value : values) {
+                value = kLow + static_cast<std::uint32_t>(rng() % (kHigh - kLow + 1));
+                if (restart && rng() % 8 == 0) value = restart_index;
+            }
+            values.front() = kLow;
+            values[1] = kHigh;
+            const auto pack = [&](const std::vector<std::uint32_t>& list) {
+                std::vector<std::uint8_t> bytes(list.size() * size);
+                for (std::size_t i = 0; i < list.size(); i++) {
+                    for (std::uint32_t b = 0; b < size; b++) {
+                        bytes[i * size + b] = static_cast<std::uint8_t>(list[i] >> (8 * (size - 1 - b)));
+                    }
+                }
+                return bytes;
+            };
+            const auto check = [&](const std::vector<std::uint32_t>& list, bool expect) {
+                const std::vector<std::uint8_t> src = pack(list);
+                const std::uint32_t count = static_cast<std::uint32_t>(list.size());
+                std::vector<std::uint8_t> expected(src.size()), got(src.size(), 0xCD);
+                tox2::convertIndices(is_u16, src, count, expected);
+                const bool in_range = tox2::indicesInRange(is_u16, src, count, kLow, kHigh, restart, restart_index);
+                const bool checked =
+                        tox2::convertIndicesChecked(is_u16, src, count, kLow, kHigh, restart, restart_index, got);
+                CHECK(in_range == expect);
+                CHECK(checked == in_range);
+                if (checked) CHECK(got == expected);
+            };
+            check(values, true);
+
+            std::vector<std::uint32_t> first_out = values, last_out = values;
+            first_out.front() = kLow - 1;
+            last_out.back() = kHigh + 1;
+            check(first_out, false);
+            check(last_out, false);
+            first_out.front() = kHigh + 1;
+            last_out.back() = kLow - 1;
+            check(first_out, false);
+            check(last_out, false);
+        }
+    }
+
+    // A u16 index never matches a restart value wider than 16 bits, so 0xFFFF is out of range there.
+    const std::uint8_t u16_ffff[4] = {0x00, 0x0A, 0xFF, 0xFF};
+    std::uint8_t out[4] = {};
+    CHECK(!tox2::convertIndicesChecked(true, u16_ffff, 2, 10, 20, true, 0xFFFFFFFF, out));
+    CHECK(tox2::convertIndicesChecked(true, u16_ffff, 2, 10, 20, true, 0xFFFF, out) && out[0] == 0x0A && out[1] == 0 &&
+          out[2] == 0xFF && out[3] == 0xFF);
+
+    // A source or destination shorter than count indices fails, like indicesInRange on a short source.
+    CHECK(!tox2::convertIndicesChecked(true, std::span<const std::uint8_t>(u16_ffff, 3), 2, 0, 0xFFFF, false, 0, out));
+    CHECK(!tox2::convertIndicesChecked(true, u16_ffff, 2, 0, 0xFFFF, false, 0, std::span<std::uint8_t>(out, 3)));
+    CHECK(tox2::convertIndicesChecked(false, {}, 0, 5, 7, false, 0, {}));
+}
+
 void testVertexConvertMatchesReference() {
     std::uint32_t state = 0x12345678u;  // xorshift32, fixed seed
     auto nextByte = [&state]() {
@@ -1440,6 +1506,34 @@ void testRendererQuad(tox2::VkContext& ctx) {
     CHECK(pixelArgb(bgra, width, 2, 2) == 0xFF404040);
 
     CHECK(renderer.valid());
+    tox2::rsxUnimplementedReset();
+}
+
+// An indexed draw whose index lies outside the range the frame builder recorded is skipped and counted. The builder
+// derives the range from the same indices, so the draw is edited by hand.
+void testIndexOutsideRange(tox2::VkContext& ctx) {
+    tox2::rsxUnimplementedReset();
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+    CHECK(renderer.valid());
+    QuadOptions options;
+    options.draw = QuadDraw::IndexedU16;
+    std::vector<tox2::RsxCommand> commands = replaySynthetic(makeRenderedQuadCapture(options));
+    tox2::RsxDraw* draw = nullptr;
+    for (tox2::RsxCommand& command : commands) {
+        if (auto* candidate = std::get_if<tox2::RsxDraw>(&command)) draw = candidate;
+    }
+    CHECK(draw != nullptr && draw->indexed && draw->count == 4 && draw->index_data.size() == 8);
+    if (draw == nullptr || draw->index_data.size() != 8) return;
+    CHECK(draw->min_index == 10 && draw->max_index == 13);
+    draw->index_data[7] = 14;  // big-endian 0x000E past the recorded maximum
+    renderer.execute(commands);
+    CHECK(renderer.valid());
+    std::vector<std::uint8_t> bgra;
+    std::uint32_t width = 0, height = 0;
+    CHECK(renderer.readDisplay(bgra, width, height));
+    CHECK(renderer.stats().draws_skipped == 1);
+    CHECK(unimplementedCount("state index outside the vertex range") == 1);
+    CHECK(bgra.size() == 64 * 64 * 4 && pixelArgb(bgra, width, 32, 32) == 0xFF000000);
     tox2::rsxUnimplementedReset();
 }
 
@@ -5327,6 +5421,7 @@ int main() {
     testZetaWriteRule();
     testVertexConvert();
     testVertexConvertMatchesReference();
+    testConvertIndicesChecked();
     testAaModeNames();
     testLayoutSource();
 
@@ -5359,6 +5454,7 @@ int main() {
     testPresentOverlayNeedsPresenter(*ctx);
     testRendererScissorAndMask(*ctx);
     testRendererQuad(*ctx);
+    testIndexOutsideRange(*ctx);
     testRendererBranchBits(*ctx);
     testVertexConstantUploadReuse(*ctx);
     testRendererTextures(*ctx);

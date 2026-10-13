@@ -1740,6 +1740,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     std::uint32_t vertex_count = draw.count;
     std::uint32_t min_index = 0;
     bool restart = false;
+    UploadRef indices;
     if (draw.indexed) {
         min_index = draw.min_index;
         const std::uint64_t span = static_cast<std::uint64_t>(draw.max_index) - draw.min_index + 1;
@@ -1750,8 +1751,12 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         if (restart && !rsxPrimitiveRestartSupported(draw.primitive, draw.index_type, draw.restart_index)) {
             return skip({}, {});
         }
-        if (!indicesInRange(is_u16, draw.index_data, draw.count, draw.min_index, draw.max_index, restart,
-                            draw.restart_index)) {
+        // The range check and the byte swap share one pass over the indices. A draw that fails the check leaves
+        // its upload unused, which only costs space in this frame's buffer.
+        const std::size_t index_bytes = static_cast<std::size_t>(draw.count) * (is_u16 ? 2 : 4);
+        if (!allocUpload(index_bytes, indices)) return;
+        if (!convertIndicesChecked(is_u16, draw.index_data, draw.count, draw.min_index, draw.max_index, restart,
+                                   draw.restart_index, std::span<std::uint8_t>(indices.data, index_bytes))) {
             return skip("state", "index outside the vertex range");
         }
         vertex_count = static_cast<std::uint32_t>(span);
@@ -1834,13 +1839,6 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         key.vertex_strides[slot] = 0;
         vertex_buffers[slot] = defaults.buffer;
         vertex_offsets[slot] = defaults.offset + slot * 16;
-    }
-
-    UploadRef indices;
-    if (draw.indexed) {
-        const std::size_t index_bytes = static_cast<std::size_t>(draw.count) * (is_u16 ? 2 : 4);
-        if (!allocUpload(index_bytes, indices)) return;
-        convertIndices(is_u16, draw.index_data, draw.count, std::span<std::uint8_t>(indices.data, index_bytes));
     }
 
     // Fixed-function state baked into the pipeline.

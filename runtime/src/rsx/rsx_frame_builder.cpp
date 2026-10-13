@@ -64,6 +64,35 @@ std::uint32_t readBe32(const std::uint8_t* p) {
 
 std::uint32_t readBe16(const std::uint8_t* p) { return (static_cast<std::uint32_t>(p[0]) << 8) | p[1]; }
 
+// Smallest and largest index outside the restart value, and whether the restart value occurred. The restart test is
+// hoisted out of the loops: most draws have no restart enabled, and a u16 index can never equal a wider value.
+template <std::uint32_t kSize>
+void scanIndices(const std::uint8_t* data, std::uint32_t count, bool restart, std::uint32_t restart_index,
+                 std::uint32_t& min_index, std::uint32_t& max_index, bool& restart_used) {
+    const auto read = [](const std::uint8_t* p) { return kSize == 2 ? readBe16(p) : readBe32(p); };
+    std::uint32_t lo = 0xFFFFFFFF, hi = 0;
+    if (kSize == 2 && restart_index > 0xFFFF) restart = false;
+    if (!restart) {
+        for (std::uint32_t i = 0; i < count; i++) {
+            const std::uint32_t index = read(data + static_cast<std::size_t>(i) * kSize);
+            lo = std::min(lo, index);
+            hi = std::max(hi, index);
+        }
+    } else {
+        for (std::uint32_t i = 0; i < count; i++) {
+            const std::uint32_t index = read(data + static_cast<std::size_t>(i) * kSize);
+            if (index == restart_index) {
+                restart_used = true;
+                continue;
+            }
+            lo = std::min(lo, index);
+            hi = std::max(hi, index);
+        }
+    }
+    min_index = lo;
+    max_index = hi;
+}
+
 // Big-endian bytes of `words`, the form the census hashes programs in.
 std::uint64_t hashWords(const std::vector<std::uint32_t>& words) {
     std::vector<std::uint8_t> bytes;
@@ -751,15 +780,12 @@ void RsxFrameBuilder::buildDraw(const RsxRegisters& regs) {
         const bool restart = regs.reg(kMethodNv4097SetRestartIndexEnable) != 0;
         const std::uint32_t restart_index = regs.reg(kMethodNv4097SetRestartIndex);
         std::uint32_t min_index = 0xFFFFFFFF, max_index = 0;
-        for (std::uint32_t i = 0; i < range_.count; i++) {
-            const std::uint8_t* p = draw.index_data.data() + static_cast<std::size_t>(i) * type_size;
-            const std::uint32_t index = type_size == 2 ? readBe16(p) : readBe32(p);
-            if (restart && index == restart_index) {
-                draw.restart_used = true;
-                continue;
-            }
-            min_index = std::min(min_index, index);
-            max_index = std::max(max_index, index);
+        if (type_size == 2) {
+            scanIndices<2>(draw.index_data.data(), range_.count, restart, restart_index, min_index, max_index,
+                           draw.restart_used);
+        } else {
+            scanIndices<4>(draw.index_data.data(), range_.count, restart, restart_index, min_index, max_index,
+                           draw.restart_used);
         }
         draw.restart_index = restart_index;
         draw.max_index = max_index;
