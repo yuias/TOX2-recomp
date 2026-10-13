@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -40,7 +41,7 @@ void printUsage() {
             "                      [--compare PNG [--compare-rect X,Y,W,H] [--max-diff N] [--max-mean X]\n"
             "                       [--max-differing P]]\n"
             "                      [--resolution-scale N] [--aa-mode supersample|msaa] [--no-validation]\n"
-            "                      [--shader-cache DIR]\n"
+            "                      [--shader-cache DIR] [--repeat N] [--quiet]\n"
             "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture\n"
             "  --out DIR           write the displayed frame as DIR/<capture name>.png\n"
             "  --compare PNG       diff the displayed frame against PNG (box-downsampled first when it is a whole\n"
@@ -55,7 +56,11 @@ void printUsage() {
             "                      supersample (one sample per memory-layout pixel); msaa falls back to supersample\n"
             "                      on a device without 2-sample support\n"
             "  --no-validation     do not enable the Vulkan validation layer\n"
-            "  --shader-cache DIR  directory of the on-disk SPIR-V cache\n",
+            "  --shader-cache DIR  directory of the on-disk SPIR-V cache\n"
+            "  --repeat N          replay and render the capture N times (N >= 1) with one memory view, builder and\n"
+            "                      renderer, and print the median time per phase (the first iteration is warm-up and\n"
+            "                      left out when N >= 2); not with --out or --compare\n"
+            "  --quiet             do not print the per-command lines\n",
             stderr);
 }
 
@@ -163,6 +168,164 @@ void printDraw(const tox2::RsxDraw& draw, std::span<const tox2::RsxSurface> surf
     std::printf("\n");
 }
 
+using Clock = std::chrono::steady_clock;
+
+std::uint64_t nanosSince(Clock::time_point begin) {
+    return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - begin).count());
+}
+
+// What one --repeat iteration measured: times in nanoseconds, counters as deltas over the iteration.
+struct IterationSample {
+    std::uint64_t build_ns = 0, build_draw_ns = 0, record_draw_ns = 0, record_clear_ns = 0, submit_ns = 0,
+                  gpu_wait_ns = 0;
+    std::uint64_t draws = 0, fp_hits = 0, fp_misses = 0, vp_hits = 0, vp_misses = 0;
+    std::uint64_t bytes_copied = 0, bytes_union = 0;
+    std::uint64_t barriers = 0, barriers_skipped = 0, instances = 0, state_calls = 0, state_skipped = 0;
+    std::uint64_t uploads_reused = 0;
+};
+
+std::uint64_t median(const std::vector<IterationSample>& samples, std::uint64_t IterationSample::* field) {
+    std::vector<std::uint64_t> values;
+    values.reserve(samples.size());
+    for (const IterationSample& sample : samples) values.push_back(sample.*field);
+    std::sort(values.begin(), values.end());
+    return values[values.size() / 2];
+}
+
+double toMs(std::uint64_t ns) { return static_cast<double>(ns) / 1e6; }
+
+unsigned long long toUll(std::uint64_t value) { return static_cast<unsigned long long>(value); }
+
+std::string memoryFlagNames(VkMemoryPropertyFlags flags) {
+    std::string text = std::format("{:#x}", static_cast<std::uint32_t>(flags));
+    if (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) text += " device-local";
+    if (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) text += " host-visible";
+    if (flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) text += " host-coherent";
+    if (flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) text += " host-cached";
+    return text;
+}
+
+// What the closing lines need from a --repeat run (the last iteration's figures).
+struct TimedResult {
+    std::size_t commands = 0, draws = 0, skipped = 0;
+    tox2::AaMode aa_mode = tox2::AaMode::Msaa;
+};
+
+// Replays and renders the capture `repeat` times with one memory view, builder and renderer, so the texture cache,
+// program caches and pipelines are warm as in the game's steady state. Each command is executed on its own, so the
+// recording time is split by command type; time spent waiting for a frame slot is reported apart from it. The
+// unimplemented census is reset per iteration so the printed section is that of one replay.
+bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& capture_name, std::uint32_t repeat,
+                    tox2::VkContext& context, const tox2::RenderOptions& render_options, TimedResult& result) {
+    tox2::ReplayRsxMemoryView memory;
+    tox2::RsxFrameBuilder builder(memory);
+    builder.setTimingEnabled(true);
+    tox2::RsxRenderer renderer(context, render_options);
+    result.aa_mode = renderer.aaMode();
+
+    std::vector<IterationSample> samples;
+    for (std::uint32_t iteration = 0; iteration < repeat; iteration++) {
+        tox2::rsxUnimplementedReset();
+        const tox2::RsxBuilderStats builder_before = builder.stats();
+        IterationSample sample;
+
+        Clock::time_point begin = Clock::now();
+        tox2::replayCapture(reader, memory, builder);
+        std::vector<tox2::RsxCommand> commands = builder.takeCommands();
+        sample.build_ns = nanosSince(begin);
+        const tox2::RsxBuilderStats& builder_after = builder.stats();
+        sample.build_draw_ns = builder_after.build_draw_ns - builder_before.build_draw_ns;
+        sample.fp_hits = builder_after.fp_cache_hits - builder_before.fp_cache_hits;
+        sample.fp_misses = builder_after.fp_cache_misses - builder_before.fp_cache_misses;
+        sample.vp_hits = builder_after.vp_cache_hits - builder_before.vp_cache_hits;
+        sample.vp_misses = builder_after.vp_cache_misses - builder_before.vp_cache_misses;
+        sample.bytes_copied = builder_after.vertex_bytes_copied - builder_before.vertex_bytes_copied;
+        sample.bytes_union = builder_after.vertex_bytes_union - builder_before.vertex_bytes_union;
+
+        const tox2::RendererStats renderer_before = renderer.stats();
+        for (tox2::RsxCommand& command : commands) {
+            const std::uint64_t wait_before = renderer.stats().slot_wait_ns;
+            begin = Clock::now();
+            renderer.execute(std::span<tox2::RsxCommand>(&command, 1));
+            const std::uint64_t elapsed = nanosSince(begin);
+            const std::uint64_t wait = std::min(renderer.stats().slot_wait_ns - wait_before, elapsed);
+            sample.gpu_wait_ns += wait;
+            const bool is_draw = std::holds_alternative<tox2::RsxDraw>(command);
+            std::uint64_t& phase = is_draw                                           ? sample.record_draw_ns
+                                   : std::holds_alternative<tox2::RsxClear>(command) ? sample.record_clear_ns
+                                                                                     : sample.submit_ns;
+            phase += elapsed - wait;
+            if (is_draw) sample.draws++;
+        }
+        if (!renderer.valid()) {
+            std::fprintf(stderr, "error: %s\n", renderer.error().c_str());
+            return false;
+        }
+        const tox2::RendererStats& renderer_after = renderer.stats();
+        sample.barriers = renderer_after.barriers - renderer_before.barriers;
+        sample.barriers_skipped = renderer_after.barriers_skipped - renderer_before.barriers_skipped;
+        sample.instances = renderer_after.rendering_instances - renderer_before.rendering_instances;
+        sample.state_calls = renderer_after.state_calls - renderer_before.state_calls;
+        sample.state_skipped = renderer_after.state_calls_skipped - renderer_before.state_calls_skipped;
+        sample.uploads_reused = renderer_after.vp_constant_uploads_reused - renderer_before.vp_constant_uploads_reused;
+
+        result.commands = commands.size();
+        result.draws = sample.draws;
+        result.skipped = renderer_after.draws_skipped - renderer_before.draws_skipped;
+        builder.recycle(std::move(commands));
+        // The first iteration creates pipelines and uploads textures.
+        if (iteration > 0 || repeat == 1) samples.push_back(sample);
+    }
+
+    const double build = toMs(median(samples, &IterationSample::build_ns));
+    const double record_draw = toMs(median(samples, &IterationSample::record_draw_ns));
+    const double record_clear = toMs(median(samples, &IterationSample::record_clear_ns));
+    const double submit = toMs(median(samples, &IterationSample::submit_ns));
+    std::printf(
+            "timing: %s, %u iteration%s (%s), median ms per iteration: build %.2f (buildDraw %.2f), recordDraw %.2f, "
+            "recordClear %.2f, submit %.2f, gpu wait %.2f, total %.2f\n",
+            capture_name.c_str(), repeat, repeat == 1 ? "" : "s", repeat == 1 ? "none excluded" : "first excluded",
+            build, toMs(median(samples, &IterationSample::build_draw_ns)), record_draw, record_clear, submit,
+            toMs(median(samples, &IterationSample::gpu_wait_ns)), build + record_draw + record_clear + submit);
+    std::printf(
+            "builder: per iteration %llu draws, fp cache %llu hits %llu misses, vp cache %llu hits %llu misses, "
+            "vertex bytes %llu copied (union %llu)\n",
+            toUll(median(samples, &IterationSample::draws)), toUll(median(samples, &IterationSample::fp_hits)),
+            toUll(median(samples, &IterationSample::fp_misses)), toUll(median(samples, &IterationSample::vp_hits)),
+            toUll(median(samples, &IterationSample::vp_misses)), toUll(median(samples, &IterationSample::bytes_copied)),
+            toUll(median(samples, &IterationSample::bytes_union)));
+    std::printf(
+            "render: per iteration %llu barriers (%llu skipped), %llu rendering instances, %llu state calls (%llu "
+            "skipped), %llu vp constant uploads reused; upload memory %s\n",
+            toUll(median(samples, &IterationSample::barriers)),
+            toUll(median(samples, &IterationSample::barriers_skipped)),
+            toUll(median(samples, &IterationSample::instances)), toUll(median(samples, &IterationSample::state_calls)),
+            toUll(median(samples, &IterationSample::state_skipped)),
+            toUll(median(samples, &IterationSample::uploads_reused)),
+            memoryFlagNames(renderer.stats().upload_memory_flags).c_str());
+    return true;
+}
+
+// The closing lines of every run: the replay summary, the unimplemented census and the validation result.
+int printSummary(std::size_t commands, std::size_t draws, std::size_t skipped, std::uint32_t resolution_scale,
+                 tox2::AaMode effective_aa_mode, const std::string& diff_text, const std::string& png_text,
+                 bool validation, bool validation_active, std::uint32_t validation_errors, int exit_code) {
+    const std::string scale_text = resolution_scale > 1 ? std::format(", resolution scale {}", resolution_scale) : "";
+    // The default (msaa) is not mentioned; a fallback to supersample is, so a log shows which mode drew the frame.
+    const std::string aa_text = effective_aa_mode == tox2::AaMode::Supersample ? ", aa supersample" : "";
+    std::printf("replay: %zu commands, %zu draws, %zu skipped%s%s%s\n", commands, draws, skipped, scale_text.c_str(),
+                aa_text.c_str(), diff_text.c_str());
+    // The game's census omits an empty section; a replay says so explicitly.
+    const std::string section = unimplementedSection();
+    std::printf("%s\n", section.empty() ? "census: rsx unimplemented 0 kinds" : section.c_str());
+    if (!png_text.empty()) std::printf("%s\n", png_text.c_str());
+    const char* validation_state = !validation ? "disabled" : validation_active ? "active" : "inactive";
+    std::printf("validation: %s, %u errors\n", validation_state, validation_errors);
+    if (validation_errors != 0) exit_code = 1;
+    return exit_code;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -171,6 +334,8 @@ int main(int argc, char** argv) {
     std::string compare_path;
     std::string shader_cache;
     bool validation = true;
+    bool quiet = false;
+    std::uint32_t repeat = 0;  // --repeat: 0 means a single replay with the usual output
     std::uint32_t resolution_scale = 1;
     tox2::AaMode aa_mode = tox2::AaMode::Msaa;
     std::uint32_t rect[4] = {};  // --compare-rect: x, y, width, height
@@ -181,6 +346,21 @@ int main(int argc, char** argv) {
         const std::string_view arg = argv[i];
         if (arg == "--no-validation") {
             validation = false;
+            continue;
+        }
+        if (arg == "--quiet") {
+            quiet = true;
+            continue;
+        }
+        if (arg == "--repeat") {
+            char* end = nullptr;
+            const long value = i + 1 < argc ? std::strtol(argv[i + 1], &end, 10) : 0;
+            if (i + 1 >= argc || end == argv[i + 1] || *end != '\0' || value < 1 || value > 100000) {
+                std::fputs("error: --repeat takes a whole number from 1 to 100000\n", stderr);
+                return 2;
+            }
+            repeat = static_cast<std::uint32_t>(value);
+            i++;
             continue;
         }
         if (arg == "--resolution-scale") {
@@ -246,6 +426,11 @@ int main(int argc, char** argv) {
         printUsage();
         return 2;
     }
+    if (repeat != 0 && (!out_dir.empty() || !compare_path.empty())) {
+        // Later iterations draw over the previous iteration's targets, so the image is not the capture's frame.
+        std::fputs("error: --repeat cannot be combined with --out or --compare\n", stderr);
+        return 2;
+    }
 
     tox2::RsxCaptureReader reader;
     std::string error;
@@ -256,6 +441,28 @@ int main(int argc, char** argv) {
 
     tox2::setRsxUnimplementedProvider(&unimplementedCensus, &tox2::rsxUnimplementedReset);
     tox2::rsxUnimplementedReset();
+
+    if (repeat != 0) {
+        tox2::VkContextOptions timed_context_options;
+        timed_context_options.validation = validation;
+        std::unique_ptr<tox2::VkContext> timed_context = tox2::createVkContext(timed_context_options, error);
+        if (!timed_context) {
+            std::fprintf(stderr, "error: --repeat needs a Vulkan device: %s\n", error.c_str());
+            return 1;
+        }
+        tox2::RenderOptions timed_options;
+        timed_options.shader_cache = shader_cache;
+        timed_options.resolution_scale = resolution_scale;
+        timed_options.aa_mode = aa_mode;
+        TimedResult timed;
+        const std::string capture_name = std::filesystem::path(capture_path).stem().string();
+        const bool ok = runTimedReplay(reader, capture_name, repeat, *timed_context, timed_options, timed);
+        // The renderer is gone by now, so errors from its teardown are counted.
+        return printSummary(timed.commands, timed.draws, timed.skipped, resolution_scale, timed.aa_mode, {}, {},
+                            validation, timed_context->validationEnabled(), timed_context->validationErrorCount(),
+                            ok ? 0 : 1);
+    }
+
     tox2::ReplayRsxMemoryView memory;
     tox2::RsxFrameBuilder builder(memory);
     tox2::replayCapture(reader, memory, builder);
@@ -264,11 +471,11 @@ int main(int argc, char** argv) {
     std::size_t draws = 0;
     for (const tox2::RsxCommand& command : commands) {
         if (const auto* clear = std::get_if<tox2::RsxClear>(&command)) {
-            printClear(*clear);
+            if (!quiet) printClear(*clear);
         } else if (const auto* draw = std::get_if<tox2::RsxDraw>(&command)) {
-            printDraw(*draw, builder.knownSurfaces());
+            if (!quiet) printDraw(*draw, builder.knownSurfaces());
             draws++;
-        } else {
+        } else if (!quiet) {
             const auto& flip = std::get<tox2::RsxFlip>(command);
             std::printf("flip buffer=%u %ux%u@0x%x\n", flip.buffer, flip.width, flip.height, flip.offset);
         }
@@ -382,17 +589,6 @@ int main(int argc, char** argv) {
         validation_errors = context->validationErrorCount();
     }
 
-    const std::string scale_text = resolution_scale > 1 ? std::format(", resolution scale {}", resolution_scale) : "";
-    // The default (msaa) is not mentioned; a fallback to supersample is, so a log shows which mode drew the frame.
-    const std::string aa_text = effective_aa_mode == tox2::AaMode::Supersample ? ", aa supersample" : "";
-    std::printf("replay: %zu commands, %zu draws, %zu skipped%s%s%s\n", commands.size(), draws, skipped,
-                scale_text.c_str(), aa_text.c_str(), diff_text.c_str());
-    // The game's census omits an empty section; a replay says so explicitly.
-    const std::string section = unimplementedSection();
-    std::printf("%s\n", section.empty() ? "census: rsx unimplemented 0 kinds" : section.c_str());
-    if (!png_text.empty()) std::printf("%s\n", png_text.c_str());
-    const char* validation_state = !validation ? "disabled" : validation_active ? "active" : "inactive";
-    std::printf("validation: %s, %u errors\n", validation_state, validation_errors);
-    if (validation_errors != 0) exit_code = 1;
-    return exit_code;
+    return printSummary(commands.size(), draws, skipped, resolution_scale, effective_aa_mode, diff_text, png_text,
+                        validation, validation_active, validation_errors, exit_code);
 }

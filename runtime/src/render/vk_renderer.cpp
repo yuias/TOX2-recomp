@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <bit>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -436,7 +437,11 @@ void RsxRenderer::logImageCreations() {
 
 bool RsxRenderer::waitSlot(FrameSlot& slot) {
     if (!slot.pending) return true;
+    const auto wait_begin = std::chrono::steady_clock::now();
     const VkResult result = vkWaitForFences(context_.device(), 1, &slot.fence, VK_TRUE, kFenceTimeoutNs);
+    stats_.slot_wait_ns += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_begin)
+                    .count());
     if (result != VK_SUCCESS) {
         fail(std::format("waiting for the GPU failed ({})", static_cast<int>(result)));
         return false;
@@ -540,6 +545,7 @@ void RsxRenderer::transitionImage(VkImage image, VkImageAspectFlags aspect, VkIm
     dependency.imageMemoryBarrierCount = 1;
     dependency.pImageMemoryBarriers = &barrier;
     vkCmdPipelineBarrier2(slots_[current_slot_]->cmd, &dependency);
+    stats_.barriers++;
     current = layout;
 }
 
@@ -833,6 +839,7 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
     };
 
     vkCmdBeginRendering(cmd, &rendering);
+    stats_.rendering_instances++;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
@@ -1088,6 +1095,9 @@ bool RsxRenderer::allocUpload(std::size_t size, UploadRef& out) {
             return false;
         }
         created.mapped = static_cast<std::uint8_t*>(mapped.pMappedData);
+        if (stats_.upload_memory_flags == 0) {
+            vmaGetAllocationMemoryProperties(context_.allocator(), created.allocation, &stats_.upload_memory_flags);
+        }
         noteImageCreated(RenderImageKind::UploadBlock, created.size);
         slot.uploads.push_back(created);
         block = &slot.uploads.back();
@@ -1345,6 +1355,7 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
     }
 
     vkCmdBeginRendering(cmd, &rendering);
+    stats_.rendering_instances++;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
@@ -1947,7 +1958,9 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     rendering.pStencilAttachment = depth && formatHasStencil(depth->format) ? &depth_attachment : nullptr;
 
     vkCmdBeginRendering(cmd, &rendering);
+    stats_.rendering_instances++;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    stats_.state_calls++;
 
     const VkViewport viewport = {0.0f,
                                  0.0f,
@@ -1959,6 +1972,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
                               {scissor_rect.width, scissor_rect.height}};
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
+    stats_.state_calls += 2;
     constexpr std::uint32_t kCullFront = 0x404, kCullBack = 0x405, kFrontFaceCw = 0x900;
     VkCullModeFlags cull = VK_CULL_MODE_NONE;
     if (raster.cull) {
@@ -1975,12 +1989,14 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     vkCmdSetDepthTestEnable(cmd, depth_test ? VK_TRUE : VK_FALSE);
     vkCmdSetDepthWriteEnable(cmd, depth_test && raster.depth_write ? VK_TRUE : VK_FALSE);
     vkCmdSetDepthCompareOp(cmd, static_cast<VkCompareOp>(raster.depth_func & 7u));
+    stats_.state_calls += 7;  // cull mode, front face, topology, restart, depth test, depth write, depth compare
 
     // The stencil state is set on every draw, with the test off too, so no draw inherits the previous one's.
     // Vulkan has no stencil without the aspect (Z16 or no depth target): the draw runs untested and is counted.
     const bool stencil_test = raster.stencil_test && depth && formatHasStencil(depth->format);
     if (raster.stencil_test && !stencil_test) rsxNoteUnimplemented("state", "stencil test without a stencil surface");
     vkCmdSetStencilTestEnable(cmd, stencil_test ? VK_TRUE : VK_FALSE);
+    stats_.state_calls++;
     const std::pair<VkStencilFaceFlagBits, const RsxStencilFace*> faces[] = {
             {VK_STENCIL_FACE_FRONT_BIT, &raster.stencil_front}, {VK_STENCIL_FACE_BACK_BIT, &raster.stencil_back}};
     for (const auto& [face_bit, face] : faces) {
@@ -1989,10 +2005,12 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         vkCmdSetStencilCompareMask(cmd, face_bit, face->func_mask);
         vkCmdSetStencilWriteMask(cmd, face_bit, face->write_mask);
         vkCmdSetStencilReference(cmd, face_bit, face->ref);
+        stats_.state_calls += 4;
     }
     float constants[4];
     blendConstants(raster.blend_color, constants);
     vkCmdSetBlendConstants(cmd, constants);
+    stats_.state_calls++;
 
     for (std::uint32_t slot = 0; slot < kPipelineVertexSlots; slot++) {
         if (vertex_buffers[slot] != VK_NULL_HANDLE)
@@ -2198,6 +2216,7 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
     rect.layerCount = 1;
 
     vkCmdBeginRendering(cmd, &rendering);
+    stats_.rendering_instances++;
     if (attachment_count != 0 && rect.rect.extent.width != 0 && rect.rect.extent.height != 0) {
         vkCmdClearAttachments(cmd, attachment_count, attachments, 1, &rect);
     }
@@ -2262,6 +2281,7 @@ void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& co
                               {clear_rect.width, clear_rect.height}};
 
     vkCmdBeginRendering(cmd, &rendering);
+    stats_.rendering_instances++;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);

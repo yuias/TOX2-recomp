@@ -43,6 +43,16 @@ inline constexpr std::uint32_t kRsxMaxIndexCount = 1u << 20;
 inline constexpr std::uint32_t kRsxMaxTextureBytes = 64u << 20;
 inline constexpr std::size_t kRsxMaxKnownSurfaces = 64;
 
+// Counters for measuring the builder. Times and the union figure are taken only while timing is enabled.
+struct RsxBuilderStats {
+    std::uint64_t build_draw_calls = 0;  // buildDraw runs (including draws it drops)
+    std::uint64_t build_draw_ns = 0;     // wall time inside buildDraw
+    std::uint64_t fp_cache_hits = 0, fp_cache_misses = 0;
+    std::uint64_t vp_cache_hits = 0, vp_cache_misses = 0;
+    std::uint64_t vertex_bytes_copied = 0;  // guest vertex bytes fillVertices copied
+    std::uint64_t vertex_bytes_union = 0;   // bytes of the union of those ranges per location
+};
+
 class RsxFrameBuilder {
 public:
     explicit RsxFrameBuilder(RsxMemoryView& memory) : memory_(memory) {}
@@ -53,6 +63,13 @@ public:
 
     // Moves out what was built since the last call.
     std::vector<RsxCommand> takeCommands();
+
+    // Gives back commands the caller has finished with (after execution), so the builder may reuse their buffers.
+    void recycle(std::vector<RsxCommand>&& commands);
+
+    // While enabled, buildDraw is timed into stats().build_draw_ns; the clock is not read otherwise.
+    void setTimingEnabled(bool enabled) { timing_enabled_ = enabled; }
+    const RsxBuilderStats& stats() const { return stats_; }
 
     // Deferred mode: SET_BEGIN_END(0) only marks the draw as pending, and finishDraw() copies its guest
     // bytes and builds the command. The caller must call finishDraw() before the next write, with the
@@ -97,6 +114,8 @@ private:
     std::uint64_t flips_ = 0;
     RsxTextureCache textures_;
     std::vector<std::uint8_t> texture_scratch_;  // guest bytes of the texture being checked or converted
+    RsxBuilderStats stats_;
+    bool timing_enabled_ = false;
 
     // The open draw clause between SET_BEGIN_END(prim) and SET_BEGIN_END(0).
     bool in_draw_ = false;

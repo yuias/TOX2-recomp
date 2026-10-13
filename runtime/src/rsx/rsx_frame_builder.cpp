@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cstring>
 #include <format>
 #include <string>
@@ -158,6 +159,9 @@ void RsxFrameBuilder::onFlip(const RsxRegisters&, std::uint32_t buffer, const Rs
 }
 
 std::vector<RsxCommand> RsxFrameBuilder::takeCommands() { return std::exchange(commands_, {}); }
+
+// Nothing is kept yet: the commands are released here.
+void RsxFrameBuilder::recycle(std::vector<RsxCommand>&& commands) { commands.clear(); }
 
 void RsxFrameBuilder::beginDraw(std::uint32_t primitive) {
     in_draw_ = true;
@@ -507,6 +511,23 @@ void RsxFrameBuilder::finishDraw(const RsxRegisters& regs) {
 }
 
 void RsxFrameBuilder::buildDraw(const RsxRegisters& regs) {
+    // Counts the early returns for dropped draws too.
+    struct Timer {
+        RsxBuilderStats& stats;
+        bool enabled;
+        std::chrono::steady_clock::time_point begin;
+        Timer(RsxBuilderStats& stats, bool enabled) : stats(stats), enabled(enabled) {
+            if (enabled) begin = std::chrono::steady_clock::now();
+        }
+        ~Timer() {
+            if (!enabled) return;
+            stats.build_draw_ns += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin)
+                            .count());
+        }
+    } timer(stats_, timing_enabled_);
+    stats_.build_draw_calls++;
+
     RsxDraw draw;
     draw.primitive = primitive_;
     draw.indexed = indexed_;

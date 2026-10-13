@@ -79,6 +79,15 @@ struct RendererStats {
     std::array<std::uint64_t, kImagePoolMissCount> image_pool_misses{};
     std::uint64_t image_pool_bytes = 0;     // held by the pool at the end of the last flip
     ImagePoolDiscards image_pool_discards;  // the pool's discards() at the end of the last flip
+    // Recording cost counters, read by the replay tool's timing report.
+    std::uint64_t slot_wait_ns = 0;                 // in vkWaitForFences for a frame slot (the GPU behind the CPU)
+    std::uint64_t barriers = 0;                     // image barriers recorded by transitionImage
+    std::uint64_t barriers_skipped = 0;             // transitions that needed no barrier
+    std::uint64_t rendering_instances = 0;          // vkCmdBeginRendering calls, all paths
+    std::uint64_t state_calls = 0;                  // vkCmdSet* and vkCmdBindPipeline calls recorded by recordDraw
+    std::uint64_t state_calls_skipped = 0;          // ... not recorded because the value was already set
+    std::uint64_t vp_constant_uploads_reused = 0;   // vertex constant uploads shared by draws with equal constants
+    VkMemoryPropertyFlags upload_memory_flags = 0;  // of the first upload block (vmaGetAllocationMemoryProperties)
 };
 
 // Single-threaded: execute, readDisplay and stats are called from one thread. The renderer never
