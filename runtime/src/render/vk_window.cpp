@@ -174,6 +174,12 @@ private:
         }
         Window* self = reinterpret_cast<Window*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (self == nullptr) return DefWindowProcW(hwnd, message, wparam, lparam);
+        if (isFullscreenToggle(message, wparam, lparam)) {
+            self->toggleFullscreen();
+            return 0;
+        }
+        // The WM_SYSCHAR that TranslateMessage makes from Alt+Enter would make DefWindowProc beep.
+        if (message == WM_SYSCHAR && wparam == VK_RETURN) return 0;
         MessageRoute route;
         if (self->on_message_) {
             route = self->on_message_(WindowMessage{hwnd, message, static_cast<std::uint64_t>(wparam),
@@ -219,6 +225,42 @@ private:
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
 
+    // Alt+Enter or F11, first press only (auto-repeat would toggle back and forth). Bit 29 of lparam is
+    // the context code: Alt is down.
+    static bool isFullscreenToggle(UINT message, WPARAM wparam, LPARAM lparam) {
+        if (message != WM_KEYDOWN && message != WM_SYSKEYDOWN) return false;
+        if ((lparam & (1 << 30)) != 0) return false;
+        if (wparam == VK_F11) return true;
+        return wparam == VK_RETURN && message == WM_SYSKEYDOWN && (lparam & (1 << 29)) != 0;
+    }
+
+    // Borderless fullscreen: a popup window covering the monitor it is on. The swapchain follows the
+    // client size through WM_SIZE, so nothing on the Vulkan side changes here.
+    void toggleFullscreen() {
+        if (!fullscreen_) {
+            MONITORINFO monitor{};
+            monitor.cbSize = sizeof(monitor);
+            windowed_placement_.length = sizeof(windowed_placement_);
+            if (!GetWindowPlacement(hwnd_, &windowed_placement_) ||
+                !GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &monitor)) {
+                return;
+            }
+            windowed_style_ = GetWindowLongW(hwnd_, GWL_STYLE);
+            SetWindowLongW(hwnd_, GWL_STYLE, (windowed_style_ & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+            const RECT& r = monitor.rcMonitor;
+            SetWindowPos(hwnd_, HWND_TOP, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                         SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+            fullscreen_ = true;
+        } else {
+            SetWindowLongW(hwnd_, GWL_STYLE, windowed_style_);
+            // The placement restores a maximised window as maximised.
+            SetWindowPlacement(hwnd_, &windowed_placement_);
+            SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            fullscreen_ = false;
+        }
+    }
+
     std::function<void()> on_close_;
     std::function<MessageRoute(const WindowMessage&)> on_message_;
     std::function<void(const KeyMessage&)> on_key_;
@@ -231,6 +273,10 @@ private:
     std::atomic<bool> closing_{false};
     std::atomic<std::uint32_t> width_{0};
     std::atomic<std::uint32_t> height_{0};
+    // UI thread only.
+    bool fullscreen_ = false;
+    LONG windowed_style_ = 0;
+    WINDOWPLACEMENT windowed_placement_{};
 };
 
 Presenter::Presenter(VkContext& context) : context_(context) {}

@@ -576,6 +576,9 @@ nothing joins them, because the process ends with `std::_Exit`.
   without focus). Script buttons are a separate source and stay; the gamepad thread releases its own
   source when the process loses the foreground window. `Alt` combinations still reach the
   default window procedure, so `Alt+F4` closes the window.
+- `F11` and `Alt+Enter` switch the window between windowed and borderless fullscreen (a popup window
+  covering the monitor the window is on); the next press restores the earlier size and position. Neither key
+  is in the pad map, and the window procedure handles them before the overlay and the pad see them.
 - `F1` (scan code `0x3B`) is not in the pad map: it toggles the [debug overlay](#debug-overlay) and
   never reaches the pad, with any `--pad` value. While the overlay is shown and ImGui wants the
   keyboard (a text box is active), key presses (`WM_KEYDOWN`, `WM_SYSKEYDOWN`) are withheld from the
