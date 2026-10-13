@@ -1,9 +1,11 @@
 // lv2 mutexes and condition variables (syscalls 100-109) and the lightweight mutex of
 // sysPrxForUser. Behaviour follows RPCS3 `Emu/Cell/lv2/sys_mutex.cpp`, `sys_cond.cpp` and
 // `Modules/sys_lwmutex_.cpp`. Handlers run under the guest lock; a blocking call waits through
-// blockingWait, which gives the lock up. Deferred: waiters wake in no particular order, not by
-// priority or FIFO (see GuestLock).
+// blockingWait, which gives the lock up. An unlock hands the mutex or lwmutex straight to the waiter its protocol
+// chooses (FIFO: the longest waiter; otherwise the lowest priority number, then the longest waiter), so the unlocking
+// thread cannot take it back first. Deferred: cond and lwcond waiters still wake in no particular order.
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <iterator>
@@ -22,12 +24,24 @@ namespace {
 // Owner value of a thread that is not a guest thread (host-side callers such as tests).
 constexpr std::uint32_t kHostCallerId = 0x01ffffff;
 
+// Priority of a waiter that is not a guest thread (host-side callers such as tests): behind every guest thread.
+constexpr std::int32_t kHostWaiterPriority = 3071;
+
+// A thread blocked on a mutex or lwmutex. It lives in the object's list in arrival order; the node address is stable
+// while the waiter blocks and its own waiter erases it.
+struct SyncWaiter {
+    const GuestThread* thread = nullptr;  // nullptr for a host caller; its priority is read when a waiter is chosen
+    std::uint32_t tid = 0;
+    bool granted = false;  // the unlock gave this waiter the object; it owns it even if its wait timed out meanwhile
+};
+
 struct Mutex {
+    std::uint32_t protocol = kSyncFifo;
     std::uint32_t recursive = 0;
     std::uint32_t owner = 0;       // thread id, 0 = free
     std::uint32_t lock_count = 0;  // recursive locks beyond the first
     std::uint32_t cond_count = 0;  // condition variables bound to this mutex
-    std::uint32_t waiters = 0;
+    std::list<SyncWaiter> waiters;
     std::condition_variable_any cv;
 };
 
@@ -39,7 +53,7 @@ struct Cond {
 };
 
 struct Lwmutex {
-    std::uint32_t waiters = 0;
+    std::list<SyncWaiter> waiters;
     std::condition_variable_any cv;
 };
 
@@ -59,6 +73,44 @@ IdMap<Lwmutex> g_lwmutexes(kLwmutexIdBase, kSyncIdStep);
 IdMap<Lwcond> g_lwconds(kLwcondIdBase, kSyncIdStep);
 ProcessSyncObjects g_process_objects;
 
+// Read by the perf thread, written under the guest lock.
+std::atomic<std::uint64_t> g_mutex_waits{0}, g_mutex_handoffs{0}, g_lwmutex_waits{0}, g_lwmutex_handoffs{0};
+
+// The waiter an unlock gives the object to (RPCS3 `lv2_obj::schedule`): the longest waiter for FIFO, otherwise the
+// lowest priority number and among equals the longest waiter. Waiters that were already granted are skipped.
+SyncWaiter* chooseWaiter(std::list<SyncWaiter>& waiters, std::uint32_t protocol) {
+    SyncWaiter* best = nullptr;
+    std::int32_t best_priority = 0;
+    for (SyncWaiter& waiter : waiters) {
+        if (waiter.granted) continue;
+        if (protocol == kSyncFifo) return &waiter;
+        const std::int32_t priority = waiter.thread != nullptr ? waiter.thread->priority() : kHostWaiterPriority;
+        if (best == nullptr || priority < best_priority) {
+            best = &waiter;
+            best_priority = priority;
+        }
+    }
+    return best;
+}
+
+const GuestThread* callerThread(const Tox2PpuContext* ctx) {
+    if (ctx != nullptr && ctx->runtime != nullptr) return static_cast<const GuestThread*>(ctx->runtime);
+    return currentThread();
+}
+
+// Gives up a mutex whose recursion count is already 0: the chosen waiter becomes the owner at once (lv2 `reown`).
+void releaseMutex(Mutex& m) {
+    SyncWaiter* next = chooseWaiter(m.waiters, m.protocol);
+    if (next == nullptr) {
+        m.owner = 0;
+        return;
+    }
+    next->granted = true;
+    m.owner = next->tid;
+    g_mutex_handoffs.fetch_add(1, std::memory_order_relaxed);
+    m.cv.notify_all();
+}
+
 bool validMutexAttr(std::uint32_t protocol, std::uint32_t recursive) {
     const bool protocol_ok = protocol == kSyncFifo || protocol == kSyncPriority || protocol == kSyncPriorityInherit;
     return protocol_ok && (recursive == kSyncRecursive || recursive == kSyncNotRecursive);
@@ -66,18 +118,20 @@ bool validMutexAttr(std::uint32_t protocol, std::uint32_t recursive) {
 
 // Takes `m` for `tid`, waiting while another thread owns it. The caller has checked that `tid` does
 // not own it already.
-std::uint32_t acquireMutex(const std::shared_ptr<Mutex>& m, std::uint32_t tid, std::uint64_t timeout_us,
-                           const char* what) {
+std::uint32_t acquireMutex(const std::shared_ptr<Mutex>& m, const GuestThread* thread, std::uint32_t tid,
+                           std::uint64_t timeout_us, const char* what) {
     if (m->owner == 0) {
         m->owner = tid;
         return kCellOk;
     }
-    m->waiters++;
-    const bool taken = blockingWait(m->cv, [&m] { return m->owner == 0; }, what, waitTimeout(timeout_us));
-    m->waiters--;
-    if (!taken) return kCellEtimedout;
-    m->owner = tid;
-    return kCellOk;
+    m->waiters.push_back({thread, tid, false});
+    const auto self = std::prev(m->waiters.end());
+    g_mutex_waits.fetch_add(1, std::memory_order_relaxed);
+    blockingWait(m->cv, [&self] { return self->granted; }, what, waitTimeout(timeout_us));
+    // An unlock that granted this waiter already made it the owner, so a timeout that raced with it loses.
+    const bool owns = self->granted;
+    m->waiters.erase(self);
+    return owns ? kCellOk : kCellEtimedout;
 }
 
 // The lock-recursion step shared by mutex and lwmutex try/lock when the caller owns the lock.
@@ -101,6 +155,7 @@ std::uint32_t callerThreadId(const Tox2PpuContext* ctx) {
 std::uint32_t mutexCreate(std::uint32_t protocol, std::uint32_t recursive, std::uint32_t* id_out) {
     if (!validMutexAttr(protocol, recursive)) return kCellEinval;
     auto m = std::make_shared<Mutex>();
+    m->protocol = protocol;
     m->recursive = recursive;
     *id_out = g_mutexes.add(std::move(m));
     return kCellOk;
@@ -109,8 +164,7 @@ std::uint32_t mutexCreate(std::uint32_t protocol, std::uint32_t recursive, std::
 std::uint32_t mutexDestroy(std::uint32_t id) {
     const auto m = g_mutexes.find(id);
     if (m == nullptr) return kCellEsrch;
-    // A waiter implies an owner, but a woken waiter may still be queued for the guest lock.
-    if (m->owner != 0 || m->waiters != 0) return kCellEbusy;
+    if (m->owner != 0 || !m->waiters.empty()) return kCellEbusy;
     if (m->cond_count != 0) return kCellEperm;
     g_mutexes.erase(id);
     return kCellOk;
@@ -121,7 +175,7 @@ std::uint32_t mutexLock(const Tox2PpuContext* ctx, std::uint32_t id, std::uint64
     if (m == nullptr) return kCellEsrch;
     const std::uint32_t tid = callerThreadId(ctx);
     if (m->owner == tid) return recurse(m->recursive == kSyncRecursive, m->lock_count);
-    return acquireMutex(m, tid, timeout_us, "sys_mutex_lock");
+    return acquireMutex(m, callerThread(ctx), tid, timeout_us, "sys_mutex_lock");
 }
 
 std::uint32_t mutexTryLock(const Tox2PpuContext* ctx, std::uint32_t id) {
@@ -142,8 +196,7 @@ std::uint32_t mutexUnlock(const Tox2PpuContext* ctx, std::uint32_t id) {
         m->lock_count--;
         return kCellOk;
     }
-    m->owner = 0;
-    m->cv.notify_one();
+    releaseMutex(*m);
     return kCellOk;
 }
 
@@ -180,16 +233,37 @@ std::uint32_t lwmutexAcquire(const Tox2PpuContext* ctx, std::uint8_t* base, std:
 
     const auto object = g_lwmutexes.find(tox2Read32(base, lwmutex + kLwmutexSleepQueue));
     if (object == nullptr) return kCellEsrch;
-    object->waiters++;
-    tox2Write32(base, lwmutex + kLwmutexWaiter, object->waiters);
-    const bool taken = blockingWait(
-            object->cv, [&] { return tox2Read32(base, lwmutex + kLwmutexOwner) == kLwmutexFree; }, "sys_lwmutex_lock",
-            waitTimeout(timeout_us));
-    object->waiters--;
-    tox2Write32(base, lwmutex + kLwmutexWaiter, object->waiters);
-    if (!taken) return kCellEtimedout;
+    object->waiters.push_back({callerThread(ctx), tid, false});
+    const auto self = std::prev(object->waiters.end());
+    g_lwmutex_waits.fetch_add(1, std::memory_order_relaxed);
+    tox2Write32(base, lwmutex + kLwmutexWaiter, static_cast<std::uint32_t>(object->waiters.size()));
+    blockingWait(object->cv, [&self] { return self->granted; }, "sys_lwmutex_lock", waitTimeout(timeout_us));
+    // The unlock left the owner word reserved for a granted waiter, so a timeout that raced with it loses.
+    const bool owns = self->granted;
+    object->waiters.erase(self);
+    tox2Write32(base, lwmutex + kLwmutexWaiter, static_cast<std::uint32_t>(object->waiters.size()));
+    if (!owns) return kCellEtimedout;
     tox2Write32(base, lwmutex + kLwmutexOwner, tid);
     return kCellOk;
+}
+
+// Gives up an lwmutex whose recursion count is already 0. With a waiter the owner word becomes kLwmutexReserved, as
+// RPCS3's user-side unlock leaves it, and the waiter writes its own id when it resumes; nobody else can take the
+// lwmutex in between.
+void releaseLwmutex(std::uint8_t* base, std::uint32_t lwmutex) {
+    const auto object = g_lwmutexes.find(tox2Read32(base, lwmutex + kLwmutexSleepQueue));
+    // The protocol is the low nibble of the attribute word; the recursive flag sits above it.
+    SyncWaiter* next = object != nullptr
+                               ? chooseWaiter(object->waiters, tox2Read32(base, lwmutex + kLwmutexAttribute) & 0xf)
+                               : nullptr;
+    if (next == nullptr) {
+        tox2Write32(base, lwmutex + kLwmutexOwner, kLwmutexFree);
+        return;
+    }
+    next->granted = true;
+    tox2Write32(base, lwmutex + kLwmutexOwner, kLwmutexReserved);
+    g_lwmutex_handoffs.fetch_add(1, std::memory_order_relaxed);
+    object->cv.notify_all();
 }
 
 }  // namespace
@@ -213,7 +287,7 @@ std::uint32_t lwmutexDestroy(const Tox2PpuContext* ctx, std::uint8_t* base, std:
     const std::uint32_t id = tox2Read32(base, lwmutex + kLwmutexSleepQueue);
     const auto object = g_lwmutexes.find(id);
     if (object == nullptr) return kCellEsrch;
-    if (object->waiters != 0) return kCellEbusy;
+    if (!object->waiters.empty()) return kCellEbusy;
     g_lwmutexes.erase(id);
     tox2Write32(base, lwmutex + kLwmutexOwner, kLwmutexDead);
     return kCellOk;
@@ -235,9 +309,7 @@ std::uint32_t lwmutexUnlock(const Tox2PpuContext* ctx, std::uint8_t* base, std::
         tox2Write32(base, lwmutex + kLwmutexRecursiveCount, count - 1);
         return kCellOk;
     }
-    tox2Write32(base, lwmutex + kLwmutexOwner, kLwmutexFree);
-    const auto object = g_lwmutexes.find(tox2Read32(base, lwmutex + kLwmutexSleepQueue));
-    if (object != nullptr) object->cv.notify_one();
+    releaseLwmutex(base, lwmutex);
     return kCellOk;
 }
 
@@ -272,10 +344,7 @@ std::uint32_t lwcondWait(const Tox2PpuContext* ctx, std::uint8_t* base, std::uin
     // anything can run so a signal sent right after cannot be missed.
     const std::uint32_t saved_count = tox2Read32(base, lwmutex + kLwmutexRecursiveCount);
     tox2Write32(base, lwmutex + kLwmutexRecursiveCount, 0);
-    tox2Write32(base, lwmutex + kLwmutexOwner, kLwmutexFree);
-    if (const auto mutex_object = g_lwmutexes.find(tox2Read32(base, lwmutex + kLwmutexSleepQueue))) {
-        mutex_object->cv.notify_one();
-    }
+    releaseLwmutex(base, lwmutex);
 
     object->waiters.emplace_back();
     const auto self = std::prev(object->waiters.end());
@@ -302,6 +371,11 @@ std::uint32_t lwcondSignal(std::uint8_t* base, std::uint32_t lwcond) {
         }
     }
     return kCellOk;
+}
+
+SyncHandoffStats syncHandoffStats() {
+    return {g_mutex_waits.load(std::memory_order_relaxed), g_mutex_handoffs.load(std::memory_order_relaxed),
+            g_lwmutex_waits.load(std::memory_order_relaxed), g_lwmutex_handoffs.load(std::memory_order_relaxed)};
 }
 
 const ProcessSyncObjects& processSyncObjects() { return g_process_objects; }
@@ -422,8 +496,7 @@ void sysCondWait(Tox2PpuContext* ctx, std::uint8_t* base) {
 
     const std::uint32_t saved_count = mutex->lock_count;
     mutex->lock_count = 0;
-    mutex->owner = 0;
-    mutex->cv.notify_one();
+    releaseMutex(*mutex);
 
     cond->waiters++;
     const bool signaled =
@@ -432,7 +505,7 @@ void sysCondWait(Tox2PpuContext* ctx, std::uint8_t* base) {
     cond->waiters--;
 
     // Only the mutex wait can still block; it has no timeout of its own.
-    acquireMutex(mutex, tid, 0, "sys_cond_wait");
+    acquireMutex(mutex, callerThread(ctx), tid, 0, "sys_cond_wait");
     mutex->lock_count = saved_count;
     setResultCode(ctx, signaled ? kCellOk : kCellEtimedout);
 }

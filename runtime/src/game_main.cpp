@@ -46,6 +46,7 @@
 #include "input/keyboard_pad.h"
 #include "input/pad_script.h"
 #include "libsre_ppu_tables.h"
+#include "lv2/sys_sync.h"
 #include "lv2/syscalls.h"
 #include "lv2/vfs.h"
 #include "lv2/vfs_config.h"
@@ -732,7 +733,8 @@ bool isAudioPathClass(tox2::GuestLockClass cls) {
 }
 
 tox2::PerfSource lockPerfSource() {
-    return [prev = tox2::GuestLockStats{}, prev_yields = tox2::PpuYieldStats{}]() mutable -> std::string {
+    return [prev = tox2::GuestLockStats{}, prev_yields = tox2::PpuYieldStats{},
+            prev_handoffs = tox2::SyncHandoffStats{}]() mutable -> std::string {
         const tox2::GuestLockStats now = tox2::guestLock().stats();
         std::string body;
         for (std::size_t i = 0; i < tox2::kGuestLockClassCount; i++) {
@@ -771,6 +773,18 @@ tox2::PerfSource lockPerfSource() {
                                 yields.to_host - prev_yields.to_host, yields.kept - prev_yields.kept,
                                 yields.backoffs - prev_yields.backoffs);
             prev_yields = yields;
+        }
+        const tox2::SyncHandoffStats handoffs = tox2::syncHandoffStats();
+        if (handoffs.mutex_waits != prev_handoffs.mutex_waits ||
+            handoffs.mutex_handoffs != prev_handoffs.mutex_handoffs ||
+            handoffs.lwmutex_waits != prev_handoffs.lwmutex_waits ||
+            handoffs.lwmutex_handoffs != prev_handoffs.lwmutex_handoffs) {
+            body += std::format("{}lwmutex wait {} handoff {} mutex wait {} handoff {}", body.empty() ? "lock " : " | ",
+                                handoffs.lwmutex_waits - prev_handoffs.lwmutex_waits,
+                                handoffs.lwmutex_handoffs - prev_handoffs.lwmutex_handoffs,
+                                handoffs.mutex_waits - prev_handoffs.mutex_waits,
+                                handoffs.mutex_handoffs - prev_handoffs.mutex_handoffs);
+            prev_handoffs = handoffs;
         }
         prev = now;
         return body;

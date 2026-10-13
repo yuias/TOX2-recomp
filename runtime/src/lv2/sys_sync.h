@@ -91,6 +91,17 @@ std::uint32_t mutexLock(const Tox2PpuContext* ctx, std::uint32_t id, std::uint64
 std::uint32_t mutexTryLock(const Tox2PpuContext* ctx, std::uint32_t id);
 std::uint32_t mutexUnlock(const Tox2PpuContext* ctx, std::uint32_t id);
 
+// Blocking lock calls and unlocks that gave the object to a waiter, since start. An unlock hands the mutex or
+// lwmutex directly to the waiter its protocol chooses; the count of hand-offs includes those of the release inside
+// a condition variable wait. Any thread.
+struct SyncHandoffStats {
+    std::uint64_t mutex_waits = 0;
+    std::uint64_t mutex_handoffs = 0;
+    std::uint64_t lwmutex_waits = 0;
+    std::uint64_t lwmutex_handoffs = 0;
+};
+SyncHandoffStats syncHandoffStats();
+
 // `lwmutex` is the guest address of a `sys_lwmutex_t`, `attr` that of a `sys_lwmutex_attribute_t`.
 std::uint32_t lwmutexCreate(std::uint8_t* base, std::uint32_t lwmutex, std::uint32_t attr);
 std::uint32_t lwmutexDestroy(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex);

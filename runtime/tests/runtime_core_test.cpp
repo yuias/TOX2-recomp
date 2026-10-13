@@ -10911,6 +10911,283 @@ void testLwcond() {
     tox2::resetCensus();
 }
 
+// Polls `done` with the guest lock held; false after 5 s. Seeing a worker's flag this way means the worker, which sets
+// it while holding the lock, has since given the lock up in a blocking wait.
+template <class Pred>
+bool waitUnderGuestLock(Pred done) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+            if (done()) return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
+}
+
+// An unlock gives the lwmutex to the waiter its protocol chooses and leaves the owner word reserved, so the unlocking
+// thread cannot take it back; a grant that races with the waiter's timeout still makes it the owner.
+void testLwmutexHandoff() {
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t lw = scratch, lc = scratch + 0x40, attr = scratch + 0x80, cattr = scratch + 0xa0;
+
+    constexpr const char* kModule = "sysPrxForUser";
+    const Tox2ImportInfo imports[] = {
+            {0x00800000, 0x2f85c0ef, kModule, "sys_lwmutex_create"},
+            {0x00800010, 0x1573dc3f, kModule, "sys_lwmutex_lock"},
+            {0x00800020, 0xaeb78725, kModule, "sys_lwmutex_trylock"},
+            {0x00800030, 0x1bc200f4, kModule, "sys_lwmutex_unlock"},
+            {0x00800040, 0xda0eb71a, kModule, "sys_lwcond_create"},
+            {0x00800050, 0x2a6d9d51, kModule, "sys_lwcond_wait"},
+            {0x00800060, 0xef87a695, kModule, "sys_lwcond_signal"},
+    };
+    tox2::installImports(imports, 7);
+    enum { kCreate, kLock, kTryLock, kUnlock, kCondCreate, kWait, kSignal };
+    auto call = [&](tox2::GuestThread& caller, std::uint32_t index, std::uint64_t r3, std::uint64_t r4 = 0,
+                    std::uint64_t r5 = 0) {
+        Tox2PpuContext* ctx = &caller.context();
+        ctx->gpr[3] = r3;
+        ctx->gpr[4] = r4;
+        ctx->gpr[5] = r5;
+        tox2HleCall(ctx, base, index);
+        return ctx->gpr[3];
+    };
+    auto a = makeCaller(0x01000000);
+    auto b = makeCaller(0x01000001);
+    auto c = makeCaller(0x01000002);
+    auto d = makeCaller(0x01000003);
+    auto e = makeCaller(0x01000004);
+    a->setPriority(1001);
+    b->setPriority(1001);
+    c->setPriority(500);
+    d->setPriority(1001);
+    e->setPriority(1001);
+    const tox2::SyncHandoffStats stats_before = tox2::syncHandoffStats();
+
+    // `a` owns the lwmutex and b, c, d queue in that order. After a's unlock the lwmutex is reserved for the chosen
+    // waiter and each owner unlocks in turn, so the serving order is the protocol's.
+    auto serveOrder = [&](std::uint32_t protocol) {
+        tox2Write32(base, attr, protocol);
+        tox2Write32(base, attr + 4, 0x10);
+        CHECK(call(*a, kCreate, lw, attr) == 0);
+        CHECK(call(*a, kLock, lw, 0) == 0);
+        std::vector<std::string> served;
+        std::vector<std::thread> workers;
+        tox2::GuestThread* const callers[] = {b.get(), c.get(), d.get()};
+        const char* const names[] = {"b", "c", "d"};
+        for (std::uint32_t i = 0; i < 3; i++) {
+            workers.emplace_back([&, i] {
+                std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+                const bool locked = call(*callers[i], kLock, lw, 0) == 0;
+                served.push_back(locked ? names[i] : "failed");
+                call(*callers[i], kUnlock, lw);
+            });
+            CHECK(waitUnderGuestLock([&] { return tox2Read32(base, lw + 4) == i + 1; }));
+        }
+        {
+            // The chosen waiter cannot run before the guest lock is given up.
+            std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+            CHECK(call(*a, kUnlock, lw) == 0);
+            CHECK(tox2Read32(base, lw) == tox2::kLwmutexReserved);
+            CHECK(call(*a, kTryLock, lw) == err(tox2::kCellEbusy));
+            CHECK(call(*a, kUnlock, lw) == err(tox2::kCellEperm));
+        }
+        for (std::thread& worker : workers) worker.join();
+        CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree && tox2Read32(base, lw + 4) == 0);
+        return served;
+    };
+    const std::vector<std::string> by_priority = {"c", "b", "d"};
+    CHECK(serveOrder(2) == by_priority);
+    const tox2::SyncHandoffStats stats_after = tox2::syncHandoffStats();
+    CHECK(stats_after.lwmutex_waits - stats_before.lwmutex_waits == 3);
+    CHECK(stats_after.lwmutex_handoffs - stats_before.lwmutex_handoffs == 3);
+    CHECK(stats_after.mutex_waits == stats_before.mutex_waits);
+    const std::vector<std::string> by_arrival = {"b", "c", "d"};
+    CHECK(serveOrder(1) == by_arrival);
+    CHECK(tox2::syncHandoffStats().lwmutex_handoffs - stats_before.lwmutex_handoffs == 6);
+
+    // The unlock grants the waiter after its timeout expired but before it got the guest lock back: it owns the
+    // lwmutex and reports success.
+    tox2Write32(base, attr, 2);
+    CHECK(call(*a, kCreate, lw, attr) == 0);
+    CHECK(call(*a, kLock, lw, 0) == 0);
+    std::uint64_t e_result = ~0ull;
+    std::thread timed([&] {
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        e_result = call(*e, kLock, lw, 20'000);
+    });
+    CHECK(waitUnderGuestLock([&] { return tox2Read32(base, lw + 4) == 1; }));
+    {
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        CHECK(call(*a, kUnlock, lw) == 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    timed.join();
+    CHECK(e_result == 0);
+    CHECK(tox2Read32(base, lw) == 0x01000004 && tox2Read32(base, lw + 4) == 0);
+    CHECK(call(*e, kUnlock, lw) == 0);
+    CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree);
+
+    // The release inside lwcond_wait hands the lwmutex over too: b queued before `a` waits on the condition, so
+    // right after the wait began the lwmutex is reserved for b. The observer queues for the guest lock before the wait
+    // wakes b, so it runs first.
+    CHECK(call(*a, kCondCreate, lc, lw, cattr) == 0);
+    CHECK(call(*a, kLock, lw, 0) == 0);
+    std::uint64_t b_result = ~0ull, a_result = ~0ull;
+    std::thread locker([&] {
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        b_result = call(*b, kLock, lw, 0);
+        call(*b, kUnlock, lw);
+    });
+    CHECK(waitUnderGuestLock([&] { return tox2Read32(base, lw + 4) == 1; }));
+    std::thread observer;
+    std::uint32_t owner_word = 0;
+    std::uint64_t try_result = ~0ull, signal_result = ~0ull;
+    {
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        observer = std::thread([&] {
+            std::lock_guard<tox2::GuestLock> observer_guard(tox2::guestLock());
+            owner_word = tox2Read32(base, lw);
+            try_result = call(*c, kTryLock, lw);
+            signal_result = call(*c, kSignal, lc);
+        });
+        while (tox2::guestLock().waiterCount() == 0) std::this_thread::yield();
+        a_result = call(*a, kWait, lc, 0);
+    }
+    observer.join();
+    locker.join();
+    CHECK(owner_word == tox2::kLwmutexReserved);
+    CHECK(try_result == err(tox2::kCellEbusy) && signal_result == 0);
+    CHECK(b_result == 0 && a_result == 0);
+    CHECK(tox2Read32(base, lw) == 0x01000000);  // the waiter took the lwmutex back after b
+    CHECK(call(*a, kUnlock, lw) == 0);
+    CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree);
+
+    p.main.free(scratch);
+    tox2::resetSyncObjects();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+}
+
+// The same for sys_mutex: an unlock, also the one inside sys_cond_wait, makes the chosen waiter the owner at once.
+void testMutexHandoff() {
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t id_out = scratch, cond_out = scratch + 8, attr = scratch + 0x40;
+
+    auto a = makeCaller(0x01000000);
+    auto b = makeCaller(0x01000001);
+    auto c = makeCaller(0x01000002);
+    auto d = makeCaller(0x01000003);
+    a->setPriority(1001);
+    b->setPriority(1001);
+    c->setPriority(500);
+    d->setPriority(1001);
+    const tox2::SyncHandoffStats stats_before = tox2::syncHandoffStats();
+
+    auto serveOrder = [&](std::uint32_t protocol) {
+        tox2Write32(base, attr, protocol);
+        tox2Write32(base, attr + 4, 0x20);
+        CHECK(syscallAs(*a, 100, id_out, attr) == 0);
+        const std::uint32_t m = tox2Read32(base, id_out);
+        CHECK(syscallAs(*a, 102, m, 0) == 0);
+        std::vector<std::string> served;
+        std::vector<std::thread> workers;
+        std::atomic<std::uint32_t> queued{0};
+        tox2::GuestThread* const callers[] = {b.get(), c.get(), d.get()};
+        const char* const names[] = {"b", "c", "d"};
+        for (std::uint32_t i = 0; i < 3; i++) {
+            workers.emplace_back([&, i, m] {
+                std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+                queued++;
+                const bool locked = syscallAs(*callers[i], 102, m, 0) == 0;
+                served.push_back(locked ? names[i] : "failed");
+                syscallAs(*callers[i], 104, m);
+            });
+            CHECK(waitUnderGuestLock([&] { return queued.load() == i + 1; }));
+        }
+        {
+            std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+            CHECK(syscallAs(*a, 104, m) == 0);
+            CHECK(syscallAs(*a, 103, m) == err(tox2::kCellEbusy));
+            CHECK(syscallAs(*a, 104, m) == err(tox2::kCellEperm));
+            CHECK(syscallAs(*a, 101, m) == err(tox2::kCellEbusy));
+        }
+        for (std::thread& worker : workers) worker.join();
+        CHECK(syscallAs(*a, 101, m) == 0);
+        return served;
+    };
+    const std::vector<std::string> by_priority = {"c", "b", "d"};
+    CHECK(serveOrder(2) == by_priority);
+    const tox2::SyncHandoffStats stats_after = tox2::syncHandoffStats();
+    CHECK(stats_after.mutex_waits - stats_before.mutex_waits == 3);
+    CHECK(stats_after.mutex_handoffs - stats_before.mutex_handoffs == 3);
+    CHECK(stats_after.lwmutex_waits == stats_before.lwmutex_waits);
+    const std::vector<std::string> by_arrival = {"b", "c", "d"};
+    CHECK(serveOrder(1) == by_arrival);
+
+    // Waiting on the condition variable hands the mutex to the queued waiter, who owns it before it runs. The observer
+    // queues for the guest lock before the wait wakes b, so it runs first.
+    tox2Write32(base, attr, 2);
+    tox2Write32(base, attr + 4, 0x20);
+    CHECK(syscallAs(*a, 100, id_out, attr) == 0);
+    const std::uint32_t m = tox2Read32(base, id_out);
+    CHECK(syscallAs(*a, 105, cond_out, m, attr) == 0);
+    const std::uint32_t cv = tox2Read32(base, cond_out);
+    CHECK(syscallAs(*a, 102, m, 0) == 0);
+    std::uint64_t b_result = ~0ull, a_result = ~0ull;
+    std::atomic<bool> b_queued{false};
+    std::thread locker([&] {
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        b_queued = true;
+        b_result = syscallAs(*b, 102, m, 0);
+        syscallAs(*b, 104, m);
+    });
+    CHECK(waitUnderGuestLock([&] { return b_queued.load(); }));
+    std::thread observer;
+    std::uint64_t relock_result = ~0ull, try_result = ~0ull, unlock_result = ~0ull, signal_result = ~0ull;
+    {
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        observer = std::thread([&] {
+            std::lock_guard<tox2::GuestLock> observer_guard(tox2::guestLock());
+            // b has not run yet, but the non-recursive relock shows it owns the mutex.
+            relock_result = syscallAs(*b, 102, m, 0);
+            try_result = syscallAs(*c, 103, m);
+            unlock_result = syscallAs(*a, 104, m);
+            signal_result = syscallAs(*c, 108, cv);
+        });
+        while (tox2::guestLock().waiterCount() == 0) std::this_thread::yield();
+        a_result = syscallAs(*a, 107, cv, 0);
+    }
+    observer.join();
+    locker.join();
+    CHECK(relock_result == err(tox2::kCellEdeadlk) && try_result == err(tox2::kCellEbusy));
+    CHECK(unlock_result == err(tox2::kCellEperm) && signal_result == 0);
+    CHECK(b_result == 0 && a_result == 0);
+    CHECK(syscallAs(*a, 104, m) == 0);  // the waiter owns the mutex again
+    CHECK(syscallAs(*a, 104, m) == err(tox2::kCellEperm));
+
+    p.main.free(scratch);
+    tox2::resetSyncObjects();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+}
+
 void testGuestPrintf() {
     tox2::Process& p = tox2::process();
     CHECK(p.memory.reserve());
@@ -13132,6 +13409,8 @@ int main(int argc, char** argv) {
     testRsxConsumer();
     testLwmutex();
     testLwcond();
+    testLwmutexHandoff();
+    testMutexHandoff();
     testGuestPrintf();
     testSysPrxForUserLibc();
     testSpuImageImport();
