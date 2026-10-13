@@ -1,6 +1,7 @@
 #include "render/vk_textures.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <format>
 #include <utility>
@@ -183,10 +184,16 @@ SamplerSettings samplerSettings(const RsxTextureDesc& texture) {
 TextureImage::~TextureImage() {
     if (context == nullptr) return;
     for (const auto& entry : views) vkDestroyImageView(context->device(), entry.second, nullptr);
-    if (image != VK_NULL_HANDLE) vmaDestroyImage(context->allocator(), image, allocation);
+    if (image == VK_NULL_HANDLE) return;
+    if (pool) {
+        pool->give(pool_key, bytes, image, allocation);
+    } else {
+        vmaDestroyImage(context->allocator(), image, allocation);
+    }
 }
 
-TextureCache::TextureCache(VkContext& context) : context_(context) {}
+TextureCache::TextureCache(VkContext& context, std::shared_ptr<ImagePool> pool)
+    : context_(context), pool_(std::move(pool)) {}
 
 TextureCache::~TextureCache() {
     images_.clear();
@@ -231,7 +238,8 @@ bool TextureCache::formatUsable(VkFormat format) {
 
 std::shared_ptr<TextureImage> TextureCache::create(std::uint32_t width, std::uint32_t height, VkFormat format,
                                                    VkImageUsageFlags usage, std::uint32_t levels, std::uint32_t depth,
-                                                   std::uint32_t layers, VkImageViewType view_type) {
+                                                   std::uint32_t layers, VkImageViewType view_type,
+                                                   ImagePoolResult* pooled) {
     const VkPhysicalDeviceLimits& limits = context_.deviceProperties().limits;
     // A 3D image is limited by maxImageDimension3D on all three sides; a cube by maxImageDimensionCube.
     const std::uint32_t max_side = view_type == VK_IMAGE_VIEW_TYPE_3D     ? limits.maxImageDimension3D
@@ -276,6 +284,18 @@ std::shared_ptr<TextureImage> TextureCache::create(std::uint32_t width, std::uin
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
     image_info.usage = usage;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (pooled != nullptr && pool_) {
+        // The key leaves out what a pooled caller never varies (single level and layer, 2D).
+        assert(levels == 1 && depth == 1 && layers == 1 && view_type == VK_IMAGE_VIEW_TYPE_2D);
+        const PooledImageKey key{format, width, height, image_info.samples, usage};
+        *pooled = pool_->take(key, texture->image, texture->allocation);
+        if (pooled->hit) {
+            texture->pool = pool_;
+            texture->pool_key = key;
+            return texture;
+        }
+        texture->pool_key = key;
+    }
     VmaAllocationCreateInfo alloc_info{};
     alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     if (vmaCreateImage(context_.allocator(), &image_info, &alloc_info, &texture->image, &texture->allocation,
@@ -284,6 +304,7 @@ std::shared_ptr<TextureImage> TextureCache::create(std::uint32_t width, std::uin
         fail("vmaCreateImage failed for a texture");
         return nullptr;
     }
+    if (pooled != nullptr && pool_) texture->pool = pool_;
     return texture;
 }
 
@@ -333,9 +354,14 @@ std::shared_ptr<TextureImage> TextureCache::acquire(const RsxTextureDesc& textur
     return created;
 }
 
-std::shared_ptr<TextureImage> TextureCache::renderable(std::uint32_t width, std::uint32_t height) {
+std::shared_ptr<TextureImage> TextureCache::renderable(std::uint32_t width, std::uint32_t height,
+                                                       ImagePoolResult* pooled) {
+    ImagePoolResult local;
+    if (pooled == nullptr) pooled = &local;
+    *pooled = ImagePoolResult{};
     return create(width, height, VK_FORMAT_B8G8R8A8_UNORM,
-                  VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+                  VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 1, 1, 1, VK_IMAGE_VIEW_TYPE_2D,
+                  pooled);
 }
 
 std::shared_ptr<TextureImage> TextureCache::scratch(std::uint32_t width, std::uint32_t height) {

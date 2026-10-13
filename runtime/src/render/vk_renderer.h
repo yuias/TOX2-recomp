@@ -73,9 +73,9 @@ struct RendererStats {
     // texel size). The Texture entries follow the texture cache as of the end of the last execute() or flip.
     std::array<std::uint64_t, kRenderImageKindCount> images_created{};
     std::array<std::uint64_t, kRenderImageKindCount> image_bytes_created{};
-    // Retired images reused instead of created, by RenderImageKind (only Target and Sidecar are pooled so far).
+    // Retired images reused instead of created, by RenderImageKind (Target, Sidecar and DepthArgb are pooled).
     std::array<std::uint64_t, kRenderImageKindCount> image_pool_hits{};
-    // Creations of pooled kinds, by ImagePoolMiss. Their sum equals images_created[Target] + [Sidecar].
+    // Creations of pooled kinds, by ImagePoolMiss. Their sum equals images_created[Target] + [Sidecar] + [DepthArgb].
     std::array<std::uint64_t, kImagePoolMissCount> image_pool_misses{};
     std::uint64_t image_pool_bytes = 0;     // held by the pool at the end of the last flip
     ImagePoolDiscards image_pool_discards;  // the pool's discards() at the end of the last flip

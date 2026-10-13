@@ -2067,9 +2067,11 @@ void putSurfaceQuad(tox2::rsx_synthetic::SceneBuilder& scene, std::uint32_t x0, 
     }
 }
 
-// The textured pass of both scenes: unit 0 reads `offset` as a 64x64 linear texture of the base format `format`.
-void setSurfaceTextureState(tox2::rsx_synthetic::SceneBuilder& scene, std::uint32_t offset, std::uint32_t format) {
-    scene.bindTexture(offset, 64, 64);
+// The textured pass of both scenes: unit 0 reads `offset` as a `size` x `size` linear texture of the base format
+// `format`.
+void setSurfaceTextureState(tox2::rsx_synthetic::SceneBuilder& scene, std::uint32_t offset, std::uint32_t format,
+                            std::uint32_t size = 64) {
+    scene.bindTexture(offset, size, size);
     scene.write(tox2::kMethodNv4097SetTextureFormat, 1u | (2u << 4) | ((format | 0x20u) << 8) | (1u << 16));
     scene.write(tox2::kMethodNv4097SetVertexAttribOutputMask, 1u << 14);  // TEX0
     scene.write(tox2::kMethodNv4097SetShaderControl, 0x400);              // color from H0
@@ -2391,6 +2393,58 @@ void testRendererImageCreationCounters(tox2::VkContext& ctx) {
         CHECK(msaa.images_created[sidecar] > 0 && msaa.image_pool_hits[sidecar] > 0);
         CHECK(msaa.image_pool_hits[target] > 0);
     }
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
+// The depth surface of makeDepthResizeCapture, with a draw at 128x128 that reads it as an A8R8G8B8 texture: each frame
+// needs one depth-as-ARGB image, and the image of the target the 64x64 binding replaced goes back to the pool.
+std::vector<std::uint8_t> makeDepthArgbResizeCapture() {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    scene.setSurface(0, 64);
+    scene.write(tox2::kMethodNv4097SetZstencilClearValue, 0xFFFFFF00u);
+    scene.write(tox2::kMethodNv4097ClearSurface, 0x03);
+    scene.setSurface(0, 128);
+    scene.write(tox2::kMethodNv4097ClearSurface, 0x03);
+    setQuadRenderState(scene, 64.0f);
+    scene.setFloatAttrib(0, 3, kPositionsOffset);
+    setSurfaceTextureState(scene, kDepthOffset, 0x85, 128);
+    putSurfaceQuad(scene, 16, 48);
+    scene.drawStrip(4);
+    return scene.finish();
+}
+
+void testRendererDepthArgbPool(tox2::VkContext& ctx) {
+    using tox2::RenderImageKind;
+    constexpr std::uint64_t kFrames = 12, kSteadyFrom = 7;
+    const auto argb = static_cast<std::size_t>(RenderImageKind::DepthArgb);
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+    CHECK(renderer.valid());
+    tox2::RendererStats before_steady;
+    for (std::uint64_t frame = 1; frame <= kFrames; frame++) {
+        std::vector<tox2::RsxCommand> commands = replaySynthetic(makeDepthArgbResizeCapture());
+        tox2::rsxUnimplementedReset();
+        renderer.execute(commands);
+        CHECK(renderer.valid());
+        const tox2::RendererStats& stats = renderer.stats();
+        CHECK(stats.depth_conversions == frame);
+        std::uint64_t misses = 0;
+        for (const std::uint64_t count : stats.image_pool_misses) misses += count;
+        CHECK(misses ==
+              stats.images_created[static_cast<std::size_t>(RenderImageKind::Target)] + stats.images_created[argb]);
+        if (frame == kSteadyFrom) before_steady = stats;
+        if (frame > kSteadyFrom) {
+            // The last 5 frames: the one image each frame needs comes from the pool.
+            CHECK(stats.images_created[argb] == before_steady.images_created[argb]);
+            CHECK(stats.image_pool_hits[argb] == before_steady.image_pool_hits[argb] + (frame - kSteadyFrom));
+        }
+    }
+    CHECK(renderer.stats().images_created[argb] > 0);
+    CHECK(renderer.stats().image_bytes_created[argb] == renderer.stats().images_created[argb] * 128 * 128 * 4);
+    CHECK(renderer.stats().image_pool_hits[argb] + renderer.stats().images_created[argb] == kFrames);
     CHECK(ctx.validationErrorCount() == errors_before);
     tox2::rsxUnimplementedReset();
 }
@@ -4826,6 +4880,7 @@ int main() {
     testRendererDepthTexture(*ctx);
     testImagePool(*ctx);
     testRendererImageCreationCounters(*ctx);
+    testRendererDepthArgbPool(*ctx);
     testRendererStencil(*ctx);
     testRendererUserClip(*ctx);
     testRendererConditionCode(*ctx);

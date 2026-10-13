@@ -12,6 +12,7 @@
 #include <string>
 #include <tuple>
 
+#include "render/image_pool.h"
 #include "render/vk_context.h"
 #include "rsx/rsx_frame.h"
 #include "rsx/rsx_texture_layout.h"
@@ -83,6 +84,10 @@ struct TextureImage {
     // RsxTextureDesc::content_id of the blob the image was last uploaded from; 0 = never (or not from a blob).
     std::uint64_t content_id = 0;
     std::map<std::uint32_t, VkImageView> views;  // by remap word (low 16 bits)
+    // Set for images that go back to the pool instead of being destroyed. The last reference drops only after the
+    // slots that used the image were waited, so the GPU is done with it by then.
+    std::shared_ptr<ImagePool> pool;
+    PooledImageKey pool_key{};
 
     TextureImage() = default;
     TextureImage(const TextureImage&) = delete;
@@ -92,7 +97,8 @@ struct TextureImage {
 
 class TextureCache {
 public:
-    explicit TextureCache(VkContext& context);
+    // With a pool, renderable() images are taken from it and returned to it.
+    explicit TextureCache(VkContext& context, std::shared_ptr<ImagePool> pool = nullptr);
     ~TextureCache();
     TextureCache(const TextureCache&) = delete;
     TextureCache& operator=(const TextureCache&) = delete;
@@ -109,8 +115,11 @@ public:
     std::shared_ptr<TextureImage> scratch(std::uint32_t width, std::uint32_t height);
 
     // A B8G8R8A8 image the renderer draws into and then samples (SAMPLED and COLOR_ATTACHMENT usage), owned by
-    // the caller. Null with a counted note when the size is not supported.
-    std::shared_ptr<TextureImage> renderable(std::uint32_t width, std::uint32_t height);
+    // the caller. Null with a counted note when the size is not supported. With a pool the image is reused from it
+    // when one of the size is there; `*pooled` then says whether it was (without a pool: no hit, NoEntry). The
+    // contents and layout of a reused image are undefined, as for a new one.
+    std::shared_ptr<TextureImage> renderable(std::uint32_t width, std::uint32_t height,
+                                             ImagePoolResult* pooled = nullptr);
 
     // Images created by acquire() and scratch() so far, and their total size in bytes; renderable() images are
     // the caller's to count.
@@ -148,12 +157,14 @@ private:
 
     std::shared_ptr<TextureImage> create(std::uint32_t width, std::uint32_t height, VkFormat format,
                                          VkImageUsageFlags usage, std::uint32_t levels = 1, std::uint32_t depth = 1,
-                                         std::uint32_t layers = 1, VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D);
+                                         std::uint32_t layers = 1, VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D,
+                                         ImagePoolResult* pooled = nullptr);
     bool formatUsable(VkFormat format);
     bool linearFilterable(VkFormat format);
     void fail(std::string message);
 
     VkContext& context_;
+    std::shared_ptr<ImagePool> pool_;
     std::map<VkFormat, bool> format_usable_;
     std::map<VkFormat, bool> linear_filterable_;
     std::string error_;

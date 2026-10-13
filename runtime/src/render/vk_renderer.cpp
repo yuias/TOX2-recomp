@@ -294,7 +294,7 @@ RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(c
         return;
     }
     image_pool_ = std::make_shared<ImagePool>(context_);
-    textures_ = std::make_unique<TextureCache>(context_);
+    textures_ = std::make_unique<TextureCache>(context_, image_pool_);
     const VkDevice device = context_.device();
     for (std::unique_ptr<FrameSlot>& slot_ptr : slots_) {
         slot_ptr = std::make_unique<FrameSlot>();
@@ -1236,13 +1236,19 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
     if (depth.argb && depth.argb_serial == depth.write_serial) return depth.argb;
 
     if (!depth.argb) {
-        depth.argb = textures_->renderable(depth.image_width, depth.image_height);
+        ImagePoolResult pooled;
+        depth.argb = textures_->renderable(depth.image_width, depth.image_height, &pooled);
         if (!textures_->valid()) {
             fail(textures_->error());
             return nullptr;
         }
         if (!depth.argb) return nullptr;
-        noteImageCreated(RenderImageKind::DepthArgb, depth.argb->bytes);
+        if (pooled.hit) {
+            stats_.image_pool_hits[static_cast<std::size_t>(RenderImageKind::DepthArgb)]++;
+        } else {
+            stats_.image_pool_misses[static_cast<std::size_t>(pooled.miss)]++;
+            noteImageCreated(RenderImageKind::DepthArgb, depth.argb->bytes);
+        }
     }
     const auto aspectView = [&](VkImageAspectFlags aspect, VkImageView& view) {
         if (from_sidecar || view != VK_NULL_HANDLE) return true;
