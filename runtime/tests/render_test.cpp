@@ -2205,6 +2205,44 @@ void testRendererDepthTexture(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// One depth surface bound at 64x64 and then at 128x128 by depth-only clears, every frame: each binding replaces the
+// target the other one left at the same address, so two targets are created per frame.
+std::vector<std::uint8_t> makeDepthResizeCapture() {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    scene.setSurface(0, 64);
+    scene.write(tox2::kMethodNv4097SetZstencilClearValue, 0xFFFFFF00u);
+    scene.write(tox2::kMethodNv4097ClearSurface, 0x03);
+    scene.setSurface(0, 128);
+    scene.write(tox2::kMethodNv4097ClearSurface, 0x03);
+    return scene.finish();
+}
+
+void testRendererImageCreationCounters(tox2::VkContext& ctx) {
+    using tox2::RenderImageKind;
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+    CHECK(renderer.valid());
+    const auto target = static_cast<std::size_t>(RenderImageKind::Target);
+    const std::uint64_t texel = ctx.depthStencilFormat() == VK_FORMAT_D32_SFLOAT_S8_UINT ? 8 : 4;
+    constexpr std::uint64_t kFrames = 3;
+    for (std::uint64_t frame = 1; frame <= kFrames; frame++) {
+        std::vector<tox2::RsxCommand> commands = replaySynthetic(makeDepthResizeCapture());
+        tox2::rsxUnimplementedReset();
+        renderer.execute(commands);
+        CHECK(renderer.valid());
+        const tox2::RendererStats& stats = renderer.stats();
+        CHECK(stats.images_created[target] == 2 * frame);
+        CHECK(stats.image_bytes_created[target] == frame * (64 * 64 + 128 * 128) * texel);
+        for (std::size_t kind = 0; kind < tox2::kRenderImageKindCount; kind++) {
+            if (kind != target) {
+                CHECK(stats.images_created[kind] == 0 && stats.image_bytes_created[kind] == 0);
+            }
+        }
+    }
+    CHECK(renderer.stats().flips == kFrames);
+    tox2::rsxUnimplementedReset();
+}
+
 // A clear that includes stencil under a write mask other than 0 or 0xFF is counted by the frame
 // builder (the renderer clears the whole byte).
 void testPartialStencilNote() {
@@ -4634,6 +4672,7 @@ int main() {
     testRendererVolumeTextures(*ctx);
     testRendererFloatSurface(*ctx);
     testRendererDepthTexture(*ctx);
+    testRendererImageCreationCounters(*ctx);
     testRendererStencil(*ctx);
     testRendererUserClip(*ctx);
     testRendererConditionCode(*ctx);

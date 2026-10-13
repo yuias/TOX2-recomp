@@ -31,12 +31,22 @@ namespace {
 constexpr std::uint64_t kFenceTimeoutNs = 10'000'000'000ull;
 constexpr std::size_t kUploadAlignment = 256;  // covers every uniform and vertex buffer offset alignment
 constexpr std::size_t kUploadBlockSize = 8u << 20;
+constexpr std::uint64_t kImageLogFlips = 600;  // flips between the image-creation log lines
 // The only operations that write a swapchain image: the black clear and the blit.
 constexpr VkPipelineStageFlags2 kPresentWriteStages = VK_PIPELINE_STAGE_2_CLEAR_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT;
 constexpr std::uint32_t kIdentityRemap = 0xAAE4;  // RSX_TEXTURE_REMAP_IDENTITY (RPCS3 `gcm_enums.h`)
 
 bool formatHasStencil(VkFormat format) {
     return format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+}
+
+// Bytes per texel of the formats a render target uses (the 32-bit depth-stencil format is counted as 8: padded).
+std::uint32_t targetTexelBytes(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_D16_UNORM: return 2;
+        case VK_FORMAT_D32_SFLOAT_S8_UINT: return 8;
+        default: return 4;
+    }
 }
 
 VkImageAspectFlags depthAspect(VkFormat format) {
@@ -327,6 +337,41 @@ void RsxRenderer::fail(std::string message) {
     if (error_.empty()) error_ = std::move(message);
 }
 
+void RsxRenderer::noteImageCreated(RenderImageKind kind, std::uint64_t bytes) {
+    const auto index = static_cast<std::size_t>(kind);
+    stats_.images_created[index]++;
+    stats_.image_bytes_created[index] += bytes;
+}
+
+void RsxRenderer::syncTextureStats() {
+    if (!textures_) return;
+    const auto index = static_cast<std::size_t>(RenderImageKind::Texture);
+    stats_.images_created[index] = textures_->imagesCreated();
+    stats_.image_bytes_created[index] = textures_->imageBytesCreated();
+}
+
+// Image churn shows up in the allocator and driver time of the RSX thread; this tells which kinds cause it.
+void RsxRenderer::logImageCreations() {
+    syncTextureStats();
+    const auto delta = [&](RenderImageKind kind, std::uint64_t& count, double& megabytes) {
+        const auto index = static_cast<std::size_t>(kind);
+        count = stats_.images_created[index] - logged_stats_.images_created[index];
+        megabytes = static_cast<double>(stats_.image_bytes_created[index] - logged_stats_.image_bytes_created[index]) /
+                    (1024.0 * 1024.0);
+    };
+    std::uint64_t counts[kRenderImageKindCount];
+    double megabytes[kRenderImageKindCount];
+    for (std::size_t i = 0; i < kRenderImageKindCount; i++)
+        delta(static_cast<RenderImageKind>(i), counts[i], megabytes[i]);
+    logDebug(
+            "tox2: render: last 600 flips: created target {} ({:.1f} MB), sidecar {} ({:.1f} MB), depth-argb {} "
+            "({:.1f} MB), texture {} ({:.1f} MB), upload-block {} ({:.1f} MB)",
+            counts[0], megabytes[0], counts[1], megabytes[1], counts[2], megabytes[2], counts[3], megabytes[3],
+            counts[4], megabytes[4]);
+    logged_stats_.images_created = stats_.images_created;
+    logged_stats_.image_bytes_created = stats_.image_bytes_created;
+}
+
 bool RsxRenderer::waitSlot(FrameSlot& slot) {
     if (!slot.pending) return true;
     const VkResult result = vkWaitForFences(context_.device(), 1, &slot.fence, VK_TRUE, kFenceTimeoutNs);
@@ -546,6 +591,8 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth,
         fail("vmaCreateImage failed for a render target");
         return nullptr;
     }
+    noteImageCreated(RenderImageKind::Target,
+                     static_cast<std::uint64_t>(image_width) * image_height * targetTexelBytes(format));
 
     VkImageViewCreateInfo view_info{};
     view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -610,6 +657,8 @@ bool RsxRenderer::ensureMultisample(RenderTarget& target) {
         fail("vmaCreateImage failed for a multisampled render target");
         return false;
     }
+    noteImageCreated(RenderImageKind::Sidecar, static_cast<std::uint64_t>(image_info.extent.width) *
+                                                       image_info.extent.height * 2 * targetTexelBytes(target.format));
     VkImageViewCreateInfo view_info{};
     view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     view_info.image = sidecar->image;
@@ -984,6 +1033,7 @@ bool RsxRenderer::allocUpload(std::size_t size, UploadRef& out) {
             return false;
         }
         created.mapped = static_cast<std::uint8_t*>(mapped.pMappedData);
+        noteImageCreated(RenderImageKind::UploadBlock, created.size);
         slot.uploads.push_back(created);
         block = &slot.uploads.back();
     }
@@ -1137,6 +1187,7 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
             return nullptr;
         }
         if (!depth.argb) return nullptr;
+        noteImageCreated(RenderImageKind::DepthArgb, depth.argb->bytes);
     }
     const auto aspectView = [&](VkImageAspectFlags aspect, VkImageView& view) {
         if (from_sidecar || view != VK_NULL_HANDLE) return true;
@@ -2192,6 +2243,8 @@ bool RsxRenderer::ensureReadback(FrameSlot& slot, VkDeviceSize size) {
 void RsxRenderer::recordFlip(const RsxFlip& flip) {
     stats_.flips++;
     textures_->trim();
+    syncTextureStats();
+    if (stats_.flips % kImageLogFlips == 0) logImageCreations();
     FrameSlot& slot = *slots_[current_slot_];
     dump_this_flip_ = dump_requested_;
     dump_requested_ = false;
@@ -2327,7 +2380,7 @@ void RsxRenderer::recordPresentBlit(FrameSlot& slot, RenderTarget* source) {
 
 void RsxRenderer::execute(std::span<RsxCommand> commands) {
     for (RsxCommand& command : commands) {
-        if (!beginFrame()) return;
+        if (!beginFrame()) break;
         if (const auto* clear = std::get_if<RsxClear>(&command)) {
             recordClear(*clear);
         } else if (const auto* draw = std::get_if<RsxDraw>(&command)) {
@@ -2342,8 +2395,9 @@ void RsxRenderer::execute(std::span<RsxCommand> commands) {
                 if (dumpDisplay(path) && requested) last_requested_dump_ = path;
             }
         }
-        if (!valid()) return;
+        if (!valid()) break;
     }
+    syncTextureStats();
 }
 
 // The flip number counts from 1; stats_.flips already includes the flip being recorded.

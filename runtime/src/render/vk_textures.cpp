@@ -326,6 +326,8 @@ std::shared_ptr<TextureImage> TextureCache::acquire(const RsxTextureDesc& textur
             create(texture.width, texture.height, format, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                    levels, depth, layers, view_type);
     if (!created) return nullptr;
+    images_created_++;
+    image_bytes_created_ += created->bytes;
     created->last_used = ++tick_;
     images_[key] = created;
     return created;
@@ -343,6 +345,8 @@ std::shared_ptr<TextureImage> TextureCache::scratch(std::uint32_t width, std::ui
     std::shared_ptr<TextureImage> created = create(width, height, VK_FORMAT_B8G8R8A8_UNORM,
                                                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     if (!created) return nullptr;
+    images_created_++;
+    image_bytes_created_ += created->bytes;
     if (scratch_.size() >= kMaxScratchImages) scratch_.clear();
     scratch_[key] = created;
     return created;

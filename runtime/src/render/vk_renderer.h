@@ -48,6 +48,16 @@ struct RenderOptions {
     AaMode aa_mode = AaMode::Msaa;
 };
 
+// What a created GPU image or upload block was for (see RendererStats::images_created).
+enum class RenderImageKind : std::uint8_t {
+    Target,       // colour or depth target
+    Sidecar,      // 2-sample image of an anti-aliased target
+    DepthArgb,    // A8R8G8B8 rewrite of a depth surface
+    Texture,      // texture cache image (not the DepthArgb ones)
+    UploadBlock,  // host-visible draw upload buffer
+};
+inline constexpr std::size_t kRenderImageKindCount = 5;
+
 struct RendererStats {
     std::uint64_t clears = 0;         // clears recorded (a clear whose mask is not modelled still counts)
     std::uint64_t draws = 0;          // draws handled: recorded into a command buffer, or dropped with an empty scissor
@@ -58,6 +68,10 @@ struct RendererStats {
     std::uint64_t depth_conversions = 0;  // depth surfaces rewritten as A8R8G8B8 texels for a draw that reads them
     std::uint64_t surface_inherits = 0;   // copies of an old target's contents into a resized one
     std::uint64_t layout_copies = 0;      // multisampled targets copied into their memory layout for a read
+    // GPU images and upload blocks created, by RenderImageKind, with their size in bytes (width x height x samples x
+    // texel size). The Texture entries follow the texture cache as of the end of the last execute() or flip.
+    std::array<std::uint64_t, kRenderImageKindCount> images_created{};
+    std::array<std::uint64_t, kRenderImageKindCount> image_bytes_created{};
 };
 
 // Single-threaded: execute, readDisplay and stats are called from one thread. The renderer never
@@ -143,6 +157,9 @@ private:
     using TargetMap = std::map<TargetKey, std::shared_ptr<RenderTarget>>;
 
     void fail(std::string message);
+    void noteImageCreated(RenderImageKind kind, std::uint64_t bytes);
+    void syncTextureStats();
+    void logImageCreations();
     bool beginFrame();
     bool waitSlot(FrameSlot& slot);
     bool submitFrame();
@@ -192,6 +209,7 @@ private:
     RenderOptions options_;
     std::string error_;
     RendererStats stats_;
+    RendererStats logged_stats_;  // stats_ at the last image-creation log line
     std::uint32_t resolution_scale_ = 1;
     AaMode aa_mode_ = AaMode::Supersample;
     // Always created: its worker thread only starts with the first submitted frame.

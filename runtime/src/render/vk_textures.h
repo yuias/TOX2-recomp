@@ -112,6 +112,11 @@ public:
     // the caller. Null with a counted note when the size is not supported.
     std::shared_ptr<TextureImage> renderable(std::uint32_t width, std::uint32_t height);
 
+    // Images created by acquire() and scratch() so far, and their total size in bytes; renderable() images are
+    // the caller's to count.
+    std::uint64_t imagesCreated() const { return images_created_; }
+    std::uint64_t imageBytesCreated() const { return image_bytes_created_; }
+
     // View with the component mapping of `remap`; null on a Vulkan failure.
     VkImageView view(TextureImage& image, std::uint32_t remap);
     // View of an image the cache does not own, with the same mapping rule. An R32_SFLOAT image gets the
@@ -153,6 +158,8 @@ private:
     std::map<VkFormat, bool> linear_filterable_;
     std::string error_;
     std::uint64_t tick_ = 0;
+    std::uint64_t images_created_ = 0;
+    std::uint64_t image_bytes_created_ = 0;
     std::map<Key, std::shared_ptr<TextureImage>> images_;
     std::map<std::pair<std::uint32_t, std::uint32_t>, std::shared_ptr<TextureImage>> scratch_;
     std::map<SamplerSettings, VkSampler> samplers_;
