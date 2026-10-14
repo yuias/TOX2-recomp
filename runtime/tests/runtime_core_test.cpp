@@ -12698,6 +12698,305 @@ void testGuestLockPpuPriority() {
     }
 }
 
+// Polls until `done` holds; false after five seconds, so a broken wait fails a check instead of hanging the test.
+template <class Pred>
+bool pollUntil(Pred done) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!done()) {
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::yield();
+    }
+    return true;
+}
+
+// A thread that queues for slots as a PPU thread of this lv2 priority; the override is reset on every path.
+std::thread slotThread(std::optional<std::int32_t> priority, std::function<void()> body) {
+    return std::thread([priority, body = std::move(body)] {
+        tox2::setGuestLockPpuPriorityForTesting(priority);
+        body();
+        tox2::setGuestLockPpuPriorityForTesting(std::nullopt);
+    });
+}
+
+// Starts a thread and returns once `slots` shows it queued.
+void queueSlotThread(tox2::PpuSlots& slots, std::vector<std::thread>& threads, std::int32_t priority,
+                     std::function<void()> body) {
+    const std::size_t queued = slots.waiterCount();
+    threads.push_back(slotThread(priority, std::move(body)));
+    CHECK(pollUntil([&] { return slots.waiterCount() > queued; }));
+}
+
+void joinAll(std::vector<std::thread>& threads) {
+    for (std::thread& t : threads) t.join();
+    threads.clear();
+}
+
+// Capacity 2 lets two threads hold at once; a third waits for a release. Capacity 1 admits one.
+void testPpuSlotsTwoHolders() {
+    for (const unsigned capacity : {2u, 1u}) {
+        tox2::PpuSlots slots(capacity);
+        CHECK(slots.capacity() == capacity);
+        std::atomic<int> holding{0};
+        std::atomic<bool> go{false}, extra_held{false};
+        std::vector<std::thread> threads;
+        for (unsigned i = 0; i < capacity; i++) {
+            threads.push_back(slotThread(1001, [&] {
+                slots.acquire();
+                holding++;  // all holders reach this while holding
+                pollUntil([&] { return go.load(); });
+                slots.release();
+            }));
+        }
+        CHECK(pollUntil([&] { return holding.load() == static_cast<int>(capacity); }));
+        threads.push_back(slotThread(1001, [&] {
+            slots.acquire();
+            extra_held = true;
+            slots.release();
+        }));
+        CHECK(pollUntil([&] { return slots.waiterCount() == 1; }));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        CHECK(!extra_held);
+        go = true;
+        joinAll(threads);
+        CHECK(extra_held);
+        CHECK(slots.waiterCount() == 0 && slots.releaseCount() == capacity + 1);
+        const tox2::PpuSlotStats s = slots.stats();
+        CHECK(s.acquisitions == capacity + 1 && s.contended == 1);
+        CHECK(slots.arrivals() == capacity + 1);
+    }
+}
+
+// Waiters are served by lv2 priority, then queue order, at every capacity.
+void testPpuSlotsPriority() {
+    tox2::PpuSlots slots(2);
+    std::mutex order_mutex;
+    std::vector<std::string> order;
+    std::atomic<bool> second_held{false}, second_go{false};
+    std::atomic<int> permits{0};
+    const auto order_size = [&] {
+        std::lock_guard lock(order_mutex);
+        return order.size();
+    };
+    const auto waiter = [&](std::string name) {
+        return [&, name = std::move(name)] {
+            slots.acquire();
+            {
+                std::lock_guard lock(order_mutex);
+                order.push_back(name);
+            }
+            // Holds until the test lets one holder go.
+            pollUntil([&] {
+                int p = permits.load();
+                return p > 0 && permits.compare_exchange_strong(p, p - 1);
+            });
+            slots.release();
+        };
+    };
+
+    // The test thread and a second thread fill both slots.
+    slots.acquire();
+    std::vector<std::thread> threads;
+    threads.push_back(slotThread(1001, [&] {
+        slots.acquire();
+        second_held = true;
+        pollUntil([&] { return second_go.load(); });
+        slots.release();
+    }));
+    CHECK(pollUntil([&] { return second_held.load(); }));
+    queueSlotThread(slots, threads, 1001, waiter("1001a"));
+    queueSlotThread(slots, threads, 100, waiter("100"));
+    queueSlotThread(slots, threads, 1001, waiter("1001b"));
+    queueSlotThread(slots, threads, 0, waiter("0"));
+    CHECK(slots.hasWaiterAtOrAbove(0) && slots.waiterCount() == 4);
+
+    slots.release();
+    CHECK(pollUntil([&] { return order_size() == 1; }));
+    second_go = true;
+    CHECK(pollUntil([&] { return order_size() == 2; }));
+    permits++;
+    CHECK(pollUntil([&] { return order_size() == 3; }));
+    permits++;
+    CHECK(pollUntil([&] { return order_size() == 4; }));
+    permits += 2;
+    joinAll(threads);
+    const std::vector<std::string> expected{"0", "100", "1001a", "1001b"};
+    CHECK(order == expected);
+    CHECK(slots.waiterCount() == 0 && !slots.hasWaiterAtOrAbove(3071));
+}
+
+// A yielding holder queues behind its equal-priority peers and ahead of lower-priority waiters.
+void testPpuSlotsRotation() {
+    for (const unsigned capacity : {1u, 2u}) {
+        tox2::PpuSlots slots(capacity);
+        std::mutex order_mutex;
+        std::vector<std::string> order;
+        std::atomic<bool> a_held{false}, a_go{false}, x_held{false}, x_go{false}, yielded{false};
+        const auto turn = [&](std::string name) {
+            return [&, name = std::move(name)] {
+                slots.acquire();
+                {
+                    std::lock_guard lock(order_mutex);
+                    order.push_back(name);
+                }
+                slots.release();
+            };
+        };
+        std::vector<std::thread> threads;
+        threads.push_back(slotThread(1001, [&] {
+            slots.acquire();
+            a_held = true;
+            pollUntil([&] { return a_go.load(); });
+            yielded = slots.yield();
+            {
+                std::lock_guard lock(order_mutex);
+                order.push_back("A");
+            }
+            slots.release();
+        }));
+        CHECK(pollUntil([&] { return a_held.load(); }));
+        std::thread x;
+        if (capacity == 2) {
+            // Another holder keeps the second slot busy, so the yield is the only thing that frees one.
+            x = slotThread(1001, [&] {
+                slots.acquire();
+                x_held = true;
+                pollUntil([&] { return x_go.load(); });
+                slots.release();
+            });
+            CHECK(pollUntil([&] { return x_held.load(); }));
+        }
+        queueSlotThread(slots, threads, 1001, turn("B"));
+        queueSlotThread(slots, threads, 1005, turn("C"));
+        a_go = true;
+        joinAll(threads);
+        x_go = true;
+        if (x.joinable()) x.join();
+        const std::vector<std::string> expected{"B", "A", "C"};
+        CHECK(order == expected);
+        CHECK(yielded);
+        // The yield, then the three releases that follow it.
+        CHECK(slots.releaseCount() == 4 + (capacity == 2 ? 1u : 0u));
+    }
+}
+
+void testPpuSlotsYield() {
+    tox2::PpuSlots slots(1);
+    slots.acquire();
+    CHECK(slots.heldByCurrentThread());
+    const std::uint64_t releases = slots.releaseCount();
+    CHECK(!slots.yield());
+    CHECK(slots.releaseCount() == releases && slots.heldByCurrentThread());
+    CHECK(slots.arrivals() == 1);
+
+    // With a waiter queued the yield hands the slot over and comes back after it.
+    std::atomic<bool> waiter_ran{false};
+    std::vector<std::thread> threads;
+    queueSlotThread(slots, threads, 1001, [&] {
+        slots.acquire();
+        waiter_ran = true;
+        slots.release();
+    });
+    CHECK(slots.hasWaiterAtOrAbove(1001) && !slots.hasWaiterAtOrAbove(1000));
+    CHECK(slots.yield());
+    CHECK(waiter_ran && slots.heldByCurrentThread());
+    CHECK(slots.releaseCount() == releases + 2);
+    joinAll(threads);
+    slots.release();
+    CHECK(!slots.heldByCurrentThread());
+    CHECK(slots.releaseCount() == releases + 3);
+}
+
+void testPpuSlotsStats() {
+    // Two holders overlap for 20 ms.
+    {
+        tox2::PpuSlots slots(2);
+        std::atomic<int> holding{0};
+        std::vector<std::thread> threads;
+        for (int i = 0; i < 2; i++) {
+            threads.push_back(slotThread(1001, [&] {
+                slots.acquire();
+                holding++;
+                pollUntil([&] { return holding.load() == 2; });
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                slots.release();
+            }));
+        }
+        joinAll(threads);
+        const tox2::PpuSlotStats s = slots.stats();
+        CHECK(s.parallel_us >= 15'000);
+        CHECK(s.held_us >= 30'000);
+        CHECK(s.full_waiting_us == 0);
+        CHECK(s.wait[0].count == 2 && s.wait[0].max_us == 0 && s.wait[1].count == 0);
+    }
+
+    // One holder keeps the only slot for 20 ms with a waiter queued the whole time.
+    {
+        tox2::PpuSlots slots(1);
+        slots.acquire();
+        std::vector<std::thread> threads;
+        queueSlotThread(slots, threads, 100, [&] {
+            slots.acquire();
+            slots.release();
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        slots.release();
+        joinAll(threads);
+        const tox2::PpuSlotStats s = slots.stats();
+        CHECK(s.full_waiting_us >= 15'000);
+        CHECK(s.parallel_us == 0);
+        CHECK(s.contended == 1 && s.acquisitions == 2);
+        // The waiter has priority 100, which is not "ppu-high" (below 100): it counts in the ppu bucket.
+        CHECK(s.wait[0].count == 2 && s.wait[0].max_us >= 15'000 && s.wait[1].count == 0);
+    }
+
+    // The same hold without a waiter adds nothing to full_waiting_us, and a high-priority waiter lands in [1].
+    {
+        tox2::PpuSlots slots(1);
+        slots.acquire();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        slots.release();
+        const tox2::PpuSlotStats s = slots.stats();
+        CHECK(s.full_waiting_us == 0 && s.parallel_us == 0 && s.held_us >= 15'000);
+
+        slots.acquire();
+        std::vector<std::thread> threads;
+        queueSlotThread(slots, threads, 0, [&] {
+            slots.acquire();
+            slots.release();
+        });
+        slots.release();
+        joinAll(threads);
+        CHECK(slots.stats().wait[1].count == 1);
+    }
+}
+
+// An uncontended acquire + release pair costs at most twice an uncontended GuestLock pair.
+void testPpuSlotsUncontendedCost() {
+    constexpr int kRuns = 5;
+    constexpr int kPairs = 1'000'000;
+    tox2::PpuSlots slots(1);
+    tox2::GuestLock lock;
+    const auto measure = [](auto& primitive, auto&& take, auto&& give) {
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < kPairs; i++) {
+            take(primitive);
+            give(primitive);
+        }
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        return static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()) / kPairs;
+    };
+    std::array<double, kRuns> slot_ns{}, lock_ns{};
+    for (int run = 0; run < kRuns; run++) {
+        slot_ns[run] = measure(slots, [](tox2::PpuSlots& s) { s.acquire(); }, [](tox2::PpuSlots& s) { s.release(); });
+        lock_ns[run] = measure(lock, [](tox2::GuestLock& l) { l.lock(); }, [](tox2::GuestLock& l) { l.unlock(); });
+    }
+    std::ranges::sort(slot_ns);
+    std::ranges::sort(lock_ns);
+    std::printf("ppu slots uncontended pair: %.0f ns, guest lock uncontended pair: %.0f ns\n", slot_ns[kRuns / 2],
+                lock_ns[kRuns / 2]);
+    CHECK(slot_ns[kRuns / 2] <= 2.0 * lock_ns[kRuns / 2]);
+}
+
 // Rapid yields reach the backoff and let another host thread take the lock; spaced yields never do.
 void testYieldBackoff() {
     tox2::setYieldBackoffEnabled(true);
@@ -13563,6 +13862,12 @@ int main(int argc, char** argv) {
     testGuestLockSingleWake();
     testGuestLockPpuOverlap();
     testGuestLockPpuPriority();
+    testPpuSlotsTwoHolders();
+    testPpuSlotsPriority();
+    testPpuSlotsRotation();
+    testPpuSlotsYield();
+    testPpuSlotsStats();
+    testPpuSlotsUncontendedCost();
     testYieldBackoff();
     testPpuYieldStats();
     testPpuYieldSemantics();

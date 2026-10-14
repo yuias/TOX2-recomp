@@ -44,7 +44,7 @@ thread_local GuestThread* t_current = nullptr;
 constexpr std::uint8_t kNoExplicitClass = 0xFF;
 thread_local std::uint8_t t_lock_class = kNoExplicitClass;
 thread_local std::optional<std::int32_t> t_test_ppu_priority;
-// Numbers the host threads that queue for the guest lock; 0 means "none yet".
+// Numbers the host threads that queue for the guest lock or a PPU slot; 0 means "none yet".
 thread_local std::uint64_t t_identity = 0;
 std::atomic<std::uint64_t> g_next_identity{1};
 
@@ -54,9 +54,10 @@ constexpr std::int32_t kLowestPpuPriority = 3071;
 // eligible. Not INT32_MAX, which is GuestLock's "no PPU waiter".
 constexpr std::int32_t kHostYieldPriority = 3072;
 
-std::uint64_t currentIdentity() {
-    if (t_identity == 0) t_identity = g_next_identity.fetch_add(1, std::memory_order_relaxed);
-    return t_identity;
+// Nanoseconds from `from` to `to`; 0 if the clock reads went backwards.
+std::uint64_t elapsedNs(std::chrono::steady_clock::time_point from, std::chrono::steady_clock::time_point to) {
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(to - from).count();
+    return ns > 0 ? static_cast<std::uint64_t>(ns) : 0;
 }
 
 bool isPpuClass(GuestLockClass cls) { return cls == GuestLockClass::Ppu || cls == GuestLockClass::PpuHigh; }
@@ -273,6 +274,11 @@ unsigned __stdcall guestThreadMain(void* arg) {
 
 void setGuestLockClass(GuestLockClass cls) { t_lock_class = static_cast<std::uint8_t>(cls); }
 
+std::uint64_t currentThreadIdentity() {
+    if (t_identity == 0) t_identity = g_next_identity.fetch_add(1, std::memory_order_relaxed);
+    return t_identity;
+}
+
 void setGuestLockPpuPriorityForTesting(std::optional<std::int32_t> priority) { t_test_ppu_priority = priority; }
 
 void setGuestLockLongHoldObserverForTesting(GuestLockLongHoldObserver observer) {
@@ -339,7 +345,7 @@ void GuestLock::lock() {
         t_activity.hold_prev = nullptr;
         if (ppu) {
             holder_ppu_tag_ = next_ppu_tag_++;
-            last_ppu_identity_ = currentIdentity();
+            last_ppu_identity_ = currentThreadIdentity();
         }
         lock.unlock();
         // After mutex_ is released to keep its critical section short; only the holder reads it.
@@ -349,7 +355,7 @@ void GuestLock::lock() {
     }
 
     Waiter node;
-    node.identity = currentIdentity();
+    node.identity = currentThreadIdentity();
     node.arrival = arrival;
     node.cls = cls;
     node.ppu = ppu;
@@ -586,7 +592,7 @@ bool GuestLock::yieldToHostWaiters() {
     grant(oldest_host);
 
     Waiter node;
-    node.identity = currentIdentity();
+    node.identity = currentThreadIdentity();
     node.arrival = now;
     node.cls = cls;
     node.ppu = isPpuClass(cls);
@@ -628,6 +634,185 @@ GuestLock& guestLock() {
     // Leaked: host threads may still be queued on it while the process exits.
     static GuestLock* lock = new GuestLock;
     return *lock;
+}
+
+struct PpuSlots::Waiter {
+    Waiter* next = nullptr;     // list in arrival order
+    std::int32_t priority = 0;  // lv2 priority captured at queue time
+    std::uint64_t tag = 0;      // lv2 order within a priority
+    std::uint64_t identity = 0;
+    std::size_t wait_class = 0;  // index into wait_
+    std::chrono::steady_clock::time_point arrival;
+    std::chrono::steady_clock::time_point granted_at;  // written by the releaser
+    bool granted = false;                              // guarded by mutex_
+    // Only this waiter waits on it. releaseLocked() notifies it under mutex_: the node is on the waiter's stack, so a
+    // waiter that wakes spuriously and sees `granted` must not return, and destroy the node, before the notify.
+    std::condition_variable cv;
+};
+
+PpuSlots::PpuSlots(unsigned capacity) : capacity_(capacity) {
+    if (capacity < 1 || capacity > kMaxPpuSlots) fatal(FatalKind::Internal, "PpuSlots: capacity out of range");
+}
+
+void PpuSlots::setCapacity(unsigned capacity) {
+    if (capacity < 1 || capacity > kMaxPpuSlots) fatal(FatalKind::Internal, "PpuSlots: capacity out of range");
+    std::lock_guard lock(mutex_);
+    if (busy_ != 0 || head_ != nullptr) fatal(FatalKind::Internal, "PpuSlots::setCapacity: not idle");
+    capacity_.store(capacity, std::memory_order_relaxed);
+}
+
+void PpuSlots::acquire() {
+    std::unique_lock lock(mutex_);
+    takeOrWait(lock, std::chrono::steady_clock::now());
+}
+
+void PpuSlots::release() {
+    std::lock_guard lock(mutex_);
+    releaseLocked(std::chrono::steady_clock::now());
+}
+
+bool PpuSlots::yield() {
+    // The common case, one atomic load. Entries leave the queue only when a holder releases, so the caller cannot lose
+    // a waiter it has seen here to anyone but another holder, which the check below under the mutex covers.
+    if (waiters_.load(std::memory_order_relaxed) == 0) return false;
+    std::unique_lock lock(mutex_);
+    if (head_ == nullptr) return false;
+    const auto now = std::chrono::steady_clock::now();
+    releaseLocked(now);
+    // The slot went to the chosen waiter, so every slot is held again and the caller queues behind it.
+    takeOrWait(lock, now);
+    return true;
+}
+
+bool PpuSlots::heldByCurrentThread() const {
+    const std::uint64_t identity = currentThreadIdentity();
+    for (const Holder& holder : holders_) {
+        if (holder.identity.load(std::memory_order_relaxed) == identity) return true;
+    }
+    return false;
+}
+
+void PpuSlots::takeOrWait(std::unique_lock<std::mutex>& lock, std::chrono::steady_clock::time_point now) {
+    const std::size_t wait_class = currentGuestLockClass() == GuestLockClass::PpuHigh ? 1 : 0;
+    const std::uint64_t identity = currentThreadIdentity();
+    advanceTime(now);
+    if (busy_ < capacity_.load(std::memory_order_relaxed)) {
+        for (Holder& holder : holders_) {
+            if (holder.identity.load(std::memory_order_relaxed) != 0) continue;
+            holder.identity.store(identity, std::memory_order_relaxed);
+            holder.start = now;
+            break;
+        }
+        busy_++;
+        acquisitions_.store(acquisitions_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        arrivals_.store(arrivals_.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+        lock.unlock();
+        wait_[wait_class].record(0);
+        return;
+    }
+
+    Waiter node;
+    node.priority = currentPpuPriority().value_or(kLowestPpuPriority);
+    node.tag = next_tag_++;
+    node.identity = identity;
+    node.wait_class = wait_class;
+    node.arrival = now;
+    if (tail_ != nullptr) {
+        tail_->next = &node;
+    } else {
+        head_ = &node;
+    }
+    tail_ = &node;
+    refreshMirrors();
+    // Counted only once the node is linked, so a caller that sees the arrival can rely on the queue entry.
+    arrivals_.store(arrivals_.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+    do {
+        node.cv.wait(lock);
+    } while (!node.granted);
+    lock.unlock();
+    wait_[wait_class].record(elapsedUs(node.arrival, node.granted_at));
+    contended_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void PpuSlots::releaseLocked(std::chrono::steady_clock::time_point now) {
+    const std::uint64_t identity = currentThreadIdentity();
+    Holder* mine = nullptr;
+    for (Holder& holder : holders_) {
+        if (holder.identity.load(std::memory_order_relaxed) == identity) mine = &holder;
+    }
+    if (mine == nullptr) fatal(FatalKind::Internal, "PpuSlots::release: the calling thread holds no slot");
+    advanceTime(now);
+    held_ns_.store(held_ns_.load(std::memory_order_relaxed) + elapsedNs(mine->start, now), std::memory_order_relaxed);
+    releases_.store(releases_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+
+    // The lowest priority number, then the earliest tag.
+    Waiter *best = nullptr, *best_prev = nullptr, *prev = nullptr;
+    for (Waiter* w = head_; w != nullptr; prev = w, w = w->next) {
+        if (best == nullptr || w->priority < best->priority || (w->priority == best->priority && w->tag < best->tag)) {
+            best = w;
+            best_prev = prev;
+        }
+    }
+    if (best == nullptr) {
+        mine->identity.store(0, std::memory_order_relaxed);
+        busy_--;
+        return;
+    }
+    (best_prev != nullptr ? best_prev->next : head_) = best->next;
+    if (tail_ == best) tail_ = best_prev;
+    best->next = nullptr;
+    // The slot changes hands without being free in between, so busy_ stays and no one can barge.
+    mine->identity.store(best->identity, std::memory_order_relaxed);
+    mine->start = now;
+    acquisitions_.store(acquisitions_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    best->granted = true;
+    best->granted_at = now;
+    refreshMirrors();
+    best->cv.notify_one();
+}
+
+void PpuSlots::advanceTime(std::chrono::steady_clock::time_point now) {
+    const std::uint64_t dt = elapsedNs(last_change_, now);
+    if (busy_ >= 2) parallel_ns_.store(parallel_ns_.load(std::memory_order_relaxed) + dt, std::memory_order_relaxed);
+    if (busy_ == capacity_.load(std::memory_order_relaxed) && head_ != nullptr) {
+        full_waiting_ns_.store(full_waiting_ns_.load(std::memory_order_relaxed) + dt, std::memory_order_relaxed);
+    }
+    last_change_ = now;
+}
+
+void PpuSlots::refreshMirrors() {
+    std::int32_t best = std::numeric_limits<std::int32_t>::max();
+    std::size_t count = 0;
+    for (const Waiter* w = head_; w != nullptr; w = w->next) {
+        best = std::min(best, w->priority);
+        count++;
+    }
+    best_priority_.store(best, std::memory_order_relaxed);
+    waiters_.store(count, std::memory_order_relaxed);
+}
+
+PpuSlotStats PpuSlots::stats() const {
+    PpuSlotStats out;
+    for (std::size_t i = 0; i < wait_.size(); i++) out.wait[i] = wait_[i].snapshot();
+    out.acquisitions = acquisitions_.load(std::memory_order_relaxed);
+    out.contended = contended_.load(std::memory_order_relaxed);
+    // Includes the interval since the last change, so a reader sees the state it is in now.
+    std::lock_guard lock(mutex_);
+    const std::uint64_t pending = elapsedNs(last_change_, std::chrono::steady_clock::now());
+    std::uint64_t parallel_ns = parallel_ns_.load(std::memory_order_relaxed);
+    std::uint64_t full_waiting_ns = full_waiting_ns_.load(std::memory_order_relaxed);
+    if (busy_ >= 2) parallel_ns += pending;
+    if (busy_ == capacity_.load(std::memory_order_relaxed) && head_ != nullptr) full_waiting_ns += pending;
+    out.held_us = held_ns_.load(std::memory_order_relaxed) / 1000;
+    out.parallel_us = parallel_ns / 1000;
+    out.full_waiting_us = full_waiting_ns / 1000;
+    return out;
+}
+
+PpuSlots& ppuSlots() {
+    // Leaked: guest threads may still be queued on it while the process exits.
+    static PpuSlots* slots = new PpuSlots(1);
+    return *slots;
 }
 
 GuestThread::GuestThread(std::uint32_t id, const GuestThreadParams& params, std::uint32_t stack_addr,

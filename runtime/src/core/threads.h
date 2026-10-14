@@ -37,6 +37,9 @@ std::optional<std::int32_t> currentPpuPriority();
 // kPpuHighPriorityBelow); nullopt restores its own identity. Thread-local.
 void setGuestLockPpuPriorityForTesting(std::optional<std::int32_t> priority);
 std::string_view guestLockClassName(GuestLockClass cls);  // "ppu", "ppu-high", "spu", "audio", "rsx", "other"
+// A nonzero number that names the calling host thread, assigned on first use. GuestLock and PpuSlots record it to tell
+// which thread holds them.
+std::uint64_t currentThreadIdentity();
 
 // Thresholds of the `over` counts in GuestLockStats.
 inline constexpr std::uint64_t kGuestLockWaitOverUs = 1000;
@@ -213,6 +216,92 @@ private:
 };
 
 GuestLock& guestLock();
+
+// The most PPU slots a PpuSlots can have (the PS3 has two PPU hardware threads).
+inline constexpr unsigned kMaxPpuSlots = 2;
+
+struct PpuSlotStats {
+    std::array<LatencySnapshot, 2> wait;  // [0] ppu, [1] ppu-high: queue -> grant; 0 when a slot was free
+    std::uint64_t acquisitions = 0, contended = 0;
+    std::uint64_t held_us = 0;          // sum of completed holds (slot-microseconds); open holds are not included
+    std::uint64_t parallel_us = 0;      // wall time with two slots held
+    std::uint64_t full_waiting_us = 0;  // wall time with every slot held and at least one waiter queued
+};
+
+// The right to execute guest code: up to `capacity` threads hold a slot at once, the rest queue. Selection follows the
+// GuestLock rule for PPU waiters, strictly: the lowest lv2 priority number, then the earliest queue order, with the
+// priority captured when the thread queued. release() hands its slot straight to the chosen waiter. There is no
+// displacement of a holder, and no alternation rule: the hardware threads are real here, so the top `capacity` ready
+// threads hold the slots and a lower-ranked one waits. Waiters are nodes on their own stacks, each with its own
+// condition variable, so the acquire and release paths allocate nothing.
+class PpuSlots {
+public:
+    explicit PpuSlots(unsigned capacity);  // 1..kMaxPpuSlots
+    PpuSlots(const PpuSlots&) = delete;
+    PpuSlots& operator=(const PpuSlots&) = delete;
+
+    void setCapacity(unsigned capacity);  // only while idle (no holder, no waiter)
+    unsigned capacity() const { return capacity_.load(std::memory_order_relaxed); }
+    // Queues with currentPpuPriority().value_or(lowest) and a fresh order tag when every slot is held.
+    void acquire();
+    void release();  // holder only
+    // Holder only. When a waiter is queued: gives the slot up (the next holder is chosen while the caller is not
+    // queued) and queues again with a fresh tag, atomically, so the caller is already queued when the waiter it served
+    // finishes; returns true. Returns false and keeps the slot when nobody waits.
+    bool yield();
+    // Priority numerically <=. Exact for the sole holder at capacity 1: entries leave the queue only when a holder
+    // releases, and a waiter that arrives concurrently is equivalent to one that arrived just after the call. At
+    // capacity 2 the other holder's release can dequeue the entry concurrently, so the answer is a hint.
+    bool hasWaiterAtOrAbove(std::int32_t priority) const {
+        return best_priority_.load(std::memory_order_relaxed) <= priority;
+    }
+    // Threads queued; a thread counts once its place in the queue is fixed.
+    std::size_t waiterCount() const { return waiters_.load(std::memory_order_relaxed); }
+    // acquire() calls so far, contended or not. Counted once the caller's place is fixed (queued or holding), so a
+    // caller polling for a new thread's arrival never sees it before the thread is in the queue.
+    std::uint64_t arrivals() const { return arrivals_.load(std::memory_order_acquire); }
+    std::uint64_t releaseCount() const { return releases_.load(std::memory_order_relaxed); }
+    bool heldByCurrentThread() const;
+    PpuSlotStats stats() const;  // any thread
+
+private:
+    struct Waiter;  // lives on the waiting thread's stack
+
+    struct Holder {
+        std::atomic<std::uint64_t> identity{0};         // 0: free; atomic so heldByCurrentThread() needs no mutex
+        std::chrono::steady_clock::time_point start{};  // guarded by mutex_
+    };
+
+    // Under `lock` (a lock on mutex_): takes a free slot or queues, waits for the grant and records the wait.
+    void takeOrWait(std::unique_lock<std::mutex>& lock, std::chrono::steady_clock::time_point now);
+    // Under mutex_. Ends the calling thread's hold and grants its slot to the best waiter, if any.
+    void releaseLocked(std::chrono::steady_clock::time_point now);
+    // Under mutex_. Adds the time since the last change of busy_ or of the queue to the integrals.
+    void advanceTime(std::chrono::steady_clock::time_point now);
+    void refreshMirrors();  // under mutex_; recomputes best_priority_ and waiters_ from the list
+
+    mutable std::mutex mutex_;
+    Waiter* head_ = nullptr;      // guarded by mutex_; arrival order
+    Waiter* tail_ = nullptr;      // guarded by mutex_
+    unsigned busy_ = 0;           // guarded by mutex_; slots held, 0..capacity_. busy_ < capacity_ implies no waiter
+    std::uint64_t next_tag_ = 0;  // guarded by mutex_; lv2 order within a priority
+    std::array<Holder, kMaxPpuSlots> holders_;
+    std::atomic<unsigned> capacity_;
+    // Mirrors of the list, written under mutex_ with a plain load + store.
+    std::atomic<std::int32_t> best_priority_{std::numeric_limits<std::int32_t>::max()};
+    std::atomic<std::size_t> waiters_{0};
+    std::atomic<std::uint64_t> arrivals_{0}, releases_{0};
+
+    std::array<LatencyStats, 2> wait_{LatencyStats{kGuestLockWaitOverUs}, LatencyStats{kGuestLockWaitOverUs}};
+    // Written under mutex_ with a plain load + store; atomic for stats(). Times are kept in nanoseconds so that many
+    // short intervals do not lose their sub-microsecond parts.
+    std::atomic<std::uint64_t> acquisitions_{0}, contended_{0};
+    std::atomic<std::uint64_t> held_ns_{0}, parallel_ns_{0}, full_waiting_ns_{0};
+    std::chrono::steady_clock::time_point last_change_{};  // guarded by mutex_
+};
+
+// Leaked, like guestLock(). Capacity 1 until setCapacity changes it.
+PpuSlots& ppuSlots();
 
 // For tests: while set, a long hold is passed to the observer instead of being logged. Called by the releasing thread,
 // after the lock was passed on; a null observer restores logging.
