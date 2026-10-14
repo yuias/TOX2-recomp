@@ -22,7 +22,7 @@ constexpr std::int32_t kThreadPriority = 1001;
 constexpr std::uint32_t kThreadStackSize = 0x10000;
 constexpr char kThreadName[] = "_libsail-control";
 
-// Everything is guarded by the guest lock.
+// Everything is guarded by the kernel lock.
 struct ServiceState {
     std::condition_variable_any wake;
     std::deque<SailCall> queue;
@@ -44,6 +44,9 @@ ServiceState& serviceState() {
 // Entry function of the thread; r3 holds the generation it serves. Returning ends the thread (only
 // stopSailService asks for it, by bumping the generation).
 void serviceThreadBody(Tox2PpuContext* ctx, std::uint8_t* base) {
+    // First, before any state access: startServiceThread writes thread_id after this thread started, and in Split2
+    // the thread can run at once on the free slot, so only the kernel lock orders its first read after that write.
+    KernelSection kernel;
     ServiceState& s = serviceState();
     const std::uint64_t generation = ctx->gpr[3];
     for (;;) {
@@ -63,7 +66,7 @@ void serviceThreadBody(Tox2PpuContext* ctx, std::uint8_t* base) {
 }
 
 // Written once at start-up, before any movie opens. The pointer is published with release so the
-// decode threads, which never take the guest lock, can load it.
+// decode threads, which never take the kernel lock, can load it.
 struct FactoryHolder {
     std::atomic<MediaCodecFactory*> current{nullptr};
     std::unique_ptr<MediaCodecFactory> owned;

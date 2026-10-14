@@ -179,7 +179,7 @@ tox2::SailCall recordingCall(int id, std::uint32_t guest_opd, std::function<void
     };
 }
 
-void testSailService() {
+void sailServiceCase() {
     tox2::setLogSink([](std::string_view) {});
     tox2::resetCensus();
     tox2::resetLogOnce();
@@ -250,6 +250,36 @@ void testSailService() {
     tox2::setLogSink({});
     tox2::resetCensus();
     tox2::resetLogOnce();
+}
+
+// Selects a split mode and restores Legacy at the end, once the service thread has given up its slot (it marks itself
+// Exited before it releases the slot).
+class SplitModeScope {
+public:
+    explicit SplitModeScope(tox2::PpuThreadsMode mode) { tox2::setPpuThreadsMode(mode); }
+    ~SplitModeScope() {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        tox2::PpuSlots& slots = tox2::ppuSlots();
+        while (slots.waiterCount() != 0 || slots.stats().acquisitions != slots.releaseCount()) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                CHECK(false);
+                break;
+            }
+            std::this_thread::yield();
+        }
+        tox2::setPpuThreadsMode(tox2::PpuThreadsMode::Legacy);
+    }
+    SplitModeScope(const SplitModeScope&) = delete;
+    SplitModeScope& operator=(const SplitModeScope&) = delete;
+};
+
+// The service thread takes the kernel lock itself, so the same scenario must hold in every mode.
+void testSailService() {
+    sailServiceCase();
+    for (const tox2::PpuThreadsMode split : {tox2::PpuThreadsMode::Split1, tox2::PpuThreadsMode::Split2}) {
+        SplitModeScope mode(split);
+        sailServiceCase();
+    }
 }
 
 using Bytes = std::vector<std::uint8_t>;

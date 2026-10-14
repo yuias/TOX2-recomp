@@ -126,6 +126,8 @@ void writeCommand(std::uint8_t* base, std::uint32_t context, std::uint32_t metho
 // Wrap callback of the default context: flush up to `current`, continue in the next fragment.
 // RPCS3 `cellGcmCallback`, `getNextCommandBufferBeginEnd`, `isInCommandBufferExcept`.
 void gcmCallback(Tox2PpuContext* ctx, std::uint8_t* base) {
+    // The game calls this as guest code, outside any handler's kernel section.
+    KernelSection kernel;
     RsxState& state = rsxState();
     const std::uint32_t context = argU32(ctx, 0);
     requireCommitted(context, kContextSize, "command buffer context");

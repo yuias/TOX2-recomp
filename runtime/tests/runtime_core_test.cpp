@@ -46,6 +46,7 @@
 #include "hle/guest_printf.h"
 #include "hle/hle.h"
 #include "hle/libsre.h"
+#include "hle/sail_service.h"
 #include "input/keyboard_pad.h"
 #include "input/pad_buttons.h"
 #include "input/pad_script.h"
@@ -12124,7 +12125,8 @@ void pauseUnlocked() {
     tox2::blockingWait(cv, [] { return false; }, "test pause", std::chrono::milliseconds(2));
 }
 
-void testGcmInterruptThread() {
+// Runs in whatever PPU threads mode the caller selected (testGcmInterruptThread).
+void gcmInterruptThreadCase() {
     tox2::setLogSink([](std::string_view) {});
     tox2::resetCensus();
     tox2::resetLogOnce();
@@ -14017,6 +14019,122 @@ void testHostFunctionConcurrentLookup() {
     CHECK(tox2Lookup(tox2::kHostFunctionBase + 4 * kCount) == nullptr);
 }
 
+// The interrupt thread takes the kernel lock itself, so the same scenario must hold in every mode.
+void testGcmInterruptThread() {
+    HangGuard guard("testGcmInterruptThread");
+    gcmInterruptThreadCase();
+    for (const tox2::PpuThreadsMode split : {tox2::PpuThreadsMode::Split1, tox2::PpuThreadsMode::Split2}) {
+        SplitModeScope mode(split);
+        gcmInterruptThreadCase();
+    }
+}
+
+std::atomic<std::int64_t> g_start_call_ns{0};  // first handler / service call, steady clock
+std::atomic<int> g_start_calls{0};
+std::atomic<std::uint32_t> g_start_thread_id{0};
+
+std::int64_t steadyNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+}
+
+void recordStartCall() {
+    std::int64_t expected = 0;
+    g_start_call_ns.compare_exchange_strong(expected, steadyNs());
+    g_start_calls++;
+}
+
+TOX2_PPU_FUNC(startUserHandler) {
+    (void)ctx;
+    (void)base;
+    recordStartCall();
+}
+
+// Split2 with the second slot free: the new thread runs at once but waits for the starter's kernel lock, so its first
+// read of the state follows the starter's writes and the handler is not called before the lock is released.
+void testSplitGcmInterruptStart() {
+    HangGuard guard("testSplitGcmInterruptStart");
+    GuestThreadEnv env({startUserHandler}, true);
+    tox2::resetRsxState();
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    g_start_call_ns = 0;
+    g_start_calls = 0;
+    tox2::rsxState().user_handler = env.opd(0);
+
+    std::int64_t released_ns = 0;
+    std::uint32_t id = 0;
+    bool alive_while_held = false, alive_after = false;
+    std::uint64_t user_calls = 0;
+    std::thread starter = slotThread(1001, [&] {
+        tox2::PpuSlots& slots = tox2::ppuSlots();
+        tox2::GuestLock& kernel = tox2::guestLock();
+        slots.acquire();
+        kernel.lock();
+        id = tox2::startGcmInterruptThread();
+        tox2::postGcmInterrupt(tox2::RsxInterrupt::User, 7);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const tox2::GuestThread* thread = tox2::findThread(id);
+        alive_while_held = thread != nullptr && thread->state() != tox2::ThreadState::Exited;
+        released_ns = steadyNs();
+        kernel.unlock();
+        CHECK(pollUntil([] { return g_start_calls.load() >= 1; }));
+        alive_after = thread != nullptr && thread->state() != tox2::ThreadState::Exited;
+        user_calls = tox2::gcmInterruptCounts().user;  // stopGcmInterruptThread zeroes the counters
+        kernel.lock();
+        tox2::stopGcmInterruptThread();
+        kernel.unlock();
+        slots.release();
+    });
+    starter.join();
+    CHECK(id != 0);
+    CHECK(alive_while_held && alive_after);
+    CHECK(user_calls == 1 && g_start_calls == 1);
+    CHECK(g_start_call_ns.load() >= released_ns);
+    tox2RegisterFuncs(nullptr, 0);
+    tox2::resetHostFunctions();
+    tox2::resetRsxState();
+}
+
+// The same for the sail service: the queued call runs exactly once, after the starter released the kernel lock.
+void testSplitSailServiceStart() {
+    HangGuard guard("testSplitSailServiceStart");
+    GuestThreadEnv env({startUserHandler}, true);
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    g_start_call_ns = 0;
+    g_start_calls = 0;
+    g_start_thread_id = 0;
+
+    std::int64_t released_ns = 0;
+    bool queued = false, alive_after = false;
+    std::thread starter = slotThread(1001, [&] {
+        tox2::PpuSlots& slots = tox2::ppuSlots();
+        tox2::GuestLock& kernel = tox2::guestLock();
+        slots.acquire();
+        kernel.lock();
+        queued = tox2::queueSailCall([](Tox2PpuContext*, std::uint8_t*) {
+            const tox2::GuestThread* thread = tox2::currentThread();
+            g_start_thread_id = thread != nullptr ? thread->id() : 0;
+            recordStartCall();
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        released_ns = steadyNs();
+        kernel.unlock();
+        CHECK(pollUntil([] { return g_start_calls.load() >= 1; }));
+        const tox2::GuestThread* thread = tox2::findThread(g_start_thread_id.load());
+        alive_after = thread != nullptr && thread->state() != tox2::ThreadState::Exited;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));  // a second run would show up here
+        kernel.lock();
+        tox2::stopSailService();
+        kernel.unlock();
+        slots.release();
+    });
+    starter.join();
+    CHECK(queued && alive_after);
+    CHECK(g_start_calls == 1);
+    CHECK(g_start_call_ns.load() >= released_ns);
+    tox2::resetHostFunctions();
+}
+
 // Uncontended cost of one dispatcher call: legacy against Split1, for a kernel entry and a kernel-free one.
 void testSplitBoundaryCost() {
     constexpr int kRuns = 5;
@@ -14956,6 +15074,8 @@ int main(int argc, char** argv) {
     testSplitSysutilCallbacks();
     testSplitDefaultPathCount();
     testHostFunctionConcurrentLookup();
+    testSplitGcmInterruptStart();
+    testSplitSailServiceStart();
     testSplitBoundaryCost();
     testYieldBackoff();
     testPpuYieldStats();

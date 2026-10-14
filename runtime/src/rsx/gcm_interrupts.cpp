@@ -30,7 +30,7 @@ struct Item {
     std::uint32_t arg;
 };
 
-// Everything except the counters is guarded by the guest lock.
+// Everything except the counters is guarded by the kernel lock.
 struct InterruptState {
     std::condition_variable_any wake;
     std::deque<Item> queue;
@@ -60,6 +60,9 @@ void interruptHook(RsxInterrupt kind, std::uint32_t arg) { postGcmInterrupt(kind
 
 // Entry function of the thread. Returning ends the thread (only stopGcmInterruptThread asks for it).
 void interruptThreadBody(Tox2PpuContext* ctx, std::uint8_t* base) {
+    // First, before any state access: the starter writes stop/thread_id after this thread started, and in Split2 the
+    // thread can run at once on the free slot, so only the kernel lock orders its first read after those writes.
+    KernelSection kernel;
     InterruptState& s = interruptState();
     for (;;) {
         blockingWait(s.wake, [&] { return s.stop || !s.queue.empty(); }, "gcm interrupt wait", std::nullopt);
