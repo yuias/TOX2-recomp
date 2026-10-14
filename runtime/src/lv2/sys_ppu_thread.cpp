@@ -1,6 +1,6 @@
 // PPU thread syscalls and the thread creation wrapper. Behaviour follows RPCS3
-// `Emu/Cell/lv2/sys_ppu_thread.cpp` and `Modules/sys_ppu_thread_.cpp`. Handlers run under the guest
-// lock.
+// `Emu/Cell/lv2/sys_ppu_thread.cpp` and `Modules/sys_ppu_thread_.cpp`. Handlers run under the kernel
+// lock (the guest lock in legacy mode); in split modes sys_ppu_thread_yield (kernel_free) runs without it.
 
 #include "lv2/sys_ppu_thread.h"
 
@@ -118,8 +118,9 @@ void sysPpuThreadExit(Tox2PpuContext* ctx, std::uint8_t* base) {
 }
 
 // 43 sys_ppu_thread_yield: lv2 returns 0 after a switch and CELL_CANCEL otherwise. Here a switch means a queued PPU
-// thread of the same or a higher priority ran; a lower-priority thread never gets time from a yield. Queued host-class
-// waiters (RSX, audio, SPU callbacks) are still served on CELL_CANCEL, as they run in parallel on the console.
+// thread of the same or a higher priority ran; a lower-priority thread never gets time from a yield.
+// Legacy mode: queued host-class waiters (RSX, audio, SPU callbacks) are still served on CELL_CANCEL, as they run in
+// parallel on the console. Split modes: they take only the kernel lock and need no hand-over from a yield.
 void sysPpuThreadYield(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     ctx->preempt_budget = kTox2PreemptBudget;
@@ -184,7 +185,7 @@ void sysPpuThreadDetach(Tox2PpuContext* ctx, std::uint8_t* base) {
 }
 
 // 47 sys_ppu_thread_set_priority(u32 thread_id, s32 prio): stored only; a thread already queued for the guest lock
-// keeps the priority it queued with.
+// (legacy mode) or a PPU slot (split modes) keeps the priority it queued with.
 // ppuThreadCreate compares the stored value of the creator with the priority of a new thread.
 void sysPpuThreadSetPriority(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;

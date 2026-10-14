@@ -1,5 +1,5 @@
 // lv2 semaphores (syscalls 90-94 and 114). Behaviour follows RPCS3 `Emu/Cell/lv2/sys_semaphore.cpp`.
-// Handlers run under the guest lock; a blocking wait goes through blockingWait, which gives the lock
+// Handlers run under the kernel lock; a blocking wait goes through blockingWait, which gives the lock
 // up. Deferred: waiters wake in no particular order, not by priority or FIFO (see GuestLock), and
 // process-shared semaphores (an IPC key) are not supported: the key and flags are not read.
 

@@ -1,8 +1,8 @@
 #pragma once
 
 // lv2 synchronisation objects that live on the host side, addressed by guest ids, plus the native
-// entry points shared by the syscall and HLE handlers. Everything here runs under the guest lock,
-// so none of it needs atomics.
+// entry points shared by the syscall and HLE handlers. Everything here runs under the kernel lock
+// (guestLock(), which in legacy mode is also the right to run guest code), so none of it needs atomics.
 
 #include <array>
 #include <atomic>
@@ -136,11 +136,11 @@ void createProcessSyncObjects(std::uint8_t* base);
 bool eventQueueExists(std::uint32_t id);
 
 // Id of the live event queue created with `ipc_key`, or 0 (also for key 0, which is local and never
-// registered). Under the guest lock.
+// registered). Under the kernel lock.
 std::uint32_t eventQueueIdByKey(std::uint64_t ipc_key);
 
 // Sends an event to queue `id` like a connected port: hands it to the oldest receiver or stores it.
-// Returns kCellOk, kCellEbusy (queue full) or kCellEsrch (no such queue). Under the guest lock; may
+// Returns kCellOk, kCellEbusy (queue full) or kCellEsrch (no such queue). Under the kernel lock; may
 // be called from a host thread that holds it.
 std::uint32_t sendEventToQueue(std::uint32_t id, std::uint64_t source, std::uint64_t data1, std::uint64_t data2,
                                std::uint64_t data3);
@@ -150,7 +150,7 @@ std::uint32_t eventQueueType(std::uint32_t id);
 
 // An SPU thread blocked in the lv2 receive_event call (stop 0x110) on an SPU event queue. It lives on the
 // SPU host thread's stack while it is registered with the queue; whoever completes it stores the reply under
-// the guest lock, then sets `done` and wakes the thread through its channels.
+// the kernel lock, then sets `done` and wakes the thread through its channels.
 struct SpuQueueWaiter {
     SpuThread* thread = nullptr;
     std::uint32_t queue = 0;              // the queue it is registered with
@@ -166,15 +166,15 @@ enum class SpuQueueResult {
     Invalid,   // the queue does not exist or is not an SPU queue
 };
 
-// The receive of an SPU thread on queue `id`. Under the guest lock.
+// The receive of an SPU thread on queue `id`. Under the kernel lock.
 SpuQueueResult spuQueueReceive(std::uint32_t id, SpuQueueWaiter& waiter, bool block);
 
 // Takes `waiter` off the queue it waits on; for a wait that a halt ended. Nothing happens when the waiter
-// was completed meanwhile or the queue is gone. Under the guest lock.
+// was completed meanwhile or the queue is gone. Under the kernel lock.
 void spuQueueCancelWait(SpuQueueWaiter& waiter);
 
 // Sets `bitptn` in event flag `id` and wakes the waiters it satisfies (sys_event_flag_set). Returns
-// kCellOk or kCellEsrch. Under the guest lock; may be called from a host thread that holds it.
+// kCellOk or kCellEsrch. Under the kernel lock; may be called from a host thread that holds it.
 std::uint32_t eventFlagSet(std::uint32_t id, std::uint64_t bitptn);
 
 // Forgets every event flag, event queue and event port (sys_event.cpp).

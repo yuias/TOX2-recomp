@@ -30,7 +30,7 @@ constexpr std::uint32_t alignUp(std::uint32_t value, std::uint32_t alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
-// Updated under the guest lock.
+// Updated under the kernel lock.
 struct TlsState {
     bool ready = false;
     std::uint32_t image = 0, filesz = 0, zero = 0;
@@ -142,8 +142,8 @@ std::uint32_t initializeTls(Tox2PpuContext* ctx, std::uint8_t* base, std::uint32
 void bootMainThread(const LoadedExecutable& exe, std::string_view argv0, std::uint32_t module_bytes) {
     Process& p = process();
     std::uint8_t* base = p.memory.base();
-    // Nothing runs yet, but the allocators and the thread registry expect the guest lock. The new
-    // thread queues on it and starts once this function returns.
+    // Nothing runs yet, but the allocators and the thread registry expect the kernel lock. The new
+    // thread cannot enter a kernel section until this function returns (legacy mode: cannot run at all).
     std::lock_guard<GuestLock> guard(guestLock());
 
     GuestThreadParams params;

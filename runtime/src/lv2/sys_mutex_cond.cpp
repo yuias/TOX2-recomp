@@ -1,6 +1,6 @@
 // lv2 mutexes and condition variables (syscalls 100-109) and the lightweight mutex of
 // sysPrxForUser. Behaviour follows RPCS3 `Emu/Cell/lv2/sys_mutex.cpp`, `sys_cond.cpp` and
-// `Modules/sys_lwmutex_.cpp`. Handlers run under the guest lock; a blocking call waits through
+// `Modules/sys_lwmutex_.cpp`. Handlers run under the kernel lock; a blocking call waits through
 // blockingWait, which gives the lock up. An unlock hands the mutex or lwmutex straight to the waiter its protocol
 // chooses (FIFO: the longest waiter; otherwise the lowest priority number, then the longest waiter), so the unlocking
 // thread cannot take it back first. Deferred: cond and lwcond waiters still wake in no particular order.
@@ -73,7 +73,7 @@ IdMap<Lwmutex> g_lwmutexes(kLwmutexIdBase, kSyncIdStep);
 IdMap<Lwcond> g_lwconds(kLwcondIdBase, kSyncIdStep);
 ProcessSyncObjects g_process_objects;
 
-// Read by the perf thread, written under the guest lock.
+// Read by the perf thread, written under the kernel lock.
 std::atomic<std::uint64_t> g_mutex_waits{0}, g_mutex_handoffs{0}, g_lwmutex_waits{0}, g_lwmutex_handoffs{0};
 
 // The waiter an unlock gives the object to (RPCS3 `lv2_obj::schedule`): the longest waiter for FIFO, otherwise the

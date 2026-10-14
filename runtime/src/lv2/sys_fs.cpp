@@ -1,7 +1,8 @@
 // lv2 file system syscalls over the host file system (see lv2/vfs.h for the path mapping).
 // Behaviour and error codes follow RPCS3 `Emu/Cell/lv2/sys_fs.cpp` / `sys_fs.h`. Host I/O runs
-// while the calling guest thread holds the guest lock, so a long read blocks the other guest
-// threads for its duration; that is accepted for boot.
+// while the calling guest thread holds the kernel lock, so a long read blocks every other kernel section (other guest
+// threads' syscalls, RSX and audio callbacks) for its duration, and in legacy mode all guest code; that is accepted for
+// boot.
 
 #include "lv2/sys_fs.h"
 
@@ -387,7 +388,7 @@ struct TransferCounters {
 TransferCounters g_read_counters, g_write_counters;
 
 // Reads or writes `size` bytes at the current position; returns the byte count and sets `code` on
-// a host error. Timed as a whole, because the host call runs under the guest lock.
+// a host error. Timed as a whole, because the host call runs under the kernel lock.
 std::uint64_t transfer(HANDLE file, bool write, std::uint8_t* data, std::uint64_t size, std::uint32_t& code) {
     const auto start = std::chrono::steady_clock::now();
     std::uint64_t total = 0;

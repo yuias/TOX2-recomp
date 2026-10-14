@@ -67,7 +67,7 @@ private:
     std::unique_ptr<std::atomic<std::uint64_t>[]> committed_pages_;
 };
 
-// First-fit allocator over a sorted map of used ranges. Callers hold the guest lock, so there is no
+// First-fit allocator over a sorted map of used ranges. Callers hold the kernel lock, so there is no
 // mutex of its own.
 class RegionAllocator {
 public:

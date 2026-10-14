@@ -2,7 +2,7 @@
 // connections and the SPU image records, and the execution of started groups on tox2::SpuThread host
 // threads. The SPU image import and close functions (sysPrxForUser) keep their records here too.
 //
-// Handlers run under the guest lock. An SPU host thread takes that lock only inside the owner callbacks,
+// Handlers run under the kernel lock. An SPU host thread takes that lock only inside the owner callbacks,
 // around the group and event state it touches, and never while it waits on a channel. PPU-side waits
 // for SPU threads go through blockingWait, which gives the lock up.
 
@@ -157,7 +157,7 @@ struct SpuGroup {
     std::map<std::uint32_t, std::uint32_t> connections;  // event type -> event queue id
     std::uint64_t cooperative_victims = 0;
 
-    // The run in progress; all of it is guarded by the guest lock.
+    // The run in progress; all of it is guarded by the kernel lock.
     std::uint32_t unfinished = 0;        // threads whose host thread has not reported its end
     bool terminated = false;             // sys_spu_thread_group_terminate was called
     bool group_exit = false;             // a thread ended with stop 0x101
@@ -222,7 +222,7 @@ std::string sourceText(std::uint32_t source) {
     return source != 0 ? std::format("{:#010x}", source) : std::string("?");
 }
 
-// Ends the run of `group` once its last thread has ended. Under the guest lock.
+// Ends the run of `group` once its last thread has ended. Under the kernel lock.
 void stopGroup(SpuGroup& group) {
     JoinResult result;
     if (group.terminated) {
@@ -240,7 +240,7 @@ void stopGroup(SpuGroup& group) {
 }
 
 // The owner of every lv2 SPU thread. The callbacks run on the SPU's host thread; each one takes the
-// guest lock for the lv2 state it reads or changes and never holds it across a wait on a channel.
+// kernel lock for the lv2 state it reads or changes and never holds it across a wait on a channel.
 class GroupOwner final : public SpuOwner {
 public:
     void onInterruptMailbox(SpuThread& cpu, std::uint32_t value) override;
@@ -300,7 +300,7 @@ void GroupOwner::onInterruptMailbox(SpuThread& cpu, std::uint32_t value) {
                 return;
             }
         }
-        // Not under the guest lock: the wait ends early when the thread is halted.
+        // Not under the kernel lock: the wait ends early when the thread is halted.
         if (!cpu.channels().pause(kQueueRetry)) return;
     }
 }
@@ -318,7 +318,7 @@ void replyReceive(SpuThread& cpu, const SpuQueueWaiter& waiter) {
 
 // stop 0x110 (sys_spu_thread_receive_event) and 0x111 (sys_spu_thread_tryreceive_event): the queue is picked
 // from the thread's bindings by the key in the outbound mailbox, and the answer comes through the inbound
-// mailbox. Only the calling SPU thread waits, where lv2 suspends the whole group; the guest lock is not held
+// mailbox. Only the calling SPU thread waits, where lv2 suspends the whole group; the kernel lock is not held
 // while it waits, so terminate and halts still reach it.
 bool receiveEventBody(SpuThread& cpu, std::uint32_t site, std::uint32_t code) {
     const bool block = code == kStopReceiveEvent;
@@ -368,7 +368,7 @@ bool receiveEventBody(SpuThread& cpu, std::uint32_t site, std::uint32_t code) {
         case SpuQueueResult::Waiting: break;
     }
     cpu.channels().waitForOwner("stop 0x110 sys_spu_thread_receive_event", waiter.done);
-    // `done` changes only under the guest lock, so it is settled once the lock is held.
+    // `done` changes only under the kernel lock, so it is settled once the lock is held.
     std::lock_guard<GuestLock> guard(guestLock());
     if (!waiter.done.load()) {
         spuQueueCancelWait(waiter);  // the queue must not keep a pointer to this frame
@@ -429,7 +429,7 @@ void GroupOwner::onFinished(SpuThread& cpu, SpuLeave how) {
 
 // Halts every thread of `group` and waits for the host threads, without freeing anything: an SPU thread that is
 // still in onStop walks the other threads' records, so those must stay intact until all host threads have
-// ended. For teardown only: a thread that is still running may be waiting for the guest lock, so the caller
+// ended. For teardown only: a thread that is still running may be waiting for the kernel lock, so the caller
 // must not hold it unless every group has stopped.
 void haltAndJoin(SpuGroup& group) {
     for (SpuThreadRecord& thread : group.threads) {

@@ -1,9 +1,10 @@
 // Startup syscalls: process id, SDK version and exit, tty, timers, time base, user memory, memory
 // containers and page attributes.
 // Behaviour follows RPCS3 `Emu/Cell/lv2/sys_process.cpp`, `sys_tty.cpp`, `sys_timer.cpp`,
-// `sys_time.cpp` and `sys_memory.cpp`. Handlers run under the guest lock, except sys_timer_usleep and sys_timer_sleep
-// (kernel_free): a sleep touches no shared state, so it runs without the kernel lock and gives up its PPU slot while it
-// waits.
+// `sys_time.cpp` and `sys_memory.cpp`. Handlers run under the kernel lock (the guest
+// lock in legacy mode). In split modes the kernel_free ones (sys_timer_usleep, sys_timer_sleep,
+// sys_time_get_timebase_frequency) run without it: a sleep touches no shared state, so it gives up its PPU slot while
+// it waits.
 
 #include "lv2/sys_memory.h"
 

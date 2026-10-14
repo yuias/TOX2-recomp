@@ -1,6 +1,6 @@
 // lv2 event flags (syscalls 82, 83, 85, 87, 118, 132, 139), event queues (128-131, 133) and local
 // event ports (134-138). Behaviour follows RPCS3 `Emu/Cell/lv2/sys_event_flag.cpp` and
-// `sys_event.cpp`. Handlers run under the guest lock; a waiting call parks in blockingWait, which
+// `sys_event.cpp`. Handlers run under the kernel lock; a waiting call parks in blockingWait, which
 // gives the lock up. Event queues support IPC keys (a non-zero key is unique among live queues);
 // the host can look a queue up by key and send to it (eventQueueIdByKey, sendEventToQueue).
 // Deferred: waiters are served in arrival order, not by priority (see GuestLock), and IPC ports
@@ -125,7 +125,7 @@ IdMap<EventPort> g_ports(kEventPortIdBase, kSyncIdStep);
 // type in lv2, and event queues are the only keyed objects here.
 std::map<std::uint64_t, std::uint32_t> g_queue_keys;
 
-// SPU receivers see only the low 32 bits of data1..data3. The woken thread takes the guest lock, which the
+// SPU receivers see only the low 32 bits of data1..data3. The woken thread takes the kernel lock, which the
 // caller holds, before it touches or drops the waiter, so the wake may follow the store of `done`.
 void completeSpuWaiter(SpuQueueWaiter& waiter, std::uint32_t code, const Event& event) {
     SpuThread* thread = waiter.thread;
