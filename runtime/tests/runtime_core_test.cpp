@@ -13974,6 +13974,49 @@ void testSplitDefaultPathCount() {
     tox2::setLogSink({});
 }
 
+TOX2_PPU_FUNC(hostRegistryProbe) {
+    (void)ctx;
+    (void)base;
+}
+
+// One thread registers host functions while another resolves the newest published key: the lock-free lookup never
+// misses an entry whose OPD was handed out.
+void testHostFunctionConcurrentLookup() {
+    HangGuard guard("testHostFunctionConcurrentLookup");
+    BoundaryEnv env;
+    std::uint8_t* base = env.base();
+    constexpr std::uint32_t kCount = 1000;
+
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    std::atomic<std::uint32_t> latest_opd{0};
+    std::atomic<bool> done{false};
+    std::atomic<std::int64_t> lookups{0}, misses{0};
+    std::thread registrar = slotThread(1001, [&] {
+        for (std::uint32_t i = 0; i < kCount; i++) {
+            latest_opd.store(tox2::registerHostFunction("hostRegistryProbe", hostRegistryProbe));
+        }
+        done = true;
+    });
+    std::thread reader = slotThread(1001, [&] {
+        for (bool last = false; !last;) {
+            last = done.load();
+            const std::uint32_t opd = latest_opd.load();
+            if (opd == 0) continue;
+            const std::uint32_t key = tox2Read32(base, opd);
+            lookups++;
+            if (tox2Lookup(key) != hostRegistryProbe) misses++;
+        }
+    });
+    registrar.join();
+    reader.join();
+    CHECK(lookups > 0);
+    CHECK(misses == 0);
+    for (std::uint32_t i = 0; i < kCount; i++) {
+        CHECK(tox2Lookup(tox2::kHostFunctionBase + 4 * i) == hostRegistryProbe);
+    }
+    CHECK(tox2Lookup(tox2::kHostFunctionBase + 4 * kCount) == nullptr);
+}
+
 // Uncontended cost of one dispatcher call: legacy against Split1, for a kernel entry and a kernel-free one.
 void testSplitBoundaryCost() {
     constexpr int kRuns = 5;
@@ -14912,6 +14955,7 @@ int main(int argc, char** argv) {
     testSplitGuestCallbackReleasesKernel();
     testSplitSysutilCallbacks();
     testSplitDefaultPathCount();
+    testHostFunctionConcurrentLookup();
     testSplitBoundaryCost();
     testYieldBackoff();
     testPpuYieldStats();

@@ -2,6 +2,7 @@
 // 4-byte instruction address, one table (span) per image.
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <format>
 #include <string>
@@ -14,6 +15,7 @@
 #include "core/guest_memory.h"
 #include "core/host_functions.h"
 #include "core/log.h"
+#include "core/threads.h"
 #include "tox2/ppu_context.h"
 
 namespace {
@@ -92,10 +94,11 @@ struct HostFunction {
     Tox2PpuFunc* function = nullptr;
 };
 
-// Fixed capacity so lookups never race a reallocation. Registration happens under the guest lock
-// (or before boot), the same lock every tox2Lookup caller holds.
+// Fixed capacity so lookups never race a reallocation. Registration runs in a kernel section (or before boot), so
+// there is one writer at a time. Lookups take no lock (two guest threads run in parallel in the split modes): the
+// count is published with release after the entry and the OPD are written, and tox2Lookup reads it with acquire.
 std::array<HostFunction, tox2::kMaxHostFunctions> g_host_functions;
-std::uint32_t g_host_function_count = 0;
+std::atomic<std::uint32_t> g_host_function_count{0};
 std::uint32_t g_opd_block = 0;
 const std::uint8_t* g_opd_block_memory = nullptr;  // reservation the block was taken from
 
@@ -141,7 +144,10 @@ std::uint32_t registerHostFunction(const char* name, GuestHandler handler) {
     if (handler == nullptr) {
         fatal(FatalKind::Internal, std::format("host function {}: null handler", name));
     }
-    if (g_host_function_count >= kMaxHostFunctions) {
+    // Covers the whole function: the lazy OPD block allocation below takes from process().main, which is lv2 state.
+    const KernelSection kernel;
+    const std::uint32_t index = g_host_function_count.load(std::memory_order_relaxed);
+    if (index >= kMaxHostFunctions) {
         fatal(FatalKind::Internal, std::format("host function {}: table is full", name));
     }
     GuestMemory& memory = process().memory;
@@ -153,11 +159,11 @@ std::uint32_t registerHostFunction(const char* name, GuestHandler handler) {
         g_opd_block_memory = memory.base();
     }
 
-    const std::uint32_t index = g_host_function_count++;
     g_host_functions[index] = {name, reinterpret_cast<Tox2PpuFunc*>(handler)};
     const std::uint32_t opd = g_opd_block + index * 8;
     tox2Write32(memory.base(), opd, kHostFunctionBase + index * 4);
     tox2Write32(memory.base(), opd + 4, 0);
+    g_host_function_count.store(index + 1, std::memory_order_release);
     return opd;
 }
 
@@ -167,7 +173,7 @@ void resetHostFunctions() {
         process().main.free(g_opd_block);
     }
     g_host_functions.fill({});
-    g_host_function_count = 0;
+    g_host_function_count.store(0, std::memory_order_release);
     g_opd_block = 0;
     g_opd_block_memory = nullptr;
 }
@@ -186,7 +192,7 @@ Tox2PpuFunc* tox2Lookup(uint32_t addr) {
     if ((addr & 3) != 0) {
         return nullptr;
     }
-    if (addr - tox2::kHostFunctionBase < 4 * g_host_function_count) {
+    if (addr - tox2::kHostFunctionBase < 4 * g_host_function_count.load(std::memory_order_acquire)) {
         return g_host_functions[(addr - tox2::kHostFunctionBase) / 4].function;
     }
     const Span* span = findSpan(addr);
