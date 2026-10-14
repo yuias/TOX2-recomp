@@ -63,6 +63,16 @@ std::uint64_t elapsedNs(std::chrono::steady_clock::time_point from, std::chrono:
 }
 
 bool isPpuClass(GuestLockClass cls) { return cls == GuestLockClass::Ppu || cls == GuestLockClass::PpuHigh; }
+
+KernelWaitBucket kernelWaitBucket(const char* label) {
+    if (label == nullptr) return KernelWaitBucket::None;
+    const std::string_view name(label);
+    if (name.starts_with("sys_lwmutex_")) return KernelWaitBucket::Lwmutex;
+    if (name == "sys_timer_usleep" || name == "sys_timer_sleep") return KernelWaitBucket::TimerSleep;
+    if (name.starts_with("cellGcm") || name.starts_with("_cellGcm")) return KernelWaitBucket::Gcm;
+    return KernelWaitBucket::Other;
+}
+
 std::atomic<SpuHealthFn> g_spu_health{nullptr};
 
 // CPU cycles the calling thread has run. About 250 ns per call, which is a noticeable share of the many short holds of
@@ -238,6 +248,15 @@ std::vector<std::string> guestLockCensus() {
                 static_cast<double>(slots.parallel_us) / 1e6, static_cast<double>(slots.full_waiting_us) / 1e6,
                 formatLatency(slots.wait[0], kGuestLockWaitOverUs),
                 formatLatency(slots.wait[1], kGuestLockWaitOverUs)));
+        const auto bucket_text = [&](KernelWaitBucket bucket) {
+            const auto i = static_cast<std::size_t>(bucket);
+            return std::format("{:.1f} ms {}", static_cast<double>(s.ppu_wait_by_call.wait_us[i]) / 1000.0,
+                               s.ppu_wait_by_call.count[i]);
+        };
+        lines.push_back(std::format("census: ppu kernel wait by call: lwmutex {}, timer {}, gcm {}, other {}, none {}",
+                                    bucket_text(KernelWaitBucket::Lwmutex), bucket_text(KernelWaitBucket::TimerSleep),
+                                    bucket_text(KernelWaitBucket::Gcm), bucket_text(KernelWaitBucket::Other),
+                                    bucket_text(KernelWaitBucket::None)));
     }
     const PpuReservationStats reservation = ppuReservationStats();
     lines.push_back(std::format("census: ppu reservations lwarx {} stwcx {} failed {}", reservation.lwarx,
@@ -458,7 +477,14 @@ void GuestLock::enqueueAndWait(std::unique_lock<std::mutex>& lock, Waiter& node)
     t_activity.hold_prev = nullptr;
     const std::uint64_t handoff_us = elapsedUs(released_at, turn);
 
-    counters.wait.record(elapsedUs(node.arrival, turn));
+    const std::uint64_t wait_us = elapsedUs(node.arrival, turn);
+    counters.wait.record(wait_us);
+    // The waiter's thread-local label still names the call that queued it, also after a blockingWait re-acquisition.
+    if (node.ppu && splitPpuMode()) {
+        const auto bucket = static_cast<std::size_t>(kernelWaitBucket(t_activity.current));
+        ppu_wait_by_call_us_[bucket].fetch_add(wait_us, std::memory_order_relaxed);
+        ppu_wait_by_call_count_[bucket].fetch_add(1, std::memory_order_relaxed);
+    }
     counters.contended.fetch_add(1, std::memory_order_relaxed);
     counters.ahead_sum.fetch_add(ahead, std::memory_order_relaxed);
     std::uint64_t seen = counters.ahead_max.load(std::memory_order_relaxed);
@@ -686,6 +712,10 @@ GuestLockStats GuestLock::stats() const {
     out.ppu_hold_us = ppu_hold_us_.load(std::memory_order_relaxed);
     out.ppu_hold_overlap_us = ppu_hold_overlap_us_.load(std::memory_order_relaxed);
     out.long_holds = long_holds_.load(std::memory_order_relaxed);
+    for (std::size_t i = 0; i < kKernelWaitBucketCount; i++) {
+        out.ppu_wait_by_call.wait_us[i] = ppu_wait_by_call_us_[i].load(std::memory_order_relaxed);
+        out.ppu_wait_by_call.count[i] = ppu_wait_by_call_count_[i].load(std::memory_order_relaxed);
+    }
     return out;
 }
 

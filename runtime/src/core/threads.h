@@ -89,8 +89,20 @@ struct GuestLockClassStats {
     std::array<std::uint64_t, kGuestLockClassCount> waited_behind_us{};
 };
 
+// The call a PPU-class thread was in when it waited for the kernel lock, from its ActivityScope label:
+//   Lwmutex: starts with "sys_lwmutex_"; TimerSleep: "sys_timer_usleep" or "sys_timer_sleep"; Gcm: starts with
+//   "cellGcm" or "_cellGcm"; Other: any other label; None: no label.
+enum class KernelWaitBucket : std::uint8_t { Lwmutex, TimerSleep, Gcm, Other, None };
+inline constexpr std::size_t kKernelWaitBucketCount = 5;
+
+struct KernelWaitByCall {
+    std::array<std::uint64_t, kKernelWaitBucketCount> wait_us{}, count{};
+};
+
 struct GuestLockStats {
     std::array<GuestLockClassStats, kGuestLockClassCount> classes;
+    // Split modes only: contended acquisitions of PPU-class threads (Ppu, PpuHigh), by the call that waited.
+    KernelWaitByCall ppu_wait_by_call;
     LatencySnapshot handoff;                          // unlock() of the previous holder -> turn of a waiting acquirer
     std::uint64_t wakeups = 0, spurious_wakeups = 0;  // waiter wake-ups, and those that found it was not their turn
     // Hold time of PPU-class holders, and the part of it during which another PPU-class thread was queued (from the
@@ -226,6 +238,8 @@ private:
     // Written under mutex_ in unlock(), so a plain load + store is enough; atomic for stats().
     std::atomic<std::uint64_t> ppu_hold_us_{0}, ppu_hold_overlap_us_{0};
     std::atomic<std::uint64_t> long_holds_{0};  // written under mutex_ in noteRelease
+    // Written by the waiter after its turn, outside mutex_, so these are read-modify-write adds.
+    std::array<std::atomic<std::uint64_t>, kKernelWaitBucketCount> ppu_wait_by_call_us_{}, ppu_wait_by_call_count_{};
 };
 
 GuestLock& guestLock();

@@ -13345,6 +13345,74 @@ void testSplitKernelHelpers() {
     CHECK(!tox2::splitPpuMode() && tox2::ppuSlots().capacity() == 1);
 }
 
+// A host thread holds the kernel lock for 20 ms while a PPU-class thread, inside a call labelled `label` (nullptr:
+// none), waits for it. Returns the change of the by-call statistics. In a split mode the waiter takes a slot and enters
+// a KernelSection; in Legacy it takes the lock itself, as a legacy guest thread does.
+tox2::KernelWaitByCall kernelWaitByCallCase(const char* label) {
+    tox2::GuestLock& kernel = tox2::guestLock();
+    const tox2::KernelWaitByCall before = kernel.stats().ppu_wait_by_call;
+    kernel.lock();
+    std::thread waiter = slotThread(1001, [&] {
+        const bool split = tox2::splitPpuMode();
+        if (split) tox2::ppuSlots().acquire();
+        {
+            std::optional<tox2::ActivityScope> scope;
+            if (label != nullptr) scope.emplace(label);
+            if (split) {
+                tox2::KernelSection section;
+            } else {
+                kernel.lock();
+                kernel.unlock();
+            }
+        }
+        if (split) tox2::ppuSlots().release();
+    });
+    CHECK(pollUntil([&] { return kernel.hasWaiters(); }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    kernel.unlock();
+    waiter.join();
+    tox2::KernelWaitByCall delta = kernel.stats().ppu_wait_by_call;
+    for (std::size_t i = 0; i < tox2::kKernelWaitBucketCount; i++) {
+        delta.wait_us[i] -= before.wait_us[i];
+        delta.count[i] -= before.count[i];
+    }
+    return delta;
+}
+
+void testKernelWaitByCall() {
+    HangGuard guard("testKernelWaitByCall");
+    using tox2::KernelWaitBucket;
+    struct Case {
+        const char* label;
+        KernelWaitBucket bucket;
+    };
+    const Case cases[] = {
+            {"sys_lwmutex_lock", KernelWaitBucket::Lwmutex},   {"sys_timer_usleep", KernelWaitBucket::TimerSleep},
+            {"cellGcmAddressToOffset", KernelWaitBucket::Gcm}, {"_cellGcmFunc2", KernelWaitBucket::Gcm},
+            {"sys_mutex_lock", KernelWaitBucket::Other},       {nullptr, KernelWaitBucket::None},
+    };
+    {
+        SplitModeScope mode(tox2::PpuThreadsMode::Split1);
+        for (const Case& c : cases) {
+            const tox2::KernelWaitByCall delta = kernelWaitByCallCase(c.label);
+            for (std::size_t i = 0; i < tox2::kKernelWaitBucketCount; i++) {
+                if (i == static_cast<std::size_t>(c.bucket)) {
+                    CHECK(delta.wait_us[i] >= 15'000 && delta.count[i] == 1);
+                } else {
+                    CHECK(delta.wait_us[i] == 0 && delta.count[i] == 0);
+                }
+            }
+        }
+    }
+    // Legacy: the same sequence changes no bucket.
+    CHECK(!tox2::splitPpuMode());
+    for (const Case& c : cases) {
+        const tox2::KernelWaitByCall delta = kernelWaitByCallCase(c.label);
+        for (std::size_t i = 0; i < tox2::kKernelWaitBucketCount; i++)
+            CHECK(delta.wait_us[i] == 0 && delta.count[i] == 0);
+    }
+}
+
 constexpr int kStepBudget = kTox2PreemptBudget;
 std::atomic<int> g_step_count{0};
 
@@ -15064,6 +15132,7 @@ int main(int argc, char** argv) {
     testSplitTwoRunners();
     testSplitYield();
     testSplitKernelHelpers();
+    testKernelWaitByCall();
     testSplitCreatePriority();
     testSplitExitInKernelSection();
     testSplitReturnPathTls();
