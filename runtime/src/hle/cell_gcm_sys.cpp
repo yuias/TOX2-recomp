@@ -1,7 +1,8 @@
 // HLE handlers of the cellGcmSys module: initialisation, configuration, IO mapping, the command
 // buffer wrap callback, display buffers, flip commands, tiles and zcull. Behaviour follows RPCS3
 // `Emu/Cell/Modules/cellGcmSys.cpp` (function of the same name) and the memory layout of
-// `Emu/Cell/lv2/sys_rsx.cpp`; the state lives in rsx/rsx_state.h. Handlers run under the guest lock.
+// `Emu/Cell/lv2/sys_rsx.cpp`; the state lives in rsx/rsx_state.h. Handlers run under the kernel lock, except the ones
+// marked kernel_free, which touch only atomic RsxState fields, guest memory and the commit map.
 
 #include <atomic>
 #include <algorithm>
@@ -192,10 +193,10 @@ void gcmGetConfiguration(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t config = argU32(ctx, 0);
     requireCommitted(config, kConfigSize, "CellGcmConfig");
     const RsxState& state = rsxState();
-    const bool ready = state.initialized;
+    const bool ready = rsxInitialized();
     tox2Write32(base, config + kConfigLocalAddress, ready ? kRsxLocalBase : 0);
     tox2Write32(base, config + kConfigIoAddress, state.io_address);
-    tox2Write32(base, config + kConfigLocalSize, state.local_size);
+    tox2Write32(base, config + kConfigLocalSize, rsxLocalSize());
     tox2Write32(base, config + kConfigIoSize, state.io_size);
     tox2Write32(base, config + kConfigMemoryFrequency, ready ? kMemoryFrequency : 0);
     tox2Write32(base, config + kConfigCoreFrequency, ready ? kCoreFrequency : 0);
@@ -291,17 +292,23 @@ void gcmSetFlipMode(Tox2PpuContext* ctx, std::uint8_t*) {
 }
 
 // cellGcmResetFlipStatus(): void
-void gcmResetFlipStatus(Tox2PpuContext*, std::uint8_t*) { rsxState().flip_status = kRsxFlipStatusWaiting; }
+void gcmResetFlipStatus(Tox2PpuContext*, std::uint8_t*) {
+    std::atomic_ref(rsxState().flip_status).store(kRsxFlipStatusWaiting, std::memory_order_relaxed);
+}
 
 // cellGcmGetFlipStatus(): s32, the status the last flip or reset left (RPCS3 returns the renderer's flip_status).
-void gcmGetFlipStatus(Tox2PpuContext* ctx, std::uint8_t*) { ctx->gpr[3] = rsxState().flip_status; }
+// Kernel-free: the RSX thread stores the status without the guest lock, so every access is atomic.
+void gcmGetFlipStatus(Tox2PpuContext* ctx, std::uint8_t*) {
+    ctx->gpr[3] = std::atomic_ref(rsxState().flip_status).load(std::memory_order_relaxed);
+}
 
 // cellGcmGetLabelAddress(u8 index): the 16-byte label slot `index` of the semaphore area. The consumer resolves
 // the semaphore offsets of _cellGcmSetFlipCommandWithWaitLabel and the NV406E/NV4097 releases against the same
 // base (kRsxLabelAddr + offset), so a label the game polls is the one the RSX writes. Before initialisation there is
 // no label area, so the result is 0 (RPCS3 would return the bare offset, which no guest memory backs either).
 void gcmGetLabelAddress(Tox2PpuContext* ctx, std::uint8_t*) {
-    ctx->gpr[3] = rsxState().initialized ? kRsxLabelAddr + kRsxLabelStride * (argU32(ctx, 0) & 0xff) : 0;
+    // Kernel-free: `initialized` is stored atomically by gcmInitBody.
+    ctx->gpr[3] = rsxInitialized() ? kRsxLabelAddr + kRsxLabelStride * (argU32(ctx, 0) & 0xff) : 0;
 }
 
 // cellGcmGetLastFlipTime(): u64
@@ -312,7 +319,7 @@ void gcmGetLastFlipTime(Tox2PpuContext* ctx, std::uint8_t*) { ctx->gpr[3] = rsxS
 template <std::uint32_t RsxState::* Member>
 void gcmSetHandler(Tox2PpuContext* ctx, std::uint8_t*) {
     RsxState& state = rsxState();
-    if (state.initialized) state.*Member = argU32(ctx, 0);
+    if (rsxInitialized()) state.*Member = argU32(ctx, 0);
 }
 
 // Shared tail of the old-API flip functions: the flip method with the display buffer id.
@@ -385,8 +392,7 @@ void gcmBindZcull(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t s_func = stackArgU32(ctx, base, 9), s_ref = stackArgU32(ctx, base, 10);
     const std::uint32_t s_mask = stackArgU32(ctx, base, 11);
 
-    const RsxState& state = rsxState();
-    if (!state.initialized) return setResultCode(ctx, kCellEinval);
+    if (!rsxInitialized()) return setResultCode(ctx, kCellEinval);
     if (index >= kRsxZcullCount) return setResultCode(ctx, kLv1IllegalParameterValue);
 
     const std::uint32_t region = 1 | (z_format << 4) | (aa_format << 8);
@@ -411,7 +417,7 @@ void gcmBindZcull(Tox2PpuContext* ctx, std::uint8_t* base) {
 
     // The region must be non-empty and inside the zcull RAM; the offset inside local memory.
     const std::uint32_t length = zcull.width * zcull.height;
-    if (length == 0 || std::uint64_t{start} + length - 1 >= kZcullRamSize || zcull.offset >= state.local_size) {
+    if (length == 0 || std::uint64_t{start} + length - 1 >= kZcullRamSize || zcull.offset >= rsxLocalSize()) {
         return setResultCode(ctx, kCellEinval);
     }
     rsxState().zculls[index] = zcull;
@@ -427,25 +433,25 @@ void gcmUnbindZcull(Tox2PpuContext* ctx, std::uint8_t*) {
 }
 
 constexpr HleEntry kHandlers[] = {
-        {kModule, 0x055bd74d, "cellGcmGetTiledPitchSize", gcmGetTiledPitchSize},
+        {kModule, 0x055bd74d, "cellGcmGetTiledPitchSize", gcmGetTiledPitchSize, true},
         {kModule, 0x06edea9e, "cellGcmSetUserHandler", gcmSetHandler<&RsxState::user_handler>},
         {kModule, 0x15bae46b, "_cellGcmInitBody", gcmInitBodyHandler},
-        {kModule, 0x21397818, "_cellGcmSetFlipCommand", gcmSetFlipCommand},
-        {kModule, 0x21ac3697, "cellGcmAddressToOffset", gcmAddressToOffset},
+        {kModule, 0x21397818, "_cellGcmSetFlipCommand", gcmSetFlipCommand, true},
+        {kModule, 0x21ac3697, "cellGcmAddressToOffset", gcmAddressToOffset, true},
         {kModule, 0x3a33c1fd, "_cellGcmFunc15", gcmFunc15},
         {kModule, 0x4524cccd, "cellGcmBindTile", gcmBindTile<true>},
-        {kModule, 0x4ae8d215, "cellGcmSetFlipMode", gcmSetFlipMode},
-        {kModule, 0x5a41c10f, "cellGcmGetTimeStamp", gcmGetTimeStamp},
+        {kModule, 0x4ae8d215, "cellGcmSetFlipMode", gcmSetFlipMode, true},
+        {kModule, 0x5a41c10f, "cellGcmGetTimeStamp", gcmGetTimeStamp, true},
         {kModule, 0x5e2ee0f0, "cellGcmGetDefaultCommandWordSize", gcmGetDefaultCommandWordSize},
         {kModule, 0x63387071, "cellGcmGetLastFlipTime", gcmGetLastFlipTime},
-        {kModule, 0x72a577ce, "cellGcmGetFlipStatus", gcmGetFlipStatus},
+        {kModule, 0x72a577ce, "cellGcmGetFlipStatus", gcmGetFlipStatus, true},
         {kModule, 0x8cdf8c70, "cellGcmGetDefaultSegmentWordSize", gcmGetDefaultSegmentWordSize},
         {kModule, 0x9ba451e4, "cellGcmSetDefaultFifoSize", gcmSetDefaultFifoSize},
         {kModule, 0x9dc04436, "cellGcmBindZcull", gcmBindZcull},
         {kModule, 0xa114ec67, "cellGcmMapMainMemory", gcmMapMainMemory},
         {kModule, 0xa41ef7e8, "cellGcmSetFlipHandler", gcmSetHandler<&RsxState::flip_handler>},
         {kModule, 0xa53d12ae, "cellGcmSetDisplayBuffer", gcmSetDisplayBuffer},
-        {kModule, 0xa547adde, "cellGcmGetControlRegister", gcmGetControlRegister},
+        {kModule, 0xa547adde, "cellGcmGetControlRegister", gcmGetControlRegister, true},
         {kModule, 0xa75640e8, "cellGcmUnbindZcull", gcmUnbindZcull},
         {kModule, 0xa91b0402, "cellGcmSetVBlankHandler", gcmSetHandler<&RsxState::vblank_handler>},
         {kModule, 0xb2e761d4, "cellGcmResetFlipStatus", gcmResetFlipStatus},
@@ -454,7 +460,7 @@ constexpr HleEntry kHandlers[] = {
         {kModule, 0xd9b7653e, "cellGcmUnbindTile", gcmBindTile<false>},
         {kModule, 0xe315a0b2, "cellGcmGetConfiguration", gcmGetConfiguration},
         {kModule, 0xefd00f54, "cellGcmUnmapEaIoAddress", gcmUnmapEaIoAddress},
-        {kModule, 0xf80196c1, "cellGcmGetLabelAddress", gcmGetLabelAddress},
+        {kModule, 0xf80196c1, "cellGcmGetLabelAddress", gcmGetLabelAddress, true},
 };
 
 }  // namespace
@@ -464,7 +470,7 @@ std::span<const HleEntry> cellGcmSysHandlers() { return kHandlers; }
 std::uint32_t gcmInitBody(std::uint8_t* base, std::uint32_t context_pp, std::uint32_t cmd_size, std::uint32_t io_size,
                           std::uint32_t io_address, std::uint32_t local_size) {
     RsxState& state = rsxState();
-    if (state.initialized) {
+    if (rsxInitialized()) {
         // RPCS3 supports one context only and throws on a second allocation.
         logError("tox2: gcm: _cellGcmInitBody called twice");
         return kGcmErrorFailure;
@@ -477,14 +483,14 @@ std::uint32_t gcmInitBody(std::uint8_t* base, std::uint32_t context_pp, std::uin
         return kGcmErrorFailure;
     }
 
-    state = RsxState{};
-    state.local_size = local_size;
+    clearRsxState();
+    std::atomic_ref(state.local_size).store(local_size, std::memory_order_relaxed);
     if (const std::uint32_t error = rsxMapEaIo(io_address, 0, io_size); error != 0) {
         logError("tox2: gcm: cannot map the IO area ea={:#010x} size={:#x} (error {:#010x})", io_address, io_size,
                  error);
         memory.decommit(kRsxDeviceAddr, kRsxContextCommitSize);
         memory.decommit(kRsxLocalBase, local_size);
-        state = RsxState{};
+        clearRsxState();
         return kGcmErrorFailure;
     }
 
@@ -526,7 +532,7 @@ std::uint32_t gcmInitBody(std::uint8_t* base, std::uint32_t context_pp, std::uin
     std::memset(base + kRsxDeviceAddr, 0, 0x100);
     tox2Write32(base, kRsxDeviceAddr + 0x30, 1);
 
-    state.initialized = true;
+    std::atomic_ref(state.initialized).store(true, std::memory_order_relaxed);
     state.io_address = io_address;
     state.io_size = io_size;
     state.context_pp = context_pp;

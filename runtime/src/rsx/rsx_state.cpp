@@ -19,12 +19,51 @@ constexpr std::uint32_t kEaPageLimit = kRsxLocalBase >> kPageShift;
 
 RsxState& rsxState() { return g_state; }
 
+bool rsxInitialized() { return std::atomic_ref(g_state.initialized).load(std::memory_order_relaxed); }
+
+std::uint32_t rsxLocalSize() { return std::atomic_ref(g_state.local_size).load(std::memory_order_relaxed); }
+
+void clearRsxState() {
+    // Not `g_state = RsxState{}`: the whole-struct store would be a plain write to the fields that kernel-free handlers
+    // and the RSX thread read atomically without the guest lock.
+    const RsxState fresh;
+    RsxState& s = g_state;
+    constexpr auto kRelaxed = std::memory_order_relaxed;
+    std::atomic_ref(s.initialized).store(fresh.initialized, kRelaxed);
+    std::atomic_ref(s.local_size).store(fresh.local_size, kRelaxed);
+    for (std::size_t i = 0; i < s.io_of_ea.size(); i++)
+        std::atomic_ref(s.io_of_ea[i]).store(fresh.io_of_ea[i], kRelaxed);
+    for (std::size_t i = 0; i < s.ea_of_io.size(); i++)
+        std::atomic_ref(s.ea_of_io[i]).store(fresh.ea_of_io[i], kRelaxed);
+    std::atomic_ref(s.requested_vsync).store(fresh.requested_vsync, kRelaxed);
+    std::atomic_ref(s.flip_status).store(fresh.flip_status, kRelaxed);
+
+    s.io_address = fresh.io_address;
+    s.io_size = fresh.io_size;
+    s.context_pp = fresh.context_pp;
+    s.io_map_size = fresh.io_map_size;
+    s.command_begin = fresh.command_begin;
+    s.fragment_count = fresh.fragment_count;
+    s.command_size = fresh.command_size;
+    s.segment_size = fresh.segment_size;
+    s.wrap_callback = fresh.wrap_callback;
+    s.display = fresh.display;
+    s.display_count = fresh.display_count;
+    s.tiles = fresh.tiles;
+    s.zculls = fresh.zculls;
+    s.last_flip_time = fresh.last_flip_time;
+    s.vblank_count = fresh.vblank_count;
+    s.flip_handler = fresh.flip_handler;
+    s.vblank_handler = fresh.vblank_handler;
+    s.user_handler = fresh.user_handler;
+}
+
 void resetRsxState() {
-    if (g_state.initialized) {
+    if (rsxInitialized()) {
         process().memory.decommit(kRsxDeviceAddr, kRsxContextCommitSize);
-        process().memory.decommit(kRsxLocalBase, g_state.local_size);
+        process().memory.decommit(kRsxLocalBase, rsxLocalSize());
     }
-    g_state = RsxState{};
+    clearRsxState();
 }
 
 std::condition_variable_any& rsxGetAdvanced() { return g_get_advanced; }
@@ -39,13 +78,14 @@ bool rsxIoToEa(std::uint32_t io, std::uint32_t& ea) {
 }
 
 bool rsxEaToOffset(std::uint32_t ea, std::uint32_t& offset) {
-    if (const std::uint32_t local = ea - kRsxLocalBase; local < g_state.local_size) {
+    // cellGcmAddressToOffset calls this without the kernel lock.
+    if (const std::uint32_t local = ea - kRsxLocalBase; local < rsxLocalSize()) {
         offset = local;
         return true;
     }
     // RPCS3 indexes its table with any address; the host table covers the EAs below local memory.
     if ((ea >> kPageShift) >= kEaPageLimit) return false;
-    const std::uint32_t io_page = g_state.io_of_ea[ea >> kPageShift];
+    const std::uint32_t io_page = std::atomic_ref(g_state.io_of_ea[ea >> kPageShift]).load(std::memory_order_relaxed);
     const std::uint32_t io_base = io_page << kPageShift;  // wraps to >= the IO space when unmapped
     if (io_base >= kRsxIoSpaceSize) return false;
     offset = io_base | (ea & kPageMask);
@@ -65,7 +105,8 @@ std::uint32_t rsxMapEaIo(std::uint32_t ea, std::uint32_t io, std::uint32_t size)
     const std::uint32_t ea_page = ea >> kPageShift, io_page = io >> kPageShift;
     const std::uint32_t pages = size >> kPageShift;
     for (std::uint32_t i = 0; i < pages; i++) {
-        g_state.io_of_ea[ea_page + i] = static_cast<std::uint16_t>(io_page + i);
+        std::atomic_ref(g_state.io_of_ea[ea_page + i])
+                .store(static_cast<std::uint16_t>(io_page + i), std::memory_order_relaxed);
         std::atomic_ref(g_state.ea_of_io[io_page + i])
                 .store(static_cast<std::uint16_t>(ea_page + i), std::memory_order_relaxed);
     }
@@ -81,7 +122,7 @@ std::uint32_t rsxMapMainMemory(std::uint32_t ea, std::uint32_t size, std::uint32
     const std::uint32_t total = kRsxIoSpaceSize >> kPageShift;
     std::uint32_t run = 0;
     for (std::uint32_t io = 0; io < total; io++) {
-        run = g_state.ea_of_io[io] >= kEaPageLimit ? run + 1 : 0;
+        run = std::atomic_ref(g_state.ea_of_io[io]).load(std::memory_order_relaxed) >= kEaPageLimit ? run + 1 : 0;
         if (run < pages) continue;
 
         const std::uint32_t start = (io + 1 - pages) << kPageShift;
@@ -96,17 +137,17 @@ std::uint32_t rsxUnmapEa(std::uint32_t ea) {
     const std::uint32_t ea_page = ea >> kPageShift;
     if (ea_page >= kEaPageLimit) return kGcmErrorFailure;
 
-    const std::uint32_t io_page = g_state.io_of_ea[ea_page];
+    const std::uint32_t io_page = std::atomic_ref(g_state.io_of_ea[ea_page]).load(std::memory_order_relaxed);
     if ((io_page << kPageShift) >= kRsxIoSpaceSize) return kGcmErrorFailure;
 
     // The mapping is recorded under the EA page that the IO page currently points back to.
-    const std::uint32_t start_page = g_state.ea_of_io[io_page];
+    const std::uint32_t start_page = std::atomic_ref(g_state.ea_of_io[io_page]).load(std::memory_order_relaxed);
     if (start_page >= kEaPageLimit) return kGcmErrorFailure;
     const std::uint32_t pages = g_state.io_map_size[start_page];
     if (pages == 0 || io_page + pages > kRsxIoPages) return kGcmErrorFailure;
 
     for (std::uint32_t i = 0; i < pages; i++) {
-        g_state.io_of_ea[start_page + i] = kRsxUnmapped;
+        std::atomic_ref(g_state.io_of_ea[start_page + i]).store(kRsxUnmapped, std::memory_order_relaxed);
         std::atomic_ref(g_state.ea_of_io[io_page + i]).store(kRsxUnmapped, std::memory_order_relaxed);
     }
     g_state.io_map_size[start_page] = 0;

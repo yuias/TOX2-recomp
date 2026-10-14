@@ -13881,6 +13881,169 @@ void testSplitSyscallStress() {
     }
 }
 
+// An initialised gcm state (no consumer thread) with the cellGcmSys imports the kernel-free tests call through
+// tox2HleCall. The IO area is mapped at IO offset 0, so `area() + n` has the offset n.
+class GcmEnv {
+public:
+    enum Import : std::uint32_t {
+        AddressToOffset,
+        GetFlipStatus,
+        GetLabelAddress,
+        SetFlipCommand,
+        GetTimeStamp,
+        GetControlRegister,
+        GetTiledPitchSize,
+        SetFlipMode,
+        MapMain,
+        UnmapEa,
+        ImportCount
+    };
+
+    GcmEnv() {
+        tox2::resetRsxState();
+        area_ = tox2::process().user1m.allocate(0x400000, 0x100000);
+        CHECK(area_ != 0 && (area_ & 0xfffff) == 0);
+        static const Tox2ImportInfo kImports[] = {
+                {0x00800000, 0x21ac3697, "cellGcmSys", "cellGcmAddressToOffset"},
+                {0x00800010, 0x72a577ce, "cellGcmSys", "cellGcmGetFlipStatus"},
+                {0x00800020, 0xf80196c1, "cellGcmSys", "cellGcmGetLabelAddress"},
+                {0x00800030, 0x21397818, "cellGcmSys", "_cellGcmSetFlipCommand"},
+                {0x00800040, 0x5a41c10f, "cellGcmSys", "cellGcmGetTimeStamp"},
+                {0x00800050, 0xa547adde, "cellGcmSys", "cellGcmGetControlRegister"},
+                {0x00800060, 0x055bd74d, "cellGcmSys", "cellGcmGetTiledPitchSize"},
+                {0x00800070, 0x4ae8d215, "cellGcmSys", "cellGcmSetFlipMode"},
+                {0x00800080, 0xa114ec67, "cellGcmSys", "cellGcmMapMainMemory"},
+                {0x00800090, 0xefd00f54, "cellGcmSys", "cellGcmUnmapEaIoAddress"},
+        };
+        tox2::installImports(kImports, ImportCount);
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        CHECK(tox2::gcmInitBody(env_.base(), env_.data(), 0x10000, kIoSize, area_, kLocalSize) == 0);
+    }
+    ~GcmEnv() {
+        tox2::resetRsxState();
+        tox2::process().user1m.free(area_);
+    }
+    GcmEnv(const GcmEnv&) = delete;
+    GcmEnv& operator=(const GcmEnv&) = delete;
+
+    static constexpr std::uint32_t kIoSize = 0x100000, kLocalSize = 0x200000;
+
+    std::uint8_t* base() const { return env_.base(); }
+    std::uint32_t data() const { return env_.data(); }
+    std::uint32_t area() const { return area_; }
+
+    std::uint64_t call(tox2::GuestThread& caller, Import index, std::initializer_list<std::uint64_t> args) const {
+        Tox2PpuContext* ctx = &caller.context();
+        int reg = 3;
+        for (const std::uint64_t value : args) ctx->gpr[reg++] = value;
+        tox2HleCall(ctx, base(), index);
+        return ctx->gpr[3];
+    }
+
+private:
+    BoundaryEnv env_;
+    std::uint32_t area_ = 0;
+};
+
+// In Split2, a slot holder's call of each kernel-free gcm handler returns while a host thread holds the kernel lock;
+// a handler that took the lock would return only after the hold ended.
+void testKernelFreeHandlers() {
+    HangGuard guard("testKernelFreeHandlers");
+    GcmEnv gcm;
+    auto caller = makeCaller(0x01000000);
+    const std::uint32_t out = gcm.data();
+    struct GcmCall {
+        const char* name;
+        GcmEnv::Import import;
+        std::array<std::uint64_t, 2> args;
+        std::optional<std::uint64_t> expected;  // nullopt: the handler returns void
+    };
+    const std::array<GcmCall, 8> calls{{
+            {"cellGcmAddressToOffset", GcmEnv::AddressToOffset, {gcm.area() + 8, out}, 0},
+            {"cellGcmGetFlipStatus", GcmEnv::GetFlipStatus, {}, tox2::kRsxFlipStatusDone},
+            {"cellGcmGetLabelAddress", GcmEnv::GetLabelAddress, {1, 0}, tox2::kRsxLabelAddr + tox2::kRsxLabelStride},
+            {"_cellGcmSetFlipCommand", GcmEnv::SetFlipCommand, {tox2::kRsxDeviceAddr, 0}, std::nullopt},
+            {"cellGcmGetTimeStamp", GcmEnv::GetTimeStamp, {0, 0}, ~std::uint64_t{0}},
+            {"cellGcmGetControlRegister", GcmEnv::GetControlRegister, {}, tox2::kRsxControlAddr},
+            {"cellGcmGetTiledPitchSize", GcmEnv::GetTiledPitchSize, {0x1400, 0}, 0x1400},
+            {"cellGcmSetFlipMode", GcmEnv::SetFlipMode, {tox2::kRsxDisplayVsync, 0}, std::nullopt},
+    }};
+
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+    std::atomic<bool> go{false};
+    std::array<std::chrono::steady_clock::time_point, calls.size()> returned{};
+    std::array<std::uint64_t, calls.size()> results{};
+    std::thread holder = slotThread(1001, [&] {
+        slots.acquire();
+        CHECK(pollUntil([&] { return go.load(); }));
+        for (std::size_t i = 0; i < calls.size(); i++) {
+            results[i] = gcm.call(*caller, calls[i].import, {calls[i].args[0], calls[i].args[1]});
+            returned[i] = std::chrono::steady_clock::now();
+        }
+        slots.release();
+    });
+    std::chrono::steady_clock::time_point hold_end;
+    {
+        std::lock_guard<tox2::GuestLock> host(tox2::guestLock());
+        go = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        hold_end = std::chrono::steady_clock::now();
+    }
+    holder.join();
+    for (std::size_t i = 0; i < calls.size(); i++) {
+        if (returned[i] >= hold_end) {
+            std::fprintf(stderr, "%s waited for the kernel lock\n", calls[i].name);
+            CHECK(false);
+        }
+        if (calls[i].expected) CHECK(results[i] == *calls[i].expected);
+    }
+    CHECK(tox2Read32(gcm.base(), out) == 8);
+}
+
+// cellGcmAddressToOffset on a mapping that stays in place keeps returning its offset while another slot holder maps
+// and unmaps a second range, which rewrites the lock-free tables the lookup reads.
+void testGcmAddressToOffsetConcurrent() {
+    HangGuard guard("testGcmAddressToOffsetConcurrent");
+    GcmEnv gcm;
+    auto reader = makeCaller(0x01000000);
+    auto mapper = makeCaller(0x01000001);
+    const std::uint32_t reader_out = gcm.data() + 0x100, mapper_out = gcm.data() + 0x200;
+    const std::uint32_t second = gcm.area() + 0x100000;
+    constexpr int kLookups = 1'000'000;
+
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+    std::atomic<bool> reader_done{false};
+    std::atomic<int> mapper_rounds{0}, failures{0};
+    std::vector<std::thread> threads;
+    threads.push_back(slotThread(1001, [&] {
+        slots.acquire();
+        for (int n = 0; n < kLookups; n++) {
+            const std::uint64_t result = gcm.call(*reader, GcmEnv::AddressToOffset, {gcm.area() + 8, reader_out});
+            if (result != 0 || tox2Read32(gcm.base(), reader_out) != 8) failures++;
+            if (n == 0) CHECK(pollUntil([&] { return mapper_rounds.load() > 0; }));
+        }
+        reader_done = true;
+        slots.release();
+    }));
+    threads.push_back(slotThread(1001, [&] {
+        slots.acquire();
+        while (!reader_done.load()) {
+            if (gcm.call(*mapper, GcmEnv::MapMain, {second, 0x100000, mapper_out}) != 0 ||
+                tox2Read32(gcm.base(), mapper_out) != 0x100000) {
+                failures++;
+            }
+            if (gcm.call(*mapper, GcmEnv::UnmapEa, {second}) != 0) failures++;
+            mapper_rounds++;
+        }
+        slots.release();
+    }));
+    joinAll(threads);
+    CHECK(failures == 0);
+    CHECK(mapper_rounds > 0);
+}
+
 std::atomic<int> g_callee_kernel_held{-1};
 
 TOX2_PPU_FUNC(kernelProbeCallee) {
@@ -15139,6 +15302,8 @@ int main(int argc, char** argv) {
     testSplitYieldInsideKernel();
     testSplitReservationCounter();
     testSplitSyscallStress();
+    testKernelFreeHandlers();
+    testGcmAddressToOffsetConcurrent();
     testSplitGuestCallbackReleasesKernel();
     testSplitSysutilCallbacks();
     testSplitDefaultPathCount();

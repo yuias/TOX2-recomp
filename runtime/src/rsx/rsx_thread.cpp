@@ -536,7 +536,7 @@ void RsxConsumer::flip(std::uint32_t buffer) {
                 tox2Read32(base_, kRsxControlAddr + kControlPut), tox2Read32(base_, kRsxControlAddr + kControlGet),
                 get_);
     }
-    state.flip_status = kRsxFlipStatusDone;
+    std::atomic_ref(state.flip_status).store(kRsxFlipStatusDone, std::memory_order_relaxed);
     const std::uint64_t now = systemTimeUs();
     state.last_flip_time = now > kFlipTimeOffsetUs ? now - kFlipTimeOffsetUs : 0;
     if (arg_census_ != nullptr) arg_census_->onFlip(now);

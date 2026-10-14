@@ -5,7 +5,9 @@
 // mapping rules follow RPCS3 `Emu/Cell/Modules/cellGcmSys.cpp` (`_cellGcmInitBody`,
 // `gcmMapEaIoAddress`, `cellGcmMapMainMemory`, `cellGcmUnmapEaIoAddress`) and
 // `Emu/Cell/lv2/sys_rsx.cpp` (`sys_rsx_device_map`, `sys_rsx_context_allocate`,
-// `sys_rsx_context_iomap`). Everything is accessed under the guest lock.
+// `sys_rsx_context_iomap`). Writers run under the kernel lock. The RSX thread and the kernel-free gcm handlers read
+// some fields without it, so every run-time access to initialized, local_size, io_of_ea, ea_of_io, requested_vsync and
+// flip_status goes through relaxed std::atomic_ref; all other fields are plain kernel-lock state.
 
 #include <array>
 #include <condition_variable>
@@ -105,6 +107,15 @@ struct RsxState {
 };
 
 RsxState& rsxState();
+
+// Atomic reads of `initialized` and `local_size`, for callers that do not hold the kernel lock or just want the rule
+// kept in one place.
+bool rsxInitialized();
+std::uint32_t rsxLocalSize();
+
+// Back to the default state field by field: the atomic fields listed above are stored through std::atomic_ref, the
+// rest plainly. Decommits nothing.
+void clearRsxState();
 
 // Back to the uninitialised state and decommits what initialisation committed. For tests.
 void resetRsxState();
