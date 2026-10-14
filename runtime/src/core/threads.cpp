@@ -61,6 +61,37 @@ std::uint64_t currentIdentity() {
 bool isPpuClass(GuestLockClass cls) { return cls == GuestLockClass::Ppu || cls == GuestLockClass::PpuHigh; }
 std::atomic<SpuHealthFn> g_spu_health{nullptr};
 
+// CPU cycles the calling thread has run. About 250 ns per call, which is a noticeable share of the many short holds of
+// the RSX thread (40k+ acquisitions/s, rsx lock ms/flip +0.3), so only PPU-class holders read it, once per hold plus
+// once more when the hold turns out to be long.
+std::uint64_t threadCycles() {
+    ULONG64 cycles = 0;
+    QueryThreadCycleTime(GetCurrentThread(), &cycles);
+    return cycles;
+}
+
+// The unit of QueryThreadCycleTime is not documented as time, so it is calibrated against steady_clock: the thread
+// spins for a millisecond a few times and the highest cycles/ms ratio wins, since a spin the host preempted counts
+// fewer cycles than wall time. Done during static initialisation because a lazy calibration would run inside a hold.
+double calibrateCyclesPerMs() {
+    constexpr int kSpins = 5;
+    constexpr auto kSpinTime = std::chrono::milliseconds(1);
+    double best = 0.0;
+    for (int i = 0; i < kSpins; i++) {
+        const std::uint64_t cycles_start = threadCycles();
+        const auto start = std::chrono::steady_clock::now();
+        auto end = start;
+        while (end - start < kSpinTime) end = std::chrono::steady_clock::now();
+        const std::uint64_t cycles = threadCycles() - cycles_start;
+        const double ms = std::chrono::duration<double, std::milli>(end - start).count();
+        best = std::max(best, static_cast<double>(cycles) / ms);
+    }
+    return best;
+}
+const double g_cycles_per_ms = calibrateCyclesPerMs();
+
+std::atomic<GuestLockLongHoldObserver> g_long_hold_observer{nullptr};
+
 // Long-hold log lines are limited per wall-clock second, over all locks; holds beyond the limit are still counted.
 constexpr int kMaxLongHoldLogsPerSecond = 20;
 std::atomic<std::int64_t> g_long_hold_window{-1};
@@ -240,6 +271,10 @@ void setGuestLockClass(GuestLockClass cls) { t_lock_class = static_cast<std::uin
 
 void setGuestLockPpuPriorityForTesting(std::optional<std::int32_t> priority) { t_test_ppu_priority = priority; }
 
+void setGuestLockLongHoldObserverForTesting(GuestLockLongHoldObserver observer) {
+    g_long_hold_observer.store(observer, std::memory_order_relaxed);
+}
+
 std::optional<std::int32_t> currentPpuPriority() {
     if (t_test_ppu_priority.has_value()) return t_test_ppu_priority;
     if (t_lock_class != kNoExplicitClass || t_current == nullptr) return std::nullopt;
@@ -297,11 +332,14 @@ void GuestLock::lock() {
         hold_start_ = arrival;
         holder_class_ = cls;
         t_activity.hold_last = nullptr;
+        t_activity.hold_prev = nullptr;
         if (ppu) {
             holder_ppu_tag_ = next_ppu_tag_++;
             last_ppu_identity_ = currentIdentity();
         }
         lock.unlock();
+        // After mutex_ is released to keep its critical section short; only the holder reads it.
+        if (ppu) hold_start_cycles_ = threadCycles();
         counters.wait.record(0);
         return;
     }
@@ -355,7 +393,9 @@ void GuestLock::enqueueAndWait(std::unique_lock<std::mutex>& lock, Waiter& node)
     hold_start_ = turn;
     holder_class_ = node.cls;
     holder_ppu_tag_ = node.ppu_tag;
+    if (node.ppu) hold_start_cycles_ = threadCycles();
     t_activity.hold_last = nullptr;
+    t_activity.hold_prev = nullptr;
     const std::uint64_t handoff_us = elapsedUs(released_at, turn);
 
     counters.wait.record(elapsedUs(node.arrival, turn));
@@ -451,7 +491,10 @@ void GuestLock::noteRelease(std::chrono::steady_clock::time_point now, GuestLock
     outstanding_.store(outstanding_.load(std::memory_order_relaxed) - 1, std::memory_order_relaxed);
 }
 
-GuestLock::LongHoldReport GuestLock::captureLongHold(std::uint64_t hold_us, GuestLockClass holder) {
+double GuestLock::cyclesToMs(std::uint64_t cycles) { return static_cast<double>(cycles) / g_cycles_per_ms; }
+
+GuestLock::LongHoldReport GuestLock::captureLongHold(std::uint64_t hold_us, GuestLockClass holder,
+                                                     std::uint64_t start_cycles) {
     LongHoldReport report;
     if (hold_us < kGuestLockLongHoldUs) return report;
     report.hold_us = hold_us;
@@ -459,22 +502,37 @@ GuestLock::LongHoldReport GuestLock::captureLongHold(std::uint64_t hold_us, Gues
     report.thread = t_current;
     report.at_release = t_activity.current;
     report.last_in_hold = t_activity.hold_last;
+    report.previous_in_hold = t_activity.hold_prev;
+    report.has_cpu = isPpuClass(holder);
+    if (report.has_cpu) report.cpu_cycles = threadCycles() - start_cycles;
     return report;
 }
 
 void GuestLock::emitLongHold(const LongHoldReport& report, std::chrono::steady_clock::time_point now) {
-    if (report.hold_us == 0 || !allowLongHoldLog(now)) return;
+    if (report.hold_us == 0) return;
+    if (const GuestLockLongHoldObserver observer = g_long_hold_observer.load(std::memory_order_relaxed)) {
+        observer(report);
+        return;
+    }
+    if (!allowLongHoldLog(now)) return;
     const char* at_release = report.at_release != nullptr ? report.at_release : "none";
     const char* last_in_hold = report.last_in_hold != nullptr ? report.last_in_hold : "none";
+    const char* previous_in_hold = report.previous_in_hold != nullptr ? report.previous_in_hold : "none";
     const double ms = static_cast<double>(report.hold_us) / 1000.0;
+    std::string cpu = "n/a";
+    if (report.has_cpu) {
+        cpu = std::format("{:.2f} ms ({:.1f} Mcycles)", cyclesToMs(report.cpu_cycles),
+                          static_cast<double>(report.cpu_cycles) / 1e6);
+    }
     if (report.thread != nullptr) {
         logWarn("tox2: guest lock long hold: {:.2f} ms holder {} thread {:#010x} prio {} ({}) at release: {} last in "
-                "hold: {}",
+                "hold: {} previous in hold: {} cpu {}",
                 ms, guestLockClassName(report.holder), report.thread->id(), report.thread->priority(),
-                report.thread->name(), at_release, last_in_hold);
+                report.thread->name(), at_release, last_in_hold, previous_in_hold, cpu);
     } else {
-        logWarn("tox2: guest lock long hold: {:.2f} ms holder {} at release: {} last in hold: {}", ms,
-                guestLockClassName(report.holder), at_release, last_in_hold);
+        logWarn("tox2: guest lock long hold: {:.2f} ms holder {} at release: {} last in hold: {} previous in hold: {} "
+                "cpu {}",
+                ms, guestLockClassName(report.holder), at_release, last_in_hold, previous_in_hold, cpu);
     }
 }
 
@@ -493,7 +551,7 @@ void GuestLock::unlock() {
     // Recorded before the release: a lock that lives on a test's stack must not be touched after a waiter
     // may have taken it and let the owner destroy it.
     classes_[static_cast<std::size_t>(holder)].hold.record(hold_us);
-    const LongHoldReport report = captureLongHold(hold_us, holder);
+    const LongHoldReport report = captureLongHold(hold_us, holder, hold_start_cycles_);
     {
         std::lock_guard lock(mutex_);
         noteRelease(now, holder, hold_us);
@@ -517,7 +575,7 @@ bool GuestLock::yieldToHostWaiters() {
     const GuestLockClass holder = holder_class_;
     const std::uint64_t hold_us = elapsedUs(hold_start_, now);
     classes_[static_cast<std::size_t>(holder)].hold.record(hold_us);
-    const LongHoldReport report = captureLongHold(hold_us, holder);
+    const LongHoldReport report = captureLongHold(hold_us, holder, hold_start_cycles_);
     noteRelease(now, holder, hold_us);
     Waiter* oldest_host = head_;
     while (oldest_host->ppu) oldest_host = oldest_host->next;

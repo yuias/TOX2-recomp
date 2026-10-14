@@ -12368,6 +12368,10 @@ void testGuestLockStats() {
     }
 }
 
+std::vector<tox2::GuestLock::LongHoldReport> g_long_hold_reports;
+
+void collectLongHold(const tox2::GuestLock::LongHoldReport& report) { g_long_hold_reports.push_back(report); }
+
 // A hold of at least kGuestLockLongHoldUs is counted, also when it ends in yieldToHostWaiters; a shorter one is not.
 void testGuestLockLongHold() {
     constexpr auto kSleep = std::chrono::microseconds(tox2::kGuestLockLongHoldUs + 3000);
@@ -12396,6 +12400,15 @@ void testGuestLockLongHold() {
         CHECK(std::string_view(tox2::t_activity.current) == "outer");
     }
     CHECK(tox2::t_activity.current == nullptr && std::string_view(tox2::t_activity.hold_last) == "inner");
+    CHECK(std::string_view(tox2::t_activity.hold_prev) == "outer");
+    {
+        // The same label again changes nothing, so hold_prev keeps the label before it.
+        const tox2::ActivityScope again("inner");
+        CHECK(std::string_view(tox2::t_activity.hold_prev) == "outer");
+    }
+    lock.unlock();
+    lock.lock();
+    CHECK(tox2::t_activity.hold_last == nullptr && tox2::t_activity.hold_prev == nullptr);
     lock.unlock();
 
     // A host waiter makes yieldToHostWaiters release; the hold that ends there counts too.
@@ -12410,6 +12423,48 @@ void testGuestLockLongHold() {
     lock.unlock();
     waiter.join();
     CHECK(lock.stats().long_holds == 2);
+
+    // The report separates a holder that ran from one the host did not schedule, and names the last two labels.
+    {
+        constexpr auto kHold = std::chrono::milliseconds(tox2::kGuestLockLongHoldUs / 1000 + 4);
+        tox2::setGuestLockLongHoldObserverForTesting(&collectLongHold);
+        tox2::setGuestLockPpuPriorityForTesting(1001);  // the cycle count is taken for PPU-class holders only
+        g_long_hold_reports.clear();
+
+        lock.lock();
+        {
+            const tox2::ActivityScope first("first");
+        }
+        {
+            const tox2::ActivityScope second("second");
+        }
+        for (const auto start = std::chrono::steady_clock::now(); std::chrono::steady_clock::now() - start < kHold;) {
+        }
+        lock.unlock();
+
+        lock.lock();
+        std::this_thread::sleep_for(kHold);
+        lock.unlock();
+        tox2::setGuestLockLongHoldObserverForTesting(nullptr);
+        tox2::setGuestLockPpuPriorityForTesting(std::nullopt);
+
+        CHECK(g_long_hold_reports.size() == 2);
+        if (g_long_hold_reports.size() == 2) {
+            const tox2::GuestLock::LongHoldReport& busy = g_long_hold_reports[0];
+            const tox2::GuestLock::LongHoldReport& idle = g_long_hold_reports[1];
+            const double busy_cpu_ms = tox2::GuestLock::cyclesToMs(busy.cpu_cycles);
+            const double idle_cpu_ms = tox2::GuestLock::cyclesToMs(idle.cpu_cycles);
+            const double busy_ms = static_cast<double>(busy.hold_us) / 1000.0;
+            const double idle_ms = static_cast<double>(idle.hold_us) / 1000.0;
+            std::printf("long hold cpu: busy %.2f of %.2f ms, sleep %.2f of %.2f ms\n", busy_cpu_ms, busy_ms,
+                        idle_cpu_ms, idle_ms);
+            CHECK(busy.has_cpu && idle.has_cpu && busy.cpu_cycles > 0 && busy_cpu_ms >= 0.5 * busy_ms);
+            CHECK(idle_cpu_ms <= 0.5 * idle_ms);
+            CHECK(std::string_view(busy.last_in_hold) == "second" &&
+                  std::string_view(busy.previous_in_hold) == "first");
+            CHECK(busy.at_release == nullptr && idle.last_in_hold == nullptr && idle.previous_in_hold == nullptr);
+        }
+    }
 }
 
 // A release wakes only the waiter it serves, not every waiter.

@@ -46,11 +46,14 @@ inline constexpr std::uint64_t kGuestLockHandoffOverUs = 100;
 inline constexpr std::uint64_t kGuestLockLongHoldUs = 5000;
 
 // What the calling thread is executing on the host side, for naming the code behind a long guest lock hold. Labels
-// are static strings: setting one is two thread-local pointer stores. `hold_last` is the last label set since the
-// thread's current hold of the guest lock began (reset by GuestLock when a hold starts).
+// are static strings: setting one is a pointer compare and up to three thread-local stores. `hold_last` is the last
+// label set since the thread's current hold of the guest lock began, and `hold_prev` the one it replaced (both reset by
+// GuestLock when a hold starts): a release inside a labelled call has hold_last == current, so hold_prev is the only
+// trace of what ran before it.
 struct ActivityLabels {
     const char* current = nullptr;
     const char* hold_last = nullptr;
+    const char* hold_prev = nullptr;
 };
 inline thread_local ActivityLabels t_activity;
 
@@ -59,7 +62,11 @@ class ActivityScope {
 public:
     explicit ActivityScope(const char* what) : previous_(t_activity.current) {
         t_activity.current = what;
-        t_activity.hold_last = what;
+        const char* last = t_activity.hold_last;
+        if (last != what) {
+            t_activity.hold_prev = last;
+            t_activity.hold_last = what;
+        }
     }
     ~ActivityScope() { t_activity.current = previous_; }
     ActivityScope(const ActivityScope&) = delete;
@@ -130,6 +137,24 @@ public:
 
     GuestLockStats stats() const;  // any thread
 
+    // Describes a long hold for the log line. Captured by the holder before it releases (it reads the holder's
+    // thread-local state), formatted and emitted only after mutex_ is released.
+    struct LongHoldReport {
+        std::uint64_t hold_us = 0;  // 0: not a long hold
+        GuestLockClass holder = GuestLockClass::Other;
+        const GuestThread* thread = nullptr;
+        const char* at_release = nullptr;
+        const char* last_in_hold = nullptr;
+        const char* previous_in_hold = nullptr;
+        // CPU cycles the holder's thread ran during the hold (QueryThreadCycleTime): a wall time far above the CPU
+        // time means the host descheduled it. Measured for PPU-class holders only; the call is too costly for the
+        // many short holds of the host classes.
+        bool has_cpu = false;
+        std::uint64_t cpu_cycles = 0;
+    };
+    // Converts thread cycles to milliseconds, with the ratio measured at startup.
+    static double cyclesToMs(std::uint64_t cycles);
+
 private:
     struct Waiter;  // lives on the waiting thread's stack
 
@@ -144,16 +169,7 @@ private:
     Waiter* chooseNext();
     // Under mutex_.
     void unlink(Waiter* waiter);
-    // Describes a long hold for the log line. Captured by the holder before it releases (it reads the holder's
-    // thread-local state), formatted and emitted only after mutex_ is released.
-    struct LongHoldReport {
-        std::uint64_t hold_us = 0;  // 0: not a long hold
-        GuestLockClass holder = GuestLockClass::Other;
-        const GuestThread* thread = nullptr;
-        const char* at_release = nullptr;
-        const char* last_in_hold = nullptr;
-    };
-    static LongHoldReport captureLongHold(std::uint64_t hold_us, GuestLockClass holder);
+    static LongHoldReport captureLongHold(std::uint64_t hold_us, GuestLockClass holder, std::uint64_t start_cycles);
     // Touches no member, so it may run after the lock was passed on.
     static void emitLongHold(const LongHoldReport& report, std::chrono::steady_clock::time_point now);
 
@@ -181,6 +197,7 @@ private:
     // The holder's own state: written by a thread when it gets its turn and read only by that thread in
     // unlock(), before the lock is passed on.
     std::chrono::steady_clock::time_point hold_start_{};
+    std::uint64_t hold_start_cycles_ = 0;  // the PPU-class holder thread's cycle count at hold_start_
     GuestLockClass holder_class_ = GuestLockClass::Other;
     std::uint64_t holder_ppu_tag_ = 0;  // PPU holder: the tag it was granted or drew; reused by yieldToHostWaiters
     // Written in unlock() under mutex_; waiters diff it between queueing and their turn.
@@ -196,6 +213,11 @@ private:
 };
 
 GuestLock& guestLock();
+
+// For tests: while set, a long hold is passed to the observer instead of being logged. Called by the releasing thread,
+// after the lock was passed on; a null observer restores logging.
+using GuestLockLongHoldObserver = void (*)(const GuestLock::LongHoldReport&);
+void setGuestLockLongHoldObserverForTesting(GuestLockLongHoldObserver observer);
 
 enum class ThreadState { Created, Running, Blocked, Exited };
 
