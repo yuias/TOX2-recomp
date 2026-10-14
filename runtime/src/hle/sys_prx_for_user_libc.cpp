@@ -1,6 +1,7 @@
 // sysPrxForUser string, memory and printf functions, and the abort hook libsre calls after its own
 // diagnostics. Strings are read straight from guest memory, so a bad pointer ends in the guest fault
-// handler like it would on the console. Handlers run under the guest lock.
+// handler like it would on the console. Handlers run under the kernel lock, except the ones marked kernel_free, which
+// touch only guest memory, the commit map and logging (own mutexes). Printing to stdout and abort stay under the lock.
 
 #include <algorithm>
 #include <cstdint>
@@ -176,20 +177,20 @@ void sysAbort(Tox2PpuContext* ctx, std::uint8_t* base) {
 }
 
 constexpr HleEntry kHandlers[] = {
-        {kModule, 0x04e83d2c, "_sys_strncmp", sysStrncmp},
-        {kModule, 0x052d29a6, "_sys_strcat", sysStrcat},
-        {kModule, 0x0618936b, "_sys_vsnprintf", sysVsnprintf},
-        {kModule, 0x06574237, "_sys_snprintf", sysSnprintf},
-        {kModule, 0x2d36462b, "_sys_strlen", sysStrlen},
-        {kModule, 0x68b9b011, "_sys_memset", sysMemset},
-        {kModule, 0x6bf66ea7, "_sys_memcpy", sysMemcpy},
-        {kModule, 0x996f7cf8, "_sys_strncat", sysStrncat},
-        {kModule, 0x99c88692, "_sys_strcpy", sysStrcpy},
+        {kModule, 0x04e83d2c, "_sys_strncmp", sysStrncmp, true},
+        {kModule, 0x052d29a6, "_sys_strcat", sysStrcat, true},
+        {kModule, 0x0618936b, "_sys_vsnprintf", sysVsnprintf, true},
+        {kModule, 0x06574237, "_sys_snprintf", sysSnprintf, true},
+        {kModule, 0x2d36462b, "_sys_strlen", sysStrlen, true},
+        {kModule, 0x68b9b011, "_sys_memset", sysMemset, true},
+        {kModule, 0x6bf66ea7, "_sys_memcpy", sysMemcpy, true},
+        {kModule, 0x996f7cf8, "_sys_strncat", sysStrncat, true},
+        {kModule, 0x99c88692, "_sys_strcpy", sysStrcpy, true},
         {kModule, 0x9f04f7af, "_sys_printf", sysPrintf},
         {kModule, 0x9fb6228e, "abort", sysAbort},
-        {kModule, 0xd3039d4d, "_sys_strncpy", sysStrncpy},
+        {kModule, 0xd3039d4d, "_sys_strncpy", sysStrncpy, true},
         {kModule, 0xfa7f693d, "_sys_vprintf", sysVprintf},
-        {kModule, 0xfb5db080, "_sys_memcmp", sysMemcmp},
+        {kModule, 0xfb5db080, "_sys_memcmp", sysMemcmp, true},
 };
 
 }  // namespace

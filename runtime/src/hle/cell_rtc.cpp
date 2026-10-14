@@ -7,13 +7,18 @@
 // (u16 year, month, day, hour, minute, second, u32 microsecond). Pointers are checked for being
 // committed guest memory, which is what RPCS3's page-attribute query amounts to.
 //
+// cellRtcGetCurrentTick and cellRtcConvertUtcToLocalTime are kernel_free: they touch only guest memory, the commit map,
+// host clocks and the atomic local-offset override.
+//
 // Deviations from RPCS3: there is no lv2 time-zone syscall in this runtime, so the local offset is
 // read from the host time zone (the same source RPCS3 uses on Windows: minus the bias, minus the
 // standard or daylight bias while in effect). The clock is the host UTC clock with no scaling or
 // console time offset.
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 
@@ -41,13 +46,16 @@ constexpr std::uint64_t kTicksPerSecond = 1000000ull;
 constexpr std::uint64_t kTicksPerDay = 86400ull * kTicksPerSecond;
 constexpr std::uint64_t kDaysPerCycle = 146097;  // days in 400 Gregorian years
 
-std::optional<std::int32_t> g_local_offset_override;
+// Test hook for the time zone; atomic because the kernel-free handlers read it without the kernel lock.
+constexpr std::int64_t kNoOffsetOverride = std::numeric_limits<std::int64_t>::min();
+std::atomic<std::int64_t> g_local_offset_override{kNoOffsetOverride};
 
 bool mapped(std::uint32_t addr, std::uint32_t size) { return addr != 0 && process().memory.isCommitted(addr, size); }
 
 // Minutes east of UTC including the daylight saving offset in effect (RPCS3 timezone + summertime).
 std::int32_t localOffsetMinutes() {
-    if (g_local_offset_override) return *g_local_offset_override;
+    const std::int64_t override_minutes = g_local_offset_override.load(std::memory_order_relaxed);
+    if (override_minutes != kNoOffsetOverride) return static_cast<std::int32_t>(override_minutes);
     TIME_ZONE_INFORMATION info{};
     const DWORD state = GetTimeZoneInformation(&info);
     if (state == TIME_ZONE_ID_INVALID) return 0;
@@ -147,15 +155,17 @@ void rtcGetDayOfWeek(Tox2PpuContext* ctx, std::uint8_t* base) {
 
 constexpr HleEntry kHandlers[] = {
         {kModule, 0x99b13034, "cellRtcSetTick", rtcSetTick},
-        {kModule, 0x9dafc0d9, "cellRtcGetCurrentTick", rtcGetCurrentTick},
+        {kModule, 0x9dafc0d9, "cellRtcGetCurrentTick", rtcGetCurrentTick, true},
         {kModule, 0xc2d8cf95, "cellRtcGetDayOfWeek", rtcGetDayOfWeek},
-        {kModule, 0xc48d5002, "cellRtcConvertUtcToLocalTime", rtcConvertUtcToLocalTime},
+        {kModule, 0xc48d5002, "cellRtcConvertUtcToLocalTime", rtcConvertUtcToLocalTime, true},
 };
 
 }  // namespace
 
 std::span<const HleEntry> cellRtcHandlers() { return kHandlers; }
 
-void setRtcLocalOffsetMinutes(std::optional<std::int32_t> minutes) { g_local_offset_override = minutes; }
+void setRtcLocalOffsetMinutes(std::optional<std::int32_t> minutes) {
+    g_local_offset_override.store(minutes ? *minutes : kNoOffsetOverride, std::memory_order_relaxed);
+}
 
 }  // namespace tox2

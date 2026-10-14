@@ -1,6 +1,8 @@
 // HLE handlers of the cellSysutil callback pump and the BGM playback status. Behaviour follows
 // RPCS3 `Emu/Cell/Modules/cellSysutil.cpp` (function of the same name). Handlers run under the
-// guest lock, so the tables need no mutex.
+// kernel lock, so the tables need no mutex, except the ones marked kernel_free (cellSysutilGetBgmPlaybackStatus,
+// cellVideoOutGetResolution, cellVideoOutSetGamma): they touch only guest memory, constants and the atomic BGM state,
+// and log through the self-synchronised log.
 //
 // Deviations from RPCS3:
 //  - The queue has no abort handles (RPCS3 uses them to drop queued savedata/dialog callbacks of a
@@ -15,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <format>
@@ -52,7 +55,12 @@ struct Slot {
 std::array<Slot, kSlotCount> g_slots;
 std::deque<SysutilCall> g_queue;
 bool g_draw_started = false;
+// Read by the kernel-free getBgmPlaybackStatus, so every access goes through a relaxed atomic_ref.
 std::uint8_t g_bgm_enable_state = kBgmDisable;
+
+void setBgmEnableState(std::uint8_t state) {
+    std::atomic_ref(g_bgm_enable_state).store(state, std::memory_order_relaxed);
+}
 
 // cellSysutilRegisterCallback(u32 slot, CellSysutilCallback func, void* userdata)
 void registerCallback(Tox2PpuContext* ctx, std::uint8_t*) {
@@ -93,13 +101,13 @@ void checkCallback(Tox2PpuContext* ctx, std::uint8_t* base) {
 
 // cellSysutilEnableBgmPlayback()
 void enableBgmPlayback(Tox2PpuContext* ctx, std::uint8_t*) {
-    g_bgm_enable_state = kBgmEnable;
+    setBgmEnableState(kBgmEnable);
     ctx->gpr[3] = kCellOk;
 }
 
 // cellSysutilDisableBgmPlayback()
 void disableBgmPlayback(Tox2PpuContext* ctx, std::uint8_t*) {
-    g_bgm_enable_state = kBgmDisable;
+    setBgmEnableState(kBgmDisable);
     ctx->gpr[3] = kCellOk;
 }
 
@@ -112,7 +120,7 @@ void getBgmPlaybackStatus(Tox2PpuContext* ctx, std::uint8_t* base) {
     }
     for (std::uint32_t i = 0; i < kBgmStatusSize; i++) tox2Write8(base, status_addr + i, 0);
     tox2Write8(base, status_addr, kBgmPlayerStop);
-    tox2Write8(base, status_addr + 1, g_bgm_enable_state);
+    tox2Write8(base, status_addr + 1, std::atomic_ref(g_bgm_enable_state).load(std::memory_order_relaxed));
     ctx->gpr[3] = kCellOk;
 }
 
@@ -490,12 +498,12 @@ constexpr HleEntry kHandlers[] = {
         {kModule, 0x4692ab35, "cellAudioOutConfigure", audioOutConfigure},
         {kModule, 0x887572d5, "cellVideoOutGetState", videoOutGetState},
         {kModule, 0x9d98afa0, "cellSysutilRegisterCallback", registerCallback},
-        {kModule, 0xa11552f6, "cellSysutilGetBgmPlaybackStatus", getBgmPlaybackStatus},
+        {kModule, 0xa11552f6, "cellSysutilGetBgmPlaybackStatus", getBgmPlaybackStatus, true},
         {kModule, 0xa322db75, "cellVideoOutGetResolutionAvailability", videoOutGetResolutionAvailability},
         {kModule, 0xc01b4e7c, "cellAudioOutGetSoundAvailability", audioOutGetSoundAvailability},
-        {kAvconfExtModule, 0xc7020f62, "cellVideoOutSetGamma", videoOutSetGamma},
+        {kAvconfExtModule, 0xc7020f62, "cellVideoOutSetGamma", videoOutSetGamma, true},
         {kModule, 0xcfdd8e87, "cellSysutilDisableBgmPlayback", disableBgmPlayback},
-        {kModule, 0xe558748d, "cellVideoOutGetResolution", videoOutGetResolution},
+        {kModule, 0xe558748d, "cellVideoOutGetResolution", videoOutGetResolution, true},
         {kModule, 0xed5d96af, "cellAudioOutGetConfiguration", audioOutGetConfiguration},
         {kModule, 0xf4e3caa0, "cellAudioOutGetState", audioOutGetState},
 };
@@ -537,7 +545,7 @@ void resetCellSysutil() {
     g_slots = {};
     g_queue.clear();
     g_draw_started = false;
-    g_bgm_enable_state = kBgmDisable;
+    setBgmEnableState(kBgmDisable);
     g_video_mode = {};
     g_video_configured = false;
     g_audio_out = {};

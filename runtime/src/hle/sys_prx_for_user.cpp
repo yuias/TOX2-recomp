@@ -1,6 +1,7 @@
 // HLE handlers of the sysPrxForUser module. Behaviour follows RPCS3 `Modules/sysPrxForUser.cpp`,
 // `sys_ppu_thread_.cpp`, `sys_lwmutex_.cpp`, `sys_heap.cpp`, `sys_prx_.cpp` and `sys_spu_.cpp`. Handlers run under the
-// guest lock.
+// kernel lock, except the ones marked kernel_free, which touch only the context, guest memory, immutable data, the
+// host clock and the caller's own thread id.
 
 #include <algorithm>
 #include <cstdint>
@@ -277,18 +278,18 @@ constexpr HleEntry kHandlers[] = {
         {kModule, 0x1c9a942c, "sys_lwcond_destroy", sysLwcondDestroy},
         {kModule, 0x24a1ea07, "sys_ppu_thread_create", sysPpuThreadCreate},
         {kModule, 0x2a6d9d51, "sys_lwcond_wait", sysLwcondWait},
-        {kModule, 0x2c847572, "_sys_process_atexitspawn", returnOk},
+        {kModule, 0x2c847572, "_sys_process_atexitspawn", returnOk, true},
         {kModule, 0x2f85c0ef, "sys_lwmutex_create", sysLwmutexCreate},
-        {kModule, 0x350d454e, "sys_ppu_thread_get_id", sysPpuThreadGetId},
+        {kModule, 0x350d454e, "sys_ppu_thread_get_id", sysPpuThreadGetId, true},
         {kModule, 0x35168520, "_sys_heap_malloc", sysHeapMalloc},
         {kModule, 0x42b23552, "sys_prx_register_library", returnOk},
         {kModule, 0x44265c08, "_sys_heap_memalign", sysHeapMemalign},
         {kModule, 0x45fe2fce, "_sys_spu_printf_initialize", sysSpuPrintfInitialize},
         {kModule, 0x5fdfb2fe, "_sys_spu_printf_detach_group", sysSpuPrintfDetachGroup},
         {kModule, 0x744680a2, "sys_initialize_tls", sysInitializeTls},
-        {kModule, 0x8461e528, "sys_time_get_system_time", sysTimeGetSystemTime},
+        {kModule, 0x8461e528, "sys_time_get_system_time", sysTimeGetSystemTime, true},
         {kModule, 0x8a561d92, "_sys_heap_free", sysHeapFree},
-        {kModule, 0x96328741, "_sys_process_at_Exitspawn", returnOk},
+        {kModule, 0x96328741, "_sys_process_at_Exitspawn", returnOk, true},
         {kModule, 0xa2c7ba64, "sys_prx_exitspawn_with_level", returnOk},
         {kModule, 0xa3e3be68, "sys_ppu_thread_once", sysPpuThreadOnce},
         {kModule, 0xaeb78725, "sys_lwmutex_trylock", sysLwmutexTryLock},

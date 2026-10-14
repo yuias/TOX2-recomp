@@ -13881,9 +13881,10 @@ void testSplitSyscallStress() {
     }
 }
 
-// An initialised gcm state (no consumer thread) with the cellGcmSys imports the kernel-free tests call through
-// tox2HleCall. The IO area is mapped at IO offset 0, so `area() + n` has the offset n.
-class GcmEnv {
+// An initialised gcm state (no consumer thread) with the imports the kernel-free tests call through tox2HleCall:
+// cellGcmSys and the libc, sysPrxForUser, sysutil and rtc handlers marked kernel_free. The IO area is mapped at IO
+// offset 0, so `area() + n` has the offset n.
+class KernelFreeEnv {
 public:
     enum Import : std::uint32_t {
         AddressToOffset,
@@ -13896,10 +13897,30 @@ public:
         SetFlipMode,
         MapMain,
         UnmapEa,
+        Strlen,
+        Strcpy,
+        Strcat,
+        Strncpy,
+        Strncat,
+        Strncmp,
+        Memcmp,
+        Memset,
+        Memcpy,
+        Snprintf,
+        Vsnprintf,
+        AtExitSpawn,
+        AtExitSpawnUpper,
+        GetThreadId,
+        GetSystemTime,
+        GetBgmStatus,
+        VideoOutGetResolution,
+        VideoOutSetGamma,
+        RtcGetCurrentTick,
+        RtcConvertUtcToLocalTime,
         ImportCount
     };
 
-    GcmEnv() {
+    KernelFreeEnv() {
         tox2::resetRsxState();
         area_ = tox2::process().user1m.allocate(0x400000, 0x100000);
         CHECK(area_ != 0 && (area_ & 0xfffff) == 0);
@@ -13914,17 +13935,37 @@ public:
                 {0x00800070, 0x4ae8d215, "cellGcmSys", "cellGcmSetFlipMode"},
                 {0x00800080, 0xa114ec67, "cellGcmSys", "cellGcmMapMainMemory"},
                 {0x00800090, 0xefd00f54, "cellGcmSys", "cellGcmUnmapEaIoAddress"},
+                {0x008000a0, 0x2d36462b, "sysPrxForUser", "_sys_strlen"},
+                {0x008000b0, 0x99c88692, "sysPrxForUser", "_sys_strcpy"},
+                {0x008000c0, 0x052d29a6, "sysPrxForUser", "_sys_strcat"},
+                {0x008000d0, 0xd3039d4d, "sysPrxForUser", "_sys_strncpy"},
+                {0x008000e0, 0x996f7cf8, "sysPrxForUser", "_sys_strncat"},
+                {0x008000f0, 0x04e83d2c, "sysPrxForUser", "_sys_strncmp"},
+                {0x00800100, 0xfb5db080, "sysPrxForUser", "_sys_memcmp"},
+                {0x00800110, 0x68b9b011, "sysPrxForUser", "_sys_memset"},
+                {0x00800120, 0x6bf66ea7, "sysPrxForUser", "_sys_memcpy"},
+                {0x00800130, 0x06574237, "sysPrxForUser", "_sys_snprintf"},
+                {0x00800140, 0x0618936b, "sysPrxForUser", "_sys_vsnprintf"},
+                {0x00800150, 0x2c847572, "sysPrxForUser", "_sys_process_atexitspawn"},
+                {0x00800160, 0x96328741, "sysPrxForUser", "_sys_process_at_Exitspawn"},
+                {0x00800170, 0x350d454e, "sysPrxForUser", "sys_ppu_thread_get_id"},
+                {0x00800180, 0x8461e528, "sysPrxForUser", "sys_time_get_system_time"},
+                {0x00800190, 0xa11552f6, "cellSysutil", "cellSysutilGetBgmPlaybackStatus"},
+                {0x008001a0, 0xe558748d, "cellSysutil", "cellVideoOutGetResolution"},
+                {0x008001b0, 0xc7020f62, "cellSysutilAvconfExt", "cellVideoOutSetGamma"},
+                {0x008001c0, 0x9dafc0d9, "cellRtc", "cellRtcGetCurrentTick"},
+                {0x008001d0, 0xc48d5002, "cellRtc", "cellRtcConvertUtcToLocalTime"},
         };
         tox2::installImports(kImports, ImportCount);
         std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
         CHECK(tox2::gcmInitBody(env_.base(), env_.data(), 0x10000, kIoSize, area_, kLocalSize) == 0);
     }
-    ~GcmEnv() {
+    ~KernelFreeEnv() {
         tox2::resetRsxState();
         tox2::process().user1m.free(area_);
     }
-    GcmEnv(const GcmEnv&) = delete;
-    GcmEnv& operator=(const GcmEnv&) = delete;
+    KernelFreeEnv(const KernelFreeEnv&) = delete;
+    KernelFreeEnv& operator=(const KernelFreeEnv&) = delete;
 
     static constexpr std::uint32_t kIoSize = 0x100000, kLocalSize = 0x200000;
 
@@ -13945,28 +13986,68 @@ private:
     std::uint32_t area_ = 0;
 };
 
-// In Split2, a slot holder's call of each kernel-free gcm handler returns while a host thread holds the kernel lock;
+// In Split2, a slot holder's call of each kernel-free handler returns while a host thread holds the kernel lock;
 // a handler that took the lock would return only after the hold ended.
 void testKernelFreeHandlers() {
     HangGuard guard("testKernelFreeHandlers");
-    GcmEnv gcm;
+    KernelFreeEnv gcm;
+    tox2::resetCellSysutil();  // the BGM status check expects the default (enabled) state
     auto caller = makeCaller(0x01000000);
+    caller->context().fpr[1].f64 = 1.0;  // the gamma argument of cellVideoOutSetGamma
+    constexpr std::uint32_t kOffsetMinutes = 540;
+    tox2::setRtcLocalOffsetMinutes(kOffsetMinutes);
+
+    // Scratch layout inside the data area, one slot per handler that writes.
     const std::uint32_t out = gcm.data();
-    struct GcmCall {
+    const std::uint32_t str_abc = out + 0x100, str_abd = out + 0x110, fmt = out + 0x120, va_list = out + 0x130;
+    const std::uint32_t cat_buf = out + 0x200, ncat_buf = out + 0x220, set_buf = out + 0x240, cpy_buf = out + 0x260;
+    const std::uint32_t snp_buf = out + 0x280, vsn_buf = out + 0x2a0, tid_out = out + 0x2c0;
+    const std::uint32_t bgm_out = out + 0x300, res_out = out + 0x340, utc_tick = out + 0x360, local_tick = out + 0x368;
+    std::memcpy(gcm.base() + str_abc, "abc", 4);
+    std::memcpy(gcm.base() + str_abd, "abd", 4);
+    std::memcpy(gcm.base() + fmt, "x%d", 4);
+    tox2Write64(gcm.base(), va_list, 7);
+    constexpr std::uint64_t kMinusOne = ~std::uint64_t{0};  // s32 -1 sign-extended
+
+    struct HandlerCall {
         const char* name;
-        GcmEnv::Import import;
-        std::array<std::uint64_t, 2> args;
-        std::optional<std::uint64_t> expected;  // nullopt: the handler returns void
+        KernelFreeEnv::Import import;
+        std::array<std::uint64_t, 4> args;
+        std::optional<std::uint64_t> expected;  // nullopt: the result is void or not deterministic
     };
-    const std::array<GcmCall, 8> calls{{
-            {"cellGcmAddressToOffset", GcmEnv::AddressToOffset, {gcm.area() + 8, out}, 0},
-            {"cellGcmGetFlipStatus", GcmEnv::GetFlipStatus, {}, tox2::kRsxFlipStatusDone},
-            {"cellGcmGetLabelAddress", GcmEnv::GetLabelAddress, {1, 0}, tox2::kRsxLabelAddr + tox2::kRsxLabelStride},
-            {"_cellGcmSetFlipCommand", GcmEnv::SetFlipCommand, {tox2::kRsxDeviceAddr, 0}, std::nullopt},
-            {"cellGcmGetTimeStamp", GcmEnv::GetTimeStamp, {0, 0}, ~std::uint64_t{0}},
-            {"cellGcmGetControlRegister", GcmEnv::GetControlRegister, {}, tox2::kRsxControlAddr},
-            {"cellGcmGetTiledPitchSize", GcmEnv::GetTiledPitchSize, {0x1400, 0}, 0x1400},
-            {"cellGcmSetFlipMode", GcmEnv::SetFlipMode, {tox2::kRsxDisplayVsync, 0}, std::nullopt},
+    using Env = KernelFreeEnv;
+    const std::array<HandlerCall, 28> calls{{
+            {"cellGcmAddressToOffset", KernelFreeEnv::AddressToOffset, {gcm.area() + 8, out}, 0},
+            {"cellGcmGetFlipStatus", KernelFreeEnv::GetFlipStatus, {}, tox2::kRsxFlipStatusDone},
+            {"cellGcmGetLabelAddress",
+             KernelFreeEnv::GetLabelAddress,
+             {1, 0},
+             tox2::kRsxLabelAddr + tox2::kRsxLabelStride},
+            {"_cellGcmSetFlipCommand", KernelFreeEnv::SetFlipCommand, {tox2::kRsxDeviceAddr, 0}, std::nullopt},
+            {"cellGcmGetTimeStamp", KernelFreeEnv::GetTimeStamp, {0, 0}, ~std::uint64_t{0}},
+            {"cellGcmGetControlRegister", KernelFreeEnv::GetControlRegister, {}, tox2::kRsxControlAddr},
+            {"cellGcmGetTiledPitchSize", KernelFreeEnv::GetTiledPitchSize, {0x1400, 0}, 0x1400},
+            {"cellGcmSetFlipMode", KernelFreeEnv::SetFlipMode, {tox2::kRsxDisplayVsync, 0}, std::nullopt},
+            {"_sys_strlen", Env::Strlen, {str_abc}, 3},
+            {"_sys_strcpy", Env::Strcpy, {cat_buf, str_abc}, cat_buf},
+            {"_sys_strcat", Env::Strcat, {cat_buf, str_abc}, cat_buf},
+            {"_sys_strncpy", Env::Strncpy, {ncat_buf, str_abc, 4}, ncat_buf},
+            {"_sys_strncat", Env::Strncat, {ncat_buf, str_abd, 2}, ncat_buf},
+            {"_sys_strncmp", Env::Strncmp, {str_abc, str_abd, 3}, kMinusOne},
+            {"_sys_memcmp", Env::Memcmp, {str_abc, str_abd, 3}, kMinusOne},
+            {"_sys_memset", Env::Memset, {set_buf, 0x41, 4}, set_buf},
+            {"_sys_memcpy", Env::Memcpy, {cpy_buf, str_abc, 4}, cpy_buf},
+            {"_sys_snprintf", Env::Snprintf, {snp_buf, 16, fmt, 7}, 2},
+            {"_sys_vsnprintf", Env::Vsnprintf, {vsn_buf, 16, fmt, va_list}, 2},
+            {"_sys_process_atexitspawn", Env::AtExitSpawn, {}, 0},
+            {"_sys_process_at_Exitspawn", Env::AtExitSpawnUpper, {}, 0},
+            {"sys_ppu_thread_get_id", Env::GetThreadId, {tid_out}, 0},
+            {"sys_time_get_system_time", Env::GetSystemTime, {}, std::nullopt},
+            {"cellSysutilGetBgmPlaybackStatus", Env::GetBgmStatus, {bgm_out}, 0},
+            {"cellVideoOutGetResolution", Env::VideoOutGetResolution, {2, res_out}, 0},
+            {"cellVideoOutSetGamma", Env::VideoOutSetGamma, {0}, 0},
+            {"cellRtcGetCurrentTick", Env::RtcGetCurrentTick, {utc_tick}, 0},
+            {"cellRtcConvertUtcToLocalTime", Env::RtcConvertUtcToLocalTime, {utc_tick, local_tick}, 0},
     }};
 
     SplitModeScope mode(tox2::PpuThreadsMode::Split2);
@@ -13978,7 +14059,8 @@ void testKernelFreeHandlers() {
         slots.acquire();
         CHECK(pollUntil([&] { return go.load(); }));
         for (std::size_t i = 0; i < calls.size(); i++) {
-            results[i] = gcm.call(*caller, calls[i].import, {calls[i].args[0], calls[i].args[1]});
+            const auto& a = calls[i].args;
+            results[i] = gcm.call(*caller, calls[i].import, {a[0], a[1], a[2], a[3]});
             returned[i] = std::chrono::steady_clock::now();
         }
         slots.release();
@@ -13993,19 +14075,81 @@ void testKernelFreeHandlers() {
     holder.join();
     for (std::size_t i = 0; i < calls.size(); i++) {
         if (returned[i] >= hold_end) {
+            // The calls run in order, so every call after the first one that waited returns late too.
             std::fprintf(stderr, "%s waited for the kernel lock\n", calls[i].name);
             CHECK(false);
+            break;
         }
         if (calls[i].expected) CHECK(results[i] == *calls[i].expected);
     }
+    tox2::setRtcLocalOffsetMinutes(std::nullopt);
+
+    // What the handlers wrote.
+    const auto text = [&](std::uint32_t addr) { return std::string(reinterpret_cast<const char*>(gcm.base() + addr)); };
     CHECK(tox2Read32(gcm.base(), out) == 8);
+    CHECK(text(cat_buf) == "abcabc");
+    CHECK(text(ncat_buf) == "abcab");
+    CHECK(text(set_buf).substr(0, 4) == "AAAA");
+    CHECK(text(cpy_buf) == "abc");
+    CHECK(text(snp_buf) == "x7");
+    CHECK(text(vsn_buf) == "x7");
+    CHECK(tox2Read64(gcm.base(), tid_out) == 0x01000000);
+    CHECK(tox2Read8(gcm.base(), bgm_out + 1) == 1);  // BGM disabled
+    CHECK(tox2Read16(gcm.base(), res_out) == 1280 && tox2Read16(gcm.base(), res_out + 2) == 720);
+    CHECK(tox2Read64(gcm.base(), local_tick) - tox2Read64(gcm.base(), utc_tick) ==
+          std::uint64_t{kOffsetMinutes} * 60'000'000);
+}
+
+// _sys_memcpy copies exactly its range while another slot holder keeps rewriting the words on both sides of the
+// destination; a copy that read and rewrote neighbouring bytes would lose a write or leak source bytes into them.
+void testMemcpyNeighbourWrites() {
+    HangGuard guard("testMemcpyNeighbourWrites");
+    KernelFreeEnv env;
+    auto copier = makeCaller(0x01000000);
+    constexpr std::uint32_t kLength = 61;  // odd, so the copy has a head and a tail
+    const std::uint32_t src = env.data() + 0x100, dst = env.data() + 0x200;
+    const std::uint32_t before = dst - 4, after = dst + kLength;
+    constexpr int kCopies = 200'000;
+
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+    std::atomic<bool> copier_done{false}, writer_running{false};
+    std::atomic<int> bad_copies{0}, bad_neighbours{0};
+    std::vector<std::thread> threads;
+    threads.push_back(slotThread(1001, [&] {
+        slots.acquire();
+        CHECK(pollUntil([&] { return writer_running.load(); }));
+        for (int n = 0; n < kCopies; n++) {
+            for (std::uint32_t i = 0; i < kLength; i++) env.base()[src + i] = static_cast<std::uint8_t>(n + i);
+            if (env.call(*copier, KernelFreeEnv::Memcpy, {dst, src, kLength}) != dst) bad_copies++;
+            if (std::memcmp(env.base() + dst, env.base() + src, kLength) != 0) bad_copies++;
+        }
+        copier_done = true;
+        slots.release();
+    }));
+    threads.push_back(slotThread(1001, [&] {
+        slots.acquire();
+        writer_running = true;
+        std::uint32_t value = 0;
+        while (!copier_done.load()) {
+            value = value * 1664525 + 1013904223;
+            tox2Write32(env.base(), before, value);
+            tox2Write32(env.base(), after, ~value);
+            // Read back at once: a copy that stored stale bytes over a neighbour would show here.
+            if (tox2Read32(env.base(), before) != value || tox2Read32(env.base(), after) != ~value) bad_neighbours++;
+        }
+        slots.release();
+    }));
+    joinAll(threads);
+    CHECK(bad_copies == 0);
+    CHECK(bad_neighbours == 0);
 }
 
 // cellGcmAddressToOffset on a mapping that stays in place keeps returning its offset while another slot holder maps
 // and unmaps a second range, which rewrites the lock-free tables the lookup reads.
 void testGcmAddressToOffsetConcurrent() {
     HangGuard guard("testGcmAddressToOffsetConcurrent");
-    GcmEnv gcm;
+    KernelFreeEnv gcm;
     auto reader = makeCaller(0x01000000);
     auto mapper = makeCaller(0x01000001);
     const std::uint32_t reader_out = gcm.data() + 0x100, mapper_out = gcm.data() + 0x200;
@@ -14020,7 +14164,8 @@ void testGcmAddressToOffsetConcurrent() {
     threads.push_back(slotThread(1001, [&] {
         slots.acquire();
         for (int n = 0; n < kLookups; n++) {
-            const std::uint64_t result = gcm.call(*reader, GcmEnv::AddressToOffset, {gcm.area() + 8, reader_out});
+            const std::uint64_t result =
+                    gcm.call(*reader, KernelFreeEnv::AddressToOffset, {gcm.area() + 8, reader_out});
             if (result != 0 || tox2Read32(gcm.base(), reader_out) != 8) failures++;
             if (n == 0) CHECK(pollUntil([&] { return mapper_rounds.load() > 0; }));
         }
@@ -14030,11 +14175,11 @@ void testGcmAddressToOffsetConcurrent() {
     threads.push_back(slotThread(1001, [&] {
         slots.acquire();
         while (!reader_done.load()) {
-            if (gcm.call(*mapper, GcmEnv::MapMain, {second, 0x100000, mapper_out}) != 0 ||
+            if (gcm.call(*mapper, KernelFreeEnv::MapMain, {second, 0x100000, mapper_out}) != 0 ||
                 tox2Read32(gcm.base(), mapper_out) != 0x100000) {
                 failures++;
             }
-            if (gcm.call(*mapper, GcmEnv::UnmapEa, {second}) != 0) failures++;
+            if (gcm.call(*mapper, KernelFreeEnv::UnmapEa, {second}) != 0) failures++;
             mapper_rounds++;
         }
         slots.release();
@@ -15303,6 +15448,7 @@ int main(int argc, char** argv) {
     testSplitReservationCounter();
     testSplitSyscallStress();
     testKernelFreeHandlers();
+    testMemcpyNeighbourWrites();
     testGcmAddressToOffsetConcurrent();
     testSplitGuestCallbackReleasesKernel();
     testSplitSysutilCallbacks();
