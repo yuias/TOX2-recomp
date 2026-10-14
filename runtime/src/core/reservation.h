@@ -172,4 +172,12 @@ private:
 // The process-wide table that PPU and SPU threads share.
 ReservationTable& reservations();
 
+// Totals over all host threads that ran PPU reservation instructions. `lwarx` counts ldarx too, `stwcx` counts stdcx.
+// too; `stwcx_failed` includes store-conditionals that fail without reaching the table.
+struct PpuReservationStats {
+    std::uint64_t lwarx = 0, stwcx = 0, stwcx_failed = 0;
+};
+
+PpuReservationStats ppuReservationStats();
+
 }  // namespace tox2

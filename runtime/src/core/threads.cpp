@@ -17,6 +17,7 @@
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
+#include "core/reservation.h"
 #include "core/sleeper.h"
 #include "tox2/ppu_context.h"
 
@@ -203,6 +204,9 @@ std::vector<std::string> guestLockCensus() {
         }
         lines.push_back(std::move(line));
     }
+    const PpuReservationStats reservation = ppuReservationStats();
+    lines.push_back(std::format("census: ppu reservations lwarx {} stwcx {} failed {}", reservation.lwarx,
+                                reservation.stwcx, reservation.stwcx_failed));
     FILETIME created, exited, kernel, user;
     if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
         // FILETIME counts 100 ns units.

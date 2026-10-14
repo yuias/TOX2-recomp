@@ -1,9 +1,12 @@
 // Runtime hooks that emitted code calls for CPU-level behaviour: reservations, cache and sync
 // instructions, the timebase, FPSCR access, and the fatal instruction paths.
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <mutex>
+#include <vector>
 
 #include "core/census.h"
 #include "core/fatal.h"
@@ -47,11 +50,52 @@ std::uint64_t elapsedCounter() {
     return now > g_start_counter ? static_cast<std::uint64_t>(now - g_start_counter) : 0;
 }
 
+// One block per host thread, written only by that thread, so counting adds no shared-cache-line write to the
+// reservation hooks. Each counter is an atomic so that the reader's loads are not a data race.
+struct alignas(64) ReservationCounters {
+    std::atomic<std::uint64_t> lwarx{0}, stwcx{0}, stwcx_failed{0};
+
+    static void bump(std::atomic<std::uint64_t>& counter) {
+        counter.store(counter.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    }
+};
+
+std::mutex g_counters_mutex;
+// Blocks are never freed: a thread that exits keeps its totals in the sum.
+std::vector<ReservationCounters*> g_counters;
+
+ReservationCounters& threadCounters() {
+    thread_local ReservationCounters* counters = [] {
+        auto* block = new ReservationCounters;
+        std::lock_guard lock(g_counters_mutex);
+        g_counters.push_back(block);
+        return block;
+    }();
+    return *counters;
+}
+
+void countStoreConditional(bool ok) {
+    ReservationCounters& counters = threadCounters();
+    ReservationCounters::bump(counters.stwcx);
+    if (!ok) ReservationCounters::bump(counters.stwcx_failed);
+}
+
 }  // namespace
 
 namespace tox2 {
 
 std::uint64_t systemTimeUs() { return scaleCounter(elapsedCounter(), 1000000u); }
+
+PpuReservationStats ppuReservationStats() {
+    PpuReservationStats total;
+    std::lock_guard lock(g_counters_mutex);
+    for (const ReservationCounters* block : g_counters) {
+        total.lwarx += block->lwarx.load(std::memory_order_relaxed);
+        total.stwcx += block->stwcx.load(std::memory_order_relaxed);
+        total.stwcx_failed += block->stwcx_failed.load(std::memory_order_relaxed);
+    }
+    return total;
+}
 
 }  // namespace tox2
 
@@ -80,6 +124,7 @@ void tox2Trap(Tox2PpuContext* ctx, uint8_t* base, uint32_t site) {
 // reservation, successful or not. The checks and the write happen under the stripe lock, so they are
 // atomic against SPU GETLLAR/PUTLLC and PUT on the same line even though SPU threads run without the guest lock.
 uint32_t tox2Lwarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
+    ReservationCounters::bump(threadCounters().lwarx);
     uint64_t value;
     tox2::reservations().loadReserved(base, ea, 4, value, ctx->reserve_version);
     ctx->reserve_addr = ea;
@@ -89,6 +134,7 @@ uint32_t tox2Lwarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
 }
 
 uint64_t tox2Ldarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
+    ReservationCounters::bump(threadCounters().lwarx);
     uint64_t value;
     tox2::reservations().loadReserved(base, ea, 8, value, ctx->reserve_version);
     ctx->reserve_addr = ea;
@@ -101,6 +147,7 @@ bool tox2Stwcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint32_t value) 
     const bool ok = ctx->reserve_valid && ctx->reserve_addr == ea &&
                     tox2::reservations().storeConditional(base, ea, 4, ctx->reserve_value, ctx->reserve_version, value);
     ctx->reserve_valid = 0;
+    countStoreConditional(ok);
     return ok;
 }
 
@@ -108,6 +155,7 @@ bool tox2Stdcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint64_t value) 
     const bool ok = ctx->reserve_valid && ctx->reserve_addr == ea &&
                     tox2::reservations().storeConditional(base, ea, 8, ctx->reserve_value, ctx->reserve_version, value);
     ctx->reserve_valid = 0;
+    countStoreConditional(ok);
     return ok;
 }
 

@@ -13057,6 +13057,40 @@ void testReservationAndDcbz() {
     CHECK(tox2Mffs(ctx.get()) == 0x70000001u);
 }
 
+// The counters are process-wide, so the test compares against totals taken before it.
+void testPpuReservationStats() {
+    std::unique_ptr<tox2::GuestMemory> memory(newMemory());
+    std::uint8_t* base = memory->base();
+    CHECK(memory->commit(0x20000, 0x1000));
+    auto ctx = std::make_unique<Tox2PpuContext>();
+    const tox2::PpuReservationStats before = tox2::ppuReservationStats();
+
+    for (int i = 0; i < 2; i++) {
+        const std::uint32_t value = tox2Lwarx(ctx.get(), base, 0x20200);
+        CHECK(tox2Stwcx(ctx.get(), base, 0x20200, value + 1));
+    }
+    tox2Lwarx(ctx.get(), base, 0x20200);
+    const std::uint8_t other_word[4] = {1, 2, 3, 4};
+    tox2::reservations().put(base, 0x20208, other_word, 4);  // another word of the reserved line
+    CHECK(!tox2Stwcx(ctx.get(), base, 0x20200, 99));
+
+    const tox2::PpuReservationStats after_first = tox2::ppuReservationStats();
+    CHECK(after_first.lwarx - before.lwarx == 3);
+    CHECK(after_first.stwcx - before.stwcx == 3);
+    CHECK(after_first.stwcx_failed - before.stwcx_failed == 1);
+
+    // A second host thread counts into its own block, which stays in the totals after the thread exits.
+    std::thread([&] {
+        auto other = std::make_unique<Tox2PpuContext>();
+        const std::uint32_t value = tox2Lwarx(other.get(), base, 0x20300);
+        CHECK(tox2Stwcx(other.get(), base, 0x20300, value + 1));
+    }).join();
+    const tox2::PpuReservationStats after_second = tox2::ppuReservationStats();
+    CHECK(after_second.lwarx - before.lwarx == 4);
+    CHECK(after_second.stwcx - before.stwcx == 4);
+    CHECK(after_second.stwcx_failed - before.stwcx_failed == 1);
+}
+
 struct ChildResult {
     DWORD exit_code = 0xFFFFFFFF;
     std::string output;
@@ -13535,6 +13569,7 @@ int main(int argc, char** argv) {
     testPerfLine();
     testRsxBusyFormat();
     testReservationAndDcbz();
+    testPpuReservationStats();
     testGuestStackWalk();
     testFaultChild();
     testOverflowChild();

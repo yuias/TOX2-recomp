@@ -735,7 +735,8 @@ bool isAudioPathClass(tox2::GuestLockClass cls) {
 
 tox2::PerfSource lockPerfSource() {
     return [prev = tox2::GuestLockStats{}, prev_yields = tox2::PpuYieldStats{},
-            prev_handoffs = tox2::SyncHandoffStats{}]() mutable -> std::string {
+            prev_handoffs = tox2::SyncHandoffStats{},
+            prev_reservations = tox2::PpuReservationStats{}]() mutable -> std::string {
         const tox2::GuestLockStats now = tox2::guestLock().stats();
         std::string body;
         for (std::size_t i = 0; i < tox2::kGuestLockClassCount; i++) {
@@ -802,6 +803,13 @@ tox2::PerfSource lockPerfSource() {
             body += std::format("{}ppu overlap {:.2f} of {:.2f} ms", body.empty() ? "lock " : " | ",
                                 static_cast<double>(now.ppu_hold_overlap_us - prev.ppu_hold_overlap_us) / 1000.0,
                                 static_cast<double>(now.ppu_hold_us - prev.ppu_hold_us) / 1000.0);
+        }
+        const tox2::PpuReservationStats reservations = tox2::ppuReservationStats();
+        if (reservations.stwcx != prev_reservations.stwcx) {
+            body += std::format("{}stwcx {} fail {}", body.empty() ? "lock " : " | ",
+                                reservations.stwcx - prev_reservations.stwcx,
+                                reservations.stwcx_failed - prev_reservations.stwcx_failed);
+            prev_reservations = reservations;
         }
         prev = now;
         return body;
