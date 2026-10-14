@@ -2,7 +2,7 @@
 
 // Host movie player: one PAMF file read, demuxed and decoded on a decode thread into bounded queues
 // that the cellSail handlers poll. Core code: codecs come only through media/movie_decoder.h, so the
-// player builds and tests without FFmpeg. It never takes the guest lock and never calls into the guest;
+// player builds and tests without FFmpeg. It never takes the kernel lock and never calls into the guest;
 // the consumer-side calls only take a short internal mutex and never wait for the decode thread.
 //
 // Time. All times are 90 kHz ticks. The player's clock is a function returning a monotonic tick count

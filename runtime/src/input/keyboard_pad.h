@@ -29,7 +29,7 @@ std::optional<PadButton> padButtonForScanCode(std::uint32_t scan_code);
 enum class InputSource : std::uint8_t { Keyboard, Script, Gamepad, Count };
 
 // Pad state held by host input. Written by the window thread (Keyboard), the script thread (Script)
-// and the gamepad thread (Gamepad), read by poll on guest threads under the guest lock, so
+// and the gamepad thread (Gamepad), read by poll on guest threads under the kernel lock, so
 // everything is a relaxed atomic: each mask bit, press time and snapshot is independent, and a
 // stale read delays a change by one poll (the button mask and the analog snapshot are not updated
 // together, so a poll between the two stores sees one stale part).
@@ -85,7 +85,7 @@ private:
     std::atomic<std::uint64_t> analog_;
     std::atomic<bool> gamepad_connected_{false};
     std::atomic<std::uint16_t> vibration_{0};  // small motor in the low byte, large in the high byte
-    // poll() runs under the guest lock and must never block.
+    // poll() runs under the kernel lock and must never block.
     static_assert(std::atomic<std::int64_t>::is_always_lock_free && std::atomic<PadButtons>::is_always_lock_free &&
                   std::atomic<std::uint64_t>::is_always_lock_free && std::atomic<std::uint16_t>::is_always_lock_free &&
                   std::atomic<bool>::is_always_lock_free);

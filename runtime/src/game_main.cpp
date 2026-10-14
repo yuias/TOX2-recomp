@@ -711,7 +711,7 @@ tox2::PerfSource audioPerfSource() {
 }
 
 // The game's own timing state, for judging whether dt and the render hand-off keep up with the frame interval.
-// Snapshot reads of live guest memory without the guest lock; the values are diagnostic only.
+// Snapshot reads of live guest memory without the kernel lock; the values are diagnostic only.
 tox2::PerfSource gamePerfSource() {
     return []() -> std::string {
         if (!gameTimeMapped()) return {};

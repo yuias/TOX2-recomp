@@ -31,7 +31,7 @@ namespace tox2 {
 inline constexpr std::uint32_t kRsxCaptureVersion = 2;
 
 // The file image in three parts, so the bulk of it (the recorded stream) is moved rather than copied
-// while the guest lock is held.
+// while the kernel lock is held.
 struct RsxCaptureFile {
     std::vector<std::uint8_t> head;    // header, REGS, DISP, SURF
     std::vector<std::uint8_t> stream;  // WRIT / MEMR / FLIP chunks

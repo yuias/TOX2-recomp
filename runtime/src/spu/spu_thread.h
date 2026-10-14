@@ -4,7 +4,7 @@
 // Nothing here knows about SPURS or lv2 thread groups; whoever runs the thread supplies a SpuOwner.
 //
 // An SPU thread runs outside the guest lock, in parallel with the PPU threads. It must never take the
-// guest lock except around calls into lv2 state, and never while it waits on a channel.
+// kernel lock except around calls into lv2 state, and never while it waits on a channel.
 
 #include <array>
 #include <atomic>
@@ -38,7 +38,7 @@ enum class SpuLeave {
 };
 
 // What the thread's runner reports to. A raw SPU or a test harness can implement it as well as an lv2
-// SPU thread group. Callbacks run on the SPU's host thread, without the guest lock.
+// SPU thread group. Callbacks run on the SPU's host thread, without the kernel lock.
 class SpuOwner {
 public:
     virtual ~SpuOwner() = default;
@@ -152,7 +152,7 @@ public:
 
     // Timing of the blocking receive (stop 0x110), recorded by this thread's own host thread. busy: from the reply
     // of one receive to the arrival of the next, the SPU's wall time per event (compare with kSpuReceiveOverUs);
-    // wait: from arrival to reply, the idle time for the event plus the guest-lock wait for the reply.
+    // wait: from arrival to reply, the idle time for the event plus the kernel-lock wait for the reply.
     LatencySnapshot receiveBusy() const { return receive_busy_.snapshot(); }
     LatencySnapshot receiveWait() const { return receive_wait_.snapshot(); }
     void noteReceiveArrival(std::chrono::steady_clock::time_point arrival) {

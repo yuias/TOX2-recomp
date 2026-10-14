@@ -40,7 +40,7 @@ constexpr std::uint64_t rsxInlineBlitOffset(std::uint32_t offset, std::uint32_t 
            static_cast<std::uint64_t>(pitch) * point_y;
 }
 
-// Called by the RSX thread with the guest lock held. `arg` is the head (1) for VBlank and Flip and
+// Called by the RSX thread with the kernel lock held. `arg` is the head (1) for VBlank and Flip and
 // the cause for User. No-op while unset.
 void setRsxInterruptHook(void (*hook)(RsxInterrupt kind, std::uint32_t arg));
 
@@ -57,7 +57,7 @@ void waitRsxFlipCount(std::uint64_t n);
 // relaxed atomics; read from any thread.
 struct RsxThreadTimes {
     std::uint64_t idle_us = 0;       // sleeping between passes
-    std::uint64_t lock_wait_us = 0;  // waiting for the guest lock
+    std::uint64_t lock_wait_us = 0;  // waiting for the kernel lock
     std::uint64_t pump_us = 0;       // holding it: pump slices and vblank ticks
     std::uint64_t build_us = 0;      // takeCommands(): the pending draw's copies, outside the lock
     std::uint64_t record_us = 0;     // dispatchCommands() and capture writes: renderer recording, submit
@@ -82,7 +82,7 @@ enum class RsxFlipLimit {
     Off,
 };
 
-// Register state and effects behind the parser. All members are used under the guest lock except
+// Register state and effects behind the parser. All members are used under the kernel lock except
 // census(), which only touches atomics, and takeCommands()/takeCaptures(), which only touch state the
 // RSX thread owns.
 class RsxConsumer final : public RsxSink {
@@ -92,7 +92,7 @@ public:
     bool readIo(std::uint32_t io, std::uint32_t& word) override;
     bool write(std::uint32_t method, std::uint32_t value) override;
     // True after the write that ends a draw clause: the run stops there so that takeCommands() can copy
-    // the draw's guest bytes outside the guest lock with the registers that draw used.
+    // the draw's guest bytes outside the kernel lock with the registers that draw used.
     bool stopAfterWrite() override;
 
     // Parses what the guest has put since the last call (at most `max_words` words), then publishes
@@ -116,7 +116,7 @@ public:
     // pump, and switching to Hz60 or Vsync holds the flips after the next one.
     void setFlipLimit(RsxFlipLimit limit) { flip_limit_.store(limit, std::memory_order_relaxed); }
     // The time the held flip becomes due, while the parser is stopped at one held by the Hz60 deadline. The host
-    // thread uses it to sleep without the guest lock until then, because nothing can advance before.
+    // thread uses it to sleep without the kernel lock until then, because nothing can advance before.
     std::optional<Clock::time_point> flipHoldDeadline() const {
         return flip_waiting_ && !vblank_at_flip_ && flip_limit_.load(std::memory_order_relaxed) != RsxFlipLimit::Off
                        ? flip_deadline_
@@ -147,7 +147,7 @@ public:
     bool frameBuilderLive() const { return builder_live_.load(std::memory_order_acquire); }
     // Drops the frame builder again. Only while nothing was written yet and no capture is enabled.
     void disableFrameBuilder();
-    // Commands built since the last call, after building a pending draw. Needs no guest lock (only the
+    // Commands built since the last call, after building a pending draw. Needs no kernel lock (only the
     // pump's thread may call it); the draw's copies then run without it.
     std::vector<RsxCommand> takeCommands();
     // Gives back commands that were executed and are not kept, so their buffers serve the next draws. Same thread
@@ -273,7 +273,7 @@ private:
     std::pair<std::uint32_t, std::uint32_t> pending_end_{0, 0};
 };
 
-// Receives the commands the frame builder produced, in order, on the RSX thread without the guest lock.
+// Receives the commands the frame builder produced, in order, on the RSX thread without the kernel lock.
 // Without a sink they are counted and dropped. Call before startRsxThread.
 using RsxCommandSink = std::function<void(std::vector<RsxCommand>&&)>;
 void setRsxCommandSink(RsxCommandSink sink);
@@ -300,7 +300,7 @@ struct RsxRenderCounts {
 class RsxExecutor {
 public:
     virtual ~RsxExecutor() = default;
-    // Runs on the RSX thread without the guest lock; the commands carry every byte they need.
+    // Runs on the RSX thread without the kernel lock; the commands carry every byte they need.
     virtual void execute(std::span<RsxCommand> commands) = 0;
     // Any thread.
     virtual RsxRenderCounts counts() const = 0;
@@ -328,7 +328,7 @@ void setRsxFlipLimit(RsxFlipLimit limit);
 RsxFlipLimit rsxFlipLimit();
 
 // Captures the listed frames (see RsxConsumer::enableCapture) into `<dir>/frame_<N>.tox2cap`, written on
-// the RSX thread after the guest lock is released. Implies the frame builder. Call before startRsxThread.
+// the RSX thread after the kernel lock is released. Implies the frame builder. Call before startRsxThread.
 // The directory defaults to generated/rsx/captures, which also receives the captures requested at run time.
 void setRsxCaptureFrames(std::vector<std::uint32_t> frames, std::filesystem::path dir);
 

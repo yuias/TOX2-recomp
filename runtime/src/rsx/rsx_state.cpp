@@ -25,7 +25,7 @@ std::uint32_t rsxLocalSize() { return std::atomic_ref(g_state.local_size).load(s
 
 void clearRsxState() {
     // Not `g_state = RsxState{}`: the whole-struct store would be a plain write to the fields that kernel-free handlers
-    // and the RSX thread read atomically without the guest lock.
+    // and the RSX thread read atomically without the kernel lock.
     const RsxState fresh;
     RsxState& s = g_state;
     constexpr auto kRelaxed = std::memory_order_relaxed;
@@ -70,7 +70,7 @@ std::condition_variable_any& rsxGetAdvanced() { return g_get_advanced; }
 
 bool rsxIoToEa(std::uint32_t io, std::uint32_t& ea) {
     if (io >= kRsxIoSpaceSize) return false;
-    // The RSX thread copies draw data without the guest lock, so this table is read and written atomically.
+    // The RSX thread copies draw data without the kernel lock, so this table is read and written atomically.
     const std::uint32_t page = std::atomic_ref(g_state.ea_of_io[io >> kPageShift]).load(std::memory_order_relaxed);
     if (page >= kEaPageLimit) return false;
     ea = (page << kPageShift) | (io & kPageMask);

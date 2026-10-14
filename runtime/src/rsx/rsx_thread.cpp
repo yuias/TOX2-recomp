@@ -57,7 +57,7 @@ constexpr std::uint32_t kBlitColorRegisters = 0x700;  // NV308A_COLOR spans this
 
 constexpr std::uint32_t kMethodCount = 0x4000;  // 16-bit register offsets, 4 bytes apart
 constexpr std::uint32_t kPumpSliceWords = 128;  // words per pump() call inside one lock hold
-// Checked after each slice, so one slice can exceed it.
+// Hold budget of the kernel lock (the name predates it). Checked after each slice, so one slice can exceed it.
 constexpr std::chrono::microseconds kMaxGuestLockHold{300};
 
 // Names of the registers the consumer interprets. The census prints hex for the others.
@@ -708,7 +708,7 @@ void dispatchCommands(RsxConsumer* consumer, RsxExecutor* executor, std::vector<
     }
 }
 
-// File I/O stays out of the guest lock; a failed write is reported and the run goes on.
+// File I/O stays out of the kernel lock; a failed write is reported and the run goes on.
 void writeCaptures(RsxConsumer* consumer, const std::vector<RsxConsumer::FinishedCapture>& captures) {
     for (const RsxConsumer::FinishedCapture& capture : captures) {
         const std::filesystem::path path = g_capture_dir / std::format("frame_{}.tox2cap", capture.frame);
@@ -778,7 +778,7 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
         return true;
     };
     for (;;) {
-        // A flip held by the limit ends the pump with Waiting and the loop comes back here, outside the guest
+        // A flip held by the limit ends the pump with Waiting and the loop comes back here, outside the kernel
         // lock. A flip held by the Hz60 deadline ends the sleep at that deadline, so it completes on time. A flip
         // held for a vblank sleeps up to the next tick instead of polling: nothing can advance before it. Either
         // way the vblank ticks still arrive on time.
@@ -810,9 +810,10 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
             std::vector<RsxCommand> commands;
             std::vector<RsxConsumer::FinishedCapture> captures;
             {
-                // The guest lock is a FIFO queue shared with the audio engine and every guest thread.
-                // Pumping in small slices and leaving once the hold budget is spent lets the waiters in between;
-                // the loop re-queues for the rest. A pump also stops after each draw end, whose vertex and
+                // The kernel lock is a FIFO queue shared with the audio engine and the guest threads' kernel sections
+                // (in legacy mode every guest thread holds it, as the guest lock). Pumping in small slices and
+                // leaving once the hold budget is spent lets the waiters in between; the loop re-queues for the
+                // rest. A pump also stops after each draw end, whose vertex and
                 // texture bytes takeCommands() then copies without the lock.
                 std::lock_guard<GuestLock> lock(guestLock());
                 const auto hold_start = Clock::now();

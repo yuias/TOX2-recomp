@@ -5,7 +5,7 @@
 // tox2SpuReadChannel, tox2SpuWriteChannel, tox2SpuChannelCount and tox2SpuStop.
 //
 // Every blocking wait uses the thread's own mutex and condition variable (or, for a wait on the
-// lock-line-lost event, the reservation table's store epoch), never the guest lock, and ends when a halt
+// lock-line-lost event, the reservation table's store epoch), never the kernel lock, and ends when a halt
 // is requested: the hook then returns false and the generated code leaves.
 //
 // Threads: the SPU's own host thread calls read/write/count/stop. Any thread may call pushInMbox,

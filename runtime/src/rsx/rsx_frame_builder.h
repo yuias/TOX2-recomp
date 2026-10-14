@@ -33,7 +33,7 @@ public:
     }
 };
 
-// Live view over guest memory. The RSX thread reads through it without the guest lock: like the
+// Live view over guest memory. The RSX thread reads through it without the kernel lock: like the
 // hardware, it relies on the game not freeing or unmapping memory a submitted draw still reads.
 class GuestRsxMemoryView final : public RsxMemoryView {
 public:

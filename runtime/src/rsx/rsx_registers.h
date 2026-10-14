@@ -3,7 +3,7 @@
 // Host copy of the RSX method register file plus the vertex program ucode and constant stores.
 // Behaviour follows RPCS3 `Emu/RSX/NV47/HW/nv4097.cpp` (`set_transform_program`,
 // `set_transform_constant`), `Emu/RSX/rsx_methods.h` (`rsx_state`) and `Emu/RSX/rsx_methods.cpp`
-// (`rsx_state::init`). Not thread safe; the RSX consumer owns it under the guest lock.
+// (`rsx_state::init`). Not thread safe; the RSX consumer owns it and uses it under the kernel lock.
 
 #include <array>
 #include <cstdint>

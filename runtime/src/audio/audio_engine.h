@@ -19,7 +19,7 @@
 namespace tox2 {
 
 // Periods the engine may produce beyond the first one when it wakes late. Zero: the game's mixer
-// writes exactly one block per notify and needs the guest lock to do it, so two periods produced
+// writes exactly one block per notify and needs the kernel lock to do it, so two periods produced
 // back to back under one lock hold would consume a block the mixer never rewrote. Late periods are
 // skipped instead (silent, no producer call).
 inline constexpr std::uint32_t kMaxCatchUpBlocks = 0;
@@ -41,7 +41,7 @@ inline constexpr double kClockKpPpmPerFrame = 2.0;
 inline constexpr double kClockKiPpmPerFrameSecond = 0.05;
 
 // Fills one block (kAudioBlockSamples, interleaved stereo host float) for the current period. Runs
-// on the engine thread and takes the guest lock itself. The block is zeroed before the call.
+// on the engine thread and takes the kernel lock itself. The block is zeroed before the call.
 using AudioBlockProducer = std::function<void(std::span<float> block)>;
 
 struct AudioEngineConfig {
@@ -59,10 +59,10 @@ void configureAudioEngine(AudioEngineConfig config);
 // of the first call is kept.
 void startAudioEngine(AudioBlockProducer producer);
 
-// Stops producing. Never waits: the engine thread may itself be waiting for the guest lock that the
+// Stops producing. Never waits: the engine thread may itself be waiting for the kernel lock that the
 // caller holds. A producer call already under way, possibly still waiting for that lock, completes
 // after this returns; no further call starts. The producer must therefore check its own state
-// (cellAudio's) under the guest lock.
+// (cellAudio's) under the kernel lock.
 void requestAudioEngineStop();
 
 struct AudioEngineStats {
@@ -73,7 +73,7 @@ struct AudioEngineStats {
     std::uint64_t blocks = 0;
     std::uint64_t non_silent_blocks = 0;
     std::uint64_t skipped_blocks = 0;
-    std::chrono::microseconds max_producer_time{0};  // includes the wait for the guest lock
+    std::chrono::microseconds max_producer_time{0};  // includes the wait for the kernel lock
     // Rate of the engine's clock relative to 48 kHz (positive: faster). Zero for an output without a
     // fill level, such as the null output.
     double clock_ppm = 0.0;
