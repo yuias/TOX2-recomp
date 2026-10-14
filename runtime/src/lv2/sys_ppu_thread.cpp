@@ -183,7 +183,8 @@ void sysPpuThreadDetach(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, kCellOk);
 }
 
-// 47 sys_ppu_thread_set_priority(u32 thread_id, s32 prio): stored only (no priority scheduling).
+// 47 sys_ppu_thread_set_priority(u32 thread_id, s32 prio): stored only; a thread already queued for the guest lock
+// keeps the priority it queued with.
 // ppuThreadCreate compares the stored value of the creator with the priority of a new thread.
 void sysPpuThreadSetPriority(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
