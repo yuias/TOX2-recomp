@@ -90,11 +90,15 @@ device does not underrun because of it. `kMaxCatchUpBlocks` is 0.
 
 ### Guest lock
 
-Guest memory and lv2 objects are touched only under the guest lock, which is shared with every guest thread and
-with the RSX thread. Waiters queue in a list and an unlock wakes only the one it hands the lock to. The audio
-engine, the RSX thread and SPU threads are served in arrival order. Guest threads fill the "PPU slots" of that order
-by lv2 priority, so a thread with a lower priority number, such as the game's sound threads at priority 0, gets a
-slot before a thread at 1001 (see [Threads](runtime.md#threads)). The engine takes it for one period at a
+lv2 and HLE state is touched only under the guest lock, which is shared with every guest thread and with the RSX
+thread. With `--ppu-threads legacy` it is also the right to run guest code, so guest memory is touched only under it
+too and PPU guest threads never run in parallel. With `--ppu-threads 1` or `2` (the default is `2`) the same lock is
+the kernel lock: guest threads take it only inside syscall and HLE handlers and run guest code in a PPU slot without
+it, so the mixer and the other guest threads run beside the audio engine, which still takes the lock for the
+producer call (see [Threads](runtime.md#threads)). Waiters queue in a list and an unlock wakes only the one it hands
+the lock to. The audio engine, the RSX thread and SPU threads are served in arrival order. Guest threads fill the "PPU
+turns" of that order by lv2 priority, so a thread with a lower priority number, such as the game's sound threads at
+priority 0, gets a turn before a thread at 1001. The engine takes it for one period at a
 time and never holds it while sleeping, writing the dump or talking to a device. The `cellAudio`
 and `cellAtrac` handlers never wait for the engine thread or the device, because the engine may
 itself be waiting for the lock. Device threads never take the lock and never touch guest memory.
@@ -127,8 +131,8 @@ The audio engine thread runs at `THREAD_PRIORITY_TIME_CRITICAL` and the host thr
 scheduler context and an lv2 priority of 31 or less (the game's sound engine `bnusCore`, priority 16; the SPURS
 kernels use 250) at `THREAD_PRIORITY_HIGHEST` (`runtime/src/core/host_priority.*`), so a saturated renderer cannot
 take their time slices. All of them sleep or block while they wait, so the raise cannot starve other threads.
-PPU guest threads stay at normal priority because they run one at a time under the guest lock, and the RSX thread
-stays at normal priority too. `--host-priorities off` (see [Options](runtime-options.md)) leaves every thread
+PPU guest threads stay at normal priority: the lock or the PPU slots already order them by lv2 priority, and at most two
+run at once (one in `legacy`). The RSX thread stays at normal priority too. `--host-priorities off` (see [Options](runtime-options.md)) leaves every thread
 at normal priority. The first use of each role logs `tox2: host: <role> thread priority <n>` at debug level; a
 refused change logs a warning and the thread keeps its priority. With the lock and reservation changes in place
 the raise made no measurable difference to the number of unwritten blocks; there were fewer guest-lock waits above
@@ -392,7 +396,7 @@ Lines start with `tox2: audio:`, `tox2: atrac:`, `tox2: timer:` or `tox2: thread
 | `tox2: timer: requested <n> ms, system period <x> ms\|unknown` | debug | Start-up |
 | `tox2: timer: the 1 ms resolution request was refused; timed waits use the default tick` | warn | Start-up |
 | `tox2: thread: <id> <name> prio <p> starts before creator <id> prio <q>` | debug | A thread was created with a lower priority number than its creator |
-| `tox2: thread: <id> <name> not queued within 5 ms; creator continues` | info | The new thread did not queue for the guest lock in time |
+| `tox2: thread: <id> <name> not queued within 5 ms; creator continues` | info | The new thread did not queue for the guest lock (a PPU slot in `--ppu-threads 1\|2`) in time |
 | `tox2: host: <audio engine\|high-priority SPU> thread priority <n>` | debug | First use of a host priority role (`<n>` is the Windows thread priority value); a refused change is a warning `tox2: host: cannot raise the <role> thread priority (error <n>)` |
 | `tox2: perf: t <s> s: audio flips <n> periods <n> unwritten <n> (runs <n>)` | debug | Once per second from the first `cellAudioInit`: the deltas over the last second. `t` is the guest system time |
 | `tox2: perf: t <s> s: lock <class> n <n> avg <x> p99 <x> max <x> ms >1.00ms <n> hold p99 <x> max <x> \| <class> ...` | debug | Once per second, for each guest-lock class that took the lock in that second: its wait (count, mean, 99th percentile, maximum in ms and the number of waits above 1 ms), then its hold. The classes `audio`, `spu` and `ppu-high` add `ahead avg <n> behind <class> <ms> ... ms`: the mean queue length of the contended acquisitions and the time the waits were spent behind each holder class (sums over the waiters, so read them as ratios). Further fields follow, separated by `\|`, when they apply in that second: `yield calls <n> ok <n> host <n> kept <n> backoff <n>` (the outcomes of `sys_ppu_thread_yield`, see [Threads](runtime.md#threads)), `lwmutex wait <n> handoff <n> mutex wait <n> handoff <n>` (waits on a lightweight mutex or mutex and how many ended in an ownership hand-off), `long holds <n>` (guest-lock holds of 5 ms or more) and `fs read <n> <bytes> bytes max <x> ms write <n> <bytes> bytes max <x> ms` (the file system transfers of that second and the longest one) |

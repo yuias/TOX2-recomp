@@ -303,7 +303,12 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   keyboard has a fixed mapping, no analog sticks and no vibration; gamepads are read through
   GameInput with a fixed mapping. Only port 0 exists; there is no mouse or `cellKb` input. See
   [Input](input.md). The game reads port 0 (7,794 `cellPadGetData` calls in the 30 s run); no input has been sent to it.
-- Scheduling beyond the lock order: the guest lock hands over by lv2 priority, but there is no displacement of
-  the holder when a better thread becomes ready, no rescheduling on `sys_ppu_thread_set_priority`, no priority
-  inheritance, and condition variable, semaphore and event waiters do not wake by priority. Two PPU threads never
-  run at once (an lv2 console runs two). lv2 interrupt threads and savestates are not implemented.
+- Scheduling beyond the lock order: the guest lock and the PPU slots hand over by lv2 priority, but there is no
+  displacement of the holder when a better thread becomes ready, no rescheduling on `sys_ppu_thread_set_priority`, no
+  priority inheritance, and condition variable, semaphore and event waiters do not wake by priority. The default
+  `--ppu-threads 2` runs two PPU threads at once, like the two hardware threads of an lv2 console; `1` runs one with
+  the host threads beside it, and `legacy` runs one at a time under the guest lock (see
+  [Threads](runtime.md#threads)). In `2` a plain store of one PPU thread does not cancel the other's reservation on
+  another word of the same line, and every lightweight mutex call still takes the kernel lock, which is the largest
+  remaining cost of the mode. Closing a `cellPngDec` decoder from one thread while another
+  decodes with it is not guarded in `1` and `2`. lv2 interrupt threads and savestates are not implemented.
