@@ -61,6 +61,20 @@ std::uint64_t currentIdentity() {
 bool isPpuClass(GuestLockClass cls) { return cls == GuestLockClass::Ppu || cls == GuestLockClass::PpuHigh; }
 std::atomic<SpuHealthFn> g_spu_health{nullptr};
 
+// Long-hold log lines are limited per wall-clock second, over all locks; holds beyond the limit are still counted.
+constexpr int kMaxLongHoldLogsPerSecond = 20;
+std::atomic<std::int64_t> g_long_hold_window{-1};
+std::atomic<int> g_long_hold_logged{0};
+
+bool allowLongHoldLog(std::chrono::steady_clock::time_point now) {
+    const std::int64_t second = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+    std::int64_t window = g_long_hold_window.load(std::memory_order_relaxed);
+    if (window != second && g_long_hold_window.compare_exchange_strong(window, second, std::memory_order_relaxed)) {
+        g_long_hold_logged.store(0, std::memory_order_relaxed);
+    }
+    return g_long_hold_logged.fetch_add(1, std::memory_order_relaxed) < kMaxLongHoldLogsPerSecond;
+}
+
 // State of the yield backoff: `run` counts consecutive yields that arrived within kYieldSpinGap of the previous one's
 // return.
 struct YieldSpin {
@@ -282,6 +296,7 @@ void GuestLock::lock() {
         outstanding_.store(outstanding_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         hold_start_ = arrival;
         holder_class_ = cls;
+        t_activity.hold_last = nullptr;
         if (ppu) {
             holder_ppu_tag_ = next_ppu_tag_++;
             last_ppu_identity_ = currentIdentity();
@@ -340,6 +355,7 @@ void GuestLock::enqueueAndWait(std::unique_lock<std::mutex>& lock, Waiter& node)
     hold_start_ = turn;
     holder_class_ = node.cls;
     holder_ppu_tag_ = node.ppu_tag;
+    t_activity.hold_last = nullptr;
     const std::uint64_t handoff_us = elapsedUs(released_at, turn);
 
     counters.wait.record(elapsedUs(node.arrival, turn));
@@ -428,8 +444,38 @@ void GuestLock::noteRelease(std::chrono::steady_clock::time_point now, GuestLock
                                        std::memory_order_relaxed);
         }
     }
+    if (hold_us >= kGuestLockLongHoldUs) {
+        long_holds_.store(long_holds_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    }
     releases_.store(releases_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
     outstanding_.store(outstanding_.load(std::memory_order_relaxed) - 1, std::memory_order_relaxed);
+}
+
+GuestLock::LongHoldReport GuestLock::captureLongHold(std::uint64_t hold_us, GuestLockClass holder) {
+    LongHoldReport report;
+    if (hold_us < kGuestLockLongHoldUs) return report;
+    report.hold_us = hold_us;
+    report.holder = holder;
+    report.thread = t_current;
+    report.at_release = t_activity.current;
+    report.last_in_hold = t_activity.hold_last;
+    return report;
+}
+
+void GuestLock::emitLongHold(const LongHoldReport& report, std::chrono::steady_clock::time_point now) {
+    if (report.hold_us == 0 || !allowLongHoldLog(now)) return;
+    const char* at_release = report.at_release != nullptr ? report.at_release : "none";
+    const char* last_in_hold = report.last_in_hold != nullptr ? report.last_in_hold : "none";
+    const double ms = static_cast<double>(report.hold_us) / 1000.0;
+    if (report.thread != nullptr) {
+        logWarn("tox2: guest lock long hold: {:.2f} ms holder {} thread {:#010x} prio {} ({}) at release: {} last in "
+                "hold: {}",
+                ms, guestLockClassName(report.holder), report.thread->id(), report.thread->priority(),
+                report.thread->name(), at_release, last_in_hold);
+    } else {
+        logWarn("tox2: guest lock long hold: {:.2f} ms holder {} at release: {} last in hold: {}", ms,
+                guestLockClassName(report.holder), at_release, last_in_hold);
+    }
 }
 
 void GuestLock::grant(Waiter* next) {
@@ -447,14 +493,20 @@ void GuestLock::unlock() {
     // Recorded before the release: a lock that lives on a test's stack must not be touched after a waiter
     // may have taken it and let the owner destroy it.
     classes_[static_cast<std::size_t>(holder)].hold.record(hold_us);
-    std::lock_guard lock(mutex_);
-    noteRelease(now, holder, hold_us);
-    Waiter* next = chooseNext();
-    if (next == nullptr) {
-        held_ = false;
-        return;
+    const LongHoldReport report = captureLongHold(hold_us, holder);
+    {
+        std::lock_guard lock(mutex_);
+        noteRelease(now, holder, hold_us);
+        Waiter* next = chooseNext();
+        if (next == nullptr) {
+            held_ = false;
+        } else {
+            grant(next);
+        }
     }
-    grant(next);
+    // After the release: formatting and writing the line must not extend the hold of the next thread. Uses no member,
+    // because a lock on a test's stack may be gone by now.
+    emitLongHold(report, now);
 }
 
 bool GuestLock::yieldToHostWaiters() {
@@ -465,6 +517,7 @@ bool GuestLock::yieldToHostWaiters() {
     const GuestLockClass holder = holder_class_;
     const std::uint64_t hold_us = elapsedUs(hold_start_, now);
     classes_[static_cast<std::size_t>(holder)].hold.record(hold_us);
+    const LongHoldReport report = captureLongHold(hold_us, holder);
     noteRelease(now, holder, hold_us);
     Waiter* oldest_host = head_;
     while (oldest_host->ppu) oldest_host = oldest_host->next;
@@ -481,6 +534,8 @@ bool GuestLock::yieldToHostWaiters() {
         node.ppu_tag = holder_ppu_tag_;  // a yield without a switch does not rotate within the priority
     }
     enqueueAndWait(lock, node);
+    // The report is written only now: the wait above is where mutex_ is released, and the caller holds the lock again.
+    emitLongHold(report, now);
     return true;
 }
 
@@ -503,6 +558,7 @@ GuestLockStats GuestLock::stats() const {
     out.spurious_wakeups = spurious_wakeups_.load(std::memory_order_relaxed);
     out.ppu_hold_us = ppu_hold_us_.load(std::memory_order_relaxed);
     out.ppu_hold_overlap_us = ppu_hold_overlap_us_.load(std::memory_order_relaxed);
+    out.long_holds = long_holds_.load(std::memory_order_relaxed);
     return out;
 }
 

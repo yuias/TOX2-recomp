@@ -10,6 +10,7 @@
 
 #include "core/census.h"
 #include "core/log.h"
+#include "core/threads.h"
 #include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 
@@ -249,6 +250,7 @@ void tox2Syscall(Tox2PpuContext* ctx, uint8_t* base, uint32_t site) {
     tox2::censusSyscall(number, name, implemented);
 
     if (implemented) {
+        const tox2::ActivityScope activity(name != nullptr ? name : "syscall ?");
         entry->handler(ctx, base);
         return;
     }

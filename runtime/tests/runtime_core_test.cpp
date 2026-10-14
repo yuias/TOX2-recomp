@@ -12368,6 +12368,50 @@ void testGuestLockStats() {
     }
 }
 
+// A hold of at least kGuestLockLongHoldUs is counted, also when it ends in yieldToHostWaiters; a shorter one is not.
+void testGuestLockLongHold() {
+    constexpr auto kSleep = std::chrono::microseconds(tox2::kGuestLockLongHoldUs + 3000);
+    tox2::GuestLock lock;
+    for (int i = 0; i < 10; i++) {
+        lock.lock();
+        lock.unlock();
+    }
+    CHECK(lock.stats().long_holds == 0);
+
+    lock.lock();
+    std::this_thread::sleep_for(kSleep);
+    lock.unlock();
+    CHECK(lock.stats().long_holds == 1);
+
+    // The label restores on scope exit, and a new hold starts without the previous hold's last label.
+    CHECK(tox2::t_activity.current == nullptr);
+    lock.lock();
+    CHECK(tox2::t_activity.hold_last == nullptr);
+    {
+        const tox2::ActivityScope outer("outer");
+        {
+            const tox2::ActivityScope inner("inner");
+            CHECK(std::string_view(tox2::t_activity.current) == "inner");
+        }
+        CHECK(std::string_view(tox2::t_activity.current) == "outer");
+    }
+    CHECK(tox2::t_activity.current == nullptr && std::string_view(tox2::t_activity.hold_last) == "inner");
+    lock.unlock();
+
+    // A host waiter makes yieldToHostWaiters release; the hold that ends there counts too.
+    std::thread waiter([&] {
+        lock.lock();
+        lock.unlock();
+    });
+    lock.lock();
+    while (!lock.hasHostWaiters()) std::this_thread::yield();
+    std::this_thread::sleep_for(kSleep);
+    CHECK(lock.yieldToHostWaiters());
+    lock.unlock();
+    waiter.join();
+    CHECK(lock.stats().long_holds == 2);
+}
+
 // A release wakes only the waiter it serves, not every waiter.
 void testGuestLockSingleWake() {
     tox2::GuestLock lock;
@@ -13426,6 +13470,7 @@ int main(int argc, char** argv) {
     testHostPriority();
     testGuestLockFifo();
     testGuestLockStats();
+    testGuestLockLongHold();
     testGuestLockSingleWake();
     testGuestLockPpuOverlap();
     testGuestLockPpuPriority();

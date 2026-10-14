@@ -46,6 +46,7 @@
 #include "input/keyboard_pad.h"
 #include "input/pad_script.h"
 #include "libsre_ppu_tables.h"
+#include "lv2/sys_fs.h"
 #include "lv2/sys_sync.h"
 #include "lv2/syscalls.h"
 #include "lv2/vfs.h"
@@ -785,6 +786,17 @@ tox2::PerfSource lockPerfSource() {
                                 handoffs.mutex_waits - prev_handoffs.mutex_waits,
                                 handoffs.mutex_handoffs - prev_handoffs.mutex_handoffs);
             prev_handoffs = handoffs;
+        }
+        // Appended after the fields above, whose text scripts parse.
+        if (now.long_holds != prev.long_holds) {
+            body += std::format("{}long holds {}", body.empty() ? "lock " : " | ", now.long_holds - prev.long_holds);
+        }
+        const tox2::FsTransferStats fs = tox2::takeFsTransferStats();
+        if (fs.reads != 0 || fs.writes != 0) {
+            body += std::format("{}fs read {} {} bytes max {:.2f} ms write {} {} bytes max {:.2f} ms",
+                                body.empty() ? "lock " : " | ", fs.reads, fs.read_bytes,
+                                static_cast<double>(fs.read_max_us) / 1000.0, fs.writes, fs.write_bytes,
+                                static_cast<double>(fs.write_max_us) / 1000.0);
         }
         prev = now;
         return body;

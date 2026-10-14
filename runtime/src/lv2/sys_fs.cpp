@@ -3,7 +3,11 @@
 // while the calling guest thread holds the guest lock, so a long read blocks the other guest
 // threads for its duration; that is accepted for boot.
 
+#include "lv2/sys_fs.h"
+
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <format>
@@ -368,9 +372,24 @@ bool setPos(HANDLE file, std::int64_t offset, DWORD method, std::uint64_t* resul
     return true;
 }
 
+// Per-interval figures behind takeFsTransferStats(); relaxed, since they only feed a periodic log line.
+struct TransferCounters {
+    std::atomic<std::uint64_t> count{0}, bytes{0}, max_us{0};
+
+    void record(std::uint64_t transferred, std::uint64_t us) {
+        count.fetch_add(1, std::memory_order_relaxed);
+        bytes.fetch_add(transferred, std::memory_order_relaxed);
+        std::uint64_t seen = max_us.load(std::memory_order_relaxed);
+        while (us > seen && !max_us.compare_exchange_weak(seen, us, std::memory_order_relaxed)) {
+        }
+    }
+};
+TransferCounters g_read_counters, g_write_counters;
+
 // Reads or writes `size` bytes at the current position; returns the byte count and sets `code` on
-// a host error.
+// a host error. Timed as a whole, because the host call runs under the guest lock.
 std::uint64_t transfer(HANDLE file, bool write, std::uint8_t* data, std::uint64_t size, std::uint32_t& code) {
+    const auto start = std::chrono::steady_clock::now();
     std::uint64_t total = 0;
     while (total < size) {
         const DWORD chunk = static_cast<DWORD>(std::min<std::uint64_t>(size - total, 0x40000000));
@@ -386,6 +405,8 @@ std::uint64_t transfer(HANDLE file, bool write, std::uint8_t* data, std::uint64_
             break;
         }
     }
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
+    (write ? g_write_counters : g_read_counters).record(total, static_cast<std::uint64_t>(us.count()));
     return total;
 }
 
@@ -481,6 +502,17 @@ std::uint32_t openGuest(std::uint8_t* base, std::uint32_t path_addr, std::int32_
 }
 
 }  // namespace
+
+FsTransferStats takeFsTransferStats() {
+    FsTransferStats out;
+    out.reads = g_read_counters.count.exchange(0, std::memory_order_relaxed);
+    out.read_bytes = g_read_counters.bytes.exchange(0, std::memory_order_relaxed);
+    out.read_max_us = g_read_counters.max_us.exchange(0, std::memory_order_relaxed);
+    out.writes = g_write_counters.count.exchange(0, std::memory_order_relaxed);
+    out.write_bytes = g_write_counters.bytes.exchange(0, std::memory_order_relaxed);
+    out.write_max_us = g_write_counters.max_us.exchange(0, std::memory_order_relaxed);
+    return out;
+}
 
 std::uint32_t fsStatPath(std::string_view guest_path, FsStat& out) {
     const VfsResolution res = resolveVfs(guest_path);

@@ -19,6 +19,7 @@
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
+#include "core/threads.h"
 #include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 
@@ -202,6 +203,7 @@ void runImport(InstalledImport& import, Tox2PpuContext* ctx, std::uint8_t* base)
     censusHle(import.module, import.name, implemented);
 
     if (implemented) {
+        const ActivityScope activity(import.name != nullptr ? import.name : "hle ?");
         import.handler(ctx, base);
         return;
     }

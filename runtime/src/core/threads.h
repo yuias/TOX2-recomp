@@ -19,6 +19,8 @@
 
 namespace tox2 {
 
+class GuestThread;
+
 // Who is waiting for or holding the guest lock. Guest threads are Ppu or PpuHigh by their lv2 priority at the time
 // of the call; host threads name themselves once with setGuestLockClass (default Other).
 enum class GuestLockClass : std::uint8_t { Ppu, PpuHigh, Spu, Audio, Rsx, Other };
@@ -40,6 +42,32 @@ std::string_view guestLockClassName(GuestLockClass cls);  // "ppu", "ppu-high", 
 inline constexpr std::uint64_t kGuestLockWaitOverUs = 1000;
 inline constexpr std::uint64_t kGuestLockHoldOverUs = 1000;
 inline constexpr std::uint64_t kGuestLockHandoffOverUs = 100;
+// A hold at least this long is counted in GuestLockStats::long_holds and logged (rate-limited).
+inline constexpr std::uint64_t kGuestLockLongHoldUs = 5000;
+
+// What the calling thread is executing on the host side, for naming the code behind a long guest lock hold. Labels
+// are static strings: setting one is two thread-local pointer stores. `hold_last` is the last label set since the
+// thread's current hold of the guest lock began (reset by GuestLock when a hold starts).
+struct ActivityLabels {
+    const char* current = nullptr;
+    const char* hold_last = nullptr;
+};
+inline thread_local ActivityLabels t_activity;
+
+// Names the code the thread runs from construction to destruction, restoring the enclosing label afterwards.
+class ActivityScope {
+public:
+    explicit ActivityScope(const char* what) : previous_(t_activity.current) {
+        t_activity.current = what;
+        t_activity.hold_last = what;
+    }
+    ~ActivityScope() { t_activity.current = previous_; }
+    ActivityScope(const ActivityScope&) = delete;
+    ActivityScope& operator=(const ActivityScope&) = delete;
+
+private:
+    const char* previous_;
+};
 
 struct GuestLockClassStats {
     LatencySnapshot wait;                        // entry -> turn; 0 when uncontended
@@ -58,6 +86,7 @@ struct GuestLockStats {
     // Hold time of PPU-class holders, and the part of it during which another PPU-class thread was queued (from the
     // later of the hold start and that waiter's arrival): what a second PPU hardware thread could have run.
     std::uint64_t ppu_hold_us = 0, ppu_hold_overlap_us = 0;
+    std::uint64_t long_holds = 0;  // holds of at least kGuestLockLongHoldUs, logged or not
 };
 
 // The one lock all guest code runs under. A thread takes it when it starts and gives it up only
@@ -115,6 +144,19 @@ private:
     Waiter* chooseNext();
     // Under mutex_.
     void unlink(Waiter* waiter);
+    // Describes a long hold for the log line. Captured by the holder before it releases (it reads the holder's
+    // thread-local state), formatted and emitted only after mutex_ is released.
+    struct LongHoldReport {
+        std::uint64_t hold_us = 0;  // 0: not a long hold
+        GuestLockClass holder = GuestLockClass::Other;
+        const GuestThread* thread = nullptr;
+        const char* at_release = nullptr;
+        const char* last_in_hold = nullptr;
+    };
+    static LongHoldReport captureLongHold(std::uint64_t hold_us, GuestLockClass holder);
+    // Touches no member, so it may run after the lock was passed on.
+    static void emitLongHold(const LongHoldReport& report, std::chrono::steady_clock::time_point now);
+
     // Under mutex_. Takes the release into the statistics.
     void noteRelease(std::chrono::steady_clock::time_point now, GuestLockClass holder, std::uint64_t hold_us);
     // Under mutex_. Unlinks `next`, marks it granted and wakes it; the woken thread sets the holder fields.
@@ -150,6 +192,7 @@ private:
     std::atomic<std::uint64_t> wakeups_{0}, spurious_wakeups_{0};
     // Written under mutex_ in unlock(), so a plain load + store is enough; atomic for stats().
     std::atomic<std::uint64_t> ppu_hold_us_{0}, ppu_hold_overlap_us_{0};
+    std::atomic<std::uint64_t> long_holds_{0};  // written under mutex_ in noteRelease
 };
 
 GuestLock& guestLock();
