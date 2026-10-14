@@ -97,7 +97,7 @@ struct Options {
     tox2::RsxFlipLimit frame_limit = tox2::RsxFlipLimit::Vsync;       // --frame-limit vsync (default), 60 or off
     bool host_priorities = true;                                      // --host-priorities on (default) or off
     bool yield_backoff = true;                                        // --yield-backoff on (default) or off
-    tox2::PpuThreadsMode ppu_threads = tox2::PpuThreadsMode::Legacy;  // --ppu-threads legacy (default), 1 or 2
+    tox2::PpuThreadsMode ppu_threads = tox2::PpuThreadsMode::Split2;  // --ppu-threads legacy, 1 or 2 (default)
     bool window = false;                                              // settled after all arguments
     bool pad_probe = false;
     std::string dump_frames;
