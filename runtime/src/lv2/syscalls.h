@@ -23,7 +23,7 @@ struct SyscallEntry {
     GuestHandler handler;  // null: the default handler runs
     // Split PPU modes: the handler runs without the kernel lock. Only for a handler that touches nothing but its
     // context, thread-locals, guest memory and atomics (it must not block, allocate guest memory or touch lv2/HLE
-    // state).
+    // state). The one blocking exception is a timed sleep with no waker, through sleepGuestThread.
     bool kernel_free = false;
 };
 

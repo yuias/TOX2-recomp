@@ -584,6 +584,14 @@ bool blockingWait(std::condition_variable_any& cv, Pred done, const char* what,
     return satisfied;
 }
 
+// Sleeps the calling guest thread for `duration`; nothing wakes it earlier. `what` names the wait for the census and
+// the supervisor. Legacy: blockingWait on a never-signalled condition variable, so the caller needs the guest lock.
+// Split modes: the sleep touches no shared state, so the caller must not hold the kernel lock (fatal internal error
+// otherwise); it releases the caller's slot for the sleep and takes one again afterwards by the usual priority rules.
+// Marks the thread's first release point, because a sleep is where legacy would let a queued thread in (see
+// startGuestThreadFirst). A host thread, which has no slot, only sleeps.
+void sleepGuestThread(std::chrono::microseconds duration, const char* what);
+
 // What the supervisor needs to know about one thread.
 struct ThreadHealth {
     ThreadState state = ThreadState::Running;

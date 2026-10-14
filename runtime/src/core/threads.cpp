@@ -1122,8 +1122,8 @@ bool yieldSlot() {
     if (t_current != nullptr) t_current->markFirstRelease();
     PpuSlots& slots = ppuSlots();
     if (slots.waiterCount() == 0 || !slots.heldByCurrentThread()) return false;
-    // Budget expiry can happen inside a handler's kernel section (sys_timer_usleep(0), the GCM interrupt and sail
-    // service bodies): the lock goes first and comes back last, so no thread waits for a slot with the kernel lock.
+    // Budget expiry can happen inside a handler's kernel section (the GCM interrupt and sail service bodies): the lock
+    // goes first and comes back last, so no thread waits for a slot with the kernel lock.
     KernelExit leave_kernel;
     return slots.yield();
 }
@@ -1229,6 +1229,28 @@ void blockEnter(GuestThread* thread, const char* what, bool indefinite) {
 
 void blockLeave(GuestThread* thread) {
     if (thread != nullptr) thread->setState(ThreadState::Running);
+}
+
+void sleepGuestThread(std::chrono::microseconds duration, const char* what) {
+    if (!splitPpuMode()) {
+        static std::condition_variable_any never_signalled;
+        blockingWait(never_signalled, [] { return false; }, what, duration);
+        return;
+    }
+    // The sleep itself needs no lock, and holding the kernel lock for it would stall every other kernel section.
+    if (guestLock().heldByCurrentThread()) {
+        fatal(FatalKind::Internal, std::format("{}: sleep with the kernel lock held", what));
+    }
+    GuestThread* thread = t_current;
+    blockEnter(thread, what, false);
+    if (thread != nullptr) thread->markFirstRelease();
+    // Keyed on the slot, not on the guest thread: a caller without a GuestThread can hold a slot too.
+    PpuSlots& slots = ppuSlots();
+    const bool held = slots.heldByCurrentThread();
+    if (held) slots.release();
+    std::this_thread::sleep_for(duration);
+    if (held) slots.acquire();
+    blockLeave(thread);
 }
 
 void runSupervisor(std::uint32_t seconds) {

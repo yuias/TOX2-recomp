@@ -13636,8 +13636,8 @@ void testSplitReturnPathTls() {
     joinAll(threads);
 }
 
-// Budget expiry inside a handler's kernel section (sys_timer_usleep(0) calls tox2Yield from its handler): the kernel
-// lock goes first, so the thread that takes the slot can take the kernel lock, and comes back last.
+// Budget expiry inside a handler's kernel section (as in the GCM interrupt and sail service bodies): the kernel lock
+// goes first, so the thread that takes the slot can take the kernel lock, and comes back last.
 void testSplitYieldInsideKernel() {
     HangGuard guard("testSplitYieldInsideKernel");
     SplitModeScope mode(tox2::PpuThreadsMode::Split1);
@@ -14187,6 +14187,182 @@ void testGcmAddressToOffsetConcurrent() {
     joinAll(threads);
     CHECK(failures == 0);
     CHECK(mapper_rounds > 0);
+}
+
+std::atomic<std::uint64_t> g_sleep_us{0};
+std::atomic<bool> g_sleep_hold_after{false};
+
+// sys_timer_usleep(g_sleep_us) issued the way generated code does it, outside any kernel section. With
+// g_sleep_hold_after set the thread then keeps computing without a yield or a syscall, so the sleep is its only release
+// point before it ends.
+TOX2_PPU_FUNC(sleepThenHoldEntry) {
+    ctx->gpr[11] = 141;
+    ctx->gpr[3] = g_sleep_us.load();
+    tox2Syscall(ctx, base, 0x10000);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (g_sleep_hold_after.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+}
+
+// sys_timer_usleep and sys_timer_sleep run without the kernel lock and give up the PPU slot while they sleep.
+void testKernelFreeSleep() {
+    HangGuard guard("testKernelFreeSleep");
+    GuestThreadEnv env({sleepThenHoldEntry});
+    auto caller = makeCaller(0x01000000);
+    const tox2::SyscallEntry* usleep_entry = tox2::findSyscall(141);
+    const tox2::SyscallEntry* sleep_entry = tox2::findSyscall(142);
+    CHECK(usleep_entry != nullptr && usleep_entry->kernel_free);
+    CHECK(sleep_entry != nullptr && sleep_entry->kernel_free);
+    const auto now = [] { return std::chrono::steady_clock::now(); };
+    const auto microsSince = [&](std::chrono::steady_clock::time_point t) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(now() - t).count();
+    };
+
+    // A slot holder's sleep returns while a host thread holds the kernel lock; a handler that took it would return only
+    // after the hold ended.
+    {
+        SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+        tox2::PpuSlots& slots = tox2::ppuSlots();
+        std::atomic<bool> go{false};
+        std::chrono::steady_clock::time_point started, returned, hold_end;
+        std::thread holder = slotThread(1001, [&] {
+            slots.acquire();
+            CHECK(pollUntil([&] { return go.load(); }));
+            started = now();
+            CHECK(syscallAs(*caller, 141, 5000) == 0);
+            returned = now();
+            CHECK(slots.heldByCurrentThread());  // the slot came back
+            slots.release();
+        });
+        {
+            std::lock_guard<tox2::GuestLock> host(tox2::guestLock());
+            go = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            hold_end = now();
+        }
+        holder.join();
+        CHECK(returned < hold_end);
+        CHECK(returned - started >= std::chrono::milliseconds(5));
+    }
+
+    // While a guest thread sleeps, a third thread gets its slot at once; the sleeper reads Blocked until it holds a
+    // slot again, and it queues for that by its priority like any other waiter.
+    {
+        constexpr std::uint64_t kSleepUs = 300'000;
+        SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+        tox2::PpuSlots& slots = tox2::ppuSlots();
+        std::atomic<bool> a_held{false}, a_release{false}, c_go{false}, c_release{false};
+        std::atomic<std::int64_t> c_wait_us{-1};
+        std::atomic<int> d_saw_state{-1};
+        std::vector<std::thread> threads;
+        threads.push_back(slotThread(1001, [&] {  // A holds one slot throughout
+            slots.acquire();
+            a_held = true;
+            pollUntil([&] { return a_release.load(); });
+            slots.release();
+        }));
+        CHECK(pollUntil([&] { return a_held.load(); }));
+        threads.push_back(slotThread(1001, [&] {  // C is the third thread
+            pollUntil([&] { return c_go.load(); });
+            const auto start = now();
+            slots.acquire();
+            c_wait_us = microsSince(start);
+            pollUntil([&] { return c_release.load(); });
+            slots.release();
+        }));
+
+        g_sleep_us = kSleepUs;
+        g_sleep_hold_after = false;
+        tox2::GuestThreadParams params;
+        params.entry_opd = env.opd(0);
+        params.priority = 1001;
+        params.stack_size = 0x10000;
+        params.name = "sleeper";
+        const std::uint32_t sleeper_id = tox2::createGuestThread(params);
+        const tox2::GuestThread* sleeper = tox2::findThread(sleeper_id);
+        CHECK(sleeper != nullptr);
+        if (sleeper == nullptr) {
+            a_release = c_go = c_release = true;
+            joinAll(threads);
+            return;
+        }
+        CHECK(pollUntil([&] { return sleeper->state() == tox2::ThreadState::Blocked; }));
+        CHECK(std::string_view(sleeper->blockedIn() != nullptr ? sleeper->blockedIn() : "") == "sys_timer_usleep");
+        CHECK(!sleeper->indefiniteWait());  // a timed sleep is no stall
+
+        c_go = true;
+        CHECK(pollUntil([&] { return c_wait_us.load() >= 0; }));
+        CHECK(c_wait_us.load() < 5000);
+        CHECK(sleeper->state() == tox2::ThreadState::Blocked);  // still asleep: C did not wait for the wake-up
+
+        // The sleeper wakes while A and C hold both slots and queues; a better thread queued after it is served first.
+        CHECK(pollUntil([&] { return slots.waiterCount() == 1; }));
+        queueSlotThread(slots, threads, 500, [&] {
+            slots.acquire();
+            d_saw_state = static_cast<int>(sleeper->state());
+            slots.release();
+        });
+        a_release = true;
+        CHECK(pollUntil([&] { return d_saw_state.load() >= 0; }));
+        CHECK(d_saw_state.load() == static_cast<int>(tox2::ThreadState::Blocked));
+        CHECK(pollUntil([&] { return sleeper->state() == tox2::ThreadState::Exited; }));
+        c_release = true;
+        joinAll(threads);
+    }
+
+    // The creator of a higher-priority thread waits for that thread's first release point. The new thread computes
+    // after its sleep until released, so only the sleep can end the wait.
+    {
+        SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+        tox2::PpuSlots& slots = tox2::ppuSlots();
+        tox2::GuestLock& kernel = tox2::guestLock();
+        g_sleep_us = 1000;
+        g_sleep_hold_after = true;
+        std::atomic<std::uint32_t> thread_id{0};
+        std::atomic<bool> create_ok{false}, creator_returned{false};
+        std::thread creator = slotThread(1001, [&] {
+            slots.acquire();
+            kernel.lock();
+            tox2::GuestThreadParams params;
+            params.entry_opd = env.opd(0);
+            params.priority = 500;
+            params.stack_size = 0x10000;
+            params.name = "sleeping child";
+            tox2::GuestThread* thread = tox2::prepareGuestThread(params);
+            if (thread != nullptr) {
+                thread_id = thread->id();
+                create_ok = tox2::startGuestThreadFirst(thread);
+                creator_returned = true;
+            }
+            kernel.unlock();
+            slots.release();
+        });
+        const auto deadline = now() + std::chrono::seconds(1);
+        while (!creator_returned.load() && now() < deadline) std::this_thread::yield();
+        const bool in_time = creator_returned.load();
+        g_sleep_hold_after = false;  // lets the child end even when the creator did not return
+        CHECK(in_time);
+        creator.join();
+        CHECK(create_ok);
+        const tox2::GuestThread* child = tox2::findThread(thread_id);
+        CHECK(child != nullptr && pollUntil([&] { return child->state() == tox2::ThreadState::Exited; }));
+    }
+
+    // Legacy: the sleep takes its time and lets other holders of the guest lock in meanwhile.
+    {
+        CHECK(!tox2::splitPpuMode());
+        std::lock_guard<tox2::GuestLock> hold(tox2::guestLock());
+        std::atomic<bool> host_got_lock{false};
+        std::thread host([&] {
+            std::lock_guard<tox2::GuestLock> lock(tox2::guestLock());
+            host_got_lock = true;
+        });
+        CHECK(pollUntil([&] { return tox2::guestLock().waiterCount() > 0; }));
+        const auto start = now();
+        CHECK(syscallAs(*caller, 141, 5000) == 0);
+        CHECK(microsSince(start) >= 5000);
+        CHECK(host_got_lock.load());
+        host.join();
+    }
 }
 
 std::atomic<int> g_callee_kernel_held{-1};
@@ -15450,6 +15626,7 @@ int main(int argc, char** argv) {
     testKernelFreeHandlers();
     testMemcpyNeighbourWrites();
     testGcmAddressToOffsetConcurrent();
+    testKernelFreeSleep();
     testSplitGuestCallbackReleasesKernel();
     testSplitSysutilCallbacks();
     testSplitDefaultPathCount();

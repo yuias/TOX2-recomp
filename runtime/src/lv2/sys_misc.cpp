@@ -1,13 +1,14 @@
 // Startup syscalls: process id, SDK version and exit, tty, timers, time base, user memory, memory
 // containers and page attributes.
 // Behaviour follows RPCS3 `Emu/Cell/lv2/sys_process.cpp`, `sys_tty.cpp`, `sys_timer.cpp`,
-// `sys_time.cpp` and `sys_memory.cpp`. Handlers run under the guest lock.
+// `sys_time.cpp` and `sys_memory.cpp`. Handlers run under the guest lock, except sys_timer_usleep and sys_timer_sleep
+// (kernel_free): a sleep touches no shared state, so it runs without the kernel lock and gives up its PPU slot while it
+// waits.
 
 #include "lv2/sys_memory.h"
 
 #include <algorithm>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <format>
@@ -79,10 +80,7 @@ void sleepFor(Tox2PpuContext* ctx, std::uint8_t* base, std::uint64_t microsecond
     }
     // Keeps the deadline arithmetic of the steady clock far from overflow.
     constexpr std::uint64_t kMaxSleepUs = 24ull * 3600 * 1000000;
-    static std::condition_variable_any never_signalled;
-    blockingWait(
-            never_signalled, [] { return false; }, "sys_timer_usleep",
-            std::chrono::microseconds(std::min(microseconds, kMaxSleepUs)));
+    sleepGuestThread(std::chrono::microseconds(std::min(microseconds, kMaxSleepUs)), "sys_timer_usleep");
 }
 
 }  // namespace
