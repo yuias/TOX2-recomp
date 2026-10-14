@@ -16,8 +16,8 @@ With `--log-level debug`, a host thread logs `tox2: perf: t <s> s: <body>` lines
 changes over the last second: `audio` (flips, `cellAudio` periods and unwritten port blocks), `game` (the game's
 frame time, frame interval, frame counter and job counters), `rsx` (where the RSX thread's time went per flip, as
 `rsx busy <x> ms/flip: lock <x> pump <x> build <x> record <x>, idle <x>`; see [Fake RSX](rendering.md#fake-rsx)),
-`lock` (the guest lock's wait and hold per class, and for the audio-path classes the queue length and the holders
-they waited behind) and `spu` (the receive timing of each SPU thread that blocks in `stop 0x110` and how the
+`lock` (the guest lock's wait and hold per class, for the audio-path classes the queue length and the holders
+they waited behind, and the yield outcomes, mutex hand-offs, long holds and file transfers) and `spu` (the receive timing of each SPU thread that blocks in `stop 0x110` and how the
 reservation waits ended). A source with nothing to say in that second writes no line. The audio, lock and `spu`
 fields are listed under [Audio](audio.md#log-lines); one second of those lines puts a missed audio block next to
 the lock waits and the sound engine's processing time of the same second.
@@ -99,16 +99,22 @@ Thread states are `running`, `blocked in <what>` or `exited`. A `census: guest l
 thread lines once the lock was used:
 
 ```
-census: guest lock 3781234 acquisitions in 60.0 s, hand-off n 1480 avg 0.01 p99 0.02 max 0.31 ms >0.10ms 4, wakeups 2210 (131 spurious), yield backoff 0
+census: guest lock 3781234 acquisitions in 60.0 s, hand-off n 1480 avg 0.01 p99 0.02 max 0.31 ms >0.10ms 4, wakeups 2210 (131 spurious), yield calls 99096 ok 46 host 2100 kept 95400 backoff 1550, ppu overlap 5.0 of 12.0 s
   ppu: 46800.0/s, wait n 2808000 avg 0.02 p99 0.11 max 3.10 ms >1.00ms 12, ahead avg 1.3 max 5, hold n 2808000 avg 0.01 p99 0.04 max 1054.00 ms >1.00ms 1, waited behind rsx 120.0 ms ppu 80.0 ms
   rsx: 14600.0/s, wait ...
+census: process cpu user 95.2 s kernel 14.8 s
 ```
 
-(Invented numbers, for the shape.) The header gives the acquisitions since the start, the hand-off statistics and
-the wake-ups. Each class line gives its acquisitions per second, the wait statistics, the queue length ahead of a
+(Invented numbers, for the shape.) The header gives the acquisitions since the start, the hand-off statistics, the
+wake-ups, the outcomes of `sys_ppu_thread_yield` (calls, `ok` for a call that returned `CELL_OK`, `host` for a
+`CELL_CANCEL` that passed the lock to queued host-class waiters and back, `kept` for a `CELL_CANCEL` that kept the
+lock, and the backoff sleeps; see [Threads](#threads)) and `ppu overlap`: the time PPU threads held the lock, and the
+part of it during which another PPU thread was queued, which is what a second PPU hardware thread could have run.
+Each class line gives its acquisitions per second, the wait statistics, the queue length ahead of a
 contended acquisition, the hold statistics and, as ms summed over the waiters, the holder classes its waits were
 spent behind (see [Threads](#threads)). A statistics group is `n <count> avg <x> p99 <x> max <x> ms >T <count>`:
-milliseconds, and the number of values above the threshold (1 ms for waits and holds, 0.1 ms for hand-offs).
+milliseconds, and the number of values above the threshold (1 ms for waits and holds, 0.1 ms for hand-offs). The
+`process cpu` line after the class lines is the CPU time of the whole process (`GetProcessTimes`).
 The `census: spu` section has the reservation-table and per-thread receive lines described under
 [SPU usage](spu.md#log-lines-and-census). The first call of each syscall and
 each import also logs `tox2: first sc <number> <name>` or `tox2: first hle <module>::<name>` while
@@ -161,15 +167,34 @@ census lists every such target.
 ## Threads
 
 Each guest thread is a host thread (16 MiB host stack) with its own context. All PPU guest code runs
-under one global guest lock, a FIFO ticket lock, so PPU guest threads never run in parallel. A thread
+under one global guest lock, so PPU guest threads never run in parallel. A thread
 gives up the lock only in `tox2Yield` (called from loop hooks, when another thread is waiting), in
 a blocking wait and when it exits. Blocking system calls (mutex, condition variable, event flag,
 event queue, sleep, join) wait on host condition variables with the guest lock, and record what
 they wait for for the census and for stall detection.
 
-Priority scheduling is deferred, with one exception. Runnable threads get the lock in arrival order,
-and `sys_ppu_thread_set_priority` and `sys_ppu_thread_get_priority` only store and return the value.
-The exception is the creation rule of `sys_ppu_thread_create`: a new thread whose priority number is
+The waiters of the lock sit in a list of nodes on their own stacks, each with its own condition variable, and an
+unlock hands the lock directly to one of them and wakes only that thread. The holder cannot take it back first.
+Host-class waiters (`rsx`, `audio`, `spu`, `other`) are served in arrival order. PPU waiters (guest threads,
+including the GCM interrupt thread) fill the "PPU slots" of that order: when the oldest queued entry is a PPU
+thread, the slot goes to the PPU waiter with the lowest lv2 priority number (0 is the highest precedence), and among
+equal priorities to the one that queued first, which is not necessarily the oldest waiter. A waiter uses the priority
+it had when it queued. On lv2 two threads run at once and the rest are suspended; here one lock serves both, so the
+PPU thread that held the lock last gives the slot to the second-ranked PPU waiter when there is one. The two best
+ready threads therefore alternate, and a thread ranked third waits while two better ones stay ready. A thread that
+gives up the lock for a blocking wait, a budget expiry or an exit is not queued at that moment, so it cannot win the
+slot it just gave up. "Ready" means queued for the guest lock: a thread woken from a condition variable counts only once it
+has queued.
+
+The runtime does not displace the holder when a better thread becomes ready. That thread waits for the holder's next
+release: a blocking wait, a yield, an exit, or the end of its preemption budget (4096 loop back edges and calls).
+`sys_ppu_thread_set_priority` and `sys_ppu_thread_get_priority` only store and return the value; there is no
+rescheduling, and a new priority applies the next time the thread queues for the lock or is chosen from a mutex or
+lightweight mutex wait list. Priority inheritance is not implemented (`SYS_SYNC_PRIORITY_INHERIT` is served like
+`SYS_SYNC_PRIORITY`), and the wake order of condition variable, semaphore, event flag and event queue waiters is not
+by priority.
+
+The creation rule of `sys_ppu_thread_create` follows from this: a new thread whose priority number is
 lower than the stored priority of its creator (lower number means higher precedence on lv2) runs
 before the creator continues. `startGuestThreadFirst` starts the host thread, waits until it has
 queued for the guest lock (at most 5 ms), and yields the lock to it. The new thread then runs until
@@ -182,18 +207,44 @@ creates SPURS with PPU priority 1000, so libsre's helper threads `SpursHdlr1` an
 before the main thread continues, and `SpursHdlr0` starts the SPU thread group of the SPURS kernels
 and then waits in `sys_spu_thread_group_join` (see [Status](status.md)). The rule is logged at
 debug level, and a new thread that did not queue within 5 ms
-logs `tox2: thread: ... not queued within 5 ms; creator continues` at info level. There is no other
-priority behaviour: no priority-ordered hand-off, no wake order by priority, no preemption, and no
-rescheduling when a priority changes.
+logs `tox2: thread: ... not queued within 5 ms; creator continues` at info level.
 
-`sys_ppu_thread_yield` has a host-side backoff (`yieldGuestLockBackoff`, `--yield-backoff on|off`). The game's
-main thread and render thread hand frames to each other by spinning on lock, check, unlock and yield, and ignore
-the result; on the console they run on separate hardware threads, so the spin is free. Here each yield would be a
-guest lock hand-off that the RSX thread pays for, and the spinning thread would keep a core busy. A thread whose
-yields arrive within 50 us of the previous one's return is spinning; every 64th such yield releases the lock,
-sleeps 100 us with the high-resolution timer (about a millisecond in practice) and takes the lock again. The
-lv2 result is unchanged (`CELL_OK` when another thread ran, else `CELL_CANCEL`). The back-edge preemption
-(`tox2Yield`) and the blocking waits are not affected. The census header and the perf line count the sleeps.
+`sys_ppu_thread_yield` (`yieldPpuThread`) returns lv2's result: `CELL_OK` only when a PPU thread of equal or higher
+priority (a priority number less than or equal to the caller's) was queued, and that thread has run before the call
+returns; otherwise `CELL_CANCEL`. A lower-priority thread never gets time from a yield. Queued host-class waiters
+(RSX, audio, SPU callbacks) are still served on a `CELL_CANCEL`: on the console they run on their own hardware, so
+serving them is not a guest context switch. The lock goes to the oldest of them, and the caller queues again behind
+the host waiters that were queued before it and ahead of any lower-priority PPU waiter, with its position among its
+priority peers unchanged, as a yield without a switch does not rotate. The back-edge preemption (`tox2Yield`) and
+the creation rule instead release the lock and queue again by the ordinary rules above, so a lower-priority thread
+can run there when no better one is queued.
+
+The yield also has a host-side backoff (`--yield-backoff on|off`, checked before the rules above). The game's main
+thread and render thread hand frames to each other by spinning on lock, check, unlock and yield, and ignore the
+result; on the console they run on separate hardware threads, so the spin is free. Here each yield would be a guest
+lock hand-off that the RSX thread pays for, and the spinning thread would keep a core busy. A thread whose yields
+arrive within 50 us of the previous one's return is spinning; every 64th such yield releases the lock, sleeps 100 us
+with the high-resolution timer (about a millisecond in practice) and takes the lock again. During the sleep the lock
+is free, so any waiter may run, including a lower-priority PPU thread. The result is the one the rules above give at
+the time of the call. The blocking waits are not affected. Without the backoff, 140 s runs of this game used about
+1.8 times the process CPU time and the RSX thread waited about 1.3 times as long for the lock per flip, so it stays on
+by default. The census header and the perf line count the outcomes of every call: `ok`, `host` (a `CELL_CANCEL`
+that passed the lock to host waiters and back), `kept` (a `CELL_CANCEL` with nobody to serve) and the backoff
+sleeps.
+
+A mutex or lightweight mutex hands its ownership to one waiter when it is released. Each object keeps its waiters in
+a list in arrival order. The unlock (`sys_mutex_unlock`, `sys_lwmutex_unlock`, and the release inside
+`sys_cond_wait` and `sys_lwcond_wait`) picks the waiter by the object's protocol: the longest waiter for
+`SYS_SYNC_FIFO`, otherwise the lowest priority number and, among equals, the longest waiter. The priority is the
+waiter's current one. The chosen waiter owns the object from that moment: a mutex's owner becomes its thread id, and
+the owner word of a lightweight mutex holds the reserved value until the waiter resumes and writes its id. The
+unlocking thread, and any other thread, then sees an owned object, so it blocks (or gets `EBUSY` from a try-lock)
+instead of taking it back first. A waiter whose time-out expires after it was chosen still owns the object and the
+call returns `CELL_OK`. `SYS_SYNC_RETRY` lightweight mutexes are served like `SYS_SYNC_PRIORITY`. This differs from
+lv2 and RPCS3, where a retry-protocol unlock frees the lock and the woken waiter tries again, so another thread may
+take it first; the hand-off here is stricter and cannot deadlock. The perf `lock` line counts the waits and
+hand-offs (`lwmutex wait <n> handoff <n> mutex wait <n> handoff <n>`; every wait of a run of this game ended in a
+hand-off).
 
 `tox2_game` holds a 1 ms system timer resolution for the whole run (`timeBeginPeriod`,
 `runtime/src/core/timer_resolution.*`). Timed waits (`sys_timer_usleep`, lock and queue time-outs)
@@ -222,13 +273,26 @@ uncontended lock and unlock pair is about 56 ns). Each acquisition is attributed
 for guest threads (lv2 priority below 100 is `ppu-high`; the game's sound threads use 0), and for host threads
 the class they name themselves with `setGuestLockClass`: `rsx` (the RSX consumer), `audio` (the audio engine's
 producer call), `spu` (SPU threads in their lv2 callbacks) and `other` for the rest. Per class the lock records
-the wait (ticket taken to turn, 0 when uncontended), the hold, how many waiters were queued ahead on contended
+the wait (queueing to turn, 0 when uncontended), the hold, how many waiters were queued ahead on contended
 acquisitions, and, per holder class, the hold time that ended while the class waited. It also records the
-hand-off time from an unlock to the turn of the next waiter and the wake-ups that found it was not their turn:
-the lock is a ticket lock with one condition variable, so every waiter wakes on every hand-off. In runs of this game
-these were small enough (6 % of the wake-ups were spurious, a hand-off took under 5 us) that the lock was left as it is; the
-audio-path waits it produced were not the cause of missed audio blocks (see [Audio](audio.md#guest-lock)). Host
-threads that are raised above normal priority are listed under [Audio](audio.md#host-thread-priorities).
+hand-off time from an unlock to the turn of the next waiter and the wake-ups that found it was not their turn
+(each waiter has its own condition variable and only the chosen one is woken, so these are rare). The lock also adds
+up the time PPU threads held it (`ppu overlap` in the census header) and the part of it during which another PPU
+thread was queued; in runs of this game that was 41 to 43 % of the PPU hold time. The audio-path waits the lock
+produced were not the cause of missed audio blocks (see [Audio](audio.md#guest-lock)). Host threads that are raised
+above normal priority are listed under [Audio](audio.md#host-thread-priorities).
+
+A hold of 5 ms or more is counted and logged as a warning, so a stall can be traced to its holder:
+`tox2: guest lock long hold: <x> ms holder <class> thread <id> prio <p> (<name>) at release: <a> last in hold: <b>
+previous in hold: <c> cpu <t>`. A holder that is not a guest thread has no `thread ... (<name>)` part. The three
+activity labels name the syscall or imported function the holder was running when it released the lock, the last one
+it entered during the hold, and the one before that (a release inside a labelled call has the same last label, so the
+previous label is the only trace of what ran before it); `none` means no label. For PPU holders `cpu` is the CPU
+time the holder's thread used during the hold, so a hold far above its CPU time means the host descheduled it;
+other classes print `n/a`. At most 20 such lines are logged per second, and the perf `lock` line counts all of them
+(`long holds <n>`). In a second in which the file system calls read or write, that line also ends with `fs read <n>
+<bytes> bytes max <x> ms write <n> <bytes> bytes max <x> ms`: the number of guest reads and writes, their bytes and
+the longest host transfer, which runs under the guest lock.
 
 Thread ids start at `0x01000000`. lv2 interrupt threads are not implemented; the one interrupt
 thread the game needs is the GCM interrupt thread described under [Fake RSX](rendering.md#fake-rsx).
@@ -286,13 +350,13 @@ that does not abort or exit does not issue it.
 | Time | `sys_timer_usleep` (141), `sys_timer_sleep` (142), `sys_time_get_timebase_frequency` (147) |
 | Memory | `sys_memory_allocate` (348), `sys_memory_free` (349), `sys_memory_get_user_memory_size` (352); containers: `sys_memory_container_create` (324, 341), `_destroy` (325, 342), `_get_size` (343) and `sys_memory_allocate_from_container` (350); `sys_memory_get_page_attribute` (351) |
 | Debug notification | System call 988, which is unnamed (see above) |
-| Mutex and condition variable | `sys_mutex_create`, `_destroy`, `_lock`, `_trylock`, `_unlock` (100-104); `sys_cond_create`, `_destroy`, `_wait`, `_signal`, `_signal_all` (105-109) |
+| Mutex and condition variable | `sys_mutex_create`, `_destroy`, `_lock`, `_trylock`, `_unlock` (100-104); `sys_cond_create`, `_destroy`, `_wait`, `_signal`, `_signal_all` (105-109). An unlock hands the mutex to the waiter its protocol chooses (see [Threads](#threads)) |
 | Semaphore | `sys_semaphore_create` (90), `_destroy` (91), `_wait` (92), `_trywait` (93), `_post` (94), `_get_value` (114). Process-shared semaphores (an IPC key) are not supported; a waiter that blocks wakes in no particular order |
 | Event flag | `sys_event_flag_create` (82), `_destroy` (83), `_wait` (85), `_set` (87), `_clear` (118), `_cancel` (132), `_get` (139) |
 | Event queue and port | `sys_event_queue_create` (128), `_destroy` (129), `_receive` (130), `_tryreceive` (131), `_drain` (133); `sys_event_port_create` (134), `_destroy` (135), `_connect_local` (136), `_disconnect` (137), `_send` (138). A queue created with a non-zero IPC key can be found by that key (the host looks it up and sends to it; the `cellAudio` notify uses this); a second live queue with the same key fails with `CELL_EEXIST`, key 0 makes a local queue, and destroying the queue forgets the key. IPC ports (`sys_event_port_connect_ipc`) are not supported. |
 | SPU | `sys_spu_initialize` (169); thread groups: `sys_spu_thread_group_create` (170), `_destroy` (171), `_start` (173), `_terminate` (177), `_join` (178), `_connect_event` (185), `_disconnect_event` (186), `_set_cooperative_victims` (250), `_connect_event_all_threads` (251), `_disconnect_event_all_threads` (252); threads: `sys_spu_thread_initialize` (172), `_write_ls` (181), `_read_ls` (182), `_write_spu_mb` (190), `_connect_event` (191), `_disconnect_event` (192), `_bind_queue` (193), `_unbind_queue` (194). A started group runs its threads as SPU host threads (see [SPU system calls](#spu-system-calls)). |
 | File system | `sys_fs_open` (801), `_read` (802), `_write` (803), `_close` (804), `_opendir` (805), `_readdir` (806), `_closedir` (807), `_stat` (808), `_fstat` (809), `_mkdir` (811), `_unlink` (814), `_lseek` (818); see [Virtual file system](virtual-file-system.md#virtual-file-system) |
-| Thread | `_sys_ppu_thread_exit` (41), `sys_ppu_thread_yield` (43), `sys_ppu_thread_join` (44), `sys_ppu_thread_detach` (45; a thread that already exited without being joined is dropped, as in RPCS3), `sys_ppu_thread_set_priority` (47), `sys_ppu_thread_get_priority` (48); the creation rule of `sys_ppu_thread_create` is under [Threads](#threads) |
+| Thread | `_sys_ppu_thread_exit` (41), `sys_ppu_thread_yield` (43; `CELL_OK` only when a PPU thread of equal or higher priority ran, see [Threads](#threads)), `sys_ppu_thread_join` (44), `sys_ppu_thread_detach` (45; a thread that already exited without being joined is dropped, as in RPCS3), `sys_ppu_thread_set_priority` (47; stores the value), `sys_ppu_thread_get_priority` (48); the creation rule of `sys_ppu_thread_create` is under [Threads](#threads) |
 
 ### Process and page calls
 

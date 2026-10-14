@@ -303,5 +303,7 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   keyboard has a fixed mapping, no analog sticks and no vibration; gamepads are read through
   GameInput with a fixed mapping. Only port 0 exists; there is no mouse or `cellKb` input. See
   [Input](input.md). The game reads port 0 (7,794 `cellPadGetData` calls in the 30 s run); no input has been sent to it.
-- Priority scheduling beyond the creation rule (a new thread with a numerically lower priority than
-  its creator runs first), lv2 interrupt threads, savestates.
+- Scheduling beyond the lock order: the guest lock hands over by lv2 priority, but there is no displacement of
+  the holder when a better thread becomes ready, no rescheduling on `sys_ppu_thread_set_priority`, no priority
+  inheritance, and condition variable, semaphore and event waiters do not wake by priority. Two PPU threads never
+  run at once (an lv2 console runs two). lv2 interrupt threads and savestates are not implemented.

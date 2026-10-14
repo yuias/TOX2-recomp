@@ -90,14 +90,17 @@ device does not underrun because of it. `kMaxCatchUpBlocks` is 0.
 
 ### Guest lock
 
-Guest memory and lv2 objects are touched only under the guest lock, which is a FIFO ticket lock
-shared with every guest thread and with the RSX thread. The engine takes it for one period at a
+Guest memory and lv2 objects are touched only under the guest lock, which is shared with every guest thread and
+with the RSX thread. Waiters queue in a list and an unlock wakes only the one it hands the lock to. The audio
+engine, the RSX thread and SPU threads are served in arrival order. Guest threads fill the "PPU slots" of that order
+by lv2 priority, so a thread with a lower priority number, such as the game's sound threads at priority 0, gets a
+slot before a thread at 1001 (see [Threads](runtime.md#threads)). The engine takes it for one period at a
 time and never holds it while sleeping, writing the dump or talking to a device. The `cellAudio`
 and `cellAtrac` handlers never wait for the engine thread or the device, because the engine may
 itself be waiting for the lock. Device threads never take the lock and never touch guest memory.
 
 After each notify the earlier game's mixer needed 90 to 250 us and several passes through the lock (each hold
-under 0.1 ms) to write its block, and it only gets the lock in arrival order. A long hold by another thread makes periods run back to back
+under 0.1 ms) to write its block, and it gets the lock only after the holders ahead of it. A long hold by another thread makes periods run back to back
 and a block is then consumed before the mixer rewrote it, which plays as silence in the middle of
 the music. The long holder was the RSX thread with the frame builder on (the window, `--render
 vulkan`): it now pumps the command buffer in slices of 128 words and ends a hold once it has lasted
@@ -113,8 +116,10 @@ section, once per second in the `lock` perf line and as a table in the overlay (
 a 400 s scripted run of this game at resolution scale 1 and 3, the lock was not what made the mixer miss a block:
 the wait of the audio, SPU and high-priority guest threads had a 99th percentile of 0.11 to 0.16 ms and a
 maximum under 2 ms, and looked the same in the seconds with a missed block and in the others; a hand-off took
-under 5 us, and a contended acquisition caused about 0.07 spurious wake-ups. The ticket lock is therefore
-unchanged.
+under 5 us, and a contended acquisition caused about 0.07 spurious wake-ups. Those figures come from the earlier
+lock, which served every class in arrival order and woke all waiters on each hand-off. They did not point at the
+lock, so the lock's order for host-class waiters and their place in the queue were left as they were when guest
+threads started to be ordered by priority.
 
 ### Host thread priorities
 
@@ -360,7 +365,8 @@ Lines start with `tox2: audio:`, `tox2: atrac:`, `tox2: timer:` or `tox2: thread
 | `tox2: thread: <id> <name> not queued within 5 ms; creator continues` | info | The new thread did not queue for the guest lock in time |
 | `tox2: host: <audio engine\|high-priority SPU> thread priority <n>` | debug | First use of a host priority role (`<n>` is the Windows thread priority value); a refused change is a warning `tox2: host: cannot raise the <role> thread priority (error <n>)` |
 | `tox2: perf: t <s> s: audio flips <n> periods <n> unwritten <n> (runs <n>)` | debug | Once per second from the first `cellAudioInit`: the deltas over the last second. `t` is the guest system time |
-| `tox2: perf: t <s> s: lock <class> n <n> avg <x> p99 <x> max <x> ms >1.00ms <n> hold p99 <x> max <x> \| <class> ...` | debug | Once per second, for each guest-lock class that took the lock in that second: its wait (count, mean, 99th percentile, maximum in ms and the number of waits above 1 ms), then its hold. The classes `audio`, `spu` and `ppu-high` add `ahead avg <n> behind <class> <ms> ... ms`: the mean queue length of the contended acquisitions and the time the waits were spent behind each holder class (sums over the waiters, so read them as ratios) |
+| `tox2: perf: t <s> s: lock <class> n <n> avg <x> p99 <x> max <x> ms >1.00ms <n> hold p99 <x> max <x> \| <class> ...` | debug | Once per second, for each guest-lock class that took the lock in that second: its wait (count, mean, 99th percentile, maximum in ms and the number of waits above 1 ms), then its hold. The classes `audio`, `spu` and `ppu-high` add `ahead avg <n> behind <class> <ms> ... ms`: the mean queue length of the contended acquisitions and the time the waits were spent behind each holder class (sums over the waiters, so read them as ratios). Further fields follow, separated by `\|`, when they apply in that second: `yield calls <n> ok <n> host <n> kept <n> backoff <n>` (the outcomes of `sys_ppu_thread_yield`, see [Threads](runtime.md#threads)), `lwmutex wait <n> handoff <n> mutex wait <n> handoff <n>` (waits on a lightweight mutex or mutex and how many ended in an ownership hand-off), `long holds <n>` (guest-lock holds of 5 ms or more) and `fs read <n> <bytes> bytes max <x> ms write <n> <bytes> bytes max <x> ms` (the file system transfers of that second and the longest one) |
+| `tox2: guest lock long hold: <x> ms holder <class> thread <id> prio <p> (<name>) at release: <a> last in hold: <b> previous in hold: <c> cpu <t>` | warn | A guest-lock hold lasted 5 ms or more, at most 20 lines per second. The three labels are the syscall or imported function running at the release, the last one entered during the hold and the one before it; `cpu` is the holder thread's CPU time in the hold (PPU holders only, else `n/a`); a holder that is not a guest thread has no `thread ... (<name>)` part |
 | `tox2: perf: t <s> s: spu <id> <name> busy n <n> avg <x> p99 <x> max <x> ms >5.33ms <n>; wait p99 <x> max <x> \| rsv-wait epoch <n> timeout <n> lost-after-timeout <n>` | debug | Once per second: per SPU thread that received events, its busy time (reply to the next receive; the last number counts intervals over one 5.33 ms period) and wait time (receive to reply), and how the SPU reservation waits ended (see [SPU usage](spu.md#log-lines-and-census)) |
 
 ## Census
