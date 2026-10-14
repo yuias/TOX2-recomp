@@ -21,6 +21,10 @@ struct SyscallEntry {
     uint32_t number;
     const char* name;      // null when the number has no known name
     GuestHandler handler;  // null: the default handler runs
+    // Split PPU modes: the handler runs without the kernel lock. Only for a handler that touches nothing but its
+    // context, thread-locals, guest memory and atomics (it must not block, allocate guest memory or touch lv2/HLE
+    // state).
+    bool kernel_free = false;
 };
 
 // Every syscall the game can issue plus every implemented one, sorted by number.

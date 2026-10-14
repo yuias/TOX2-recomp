@@ -34,6 +34,7 @@ struct InstalledImport {
     const char* module = nullptr;
     const char* name = nullptr;
     GuestHandler handler = nullptr;
+    bool kernel_free = false;
     std::uint32_t default_calls = 0;
     std::uint32_t bound_opd = 0;  // descriptor of the recompiled export this import calls; 0: not bound
     std::string bound_image;
@@ -68,7 +69,7 @@ constexpr std::array<HandlerList, 19> kRegistries{
         cellRtcHandlers};
 
 // Written by installImports before any guest thread starts; the call counters are updated under
-// the guest lock.
+// the guest lock (legacy) or the kernel lock (split PPU modes).
 std::vector<InstalledImport> g_imports;
 std::vector<ModuleImports> g_modules;
 bool g_quiet = false;
@@ -171,6 +172,7 @@ std::vector<InstalledImport> resolveImports(const Tox2ImportInfo* imports, std::
             }
             if (slot.name == nullptr) slot.name = entry.name;
             slot.handler = entry.handler;
+            slot.kernel_free = entry.kernel_free;
         }
 
         const auto binding = bindings.find(key);
@@ -204,10 +206,18 @@ void runImport(InstalledImport& import, Tox2PpuContext* ctx, std::uint8_t* base)
 
     if (implemented) {
         const ActivityScope activity(import.name != nullptr ? import.name : "hle ?");
+        if (import.kernel_free) {
+            import.handler(ctx, base);
+            return;
+        }
+        // After the ActivityScope, so a contended kernel lock is attributed to this call.
+        const KernelSection kernel;
         import.handler(ctx, base);
         return;
     }
 
+    // The log limit and the counter are shared state: the section covers the whole default path.
+    const KernelSection kernel;
     if (!g_quiet && import.default_calls < kDefaultLogLimit) {
         logInfo("tox2: default hle {}::{}({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x})",
                 import.module != nullptr ? import.module : "?", import.name != nullptr ? import.name : "?", ctx->gpr[3],
@@ -292,6 +302,11 @@ void installModuleImports(const char* image, const Tox2ImportInfo* imports, std:
 void setQuietHle(bool quiet) { g_quiet = quiet; }
 
 void callGuestOpd(Tox2PpuContext* ctx, uint8_t* base, std::uint32_t opd_addr) {
+    // Guest code runs only with a slot. Every host-to-guest re-entry is expected to come from a slot-holding guest
+    // thread, so a missing slot means a path that was not audited; stop instead of running unserialised.
+    if (splitPpuMode() && !ppuSlots().heldByCurrentThread()) {
+        fatal(FatalKind::Internal, "callGuestOpd without a PPU slot");
+    }
     const std::uint64_t saved_lr = ctx->lr;
     const std::uint64_t saved_toc = ctx->gpr[2];
     const std::uint32_t entry = tox2Read32(base, opd_addr);
@@ -299,7 +314,11 @@ void callGuestOpd(Tox2PpuContext* ctx, uint8_t* base, std::uint32_t opd_addr) {
     ctx->lr = 0;
     ctx->jump_site = opd_addr;
     ctx->jump_target = entry;
-    tox2Dispatch(ctx, base);
+    {
+        // The callee may block or take kernel sections of its own; it must not run under the caller's.
+        const KernelExit leave_kernel;
+        tox2Dispatch(ctx, base);
+    }
     ctx->gpr[2] = saved_toc;
     ctx->lr = saved_lr;
 }

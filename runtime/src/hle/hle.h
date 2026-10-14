@@ -24,7 +24,8 @@ struct HleEntry {
     const char* module;
     uint32_t fnid;
     const char* name;
-    GuestHandler handler;  // null: the default handler runs
+    GuestHandler handler;      // null: the default handler runs
+    bool kernel_free = false;  // as SyscallEntry::kernel_free
 };
 
 // Handlers of the sysPrxForUser module.
@@ -266,7 +267,9 @@ std::vector<std::string> guestExportConflicts(std::span<const GuestExports> gues
 void setQuietHle(bool quiet);
 
 // Calls the function described by the guest function descriptor at `opd_addr` (entry address and
-// TOC) and returns when it does. lr and r2 are saved and restored.
+// TOC) and returns when it does. lr and r2 are saved and restored. In the split PPU modes the caller
+// must hold a PPU slot (fatal otherwise) and the kernel lock is released for the call, so a handler
+// must not assume its module state is unchanged across it.
 void callGuestOpd(Tox2PpuContext* ctx, uint8_t* base, uint32_t opd_addr);
 
 // Calls a guest function through its OPD with up to 8 arguments in r3..r10 and returns r3.

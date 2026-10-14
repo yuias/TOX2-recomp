@@ -13652,6 +13652,362 @@ void testSplitReservationCounter() {
     CHECK(tox2Read32(base, kSpuWord) == kSpuIncrements);
 }
 
+// ---- Kernel sections at the syscall and HLE boundary ----
+
+TOX2_PPU_FUNC(boundaryDummyEntry) {
+    (void)ctx;
+    (void)base;
+}
+
+// Guest memory for a boundary test, with a stack area for the threads that call back into guest code.
+class BoundaryEnv {
+public:
+    BoundaryEnv() : env_({boundaryDummyEntry}) {
+        tox2::resetHostFunctions();
+        tox2::resetCellSysutil();
+        tox2::Process& p = tox2::process();
+        data_ = p.main.allocate(0x10000, 0x10000);
+        stack_ = p.main.allocate(0x10000, 0x10000);
+        CHECK(data_ != 0 && stack_ != 0);
+    }
+    ~BoundaryEnv() {
+        tox2::installImports(nullptr, 0);
+        tox2::resetCellSysutil();
+        tox2::resetHostFunctions();
+        tox2::process().main.free(stack_);
+        tox2::process().main.free(data_);
+    }
+    BoundaryEnv(const BoundaryEnv&) = delete;
+    BoundaryEnv& operator=(const BoundaryEnv&) = delete;
+
+    std::uint8_t* base() const { return env_.base(); }
+    std::uint32_t data() const { return data_; }
+    // A caller object whose r1 points into its own part of the stack area.
+    std::unique_ptr<tox2::GuestThread> makeCallerWithStack(std::uint32_t id, unsigned index) const {
+        auto caller = makeCaller(id);
+        caller->context().gpr[1] = stack_ + 0x4000 + 0x1000 * index;
+        return caller;
+    }
+
+private:
+    GuestThreadEnv env_;
+    std::uint32_t data_ = 0, stack_ = 0;
+};
+
+// Four slot-holding threads (priorities 1001, 1001, 500, 100) run `iteration(caller)` 20,000 times each while a host
+// thread takes the kernel lock in 300 us slices. Returns the wall time.
+std::chrono::milliseconds runKernelStress(const std::function<void(tox2::GuestThread&)>& iteration) {
+    constexpr std::array<std::int32_t, 4> kPriorities{1001, 1001, 500, 100};
+    constexpr int kIterations = 20'000;
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+    std::vector<std::unique_ptr<tox2::GuestThread>> callers;
+    for (std::size_t i = 0; i < kPriorities.size(); i++) {
+        callers.push_back(makeCaller(0x01000000 + static_cast<std::uint32_t>(i)));
+    }
+    std::atomic<bool> stop{false};
+    std::thread host([&] {
+        while (!stop.load()) {
+            {
+                std::lock_guard<tox2::GuestLock> lock(tox2::guestLock());
+                const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(300);
+                while (std::chrono::steady_clock::now() < until) {
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+    });
+    const auto start = std::chrono::steady_clock::now();
+    std::vector<std::thread> threads;
+    for (std::size_t i = 0; i < kPriorities.size(); i++) {
+        threads.push_back(slotThread(kPriorities[i], [&, i] {
+            slots.acquire();
+            for (int n = 0; n < kIterations; n++) {
+                iteration(*callers[i]);
+                if (n % 100 == 99) syscallAs(*callers[i], 43);
+            }
+            slots.release();
+        }));
+    }
+    joinAll(threads);
+    const auto elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    stop = true;
+    host.join();
+    return elapsed;
+}
+
+const char* splitName(tox2::PpuThreadsMode mode) { return mode == tox2::PpuThreadsMode::Split1 ? "split1" : "split2"; }
+
+// The guest word is incremented with plain accesses under an lv2 mutex: only the kernel sections around the handlers
+// (and the lock handoff through them) keep the count exact.
+void splitSyscallStressCase(tox2::PpuThreadsMode split) {
+    BoundaryEnv env;
+    std::uint8_t* base = env.base();
+    const std::uint32_t id_out = env.data(), attr = env.data() + 0x40, word = env.data() + 0x80;
+    auto setup = makeCaller(0x01000100);
+    tox2Write32(base, attr, tox2::kSyncFifo);
+    tox2Write32(base, attr + 4, tox2::kSyncNotRecursive);
+    CHECK(syscallAs(*setup, 100, id_out, attr) == 0);
+    const std::uint32_t mutex = tox2Read32(base, id_out);
+    tox2Write32(base, word, 0);
+
+    SplitModeScope mode(split);
+    std::atomic<int> failures{0};
+    const auto elapsed = runKernelStress([&](tox2::GuestThread& caller) {
+        if (syscallAs(caller, 102, mutex, 0) != 0) failures++;
+        tox2Write32(base, word, tox2Read32(base, word) + 1);
+        if (syscallAs(caller, 104, mutex) != 0) failures++;
+    });
+    CHECK(failures == 0);
+    CHECK(tox2Read32(base, word) == 80'000);
+    CHECK(elapsed < std::chrono::seconds(30));
+    std::printf("split syscall stress (%s): %lld ms\n", splitName(split), static_cast<long long>(elapsed.count()));
+}
+
+// The same through tox2HleCall with an lwmutex from an installed import table.
+void splitHleStressCase(tox2::PpuThreadsMode split) {
+    BoundaryEnv env;
+    std::uint8_t* base = env.base();
+    constexpr const char* kModule = "sysPrxForUser";
+    const Tox2ImportInfo imports[] = {
+            {0x00800000, 0x2f85c0ef, kModule, "sys_lwmutex_create"},
+            {0x00800020, 0x1573dc3f, kModule, "sys_lwmutex_lock"},
+            {0x00800040, 0x1bc200f4, kModule, "sys_lwmutex_unlock"},
+    };
+    tox2::installImports(imports, 3);
+    enum { kCreate, kLock, kUnlock };
+    const auto call = [&](tox2::GuestThread& caller, std::uint32_t index, std::uint64_t r3, std::uint64_t r4) {
+        Tox2PpuContext* ctx = &caller.context();
+        ctx->gpr[3] = r3;
+        ctx->gpr[4] = r4;
+        tox2HleCall(ctx, base, index);
+        return ctx->gpr[3];
+    };
+    const std::uint32_t lwmutex = env.data(), attr = env.data() + 0x40, word = env.data() + 0x80;
+    auto setup = makeCaller(0x01000100);
+    tox2Write32(base, attr, tox2::kSyncFifo);
+    tox2Write32(base, attr + 4, tox2::kSyncNotRecursive);
+    CHECK(call(*setup, kCreate, lwmutex, attr) == 0);
+    tox2Write32(base, word, 0);
+
+    SplitModeScope mode(split);
+    std::atomic<int> failures{0};
+    const auto elapsed = runKernelStress([&](tox2::GuestThread& caller) {
+        if (call(caller, kLock, lwmutex, 0) != 0) failures++;
+        tox2Write32(base, word, tox2Read32(base, word) + 1);
+        if (call(caller, kUnlock, lwmutex, 0) != 0) failures++;
+    });
+    CHECK(failures == 0);
+    CHECK(tox2Read32(base, word) == 80'000);
+    CHECK(elapsed < std::chrono::seconds(30));
+    std::printf("split hle stress (%s): %lld ms\n", splitName(split), static_cast<long long>(elapsed.count()));
+}
+
+void testSplitSyscallStress() {
+    HangGuard guard("testSplitSyscallStress");
+    for (const tox2::PpuThreadsMode split : {tox2::PpuThreadsMode::Split1, tox2::PpuThreadsMode::Split2}) {
+        splitSyscallStressCase(split);
+        splitHleStressCase(split);
+    }
+}
+
+std::atomic<int> g_callee_kernel_held{-1};
+
+TOX2_PPU_FUNC(kernelProbeCallee) {
+    (void)ctx;
+    (void)base;
+    g_callee_kernel_held = tox2::guestLock().heldByCurrentThread() ? 1 : 0;
+}
+
+// A callback from a handler runs without the kernel lock and returns to the handler holding it again.
+void testSplitGuestCallbackReleasesKernel() {
+    HangGuard guard("testSplitGuestCallbackReleasesKernel");
+    for (const tox2::PpuThreadsMode split : {tox2::PpuThreadsMode::Split1, tox2::PpuThreadsMode::Split2}) {
+        BoundaryEnv env;
+        std::uint8_t* base = env.base();
+        const std::uint32_t cb = tox2::registerHostFunction("kernelProbeCallee", kernelProbeCallee);
+        CHECK(cb != 0);
+        constexpr const char* kModule = "cellSysutil";
+        const Tox2ImportInfo imports[] = {
+                {0x00800000, 0x9d98afa0, kModule, "cellSysutilRegisterCallback"},
+                {0x00800010, 0x189a74da, kModule, "cellSysutilCheckCallback"},
+        };
+        tox2::installImports(imports, 2);
+        auto caller = env.makeCallerWithStack(0x01000000, 0);
+        Tox2PpuContext* ctx = &caller->context();
+
+        SplitModeScope mode(split);
+        bool direct_after = false, hle_after = true;
+        int direct_inside = -1, hle_inside = -1;
+        std::thread thread = slotThread(1001, [&] {
+            tox2::ppuSlots().acquire();
+            {
+                // What a handler does: it runs in a kernel section (runImport opens it) and calls back.
+                tox2::KernelSection section;
+                g_callee_kernel_held = -1;
+                tox2::callGuestFunction(ctx, base, cb, {});
+                direct_inside = g_callee_kernel_held;
+                direct_after = tox2::guestLock().heldByCurrentThread();
+            }
+            // The same through a real handler: cellSysutilCheckCallback runs the queued closure, which calls back.
+            ctx->gpr[3] = 0;
+            ctx->gpr[4] = cb;
+            ctx->gpr[5] = 0;
+            tox2HleCall(ctx, base, 0);
+            {
+                tox2::KernelSection section;
+                CHECK(tox2::queueSysutilEvent(tox2::kSysutilRequestExitGame, 1) == 1);
+            }
+            g_callee_kernel_held = -1;
+            tox2HleCall(ctx, base, 1);
+            hle_inside = g_callee_kernel_held;
+            hle_after = tox2::guestLock().heldByCurrentThread();
+            tox2::ppuSlots().release();
+        });
+        thread.join();
+        CHECK(direct_inside == 0 && direct_after);
+        CHECK(hle_inside == 0 && !hle_after);
+    }
+}
+
+std::atomic<std::int64_t> g_sysutil_stress_calls{0};
+
+TOX2_PPU_FUNC(sysutilStressCallback) {
+    (void)ctx;
+    (void)base;
+    g_sysutil_stress_calls++;
+}
+
+// Thread A runs the queued closures (each calls back into guest code, which releases the kernel lock) while thread B
+// registers callbacks and queues events: every closure runs exactly once.
+void testSplitSysutilCallbacks() {
+    HangGuard guard("testSplitSysutilCallbacks");
+    BoundaryEnv env;
+    std::uint8_t* base = env.base();
+    const std::uint32_t cb = tox2::registerHostFunction("sysutilStressCallback", sysutilStressCallback);
+    CHECK(cb != 0);
+    constexpr const char* kModule = "cellSysutil";
+    const Tox2ImportInfo imports[] = {
+            {0x00800000, 0x9d98afa0, kModule, "cellSysutilRegisterCallback"},
+            {0x00800010, 0x189a74da, kModule, "cellSysutilCheckCallback"},
+    };
+    tox2::installImports(imports, 2);
+    auto a = env.makeCallerWithStack(0x01000000, 0);
+    auto b = env.makeCallerWithStack(0x01000001, 1);
+    g_sysutil_stress_calls = 0;
+
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    constexpr int kRounds = 3000;
+    std::atomic<std::int64_t> queued{0};
+    std::atomic<bool> b_done{false};
+    const auto start = std::chrono::steady_clock::now();
+    std::thread thread_a = slotThread(1001, [&] {
+        tox2::ppuSlots().acquire();
+        Tox2PpuContext* ctx = &a->context();
+        // The check after B finished drains what B queued last.
+        for (bool last = false; !last;) {
+            last = b_done.load();
+            tox2HleCall(ctx, base, 1);
+        }
+        tox2::ppuSlots().release();
+    });
+    std::thread thread_b = slotThread(1001, [&] {
+        tox2::ppuSlots().acquire();
+        Tox2PpuContext* ctx = &b->context();
+        for (int i = 0; i < kRounds; i++) {
+            ctx->gpr[3] = static_cast<std::uint32_t>(i) % 4;
+            ctx->gpr[4] = cb;
+            ctx->gpr[5] = static_cast<std::uint32_t>(i);
+            tox2HleCall(ctx, base, 0);
+            tox2::KernelSection section;  // queueSysutilEvent is called from handlers, which run in a section
+            const std::int32_t count =
+                    tox2::queueSysutilEvent(tox2::kSysutilRequestExitGame, static_cast<std::uint64_t>(i));
+            if (count > 0) queued += count;
+        }
+        b_done = true;
+        tox2::ppuSlots().release();
+    });
+    thread_b.join();
+    thread_a.join();
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    CHECK(queued > 0);
+    CHECK(g_sysutil_stress_calls == queued.load());
+    CHECK(elapsed < std::chrono::seconds(10));
+}
+
+// Two slot holders call the same default-handled import: the shared call counter and the log limit stay exact.
+void testSplitDefaultPathCount() {
+    HangGuard guard("testSplitDefaultPathCount");
+    BoundaryEnv env;
+    std::uint8_t* base = env.base();
+    std::atomic<int> default_lines{0};
+    tox2::setLogSink([&](std::string_view line) {
+        if (line.find("tox2: default hle cellTestModule::cellTestFirst(") != std::string_view::npos) default_lines++;
+    });
+    tox2::resetLogOnce();
+    tox2::setQuietHle(false);
+    const Tox2ImportInfo imports[] = {{0x00800000, 0xdeadbeef, "cellTestModule", "cellTestFirst"}};
+    tox2::installImports(imports, 1);
+    auto a = makeCaller(0x01000000);
+    auto b = makeCaller(0x01000001);
+
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    std::atomic<int> bad{0};
+    std::vector<std::thread> threads;
+    for (tox2::GuestThread* caller : {a.get(), b.get()}) {
+        threads.push_back(slotThread(1001, [&, caller] {
+            tox2::ppuSlots().acquire();
+            Tox2PpuContext* ctx = &caller->context();
+            for (int n = 0; n < 10'000; n++) {
+                ctx->gpr[3] = 0x55;
+                ctx->gpr[4] = 0x66;
+                tox2HleCall(ctx, base, 0);
+                if (ctx->gpr[3] != 0) bad++;
+            }
+            tox2::ppuSlots().release();
+        }));
+    }
+    joinAll(threads);
+    CHECK(bad == 0);
+    CHECK(default_lines == 8);
+    CHECK(tox2::formatCensus().find("  cellTestModule::cellTestFirst: 20000 [default]") != std::string::npos);
+    tox2::setLogSink({});
+}
+
+// Uncontended cost of one dispatcher call: legacy against Split1, for a kernel entry and a kernel-free one.
+void testSplitBoundaryCost() {
+    constexpr int kRuns = 5;
+    constexpr int kCalls = 300'000;
+    GuestThreadEnv env({boundaryDummyEntry});
+    auto caller = makeCaller(0x01000000);
+    const auto measure = [&](std::uint32_t number) {
+        std::array<double, kRuns> ns{};
+        for (double& run : ns) {
+            const auto start = std::chrono::steady_clock::now();
+            for (int i = 0; i < kCalls; i++) syscallAs(*caller, number);
+            const auto elapsed = std::chrono::steady_clock::now() - start;
+            run = static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()) / kCalls;
+        }
+        std::ranges::sort(ns);
+        return ns[kRuns / 2];
+    };
+    // sys_process_getpid takes the kernel lock in the split modes; sys_time_get_timebase_frequency does not.
+    const double legacy_kernel = measure(1), legacy_free = measure(147);
+    double split_kernel = 0, split_free = 0;
+    {
+        SplitModeScope mode(tox2::PpuThreadsMode::Split1);
+        tox2::ppuSlots().acquire();
+        split_kernel = measure(1);
+        split_free = measure(147);
+        tox2::ppuSlots().release();
+    }
+    std::printf(
+            "syscall dispatch uncontended: kernel entry legacy %.0f ns, split %.0f ns (+%.0f); kernel-free legacy "
+            "%.0f ns, split %.0f ns (+%.0f)\n",
+            legacy_kernel, split_kernel, split_kernel - legacy_kernel, legacy_free, split_free,
+            split_free - legacy_free);
+}
+
 // Rapid yields reach the backoff and let another host thread take the lock; spaced yields never do.
 void testYieldBackoff() {
     tox2::setYieldBackoffEnabled(true);
@@ -14164,6 +14520,13 @@ void testAbortChild() {
     CHECK(contains(r, "tox2: stop: abort from 0x011d1234 (sysPrxForUser 0x9fb6228e)"));
 }
 
+void testCallWithoutSlotChild() {
+    const ChildResult r = runChild(L"--call-without-slot-child");
+    echoChild("call without slot child", r);
+    CHECK(r.exit_code == 3);
+    CHECK(contains(r, "tox2: stop: fatal internal error: callGuestOpd without a PPU slot"));
+}
+
 void testSpuStartChild() {
     const ChildResult r = runChild(L"--spu-start-child");
     echoChild("spu start child", r);
@@ -14355,6 +14718,18 @@ int spuStartChild() {
     return 99;
 }
 
+int callWithoutSlotChild() {
+    tox2::installProcessSettings();
+    tox2::process().memory.reserve();
+    tox2::process().memory.commit(0x500000, 0x1000);
+    tox2::setPpuThreadsMode(tox2::PpuThreadsMode::Split1);
+    auto ctx = std::make_unique<Tox2PpuContext>();
+    ctx->gpr[1] = 0x500800;
+    // This thread holds no PPU slot.
+    tox2::callGuestFunction(ctx.get(), tox2::process().memory.base(), 0x500000, {});
+    return 99;
+}
+
 void childCensus() { std::fprintf(stderr, "census: test printer ran\n"); }
 
 Tox2PpuContext g_child_ctx;
@@ -14411,6 +14786,7 @@ int main(int argc, char** argv) {
         if (mode == "--overlapping-span-child") return overlappingSpanChild();
         if (mode == "--abort-child") return abortChild();
         if (mode == "--spu-start-child") return spuStartChild();
+        if (mode == "--call-without-slot-child") return callWithoutSlotChild();
     }
 
     tox2::installProcessSettings();
@@ -14532,6 +14908,11 @@ int main(int argc, char** argv) {
     testSplitReturnPathTls();
     testSplitYieldInsideKernel();
     testSplitReservationCounter();
+    testSplitSyscallStress();
+    testSplitGuestCallbackReleasesKernel();
+    testSplitSysutilCallbacks();
+    testSplitDefaultPathCount();
+    testSplitBoundaryCost();
     testYieldBackoff();
     testPpuYieldStats();
     testPpuYieldSemantics();
@@ -14547,6 +14928,7 @@ int main(int argc, char** argv) {
     testUnsortedTableChild();
     testOverlappingSpanChild();
     testAbortChild();
+    testCallWithoutSlotChild();
     testSpuStartChild();
     testSpuJoinNotInitialized();
     std::printf("runtime core tests: %d passed, %d failed\n", g_passed, g_failed);

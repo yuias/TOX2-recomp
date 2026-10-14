@@ -129,7 +129,7 @@ constexpr SyscallEntry kSyscalls[] = {
         {22, "_sys_process_exit", sysProcessExit},
         {25, "sys_process_get_sdk_version", sysProcessGetSdkVersion},
         {41, "_sys_ppu_thread_exit", sysPpuThreadExit},
-        {43, "sys_ppu_thread_yield", sysPpuThreadYield},
+        {43, "sys_ppu_thread_yield", sysPpuThreadYield, true},
         {44, "sys_ppu_thread_join", sysPpuThreadJoin},
         {45, "sys_ppu_thread_detach", sysPpuThreadDetach},
         {47, "sys_ppu_thread_set_priority", sysPpuThreadSetPriority},
@@ -169,7 +169,7 @@ constexpr SyscallEntry kSyscalls[] = {
         {139, "sys_event_flag_get", sysEventFlagGet},
         {141, "sys_timer_usleep", sysTimerUsleep},
         {142, "sys_timer_sleep", sysTimerSleep},
-        {147, "sys_time_get_timebase_frequency", sysTimeGetTimebaseFrequency},
+        {147, "sys_time_get_timebase_frequency", sysTimeGetTimebaseFrequency, true},
         {169, "sys_spu_initialize", sysSpuInitialize},
         {170, "sys_spu_thread_group_create", sysSpuThreadGroupCreate},
         {171, "sys_spu_thread_group_destroy", sysSpuThreadGroupDestroy},
@@ -251,10 +251,18 @@ void tox2Syscall(Tox2PpuContext* ctx, uint8_t* base, uint32_t site) {
 
     if (implemented) {
         const tox2::ActivityScope activity(name != nullptr ? name : "syscall ?");
+        if (entry->kernel_free) {
+            entry->handler(ctx, base);
+            return;
+        }
+        // After the ActivityScope, so a contended kernel lock is attributed to this call.
+        const tox2::KernelSection kernel;
         entry->handler(ctx, base);
         return;
     }
 
+    // Unimplemented syscalls are rare; they stay in the kernel section like every other non-exempt entry.
+    const tox2::KernelSection kernel;
     // The key is built on the stack: unimplemented syscalls can be hot.
     std::array<char, 24> key;
     const auto end = std::format_to_n(key.data(), key.size(), "default-sc-{}", number);
