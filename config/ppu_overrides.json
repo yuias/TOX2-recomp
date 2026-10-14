@@ -1,6 +1,11 @@
 {
   "overrides": [
     {
+      "entry": "0x00955f50",
+      "generated_sha256": "1f13f1729d06d1b7d820a2c6c094145154c0d4814b0576c47981d14900f2c72b",
+      "reason": "ATRAC decoder setup: first SetData under the stream mutex, flag raised after it succeeds"
+    },
+    {
       "entry": "0x00956a00",
       "generated_sha256": "5f36a5964155b3a1b262025d8471a011f227284884097c026cb9dc9a7f33e04b",
       "reason": "ATRAC stream loader: flag check, ring copy and byte count in one critical section"
