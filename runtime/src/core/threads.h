@@ -99,17 +99,20 @@ struct GuestLockStats {
     std::uint64_t long_holds = 0;  // holds of at least kGuestLockLongHoldUs, logged or not
 };
 
-// The one lock all guest code runs under. A thread takes it when it starts and gives it up only
-// inside tox2Yield, blockingWait and exitCurrentThread, so guest threads never run in parallel.
+// The lock for lv2/HLE state, and in legacy mode also the right to run guest code. A legacy guest thread takes it when
+// it starts and gives it up only inside tox2Yield, blockingWait and exitCurrentThread, so guest threads never run in
+// parallel. In the split modes (--ppu-threads 1|2) it is the kernel lock: guest threads hold it only inside kernel
+// sections (KernelSection) and host threads keep taking it as before, while the right to run guest code is a PpuSlots
+// slot. Its class and queueing rules are the same in both modes except for the alternation rule below.
 // Waiters queue in a list of nodes on their own stacks and unlock() hands the lock directly to one of them, waking
 // only that thread. Host-class waiters (spu, audio, rsx, other) keep their arrival order. PPU waiters fill the "PPU
 // slots" of that order: when the oldest queued entry is a PPU one, the slot goes to the PPU waiter with the lowest
-// lv2 priority number (then the earliest queue order), except that the thread which held the lock last yields the slot
-// to the second best, so the top two ready PPU threads alternate like lv2's two hardware threads (a thread that only
-// let host waiters in, through yieldToHostWaiters, keeps its turn). There is no
+// lv2 priority number (then the earliest queue order), except that, with alternation on (legacy), the thread which held
+// the lock last yields the slot to the second best, so the top two ready PPU threads alternate like lv2's two hardware
+// threads (a thread that only let host waiters in, through yieldToHostWaiters, keeps its turn). There is no
 // displacement of the holder and set/get_priority only store and return the value; a waiter uses the priority it had
-// when it queued. The creation rule of sys_ppu_thread_create (startGuestThreadFirst) follows from this: a new thread
-// with a numerically lower priority than its creator takes the lock before the creator continues.
+// when it queued. In legacy mode the creation rule of sys_ppu_thread_create (startGuestThreadFirst) follows from this:
+// a new thread with a numerically lower priority than its creator takes the lock before the creator continues.
 //
 // Waits and holds are timed per GuestLockClass; recording takes no lock beyond the one the operation already needs.
 class GuestLock {
@@ -137,6 +140,11 @@ public:
     bool hasHostWaiters() const { return host_waiters_.load(std::memory_order_relaxed) != 0; }
     // Releases so far; a holder that gave the lock up and got it back compares it to see whether anyone ran meanwhile.
     std::uint64_t releaseCount() const { return releases_.load(std::memory_order_relaxed); }
+
+    // True when the calling thread took the lock and has not released it. Any thread.
+    bool heldByCurrentThread() const;
+    // Turns the alternation rule of the PPU choice on (the default) or off. Only while nobody holds or waits.
+    void setAlternation(bool on) { alternation_.store(on, std::memory_order_relaxed); }
 
     GuestLockStats stats() const;  // any thread
 
@@ -196,6 +204,11 @@ private:
     std::atomic<std::uint32_t> host_waiters_{0};
     std::atomic<std::uint64_t> outstanding_{0};  // holder plus waiters; written under mutex_
     std::atomic<std::uint64_t> releases_{0};
+    std::atomic<bool> alternation_{true};
+    // currentThreadIdentity() of the holder, 0 when free. Written by the thread that takes the lock (before it returns)
+    // and by the releasing holder, so a thread reads its own identity or a stale one of another thread, never a false
+    // match.
+    std::atomic<std::uint64_t> holder_identity_{0};
 
     // The holder's own state: written by a thread when it gets its turn and read only by that thread in
     // unlock(), before the lock is passed on.
@@ -303,6 +316,73 @@ private:
 // Leaked, like guestLock(). Capacity 1 until setCapacity changes it.
 PpuSlots& ppuSlots();
 
+// --ppu-threads: how guest code is serialised.
+//   Legacy: guestLock() is both the right to run guest code and the lock for lv2/HLE state, as it always was.
+//   Split1/Split2: a guest thread holds a PpuSlots slot (capacity 1 or 2) whenever it runs guest code or a handler, and
+//   guestLock() only inside kernel sections. Lock order: slot, then kernel lock, then everything else; a thread never
+//   waits for a slot while it holds the kernel lock.
+enum class PpuThreadsMode : std::uint8_t { Legacy, Split1, Split2 };
+
+namespace detail {
+inline std::atomic<PpuThreadsMode> g_ppu_threads_mode{PpuThreadsMode::Legacy};
+}  // namespace detail
+
+// Set before any guest thread starts; tests switch only while no guest-like thread holds or waits for a slot or the
+// guest lock. Also sets the capacity of ppuSlots() and the alternation rule of guestLock().
+void setPpuThreadsMode(PpuThreadsMode mode);
+inline PpuThreadsMode ppuThreadsMode() { return detail::g_ppu_threads_mode.load(std::memory_order_relaxed); }
+inline bool splitPpuMode() { return ppuThreadsMode() != PpuThreadsMode::Legacy; }
+
+// Split modes: holds guestLock() for its scope unless the calling thread already holds it, so sections nest for free.
+// Legacy: does nothing (the caller already holds the one lock). A section that is left through exitCurrentThread never
+// runs its destructor; exitCurrentThread releases the lock itself.
+class KernelSection {
+public:
+    KernelSection() : taken_(splitPpuMode() && takeKernelLock()) {}
+    ~KernelSection() {
+        if (taken_) guestLock().unlock();
+    }
+    KernelSection(const KernelSection&) = delete;
+    KernelSection& operator=(const KernelSection&) = delete;
+
+private:
+    static bool takeKernelLock();  // false when the calling thread already holds it
+    bool taken_;
+};
+
+// Split modes: when the calling thread holds guestLock(), releases it for the scope and takes it again at the end,
+// after any slot operation inside the scope, which keeps the lock order. Legacy: does nothing.
+class KernelExit {
+public:
+    KernelExit() : released_(splitPpuMode() && releaseKernelLock()) {}
+    ~KernelExit() {
+        if (released_) guestLock().lock();
+    }
+    KernelExit(const KernelExit&) = delete;
+    KernelExit& operator=(const KernelExit&) = delete;
+
+private:
+    static bool releaseKernelLock();  // false when the calling thread does not hold it
+    bool released_;
+};
+
+// The lockable blockingWait waits with. Legacy: forwards to guestLock(). Split modes: unlock() releases guestLock(),
+// then the caller's slot if it holds one (remembered in a thread-local flag until the matching lock()); lock() takes
+// that slot first, then guestLock(). So a woken thread gets a slot by the priority rules before it competes for the
+// kernel lock, and a host thread (no slot) only takes the kernel lock again.
+class GuestWaitLock {
+public:
+    void lock();
+    void unlock();
+};
+GuestWaitLock& guestWaitLock();
+
+// Whether the calling thread may block in blockingWait: always in legacy mode, in split modes only with the kernel
+// lock held (the wait releases it; a path that waits without it would race lv2 state). blockingWait stops with a fatal
+// internal error when this is false.
+inline bool blockingWaitAllowed() { return !splitPpuMode() || guestLock().heldByCurrentThread(); }
+[[noreturn]] void failBlockingWait(const char* what);
+
 // For tests: while set, a long hold is passed to the observer instead of being logged. Called by the releasing thread,
 // after the lock was passed on; a null observer restores logging.
 using GuestLockLongHoldObserver = void (*)(const GuestLock::LongHoldReport&);
@@ -361,6 +441,18 @@ public:
     }
     std::condition_variable_any& joiners() { return joiners_; }
 
+    // Set (and waiters woken) the first time the thread reaches a place where legacy mode would let a queued thread
+    // in: a yield, a blocking wait, or exit. startGuestThreadFirst waits for it in the split modes, where a thread that
+    // keeps its slot hands nothing over.
+    void markFirstRelease() {
+        if (first_release_.load(std::memory_order_relaxed)) return;
+        first_release_.store(true, std::memory_order_release);
+        first_release_.notify_all();
+    }
+    void waitFirstRelease() {
+        while (!first_release_.load(std::memory_order_acquire)) first_release_.wait(false, std::memory_order_acquire);
+    }
+
 private:
     std::uint32_t id_;
     std::string name_;
@@ -373,6 +465,7 @@ private:
     std::atomic<const char*> blocked_in_{nullptr};
     std::atomic<bool> indefinite_wait_{false};
     std::atomic<std::int64_t> blocked_since_ms_{0};
+    std::atomic<bool> first_release_{false};
     std::condition_variable_any joiners_;
     Tox2PpuContext context_{};
 };
@@ -389,29 +482,35 @@ GuestThread* prepareGuestThread(const GuestThreadParams& params);
 // Starts the host thread of a prepared guest thread.
 void startGuestThread(GuestThread* thread);
 
-// Longest wait of startGuestThreadFirst for the new host thread to queue for the guest lock.
+// Longest wait of startGuestThreadFirst for the new host thread to queue for the guest lock or a PPU slot.
 inline constexpr std::chrono::microseconds kStartFirstBound{5000};
 
-// Starts `thread` and lets it take the guest lock before the caller continues: snapshots
-// guestLock().waiterCount(), starts the host thread, waits (polling, at most `bound`) until the
-// waiter count has grown, then yieldGuestLock(). The new host thread queues asynchronously and
-// yieldGuestLock() does nothing while nobody waits, so a bare yield would be a timing bet. Returns
-// false when the count did not grow in time; the thread is started anyway and the caller keeps the
-// lock. Called by a guest thread holding the guest lock.
+// Starts `thread` and lets it run before the caller continues. Legacy: snapshots guestLock().waiterCount(), starts the
+// host thread, waits (polling, at most `bound`) until the waiter count has grown, then yieldGuestLock(). The new host
+// thread queues asynchronously and yieldGuestLock() does nothing while nobody waits, so a bare yield would be a timing
+// bet. Split modes: the same poll on ppuSlots().arrivals(), then the caller gives up the kernel lock and its slot and
+// waits until the new thread reached its first release point (GuestThread::markFirstRelease); the poll only shows
+// that the thread started, since arrivals() also grows when a slot holder yields. Returns false when the poll timed
+// out; the thread is started anyway and the caller keeps its lock and slot. Called by a guest thread holding the guest
+// lock (legacy) or a slot (split modes).
 bool startGuestThreadFirst(GuestThread* thread, std::chrono::microseconds bound = kStartFirstBound);
 
 // prepareGuestThread + startGuestThread. Returns the new thread id, 0 on failure.
 std::uint32_t createGuestThread(const GuestThreadParams& params);
 
-// Marks the calling thread Exited, wakes its joiners, releases the guest lock and ends the host
-// thread. Must be called with the guest lock held.
+// Marks the calling thread Exited, wakes its joiners, releases the guest lock (legacy) or the kernel lock and the PPU
+// slot (split modes) and ends the host thread. Legacy: must be called with the guest lock held. Split modes: takes the
+// kernel lock if the caller does not hold it and releases it whenever the caller holds it at the end, whoever took it:
+// the call can come from inside a handler's KernelSection, whose destructor never runs across the thread's end.
 [[noreturn]] void exitCurrentThread(std::uint64_t value);
 
-// Releases the guest lock and takes it again, so the next waiter by the GuestLock rules runs first. The caller is not
-// queued when that waiter is chosen and queues with a fresh tag afterwards: it cannot win the slot it just gave up, and
-// it goes behind equal-priority waiters. Used for budget expiry and thread creation; a lower-priority PPU waiter can
-// run here when no better one is queued. Returns false, doing nothing, when nobody waits. Must be called with the guest
-// lock held.
+// Legacy: releases the guest lock and takes it again, so the next waiter by the GuestLock rules runs first. The caller
+// is not queued when that waiter is chosen and queues with a fresh tag afterwards: it cannot win the slot it just gave
+// up, and it goes behind equal-priority waiters. Used for budget expiry and thread creation; a lower-priority PPU
+// waiter can run here when no better one is queued. Returns false, doing nothing, when nobody waits. Must be called
+// with the guest lock held. Split modes: the same through PpuSlots::yield(), after releasing the kernel lock if the
+// caller holds it (budget expiry can happen inside a handler's section) and taking it again afterwards. Host-class
+// waiters do not need a slot, so nothing is passed to them. Must be called by a slot holder.
 bool yieldGuestLock();
 
 // The game hands frames between its main and render threads by spinning on sys_ppu_thread_yield (and ignores the
@@ -440,29 +539,32 @@ PpuYieldStats ppuYieldStats();
 // Number of backoff sleeps so far, any thread.
 std::uint64_t yieldBackoffCount();
 // sys_ppu_thread_yield with lv2's result rule: true only when a PPU thread of the same or a higher priority was queued,
-// and then it has run before this returns. A false return still lets queued host-class waiters (RSX, audio, SPU
-// callbacks) take the lock: on the console they run in parallel, so serving them is not a guest switch. A caller that
-// is not a PPU thread counts every PPU waiter as eligible. Includes the backoff above, which is checked first. Must be
-// called with the guest lock held.
+// and then it has run before this returns. Legacy: a false return still lets queued host-class waiters (RSX, audio,
+// SPU callbacks) take the lock: on the console they run in parallel, so serving them is not a guest switch. A caller
+// that is not a PPU thread counts every PPU waiter as eligible. Includes the backoff above, which is checked first.
+// Must be called with the guest lock held. Split modes: touches only the slots (the kernel lock is released first if
+// held), the result is decided by ppuSlots().hasWaiterAtOrAbove(), and an equal-priority thread that holds the other
+// slot gives false, as on lv2 where both are running; to_host stays 0. Must be called by a slot holder.
 bool yieldPpuThread();
 
 // Bookkeeping around a blocking wait, used by blockingWait. A null thread (host thread) is ignored.
 void blockEnter(GuestThread* thread, const char* what, bool indefinite);
 void blockLeave(GuestThread* thread);
 
-// Waits on `cv` with the guest lock (which the wait releases) until `done()` holds. `what` names
-// the wait in the census. Returns false on timeout. Every blocking syscall and HLE function uses
-// it. A wait without a timeout counts toward stall detection.
+// Waits on `cv` with the guest lock (which the wait releases; in the split modes the kernel lock, and then the caller's
+// slot as well) until `done()` holds. `what` names the wait in the census. Returns false on timeout. Every blocking
+// syscall and HLE function uses it. A wait without a timeout counts toward stall detection.
 template <class Pred>
 bool blockingWait(std::condition_variable_any& cv, Pred done, const char* what,
                   std::optional<std::chrono::microseconds> timeout) {
+    if (!blockingWaitAllowed()) failBlockingWait(what);
     GuestThread* thread = currentThread();
     blockEnter(thread, what, !timeout.has_value());
     bool satisfied = true;
     if (timeout.has_value()) {
-        satisfied = cv.wait_for(guestLock(), *timeout, done);
+        satisfied = cv.wait_for(guestWaitLock(), *timeout, done);
     } else {
-        cv.wait(guestLock(), done);
+        cv.wait(guestWaitLock(), done);
     }
     blockLeave(thread);
     return satisfied;

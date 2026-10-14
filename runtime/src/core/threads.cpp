@@ -1,4 +1,4 @@
-// Guest threads (one host thread each), the guest lock, blocking waits and the supervisor.
+// Guest threads (one host thread each), the guest lock, PPU slots, blocking waits and the supervisor.
 
 #include "core/threads.h"
 
@@ -47,6 +47,8 @@ thread_local std::optional<std::int32_t> t_test_ppu_priority;
 // Numbers the host threads that queue for the guest lock or a PPU slot; 0 means "none yet".
 thread_local std::uint64_t t_identity = 0;
 std::atomic<std::uint64_t> g_next_identity{1};
+// Set by GuestWaitLock::unlock() when it gave up the caller's slot, so the matching lock() takes one back.
+thread_local bool t_wait_released_slot = false;
 
 // Priority of a PPU-class waiter whose thread has none (an explicit Ppu class without a guest thread): the lowest.
 constexpr std::int32_t kLowestPpuPriority = 3071;
@@ -121,6 +123,23 @@ std::atomic<std::uint64_t> g_yield_switched{0};
 std::atomic<std::uint64_t> g_yield_to_host{0};
 std::atomic<std::uint64_t> g_yield_kept{0};
 std::atomic<std::uint64_t> g_yield_backoffs{0};
+
+// Counts one yield in the spin run and tells whether it is the one that sleeps (the count restarts after it, so a sleep
+// happens once per kYieldSpinThreshold yields and the yields between them still hand over at full speed).
+bool yieldSpinSleepDue() {
+    YieldSpin& spin = t_yield_spin;
+    const auto arrival = std::chrono::steady_clock::now();
+    spin.run = arrival - spin.last_return <= kYieldSpinGap ? spin.run + 1 : 1;
+    if (spin.run < kYieldSpinThreshold) return false;
+    spin.run = 0;
+    return true;
+}
+
+void sleepYieldBackoff() {
+    g_yield_backoffs.fetch_add(1, std::memory_order_relaxed);
+    thread_local Sleeper sleeper;
+    sleeper.sleep(kYieldBackoffSleep);
+}
 
 // Lock order: guest lock, then registry mutex. The census printer runs inside fatal(), possibly
 // with the guest lock held, so everything it reads here is behind this mutex or atomic.
@@ -248,8 +267,12 @@ unsigned __stdcall guestThreadMain(void* arg) {
     setFatalContext(&ctx);
     t_current = thread;
 
-    GuestLock& lock = guestLock();
-    lock.lock();
+    // Split modes: the right to run is a slot; the kernel lock is taken only where a handler needs it.
+    if (splitPpuMode()) {
+        ppuSlots().acquire();
+    } else {
+        guestLock().lock();
+    }
     thread->setState(ThreadState::Running);
 
     std::uint8_t* base = process().memory.base();
@@ -266,6 +289,8 @@ unsigned __stdcall guestThreadMain(void* arg) {
     // sys_ppu_thread_exit (which also gives the TLS block back).
     logInfo("tox2: thread {:#010x} {} returned from its entry function with {:#x}", thread->id(), thread->name(),
             ctx.gpr[3]);
+    // The TLS block allocator is lv2 state: open the kernel section before the free. exitCurrentThread releases it.
+    if (splitPpuMode() && !guestLock().heldByCurrentThread()) guestLock().lock();
     freeTls(static_cast<std::uint32_t>(ctx.gpr[13]));
     exitCurrentThread(ctx.gpr[3]);
 }
@@ -277,6 +302,14 @@ void setGuestLockClass(GuestLockClass cls) { t_lock_class = static_cast<std::uin
 std::uint64_t currentThreadIdentity() {
     if (t_identity == 0) t_identity = g_next_identity.fetch_add(1, std::memory_order_relaxed);
     return t_identity;
+}
+
+void setPpuThreadsMode(PpuThreadsMode mode) {
+    ppuSlots().setCapacity(mode == PpuThreadsMode::Split2 ? 2 : 1);
+    // Alternation emulated the second hardware thread on one lock; with real slots it would only reorder the kernel
+    // lock.
+    guestLock().setAlternation(mode == PpuThreadsMode::Legacy);
+    detail::g_ppu_threads_mode.store(mode, std::memory_order_relaxed);
 }
 
 void setGuestLockPpuPriorityForTesting(std::optional<std::int32_t> priority) { t_test_ppu_priority = priority; }
@@ -343,6 +376,7 @@ void GuestLock::lock() {
         holder_class_ = cls;
         t_activity.hold_last = nullptr;
         t_activity.hold_prev = nullptr;
+        holder_identity_.store(currentThreadIdentity(), std::memory_order_relaxed);
         if (ppu) {
             holder_ppu_tag_ = next_ppu_tag_++;
             last_ppu_identity_ = currentThreadIdentity();
@@ -401,6 +435,7 @@ void GuestLock::enqueueAndWait(std::unique_lock<std::mutex>& lock, Waiter& node)
     lock.unlock();
     const auto turn = std::chrono::steady_clock::now();
     hold_start_ = turn;
+    holder_identity_.store(node.identity, std::memory_order_relaxed);
     holder_class_ = node.cls;
     holder_ppu_tag_ = node.ppu_tag;
     if (node.ppu) hold_start_cycles_ = threadCycles();
@@ -449,7 +484,10 @@ GuestLock::Waiter* GuestLock::chooseNext() {
     // best go first, so the top two ready threads alternate and a third-ranked one waits. A resume node belongs to a
     // cancelled yield and gets its turn back.
     Waiter* pick = best;
-    if (best->identity == last_ppu_identity_ && !best->resume && second != nullptr) pick = second;
+    if (alternation_.load(std::memory_order_relaxed) && best->identity == last_ppu_identity_ && !best->resume &&
+        second != nullptr) {
+        pick = second;
+    }
     // The pick consumes the oldest PPU slot; the waiter it overtook takes over the pick's place in arrival order, so
     // host waiters keep their position.
     if (pick != oldest_ppu) oldest_ppu->seq = pick->seq;
@@ -562,6 +600,7 @@ void GuestLock::unlock() {
     // may have taken it and let the owner destroy it.
     classes_[static_cast<std::size_t>(holder)].hold.record(hold_us);
     const LongHoldReport report = captureLongHold(hold_us, holder, hold_start_cycles_);
+    holder_identity_.store(0, std::memory_order_relaxed);
     {
         std::lock_guard lock(mutex_);
         noteRelease(now, holder, hold_us);
@@ -587,6 +626,7 @@ bool GuestLock::yieldToHostWaiters() {
     classes_[static_cast<std::size_t>(holder)].hold.record(hold_us);
     const LongHoldReport report = captureLongHold(hold_us, holder, hold_start_cycles_);
     noteRelease(now, holder, hold_us);
+    holder_identity_.store(0, std::memory_order_relaxed);
     Waiter* oldest_host = head_;
     while (oldest_host->ppu) oldest_host = oldest_host->next;
     grant(oldest_host);
@@ -605,6 +645,10 @@ bool GuestLock::yieldToHostWaiters() {
     // The report is written only now: the wait above is where mutex_ is released, and the caller holds the lock again.
     emitLongHold(report, now);
     return true;
+}
+
+bool GuestLock::heldByCurrentThread() const {
+    return holder_identity_.load(std::memory_order_relaxed) == currentThreadIdentity();
 }
 
 GuestLockStats GuestLock::stats() const {
@@ -815,6 +859,55 @@ PpuSlots& ppuSlots() {
     return *slots;
 }
 
+bool KernelSection::takeKernelLock() {
+    GuestLock& kernel = guestLock();
+    if (kernel.heldByCurrentThread()) return false;
+    kernel.lock();
+    return true;
+}
+
+bool KernelExit::releaseKernelLock() {
+    GuestLock& kernel = guestLock();
+    if (!kernel.heldByCurrentThread()) return false;
+    kernel.unlock();
+    return true;
+}
+
+void GuestWaitLock::lock() {
+    if (!splitPpuMode()) {
+        guestLock().lock();
+        return;
+    }
+    // Slot first, then the kernel lock: the lock order, and a woken thread queues for the slot by its priority.
+    if (t_wait_released_slot) {
+        t_wait_released_slot = false;
+        ppuSlots().acquire();
+    }
+    guestLock().lock();
+}
+
+void GuestWaitLock::unlock() {
+    if (!splitPpuMode()) {
+        guestLock().unlock();
+        return;
+    }
+    // A blocking wait is a place where legacy would let a queued thread in.
+    if (t_current != nullptr) t_current->markFirstRelease();
+    guestLock().unlock();
+    PpuSlots& slots = ppuSlots();
+    t_wait_released_slot = slots.heldByCurrentThread();
+    if (t_wait_released_slot) slots.release();
+}
+
+GuestWaitLock& guestWaitLock() {
+    static GuestWaitLock lock;
+    return lock;
+}
+
+void failBlockingWait(const char* what) {
+    fatal(FatalKind::Internal, std::format("{}: blocking wait without the kernel lock", what));
+}
+
 GuestThread::GuestThread(std::uint32_t id, const GuestThreadParams& params, std::uint32_t stack_addr,
                          std::uint32_t stack_size)
     : id_(id),
@@ -882,7 +975,38 @@ void startGuestThread(GuestThread* thread) {
     CloseHandle(reinterpret_cast<HANDLE>(handle));
 }
 
+namespace {
+
+bool startGuestThreadFirstSplit(GuestThread* thread, std::chrono::microseconds bound) {
+    PpuSlots& slots = ppuSlots();
+    const std::uint64_t arrivals_before = slots.arrivals();
+    startGuestThread(thread);
+
+    // The count grows when a thread links its slot node. It can also grow because the other slot holder yielded, so it
+    // only shows that something arrived; the first-release wait below is what orders the new thread first.
+    const auto deadline = std::chrono::steady_clock::now() + bound;
+    while (slots.arrivals() <= arrivals_before) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::yield();
+    }
+    if (t_current != nullptr) t_current->markFirstRelease();
+    {
+        // Destroyed last: the kernel lock comes back after the slot.
+        KernelExit leave_kernel;
+        const bool holds_slot = slots.heldByCurrentThread();
+        if (holds_slot) slots.release();
+        // Not bounded by the poll: with a free second slot the new thread may run without anyone queued, and only its
+        // own first release point (at most one budget away) ends the wait.
+        thread->waitFirstRelease();
+        if (holds_slot) slots.acquire();
+    }
+    return true;
+}
+
+}  // namespace
+
 bool startGuestThreadFirst(GuestThread* thread, std::chrono::microseconds bound) {
+    if (splitPpuMode()) return startGuestThreadFirstSplit(thread, bound);
     GuestLock& lock = guestLock();
     const std::size_t waiting_before = lock.waiterCount();
     startGuestThread(thread);
@@ -905,11 +1029,35 @@ std::uint32_t createGuestThread(const GuestThreadParams& params) {
     return thread->id();
 }
 
+namespace {
+
+[[noreturn]] void exitCurrentThreadSplit(GuestThread* thread, std::uint64_t value) {
+    GuestLock& kernel = guestLock();
+    // The stack free, the state change and the joiner wake-up are lv2 state.
+    if (!kernel.heldByCurrentThread()) kernel.lock();
+    thread->setExitValue(value);
+    process().stack.free(thread->stackAddr());
+    thread->setState(ThreadState::Exited);
+    thread->joiners().notify_all();
+    setFatalContext(nullptr);
+    t_current = nullptr;
+    // Whoever took the kernel lock: a handler that called sys_ppu_thread_exit holds it through a KernelSection whose
+    // destructor never runs, because _endthreadex does not unwind.
+    if (kernel.heldByCurrentThread()) kernel.unlock();
+    if (ppuSlots().heldByCurrentThread()) ppuSlots().release();
+    thread->markFirstRelease();
+    _endthreadex(0);
+    std::_Exit(static_cast<int>(ExitCode::Fatal));
+}
+
+}  // namespace
+
 void exitCurrentThread(std::uint64_t value) {
     GuestThread* thread = t_current;
     if (thread == nullptr) {
         fatal(FatalKind::Internal, "exitCurrentThread called from a host thread");
     }
+    if (splitPpuMode()) exitCurrentThreadSplit(thread, value);
     thread->setExitValue(value);
     // The host thread no longer uses the guest stack.
     process().stack.free(thread->stackAddr());
@@ -923,7 +1071,22 @@ void exitCurrentThread(std::uint64_t value) {
     std::_Exit(static_cast<int>(ExitCode::Fatal));
 }
 
+namespace {
+
+bool yieldSlot() {
+    if (t_current != nullptr) t_current->markFirstRelease();
+    PpuSlots& slots = ppuSlots();
+    if (slots.waiterCount() == 0 || !slots.heldByCurrentThread()) return false;
+    // Budget expiry can happen inside a handler's kernel section (sys_timer_usleep(0), the GCM interrupt and sail
+    // service bodies): the lock goes first and comes back last, so no thread waits for a slot with the kernel lock.
+    KernelExit leave_kernel;
+    return slots.yield();
+}
+
+}  // namespace
+
 bool yieldGuestLock() {
+    if (splitPpuMode()) return yieldSlot();
     GuestLock& lock = guestLock();
     if (!lock.hasWaiters()) return false;
     // unlock() passes the lock to a waiter and this thread queues behind the ones still waiting.
@@ -946,27 +1109,58 @@ PpuYieldStats ppuYieldStats() {
 
 std::uint64_t yieldBackoffCount() { return ppuYieldStats().backoffs; }
 
+namespace {
+
+bool yieldPpuThreadSplit() {
+    PpuSlots& slots = ppuSlots();
+    // Decided at entry, like the legacy rule. At capacity 2 it is a hint: the other holder's release can take the
+    // entry.
+    const bool eligible = slots.hasWaiterAtOrAbove(currentPpuPriority().value_or(kHostYieldPriority));
+    if (t_current != nullptr) t_current->markFirstRelease();
+    if (!slots.heldByCurrentThread()) {
+        // A guest thread here would be running guest code without a slot; hiding it would also inflate `kept`.
+        if (t_current != nullptr) fatal(FatalKind::Internal, "sys_ppu_thread_yield without a PPU slot");
+        g_yield_kept.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    // Normally called without the kernel lock (sys_ppu_thread_yield is kernel-free); a caller inside a section must not
+    // wait for a slot with it.
+    KernelExit leave_kernel;
+    bool slept = false;
+    if (g_yield_backoff.load(std::memory_order_relaxed) && yieldSpinSleepDue()) {
+        slots.release();
+        sleepYieldBackoff();
+        slots.acquire();
+        slept = true;
+    }
+    if (!slept) {
+        if (eligible) {
+            // The eligible waiter is chosen at this release: it outranks or equals the caller, which is not queued yet.
+            slots.release();
+            slots.acquire();
+        } else {
+            g_yield_kept.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (eligible) g_yield_switched.fetch_add(1, std::memory_order_relaxed);
+    if (g_yield_backoff.load(std::memory_order_relaxed)) t_yield_spin.last_return = std::chrono::steady_clock::now();
+    return eligible;
+}
+
+}  // namespace
+
 bool yieldPpuThread() {
     g_yield_calls.fetch_add(1, std::memory_order_relaxed);
+    if (splitPpuMode()) return yieldPpuThreadSplit();
     GuestLock& lock = guestLock();
     // Decided at entry: a PPU thread that queues during the yield does not change the result.
     const bool eligible = lock.hasPpuWaiterAtOrAbove(currentPpuPriority().value_or(kHostYieldPriority));
     bool slept = false;
-    if (g_yield_backoff.load(std::memory_order_relaxed)) {
-        YieldSpin& spin = t_yield_spin;
-        const auto arrival = std::chrono::steady_clock::now();
-        spin.run = arrival - spin.last_return <= kYieldSpinGap ? spin.run + 1 : 1;
-        if (spin.run >= kYieldSpinThreshold) {
-            // Restart the count, so a sleep happens once per kYieldSpinThreshold yields and the yields between them
-            // still hand over at full speed.
-            spin.run = 0;
-            lock.unlock();
-            g_yield_backoffs.fetch_add(1, std::memory_order_relaxed);
-            thread_local Sleeper sleeper;
-            sleeper.sleep(kYieldBackoffSleep);
-            lock.lock();
-            slept = true;
-        }
+    if (g_yield_backoff.load(std::memory_order_relaxed) && yieldSpinSleepDue()) {
+        lock.unlock();
+        sleepYieldBackoff();
+        lock.lock();
+        slept = true;
     }
     if (!slept) {
         if (eligible) {

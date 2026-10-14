@@ -11956,6 +11956,8 @@ TOX2_PPU_FUNC(prioChildEntry) {
 }
 
 TOX2_PPU_FUNC(prioCreatorEntry) {
+    // As runImport does around a handler in the split modes; a no-op in Legacy, where the thread holds the guest lock.
+    tox2::KernelSection section;
     if (g_prio.set_priority_to >= 0) {
         ctx->gpr[11] = 47;  // sys_ppu_thread_set_priority(self, prio)
         ctx->gpr[3] = static_cast<tox2::GuestThread*>(ctx->runtime)->id();
@@ -11977,7 +11979,9 @@ TOX2_PPU_FUNC(prioCreatorEntry) {
     ctx->gpr[3] = 0;
 }
 
-void testPpuThreadCreatePriority() {
+// `parallel_slots` is true when the creator and a new thread of equal or lower priority can run at the same time (two
+// PPU slots): then the word a new thread writes may or may not be visible right after the create returns.
+void ppuThreadCreatePriorityScenario(bool parallel_slots) {
     tox2::setLogSink([](std::string_view) {});
     tox2::resetCensus();
     tox2::resetSyncObjects();
@@ -12055,9 +12059,9 @@ void testPpuThreadCreatePriority() {
 
     // Equal and higher numbers: the creator keeps the lock; the thread runs after it returned.
     Outcome equal = run(1005, -1, 1005, 0);
-    CHECK(equal.ok && equal.seen_after_create == 0 && equal.seen_at_end == 1);
+    CHECK(equal.ok && (parallel_slots || equal.seen_after_create == 0) && equal.seen_at_end == 1);
     Outcome lower = run(1005, -1, 1100, 0);
-    CHECK(lower.ok && lower.seen_after_create == 0 && lower.seen_at_end == 1);
+    CHECK(lower.ok && (parallel_slots || lower.seen_after_create == 0) && lower.seen_at_end == 1);
 
     // The stored priority counts: a creator that moved itself from 1100 to 1005 yields to a thread
     // at 1002.
@@ -12065,7 +12069,7 @@ void testPpuThreadCreatePriority() {
     CHECK(lowered.ok && lowered.seen_after_create == 1);
     // And the other way: a creator that raised itself to 1000 does not yield to a thread at 1002.
     Outcome raised = run(1005, 1000, 1002, 0);
-    CHECK(raised.ok && raised.seen_after_create == 0 && raised.seen_at_end == 1);
+    CHECK(raised.ok && (parallel_slots || raised.seen_after_create == 0) && raised.seen_at_end == 1);
 
     // An interrupt thread is created but not started, whatever its priority.
     Outcome interrupt = run(1005, -1, 90, tox2::kCreateInterrupt);
@@ -12079,6 +12083,8 @@ void testPpuThreadCreatePriority() {
     tox2::setLogSink({});
     tox2::resetCensus();
 }
+
+void testPpuThreadCreatePriority() { ppuThreadCreatePriorityScenario(false); }
 
 struct HandlerCall {
     char tag;
@@ -12997,6 +13003,655 @@ void testPpuSlotsUncontendedCost() {
     CHECK(slot_ns[kRuns / 2] <= 2.0 * lock_ns[kRuns / 2]);
 }
 
+// ---- Split-mode thread lifecycle and kernel helpers ----
+
+// Ends the process when a split-mode test hangs, so a broken lock order fails the run instead of blocking it.
+class HangGuard {
+public:
+    explicit HangGuard(const char* name)
+        : thread_([this, name] {
+              std::unique_lock lock(mutex_);
+              if (!cv_.wait_for(lock, std::chrono::seconds(60), [this] { return done_; })) {
+                  std::fprintf(stderr, "test hang in %s\n", name);
+                  std::fflush(stderr);
+                  std::_Exit(1);
+              }
+          }) {}
+    ~HangGuard() {
+        {
+            std::lock_guard lock(mutex_);
+            done_ = true;
+        }
+        cv_.notify_all();
+        thread_.join();
+    }
+    HangGuard(const HangGuard&) = delete;
+    HangGuard& operator=(const HangGuard&) = delete;
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool done_ = false;
+    std::thread thread_;
+};
+
+// Polls for a lock or slot that a thread under test should have released. A thread blocked on it cannot be joined, so
+// a timeout ends the process.
+template <class Pred>
+void requireWithin(std::chrono::milliseconds limit, Pred done, const char* what) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (!done()) {
+        if (std::chrono::steady_clock::now() > deadline) {
+            g_failed++;
+            std::fprintf(stderr, "check failed: %s\n", what);
+            std::fflush(stderr);
+            std::_Exit(1);
+        }
+        std::this_thread::yield();
+    }
+}
+
+// True when the global slots have no holder and no waiter.
+bool ppuSlotsIdle() {
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+    return slots.waiterCount() == 0 && slots.stats().acquisitions == slots.releaseCount();
+}
+
+// Selects a split mode for a test and restores Legacy at the end, once the guest threads of the test have given up
+// their slots (a thread marks itself Exited before it releases its slot).
+class SplitModeScope {
+public:
+    explicit SplitModeScope(tox2::PpuThreadsMode mode) { tox2::setPpuThreadsMode(mode); }
+    ~SplitModeScope() {
+        CHECK(pollUntil([] { return ppuSlotsIdle(); }));
+        tox2::setPpuThreadsMode(tox2::PpuThreadsMode::Legacy);
+    }
+    SplitModeScope(const SplitModeScope&) = delete;
+    SplitModeScope& operator=(const SplitModeScope&) = delete;
+};
+
+// Guest memory, registered entry functions (one OPD each) and, optionally, the TLS area, for tests that run real guest
+// threads.
+class GuestThreadEnv {
+public:
+    explicit GuestThreadEnv(std::initializer_list<Tox2PpuFunc*> funcs, bool with_tls = false) {
+        tox2::setLogSink([](std::string_view) {});
+        tox2::resetCensus();
+        tox2::resetSyncObjects();
+        tox2::resetPpuThreadState();
+        tox2::Process& p = tox2::process();
+        CHECK(p.memory.reserve());
+        base_ = p.memory.base();
+        scratch_ = p.main.allocate(0x10000, 0x10000);
+        CHECK(scratch_ != 0);
+        std::uint32_t index = 0;
+        for (Tox2PpuFunc* func : funcs) {
+            const std::uint32_t code = 0x10300 + 0x10 * index;
+            const std::uint32_t opd = scratch_ + 0x10 + 0x10 * index;
+            mappings_.push_back({code, func});
+            tox2Write32(base_, opd, code);
+            tox2Write32(base_, opd + 4, 0x1111);
+            opds_.push_back(opd);
+            index++;
+        }
+        tox2RegisterFuncs(mappings_.data(), static_cast<std::uint32_t>(mappings_.size()));
+        if (with_tls) {
+            const std::uint32_t tls_image = scratch_ + 0x100;
+            tox2Write32(base_, tls_image, 0xCAFEF00D);
+            auto boot_ctx = std::make_unique<Tox2PpuContext>();
+            CHECK(tox2::initializeTls(boot_ctx.get(), base_, 0x01000000, tls_image, 4, 0x20) != 0);
+        }
+    }
+    ~GuestThreadEnv() {
+        tox2::process().main.free(scratch_);
+        tox2RegisterFuncs(nullptr, 0);
+        tox2::resetSyncObjects();
+        tox2::resetPpuThreadState();
+        tox2::setLogSink({});
+        tox2::resetCensus();
+    }
+    GuestThreadEnv(const GuestThreadEnv&) = delete;
+    GuestThreadEnv& operator=(const GuestThreadEnv&) = delete;
+
+    std::uint8_t* base() const { return base_; }
+    std::uint32_t opd(std::size_t index) const { return opds_[index]; }
+
+private:
+    std::uint8_t* base_ = nullptr;
+    std::uint32_t scratch_ = 0;
+    std::vector<Tox2FuncMapping> mappings_;
+    std::vector<std::uint32_t> opds_;
+};
+
+// A: slot, then kernel lock, then a blocking wait. B takes both while A waits, so the wait released both. A, once
+// woken, takes the slot before the kernel lock: B holds the slot and then takes the kernel lock itself, which would
+// deadlock if A sat on the kernel lock while it waited for the slot.
+void testSplitBlockingWaitOrder() {
+    HangGuard guard("testSplitBlockingWaitOrder");
+    SplitModeScope mode(tox2::PpuThreadsMode::Split1);
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+    tox2::GuestLock& kernel = tox2::guestLock();
+    std::condition_variable_any cv;
+    bool woken = false;  // under the kernel lock
+    std::atomic<bool> a_ready{false}, a_returned{false}, a_wait_ok{false}, a_returned_early{true}, b_done{false};
+    std::vector<std::thread> threads;
+    threads.push_back(slotThread(1001, [&] {
+        slots.acquire();
+        kernel.lock();
+        a_ready = true;
+        a_wait_ok = tox2::blockingWait(cv, [&] { return woken; }, "test wait", std::chrono::seconds(10));
+        a_returned = true;
+        CHECK(kernel.heldByCurrentThread() && slots.heldByCurrentThread());
+        kernel.unlock();
+        slots.release();
+    }));
+    CHECK(pollUntil([&] { return a_ready.load(); }));
+    threads.push_back(slotThread(1001, [&] {
+        slots.acquire();  // possible only once A's wait gave up the slot
+        kernel.lock();    // and the kernel lock
+        woken = true;
+        cv.notify_all();
+        kernel.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        a_returned_early = a_returned.load();
+        kernel.lock();  // slot held: A must not hold the kernel lock while it waits for that slot
+        kernel.unlock();
+        b_done = true;
+        slots.release();
+    }));
+    CHECK(pollUntil([&] { return b_done.load(); }));
+    joinAll(threads);
+    CHECK(!a_returned_early && a_wait_ok);
+    CHECK(slots.waiterCount() == 0 && !kernel.hasWaiters());
+}
+
+// Two slot holders run at once, and a third thread that takes only the kernel lock runs next to both.
+void testSplitTwoRunners() {
+    HangGuard guard("testSplitTwoRunners");
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+    tox2::GuestLock& kernel = tox2::guestLock();
+    CHECK(slots.capacity() == 2);
+    std::atomic<int> holding{0};
+    std::atomic<bool> host_done{false};
+    int counter = 0;  // under the kernel lock
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 2; i++) {
+        threads.push_back(slotThread(1001, [&] {
+            slots.acquire();
+            holding++;
+            for (int n = 0; n < 100; n++) {
+                tox2::KernelSection section;
+                counter++;
+            }
+            pollUntil([&] { return host_done.load(); });
+            slots.release();
+        }));
+    }
+    int held_when_host_done = 0;
+    std::thread host([&] {
+        pollUntil([&] { return holding.load() == 2; });
+        for (int n = 0; n < 200; n++) {
+            std::lock_guard<tox2::GuestLock> lock(kernel);
+            counter++;
+        }
+        held_when_host_done = holding.load();
+        host_done = true;
+    });
+    host.join();
+    joinAll(threads);
+    CHECK(held_when_host_done == 2);
+    CHECK(counter == 400);
+    CHECK(slots.stats().parallel_us > 0);
+}
+
+// sys_ppu_thread_yield in Split2: eligible exactly when a waiter of the same or a higher priority is queued.
+void testSplitYield() {
+    HangGuard guard("testSplitYield");
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+    std::atomic<int> stage{0};  // the test lets A proceed: 1 yield to C, 2 yield ten times
+    std::atomic<int> a_progress{0};
+    std::atomic<bool> a_held{false}, b_held{false}, b_go{false}, c_ran{false}, d_ran{false};
+    bool first_result = false, c_ran_at_return = false, d_ran_during = true;
+    int later_switches = 0;
+    tox2::PpuYieldStats before{}, after{};
+    std::vector<std::thread> threads;
+    threads.push_back(slotThread(1001, [&] {  // A
+        slots.acquire();
+        a_held = true;
+        pollUntil([&] { return stage.load() >= 1; });
+        before = tox2::ppuYieldStats();
+        first_result = tox2::yieldPpuThread();
+        c_ran_at_return = c_ran.load();
+        a_progress = 1;
+        pollUntil([&] { return stage.load() >= 2; });
+        for (int i = 0; i < 10; i++) {
+            if (tox2::yieldPpuThread()) later_switches++;
+        }
+        d_ran_during = d_ran.load();
+        after = tox2::ppuYieldStats();
+        a_progress = 2;
+        slots.release();
+    }));
+    CHECK(pollUntil([&] { return a_held.load(); }));
+    threads.push_back(slotThread(1001, [&] {  // B holds the second slot
+        slots.acquire();
+        b_held = true;
+        pollUntil([&] { return b_go.load(); });
+        slots.release();
+    }));
+    CHECK(pollUntil([&] { return b_held.load(); }));
+    queueSlotThread(slots, threads, 1001, [&] {  // C
+        slots.acquire();
+        c_ran = true;
+        slots.release();
+    });
+    stage = 1;
+    CHECK(pollUntil([&] { return a_progress.load() >= 1; }));
+    queueSlotThread(slots, threads, 1005, [&] {  // D ranks below A
+        slots.acquire();
+        d_ran = true;
+        slots.release();
+    });
+    stage = 2;
+    CHECK(pollUntil([&] { return a_progress.load() >= 2; }));
+    b_go = true;
+    joinAll(threads);
+    CHECK(first_result && c_ran_at_return);
+    CHECK(later_switches == 0 && !d_ran_during);
+    CHECK(after.kept - before.kept == 10);
+    CHECK(after.switched - before.switched == 1);
+    CHECK(after.to_host == before.to_host);
+    CHECK(d_ran);  // A's release gave D the slot
+}
+
+void testSplitKernelHelpers() {
+    HangGuard guard("testSplitKernelHelpers");
+    tox2::GuestLock& kernel = tox2::guestLock();
+    const auto heldByOther = [&] {
+        bool held = true;
+        std::thread([&] { held = kernel.heldByCurrentThread(); }).join();
+        return held;
+    };
+    const auto otherCanLock = [&] {
+        bool got = false;
+        std::thread([&] {
+            kernel.lock();
+            got = true;
+            kernel.unlock();
+        }).join();
+        return got;
+    };
+
+    // Legacy: the helpers leave the one guest lock as it is.
+    CHECK(!tox2::splitPpuMode() && tox2::ppuThreadsMode() == tox2::PpuThreadsMode::Legacy);
+    CHECK(tox2::blockingWaitAllowed());
+    {
+        tox2::KernelSection section;
+        CHECK(!kernel.heldByCurrentThread());
+    }
+    {
+        std::lock_guard<tox2::GuestLock> lock(kernel);
+        CHECK(kernel.heldByCurrentThread() && !heldByOther());
+        {
+            tox2::KernelSection section;
+            tox2::KernelExit leave;
+            CHECK(kernel.heldByCurrentThread());
+        }
+        CHECK(kernel.heldByCurrentThread());
+    }
+    CHECK(!kernel.heldByCurrentThread());
+
+    for (const tox2::PpuThreadsMode split : {tox2::PpuThreadsMode::Split1, tox2::PpuThreadsMode::Split2}) {
+        SplitModeScope mode(split);
+        CHECK(tox2::splitPpuMode() && tox2::ppuThreadsMode() == split);
+        CHECK(tox2::ppuSlots().capacity() == (split == tox2::PpuThreadsMode::Split2 ? 2u : 1u));
+        CHECK(!tox2::blockingWaitAllowed());  // blockingWait without the kernel lock stops with a fatal error
+        {
+            tox2::KernelSection outer;
+            CHECK(kernel.heldByCurrentThread() && tox2::blockingWaitAllowed());
+            CHECK(!heldByOther());
+            {
+                tox2::KernelSection inner;  // nested: free
+                CHECK(kernel.heldByCurrentThread());
+            }
+            CHECK(kernel.heldByCurrentThread());
+            {
+                tox2::KernelExit leave;
+                CHECK(!kernel.heldByCurrentThread());
+                CHECK(otherCanLock());
+                {
+                    tox2::KernelExit again;  // nothing left to release
+                    CHECK(!kernel.heldByCurrentThread());
+                }
+                CHECK(!kernel.heldByCurrentThread());
+            }
+            CHECK(kernel.heldByCurrentThread());
+            // A timed wait with the lock held returns holding it again.
+            std::condition_variable_any cv;
+            CHECK(!tox2::blockingWait(cv, [] { return false; }, "test wait", std::chrono::milliseconds(1)));
+            CHECK(kernel.heldByCurrentThread());
+        }
+        CHECK(!kernel.heldByCurrentThread() && otherCanLock());
+        {
+            tox2::KernelExit leave;  // not held: nothing to release or take back
+            CHECK(!kernel.heldByCurrentThread());
+        }
+        CHECK(!kernel.heldByCurrentThread());
+    }
+    CHECK(!tox2::splitPpuMode() && tox2::ppuSlots().capacity() == 1);
+}
+
+constexpr int kStepBudget = kTox2PreemptBudget;
+std::atomic<int> g_step_count{0};
+
+// Steps through three budgets without any syscall.
+TOX2_PPU_FUNC(stepLoopEntry) {
+    for (int step = 1; step <= 3 * kStepBudget; step++) {
+        g_step_count.store(step, std::memory_order_relaxed);
+        tox2Loop(ctx, base);
+    }
+}
+
+// The creation rule must not depend on the new thread blocking: a thread that only computes still has to run first,
+// until its budget expires.
+void splitCreateStepLoopCase(tox2::PpuThreadsMode mode_to_test) {
+    GuestThreadEnv env({stepLoopEntry});
+    SplitModeScope mode(mode_to_test);
+    g_step_count = 0;
+    std::atomic<int> returned_step{-1};
+    std::atomic<std::uint32_t> thread_id{0};
+    std::atomic<bool> create_ok{false}, holds_after{false}, creator_done{false};
+    std::thread creator = slotThread(1001, [&] {
+        tox2::PpuSlots& slots = tox2::ppuSlots();
+        tox2::GuestLock& kernel = tox2::guestLock();
+        slots.acquire();
+        kernel.lock();
+        tox2::GuestThreadParams params;
+        params.entry_opd = env.opd(0);
+        params.priority = 500;
+        params.stack_size = 0x10000;
+        params.name = "stepper";
+        tox2::GuestThread* thread = tox2::prepareGuestThread(params);
+        if (thread != nullptr) {
+            thread_id = thread->id();
+            create_ok = tox2::startGuestThreadFirst(thread);
+            returned_step = g_step_count.load();
+        }
+        holds_after = kernel.heldByCurrentThread() && slots.heldByCurrentThread();
+        kernel.unlock();
+        slots.release();
+        creator_done = true;
+    });
+    CHECK(pollUntil([&] { return creator_done.load(); }));
+    creator.join();
+    CHECK(create_ok && holds_after);
+    CHECK(returned_step >= kStepBudget);  // not before the first budget expiry of the new thread
+    const tox2::GuestThread* thread = tox2::findThread(thread_id);
+    CHECK(thread != nullptr && pollUntil([&] { return thread->state() == tox2::ThreadState::Exited; }));
+    CHECK(g_step_count == 3 * kStepBudget);
+}
+
+void testSplitCreatePriority() {
+    HangGuard guard("testSplitCreatePriority");
+    {
+        SplitModeScope mode(tox2::PpuThreadsMode::Split1);
+        ppuThreadCreatePriorityScenario(false);
+    }
+    {
+        // The second slot is free, so a new thread of equal or lower priority runs next to its creator.
+        SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+        ppuThreadCreatePriorityScenario(true);
+    }
+    splitCreateStepLoopCase(tox2::PpuThreadsMode::Split1);
+    splitCreateStepLoopCase(tox2::PpuThreadsMode::Split2);
+}
+
+std::atomic<bool> g_exit_section_held{false};
+
+// What HLE sys_ppu_thread_exit does inside runImport: the handler runs in a kernel section and ends the thread.
+TOX2_PPU_FUNC(exitInSectionEntry) {
+    (void)base;
+    tox2::KernelSection section;
+    g_exit_section_held = tox2::guestLock().heldByCurrentThread();
+    tox2::exitCurrentThread(ctx->gpr[3]);
+}
+
+void testSplitExitInKernelSection() {
+    HangGuard guard("testSplitExitInKernelSection");
+    for (const tox2::PpuThreadsMode split : {tox2::PpuThreadsMode::Split1, tox2::PpuThreadsMode::Split2}) {
+        GuestThreadEnv env({exitInSectionEntry});
+        SplitModeScope mode(split);
+        g_exit_section_held = false;
+        tox2::GuestThreadParams params;
+        params.entry_opd = env.opd(0);
+        params.arg0 = 0x1234;
+        params.priority = 1001;
+        params.stack_size = 0x10000;
+        params.name = "exiter";
+        const std::uint32_t id = tox2::createGuestThread(params);
+        CHECK(id != 0);
+        const tox2::GuestThread* thread = tox2::findThread(id);
+        CHECK(thread != nullptr);
+        if (thread == nullptr) continue;
+        CHECK(pollUntil([&] { return thread->state() == tox2::ThreadState::Exited; }));
+        CHECK(g_exit_section_held && thread->exitValue() == 0x1234);
+
+        // The section's destructor never ran: exit has to release the kernel lock and the slot itself.
+        std::atomic<bool> kernel_ok{false}, slot_ok{false};
+        std::thread host([&] {
+            std::lock_guard<tox2::GuestLock> lock(tox2::guestLock());
+            kernel_ok = true;
+        });
+        requireWithin(std::chrono::seconds(1), [&] { return kernel_ok.load(); }, "kernel lock not released at exit");
+        host.join();
+        std::thread guest([&] {
+            tox2::ppuSlots().acquire();
+            slot_ok = true;
+            tox2::ppuSlots().release();
+        });
+        requireWithin(std::chrono::seconds(1), [&] { return slot_ok.load(); }, "slot not released at exit");
+        guest.join();
+    }
+}
+
+TOX2_PPU_FUNC(returnPathEntry) {
+    (void)ctx;
+    (void)base;
+}
+
+std::atomic<int> g_free_tls_warnings{0};
+
+// Threads that return from their entry function free their TLS block on the way out; that free is lv2 state and
+// must be ordered with the allocations a slot holder makes in kernel sections.
+void testSplitReturnPathTls() {
+    HangGuard guard("testSplitReturnPathTls");
+    GuestThreadEnv env({returnPathEntry}, true);
+    g_free_tls_warnings = 0;
+    tox2::setLogSink([](std::string_view line) {
+        if (line.find("freeTls(") != std::string_view::npos) g_free_tls_warnings++;
+    });
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+
+    // The guest threads that are alive (at most two) and their r13. A thread frees its block and becomes Exited without
+    // leaving the kernel lock, so inside a kernel section a thread that is not Exited still owns its block.
+    std::array<std::atomic<std::uint32_t>, 2> live_r13{}, live_id{};
+    std::atomic<bool> stop{false};
+    std::atomic<int> duplicates{0}, churn_rounds{0};
+    const auto clashesWithLive = [&](std::uint32_t r13) {  // in a kernel section
+        for (std::size_t c = 0; c < live_id.size(); c++) {
+            const std::uint32_t id = live_id[c].load();
+            if (id != 0 && r13 != 0 && live_r13[c].load() == r13 &&
+                tox2::findThread(id)->state() != tox2::ThreadState::Exited) {
+                return true;
+            }
+        }
+        return false;
+    };
+    std::vector<std::thread> threads;
+    threads.push_back(slotThread(1001, [&] {
+        slots.acquire();
+        while (!stop.load()) {
+            tox2::KernelSection section;
+            const std::uint32_t r13 = tox2::allocateTls();
+            if (clashesWithLive(r13)) duplicates++;
+            tox2::freeTls(r13);
+            churn_rounds++;
+        }
+        slots.release();
+    }));
+
+    constexpr int kThreadCount = 50;
+    const auto reapExited = [&] {
+        for (std::size_t c = 0; c < live_id.size(); c++) {
+            const std::uint32_t id = live_id[c].load();
+            if (id != 0 && tox2::findThread(id)->state() == tox2::ThreadState::Exited) live_id[c] = 0;
+        }
+    };
+    for (int i = 0; i < kThreadCount; i++) {
+        std::size_t cell = live_id.size();
+        CHECK(pollUntil([&] {
+            reapExited();
+            for (std::size_t c = 0; c < live_id.size(); c++) {
+                if (live_id[c].load() == 0) {
+                    cell = c;
+                    return true;
+                }
+            }
+            return false;
+        }));
+        if (cell == live_id.size()) break;
+        tox2::GuestThreadParams params;
+        params.entry_opd = env.opd(0);
+        params.priority = 1001;
+        params.stack_size = 0x4000;
+        params.name = "returner";
+        std::uint32_t id = 0;
+        {
+            tox2::KernelSection section;
+            params.tls_r13 = tox2::allocateTls();
+            if (clashesWithLive(params.tls_r13)) duplicates++;
+            live_r13[cell] = params.tls_r13;
+            id = tox2::createGuestThread(params);
+            live_id[cell] = id;
+        }
+        CHECK(id != 0);
+    }
+    CHECK(pollUntil([&] {
+        reapExited();
+        return live_id[0].load() == 0 && live_id[1].load() == 0;
+    }));
+    stop = true;
+    joinAll(threads);
+    CHECK(duplicates == 0);
+    CHECK(churn_rounds > 0);
+    CHECK(g_free_tls_warnings == 0);
+    tox2::setLogSink([](std::string_view) {});
+
+    // No slot was lost on the way.
+    std::atomic<int> holding{0};
+    std::atomic<bool> go{false};
+    for (int i = 0; i < 2; i++) {
+        threads.push_back(slotThread(1001, [&] {
+            slots.acquire();
+            holding++;
+            pollUntil([&] { return go.load(); });
+            slots.release();
+        }));
+    }
+    CHECK(pollUntil([&] { return holding.load() == 2; }));
+    go = true;
+    joinAll(threads);
+}
+
+// Budget expiry inside a handler's kernel section (sys_timer_usleep(0) calls tox2Yield from its handler): the kernel
+// lock goes first, so the thread that takes the slot can take the kernel lock, and comes back last.
+void testSplitYieldInsideKernel() {
+    HangGuard guard("testSplitYieldInsideKernel");
+    SplitModeScope mode(tox2::PpuThreadsMode::Split1);
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+    std::atomic<bool> a_ready{false}, a_go{false}, b_turn{false}, a_done{false};
+    bool a_holds_after = false;
+    std::vector<std::thread> threads;
+    threads.push_back(slotThread(1001, [&] {  // A
+        slots.acquire();
+        {
+            tox2::KernelSection section;
+            a_ready = true;
+            pollUntil([&] { return a_go.load(); });
+            auto ctx = std::make_unique<Tox2PpuContext>();
+            tox2Yield(ctx.get(), nullptr);
+            a_holds_after = tox2::guestLock().heldByCurrentThread() && slots.heldByCurrentThread();
+        }
+        a_done = true;
+        slots.release();
+    }));
+    CHECK(pollUntil([&] { return a_ready.load(); }));
+    queueSlotThread(slots, threads, 1001, [&] {  // B has the same priority
+        slots.acquire();
+        {
+            std::lock_guard<tox2::GuestLock> lock(tox2::guestLock());
+            b_turn = true;
+        }
+        slots.release();
+    });
+    a_go = true;
+    CHECK(pollUntil([&] { return a_done.load(); }));
+    joinAll(threads);
+    CHECK(b_turn && a_holds_after);
+}
+
+// Two PPU threads increment one word with lwarx/stwcx. while an SPU-style GETLLAR/PUTLLC loop increments another word
+// of the same line: neither count loses an update.
+void testSplitReservationCounter() {
+    HangGuard guard("testSplitReservationCounter");
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    std::unique_ptr<tox2::GuestMemory> memory(newMemory());
+    std::uint8_t* base = memory->base();
+    CHECK(memory->commit(0x20000, 0x1000));
+    constexpr std::uint32_t kPpuWord = 0x20400, kSpuWord = 0x20408;  // the same 128-byte line, separate 8-byte chunks
+    constexpr int kPpuIncrements = 200'000, kSpuIncrements = 50'000;
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 2; i++) {
+        threads.push_back(slotThread(1001, [&] {
+            slots.acquire();
+            auto ctx = std::make_unique<Tox2PpuContext>();
+            for (int n = 0; n < kPpuIncrements; n++) {
+                for (;;) {
+                    const std::uint32_t value = tox2Lwarx(ctx.get(), base, kPpuWord);
+                    if (tox2Stwcx(ctx.get(), base, kPpuWord, value + 1)) break;
+                }
+            }
+            slots.release();
+        }));
+    }
+    threads.push_back(std::thread([&] {
+        tox2::Reservation reservation;
+        std::uint8_t line[tox2::kReservationLineSize];
+        for (int n = 0; n < kSpuIncrements; n++) {
+            for (;;) {
+                tox2::reservations().getllar(base, kSpuWord, line, reservation);
+                const std::uint32_t offset = kSpuWord % tox2::kReservationLineSize;
+                const std::uint32_t value = (std::uint32_t{line[offset]} << 24) |
+                                            (std::uint32_t{line[offset + 1]} << 16) |
+                                            (std::uint32_t{line[offset + 2]} << 8) | line[offset + 3];
+                const std::uint32_t next = value + 1;
+                line[offset] = static_cast<std::uint8_t>(next >> 24);
+                line[offset + 1] = static_cast<std::uint8_t>(next >> 16);
+                line[offset + 2] = static_cast<std::uint8_t>(next >> 8);
+                line[offset + 3] = static_cast<std::uint8_t>(next);
+                if (tox2::reservations().putllc(base, kSpuWord, line, reservation)) break;
+            }
+        }
+    }));
+    joinAll(threads);
+    CHECK(tox2Read32(base, kPpuWord) == 2 * kPpuIncrements);
+    CHECK(tox2Read32(base, kSpuWord) == kSpuIncrements);
+}
+
 // Rapid yields reach the backoff and let another host thread take the lock; spaced yields never do.
 void testYieldBackoff() {
     tox2::setYieldBackoffEnabled(true);
@@ -13868,6 +14523,15 @@ int main(int argc, char** argv) {
     testPpuSlotsYield();
     testPpuSlotsStats();
     testPpuSlotsUncontendedCost();
+    testSplitBlockingWaitOrder();
+    testSplitTwoRunners();
+    testSplitYield();
+    testSplitKernelHelpers();
+    testSplitCreatePriority();
+    testSplitExitInKernelSection();
+    testSplitReturnPathTls();
+    testSplitYieldInsideKernel();
+    testSplitReservationCounter();
     testYieldBackoff();
     testPpuYieldStats();
     testPpuYieldSemantics();
