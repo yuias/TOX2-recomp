@@ -25,7 +25,7 @@ STD_R2_40_R1 = 62 << 26 | 2 << 21 | 1 << 16 | 40        # std r2,40(r1)
 FILES = ["ppu_chunk_000.c", "ppu_funcs.h", "ppu_imports.c", "ppu_tables.c", "sources.cmake"]
 REPORT_KEYS = ["schema", "generator", "input", "functions", "instructions", "import_trampolines",
                "thunks_without_toc_save", "chunks", "largest_functions", "unhandled", "edges",
-               "dynamic_targets", "labels", "loop_hooks", "output_bytes", "elapsed_s"]
+               "dynamic_targets", "labels", "loop_hooks", "overrides", "output_bytes", "elapsed_s"]
 
 
 class PlanChunksTest(unittest.TestCase):
@@ -111,6 +111,10 @@ class EmitCliTest(TempDirTestCase):
         self.text = cell.find_text_range(ElfFile.from_bytes(data))
         self.out = self.tmp / "out"
         self.report = self.tmp / "report.json"
+        # The synthetic DB has none of the entries in the repository's override file.
+        patcher = mock.patch.object(emit, "DEFAULT_OVERRIDES", self.tmp / "no_overrides.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def make_db(self, functions=None):
         return self.write_db(db_doc(sha=self.sha, text=self.text, functions=functions))

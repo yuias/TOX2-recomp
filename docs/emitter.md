@@ -41,7 +41,8 @@ Chunk files that a smaller `--chunks` makes unnecessary are removed. `--comments
 the code with the guest disassembly; it is off by default because it makes the files larger.
 
 The report (`--report`, default `generated/analysis/emit_report.json`) is JSON, and
-`emit` prints a summary on stdout:
+`emit` prints a summary on stdout. Its last line is `overrides: <n>`, followed by the entries in
+parentheses when there are any:
 
 | Field | Contents |
 | --- | --- |
@@ -51,6 +52,7 @@ The report (`--report`, default `generated/analysis/emit_report.json`) is JSON, 
 | `unhandled` | Words emitted as a call to `tox2Unhandled`: total, per mnemonic, per group, with example addresses |
 | `edges` | Calls, tail calls, switches, syscalls and traps by kind, for example `calls_direct` and `calls_indirect` |
 | `dynamic_targets` | Transfers whose constant target is not a recovered function or stub, with site and target |
+| `overrides` | The functions replaced by hand-written code, with entry and reason; see [Overrides](#overrides) |
 | `labels`, `loop_hooks`, `elapsed_s` | Emitted labels, loop hooks, run time |
 
 `--census` only counts the owned instructions by mnemonic and exits, without writing C.
@@ -109,6 +111,48 @@ For the committed database `config/libsre_functions.json` (352 functions, see
   heaviest function (`0x011d75dc`) has 851 instructions, and `emit` runs in under a second.
 - 2 `switch` statements with 14 cases, 177 system call sites, no traps, 481 direct calls, 450 calls
   of import trampolines, 28 indirect calls and 15 direct tail calls.
+
+## Overrides
+
+A guest function can be replaced by hand-written C. Every direct call, tail call and dispatch table
+row binds the symbol `fn_<address>`, so a source that defines that symbol replaces the function for
+all of them, with no run-time cost. The override file names the functions, and `emit` stops emitting
+`fn_<address>` for them:
+
+```json
+{
+  "overrides": [
+    {
+      "entry": "0x00956a00",
+      "generated_sha256": "<64 hex digits>",
+      "reason": "why the generated code is not enough"
+    }
+  ]
+}
+```
+
+`emit --overrides PATH` reads the file. The default is `config/ppu_overrides.json`; a missing default
+file means no overrides, and without overrides the output is byte-identical to what it would be without
+this feature. A missing file named with `--overrides` is an I/O error (exit 1). The option cannot be
+combined with `--symbol-prefix` (exit 2), and a prefixed image never reads the default file.
+
+- `entry` is a hex address (`0x` and one to eight digits) of a function in the database. `reason` is a
+  non-empty string. The three keys are required and no other key is allowed.
+- `generated_sha256` pins the code the override was derived from. It is the SHA-256 of the UTF-8 text
+  that `emit` writes for the function under the name `fn_<address>`, that is the title comment (the
+  database name, if any) and the function body as they appear in a chunk without `--comments`,
+  including the final newline. It is computed whatever `--comments` says. When the ELF, the database
+  or the emitter changes the text, the pin fails and the override has to be derived again.
+- A bad address, a duplicate entry, an entry that is not a function of the database, an empty
+  `reason`, a malformed file or a `generated_sha256` mismatch fails with exit 3 before any file is
+  written. The mismatch message prints the hash that `emit` computed.
+
+For an overridden function the chunk holds the body under the name `fn_<address>_generated`. Nothing
+calls it; it stays so that the override can be reviewed against the generated code, and it still counts
+in the chunk plan. `ppu_funcs.h` still declares `fn_<address>`, and `ppu_tables.c` still maps the guest
+address to `fn_<address>`. The C sources of the overrides are not named in the file: the build lists
+them, and the linker reports a function with an entry but no source (undefined `fn_<address>`) and a
+source without an entry (defined twice).
 
 ## SPU images
 

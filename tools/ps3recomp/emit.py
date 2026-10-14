@@ -8,6 +8,7 @@ import json
 import re
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from . import cell
@@ -16,6 +17,8 @@ from .emit_core import EmitEnv, EmitStats, emit_function
 from .emit_db import census_doc, census_lines, check_db_matches, load_function_db, take_census
 from .emit_output import (ExportRow, FunctionRecord, build_report, func_name, import_name,
                           read_thunk_words, render_trampoline, report_lines, write_output)
+from .emit_overrides import (DEFAULT_OVERRIDES, check_pin, generated_name, load_overrides,
+                             report_section)
 from .ghidra import _load_default_config
 from .info import (EXIT_IO, EXIT_NOT_PPU_ELF, REPO_ROOT, CliError, parse_ppu_elf, read_input,
                    reject_encrypted)
@@ -81,6 +84,9 @@ def collect_exports(elf, db) -> list[ExportRow]:
 def _run(args: argparse.Namespace) -> int:
     started = time.perf_counter()
     prefix = args.symbol_prefix or ""
+    if prefix and args.overrides:
+        raise CliError(EXIT_USAGE, "--overrides cannot be combined with --symbol-prefix; "
+                       "overrides apply to the main executable only")
     data = read_input(args.elf)
     sha256 = hashlib.sha256(data).hexdigest()
     reject_encrypted(data, sha256, _load_default_config())
@@ -116,6 +122,12 @@ def _run(args: argparse.Namespace) -> int:
             print(line)
         return 0
 
+    # A prefixed image never gets the default file, whose addresses belong to the executable.
+    overrides = [] if prefix else load_overrides(
+        Path(args.overrides) if args.overrides else DEFAULT_OVERRIDES,
+        explicit=bool(args.overrides), entries=[fn.entry for fn in db.functions])
+    overridden = {o.entry: o for o in overrides}
+
     env = EmitEnv(
         names={fn.entry: func_name(fn.entry, prefix) for fn in db.functions},
         thunks={t.addr: import_name(t.addr, prefix) for t in db.thunks},
@@ -126,8 +138,15 @@ def _run(args: argparse.Namespace) -> int:
     functions = []
     for fn in db.functions:
         addrs = fn.addrs()
-        text = emit_function(image, fn.entry, addrs, env, stats, name=func_name(fn.entry, prefix),
-                             title=fn.name)
+        name = func_name(fn.entry, prefix)
+        override = overridden.get(fn.entry)
+        if override is not None:
+            # The pin covers the plain body whatever --comments says. Its stats are thrown away so
+            # that the report counts the function once.
+            check_pin(override, emit_function(image, fn.entry, addrs, replace(env, comments=False),
+                                              EmitStats(), name=name, title=fn.name))
+            name = generated_name(name)
+        text = emit_function(image, fn.entry, addrs, env, stats, name=name, title=fn.name)
         functions.append(FunctionRecord(fn.entry, len(addrs), text))
 
     thunk_texts = []
@@ -144,7 +163,8 @@ def _run(args: argparse.Namespace) -> int:
                            prefix, exports)
     report = build_report(sha256=sha256, db_sha256=db.file_sha256, stats=stats,
                           functions=functions, thunks=db.thunks, without_toc_save=without_toc_save,
-                          summary=summary, elapsed=time.perf_counter() - started)
+                          summary=summary, overrides=report_section(overrides),
+                          elapsed=time.perf_counter() - started)
     report_path = (Path(args.report) if args.report
                    else _default_analysis_path(DEFAULT_REPORT, prefix))
     _write_text(report_path, json.dumps(report, indent=2, ensure_ascii=False) + "\n")
@@ -197,6 +217,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbol-prefix", type=_symbol_prefix, metavar="NAME",
                         help="prefix of every generated file name and global symbol; required "
                              "for a PRX, refused for the main executable")
+    parser.add_argument("--overrides", metavar="PATH",
+                        help="guest function override file (default: config/ppu_overrides.json, "
+                             "optional); refused with --symbol-prefix")
     parser.add_argument("--max-unhandled", type=_non_negative_int, metavar="N",
                         help="exit 9 if more than N words are emitted as unhandled")
     return parser

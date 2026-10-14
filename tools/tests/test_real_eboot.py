@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ps3recomp import (cell, disasm, emit, emit_core, ghidra_diff, ghidra_summary, info,
                        jumptab, nids, probe, recover, seeds)
@@ -589,7 +590,8 @@ def _emit_result():
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            # These checks describe the plain emit, without the repository's override file.
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()),                     mock.patch.object(emit, "DEFAULT_OVERRIDES", tmp_path / "no_overrides.json"):
                 code = emit.main([_ELF_PATH, "--out", str(tmp_path / "ppu"),
                                   "--report", str(tmp_path / "report.json"),
                                   "--census-out", str(tmp_path / "census.json"),
