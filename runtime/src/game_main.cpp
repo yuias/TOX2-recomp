@@ -798,6 +798,11 @@ tox2::PerfSource lockPerfSource() {
                                 static_cast<double>(fs.read_max_us) / 1000.0, fs.writes, fs.write_bytes,
                                 static_cast<double>(fs.write_max_us) / 1000.0);
         }
+        if (now.ppu_hold_us != prev.ppu_hold_us) {
+            body += std::format("{}ppu overlap {:.2f} of {:.2f} ms", body.empty() ? "lock " : " | ",
+                                static_cast<double>(now.ppu_hold_overlap_us - prev.ppu_hold_overlap_us) / 1000.0,
+                                static_cast<double>(now.ppu_hold_us - prev.ppu_hold_us) / 1000.0);
+        }
         prev = now;
         return body;
     };
