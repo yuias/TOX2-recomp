@@ -270,12 +270,17 @@ decoder state is on the host.
   (see [Movies](movies.md)), one frame per packet, synchronously inside `cellAtracDecode` under the
   guest lock (a frame takes tens of microseconds). The decoder is behind the
   `AtracFrameDecoder` interface (`media/atrac_decoder.h`), so the runtime core has no FFmpeg types.
-- **Two modes.** In memory mode (background music, sound effects) the whole file is in the buffer
-  (`read_bytes == buffer_bytes`). In streaming mode (voice) the buffer is a ring of `buffer_bytes`
-  (the earlier game used `0x20000`) that holds file bytes from offset 0 to `read_bytes` at the start.
+- **Two modes.** The mode follows the data, not the sizes. In memory mode (sound effects) every
+  frame is in the first `read_bytes` bytes, so the whole file is in the buffer whatever `buffer_bytes`
+  is. Anything else is streaming mode: the buffer is a ring of `buffer_bytes` (`0x20000` for the earlier
+  game's voice, `0x40000` for this game's background music) that holds file bytes from offset 0 to
+  `read_bytes` at the start, also when `read_bytes == buffer_bytes` (a ring that starts full).
+  The ring is a FIFO of stream bytes in the order the game feeds them: stream byte `s` lives at ring
+  offset `s % buffer_bytes`, and `buffered_end` is the stream position of the next byte to write.
   `GetStreamDataInfo` returns the write pointer in the ring, the contiguous writable bytes and the
-  file offset of the next byte to read; `AddStreamData` commits bytes at that pointer. A frame that
-  wraps around the ring is gathered from both parts.
+  file offset of the next byte to read (see Loops: this is not `buffered_end` after a loop);
+  `AddStreamData` commits bytes at that pointer. A frame that wraps around the ring is gathered from
+  both parts.
 - **`Decode`** decodes the frames at the cursor until it has output, the end is reached or the
   buffered data runs out. It writes interleaved big-endian float32 (a mono sound stays one channel),
   cuts the encoder delay at the start and the samples after `delay + count` at the end, and returns
@@ -293,22 +298,43 @@ decoder state is on the host.
   Other errors are for a bad handle state only: `Decode` before `CreateDecoder` returns `0x80610321`, a
   handle with no data `0x80610322`, `CreateDecoder` twice `0x80610323`.
 - **`GetVacantSize`** writes the number of ring bytes that `AddStreamData` could still take in
-  total: the buffer size minus the bytes from the decode cursor to the end of the buffered data,
-  limited by what is left of the file. This is not the contiguous run that `GetStreamDataInfo`
+  total: the buffer size minus the stream bytes from the decode cursor to the end of the buffered data,
+  limited only by the stream limit (see Loops). It is not limited by the file size when the file
+  loops, because the game feeds the loop region again after the pass end; a cap at the file end would
+  keep the value below the game's `0x10000` read size, which its loader takes only whole, and the
+  reader would stall before the loop end. This is not the contiguous run that `GetStreamDataInfo`
   returns, which also stops at the ring end. The game stores the value without looking at the return
   code and sizes its next file read from it. In memory mode there is nothing to add: the cell gets 0 and
   the return value is `0x80610341` (`ALLDATA_IS_ON_MEMORY`, as for the other stream calls); this game
   calls it in memory mode and ignores the code.
 - **`GetInternalErrorInfo`** writes 0 and returns success: the host decoder has no internal error.
 - **`remain`.** `GetRemainFrame` and `Decode` report the number of complete frames buffered ahead of
-  the cursor. In memory mode it is -1. In streaming mode it is -2 once the end of the file is
-  buffered and no loop-back is left. The earlier game refilled the ring only while `remain` was not negative.
+  the cursor. In memory mode it is -1. In streaming mode it is -2 once the stream limit is buffered
+  (the end of the file, or the end of the last pass to play for a looping file). The earlier game
+  refilled the ring only while `remain` was not negative; this game never reads the value.
 - **Loops.** `SetLoopNum(n)` is the number of passes through the loop region still to play, the
   current one included (-1 forever); 0 and 1 mean no loop-back follows. When decoding reaches the
   loop end and a loop-back follows, the count is decremented, the cursor goes back to the frame
-  before the one holding the loop start (in streaming mode the buffered bytes are dropped and the
-  game refills from the new read position), the decoder is reset, and the output is discarded up to
-  the loop start; the extra frame primes the decoder's overlap. `GetLoopInfo` reports status 1 when
+  before the one holding the loop start, the decoder is reset, and the output is discarded up to
+  the loop start; the extra frame primes the decoder's overlap.
+  In streaming mode nothing buffered is dropped at a loop-back. This game's reader does not follow
+  `read_pos`: it feeds the file in order up to the pass end `E`, then feeds again from a fixed offset
+  `R`, whatever the loop count. With `smpl` positions `start` and `end` in 2048-sample frames,
+  `R = frameOffset(start / 2048 - 1)` (the priming frame, frame 0 when `start` is in frame 0) and
+  `E = frameOffset(end / 2048 + 1)`, the end of the frame that holds the loop end (never above the
+  file end; the file end when there is no `smpl` loop with a non-zero end, and then the reader stops
+  there). `L = E - R`. Stream position `s` is file offset `s` while `s < E`, and `R + (s - E) % L`
+  after that: pass 0 holds file bytes `[0, E)` and every later pass `[R, E)`. The model keeps a pass
+  counter and maps the decode cursor to a stream position, so after a loop-back the frames it decodes
+  are the ones the game fed next. `GetStreamDataInfo` reports `read_pos` as the file offset of
+  `buffered_end`, which reads `R` once `E` is buffered; the game ignores it.
+  The stream limit is where the last pass to play ends: none for a usable loop with count -1,
+  `E + last * L` with `last` the pass number of the last pass otherwise (`E` without a usable loop).
+  `GetVacantSize` is 0 and `remain` is -2 once `buffered_end` reaches it. The frames after `E` of
+  a looping file are never fed, so in streaming mode the last pass, and a pass whose loop is not
+  usable, end at the end of the frame that holds the loop end (`(end / 2048 + 1) * 2048` samples)
+  instead of the end of the valid audio. A file whose `smpl` loop is not usable (its region holds no
+  valid audio) is played once and stops at `E`. `GetLoopInfo` reports status 1 when
   the file has a usable loop (queried before any decode) and the current count, so the earlier game's "last
   pass" test (`status == 1 && loops == 1`) works. A loop whose region holds no valid audio is
   ignored. A sound without loop points that the earlier game repeated was started again by the game itself
@@ -358,7 +384,11 @@ Lines start with `tox2: audio:`, `tox2: atrac:`, `tox2: timer:` or `tox2: thread
 | `tox2: atrac: decoder <handle hex>: <ch> ch <rate> Hz, <frames> frames, loop <start>-<end>\|none, all on memory\|streaming` | info | `cellAtracCreateDecoder`, `cellAtracCreateDecoderExt` |
 | `tox2: atrac: no decoder: <reason>` | warn | No FFmpeg decoder (once) |
 | `tox2: atrac: handle <hex>: unusable data: <reason>` | warn | `SetDataAndGetMemSize` failed (once per handle) |
-| `tox2: atrac: handle <hex>: decode error, playing silence for such frames: <reason>` | warn | First rejected frame of a handle |
+| `tox2: atrac: handle <hex>: decode error, playing silence for such frames: <reason>` | warn | First rejected frame of a handle. The reason starts with `frame <i> pass <k> (file <hex>, stream <hex>, ring offset <hex>, buffered to <hex>, bytes <16-byte head hex>)` |
+| `tox2: atrac: set data handle <hex>: all on memory\|streaming, read <hex> of buffer <hex>, data at <hex> size <hex>, block <hex>` | debug | `SetDataAndGetMemSize` accepted the data |
+| `tox2: atrac: stream info handle <hex>: write at <hex>, writable <hex>, read pos <hex>` | debug | `GetStreamDataInfo` (write at is the ring offset) |
+| `tox2: atrac: add stream data handle <hex>: <hex> bytes, result <hex>, buffered to <hex>` | debug | `AddStreamData` (buffered to is the stream position) |
+| `tox2: atrac: handle <hex>: frame <i> pass <k> file <hex> stream <hex> ring <hex>: <16-byte head hex>` | debug | The first frame decoded after `SetDataAndGetMemSize` and the first one after each loop-back. After a loop-back the file offset is `R`, and the head must equal the file bytes there |
 | `tox2: timer: requested <n> ms, system period <x> ms\|unknown` | debug | Start-up |
 | `tox2: timer: the 1 ms resolution request was refused; timed waits use the default tick` | warn | Start-up |
 | `tox2: thread: <id> <name> prio <p> starts before creator <id> prio <q>` | debug | A thread was created with a lower priority number than its creator |

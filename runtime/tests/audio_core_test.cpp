@@ -2359,6 +2359,117 @@ void testAtracModelLoops() {
     }
 }
 
+// The game's file reader as the HLE sees it: a source offset that starts at the bytes already read and
+// runs in file order. Each step reads n = min(chunk, vacant(), pass end - source) bytes and commits them in
+// writable-sized pieces through GetStreamDataInfo/AddStreamData (the staging drain). At the pass end the
+// source wraps to the loop restart offset when the file has a `smpl` loop with a non-zero end; without one
+// the reader stops. It never consults the read position the model reports.
+struct GameFeeder {
+    ModelRig& rig;
+    std::uint32_t chunk;
+    std::uint64_t source = 0;    // file offset of the next byte the reader takes
+    std::uint64_t restart = 0;   // where the source goes after the pass end (the priming frame)
+    std::uint64_t pass_end = 0;  // exclusive end of what the reader feeds in one pass
+    bool wraps = false;
+    bool ok = true;
+
+    GameFeeder(ModelRig& model, std::uint32_t read_bytes, std::uint32_t chunk_bytes) : rig(model), chunk(chunk_bytes) {
+        const tox2::At3Info& info = rig.stream->info();
+        const std::uint64_t file_end =
+                std::uint64_t{info.data_offset} + std::uint64_t{info.frameCount()} * info.block_align;
+        pass_end = file_end;
+        if (info.loop && info.loop->end_sample != 0) {
+            wraps = true;
+            const std::uint64_t start_frame = info.loop->start_sample / 2048;
+            restart = info.data_offset + (start_frame > 0 ? start_frame - 1 : 0) * info.block_align;
+            pass_end = std::min<std::uint64_t>(
+                    file_end, info.data_offset + (info.loop->end_sample / 2048 + 1ull) * info.block_align);
+        }
+        source = std::min<std::uint64_t>(read_bytes, pass_end);
+    }
+
+    // One read. With whole_only the read is skipped unless the model has room for all of it, as the game's
+    // loader accepts a chunk only whole. Returns the bytes committed.
+    std::uint64_t step(bool whole_only = false) {
+        if (source >= pass_end && wraps) source = restart;
+        std::uint64_t n = std::min<std::uint64_t>(chunk, pass_end > source ? pass_end - source : 0);
+        const std::uint32_t vacant = rig.stream->vacant();
+        if (whole_only && n > vacant) return 0;
+        n = std::min<std::uint64_t>(n, vacant);
+        std::uint64_t done = 0;
+        while (n > 0) {
+            const auto info = rig.stream->streamDataInfo();
+            if (!info) {
+                ok = false;
+                break;
+            }
+            const std::uint64_t piece = std::min<std::uint64_t>(n, info->writable);
+            if (piece == 0) {
+                ok = false;
+                break;
+            }
+            for (std::uint64_t i = 0; i < piece; ++i) {
+                rig.ring[(info->write_addr - ModelRig::kBufferAddr + i) % rig.ring.size()] = rig.file[source + i];
+            }
+            ok = ok && rig.stream->addStreamData(static_cast<std::uint32_t>(piece)) == 0;
+            source += piece;
+            n -= piece;
+            done += piece;
+        }
+        return done;
+    }
+};
+
+// Decode calls, each followed by one read step of the feeder.
+Collected collectFed(ModelRig& rig, GameFeeder& feeder, std::uint32_t max_calls,
+                     std::function<bool(const Collected&)> stop = {}) {
+    Collected got;
+    tox2::AtracStream& stream = *rig.stream;
+    const std::uint32_t channels = stream.info().channels;
+    for (std::uint32_t call = 0; call < max_calls && !got.finished; ++call) {
+        std::vector<float> out(2048 * channels);
+        const auto result = stream.decode(rig.ring, out);
+        if (!result) {
+            got.all_ok = false;
+            break;
+        }
+        for (std::uint32_t i = 0; i < result->samples; ++i) got.left.push_back(out[i * channels]);
+        got.call_samples.push_back(result->samples);
+        got.loops_after_call.push_back(stream.loopNum());
+        got.finished = result->finish;
+        got.last_remain = result->remain;
+        feeder.step();
+        if (stop && stop(got)) break;
+    }
+    got.all_ok = got.all_ok && feeder.ok;
+    return got;
+}
+
+// A file with no loop, fed from `read_bytes` on in `chunk`-sized reads.
+Collected collectSequential(ModelRig& rig, std::uint32_t read_bytes, std::uint32_t chunk, std::uint32_t max_calls) {
+    GameFeeder feeder(rig, read_bytes, chunk);
+    return collectFed(rig, feeder, max_calls);
+}
+
+// 2232 samples of encoder delay, `frames` frames, a loop in raw smpl sample positions.
+constexpr std::uint32_t kLoopDelay = 2232;
+Bytes makeLoopFile(std::uint32_t frames, std::uint32_t loop_start, std::uint32_t loop_end) {
+    return makeAt3File(2, frames, frames * 2048 - kLoopDelay - 1, kLoopDelay, std::pair{loop_start, loop_end});
+}
+
+// 600 frames; the loop starts in frame 100 (priming frame 99) and ends in frame 400, so the game feeds
+// frames [0, 400] and then [99, 400] again, and the last 199 frames are never fed.
+constexpr std::uint32_t kLoopStart = 100 * 2048 + 500;
+constexpr std::uint32_t kLoopEnd = 400 * 2048 + 100;
+constexpr std::uint32_t kLoopPassEnd = (kLoopEnd / 2048 + 1) * 2048;  // first sample of the frame after the end
+Bytes makeStreamLoopFile() { return makeLoopFile(600, kLoopStart, kLoopEnd); }
+
+// Frame indices decoded when frames [first, last] are played and then the decoder is reset.
+void appendFrames(std::vector<std::int64_t>& events, std::int64_t first, std::int64_t last, bool reset) {
+    for (std::int64_t f = first; f <= last; ++f) events.push_back(f);
+    if (reset) events.push_back(-1);
+}
+
 void testAtracModelStreamingLoop() {
     constexpr std::uint32_t kFrames = 300;
     constexpr std::uint32_t kEnd = kFrames * 2048 - 1;  // exclusive end of the valid audio
@@ -2367,25 +2478,13 @@ void testAtracModelStreamingLoop() {
     const Bytes file = makeAt3File(2, kFrames, kEnd - 2232, 2232, std::pair{kStart, kEnd - 1});
     CHECK(rig.open(file, 0x10000, 0x20000));
     rig.stream->setLoopNum(2);
-    std::vector<std::uint32_t> seek_read_pos;
-    std::uint32_t seen_resets = 0;
-    // After the seek the game's next request must start at the frame before the loop start.
-    const Collected got = collect(rig, 3000, [&](const Collected&) {
-        if (rig.stats.resets() > seen_resets) {
-            seen_resets = rig.stats.resets();
-            const auto info = rig.stream->streamDataInfo();
-            CHECK(info.has_value());
-            if (info) {
-                seek_read_pos.push_back(info->read_pos);
-                CHECK(info->write_addr == ModelRig::kBufferAddr + info->read_pos % 0x20000);
-                CHECK(info->writable > 0);
-            }
-        }
-        return false;
-    });
+    // The loop ends in the last frame: the pass end is the file end, then the reader goes back to the
+    // priming frame, one before the loop start.
+    GameFeeder feeder(rig, 0x10000, 0x10000);
+    CHECK(feeder.wraps && feeder.pass_end == file.size() && feeder.restart == rig.data_offset + 99 * kAt3Block);
+    const Collected got = collectFed(rig, feeder, 3000);
     CHECK(got.all_ok && got.finished);
-    CHECK(seek_read_pos.size() == 1);
-    if (!seek_read_pos.empty()) CHECK(seek_read_pos[0] == rig.data_offset + 99 * kAt3Block);
+    CHECK(rig.stats.resets() == 1);
     std::vector<float> expected;
     appendPositions(expected, 2232, kEnd - 1);
     appendPositions(expected, kStart, kEnd - 1);
@@ -2393,49 +2492,371 @@ void testAtracModelStreamingLoop() {
     CHECK(rig.stats.bad_frames == 0);
 }
 
-void testAtracModelStaleRead() {
-    // A read requested before a loop seek completes after it: its bytes belong to the old position and
-    // must not be committed. The file is long enough that data past the loop end is still unread.
-    constexpr std::uint32_t kFrames = 600;
-    constexpr std::uint32_t kLoopEnd = 200 * 2048 + 100;
+void testAtracLoopStreamOrder() {
+    // After a loop-back the ring holds the game's continuation in stream order: file bytes from the
+    // priming frame on. The decoder must see frames 99.. with their own bytes, three times in a row.
+    const Bytes file = makeStreamLoopFile();
     ModelRig rig;
-    const Bytes file = makeAt3File(2, kFrames, kFrames * 2048 - 2232 - 1, 2232, std::pair{2048u * 10, kLoopEnd});
+    CHECK(rig.open(file, 0x10000, 0x20000));
+    rig.stream->setLoopNum(-1);
+    GameFeeder feeder(rig, 0x10000, 0x10000);
+    CHECK(feeder.wraps && feeder.pass_end < file.size());
+    const Collected got = collectFed(rig, feeder, 6000, [&](const Collected&) { return rig.stats.resets() >= 3; });
+    CHECK(got.all_ok && !got.finished);
+    CHECK(rig.stats.bad_frames == 0);
+    std::vector<std::int64_t> expected_events;
+    appendFrames(expected_events, 0, 400, true);
+    appendFrames(expected_events, 99, 400, true);
+    appendFrames(expected_events, 99, 400, true);
+    CHECK(rig.stats.events == expected_events);
+    std::vector<float> expected;
+    appendPositions(expected, kLoopDelay, kLoopEnd);
+    appendPositions(expected, kLoopStart, kLoopEnd);
+    appendPositions(expected, kLoopStart, kLoopEnd);
+    CHECK(got.left == expected);
+    CHECK(std::count(got.call_samples.begin(), got.call_samples.end(), 0u) == 0);  // never starved
+}
+
+void testAtracReadPosAfterPassEnd() {
+    const Bytes file = makeStreamLoopFile();
+    ModelRig rig;
+    CHECK(rig.open(file, 0x10000, 0x20000));
+    rig.stream->setLoopNum(-1);
+    GameFeeder feeder(rig, 0x10000, 0x10000);
+    const std::uint64_t restart = feeder.restart, pass_end = feeder.pass_end, length = pass_end - restart;
+    CHECK(restart == rig.data_offset + 99 * kAt3Block && pass_end == rig.data_offset + 401 * kAt3Block);
+
+    bool at_pass_end = false, inside_pass_one = false, at_second_end = false, all_match = true;
+    collectFed(rig, feeder, 6000, [&](const Collected&) {
+        const std::uint64_t buffered = rig.stream->bufferedEnd();
+        const auto info = rig.stream->streamDataInfo();
+        if (!info) {
+            all_match = false;
+            return true;
+        }
+        const std::uint64_t expected = buffered < pass_end ? buffered : restart + (buffered - pass_end) % length;
+        all_match = all_match && info->read_pos == expected;
+        if (buffered == pass_end) at_pass_end = info->read_pos == restart;
+        if (buffered > pass_end && buffered < pass_end + length) {
+            inside_pass_one = inside_pass_one || info->read_pos == restart + (buffered - pass_end);
+        }
+        if (buffered == pass_end + length) at_second_end = info->read_pos == restart;
+        return buffered > pass_end + length;
+    });
+    CHECK(all_match);
+    CHECK(at_pass_end && inside_pass_one && at_second_end);
+}
+
+void testAtracVacantUncappedForLoop() {
+    // The loop ends 9 frames before the file end, and the buffer is 0x40000. Whenever the ring has 0x10000
+    // bytes free, the game's 0x10000 chunk must fit, also when fewer than 0x10000 bytes of the file are
+    // left past the buffered position (and when the position is past the file end).
+    constexpr std::uint32_t kBuffer = 0x40000;
+    const Bytes file = makeLoopFile(600, 100 * 2048 + 500, 590 * 2048 + 100);
+    ModelRig rig;
+    CHECK(rig.open(file, 0x10000, kBuffer));
+    rig.stream->setLoopNum(-1);
+    GameFeeder feeder(rig, 0x10000, 0x10000);
+    const std::uint64_t restart = feeder.restart, pass_end = feeder.pass_end, length = pass_end - restart;
+    const auto file_end = static_cast<std::int64_t>(file.size());
+    CHECK(file_end - static_cast<std::int64_t>(pass_end) < 0x10000);
+
+    // The stream position of the decode cursor, from what the fake decoder saw.
+    auto cursorPos = [&]() -> std::uint64_t {
+        const std::uint64_t pass = rig.stats.resets();
+        const std::int64_t last = rig.stats.events.empty() ? -1 : rig.stats.events.back();
+        const std::uint64_t at = rig.stats.events.empty() ? rig.data_offset
+                                 : last == -1             ? restart
+                                                          : rig.data_offset + (last + 1) * kAt3Block;
+        return pass == 0 ? at : pass_end + (pass - 1) * length + (at - restart);
+    };
+
+    std::uint32_t covered = 0, covered_past_end = 0, violations = 0, mismatches = 0, starved = 0;
+    bool ok = true;
+    std::vector<float> out(4096);
+    for (std::uint32_t call = 0; call < 6000 && rig.stats.resets() < 2; ++call) {
+        const auto result = rig.stream->decode(rig.ring, out);
+        ok = ok && result.has_value();
+        if (result && result->starved) ++starved;
+        const std::uint64_t buffered = rig.stream->bufferedEnd();
+        const std::uint64_t cursor = cursorPos();
+        const std::uint64_t live = buffered > cursor ? buffered - cursor : 0;
+        const std::uint64_t free_bytes = kBuffer > live ? kBuffer - live : 0;
+        const std::int64_t left_in_file = file_end - static_cast<std::int64_t>(buffered);
+        const std::uint32_t vacant = rig.stream->vacant();
+        // Without a finite loop count only the ring limits the free space.
+        if (vacant != free_bytes) ++mismatches;
+        if (left_in_file < 0x10000 && free_bytes >= 0x10000) {
+            ++covered;
+            if (left_in_file < 0) ++covered_past_end;
+            if (!(vacant >= 0x10000 && static_cast<std::int64_t>(vacant) > left_in_file)) ++violations;
+        }
+        feeder.step(true);
+    }
+    CHECK(ok && feeder.ok);
+    CHECK(violations == 0 && mismatches == 0 && starved == 0);
+    CHECK(covered > 0 && covered_past_end > 0);
+    CHECK(rig.stats.resets() == 2 && rig.stats.bad_frames == 0);
+}
+
+void testAtracLoopStreamLimit() {
+    const Bytes file = makeStreamLoopFile();
+    // loop_num 2: the second pass is the last one. The reader feeds the file up to the pass end twice and
+    // nothing else; the last pass plays up to the end of the frame that holds the loop end.
+    {
+        ModelRig rig;
+        CHECK(rig.open(file, 0x10000, 0x20000));
+        rig.stream->setLoopNum(2);
+        GameFeeder feeder(rig, 0x10000, 0x10000);
+        const std::uint64_t pass_end = feeder.pass_end, limit = pass_end + (pass_end - feeder.restart);
+        bool reached = false, overshoot = false, early_end = false;
+        const Collected got = collectFed(rig, feeder, 6000, [&](const Collected&) {
+            const std::uint64_t buffered = rig.stream->bufferedEnd();
+            overshoot = overshoot || buffered > limit;
+            if (rig.stats.resets() == 0 && rig.stream->remain() == kRemainStreamEnd) early_end = true;
+            if (buffered == limit) {
+                reached = true;
+                CHECK(rig.stream->remain() == kRemainStreamEnd);
+                CHECK(rig.stream->vacant() == 0);
+            }
+            return false;
+        });
+        CHECK(got.all_ok && got.finished);
+        CHECK(reached && !overshoot && !early_end);
+        CHECK(got.last_remain == kRemainStreamEnd);
+        CHECK(rig.stream->bufferedEnd() == limit && rig.stream->vacant() == 0);
+        std::vector<std::int64_t> expected_events;
+        appendFrames(expected_events, 0, 400, true);
+        appendFrames(expected_events, 99, 400, false);
+        CHECK(rig.stats.events == expected_events);
+        std::vector<float> expected;
+        appendPositions(expected, kLoopDelay, kLoopEnd);
+        appendPositions(expected, kLoopStart, kLoopPassEnd - 1);
+        CHECK(got.left == expected);
+        CHECK(rig.stats.bad_frames == 0);
+    }
+    // loop_num 1: no loop-back, so the single pass ends with the frame that holds the loop end, although
+    // the file goes on.
+    {
+        ModelRig rig;
+        CHECK(rig.open(file, 0x10000, 0x20000));
+        rig.stream->setLoopNum(1);
+        GameFeeder feeder(rig, 0x10000, 0x10000);
+        const Collected got = collectFed(rig, feeder, 6000);
+        CHECK(got.all_ok && got.finished && got.last_remain == kRemainStreamEnd);
+        CHECK(rig.stream->bufferedEnd() == feeder.pass_end && rig.stream->vacant() == 0);
+        std::vector<float> expected;
+        appendPositions(expected, kLoopDelay, kLoopPassEnd - 1);
+        CHECK(got.left == expected);
+        CHECK(rig.stats.resets() == 0 && rig.stats.bad_frames == 0);
+    }
+    // loop_num -1: no limit, and the stream runs past every pass end.
+    {
+        ModelRig rig;
+        CHECK(rig.open(file, 0x10000, 0x20000));
+        rig.stream->setLoopNum(-1);
+        GameFeeder feeder(rig, 0x10000, 0x10000);
+        const std::uint64_t pass_end = feeder.pass_end, two_passes = pass_end + 2 * (pass_end - feeder.restart);
+        bool never_ended = true, beyond = false;
+        const Collected got = collectFed(rig, feeder, 6000, [&](const Collected& so_far) {
+            never_ended =
+                    never_ended && rig.stream->remain() != kRemainStreamEnd && so_far.last_remain != kRemainStreamEnd;
+            beyond = beyond || rig.stream->bufferedEnd() > two_passes;
+            return rig.stats.resets() >= 3;
+        });
+        CHECK(got.all_ok && !got.finished);
+        CHECK(never_ended && beyond);
+    }
+}
+
+void testAtracNoDropAtLoopBack() {
+    // A read requested before the loop-back completes after it. The ring is a FIFO of stream bytes, so
+    // its bytes still belong at the write pointer and must be kept.
+    const Bytes file = makeStreamLoopFile();
+    ModelRig rig;
     CHECK(rig.open(file, 0x10000, 0x20000));
     rig.stream->setLoopNum(2);
+    GameFeeder feeder(rig, 0x10000, 0x10000);
     std::vector<float> out(4096);
 
-    // Play up to frame 199 with every refill completing at once.
-    while (rig.stats.events.size() < 200) {
-        const auto result = rig.stream->decode(rig.ring, out);
-        CHECK(result.has_value());
-        if (!result) return;
-        const auto info = rig.stream->streamDataInfo();
-        if (info && info->writable > 0 && result->remain >= 0 &&
-            result->remain < static_cast<std::int32_t>(rig.threshold)) {
-            const std::uint32_t bytes = std::min<std::uint32_t>(info->writable, 0x4000);
-            for (std::uint32_t i = 0; i < bytes; ++i) {
-                rig.ring[(info->write_addr - ModelRig::kBufferAddr + i) % rig.ring.size()] = file[info->read_pos + i];
-            }
-            CHECK(rig.stream->addStreamData(bytes) == 0);
-        }
+    // Play up to frame 399, which leaves one frame of room in the ring; frame 400 ends the pass.
+    for (std::uint32_t call = 0; call < 6000; ++call) {
+        CHECK(rig.stream->decode(rig.ring, out).has_value());
+        if (!rig.stats.events.empty() && rig.stats.events.back() == 399) break;
+        feeder.step();
     }
+    CHECK(!rig.stats.events.empty() && rig.stats.events.back() == 399 && rig.stats.resets() == 0);
 
-    // A read is requested and stays in flight while the decoder reaches the loop end and seeks.
     const auto request = rig.stream->streamDataInfo();
     CHECK(request.has_value() && request->writable > 0);
     if (!request) return;
-    const std::uint32_t stale_bytes = std::min<std::uint32_t>(request->writable, 0x4000);
-    for (int guard = 0; guard < 10 && rig.stats.resets() == 0; ++guard) {
-        CHECK(rig.stream->decode(rig.ring, out).has_value());
+    const std::uint32_t bytes = std::min<std::uint32_t>(request->writable, 256);
+    CHECK(feeder.source + bytes <= feeder.pass_end);
+    for (std::uint32_t i = 0; i < bytes; ++i) {
+        rig.ring[(request->write_addr - ModelRig::kBufferAddr + i) % rig.ring.size()] = file[feeder.source + i];
     }
-    CHECK(rig.stats.resets() == 1);
+    const std::uint64_t before = rig.stream->bufferedEnd();
 
-    // The late completion of the old request succeeds but neither moves the read position nor adds
-    // frames; the game asks for the position again only afterwards.
-    CHECK(rig.stream->addStreamData(stale_bytes) == 0);
-    CHECK(rig.stream->remain() == 0);
-    const auto fresh = rig.stream->streamDataInfo();
-    CHECK(fresh.has_value() && fresh->read_pos == rig.data_offset + 9 * kAt3Block);
+    CHECK(rig.stream->decode(rig.ring, out).has_value());  // frame 400, then the loop-back
+    CHECK(rig.stats.resets() == 1);
+    CHECK(rig.stream->addStreamData(bytes) == 0);
+    CHECK(rig.stream->bufferedEnd() == before + bytes);
+    feeder.source += bytes;
+
+    const Collected rest = collectFed(rig, feeder, 6000);
+    CHECK(rest.all_ok && rest.finished);
+    std::vector<std::int64_t> expected_events;
+    appendFrames(expected_events, 0, 400, true);
+    appendFrames(expected_events, 99, 400, false);
+    CHECK(rig.stats.events == expected_events);
+    CHECK(rig.stats.bad_frames == 0);
+}
+
+void testAtracTraceNote() {
+    // One note for the first frame after open and one for the first frame of each later pass; the seam
+    // note must show the file bytes at the restart offset in the ring slot of the new pass.
+    const Bytes file = makeStreamLoopFile();
+    ModelRig rig;
+    CHECK(rig.open(file, 0x10000, 0x20000));
+    rig.stream->setLoopNum(-1);
+    GameFeeder feeder(rig, 0x10000, 0x10000);
+    std::vector<std::string> notes;
+    std::vector<float> out(4096);
+    bool ok = true;
+    for (std::uint32_t call = 0; call < 6000 && rig.stats.resets() < 3; ++call) {
+        ok = ok && rig.stream->decode(rig.ring, out).has_value();
+        std::string note = rig.stream->takeTraceNote();
+        if (!note.empty()) notes.push_back(std::move(note));
+        ok = ok && rig.stream->takeTraceNote().empty();  // a note is given out once
+        feeder.step();
+    }
+    CHECK(ok);
+    auto head = [&](std::uint64_t offset) {
+        std::string hex;
+        for (std::uint64_t i = 0; i < 16; ++i) hex += std::format("{:02x}", file[offset + i]);
+        return hex;
+    };
+    const std::uint64_t first = rig.data_offset, restart = feeder.restart, pass_end = feeder.pass_end;
+    const std::uint64_t second = pass_end + (pass_end - restart);
+    CHECK(notes.size() == 3);
+    if (notes.size() != 3) return;
+    CHECK(notes[0] ==
+          std::format("frame 0 pass 0 file {:#x} stream {:#x} ring {:#x}: {}", first, first, first, head(first)));
+    CHECK(notes[1] == std::format("frame 99 pass 1 file {:#x} stream {:#x} ring {:#x}: {}", restart, pass_end,
+                                  pass_end % 0x20000, head(restart)));
+    CHECK(notes[2] == std::format("frame 99 pass 2 file {:#x} stream {:#x} ring {:#x}: {}", restart, second,
+                                  second % 0x20000, head(restart)));
+}
+
+void testAtracModelFullRingStreams() {
+    // The game reads the first buffer-full of a longer file with read_bytes == buffer_bytes; that is a ring
+    // that starts full, not the whole file.
+    constexpr std::uint32_t kFrames = 30;
+    constexpr std::uint32_t kTotal = kFrames * 2048 - 2232 - 1;
+    const Bytes file = makeAt3File(2, kFrames, kTotal, 2232);
+    const std::uint32_t data_offset = at3DataOffset(file);
+    const std::uint32_t ring_bytes = data_offset + 8 * kAt3Block;
+    for (std::uint32_t chunk : {kAt3Block, 3 * kAt3Block / 2, 0x4000u}) {
+        ModelRig rig;
+        CHECK(rig.open(file, ring_bytes, ring_bytes));
+        CHECK(!rig.stream->memoryMode());
+        CHECK(rig.stream->frames() == kFrames);
+        CHECK(rig.stream->remain() != kRemainOnMemory);
+        CHECK(rig.stream->remain() == 8);
+        const auto first = rig.stream->streamDataInfo();
+        CHECK(first.has_value());
+        // Only the header bytes are free until the first frame is decoded; they sit at the ring start.
+        if (first) CHECK(first->write_addr == ModelRig::kBufferAddr && first->writable == data_offset);
+
+        const Collected got = collectSequential(rig, ring_bytes, chunk, 2000);
+        CHECK(got.all_ok && got.finished);
+        CHECK(got.left.size() == kTotal);
+        std::vector<float> expected;
+        appendPositions(expected, 2232, kFrames * 2048 - 2);
+        CHECK(got.left == expected);
+        CHECK(got.last_remain == kRemainStreamEnd);
+        CHECK(rig.stats.bad_frames == 0 && rig.stats.resets() == 0);
+        CHECK(rig.stats.events.size() == kFrames);
+        for (std::uint32_t f = 0; f < kFrames && f < rig.stats.events.size(); ++f) {
+            CHECK(rig.stats.events[f] == static_cast<std::int64_t>(f));
+        }
+    }
+}
+
+void testAtracModelModeBoundaries() {
+    constexpr std::uint32_t kFrames = 10;
+    const Bytes file = makeAt3File(2, kFrames, kFrames * 2048, 0);
+    const auto size = static_cast<std::uint32_t>(file.size());
+
+    // Every frame read: memory mode, also with a buffer larger than the file.
+    {
+        ModelRig rig;
+        CHECK(rig.open(file, size, size));
+        CHECK(rig.stream->memoryMode() && rig.stream->frames() == kFrames);
+        CHECK(rig.stream->remain() == kRemainOnMemory);
+        const Collected got = collect(rig, 40);
+        CHECK(got.all_ok && got.finished && got.left.size() == kFrames * 2048);
+        CHECK(rig.stats.bad_frames == 0 && rig.stats.events.size() == kFrames);
+    }
+    {
+        ModelRig rig;
+        CHECK(rig.open(file, size, size + 0x1000));
+        CHECK(rig.stream->memoryMode() && rig.stream->frames() == kFrames);
+        const Collected got = collect(rig, 40);
+        CHECK(got.all_ok && got.finished && got.left.size() == kFrames * 2048);
+    }
+
+    // The buffer holds the file but less was read: streaming, and the free run reaches the file end.
+    {
+        const std::uint32_t read = size - 3 * kAt3Block - 100;
+        ModelRig rig;
+        CHECK(rig.open(file, read, size));
+        CHECK(!rig.stream->memoryMode() && rig.stream->frames() == kFrames);
+        CHECK(rig.stream->remain() != kRemainOnMemory);
+        const auto info = rig.stream->streamDataInfo();
+        CHECK(info.has_value());
+        if (info) {
+            CHECK(info->write_addr == ModelRig::kBufferAddr + read);
+            CHECK(info->writable == size - read);
+            CHECK(info->read_pos == read);
+        }
+        CHECK(rig.stream->vacant() == size - read);
+        const Collected got = collectSequential(rig, read, 0x4000, 100);
+        CHECK(got.all_ok && got.finished && got.left.size() == kFrames * 2048);
+        CHECK(rig.stats.bad_frames == 0 && rig.stats.events.size() == kFrames);
+    }
+    // The same with a buffer larger than the file.
+    {
+        const std::uint32_t read = size - 3 * kAt3Block;
+        ModelRig rig;
+        CHECK(rig.open(file, read, size + 0x1000));
+        CHECK(!rig.stream->memoryMode());
+        const auto info = rig.stream->streamDataInfo();
+        CHECK(info.has_value());
+        if (info) CHECK(info->write_addr == ModelRig::kBufferAddr + read && info->writable == size - read);
+    }
+}
+
+void testAtracModelPartialSetDataWraps() {
+    // A first read of two frames into an 8-frame ring, then refills in file order across several wraps.
+    constexpr std::uint32_t kFrames = 30;
+    constexpr std::uint32_t kTotal = kFrames * 2048;
+    const Bytes file = makeAt3File(2, kFrames, kTotal, 0);
+    const std::uint32_t data_offset = at3DataOffset(file);
+    const std::uint32_t ring_bytes = data_offset + 8 * kAt3Block;
+    const std::uint32_t read_bytes = data_offset + 2 * kAt3Block;
+    for (std::uint32_t chunk : {kAt3Block, 700u, 0x4000u}) {
+        ModelRig rig;
+        CHECK(rig.open(file, read_bytes, ring_bytes));
+        CHECK(!rig.stream->memoryMode() && rig.stream->remain() == 2);
+        const Collected got = collectSequential(rig, read_bytes, chunk, 3000);
+        CHECK(got.all_ok && got.finished);
+        std::vector<float> expected;
+        appendPositions(expected, 0, kTotal - 1);
+        CHECK(got.left == expected);
+        CHECK(rig.stats.bad_frames == 0 && rig.stats.events.size() == kFrames);
+        CHECK(file.size() > 3 * std::size_t{ring_bytes});  // several wraps
+    }
 }
 
 void testAtracModelOpenErrors() {
@@ -3027,7 +3448,15 @@ int main(int argc, char** argv) {
     testAtracModelStarvation();
     testAtracModelLoops();
     testAtracModelStreamingLoop();
-    testAtracModelStaleRead();
+    testAtracLoopStreamOrder();
+    testAtracReadPosAfterPassEnd();
+    testAtracVacantUncappedForLoop();
+    testAtracLoopStreamLimit();
+    testAtracNoDropAtLoopBack();
+    testAtracTraceNote();
+    testAtracModelFullRingStreams();
+    testAtracModelModeBoundaries();
+    testAtracModelPartialSetDataWraps();
     testAtracModelOpenErrors();
     testAtracHandlersMemory();
     testAtracHandlersMono();

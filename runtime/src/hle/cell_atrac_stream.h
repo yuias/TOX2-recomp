@@ -2,9 +2,15 @@
 
 // The host-side state of one cellAtrac handle: the stream buffer bookkeeping, the decode cursor and
 // the loop rules. The model never touches guest memory itself; the HLE layer passes the guest bytes
-// in. The game's decode thread owns both sides of the protocol (it only follows the write pointer
-// and read position it is given), so the rules here are consistent rather than a copy of the
-// firmware library.
+// in. The game's decode thread owns both sides of the protocol, so the rules here are consistent
+// rather than a copy of the firmware library.
+//
+// Streaming mode follows the order in which the game feeds the file. Its reader takes the file in
+// order, wraps from the pass end E (the end of the frame that holds the `smpl` loop end) to the
+// priming frame R (one frame before the loop start) and never looks at the read position it is given.
+// So the ring is a FIFO of stream bytes: stream byte s lives at ring offset s % buffer_bytes, pass 0
+// holds file bytes [0, E) and every later pass holds [R, E). Nothing buffered is dropped at a
+// loop-back.
 
 #include <cstdint>
 #include <expected>
@@ -75,8 +81,9 @@ struct AtracSoundInfo {
 class AtracStream {
 public:
     // `head` is the first read_bytes bytes of the file (the RIFF header at byte 0), which sit at
-    // `buffer_addr`. read_bytes == buffer_bytes is memory mode: the whole file is in the buffer.
-    // Otherwise the buffer is a ring of buffer_bytes in which file byte f lives at f % buffer_bytes.
+    // `buffer_addr`. Memory mode is when every frame is already in `head`: the whole file is in the
+    // buffer, whatever buffer_bytes is. Otherwise the buffer is a ring of buffer_bytes in which file
+    // byte f lives at f % buffer_bytes, even when read_bytes == buffer_bytes (a ring that starts full).
     // On failure returns the cellAtrac error code and describes the problem in `error`.
     static std::expected<AtracStream, std::uint32_t> open(std::span<const std::uint8_t> head, std::uint32_t buffer_addr,
                                                           std::uint32_t buffer_bytes, std::string& error);
@@ -86,6 +93,8 @@ public:
     std::uint32_t bufferBytes() const { return buffer_bytes_; }
     bool memoryMode() const { return memory_mode_; }
     std::uint32_t frames() const { return frames_; }
+    // Stream position of the next byte to be written (see the stream order notes on buffered_end_).
+    std::uint64_t bufferedEnd() const { return buffered_end_; }
 
     // The decoder may be null: Decode then outputs silence of the right length. kAtracErrorDecoderWasCreated
     // when called twice.
@@ -103,10 +112,12 @@ public:
     // Streaming only (kAtracErrorAllDataIsOnMemory in memory mode).
     std::expected<AtracStreamInfo, std::uint32_t> streamDataInfo();
     // Ring bytes that AddStreamData could still take in total (not only the contiguous run that
-    // streamDataInfo() offers): the free space, limited by what is left of the file. 0 in memory mode.
+    // streamDataInfo() offers): the free space from the decode cursor, limited only by the stream limit
+    // (the end of the last pass to play). A looping stream is not limited by the file size, because the
+    // game feeds the loop region again after the pass end. 0 in memory mode.
     std::uint32_t vacant() const;
-    // Commits n bytes at the write pointer of the last streamDataInfo(). Bytes of a read that was
-    // requested before a loop seek are dropped (success), because they no longer match the position.
+    // Commits n bytes at the write pointer. A read requested before a loop-back stays valid: the bytes
+    // continue the stream where they were requested.
     std::uint32_t addStreamData(std::uint32_t n);
 
     // Decodes the next frame that has output into `out` (host floats, interleaved, room for
@@ -117,6 +128,10 @@ public:
 
     // The reason of the first rejected frame, once; empty afterwards (the HLE layer logs it per handle).
     std::string takeFirstError() { return std::exchange(first_error_, std::string()); }
+    // A one-line description (frame, pass, file offset, stream position, ring offset and the first bytes)
+    // of the first frame decoded after open and of the first one after each loop-back, once; empty
+    // afterwards. It lets a log show that the ring holds the right bytes at a loop seam.
+    std::string takeTraceNote() { return std::exchange(trace_note_, std::string()); }
 
     // Host-clock timing of one handle for the debug log: decoding that runs slower than the sample rate
     // shows up as a wall duration longer than the decoded audio.
@@ -137,6 +152,17 @@ private:
     bool loopUsable() const;  // the file has a loop whose region holds valid audio
     bool loopBackPending() const;
     std::uint64_t passEnd() const;  // exclusive output position where the current pass ends
+
+    // Stream order (see the top of the file). A `smpl` loop is what the game's reader wraps on.
+    bool hasSmplLoop() const { return info_.loop && info_.loop->end_sample != 0; }
+    std::uint32_t restartFrame() const;       // the priming frame, which the loop-back cursor goes to
+    std::uint64_t loopRestartOffset() const;  // R: the file offset of that frame
+    std::uint64_t passFileEnd() const;        // E: file_end_ without a `smpl` loop; never above file_end_
+    std::uint64_t loopLength() const;         // L = E - R, the stream bytes of one pass after the first
+    std::uint64_t streamPos(std::uint32_t pass, std::uint32_t frame) const;
+    std::uint64_t fileOffsetOfStream(std::uint64_t s) const;
+    std::uint64_t streamLimit() const;  // UINT64_MAX when unbounded
+    void noteFrame();
     std::uint32_t writableNow() const;
     bool frameBuffered(std::uint32_t index) const;
     void gatherFrame(std::span<const std::uint8_t> ring, std::uint32_t index);
@@ -145,25 +171,27 @@ private:
     At3Info info_;
     std::uint32_t buffer_addr_ = 0, buffer_bytes_ = 0;
     bool memory_mode_ = false;
-    std::uint32_t frames_ = 0;       // complete frames the file (or the memory buffer) holds
+    std::uint32_t frames_ = 0;       // complete frames the file holds
     std::uint64_t file_end_ = 0;     // file offset after the last frame
     std::uint64_t valid_total_ = 0;  // samples of valid audio
     std::uint64_t out_end_ = 0;      // exclusive output position of the valid audio's end
 
-    std::uint64_t buffered_end_ = 0;  // file offset of the next byte to be written
-    std::uint32_t cursor_ = 0;        // next frame to decode
-    std::uint64_t emit_from_ = 0;     // output before this position is discarded
+    // Stream position of the next byte to be written. It equals the file offset in pass 0 and in memory
+    // mode, and keeps growing across loop-backs (pass k >= 1 starts at E + (k - 1) * L).
+    std::uint64_t buffered_end_ = 0;
+    std::uint32_t pass_ = 0;       // the cursor's pass: loop-backs taken so far
+    std::uint32_t cursor_ = 0;     // next frame to decode
+    std::uint64_t emit_from_ = 0;  // output before this position is discarded
     std::int32_t loop_num_ = 0;
     bool created_ = false, finished_ = false;
-    // A loop seek discards the buffered bytes; a read requested earlier (stream_epoch_ differs from
-    // info_epoch_) carries bytes from the old position.
-    std::uint32_t stream_epoch_ = 0, info_epoch_ = 0;
 
     std::unique_ptr<AtracFrameDecoder> decoder_;
     std::vector<std::uint8_t> frame_bytes_;
     std::vector<float> frame_samples_;
     std::string first_error_;
     bool error_seen_ = false;
+    std::string trace_note_;
+    bool trace_pending_ = true;  // the next decoded frame gets a note
     DebugTiming debug_timing_;
 };
 

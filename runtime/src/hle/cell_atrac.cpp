@@ -96,7 +96,9 @@ void atracSetDataAndGetMemSize(Tox2PpuContext* ctx, std::uint8_t* base) {
         return;
     }
 
-    // A repeat of a sound starts from scratch whether or not the old state was deleted.
+    // A repeat of a sound starts from scratch whether or not the old state was deleted. The mode is
+    // decided by the data, not the sizes: only a read that covers every frame is "all on memory"; a
+    // read that merely fills the buffer is the start of a stream.
     sounds().erase(handle);
     std::string error;
     auto stream =
@@ -109,6 +111,11 @@ void atracSetDataAndGetMemSize(Tox2PpuContext* ctx, std::uint8_t* base) {
         return;
     }
     unusableReported().erase(handle);
+    const At3Info& info = stream->info();
+    logDebug(
+            "tox2: atrac: set data handle {:#x}: {}, read {:#x} of buffer {:#x}, data at {:#x} size {:#x}, block {:#x}",
+            handle, stream->memoryMode() ? "all on memory" : "streaming", read_bytes, buffer_bytes, info.data_offset,
+            info.data_size, info.block_align);
     sounds().insert_or_assign(handle, std::move(*stream));
     tox2Write32(base, work_out, kAtracWorkMemoryBytes);
     setResultCode(ctx, kCellOk);
@@ -264,6 +271,9 @@ void atracDecode(Tox2PpuContext* ctx, std::uint8_t* base) {
     if (const std::string reason = sound->takeFirstError(); !reason.empty()) {
         logWarn("tox2: atrac: handle {:#x}: decode error, playing silence for such frames: {}", argU32(ctx, 0), reason);
     }
+    if (const std::string note = sound->takeTraceNote(); !note.empty()) {
+        logDebug("tox2: atrac: handle {:#x}: {}", argU32(ctx, 0), note);
+    }
     const std::size_t count = std::size_t{result->samples} * channels;
     for (std::size_t i = 0; i < count; ++i) {
         tox2Write32(base, out + static_cast<std::uint32_t>(i * 4), std::bit_cast<std::uint32_t>(pcm[i]));
@@ -296,6 +306,8 @@ void atracGetStreamDataInfo(Tox2PpuContext* ctx, std::uint8_t* base) {
     tox2Write32(base, write_ptr_out, info->write_addr);
     tox2Write32(base, writable_out, info->writable);
     tox2Write32(base, read_pos_out, info->read_pos);
+    logDebug("tox2: atrac: stream info handle {:#x}: write at {:#x}, writable {:#x}, read pos {:#x}", argU32(ctx, 0),
+             info->write_addr - sound->bufferAddr(), info->writable, info->read_pos);
     setResultCode(ctx, kCellOk);
 }
 
@@ -303,7 +315,14 @@ void atracGetStreamDataInfo(Tox2PpuContext* ctx, std::uint8_t* base) {
 void atracAddStreamData(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
     AtracStream* sound = findSound(argU32(ctx, 0));
-    setResultCode(ctx, sound != nullptr ? sound->addStreamData(argU32(ctx, 1)) : kAtracErrorUnsetData);
+    if (sound == nullptr) {
+        setResultCode(ctx, kAtracErrorUnsetData);
+        return;
+    }
+    const std::uint32_t result = sound->addStreamData(argU32(ctx, 1));
+    logDebug("tox2: atrac: add stream data handle {:#x}: {:#x} bytes, result {:#x}, buffered to {:#x}", argU32(ctx, 0),
+             argU32(ctx, 1), result, sound->bufferedEnd());
+    setResultCode(ctx, result);
 }
 
 // cellAtracGetRemainFrame(CellAtracHandle* handle, s32* remain)
