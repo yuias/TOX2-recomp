@@ -94,10 +94,11 @@ struct Options {
     bool dump_every_given = false;
     bool vk_validation = false;
     bool no_window = false;
-    tox2::RsxFlipLimit frame_limit = tox2::RsxFlipLimit::Vsync;  // --frame-limit vsync (default), 60 or off
-    bool host_priorities = true;                                 // --host-priorities on (default) or off
-    bool yield_backoff = true;                                   // --yield-backoff on (default) or off
-    bool window = false;                                         // settled after all arguments
+    tox2::RsxFlipLimit frame_limit = tox2::RsxFlipLimit::Vsync;       // --frame-limit vsync (default), 60 or off
+    bool host_priorities = true;                                      // --host-priorities on (default) or off
+    bool yield_backoff = true;                                        // --yield-backoff on (default) or off
+    tox2::PpuThreadsMode ppu_threads = tox2::PpuThreadsMode::Legacy;  // --ppu-threads legacy (default), 1 or 2
+    bool window = false;                                              // settled after all arguments
     bool pad_probe = false;
     std::string dump_frames;
     std::uint32_t dump_frames_every = 1;
@@ -346,6 +347,7 @@ void printUsage() {
             "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
             "                [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]\n"
             "                [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off]\n"
+            "                [--ppu-threads legacy|1|2]\n"
             "                [--dump-guest ADDR:SIZE:FILE]...\n",
             stderr);
 }
@@ -518,6 +520,19 @@ bool parseArgs(int argc, char** argv, Options& opt) {
                 return false;
             }
             opt.yield_backoff = name == "on";
+        } else if (arg == "--ppu-threads") {
+            std::string name;
+            if (!value(name)) return false;
+            if (name == "legacy") {
+                opt.ppu_threads = tox2::PpuThreadsMode::Legacy;
+            } else if (name == "1") {
+                opt.ppu_threads = tox2::PpuThreadsMode::Split1;
+            } else if (name == "2") {
+                opt.ppu_threads = tox2::PpuThreadsMode::Split2;
+            } else {
+                std::fprintf(stderr, "error: --ppu-threads needs legacy, 1 or 2\n");
+                return false;
+            }
         } else if (arg == "--shader-cache") {
             if (!value(opt.shader_cache)) return false;
         } else if (arg == "--vk-validation") {
@@ -735,8 +750,8 @@ bool isAudioPathClass(tox2::GuestLockClass cls) {
 
 tox2::PerfSource lockPerfSource() {
     return [prev = tox2::GuestLockStats{}, prev_yields = tox2::PpuYieldStats{},
-            prev_handoffs = tox2::SyncHandoffStats{},
-            prev_reservations = tox2::PpuReservationStats{}]() mutable -> std::string {
+            prev_handoffs = tox2::SyncHandoffStats{}, prev_reservations = tox2::PpuReservationStats{},
+            prev_slots = tox2::PpuSlotStats{}]() mutable -> std::string {
         const tox2::GuestLockStats now = tox2::guestLock().stats();
         std::string body;
         for (std::size_t i = 0; i < tox2::kGuestLockClassCount; i++) {
@@ -799,7 +814,9 @@ tox2::PerfSource lockPerfSource() {
                                 static_cast<double>(fs.read_max_us) / 1000.0, fs.writes, fs.write_bytes,
                                 static_cast<double>(fs.write_max_us) / 1000.0);
         }
-        if (now.ppu_hold_us != prev.ppu_hold_us) {
+        // In the split modes the hold time is kernel sections, which this name would misreport; the slots field below
+        // replaces it.
+        if (!tox2::splitPpuMode() && now.ppu_hold_us != prev.ppu_hold_us) {
             body += std::format("{}ppu overlap {:.2f} of {:.2f} ms", body.empty() ? "lock " : " | ",
                                 static_cast<double>(now.ppu_hold_overlap_us - prev.ppu_hold_overlap_us) / 1000.0,
                                 static_cast<double>(now.ppu_hold_us - prev.ppu_hold_us) / 1000.0);
@@ -810,6 +827,13 @@ tox2::PerfSource lockPerfSource() {
                                 reservations.stwcx - prev_reservations.stwcx,
                                 reservations.stwcx_failed - prev_reservations.stwcx_failed);
             prev_reservations = reservations;
+        }
+        if (tox2::splitPpuMode()) {
+            const tox2::PpuSlotStats slots = tox2::ppuSlots().stats();
+            body += std::format("{}slots par {:.2f} ms full {:.2f} ms", body.empty() ? "lock " : " | ",
+                                static_cast<double>(slots.parallel_us - prev_slots.parallel_us) / 1000.0,
+                                static_cast<double>(slots.full_waiting_us - prev_slots.full_waiting_us) / 1000.0);
+            prev_slots = slots;
         }
         prev = now;
         return body;
@@ -955,6 +979,11 @@ int main(int argc, char** argv) {
     tox2::setRsxFlipLimit(opt.frame_limit);
     tox2::setHostPrioritiesEnabled(opt.host_priorities);
     tox2::setYieldBackoffEnabled(opt.yield_backoff);
+    // Before any guest thread exists: the mode fixes the slot capacity and the lock rules those threads start with.
+    tox2::setPpuThreadsMode(opt.ppu_threads);
+    tox2::logInfo("tox2: ppu threads: {}", opt.ppu_threads == tox2::PpuThreadsMode::Legacy   ? "legacy"
+                                           : opt.ppu_threads == tox2::PpuThreadsMode::Split1 ? "1"
+                                                                                             : "2");
     if (!opt.rsx_census.empty()) tox2::setRsxArgCensusFile(opt.rsx_census);
     if (!opt.rsx_capture_frames.empty()) {
         tox2::setRsxCaptureFrames(opt.rsx_capture_frames, std::filesystem::path("generated") / "rsx" / "captures");

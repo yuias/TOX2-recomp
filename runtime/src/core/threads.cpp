@@ -198,12 +198,17 @@ std::vector<std::string> guestLockCensus() {
     const double seconds = std::max(static_cast<double>(systemTimeUs()) / 1e6, 1e-3);
     const PpuYieldStats yields = ppuYieldStats();
     std::vector<std::string> lines;
-    lines.push_back(
-            std::format("census: guest lock {} acquisitions in {:.1f} s, hand-off {}, wakeups {} ({} spurious), "
-                        "yield calls {} ok {} host {} kept {} backoff {}, ppu overlap {:.1f} of {:.1f} s",
-                        total, seconds, formatLatency(s.handoff, kGuestLockHandoffOverUs), s.wakeups,
-                        s.spurious_wakeups, yields.calls, yields.switched, yields.to_host, yields.kept, yields.backoffs,
-                        static_cast<double>(s.ppu_hold_overlap_us) / 1e6, static_cast<double>(s.ppu_hold_us) / 1e6));
+    std::string header = std::format(
+            "census: guest lock {} acquisitions in {:.1f} s, hand-off {}, wakeups {} ({} spurious), "
+            "yield calls {} ok {} host {} kept {} backoff {}",
+            total, seconds, formatLatency(s.handoff, kGuestLockHandoffOverUs), s.wakeups, s.spurious_wakeups,
+            yields.calls, yields.switched, yields.to_host, yields.kept, yields.backoffs);
+    // In the split modes the hold time is kernel sections, not the right to run, so the overlap would be misleading.
+    if (!splitPpuMode()) {
+        header += std::format(", ppu overlap {:.1f} of {:.1f} s", static_cast<double>(s.ppu_hold_overlap_us) / 1e6,
+                              static_cast<double>(s.ppu_hold_us) / 1e6);
+    }
+    lines.push_back(std::move(header));
     for (std::size_t i = 0; i < kGuestLockClassCount; i++) {
         const GuestLockClassStats& c = s.classes[i];
         if (c.wait.count == 0) continue;
@@ -223,6 +228,16 @@ std::vector<std::string> guestLockCensus() {
             first = false;
         }
         lines.push_back(std::move(line));
+    }
+    if (splitPpuMode()) {
+        const PpuSlotStats slots = ppuSlots().stats();
+        lines.push_back(std::format(
+                "census: ppu slots {}: held {:.1f} s, parallel {:.1f} s, full with waiters {:.1f} s, "
+                "wait {} high {}",
+                ppuSlots().capacity(), static_cast<double>(slots.held_us) / 1e6,
+                static_cast<double>(slots.parallel_us) / 1e6, static_cast<double>(slots.full_waiting_us) / 1e6,
+                formatLatency(slots.wait[0], kGuestLockWaitOverUs),
+                formatLatency(slots.wait[1], kGuestLockWaitOverUs)));
     }
     const PpuReservationStats reservation = ppuReservationStats();
     lines.push_back(std::format("census: ppu reservations lwarx {} stwcx {} failed {}", reservation.lwarx,
