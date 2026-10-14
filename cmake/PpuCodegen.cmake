@@ -23,6 +23,28 @@ function(tox2_ppu_codegen_options target)
   target_include_directories(${target} PRIVATE ${CMAKE_SOURCE_DIR}/runtime/include)
 endfunction()
 
+# Hand-written replacements of recompiled guest functions (config/ppu_overrides.json lists their entries).
+# They are an OBJECT library so that the definitions of fn_<addr> are linked whether or not anything
+# in an archive references them, and so that no archive order matters. The unit test links them against
+# fakes and needs no generated tree. Call after tox2_runtime_core is defined and before
+# tox2_ppu_add_generated_tree.
+set(TOX2_PPU_OVERRIDE_SOURCES runtime/src/ppu_overrides/atrac_stream.c)
+
+function(tox2_ppu_add_overrides)
+  add_library(tox2_ppu_overrides OBJECT ${TOX2_PPU_OVERRIDE_SOURCES})
+  tox2_ppu_codegen_options(tox2_ppu_overrides)
+
+  add_executable(tox2_ppu_overrides_tests
+    runtime/tests/ppu_overrides_test.cpp
+    $<TARGET_OBJECTS:tox2_ppu_overrides>)
+  target_compile_options(tox2_ppu_overrides_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_link_libraries(tox2_ppu_overrides_tests PRIVATE tox2_runtime_core)
+
+  add_test(NAME ppu_overrides COMMAND tox2_ppu_overrides_tests)
+  set_tests_properties(ppu_overrides PROPERTIES
+    PASS_REGULAR_EXPRESSION "ppu overrides tests: [0-9]+ passed, 0 failed")
+endfunction()
+
 # Adds the generated PPU tree and its link test when TOX2_PPU_GENERATED_DIR is set. Call after
 # tox2_ppu_stub is defined. tox2_ppu_generated links no hook library; each consumer picks the stub
 # or the real runtime.
@@ -76,6 +98,8 @@ function(tox2_ppu_add_generated_tree)
   # The stub runtimes only supply the hooks of the generated code; the SPU library is defined by
   # tox2_spu_add_generated_tree, which runs after this function.
   target_link_libraries(tox2_ppu_link_test PRIVATE tox2_ppu_generated tox2_spu_generated tox2_ppu_stub tox2_spu_stub)
+  # The objects define the overridden fn_<addr> symbols; the generated tree only holds the renamed bodies.
+  target_sources(tox2_ppu_link_test PRIVATE $<TARGET_OBJECTS:tox2_ppu_overrides>)
 
   add_test(NAME ppu_link COMMAND tox2_ppu_link_test)
   set_tests_properties(ppu_link PROPERTIES PASS_REGULAR_EXPRESSION "ppu link ok")
@@ -85,6 +109,7 @@ function(tox2_ppu_add_generated_tree)
   add_executable(tox2_game runtime/src/game_main.cpp)
   target_compile_options(tox2_game PRIVATE -march=x86-64-v3 -Wall -Wextra)
   target_link_libraries(tox2_game PRIVATE tox2_ppu_generated tox2_spu_generated tox2_runtime_core tox2_audio_wasapi tox2_input_gameinput)
+  target_sources(tox2_game PRIVATE $<TARGET_OBJECTS:tox2_ppu_overrides>)
 
   # Pins how far the game gets; updated by whoever moves the milestone.
   include("${CMAKE_SOURCE_DIR}/cmake/game_boot.cmake")
