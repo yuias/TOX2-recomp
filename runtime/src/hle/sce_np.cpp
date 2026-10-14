@@ -1,6 +1,6 @@
 // HLE handlers of the sceNp module: sceNpInit, sceNpTerm and sceNpDrmIsAvailable.
 // Behaviour follows RPCS3 `Emu/Cell/Modules/sceNp.cpp` (function of the same name) with no network
-// service behind it. Handlers run under the guest lock, so the init flag needs no mutex.
+// service behind it. Handlers run under the kernel lock, so the init flag needs no mutex.
 //
 // Deviation from RPCS3: sceNpDrmIsAvailable only checks that the file exists. RPCS3 verifies the
 // NPD/SCE header against the licensee key (and a RAP file) before accepting an edata/sdata file;

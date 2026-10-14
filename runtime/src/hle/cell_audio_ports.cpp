@@ -342,7 +342,7 @@ void CellAudioPorts::producePeriod(std::uint8_t* base, std::uint64_t now_us, std
         } else if (port.active) {
             unwritten_blocks_.fetch_add(1, std::memory_order_relaxed);
             if (port.unwritten_run++ == 0) unwritten_runs_.fetch_add(1, std::memory_order_relaxed);
-            // Written only here, under the guest lock, so a plain compare and store is enough.
+            // Written only here, under the kernel lock, so a plain compare and store is enough.
             if (port.unwritten_run > longest_unwritten_run_.load(std::memory_order_relaxed)) {
                 longest_unwritten_run_.store(port.unwritten_run, std::memory_order_relaxed);
             }

@@ -14,7 +14,7 @@
 //   CELL_SAIL_SYNC_* classes, OR-ed with the sync status).
 // The adapters' makeup and cleanup callbacks are stored but not called; the game's are empty stubs.
 //
-// Everything here runs under the guest lock.
+// Everything here runs under the kernel lock.
 
 #include <array>
 #include <cstdint>

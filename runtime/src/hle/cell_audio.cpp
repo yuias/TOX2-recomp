@@ -31,7 +31,7 @@ namespace {
 constexpr char kModule[] = "cellAudio";
 
 // The engine keeps the producer of its first start for good, so this reads the library state
-// through the global and checks it under the guest lock: one call that was already under way can
+// through the global and checks it under the kernel lock: one call that was already under way can
 // still arrive after cellAudioQuit.
 void produceBlock(std::span<float> block) {
     setGuestLockClass(GuestLockClass::Audio);

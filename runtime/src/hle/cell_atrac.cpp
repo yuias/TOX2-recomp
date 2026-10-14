@@ -6,7 +6,7 @@
 // address; nothing is written into the handle, which the game never reads.
 //
 // The stream rules are in cell_atrac_stream.cpp. Decode runs the frame decoder of the installed
-// factory under the guest lock (one ATRAC3plus frame takes tens of microseconds); without a decoder,
+// factory under the kernel lock (one ATRAC3plus frame takes tens of microseconds); without a decoder,
 // or for a frame the decoder rejects, it outputs silence of the right length.
 //
 // Argument lists and error codes follow RPCS3 `rpcs3/Emu/Cell/Modules/cellAtrac.h` (`CellAtracError`)
@@ -40,7 +40,7 @@ namespace {
 
 constexpr char kModule[] = "cellAtrac";
 
-// Under the guest lock, like every handler. Handle addresses are reused after DeleteDecoder.
+// Under the kernel lock, like every handler. Handle addresses are reused after DeleteDecoder.
 std::unordered_map<std::uint32_t, AtracStream>& sounds() {
     static std::unordered_map<std::uint32_t, AtracStream> map;
     return map;
@@ -57,7 +57,7 @@ std::unordered_set<std::uint32_t>& unusableReported() {
     return set;
 }
 
-// Written under the guest lock, read by the census at stop from another thread.
+// Written under the kernel lock, read by the census at stop from another thread.
 struct Totals {
     std::atomic<std::uint64_t> decoders{0}, frames{0}, non_silent{0}, errors{0}, without_decoder{0}, starved{0};
 };

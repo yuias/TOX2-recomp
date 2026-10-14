@@ -13,18 +13,18 @@
 
 namespace tox2 {
 
-// Runs on the service thread with the guest lock held, with that thread's context and the guest
+// Runs on the service thread with the kernel lock held, with that thread's context and the guest
 // memory base; it may call guest functions through callGuestFunction.
 using SailCall = std::function<void(Tox2PpuContext*, std::uint8_t*)>;
 
 // Appends `call` to a FIFO and wakes the thread; calls run one at a time, in order. Starts the
-// thread on first use. Needs the guest lock and an initialised guest TLS area (so it works from any
+// thread on first use. Needs the kernel lock and an initialised guest TLS area (so it works from any
 // guest thread inside an HLE handler). Returns false, dropping `call`, when the thread cannot be
 // created; nothing queued will ever run then.
 bool queueSailCall(SailCall call);
 
 // Ends the thread, drops queued calls and forgets the thread so a later queueSailCall starts a new
-// one. Needs the guest lock, which is released while waiting for the thread. For tests.
+// one. Needs the kernel lock, which is released while waiting for the thread. For tests.
 void stopSailService();
 
 }  // namespace tox2

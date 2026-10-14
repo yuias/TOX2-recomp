@@ -1,5 +1,5 @@
 // The state of the cellAudio library: ports, the read-index area, tags, timestamps and the notify
-// registrations. Everything here runs under the guest lock; only the statistics are atomics, so the
+// registrations. Everything here runs under the kernel lock; only the statistics are atomics, so the
 // census can read them from any thread.
 //
 // Behaviour follows RPCS3 `rpcs3/Emu/Cell/Modules/cellAudio.h` (`CellAudioError`, `CellAudioPortParam`,
@@ -74,7 +74,7 @@ class CellAudioPorts {
 public:
     // The logic of the 12 imports, returning the import's result code. `base` is the guest memory base;
     // guest addresses are validated here, so a bad pointer is an error code, not a fault. All of them
-    // run under the guest lock.
+    // run under the kernel lock.
     std::uint32_t init();
     std::uint32_t quit();
     std::uint32_t portOpen(std::uint8_t* base, std::uint32_t param_addr, std::uint32_t port_out_addr);
@@ -156,7 +156,7 @@ private:
     std::atomic<std::uint64_t> longest_unwritten_run_{0};
 };
 
-// The one cellAudio instance. Under the guest lock, except stats().
+// The one cellAudio instance. Under the kernel lock, except stats().
 CellAudioPorts& cellAudioPorts();
 
 }  // namespace tox2

@@ -1,6 +1,7 @@
 // HLE handlers of the cellSysmodule module. RPCS3 `Modules/cellSysmodule.cpp` rejects module ids it
 // does not know and tracks load counts; here every id succeeds, because no module is actually
-// loaded (the HLE functions are always available). Handlers run under the guest lock.
+// loaded (the HLE functions are always available). Handlers run under the kernel lock
+// (the guest lock in legacy mode).
 
 #include <cstdint>
 #include <format>

@@ -35,7 +35,7 @@
 // player and the adapters and the HLE never writes them. Only the descriptor block and a small
 // scratch block (format copies, the frame pointer array and the sound frame buffer, which the
 // callbacks need as guest memory; the decoded PCM is copied into the latter) are allocated here, through the game's own
-// allocator callbacks. Everything runs under the guest lock. The descriptor's allocator callbacks and the scratch
+// allocator callbacks. Everything runs under the kernel lock. The descriptor's allocator callbacks and the scratch
 // block's allocation run on the calling guest thread, which is how the game expects them to be called. The service
 // thread runs the notify callback, both adapters' format-changed callbacks, the graphics adapter's frame allocation and
 // release, and the release of the scratch block.
@@ -150,7 +150,7 @@ struct Stream {
     std::uint32_t video_tag = 0, sound_tag = 0;
 
     std::uint64_t get_frame_calls = 0, frames_rejected = 0;
-    // Time of the frame copy into guest memory, summed and longest (the copy runs under the guest lock).
+    // Time of the frame copy into guest memory, summed and longest (the copy runs under the kernel lock).
     std::uint64_t frame_copy_ns = 0, frame_copy_max_ns = 0;
     // Wall-clock window of the playback and the flips that happened in it.
     std::uint64_t start_us = 0, end_us = 0, start_flips = 0, end_flips = 0;
@@ -347,7 +347,7 @@ void playerFinalize(Tox2PpuContext* ctx, std::uint8_t* base) {
         logWarn("tox2: sail: the service thread did not drain within {} s while finalizing player {:#010x}",
                 kFinalizeTimeout.count(), self);
     }
-    // The drain releases the guest lock; another thread may have finalized this player and reused the
+    // The drain releases the kernel lock; another thread may have finalized this player and reused the
     // address meanwhile, and its state is not ours to release.
     if (!isCurrent(self, serial)) {
         setResultCode(ctx, kCellOk);
@@ -516,7 +516,7 @@ void playerCreateDescriptor(Tox2PpuContext* ctx, std::uint8_t* base) {
     std::memset(base + block, 0, sail::kDescriptorMaxSize);
 
     Descriptor descriptor;
-    // The callback can release the guest lock, so the player may have been finalized (or its address
+    // The callback can release the kernel lock, so the player may have been finalized (or its address
     // reused) meanwhile. The descriptor is then left unlinked: the game still gets the block and can
     // destroy it, but no finalized player's state is attached to it.
     descriptor.player = isCurrent(self, serial) ? self : 0;
@@ -977,7 +977,7 @@ void playerOpenStream(Tox2PpuContext* ctx, std::uint8_t* base) {
     }
 
     // Everything below that follows the allocator callback works on copies: the callback can release
-    // the guest lock, and the player may be finalized meanwhile.
+    // the kernel lock, and the player may be finalized meanwhile.
     const std::uint64_t serial = player->serial;
     const std::uint32_t alloc_opd = player->alloc_opd, free_opd = player->free_opd, alloc_arg = player->alloc_arg;
     const Notifier to = notifierOf(self, *player);
@@ -1052,8 +1052,8 @@ void playerOpenStream(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, kCellOk);
 }
 
-// Waits, with the guest lock released, for the decoders' first output. The wait polls: the player's
-// own wait is not one the guest lock can be released from.
+// Waits, with the kernel lock released, for the decoders' first output. The wait polls: the player's
+// own wait is not one the kernel lock can be released from.
 void waitForPreroll(Stream& stream) {
     std::condition_variable_any idle;
     const auto deadline = std::chrono::steady_clock::now() + kPrerollTimeout;

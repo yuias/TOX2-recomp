@@ -1,7 +1,7 @@
 // HLE handlers of the cellPad imports (sys_io module): Init, End, SetPortSetting, GetData, GetInfo2
 // and SetActDirect. Behaviour follows RPCS3 `Emu/Cell/Modules/cellPad.cpp` (function of the same
 // name): error order, the CellPadInfo2 and CellPadData layouts, and a GetData that reports len 0
-// while the input has not changed. Handlers run under the guest lock, so the state needs no mutex.
+// while the input has not changed. Handlers run under the kernel lock, so the state needs no mutex.
 //
 // Input comes from a PadProvider (hle.h). The built-in providers are "none" (nothing connected) and
 // "neutral" (port 0 holds a standard pad that never changes); a host backend (keyboard, XInput)

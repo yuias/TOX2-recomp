@@ -286,7 +286,7 @@ void gcmSetDisplayBuffer(Tox2PpuContext* ctx, std::uint8_t*) {
 // cellGcmSetFlipMode(mode): void. Recorded as RPCS3's `requested_vsync`; in the default flip limit (vsync) a flip in
 // VSYNC mode waits for the next vblank tick, in HSYNC mode (or any other flip limit) it does not.
 void gcmSetFlipMode(Tox2PpuContext* ctx, std::uint8_t*) {
-    // Atomic because the RSX thread reads it without the guest lock while a flip waits for a vblank.
+    // Atomic because the RSX thread reads it without the kernel lock while a flip waits for a vblank.
     std::atomic_ref<bool>(rsxState().requested_vsync)
             .store(argU32(ctx, 0) == kRsxDisplayVsync, std::memory_order_relaxed);
 }
@@ -297,7 +297,7 @@ void gcmResetFlipStatus(Tox2PpuContext*, std::uint8_t*) {
 }
 
 // cellGcmGetFlipStatus(): s32, the status the last flip or reset left (RPCS3 returns the renderer's flip_status).
-// Kernel-free: the RSX thread stores the status without the guest lock, so every access is atomic.
+// Kernel-free: the RSX thread stores the status without the kernel lock, so every access is atomic.
 void gcmGetFlipStatus(Tox2PpuContext* ctx, std::uint8_t*) {
     ctx->gpr[3] = std::atomic_ref(rsxState().flip_status).load(std::memory_order_relaxed);
 }

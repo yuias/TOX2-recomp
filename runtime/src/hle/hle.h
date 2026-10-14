@@ -82,13 +82,13 @@ inline constexpr std::uint32_t kSysutilErrorBusy = 0x8002b105;   // CELL_SYSUTIL
 using SysutilCall = std::function<void(Tox2PpuContext*, std::uint8_t*)>;
 
 // Queues `call` for the next cellSysutilCheckCallback (RPCS3 sysutil_register_cb). Call under the
-// guest lock.
+// kernel lock.
 void queueSysutilCall(SysutilCall call);
 
 // Queues func(status, param, userdata) for every callback registered right now, in slot order
 // (RPCS3 sysutil_send_system_cmd). Returns how many were queued; DRAWING_BEGIN while one is open
 // returns kSysutilErrorBusy and DRAWING_END without one returns -1, queueing nothing. Call under
-// the guest lock.
+// the kernel lock.
 std::int32_t queueSysutilEvent(std::uint64_t status, std::uint64_t param);
 
 // Forgets the registered callbacks, the queue and the BGM state. Intended for tests.
@@ -142,7 +142,7 @@ struct PadPortState {
     std::array<std::uint16_t, kPadButtonCount> button{};  // host order; words 0 and 1 are unused
 };
 
-// Source of pad input. cellPad calls it under the guest lock, so an implementation must return
+// Source of pad input. cellPad calls it under the kernel lock, so an implementation must return
 // without blocking (read an atomic snapshot that its own input thread updates). Ports are 0..6.
 class PadProvider {
 public:
@@ -164,7 +164,7 @@ inline constexpr std::uint32_t kPadCapabilityStandard = 0x1f;  // conformity, pr
 PadPortState neutralPadState();
 
 // Replaces the pad input source (null: no pad connected on any port). Call before the guest runs
-// or under the guest lock.
+// or under the kernel lock.
 void setPadProvider(std::unique_ptr<PadProvider> provider);
 
 // Selects a built-in provider by name: "none" (no pad connected) or "neutral" (port 0 holds a

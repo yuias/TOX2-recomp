@@ -2,7 +2,7 @@
 
 // Bookkeeping the cellSail handler files share: the adapter table the player binds adapters from, the
 // stream the adapters pull frames from, and the PAMF database block that CreateDatabase writes and
-// cellPamfReaderGetNumberOfSpecificStreams reads. Everything runs under the guest lock.
+// cellPamfReaderGetNumberOfSpecificStreams reads. Everything runs under the kernel lock.
 
 #include <array>
 #include <cstdint>

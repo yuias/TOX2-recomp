@@ -3,7 +3,7 @@
 // FixedSave2. Behaviour follows RPCS3
 // `Emu/Cell/Modules/cellSaveData.cpp` (`savedata_op`, `savedata_check_args`, `check_filename`,
 // `select_and_delete`) and `cellSysutil.cpp` (`sysutil_check_name_string`). Handlers run under the
-// guest lock; the callbacks (funcList, funcStat, funcFile) run synchronously on the calling thread
+// kernel lock; the callbacks (funcList, funcStat, funcFile) run synchronously on the calling thread
 // through callGuestFunction, as in RPCS3, with their Get/Set/Result structures in one guest scratch
 // block that is allocated on first use and reused (a nested or concurrent call gets BUSY).
 //

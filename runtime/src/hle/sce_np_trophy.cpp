@@ -1,6 +1,6 @@
 // HLE handlers of the sceNpTrophy module (the 10 imports the game uses). Behaviour follows RPCS3
 // `Emu/Cell/Modules/sceNpTrophy.cpp` (function of the same name), with `Loader/TRP.cpp` for the
-// trophy pack. Handlers run under the guest lock, so the tables need no mutex.
+// trophy pack. Handlers run under the kernel lock, so the tables need no mutex.
 //
 // Deviations from RPCS3:
 //  - The trophy pack is read for its header, its trophy config (XML, scanned for the id, ttype and
