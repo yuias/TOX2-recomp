@@ -154,6 +154,24 @@ address to `fn_<address>`. The C sources of the overrides are not named in the f
 them, and the linker reports a function with an entry but no source (undefined `fn_<address>`) and a
 source without an entry (defined twice).
 
+### Overrides in use
+
+Both overrides are in `runtime/src/ppu_overrides/atrac_stream.c` and close races on the stream object
+of the game's ATRAC player (`obj`). The loader pushes bytes into the ring buffer of `obj`; the decoder
+setup runs on the player's own thread and hands the ring to `cellAtrac` with `SetDataAndGetMemSize`.
+In the original code the loader could run between the setup's read of the ring byte count (`obj+0x234`)
+and its store of the staging flag (`obj+0x244`), so the ring and the data given to SetData no longer
+matched and the decoded stream was misaligned. Each body keeps the shape of the generated function, so
+it can be diffed against `fn_<address>_generated`. Mutex means the stream mutex at `obj+0x21c`.
+
+| Entry | Function | Race it closes | Edits |
+| --- | --- | --- | --- |
+| `0x00956a00` | ATRAC stream loader (`obj`, source, length) | The original checked the staging flag and copied into the ring without the mutex and took it only for the count update, so the decoder setup could run between the check, the copy and the count. | The mutex is taken right after the free-space early exit, before the flag check. The staging path releases it again before its own lock. The direct path drops its original lock, because the mutex is already held. The flag check, the ring copy and the byte count are one critical section. The free-space call stays outside the lock, as in the original: only this loader adds to the count, so the answer cannot shrink before the copy. |
+| `0x00955f50` | ATRAC decoder setup (`obj`) | The original unlocked before the first SetData and raised the flag much later, so pushes made during SetData went to the ring behind the data SetData had read. | The mutex is held across the first SetData, as the retry already was: the unlock before it and the re-lock after it are dropped. The flag is stored after a successful SetData (first try or retry), before the single unlock. A failed SetData leaves the flag at 0. A push that waits for the mutex then finds the flag set and goes to staging. The memory path (no stream mutex) is not edited. |
+
+The first SetData runs under the mutex. It parses the header and makes no lv2 call and no guest call,
+so the added wait is bounded; if SetData ever waited, the loader would wait as long.
+
 ## SPU images
 
 `spu-emit` turns the committed SPU function databases (`config/spu/<name>.json`, written by `spu-recover`; see

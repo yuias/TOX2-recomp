@@ -47,6 +47,8 @@
 | `runtime/src/hle/libsre.*` | The libsre layout header (the guest addresses of the relocated image, `kBase` and the others) and the check of a loaded image against it; see [libsre](runtime.md#libsre) |
 | `runtime/src/core/elf_loader.*`, `dispatch.*` | The executable and PRX loaders, and the dispatch tables with one span per loaded image |
 | `runtime/src/spu/` | The SPU runtime in the runtime core: SPU threads and the dispatcher, the MFC, channels and mailboxes, and the SPU census; see [SPU usage](spu.md) |
+| `config/ppu_overrides.json` | The guest functions that hand-written C replaces, each with the SHA-256 of the generated code it was derived from; see [Overrides](emitter.md#overrides) |
+| `runtime/src/ppu_overrides/` | The C sources of those replacements (`tox2_ppu_overrides`, an object library linked into `tox2_game` and the `ppu_link` test), tested by `ppu_overrides`; see [Overrides in use](emitter.md#overrides-in-use) |
 | `docs/` | Development documentation |
 | `LICENSE`, `THIRD_PARTY_NOTICES.md` | Licence of this project (0BSD) and notices of third-party components (FFmpeg, GameInput, the RPCS3 key files, Dear ImGui) |
 | `generated/` | Tool output, including `generated/ppu` from `emit` (git-ignored) |
