@@ -1,6 +1,7 @@
 #include "overlay/overlay_model.h"
 
 #include <algorithm>
+#include <format>
 
 namespace tox2 {
 
@@ -16,6 +17,13 @@ std::uint64_t deltaOf(std::uint64_t now, std::uint64_t before) { return now >= b
 bool due(const std::optional<FrameStatsHistory::Clock::time_point>& last, FrameStatsHistory::Clock::time_point now,
          FrameStatsHistory::Clock::duration interval) {
     return !last || now - *last >= interval;
+}
+
+// The size a preset gets on a screen that holds `available`; the preset's own size when nothing was measured.
+ClientSize fittedSize(WindowSizePreset preset, ClientSize available) {
+    const ClientSize wanted = presetClientSize(preset);
+    if (available.width == 0 || available.height == 0) return wanted;
+    return fitClientSize(wanted, available);
 }
 
 }  // namespace
@@ -117,16 +125,36 @@ void OverlayState::refresh(const OverlaySources& sources, FrameStatsHistory::Clo
     }
 }
 
+std::string windowSizeItemLabel(WindowSizePreset preset, ClientSize available) {
+    const ClientSize wanted = presetClientSize(preset);
+    const ClientSize fitted = fittedSize(preset, available);
+    if (fitted == wanted) return std::format("{} ({}x{})", windowSizeName(preset), wanted.width, wanted.height);
+    return std::format("{} ({}x{}, fits as {}x{})", windowSizeName(preset), wanted.width, wanted.height, fitted.width,
+                       fitted.height);
+}
+
+std::string windowSizePreviewLabel(const WindowStatus& status) {
+    if (status.fullscreen) return std::format("{} (when windowed)", windowSizeName(status.preset));
+    const bool measured = status.client.width != 0 && status.client.height != 0;
+    if (measured && status.client != fittedSize(status.preset, status.available)) {
+        return std::format("{} (window {}x{})", windowSizeName(status.preset), status.client.width,
+                           status.client.height);
+    }
+    return windowSizeItemLabel(status.preset, status.available);
+}
+
 PresentOverlayRequests takePresentRequests(OverlayState& state) {
     PresentOverlayRequests requests;
     requests.dump_display = state.dump_requested;
     requests.resolution_scale = state.resolution_scale_request;
     requests.aa_mode = state.aa_mode_request;
     requests.anisotropy = state.anisotropy_request;
+    requests.window_size = state.window_size_request;
     state.dump_requested = false;
     state.resolution_scale_request = 0;
     state.aa_mode_request.reset();
     state.anisotropy_request = 0;
+    state.window_size_request.reset();
     return requests;
 }
 

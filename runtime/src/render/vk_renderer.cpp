@@ -2447,11 +2447,14 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
                 .msaa_available = msaaAvailable(),
                 .anisotropy = anisotropy_,
                 .max_anisotropy = maxAnisotropy(),
+                .window = presenter_->windowStatus(),
         });
         if (requests.dump_display) dump_this_flip_ = true;
         requested_scale = requests.resolution_scale;
         requested_aa_mode = requests.aa_mode;
         requested_anisotropy = requests.anisotropy;
+        // The window is not part of the frame being recorded, so the request needs no deferral.
+        if (requests.window_size) presenter_->requestWindowSize(*requests.window_size);
     }
     const bool read_back = options_.readback_all || dumpDue() || dump_this_flip_;
     display_copied_ = false;

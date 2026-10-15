@@ -666,27 +666,148 @@ void testAnisotropyPanel() {
     }
 }
 
+void testWindowSizeLabels() {
+    constexpr tox2::ClientSize kBig{3840, 2160};
+    CHECK(tox2::windowSizeItemLabel(tox2::WindowSizePreset::Size720p, kBig) == "720p (1280x720)");
+    CHECK(tox2::windowSizeItemLabel(tox2::WindowSizePreset::Size2160p, kBig) == "2160p (3840x2160)");
+    // A preset that exactly fills the available area still fits.
+    CHECK(tox2::windowSizeItemLabel(tox2::WindowSizePreset::Size1080p, {1920, 1080}) == "1080p (1920x1080)");
+    // Only the presets that do not fit read as clamped.
+    constexpr tox2::ClientSize kSmall{2496, 1404};
+    CHECK(tox2::windowSizeItemLabel(tox2::WindowSizePreset::Size1440p, kSmall) ==
+          "1440p (2560x1440, fits as 2496x1404)");
+    CHECK(tox2::windowSizeItemLabel(tox2::WindowSizePreset::Size2160p, kSmall) ==
+          "2160p (3840x2160, fits as 2496x1404)");
+    CHECK(tox2::windowSizeItemLabel(tox2::WindowSizePreset::Size1080p, kSmall) == "1080p (1920x1080)");
+    // Nothing measured yet: no clamp is claimed.
+    CHECK(tox2::windowSizeItemLabel(tox2::WindowSizePreset::Size2160p, {}) == "2160p (3840x2160)");
+
+    tox2::WindowStatus status;
+    status.preset = tox2::WindowSizePreset::Size1080p;
+    status.available = kBig;
+    status.client = {1920, 1080};
+    CHECK(tox2::windowSizePreviewLabel(status) == "1080p (1920x1080)");
+
+    // The window was dragged to another size.
+    status.client = {1600, 900};
+    CHECK(tox2::windowSizePreviewLabel(status) == "1080p (window 1600x900)");
+
+    // A clamped preset whose window has the clamped size is not a deviation.
+    status.preset = tox2::WindowSizePreset::Size2160p;
+    status.available = kSmall;
+    status.client = {2496, 1404};
+    CHECK(tox2::windowSizePreviewLabel(status) == "2160p (3840x2160, fits as 2496x1404)");
+    status.client = {2000, 1125};
+    CHECK(tox2::windowSizePreviewLabel(status) == "2160p (window 2000x1125)");
+
+    // Minimised: the empty client area is not a size to show.
+    status.client = {};
+    CHECK(tox2::windowSizePreviewLabel(status) == "2160p (3840x2160, fits as 2496x1404)");
+
+    // Fullscreen: the preset applies when windowed, whatever the client area is.
+    status.fullscreen = true;
+    status.preset = tox2::WindowSizePreset::Size1440p;
+    status.client = {3840, 2160};
+    CHECK(tox2::windowSizePreviewLabel(status) == "1440p (when windowed)");
+}
+
+void testWindowSizePanel() {
+    SettingCalls recorded;
+    tox2::OverlaySources sources = makeFakeSources();
+    recorded.attach(sources);
+    constexpr float kProbeX = 60.0f;
+    constexpr float kWindowBottom = 720.0f;
+
+    {
+        // No status reported (no window): the combo is disabled and nothing can be requested.
+        tox2::OverlayState state;
+        SettingsProbe probe(state, sources);
+        if (probe.window() == nullptr) return;
+        CHECK(!probe.findHovered(probe.window()->GetID("Window size"), kProbeX, 10.0f, kWindowBottom));
+        CHECK(!probe.window()->ScrollbarY && !probe.window()->ScrollbarX);
+        CHECK(!state.window_size_request);
+        CHECK(recorded.calls.empty());
+    }
+
+    // The first state picks another preset, the second the one that is already set.
+    for (const bool pick_current : {false, true}) {
+        recorded.calls.clear();
+        tox2::OverlayState state;
+        state.window = tox2::WindowStatus{.preset = tox2::WindowSizePreset::Size720p,
+                                          .client = {1280, 720},
+                                          .available = {3840, 2160},
+                                          .fullscreen = false};
+        SettingsProbe probe(state, sources);
+        if (probe.window() == nullptr) return;
+        const std::optional<ImVec2> combo =
+                probe.findHovered(probe.window()->GetID("Window size"), kProbeX, 10.0f, kWindowBottom);
+        CHECK(combo.has_value());
+        if (!combo) return;
+        CHECK(!probe.window()->ScrollbarY && !probe.window()->ScrollbarX);
+
+        probe.click(*combo);
+        ImGuiContext& g = *ImGui::GetCurrentContext();
+        CHECK(g.OpenPopupStack.Size == 1);
+        if (g.OpenPopupStack.Size != 1 || g.OpenPopupStack[0].Window == nullptr) return;
+        ImGuiWindow* popup = g.OpenPopupStack[0].Window;
+        CHECK(recorded.calls.empty());  // opening the list changes nothing
+        CHECK(!state.window_size_request);
+        const char* label = pick_current ? "720p (1280x720)" : "1080p (1920x1080)";
+        const std::optional<ImVec2> pick = probe.findHovered(popup->GetID(label), popup->Pos.x + 10.0f, popup->Pos.y,
+                                                             popup->Pos.y + popup->Size.y);
+        CHECK(pick.has_value());
+        if (!pick) return;
+        probe.click(*pick);
+        CHECK(state.window_size_request ==
+              (pick_current ? tox2::WindowSizePreset::Size720p : tox2::WindowSizePreset::Size1080p));
+        if (pick_current) {
+            // Re-applies the size without anything to save.
+            CHECK(recorded.calls.empty());
+        } else {
+            CHECK(recorded.calls.size() == 1);
+            if (recorded.calls.size() == 1) {
+                CHECK(recorded.calls[0].first == tox2::OverlaySetting::WindowSize);
+                CHECK(recorded.calls[0].second == "1080p");
+            }
+        }
+        const tox2::PresentOverlayRequests requests = tox2::takePresentRequests(state);
+        CHECK(requests.window_size ==
+              (pick_current ? tox2::WindowSizePreset::Size720p : tox2::WindowSizePreset::Size1080p));
+        CHECK(!state.window_size_request);
+    }
+}
+
 void testPresentRequests() {
     tox2::OverlayState state;
     state.dump_requested = true;
     state.resolution_scale_request = 3;
     state.aa_mode_request = tox2::AaMode::Supersample;
     state.anisotropy_request = 4;
+    state.window_size_request = tox2::WindowSizePreset::Size1440p;
     tox2::PresentOverlayRequests requests = tox2::takePresentRequests(state);
     CHECK(requests.dump_display);
     CHECK(requests.resolution_scale == 3);
     CHECK(requests.aa_mode == tox2::AaMode::Supersample);
     CHECK(requests.anisotropy == 4);
+    CHECK(requests.window_size == tox2::WindowSizePreset::Size1440p);
     CHECK(!state.dump_requested);
     CHECK(state.resolution_scale_request == 0);
     CHECK(!state.aa_mode_request);
     CHECK(state.anisotropy_request == 0);
+    CHECK(!state.window_size_request);
 
     requests = tox2::takePresentRequests(state);
     CHECK(!requests.dump_display);
     CHECK(requests.resolution_scale == 0);
     CHECK(!requests.aa_mode);
     CHECK(requests.anisotropy == 0);
+    CHECK(!requests.window_size);
+
+    // The reported window status is not a request.
+    state.window = tox2::WindowStatus{};
+    requests = tox2::takePresentRequests(state);
+    CHECK(!requests.window_size);
+    CHECK(state.window.has_value());
 
     // The reported level is a status, not a request.
     state.anisotropy = 8;
@@ -1102,6 +1223,8 @@ int main() {
     testFlipLimiterPanel();
     testAntiAliasingPanel();
     testAnisotropyPanel();
+    testWindowSizeLabels();
+    testWindowSizePanel();
     testRuntimeSources();
 
     tox2::VkContextOptions options;

@@ -10,6 +10,7 @@
 #include "render/frame_dump.h"
 #include "render/render_scale.h"
 #include "render/vk_window.h"
+#include "render/window_size.h"
 
 namespace tox2 {
 
@@ -24,6 +25,7 @@ struct PresentFrameInfo {
     bool msaa_available = false;                // the device can draw 2-sample surfaces (AaMode::Msaa is selectable)
     std::uint32_t anisotropy = 0;               // the effective forced anisotropy level (1 = off); 0 = unknown
     float max_anisotropy = 0.0f;                // the device maximum; 0 = unsupported or unknown
+    std::optional<WindowStatus> window;         // the presenter's window; unset = unknown
 };
 
 struct PresentOverlayRequests {
@@ -36,6 +38,8 @@ struct PresentOverlayRequests {
     std::optional<AaMode> aa_mode;
     // New forced anisotropy level; 0 = no change. Applied after the flip is submitted, like the scale.
     std::uint32_t anisotropy = 0;
+    // New window size preset; unset = no change. Forwarded to the presenter at once (it posts to the UI thread).
+    std::optional<WindowSizePreset> window_size;
 };
 
 // Drawn over the presented swapchain image only. Never called without a presenter, so it cannot reach

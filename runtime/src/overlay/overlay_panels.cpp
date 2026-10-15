@@ -185,6 +185,29 @@ void drawAnisotropy(OverlayState& state, const OverlaySources& sources) {
     ImGui::EndDisabled();
 }
 
+// Same pending-request display as the scale combo. Disabled without a window (nothing reports a status). The
+// request is set for every pick, so choosing the current preset snaps a dragged window back; it is only reported
+// for saving when it differs from the preset the combo shows.
+void drawWindowSize(OverlayState& state, const OverlaySources& sources) {
+    ImGui::BeginDisabled(!state.window.has_value());
+    WindowStatus shown = state.window.value_or(WindowStatus{});
+    if (state.window_size_request) shown.preset = *state.window_size_request;
+    const std::string preview = state.window ? windowSizePreviewLabel(shown) : "n/a";
+    if (ImGui::BeginCombo("Window size", preview.c_str())) {
+        for (const WindowSizePreset preset : kWindowSizePresets) {
+            const std::string label = windowSizeItemLabel(preset, shown.available);
+            if (ImGui::Selectable(label.c_str(), preset == shown.preset)) {
+                state.window_size_request = preset;
+                if (preset != shown.preset && sources.setting_changed) {
+                    sources.setting_changed(OverlaySetting::WindowSize, windowSizeName(preset));
+                }
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+}
+
 const char* flipLimitLabel(RsxFlipLimit limit) {
     switch (limit) {
         case RsxFlipLimit::Vsync: return "VSync (game flip mode)";
@@ -226,6 +249,7 @@ void drawSettings(OverlayState& state, const OverlaySources& sources) {
     drawResolutionScale(state, sources);
     drawAntiAliasing(state, sources);
     drawAnisotropy(state, sources);
+    drawWindowSize(state, sources);
 
     // Not wired to anything yet; shown so the layout of the finished panel is visible.
     ImGui::SeparatorText("(not implemented)");

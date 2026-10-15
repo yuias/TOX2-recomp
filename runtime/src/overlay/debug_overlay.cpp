@@ -102,6 +102,7 @@ PresentOverlayRequests DebugOverlay::onFlip(const PresentFrameInfo& info) {
     state_.msaa_available = info.msaa_available;
     state_.anisotropy = info.anisotropy;
     state_.max_anisotropy = info.max_anisotropy;
+    state_.window = info.window;
     return takePresentRequests(state_);
 }
 

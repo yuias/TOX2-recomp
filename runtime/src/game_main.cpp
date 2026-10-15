@@ -211,6 +211,7 @@ void saveOverlaySetting(tox2::OverlaySetting setting, std::string_view value) {
         case tox2::OverlaySetting::ResolutionScale: g_settings_store->set("resolution_scale", value); break;
         case tox2::OverlaySetting::AaMode: g_settings_store->set("aa_mode", value); break;
         case tox2::OverlaySetting::Anisotropy: g_settings_store->set("anisotropic_filter", value); break;
+        case tox2::OverlaySetting::WindowSize: g_settings_store->set("window_size", value); break;
     }
 }
 

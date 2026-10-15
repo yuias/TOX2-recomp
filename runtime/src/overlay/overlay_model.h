@@ -19,6 +19,7 @@
 #include "render/frame_dump.h"
 #include "render/present_overlay.h"
 #include "render/vk_renderer.h"
+#include "render/window_size.h"
 #include "rsx/rsx_thread.h"
 
 namespace tox2 {
@@ -64,7 +65,7 @@ struct OverlayLockRate {
 };
 
 // A Settings choice the user made. The value is the option's command-line form.
-enum class OverlaySetting : std::uint8_t { FrameLimit, ResolutionScale, AaMode, Anisotropy };
+enum class OverlaySetting : std::uint8_t { FrameLimit, ResolutionScale, AaMode, Anisotropy, WindowSize };
 
 // Every member may be empty: the panel then shows "n/a" or disables the control. The providers are
 // called on the renderer's thread and must be safe from any thread.
@@ -147,6 +148,8 @@ struct OverlayState {
     std::uint32_t anisotropy = 0;                // last effective level the renderer reported (1 = off); 0 = unknown
     float max_anisotropy = 0.0f;                 // device maximum the renderer reported; 0 = unsupported or unknown
     std::uint32_t anisotropy_request = 0;        // set by the panel, taken by DebugOverlay::onFlip; 0 = none
+    std::optional<WindowStatus> window;          // last status the presenter reported; unset = no window
+    std::optional<WindowSizePreset> window_size_request;  // set by the panel, taken by DebugOverlay::onFlip
 
     // Calls the providers: audio at most every 250 ms, unimplemented every 500 ms, the rest every call.
     // The audio and unimplemented snapshots take locks or copy maps, which a per-frame call would not need.
@@ -156,6 +159,16 @@ private:
     std::optional<FrameStatsHistory::Clock::time_point> audio_time_;
     std::optional<FrameStatsHistory::Clock::time_point> unimplemented_time_;
 };
+
+// Combo item text for a window size preset: "1080p (1920x1080)". When `available` (the client pixels the work area
+// allows) cannot hold the preset, the size it gets is added: "2160p (3840x2160, fits as 2496x1404)". An empty
+// `available` means nothing was measured and never reads as a clamp.
+std::string windowSizeItemLabel(WindowSizePreset preset, ClientSize available);
+
+// Combo preview for a window status: the item text of `status.preset`; while fullscreen "<name> (when windowed)";
+// when the client area differs from the size the preset fits to, "<name> (window WxH)". A minimised window
+// (empty client) shows the item text.
+std::string windowSizePreviewLabel(const WindowStatus& status);
 
 // Moves the requests the panels made since the last flip into the reply for the renderer and clears them.
 PresentOverlayRequests takePresentRequests(OverlayState& state);
