@@ -9,6 +9,9 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -412,8 +415,21 @@ private:
     float closed_height_ = 0.0f;
 };
 
+// Collects what the panels report through OverlaySources::setting_changed.
+struct SettingCalls {
+    std::vector<std::pair<tox2::OverlaySetting, std::string>> calls;
+
+    void attach(tox2::OverlaySources& sources) {
+        sources.setting_changed = [this](tox2::OverlaySetting setting, std::string_view value) {
+            calls.emplace_back(setting, std::string(value));
+        };
+    }
+};
+
 void testResolutionScalePanel() {
-    const tox2::OverlaySources sources = makeFakeSources();
+    SettingCalls recorded;
+    tox2::OverlaySources sources = makeFakeSources();
+    recorded.attach(sources);
     constexpr float kProbeX = 60.0f;
     constexpr float kWindowBottom = 720.0f;
 
@@ -442,12 +458,14 @@ void testResolutionScalePanel() {
         CHECK(combo.has_value());
         if (!combo) return;
         CHECK(state.resolution_scale_request == 0);
+        CHECK(recorded.calls.empty());
 
         probe.click(*combo);
         ImGuiContext& g = *ImGui::GetCurrentContext();
         CHECK(g.OpenPopupStack.Size == 1);
         if (g.OpenPopupStack.Size != 1 || g.OpenPopupStack[0].Window == nullptr) return;
         ImGuiWindow* popup = g.OpenPopupStack[0].Window;
+        CHECK(recorded.calls.empty());  // opening the list changes nothing
         const ImGuiID entry = popup->GetID("3x");
         const std::optional<ImVec2> three =
                 probe.findHovered(entry, popup->Pos.x + 10.0f, popup->Pos.y, popup->Pos.y + popup->Size.y);
@@ -455,6 +473,11 @@ void testResolutionScalePanel() {
         if (!three) return;
         probe.click(*three);
         CHECK(state.resolution_scale_request == 3);
+        CHECK(recorded.calls.size() == 1);
+        if (recorded.calls.size() == 1) {
+            CHECK(recorded.calls[0].first == tox2::OverlaySetting::ResolutionScale);
+            CHECK(recorded.calls[0].second == "3");
+        }
         // The request is taken once; the renderer reports the scale it applied on a later flip.
         const tox2::PresentOverlayRequests requests = tox2::takePresentRequests(state);
         CHECK(requests.resolution_scale == 3);
@@ -462,16 +485,53 @@ void testResolutionScalePanel() {
     }
 }
 
+void testFlipLimiterPanel() {
+    SettingCalls recorded;
+    tox2::OverlaySources sources = makeFakeSources();
+    recorded.attach(sources);
+    tox2::RsxFlipLimit applied = tox2::RsxFlipLimit::Vsync;
+    sources.set_flip_limit = [&](tox2::RsxFlipLimit limit) { applied = limit; };
+
+    tox2::OverlayState state;
+    SettingsProbe probe(state, sources);
+    if (probe.window() == nullptr) return;
+    const std::optional<ImVec2> combo = probe.findHovered(probe.window()->GetID("Flip limiter"), 60.0f, 10.0f, 720.0f);
+    CHECK(combo.has_value());
+    if (!combo) return;
+    CHECK(recorded.calls.empty());
+
+    probe.click(*combo);
+    ImGuiContext& g = *ImGui::GetCurrentContext();
+    CHECK(g.OpenPopupStack.Size == 1);
+    if (g.OpenPopupStack.Size != 1 || g.OpenPopupStack[0].Window == nullptr) return;
+    ImGuiWindow* popup = g.OpenPopupStack[0].Window;
+    const std::optional<ImVec2> off =
+            probe.findHovered(popup->GetID("Off"), popup->Pos.x + 10.0f, popup->Pos.y, popup->Pos.y + popup->Size.y);
+    CHECK(off.has_value());
+    if (!off) return;
+    CHECK(recorded.calls.empty());
+    probe.click(*off);
+    CHECK(applied == tox2::RsxFlipLimit::Off);
+    CHECK(recorded.calls.size() == 1);
+    if (recorded.calls.size() == 1) {
+        CHECK(recorded.calls[0].first == tox2::OverlaySetting::FrameLimit);
+        CHECK(recorded.calls[0].second == "off");
+    }
+}
+
 // Draws the open Settings panel with every combination of reported mode and MSAA support; ImGui asserts on a
 // Begin/End mismatch, so reaching the end is the check.
 void testAntiAliasingPanel() {
-    const tox2::OverlaySources sources = makeFakeSources();
+    SettingCalls recorded;
+    tox2::OverlaySources sources = makeFakeSources();
+    recorded.attach(sources);
     constexpr float kProbeX = 60.0f;
     constexpr float kWindowBottom = 720.0f;
 
     const std::optional<tox2::AaMode> modes[] = {std::nullopt, tox2::AaMode::Supersample, tox2::AaMode::Msaa};
     for (const std::optional<tox2::AaMode>& mode : modes) {
         for (const bool msaa_available : {false, true}) {
+            recorded.calls.clear();
             tox2::OverlayState state;
             state.aa_mode = mode;
             state.msaa_available = msaa_available;
@@ -483,6 +543,7 @@ void testAntiAliasingPanel() {
             CHECK(combo.has_value() == mode.has_value());
             CHECK(!probe.window()->ScrollbarY && !probe.window()->ScrollbarX);
             CHECK(!state.aa_mode_request);
+            CHECK(recorded.calls.empty());
             if (!combo) continue;
 
             probe.click(*combo);
@@ -504,12 +565,19 @@ void testAntiAliasingPanel() {
             if (mode == tox2::AaMode::Msaa && supersample) {
                 probe.click(*supersample);
                 CHECK(state.aa_mode_request == tox2::AaMode::Supersample);
+                CHECK(recorded.calls.size() == 1);
+                if (recorded.calls.size() == 1) {
+                    CHECK(recorded.calls[0].first == tox2::OverlaySetting::AaMode);
+                    CHECK(recorded.calls[0].second == "supersample");
+                }
             } else if (mode == tox2::AaMode::Supersample && msaa) {
                 probe.click(*msaa);
                 CHECK(state.aa_mode_request == tox2::AaMode::Msaa);
+                CHECK(recorded.calls.size() == 1 && recorded.calls[0].second == "msaa");
             } else if (mode == tox2::AaMode::Supersample && supersample) {
                 probe.click(*supersample);
                 CHECK(!state.aa_mode_request);
+                CHECK(recorded.calls.empty());
             }
         }
     }
@@ -938,6 +1006,7 @@ int main() {
     testUnwrittenRates();
     testPresentRequests();
     testResolutionScalePanel();
+    testFlipLimiterPanel();
     testAntiAliasingPanel();
     testRuntimeSources();
 

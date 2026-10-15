@@ -16,6 +16,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -81,6 +82,16 @@ enum class RsxFlipLimit {
     // Every flip completes where its command executes.
     Off,
 };
+
+// The command-line form of the limit (--frame-limit, config key frame_limit).
+constexpr std::string_view rsxFlipLimitName(RsxFlipLimit limit) {
+    switch (limit) {
+        case RsxFlipLimit::Vsync: return "vsync";
+        case RsxFlipLimit::Hz60: return "60";
+        case RsxFlipLimit::Off: return "off";
+    }
+    return "";
+}
 
 // Register state and effects behind the parser. All members are used under the kernel lock except
 // census(), which only touches atomics, and takeCommands()/takeCaptures(), which only touch state the

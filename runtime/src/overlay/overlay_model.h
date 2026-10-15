@@ -11,6 +11,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -62,6 +63,9 @@ struct OverlayLockRate {
     double wait_over_per_s = 0.0;
 };
 
+// A Settings choice the user made. The value is the option's command-line form.
+enum class OverlaySetting : std::uint8_t { FrameLimit, ResolutionScale, AaMode };
+
 // Every member may be empty: the panel then shows "n/a" or disables the control. The providers are
 // called on the renderer's thread and must be safe from any thread.
 struct OverlaySources {
@@ -74,6 +78,9 @@ struct OverlaySources {
     std::function<void(LogLevel)> set_log_level;
     std::function<bool()> request_capture;
     std::function<RsxCaptureStatus()> capture_status;
+    // Called at the moment the user picks a different value, for the settings that can be saved (not the log
+    // level, which is a diagnostic). Runs on the renderer's thread, so it must not block.
+    std::function<void(OverlaySetting setting, std::string_view value)> setting_changed;
 };
 
 class FrameStatsHistory {

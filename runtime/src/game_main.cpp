@@ -196,6 +196,23 @@ private:
     std::atomic<bool> failed_{false};
 };
 
+// The process ends without running destructors on the stop paths, so the pending settings are written from a
+// stop hook. The store is created only when changes can be saved (not with --no-config). It is never destroyed:
+// a stop can arrive after main has returned and static destruction has begun, and the hook must not reach a
+// freed object.
+tox2::SettingsStore* g_settings_store = nullptr;
+
+// Config keys of the overlay's saveable settings. Only changes the user makes in the overlay get here, so a value
+// given on the command line is never written unless the user changes that setting.
+void saveOverlaySetting(tox2::OverlaySetting setting, std::string_view value) {
+    if (g_settings_store == nullptr) return;
+    switch (setting) {
+        case tox2::OverlaySetting::FrameLimit: g_settings_store->set("frame_limit", value); break;
+        case tox2::OverlaySetting::ResolutionScale: g_settings_store->set("resolution_scale", value); break;
+        case tox2::OverlaySetting::AaMode: g_settings_store->set("aa_mode", value); break;
+    }
+}
+
 // Runs on the RSX thread; a null result makes the consumer continue without rendering.
 std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions& opt,
                                                         const std::shared_ptr<tox2::KeyboardPadState>& keyboard,
@@ -228,7 +245,9 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions&
     std::unique_ptr<tox2::DebugOverlay> overlay;
     std::unique_ptr<tox2::Presenter> presenter;
     if (opt.window) {
-        overlay = std::make_unique<tox2::DebugOverlay>(*context, tox2::makeRuntimeOverlaySources());
+        tox2::OverlaySources overlay_sources = tox2::makeRuntimeOverlaySources();
+        overlay_sources.setting_changed = saveOverlaySetting;
+        overlay = std::make_unique<tox2::DebugOverlay>(*context, std::move(overlay_sources));
         tox2::PresenterOptions presenter_options;
         presenter_options.on_message = [overlay = overlay.get()](const tox2::WindowMessage& message) {
             return overlay->onWindowMessage(message);
@@ -573,12 +592,6 @@ void applyBuildDirDefaults(tox2::VfsLayout& layout) {
         }
     }
 }
-
-// The process ends without running destructors on the stop paths, so the pending settings are written from a
-// stop hook. The store is created only when changes can be saved (not with --no-config). It is never destroyed:
-// a stop can arrive after main has returned and static destruction has begun, and the hook must not reach a
-// freed object.
-tox2::SettingsStore* g_settings_store = nullptr;
 
 void flushSettingsStore() {
     if (g_settings_store != nullptr) g_settings_store->flush(std::chrono::milliseconds(250));
