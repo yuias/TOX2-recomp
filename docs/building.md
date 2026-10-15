@@ -21,7 +21,7 @@ then configures, builds, and optionally runs CTest.
 | `-Clean` | Delete `build/<preset>/` before configuring. This also deletes the default hdd directory `build/<preset>/hdd` (game data and saves). |
 | `-Test` | Run CTest after the build. Which tests run depends on the other parameters; see [Tests](tests.md). |
 | `-GeneratedDir <dir>` | The directory written by `ps3tool.py emit --out <dir>`. Compiles it into `tox2_ppu_generated` and `tox2_spu_generated` and builds `tox2_game` and the link tests. This game's executable is large, so it is emitted with `--chunks 256` and a full build compiles 256 generated C files; if the compiler runs out of memory, lower the parallelism with the `CMAKE_BUILD_PARALLEL_LEVEL` environment variable. Without it only the runtime libraries, tools and unit tests are built. The directory must hold the executable's `sources.cmake`, the libsre tree `<dir>/libsre/libsre_sources.cmake` (the second `emit` command in [Emitting C](emitter.md#a-prx-module-libsre)) and the SPU tree `<dir>/spu/spu_sources.cmake` (the `spu-emit` command in [Emitting C](emitter.md#spu-images)); if one is missing, configuration fails and prints the command to run. CMake variable `TOX2_PPU_GENERATED_DIR`. |
-| `-GameDir <dir>` | The game directory (the one that contains `PS3_GAME`). The `game_boot` test runs against it (it also needs `-EbootElf` or `-EbootBin`). CMake variable `TOX2_GAME_DIR`. |
+| `-GameDir <dir>` | The game directory (the one that contains `PS3_GAME`). The `game_boot` test runs against it (it also needs `-EbootElf` or `-EbootBin`). With it, configuration also writes the starter `build/<preset>/bin/config.json` (see [The starter `config.json`](#the-starter-configjson)). CMake variable `TOX2_GAME_DIR`. |
 | `-EbootElf <path>` | The decrypted executable for the Python tests that read the real ELF and for the game tests. Not needed to build. When `-EbootBin` is given and this is not, it defaults to `generated/inputs/EBOOT.elf`, the file that `-EbootBin` produces. CMake variable `TOX2_EBOOT_ELF`. |
 | `-EbootBin <path>` | The disc's `PS3_GAME/USRDIR/EBOOT.BIN`. The build decrypts it into `generated/inputs/EBOOT.elf`; see [Decrypting the inputs](#decrypting-the-inputs). The file must exist. CMake variable `TOX2_EBOOT_BIN`. |
 | `-Pup <path>` | The firmware 4.93 `PS3UPDAT.PUP`. The build extracts `libsre.prx` from it into `generated/inputs/libsre.prx` and relocates it into `generated/inputs/libsre.reloc.elf`. It is required to play: `tox2_game` loads `libsre.reloc.elf`, the libsre emit step reads it, and `game_boot` is registered only with it. The file must exist. CMake variable `TOX2_PUP`. |
@@ -47,8 +47,32 @@ These can also be passed to `cmake` directly (`cmake --preset release -D<name>=<
 | `TOX2_GAMEINPUT_DIR` | empty | An extracted `Microsoft.GameInput` package to use instead of `generated/deps/gameinput/<pinned version>` (see [Input](input.md#the-gameinput-package)). Configure needs the package from `tools/fetch-gameinput.ps1`. |
 | `TOX2_PPU_WERROR` | `ON` | Add `-Werror` for generated code and the code that mirrors it (header check, semantics harness, link test). Every such target is compiled with `-O1 -march=x86-64-v3 -ffp-contract=off -fpatchable-function-entry=8 -Wall -Wextra`, whatever the preset's optimization level; the generated SPU tree and the SPU tests that run generated code (`spu_semantics`, `spu_programs`) use `-O3` instead of `-O1` (`TOX2_SPU_CODEGEN_OPT_LEVEL` in `cmake/SpuCodegen.cmake`), because the game's SPU decode loops run several times faster at that level. |
 
-No tracked file contains a game path: they are command-line arguments, CMake cache variables, or a
-user-local VFS configuration (`config/vfs.example.json` shows the format with placeholders).
+No tracked file contains a game path: they are command-line arguments, CMake cache variables, a
+user-local VFS configuration (`config/vfs.example.json` shows the format with placeholders) or the
+git-ignored `build/<preset>/bin/config.json` below.
+
+## The starter `config.json`
+
+When `TOX2_GAME_DIR` is set (`-GameDir`) and `tox2_game` is built (`-GeneratedDir`), configuration
+writes `build/<preset>/bin/config.json`, the file `tox2_game` reads when it is started without
+`--config` or `--no-config` (see [`tox2_game` options](runtime-options.md)). The executable can then
+be started from any working directory without arguments. The file holds:
+
+| Key | Value | Written when |
+| --- | --- | --- |
+| `game_dir` | `TOX2_GAME_DIR` | always (nothing is written without it) |
+| `elf` | `TOX2_EBOOT_ELF`: the file `-EbootElf` names, or `generated/inputs/EBOOT.elf` from `-EbootBin` | the variable is set |
+| `libsre` | `generated/inputs/libsre.reloc.elf` | `-Pup` is given |
+
+`hdd_dir` is not written: the default `build/<preset>/hdd` is the directory the README describes. A
+path inside the repository or the build directory is stored relative to `bin/`, any other path is
+absolute (the file is git-ignored and machine-local).
+
+The file is written at configuration, which also covers `cmake --preset <preset>` without the script.
+An existing file is never changed, so hand edits and settings the game saved survive; if its
+`game_dir`, `elf` or `libsre` differ from the build's, configuration prints one line naming them. To
+get a new starter file, delete the old one and configure again. The `game_boot` test passes
+`--no-config`, so the file does not affect the tests.
 
 ## Decrypting the inputs
 

@@ -19,6 +19,7 @@ include(cmake/Media.cmake)
 include(cmake/Audio.cmake)
 include(cmake/Input.cmake)
 include(cmake/Decrypt.cmake)
+include(cmake/GameConfig.cmake)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
@@ -58,6 +59,7 @@ if(TARGET tox2_game)
   # FFmpeg DLLs it loads at run time are copied next to the executable by tox2_ffmpeg_runtime.
   target_link_libraries(tox2_game PRIVATE tox2_render tox2_overlay tox2_media)
   add_dependencies(tox2_game tox2_ffmpeg_runtime)
+  tox2_game_config_write()
 endif()
 
 add_executable(tox2_ppu_header_check runtime/tests/ppu_header_check.c)

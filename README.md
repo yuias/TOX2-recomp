@@ -115,6 +115,18 @@ Every build parameter, the CMake variables and the test builds are described in
 
 ## Running the game
 
+A build configured with `-GameDir` (and `-EbootBin` or `-EbootElf`, and `-Pup`) writes
+`build/release/bin/config.json` with the game directory and the paths of the decrypted executable and
+`libsre.reloc.elf`, so the game starts without arguments from any working directory:
+
+```powershell
+build/release/bin/tox2_game.exe
+```
+
+The file is written only when it does not exist, so edits survive later builds; when it differs from
+the build's paths, configuration says so and leaves it alone. Without the file, name the paths on the
+command line:
+
 ```powershell
 build/release/bin/tox2_game.exe --game-dir <game-dir> --elf generated/inputs/EBOOT.elf
 ```
