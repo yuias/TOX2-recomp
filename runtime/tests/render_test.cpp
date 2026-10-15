@@ -5607,6 +5607,136 @@ void testRendererMsaaInherit(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// ---- The 1-sample scene image of Dlaa mode ----
+
+// Whether pixel (x, y) of the rectangle's surface is red when it is drawn with one sample at the pixel centre at
+// resolution scale `scale`. No rectangle edge passes through a pixel centre at scales 1 and 2.
+bool dlaaPixelCovered(std::uint32_t x, std::uint32_t y, std::uint32_t scale) {
+    const float guest_x = (static_cast<float>(x) + 0.5f) / static_cast<float>(scale);
+    const float guest_y = (static_cast<float>(y) + 0.5f) / static_cast<float>(scale);
+    return guest_x >= kMsRectLeft && guest_x < kMsRectRight && guest_y >= kMsRectTop && guest_y < kMsRectBottom;
+}
+
+// In Dlaa mode a mode-3 surface is drawn one sample per pixel at the clip size and reaches its memory layout by a
+// copy that gives both texels of a pixel the same value; the depth read as A8R8G8B8 does the same, and switching the
+// mode at run time renders each frame like a fresh renderer in that mode.
+void testRendererDlaaSceneImage(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    {
+        tox2::RsxRenderer probe(ctx, readbackAllOptions(1, tox2::AaMode::Dlaa));
+        if (!probe.dlaaAvailable()) {
+            std::printf("DLAA scene image: skipped (%s)\n", probe.dlaaUnavailableReason().c_str());
+            tox2::rsxUnimplementedReset();
+            return;
+        }
+    }
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    constexpr std::uint32_t kRed = 0xFFFF0000, kBlack = 0xFF000000;
+
+    for (const std::uint32_t scale : {1u, 2u}) {
+        // The surface read texel by texel: both texels of a pixel are red iff the pixel centre is in the rectangle.
+        {
+            const ScaledFrame frame =
+                    renderAtScale(ctx, {makeMsaaLayoutCapture(MsaaRead::Texels)}, scale, 1, 0, tox2::AaMode::Dlaa);
+            CHECK(frame.ok && frame.width == 2 * kAaSize * scale && frame.height == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t mismatches = 0, red = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    const std::uint32_t expected = dlaaPixelCovered(x / 2, y, scale) ? kRed : kBlack;
+                    red += expected == kRed;
+                    if (pixelArgb(frame.bgra, frame.width, x, y) != expected) mismatches++;
+                }
+            }
+            if (mismatches != 0)
+                std::fprintf(stderr, "DLAA scene image at scale %u: %u texels differ\n", scale, mismatches);
+            CHECK(mismatches == 0 && red > 0);
+            CHECK(frame.stats.layout_copies >= 1 && frame.stats.draws_skipped == 0);
+            CHECK(frame.notes.empty());
+        }
+
+        // The game's resolve (a LINEAR read of the layout) averages two equal texels: no partial pixels remain.
+        {
+            const ScaledFrame frame =
+                    renderAtScale(ctx, {makeMsaaLayoutCapture(MsaaRead::Linear)}, scale, 1, 0, tox2::AaMode::Dlaa);
+            CHECK(frame.ok && frame.width == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t partial = 0, red = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    const std::uint32_t argb = pixelArgb(frame.bgra, frame.width, x, y);
+                    const std::uint32_t value = (argb >> 16) & 0xFF;
+                    partial += value > 0 && value < 255;
+                    red += argb == kRed;
+                }
+            }
+            CHECK(partial == 0 && red > 0);
+            CHECK(frame.notes.empty());
+        }
+
+        // The depth read as A8R8G8B8 matches a plain surface's words, texel by texel, and so does a pass into the
+        // colour that samples it (the game's edge effect), now that both texels of a pixel are the same sample.
+        const ScaledFrame reference =
+                renderAtScale(ctx, {makeMsaaDepthCapture(MsaaDepthRead::Reference)}, scale, 1, 0, tox2::AaMode::Dlaa);
+        CHECK(reference.ok && reference.width == kAaSize * scale);
+        if (!reference.ok) continue;
+        const std::uint32_t covered_word = pixelArgb(reference.bgra, reference.width, 10 * scale, 8 * scale);
+        const std::uint32_t uncovered_word = pixelArgb(reference.bgra, reference.width, 0, 0);
+        CHECK(covered_word != uncovered_word);
+        for (const MsaaDepthRead read : {MsaaDepthRead::Texels, MsaaDepthRead::EdgeEffect}) {
+            const ScaledFrame frame = renderAtScale(ctx, {makeMsaaDepthCapture(read)}, scale, 1, 0, tox2::AaMode::Dlaa);
+            CHECK(frame.ok && frame.width == 2 * kAaSize * scale && frame.height == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t mismatches = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    const std::uint32_t expected = dlaaPixelCovered(x / 2, y, scale) ? covered_word : uncovered_word;
+                    if (pixelArgb(frame.bgra, frame.width, x, y) != expected) mismatches++;
+                }
+            }
+            if (mismatches != 0)
+                std::fprintf(stderr, "DLAA depth read %d at scale %u: %u texels differ\n", static_cast<int>(read),
+                             scale, mismatches);
+            CHECK(mismatches == 0);
+            CHECK(frame.stats.depth_conversions >= 1 && frame.stats.draws_skipped == 0);
+            CHECK(frame.notes.empty());
+        }
+
+        // Msaa -> Dlaa -> Msaa on one renderer: each frame equals a fresh renderer's in that mode. The full clear at
+        // the start of the scene makes the older representation irrelevant.
+        {
+            const auto fresh = [&](tox2::AaMode mode) {
+                RawDisplay display;
+                const ScaledFrame frame =
+                        renderAtScale(ctx, {makeMsaaLayoutCapture(MsaaRead::Linear)}, scale, 1, 0, mode);
+                CHECK(frame.ok && frame.notes.empty());
+                display.bgra = frame.bgra;
+                display.width = frame.width;
+                display.height = frame.height;
+                return display;
+            };
+            const RawDisplay msaa_reference = fresh(tox2::AaMode::Msaa);
+            const RawDisplay dlaa_reference = fresh(tox2::AaMode::Dlaa);
+            CHECK(!sameDisplay(msaa_reference, dlaa_reference));
+
+            const std::vector<tox2::RsxCommand> drawn = replaySynthetic(makeMsaaLayoutCapture(MsaaRead::Linear));
+            tox2::rsxUnimplementedReset();
+            tox2::RsxRenderer renderer(ctx, readbackAllOptions(scale, tox2::AaMode::Msaa));
+            CHECK(renderer.valid() && renderer.aaMode() == tox2::AaMode::Msaa);
+            CHECK(sameDisplay(runFrame(renderer, drawn), msaa_reference));
+            CHECK(renderer.setAaMode(tox2::AaMode::Dlaa) && renderer.aaMode() == tox2::AaMode::Dlaa);
+            CHECK(sameDisplay(runFrame(renderer, drawn), dlaa_reference));
+            CHECK(renderer.setAaMode(tox2::AaMode::Msaa) && renderer.aaMode() == tox2::AaMode::Msaa);
+            CHECK(sameDisplay(runFrame(renderer, drawn), msaa_reference));
+            CHECK(renderer.stats().layout_copies >= 3 && renderer.stats().draws_skipped == 0);
+            CHECK(tox2::rsxUnimplementedSnapshot().empty());
+        }
+    }
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
 // ---- Point size ----
 
 // One red point at the centre of the 64x64 surface (a pixel corner), SET_POINT_SIZE `size`.
@@ -5971,6 +6101,7 @@ int main() {
     testRendererAaModeSwitch(*ctx);
     testRendererMsaaDepthAsArgb(*ctx);
     testRendererMsaaInherit(*ctx);
+    testRendererDlaaSceneImage(*ctx);
     testRendererPointSize(*ctx);
     testForcedAnisotropySampler(*ctx);
     testRendererAnisotropy(*ctx);

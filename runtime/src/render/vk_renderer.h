@@ -57,7 +57,7 @@ struct RenderOptions {
 // What a created GPU image or upload block was for (see RendererStats::images_created).
 enum class RenderImageKind : std::uint8_t {
     Target,       // colour or depth target
-    Sidecar,      // 2-sample image of an anti-aliased target
+    Sidecar,      // 2-sample (Msaa) or 1-sample (Dlaa) image of an anti-aliased target
     DepthArgb,    // A8R8G8B8 rewrite of a depth surface
     Texture,      // texture cache image (not the DepthArgb ones)
     UploadBlock,  // host-visible draw upload buffer
@@ -73,7 +73,7 @@ struct RendererStats {
     std::uint64_t feedback_copies = 0;    // render target copies made for draws that sample their own target
     std::uint64_t depth_conversions = 0;  // depth surfaces rewritten as A8R8G8B8 texels for a draw that reads them
     std::uint64_t surface_inherits = 0;   // copies of an old target's contents into a resized one
-    std::uint64_t layout_copies = 0;      // multisampled targets copied into their memory layout for a read
+    std::uint64_t layout_copies = 0;      // sidecars copied into their memory layout for a read
     // GPU images and upload blocks created, by RenderImageKind, with their size in bytes (width x height x samples x
     // texel size). The Texture entries follow the texture cache as of the end of the last execute() or flip.
     std::array<std::uint64_t, kRenderImageKindCount> images_created{};
@@ -139,7 +139,7 @@ public:
 
     // Changes how the next pass over an anti-aliased surface is drawn; false and no change for Msaa when the device
     // lacks 2-sample support, and for Dlaa when dlaaAvailable() is false. No target is touched: a read brings the
-    // memory layout up to date from the 2-sample image (syncLayout), and a pass that finds the other representation
+    // memory layout up to date from the sidecar image (syncLayout), and a pass that finds the other representation
     // newer and does not replace all of it is counted (see beginSidecarPass). Renderer thread, between commands.
     bool setAaMode(AaMode mode);
 
@@ -226,9 +226,12 @@ private:
     void transitionImage(VkImage image, VkImageAspectFlags aspect, VkImageLayout& current, VkImageLayout layout);
     void transitionSidecar(RenderTarget& target, VkImageLayout layout);
 
-    // Anti-aliased surfaces in Msaa mode (see the multisampled sidecar of RenderTarget).
-    bool multisampledPass(const RsxSurface& surface) const;
-    bool ensureMultisample(RenderTarget& target);
+    // Anti-aliased surfaces in Msaa and Dlaa mode (see the sidecar of RenderTarget).
+    // Sample count of the sidecar a pass over `surface` draws into: 2 in Msaa mode, 1 in Dlaa mode, for AA mode 3
+    // only; 0 when the pass draws the layout image.
+    VkSampleCountFlags sidecarSamples(const RsxSurface& surface) const;
+    bool sidecarPass(const RsxSurface& surface) const { return sidecarSamples(surface) != 0; }
+    bool ensureSidecar(RenderTarget& target, VkSampleCountFlagBits samples);
     bool syncLayout(RenderTarget& target);
     bool beginLayoutPass(RenderTarget& target, bool writes, bool overwrites_all);
     void beginSidecarPass(RenderTarget& target, bool writes, bool overwrites_all);
@@ -237,7 +240,7 @@ private:
     // slot's fence has signaled. False (and fail()) when the allocation fails.
     bool allocUpload(std::size_t size, UploadRef& out);
     bool ensurePlaceholder();
-    bool prepareTextures(const RsxDraw& draw, const DrawShaders& shaders, RenderTarget& color, bool multisampled,
+    bool prepareTextures(const RsxDraw& draw, const DrawShaders& shaders, RenderTarget& color, bool sidecar_pass,
                          VkDescriptorImageInfo (&infos)[kFpTextureUnitCount], float (&scales)[kFpTextureUnitCount][4]);
     bool vertexFormatSupported(VkFormat format);
     bool blendSupported(VkFormat format);
@@ -245,7 +248,7 @@ private:
 
     void recordClear(const RsxClear& clear);
     void recordMaskedColorClear(const RsxClear& clear, RenderTarget& color, std::uint32_t color_bits,
-                                bool multisampled);
+                                VkSampleCountFlags sidecar_samples);
     void recordDraw(const RsxDraw& draw);
     void recordFlip(const RsxFlip& flip);
     void recordPresentBlit(RenderTarget* source);
