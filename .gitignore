@@ -35,6 +35,9 @@ CMakeUserPresets.json
 # User-local VFS configurations (real host paths)
 *.local.json
 
+# A hand-made tox2_game config in the repository root holds local paths
+/config.json
+
 # Generated analysis output and user-supplied game binaries
 /generated/
 /game/

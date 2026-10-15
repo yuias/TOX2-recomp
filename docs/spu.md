@@ -375,7 +375,7 @@ The run below was made with the build of commit `e013aa8`, headless, from a hdd 
 the installed game data (`<scratch>` is any directory outside the repository):
 
 ```sh
-build/release/bin/tox2_game --game-dir <game-dir> --elf generated/inputs/EBOOT.elf --libsre generated/inputs/libsre.reloc.elf --no-window --seconds 30 --hdd-dir <scratch>/hdd
+build/release/bin/tox2_game --game-dir <game-dir> --elf generated/inputs/EBOOT.elf --libsre generated/inputs/libsre.reloc.elf --no-config --no-window --seconds 30 --hdd-dir <scratch>/hdd
 ```
 
 It ends at the watchdog (exit code 5), with no SPU stop and no unknown dispatch target:

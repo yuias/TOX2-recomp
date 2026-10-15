@@ -5,5 +5,5 @@
 # the hdd directory and at 14 to 16 s from an empty one; both must reach it. The run is limited to 30 s
 # because a gap in a PPU jump table stops the game at about 53 s, so a longer run would end differently.
 # Update it when the game gets further.
-set(TOX2_GAME_BOOT_ARGS "--no-window --seconds 30 --hdd-dir \"${CMAKE_BINARY_DIR}/game_hdd\"")
+set(TOX2_GAME_BOOT_ARGS "--no-config --no-window --seconds 30 --hdd-dir \"${CMAKE_BINARY_DIR}/game_hdd\"")
 set(TOX2_GAME_BOOT_MILESTONE "\\[t 01000000\\] tox2: first hle cellSpurs::cellSpursEventFlagTryWait")
