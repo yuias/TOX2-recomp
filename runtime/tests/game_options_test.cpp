@@ -1,4 +1,5 @@
-// Self-checking tests for the config file reader and writer. No game data and no player config file are read.
+// Self-checking tests for the config file reader and writer and for the command-line parser. No game data and no
+// player config file are read.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -10,11 +11,14 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "app/config_file.h"
+#include "app/game_options.h"
+#include "core/log.h"
 
 namespace {
 
@@ -432,6 +436,273 @@ void testWriteFileAtomic() {
     stdfs::remove_all(dir, ec);
 }
 
+// Parses `args` and returns the error, or an error with an empty message when the line is accepted.
+tox2::OptionsError parseError(const std::vector<std::string>& args) {
+    const auto result = tox2::parseGameOptions(args);
+    return result ? tox2::OptionsError{.message = {}} : result.error();
+}
+
+// True when the line is rejected with exactly `message`, exit code 2 and the usage text requested.
+bool rejectedLine(const std::vector<std::string>& args, std::string_view message) {
+    const tox2::OptionsError error = parseError(args);
+    return error.message == message && error.exit_code == 2 && error.print_usage;
+}
+
+void testOptionTable() {
+    const std::span<const OptionSpec> specs = tox2::gameOptionSpecs();
+    CHECK(!specs.empty());
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        for (std::size_t j = i + 1; j < specs.size(); ++j) CHECK(specs[i].name != specs[j].name);
+    }
+    // Only the settings a player changes in the window are persisted.
+    std::vector<std::string_view> persisted;
+    for (const OptionSpec& spec : specs) {
+        if (spec.persisted) persisted.push_back(spec.name);
+    }
+    CHECK((persisted == std::vector<std::string_view>{"frame-limit", "resolution-scale", "aa-mode"}));
+    for (const OptionSpec& spec : specs) {
+        if (spec.name == "frame-limit") CHECK(spec.kind == OptionKind::String && spec.needs == OptionNeeds::Nothing);
+        if (spec.name == "resolution-scale") {
+            CHECK(spec.kind == OptionKind::Unsigned && spec.needs == OptionNeeds::Renderer);
+        }
+        if (spec.name == "aa-mode") CHECK(spec.kind == OptionKind::String && spec.needs == OptionNeeds::Renderer);
+        if (spec.name == "rsx-capture") CHECK(spec.kind == OptionKind::FrameList);
+        if (spec.name == "dump-guest") CHECK(spec.kind == OptionKind::StringList);
+    }
+    CHECK(tox2::gameOptionsUsage().starts_with("usage: tox2_game "));
+}
+
+void testDefaultLines() {
+    const auto windowed = tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g"});
+    CHECK(windowed.has_value());
+    if (windowed) {
+        CHECK(windowed->game_dir == stdfs::path("g"));
+        CHECK(windowed->window && windowed->render_vulkan && !windowed->no_window);
+        CHECK(windowed->pad == "keyboard+gamepad" && windowed->audio == "wasapi");
+        CHECK(windowed->frame_limit == tox2::RsxFlipLimit::Vsync && windowed->resolution_scale == 1);
+        CHECK(windowed->aa_mode == tox2::AaMode::Msaa && windowed->ppu_threads == tox2::PpuThreadsMode::Split2);
+        CHECK(windowed->host_priorities && windowed->yield_backoff && windowed->lwmutex_fast_path);
+        CHECK(windowed->dump_frames_every == 1 && windowed->seconds == 0 && !windowed->log_level);
+        CHECK(windowed->dialog_answer.empty() && windowed->rsx_capture_frames.empty() && windowed->dumps.empty());
+    }
+
+    const auto headless = tox2::parseGameOptions(std::vector<std::string>{"--vfs-config", "v.json", "--no-window"});
+    CHECK(headless.has_value());
+    if (headless) {
+        CHECK(headless->vfs_config == stdfs::path("v.json") && headless->game_dir.empty());
+        CHECK(!headless->window && !headless->render_vulkan && headless->no_window);
+        CHECK(headless->pad == "neutral" && headless->audio == "none");
+    }
+
+    // A frame dump implies the renderer without a window.
+    const auto dumping =
+            tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--no-window", "--dump-frames", "d"});
+    CHECK(dumping && !dumping->window && dumping->render_vulkan && dumping->dump_frames == stdfs::path("d"));
+    // An explicit pad and audio are kept.
+    const auto explicit_pad = tox2::parseGameOptions(
+            std::vector<std::string>{"--game-dir", "g", "--no-window", "--pad", "none", "--audio", "wasapi"});
+    CHECK(explicit_pad && explicit_pad->pad == "none" && explicit_pad->audio == "wasapi");
+}
+
+void testValues() {
+    const auto all = tox2::parseGameOptions(std::vector<std::string>{"--game-dir",
+                                                                     "g",
+                                                                     "--elf",
+                                                                     "e.elf",
+                                                                     "--libsre",
+                                                                     "l.elf",
+                                                                     "--hdd-dir",
+                                                                     "h",
+                                                                     "--sdata-cache",
+                                                                     "s",
+                                                                     "--png-dump",
+                                                                     "p",
+                                                                     "--rsx-census",
+                                                                     "c.json",
+                                                                     "--log",
+                                                                     "l.log",
+                                                                     "--seconds",
+                                                                     "30",
+                                                                     "--strict",
+                                                                     "--quiet-hle",
+                                                                     "--load-only",
+                                                                     "--lwmutex-watch",
+                                                                     "--frame-limit",
+                                                                     "60",
+                                                                     "--host-priorities",
+                                                                     "off",
+                                                                     "--yield-backoff",
+                                                                     "off",
+                                                                     "--lwmutex-fast-path",
+                                                                     "off",
+                                                                     "--ppu-threads",
+                                                                     "legacy",
+                                                                     "--resolution-scale",
+                                                                     "3",
+                                                                     "--aa-mode",
+                                                                     "supersample",
+                                                                     "--dump-frames-every",
+                                                                     "4",
+                                                                     "--dialog-answer",
+                                                                     "no"});
+    CHECK(all.has_value());
+    if (all) {
+        CHECK(all->elf == stdfs::path("e.elf") && all->libsre == stdfs::path("l.elf") && all->hdd_dir == "h");
+        CHECK(all->sdata_cache == "s" && all->png_dump == "p" && all->rsx_census == "c.json" &&
+              all->log_file == "l.log");
+        CHECK(all->seconds == 30 && all->strict && all->quiet_hle && all->load_only && all->lwmutex_watch);
+        CHECK(all->frame_limit == tox2::RsxFlipLimit::Hz60 && !all->host_priorities && !all->yield_backoff);
+        CHECK(!all->lwmutex_fast_path && all->ppu_threads == tox2::PpuThreadsMode::Legacy);
+        CHECK(all->resolution_scale == 3 && all->aa_mode == tox2::AaMode::Supersample && all->dump_frames_every == 4);
+        CHECK(all->dialog_answer == "no");
+    }
+    const auto one = tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--ppu-threads", "1"});
+    CHECK(one && one->ppu_threads == tox2::PpuThreadsMode::Split1);
+    const auto two = tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--ppu-threads", "2"});
+    CHECK(two && two->ppu_threads == tox2::PpuThreadsMode::Split2);
+    const auto off = tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--frame-limit", "off"});
+    CHECK(off && off->frame_limit == tox2::RsxFlipLimit::Off);
+    const auto none = tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--render", "none"});
+    CHECK(none && !none->window && !none->render_vulkan && none->pad == "neutral" && none->audio == "none");
+
+    // The last value of a repeated option wins; the list options accumulate.
+    const auto repeated =
+            tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--seconds", "5", "--seconds", "10"});
+    CHECK(repeated && repeated->seconds == 10);
+    const auto frames = tox2::parseGameOptions(
+            std::vector<std::string>{"--game-dir", "g", "--rsx-capture", "1,2", "--rsx-capture", "3"});
+    CHECK(frames && frames->rsx_capture_frames == (std::vector<std::uint32_t>{1, 2, 3}));
+    const auto dumps = tox2::parseGameOptions(std::vector<std::string>{
+            "--game-dir", "g", "--dump-guest", "0x1000:16:a.bin", "--dump-guest", "0x2000:8:b.bin"});
+    CHECK(dumps && dumps->dumps.size() == 2);
+    if (dumps && dumps->dumps.size() == 2) {
+        CHECK(dumps->dumps[0].addr == 0x1000 && dumps->dumps[0].size == 16 && dumps->dumps[0].file == "a.bin");
+        CHECK(dumps->dumps[1].addr == 0x2000 && dumps->dumps[1].file == "b.bin");
+    }
+}
+
+void testErrorMessages() {
+    CHECK(rejectedLine({"--game-dir", "g", "--resolution-scale", "5"},
+                       "error: --resolution-scale needs a whole number from 1 to 4\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--resolution-scale", "x"},
+                       "error: --resolution-scale needs a whole number from 1 to 4\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--frame-limit", "30"}, "error: --frame-limit needs vsync, 60 or off\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--bogus"}, "error: unknown argument --bogus\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "stray"}, "error: unknown argument stray\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--lwmutex-watch", "extra"}, "error: unknown argument extra\n"));
+    CHECK(rejectedLine({"--game-dir"}, "error: --game-dir needs a value\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--seconds"}, "error: --seconds needs a value\n"));
+    CHECK(rejectedLine({}, "error: --game-dir or --vfs-config is required\n"));
+    CHECK(rejectedLine({"--hdd-dir", "h"}, "error: --game-dir or --vfs-config is required\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--render", "none", "--aa-mode", "msaa"},
+                       "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode and "
+                       "--vk-validation need --render vulkan\n"));
+    // The frame list reports its format after the missing value, as it always has.
+    CHECK(rejectedLine({"--game-dir", "g", "--rsx-capture"},
+                       "error: --rsx-capture needs a value\n"
+                       "error: --rsx-capture needs frame numbers (1-based), e.g. 300,600\n"));
+    for (const char* list : {"0", "1,", ",1", "x", "", "1,2,x"}) {
+        CHECK(rejectedLine({"--game-dir", "g", "--rsx-capture", list},
+                           "error: --rsx-capture needs frame numbers (1-based), e.g. 300,600\n"));
+    }
+    CHECK(rejectedLine({"--game-dir", "g", "--log-level", "loud"},
+                       "error: --log-level needs trace, debug, info, warn or error\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--dialog-answer", "maybe"},
+                       "error: --dialog-answer needs yes, no or ok\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--pad", "joystick"},
+                       "error: --pad needs none, neutral, keyboard, gamepad or keyboard+gamepad\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--audio", "alsa"}, "error: --audio needs none or wasapi\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--render", "opengl"}, "error: --render needs none or vulkan\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--aa-mode", "none"}, "error: --aa-mode needs supersample|msaa\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--host-priorities", "maybe"},
+                       "error: --host-priorities needs on or off\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--yield-backoff", "1"}, "error: --yield-backoff needs on or off\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--lwmutex-fast-path", "true"},
+                       "error: --lwmutex-fast-path needs on or off\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--ppu-threads", "3"}, "error: --ppu-threads needs legacy, 1 or 2\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--seconds", "-1"}, "error: --seconds needs a non-negative integer\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--dump-frames-every", "0"},
+                       "error: --dump-frames-every needs a positive integer\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--dump-frames-every", "4294967296"},
+                       "error: --dump-frames-every needs a positive integer\n"));
+    CHECK(parseError({"--game-dir", "g", "--dump-guest", "bad"}).message.starts_with("error: --dump-guest bad: "));
+    CHECK(rejectedLine({"--game-dir", "g", "--no-window", "--pad", "keyboard"},
+                       "error: --pad keyboard needs the window or --pad-script\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--no-window", "--pad", "gamepad"},
+                       "error: --pad gamepad needs the window\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--no-window", "--pad-probe"}, "error: --pad-probe needs the window\n"));
+}
+
+void testCheckOrder() {
+    // The first combined check in the fixed order wins.
+    CHECK(rejectedLine({"--game-dir", "g", "--render", "none", "--aa-mode", "msaa", "--pad", "keyboard"},
+                       "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode and "
+                       "--vk-validation need --render vulkan\n"));
+    // A bad option value is found before a combined check.
+    CHECK(rejectedLine({"--game-dir", "g", "--render", "none", "--aa-mode", "bogus"},
+                       "error: --aa-mode needs supersample|msaa\n"));
+    // An unknown argument is found while the line is collected, before any value is checked.
+    CHECK(rejectedLine({"--game-dir", "g", "--log-level", "loud", "--bogus"}, "error: unknown argument --bogus\n"));
+    // Every given occurrence is checked, so an invalid value is not hidden by a later valid one.
+    CHECK(rejectedLine({"--game-dir", "g", "--resolution-scale", "5", "--resolution-scale", "2"},
+                       "error: --resolution-scale needs a whole number from 1 to 4\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--seconds", "x", "--seconds", "5"},
+                       "error: --seconds needs a non-negative integer\n"));
+}
+
+void testPadScriptAndAudioDump() {
+    std::error_code ec;
+    const stdfs::path dir =
+            stdfs::temp_directory_path() / ("tox2_game_options_args_" + std::to_string(GetCurrentProcessId()));
+    stdfs::remove_all(dir, ec);
+    stdfs::create_directories(dir);
+    const stdfs::path good = dir / "ok.pad";
+    const stdfs::path bad = dir / "bad.pad";
+    // Binary, because the script reader does not strip a carriage return.
+    writeFile(good, "0.5 tap cross\n");
+    writeFile(bad, "0.5 tapp cross\n");
+    const std::string good_text = good.string();
+    const std::string bad_text = bad.string();
+
+    // A script selects the keyboard pad for an unattended run.
+    const auto scripted = tox2::parseGameOptions(
+            std::vector<std::string>{"--game-dir", "g", "--no-window", "--pad-script", good_text});
+    CHECK(scripted && scripted->pad == "keyboard" && scripted->pad_script == good &&
+          scripted->pad_script_data.events.size() == 2);
+    const tox2::OptionsError broken = parseError({"--game-dir", "g", "--pad-script", bad_text});
+    CHECK(broken.message == "error: --pad-script " + bad_text + ": line 1: unknown command \"tapp\"\n" &&
+          broken.print_usage);
+    const tox2::OptionsError missing = parseError({"--game-dir", "g", "--pad-script", (dir / "missing.pad").string()});
+    CHECK(missing.message.starts_with("error: --pad-script ") && missing.print_usage);
+    CHECK(rejectedLine({"--game-dir", "g", "--no-window", "--pad", "neutral", "--pad-script", good_text},
+                       "error: --pad-script needs --pad keyboard or keyboard+gamepad\n"));
+
+    // The audio dump probe creates the file; a path in a missing directory is a usage error.
+    const stdfs::path wav = dir / "dump.wav";
+    const auto dumping =
+            tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--audio-dump", wav.string()});
+    CHECK(dumping && dumping->audio_dump == wav && stdfs::exists(wav));
+    const std::string no_dir_text = (dir / "nodir" / "x.wav").string();
+    const tox2::OptionsError no_dir = parseError({"--game-dir", "g", "--audio-dump", no_dir_text});
+    CHECK(no_dir.message.starts_with("error: --audio-dump " + no_dir_text + ": ") && no_dir.print_usage);
+
+    stdfs::remove_all(dir, ec);
+}
+
+void testApplyOptions() {
+    // Parsing only records the level and the answer; applyGameOptions is what changes the process.
+    const bool debug_before = tox2::logEnabled(tox2::LogLevel::Debug);
+    const auto parsed = tox2::parseGameOptions(
+            std::vector<std::string>{"--game-dir", "g", "--log-level", "debug", "--dialog-answer", "no"});
+    CHECK(parsed && parsed->log_level == tox2::LogLevel::Debug && parsed->dialog_answer == "no");
+    CHECK(tox2::logEnabled(tox2::LogLevel::Debug) == debug_before);
+    if (parsed) {
+        tox2::applyGameOptions(*parsed);
+        CHECK(tox2::logEnabled(tox2::LogLevel::Debug));
+        tox2::setLogLevel(tox2::LogLevel::Info);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -454,6 +725,13 @@ int main() {
     testUpdateKeepsOtherMembers();
     testUpdateFailures();
     testWriteFileAtomic();
+    testOptionTable();
+    testDefaultLines();
+    testValues();
+    testErrorMessages();
+    testCheckOrder();
+    testPadScriptAndAudioDump();
+    testApplyOptions();
     std::printf("game options tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }

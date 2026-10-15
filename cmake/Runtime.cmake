@@ -79,6 +79,7 @@ function(tox2_runtime_add_core)
 
   add_library(tox2_runtime_core STATIC
     runtime/src/app/config_file.cpp
+    runtime/src/app/game_options.cpp
     runtime/src/audio/audio_engine.cpp
     runtime/src/audio/audio_output.cpp
     runtime/src/audio/wav_file.cpp

@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <bit>
-#include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -20,6 +19,7 @@
 #include <string_view>
 #include <vector>
 
+#include "app/game_options.h"
 #include "audio/audio_engine.h"
 #include "audio/audio_output.h"
 #include "audio/wasapi_output.h"
@@ -66,53 +66,6 @@
 #include "spu/spu_thread.h"
 
 namespace {
-
-struct Options {
-    std::string game_dir;
-    std::string elf;
-    std::string libsre;
-    std::string hdd_dir;
-    std::string sdata_cache;
-    std::string vfs_config;
-    std::string png_dump;
-    std::string rsx_census;
-    std::string log_file;
-    std::string dialog_answer;
-    std::string pad;  // --pad as given; empty until the defaults are settled after all arguments
-    std::string pad_script;
-    std::string audio;  // --audio as given; empty until the defaults are settled after all arguments
-    std::string audio_dump;
-    tox2::PadScript pad_script_data;
-    // The host pad state, set for every --pad that reads host input (keyboard, gamepad, both). The
-    // window thread, the script thread and the gamepad thread each write their own source of it.
-    std::shared_ptr<tox2::KeyboardPadState> keyboard;
-    unsigned seconds = 0;
-    bool strict = false;
-    bool quiet_hle = false;
-    bool load_only = false;
-    bool render_vulkan = false;
-    std::optional<bool> render_flag;  // --render as given; the final mode is settled after all arguments
-    bool dump_every_given = false;
-    bool vk_validation = false;
-    bool no_window = false;
-    tox2::RsxFlipLimit frame_limit = tox2::RsxFlipLimit::Vsync;       // --frame-limit vsync (default), 60 or off
-    bool host_priorities = true;                                      // --host-priorities on (default) or off
-    bool yield_backoff = true;                                        // --yield-backoff on (default) or off
-    bool lwmutex_fast_path = true;                                    // --lwmutex-fast-path on (default) or off
-    bool lwmutex_watch = false;                                       // --lwmutex-watch
-    tox2::PpuThreadsMode ppu_threads = tox2::PpuThreadsMode::Split2;  // --ppu-threads legacy, 1 or 2 (default)
-    bool window = false;                                              // settled after all arguments
-    bool pad_probe = false;
-    std::string dump_frames;
-    std::uint32_t dump_frames_every = 1;
-    std::uint32_t resolution_scale = 1;
-    bool resolution_scale_given = false;
-    tox2::AaMode aa_mode = tox2::AaMode::Msaa;
-    bool aa_mode_given = false;
-    std::string shader_cache;
-    std::vector<std::uint32_t> rsx_capture_frames;
-    std::vector<tox2::GuestDumpSpec> dumps;  // --dump-guest
-};
 
 // Guest addresses in the BLJS10188 EBOOT, read only for the per-second perf line.
 // Time block: f32 dt at +0, u64 render hand-off job counters at +0x120/+0x128/+0x130.
@@ -246,7 +199,9 @@ private:
 };
 
 // Runs on the RSX thread; a null result makes the consumer continue without rendering.
-std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const Options& opt, std::string& error) {
+std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions& opt,
+                                                        const std::shared_ptr<tox2::KeyboardPadState>& keyboard,
+                                                        std::string& error) {
     const auto start = std::chrono::steady_clock::now();
     tox2::VkContextOptions context_options;
     context_options.validation = opt.vk_validation;
@@ -266,8 +221,8 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const Options& opt, std:
     render_options.dump_every = opt.dump_frames_every;
     render_options.resolution_scale = opt.resolution_scale;
     render_options.aa_mode = opt.aa_mode;
-    render_options.shader_cache = opt.shader_cache.empty() ? std::filesystem::path("generated") / "shader_cache"
-                                                           : std::filesystem::path(opt.shader_cache);
+    render_options.shader_cache =
+            opt.shader_cache.empty() ? std::filesystem::path("generated") / "shader_cache" : opt.shader_cache;
     // Requested PNG dumps follow --dump-frames so they land next to the periodic ones.
     if (!opt.dump_frames.empty()) render_options.requested_dump_dir = opt.dump_frames;
     // Declared before the presenter so that on every return path the presenter (and its window thread, which
@@ -284,10 +239,10 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const Options& opt, std:
         presenter_options.on_close = [] {
             tox2::stopProcess(tox2::ExitCode::ProcessExit, "tox2: stop: window closed");
         };
-        if (opt.keyboard && padUsesKeyboard(opt.pad)) {
+        if (keyboard && padUsesKeyboard(opt.pad)) {
             // These run on the window thread; the state is lock-free, so the guest never waits on it.
             // Focus loss releases the keyboard source only: the gamepad thread is the sole writer of its own.
-            presenter_options.on_key = [keyboard = opt.keyboard](const tox2::KeyMessage& key) {
+            presenter_options.on_key = [keyboard](const tox2::KeyMessage& key) {
                 keyboard->keyEvent(key.scan_code, key.down, key.repeat, tox2::KeyboardPadState::Clock::now());
                 if (key.repeat) return;
                 if (const std::optional<tox2::PadButton> button = tox2::padButtonForScanCode(key.scan_code)) {
@@ -295,9 +250,7 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const Options& opt, std:
                                    tox2::padButtonName(*button));
                 }
             };
-            presenter_options.on_focus_lost = [keyboard = opt.keyboard] {
-                keyboard->releaseAll(tox2::InputSource::Keyboard);
-            };
+            presenter_options.on_focus_lost = [keyboard] { keyboard->releaseAll(tox2::InputSource::Keyboard); };
         }
         presenter = tox2::Presenter::create(*context, std::move(presenter_options), error);
         if (!presenter) {
@@ -320,309 +273,6 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const Options& opt, std:
                       render_options.dump_dir.generic_string());
     }
     return executor;
-}
-
-bool parseFrameList(std::string_view list, std::vector<std::uint32_t>& frames) {
-    while (!list.empty()) {
-        const std::size_t comma = list.find(',');
-        const std::string_view item = list.substr(0, comma);
-        std::uint32_t frame = 0;
-        const auto [end, ec] = std::from_chars(item.data(), item.data() + item.size(), frame);
-        if (item.empty() || ec != std::errc{} || end != item.data() + item.size() || frame == 0) return false;
-        frames.push_back(frame);
-        if (comma == std::string_view::npos) break;
-        list.remove_prefix(comma + 1);
-        if (list.empty()) return false;  // trailing comma
-    }
-    return !frames.empty();
-}
-
-void printUsage() {
-    std::fputs(
-            "usage: tox2_game [--game-dir DIR] [--vfs-config FILE] (at least one) [--elf PATH]\n"
-            "                [--libsre PATH]\n"
-            "                [--seconds N] [--strict] [--log FILE] [--hdd-dir DIR] [--sdata-cache DIR]\n"
-            "                [--log-level trace|debug|info|warn|error]\n"
-            "                [--quiet-hle] [--load-only] [--png-dump DIR]\n"
-            "                [--dialog-answer yes|no|ok] [--pad none|neutral|keyboard|gamepad|keyboard+gamepad]\n"
-            "                [--pad-script FILE] [--pad-probe] [--audio none|wasapi] [--audio-dump FILE]\n"
-            "                [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]\n"
-            "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
-            "                [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]\n"
-            "                [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off]\n"
-            "                [--ppu-threads legacy|1|2] [--lwmutex-fast-path on|off] [--lwmutex-watch]\n"
-            "                [--dump-guest ADDR:SIZE:FILE]...\n",
-            stderr);
-}
-
-std::optional<tox2::LogLevel> parseLogLevel(std::string_view name) {
-    if (name == "trace") return tox2::LogLevel::Trace;
-    if (name == "debug") return tox2::LogLevel::Debug;
-    if (name == "info") return tox2::LogLevel::Info;
-    if (name == "warn") return tox2::LogLevel::Warn;
-    if (name == "error") return tox2::LogLevel::Error;
-    return std::nullopt;
-}
-
-bool parseArgs(int argc, char** argv, Options& opt) {
-    for (int i = 1; i < argc; i++) {
-        const std::string_view arg = argv[i];
-        auto value = [&](std::string& out) {
-            if (i + 1 >= argc) {
-                std::fprintf(stderr, "error: %s needs a value\n", argv[i]);
-                return false;
-            }
-            out = argv[++i];
-            return true;
-        };
-        if (arg == "--game-dir") {
-            if (!value(opt.game_dir)) return false;
-        } else if (arg == "--elf") {
-            if (!value(opt.elf)) return false;
-        } else if (arg == "--libsre") {
-            if (!value(opt.libsre)) return false;
-        } else if (arg == "--hdd-dir") {
-            if (!value(opt.hdd_dir)) return false;
-        } else if (arg == "--sdata-cache") {
-            if (!value(opt.sdata_cache)) return false;
-        } else if (arg == "--vfs-config") {
-            if (!value(opt.vfs_config)) return false;
-        } else if (arg == "--png-dump") {
-            if (!value(opt.png_dump)) return false;
-        } else if (arg == "--rsx-census") {
-            if (!value(opt.rsx_census)) return false;
-        } else if (arg == "--rsx-capture") {
-            std::string list;
-            if (!value(list) || !parseFrameList(list, opt.rsx_capture_frames)) {
-                std::fprintf(stderr, "error: --rsx-capture needs frame numbers (1-based), e.g. 300,600\n");
-                return false;
-            }
-        } else if (arg == "--dump-guest") {
-            std::string text;
-            if (!value(text)) return false;
-            std::string error;
-            auto spec = tox2::parseGuestDumpSpec(text, error);
-            if (!spec) {
-                std::fprintf(stderr, "error: --dump-guest %s: %s\n", text.c_str(), error.c_str());
-                return false;
-            }
-            opt.dumps.push_back(std::move(*spec));
-        } else if (arg == "--log") {
-            if (!value(opt.log_file)) return false;
-        } else if (arg == "--log-level") {
-            std::string name;
-            if (!value(name)) return false;
-            const std::optional<tox2::LogLevel> level = parseLogLevel(name);
-            if (!level) {
-                std::fprintf(stderr, "error: --log-level needs trace, debug, info, warn or error\n");
-                return false;
-            }
-            // Applied here so that nothing later in startup logs at the wrong level.
-            tox2::setLogLevel(*level);
-        } else if (arg == "--dialog-answer") {
-            if (!value(opt.dialog_answer)) return false;
-            if (!tox2::setDialogAnswer(opt.dialog_answer)) {
-                std::fprintf(stderr, "error: --dialog-answer needs yes, no or ok\n");
-                return false;
-            }
-        } else if (arg == "--pad") {
-            std::string name;
-            if (!value(name)) return false;
-            if (name != "none" && name != "neutral" && name != "keyboard" && name != "gamepad" &&
-                name != "keyboard+gamepad") {
-                std::fprintf(stderr, "error: --pad needs none, neutral, keyboard, gamepad or keyboard+gamepad\n");
-                return false;
-            }
-            opt.pad = name;
-        } else if (arg == "--pad-script") {
-            if (!value(opt.pad_script)) return false;
-            auto script = tox2::loadPadScript(std::filesystem::path(opt.pad_script));
-            if (!script) {
-                std::fprintf(stderr, "error: --pad-script %s: %s\n", opt.pad_script.c_str(), script.error().c_str());
-                return false;
-            }
-            opt.pad_script_data = std::move(*script);
-        } else if (arg == "--pad-probe") {
-            opt.pad_probe = true;
-        } else if (arg == "--audio") {
-            std::string name;
-            if (!value(name)) return false;
-            if (name != "none" && name != "wasapi") {
-                std::fprintf(stderr, "error: --audio needs none or wasapi\n");
-                return false;
-            }
-            opt.audio = name;
-        } else if (arg == "--audio-dump") {
-            if (!value(opt.audio_dump)) return false;
-        } else if (arg == "--render") {
-            std::string name;
-            if (!value(name)) return false;
-            if (name != "none" && name != "vulkan") {
-                std::fprintf(stderr, "error: --render needs none or vulkan\n");
-                return false;
-            }
-            opt.render_flag = name == "vulkan";
-        } else if (arg == "--dump-frames") {
-            if (!value(opt.dump_frames)) return false;
-        } else if (arg == "--dump-frames-every") {
-            std::string text;
-            if (!value(text)) return false;
-            const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), opt.dump_frames_every);
-            if (ec != std::errc{} || end != text.data() + text.size() || opt.dump_frames_every == 0) {
-                std::fprintf(stderr, "error: --dump-frames-every needs a positive integer\n");
-                return false;
-            }
-            opt.dump_every_given = true;
-        } else if (arg == "--resolution-scale") {
-            std::string text;
-            if (!value(text)) return false;
-            const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), opt.resolution_scale);
-            if (ec != std::errc{} || end != text.data() + text.size() || opt.resolution_scale < 1 ||
-                opt.resolution_scale > tox2::kMaxResolutionScale) {
-                std::fprintf(stderr, "error: --resolution-scale needs a whole number from 1 to %u\n",
-                             tox2::kMaxResolutionScale);
-                return false;
-            }
-            opt.resolution_scale_given = true;
-        } else if (arg == "--aa-mode") {
-            std::string text;
-            if (!value(text)) return false;
-            const std::optional<tox2::AaMode> mode = tox2::parseAaMode(text);
-            if (!mode) {
-                std::fprintf(stderr, "error: --aa-mode needs supersample|msaa\n");
-                return false;
-            }
-            opt.aa_mode = *mode;
-            opt.aa_mode_given = true;
-        } else if (arg == "--frame-limit") {
-            std::string name;
-            if (!value(name)) return false;
-            if (name == "vsync") {
-                opt.frame_limit = tox2::RsxFlipLimit::Vsync;
-            } else if (name == "60") {
-                opt.frame_limit = tox2::RsxFlipLimit::Hz60;
-            } else if (name == "off") {
-                opt.frame_limit = tox2::RsxFlipLimit::Off;
-            } else {
-                std::fprintf(stderr, "error: --frame-limit needs vsync, 60 or off\n");
-                return false;
-            }
-        } else if (arg == "--host-priorities") {
-            std::string name;
-            if (!value(name)) return false;
-            if (name != "on" && name != "off") {
-                std::fprintf(stderr, "error: --host-priorities needs on or off\n");
-                return false;
-            }
-            opt.host_priorities = name == "on";
-        } else if (arg == "--yield-backoff") {
-            std::string name;
-            if (!value(name)) return false;
-            if (name != "on" && name != "off") {
-                std::fprintf(stderr, "error: --yield-backoff needs on or off\n");
-                return false;
-            }
-            opt.yield_backoff = name == "on";
-        } else if (arg == "--lwmutex-fast-path") {
-            std::string name;
-            if (!value(name)) return false;
-            if (name != "on" && name != "off") {
-                std::fprintf(stderr, "error: --lwmutex-fast-path needs on or off\n");
-                return false;
-            }
-            opt.lwmutex_fast_path = name == "on";
-        } else if (arg == "--lwmutex-watch") {
-            opt.lwmutex_watch = true;
-        } else if (arg == "--ppu-threads") {
-            std::string name;
-            if (!value(name)) return false;
-            if (name == "legacy") {
-                opt.ppu_threads = tox2::PpuThreadsMode::Legacy;
-            } else if (name == "1") {
-                opt.ppu_threads = tox2::PpuThreadsMode::Split1;
-            } else if (name == "2") {
-                opt.ppu_threads = tox2::PpuThreadsMode::Split2;
-            } else {
-                std::fprintf(stderr, "error: --ppu-threads needs legacy, 1 or 2\n");
-                return false;
-            }
-        } else if (arg == "--shader-cache") {
-            if (!value(opt.shader_cache)) return false;
-        } else if (arg == "--vk-validation") {
-            opt.vk_validation = true;
-        } else if (arg == "--no-window") {
-            opt.no_window = true;
-        } else if (arg == "--seconds") {
-            std::string text;
-            if (!value(text)) return false;
-            const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), opt.seconds);
-            if (ec != std::errc{} || end != text.data() + text.size()) {
-                std::fprintf(stderr, "error: --seconds needs a non-negative integer\n");
-                return false;
-            }
-        } else if (arg == "--strict") {
-            opt.strict = true;
-        } else if (arg == "--quiet-hle") {
-            opt.quiet_hle = true;
-        } else if (arg == "--load-only") {
-            opt.load_only = true;
-        } else {
-            std::fprintf(stderr, "error: unknown argument %s\n", argv[i]);
-            return false;
-        }
-    }
-    if (opt.game_dir.empty() && opt.vfs_config.empty()) {
-        std::fputs("error: --game-dir or --vfs-config is required\n", stderr);
-        return false;
-    }
-    // Playing is the default, so the window is on unless the run asks for none: --no-window for
-    // unattended runs, or an explicit "--render none", which leaves nothing to show.
-    opt.window = !opt.no_window && opt.render_flag.value_or(true);
-    // --dump-frames and the window imply vulkan; an explicit "--render none" (anywhere on the line)
-    // overrides that and then conflicts with it. The other options have no effect without a renderer.
-    opt.render_vulkan = opt.render_flag.value_or(!opt.dump_frames.empty() || opt.window);
-    const bool render_option = !opt.dump_frames.empty() || opt.dump_every_given || !opt.shader_cache.empty() ||
-                               opt.vk_validation || opt.resolution_scale_given || opt.aa_mode_given;
-    if (render_option && !opt.render_vulkan) {
-        std::fputs(
-                "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode and "
-                "--vk-validation need --render vulkan\n",
-                stderr);
-        return false;
-    }
-    // GameInput delivers readings to the foreground window only, so unattended runs have nothing to probe.
-    if (opt.pad_probe && !opt.window) {
-        std::fputs("error: --pad-probe needs the window\n", stderr);
-        return false;
-    }
-    // A window or a script is what makes a keyboard pad useful, so either one selects it by default.
-    const bool pad_input = opt.window || !opt.pad_script.empty();
-    if (opt.pad.empty()) opt.pad = opt.window ? "keyboard+gamepad" : pad_input ? "keyboard" : "neutral";
-    if (opt.pad == "keyboard" && !pad_input) {
-        std::fputs("error: --pad keyboard needs the window or --pad-script\n", stderr);
-        return false;
-    }
-    // GameInput delivers readings to the foreground window only.
-    if (padUsesGamepad(opt.pad) && !opt.window) {
-        std::fprintf(stderr, "error: --pad %s needs the window\n", opt.pad.c_str());
-        return false;
-    }
-    if (!opt.pad_script.empty() && !padUsesKeyboard(opt.pad)) {
-        std::fputs("error: --pad-script needs --pad keyboard or keyboard+gamepad\n", stderr);
-        return false;
-    }
-    // A window means somebody is listening; unattended runs must not need a sound device.
-    if (opt.audio.empty()) opt.audio = opt.window ? "wasapi" : "none";
-    if (!opt.audio_dump.empty()) {
-        // The engine creates the file again on its own thread; creating it here makes a bad path a
-        // usage error instead of a warning in the middle of a run.
-        const auto probe = tox2::WavWriter::create(opt.audio_dump, tox2::kAudioSampleRate, tox2::kAudioOutputChannels);
-        if (!probe) {
-            std::fprintf(stderr, "error: --audio-dump %s: %s\n", opt.audio_dump.c_str(), probe.error().c_str());
-            return false;
-        }
-    }
-    return true;
 }
 
 // The movies decode through FFmpeg DLLs loaded at run time. Without them the factory stays unset
@@ -891,7 +541,7 @@ tox2::PerfSource spuPerfSource() {
     };
 }
 
-void configureAudio(const Options& opt) {
+void configureAudio(const tox2::GameOptions& opt) {
     tox2::AudioEngineConfig config;
     // Only the wasapi choice builds a device output, so a run without it never touches COM.
     if (opt.audio == "wasapi") config.make_output = [] { return tox2::makeWasapiOutput(); };
@@ -932,31 +582,39 @@ int main(int argc, char** argv) {
     tox2::installProcessSettings();
     tox2::installCensus();
 
-    Options opt;
-    if (!parseArgs(argc, argv, opt)) {
-        printUsage();
-        return static_cast<int>(tox2::ExitCode::Usage);
+    std::vector<std::string> args;
+    for (int i = 1; i < argc; ++i) args.emplace_back(argv[i]);
+    auto parsed = tox2::parseGameOptions(args);
+    if (!parsed) {
+        const tox2::OptionsError& error = parsed.error();
+        std::fputs(error.message.c_str(), stderr);
+        if (error.print_usage) {
+            const std::string_view usage = tox2::gameOptionsUsage();
+            std::fwrite(usage.data(), 1, usage.size(), stderr);
+        }
+        return error.exit_code;
     }
+    tox2::GameOptions opt = std::move(*parsed);
+    tox2::applyGameOptions(opt);
 
     std::error_code ec;
     tox2::VfsCliOptions cli;
     if (!opt.game_dir.empty()) {
-        const std::filesystem::path game_dir(opt.game_dir);
-        if (!std::filesystem::is_directory(game_dir, ec)) {
-            std::fprintf(stderr, "error: game directory %s does not exist\n", opt.game_dir.c_str());
+        if (!std::filesystem::is_directory(opt.game_dir, ec)) {
+            std::fprintf(stderr, "error: game directory %s does not exist\n", opt.game_dir.string().c_str());
             return static_cast<int>(tox2::ExitCode::Usage);
         }
-        cli.game_dir = game_dir;
+        cli.game_dir = opt.game_dir;
     }
     if (!opt.hdd_dir.empty()) {
-        cli.hdd_dir = std::filesystem::path(opt.hdd_dir);
+        cli.hdd_dir = opt.hdd_dir;
     }
     if (!opt.sdata_cache.empty()) {
-        cli.sdata_cache = std::filesystem::path(opt.sdata_cache);
+        cli.sdata_cache = opt.sdata_cache;
     }
 
-    if (!opt.log_file.empty() && !tox2::setLogFile(opt.log_file)) {
-        std::fprintf(stderr, "error: cannot open log file %s\n", opt.log_file.c_str());
+    if (!opt.log_file.empty() && !tox2::setLogFile(opt.log_file.string())) {
+        std::fprintf(stderr, "error: cannot open log file %s\n", opt.log_file.string().c_str());
         return static_cast<int>(tox2::ExitCode::Usage);
     }
 
@@ -965,7 +623,7 @@ int main(int argc, char** argv) {
     // Precedence: command-line options, then the configuration file, then the defaults.
     std::optional<tox2::VfsConfigFile> vfs_file;
     if (!opt.vfs_config.empty()) {
-        auto loaded = tox2::loadVfsConfig(std::filesystem::path(opt.vfs_config));
+        auto loaded = tox2::loadVfsConfig(opt.vfs_config);
         if (!loaded) {
             tox2::logError("vfs config: {}", loaded.error());
             return static_cast<int>(tox2::ExitCode::LoadError);
@@ -983,7 +641,7 @@ int main(int argc, char** argv) {
     applyBuildDirDefaults(*layout);
     tox2::configureVfs(std::move(*layout));
 
-    std::filesystem::path elf_path(opt.elf);
+    std::filesystem::path elf_path = opt.elf;
     if (opt.elf.empty()) {
         bool read_only = false;
         const auto default_elf = tox2::resolveGuestPath("/dev_bdvd/PS3_GAME/USRDIR/EBOOT.elf", read_only);
@@ -996,7 +654,7 @@ int main(int argc, char** argv) {
 
     if (!opt.png_dump.empty()) {
         std::filesystem::create_directories(opt.png_dump, ec);
-        tox2::setPngDumpDirectory(std::filesystem::path(opt.png_dump));
+        tox2::setPngDumpDirectory(opt.png_dump);
     }
 
     loadGameParamSfo();
@@ -1011,7 +669,7 @@ int main(int argc, char** argv) {
     tox2::logInfo("tox2: ppu threads: {}", opt.ppu_threads == tox2::PpuThreadsMode::Legacy   ? "legacy"
                                            : opt.ppu_threads == tox2::PpuThreadsMode::Split1 ? "1"
                                                                                              : "2");
-    if (!opt.rsx_census.empty()) tox2::setRsxArgCensusFile(opt.rsx_census);
+    if (!opt.rsx_census.empty()) tox2::setRsxArgCensusFile(opt.rsx_census.string());
     if (!opt.rsx_capture_frames.empty()) {
         tox2::setRsxCaptureFrames(opt.rsx_capture_frames, std::filesystem::path("generated") / "rsx" / "captures");
     }
@@ -1047,7 +705,7 @@ int main(int argc, char** argv) {
     // libsre sits directly above the executable, before anything else allocates from the main region.
     // By default it is the file the build wrote next to the executable.
     const std::filesystem::path libsre_path =
-            opt.libsre.empty() ? elf_path.parent_path() / "libsre.reloc.elf" : std::filesystem::path(opt.libsre);
+            opt.libsre.empty() ? elf_path.parent_path() / "libsre.reloc.elf" : opt.libsre;
     if (!std::filesystem::is_regular_file(libsre_path, ec)) {
         tox2::logError(
                 "libsre: cannot open {} (build with -Pup to produce generated/inputs/libsre.reloc.elf, or pass --libsre)",
@@ -1130,17 +788,18 @@ int main(int argc, char** argv) {
         tox2::logWarn("tox2: timer: the 1 ms resolution request was refused; timed waits use the default tick");
     }
 
-    // The window, script and gamepad threads share `opt.keyboard`; the executor factory below copies
-    // the options, so it is created first.
+    // The host pad state, set for every --pad that reads host input (keyboard, gamepad, both). The window
+    // thread, the script thread and the gamepad thread each write their own source of it. The executor
+    // factory below copies it, so it is created first.
+    std::shared_ptr<tox2::KeyboardPadState> keyboard;
     if (padUsesKeyboard(opt.pad) || padUsesGamepad(opt.pad)) {
-        opt.keyboard = std::make_shared<tox2::KeyboardPadState>();
+        keyboard = std::make_shared<tox2::KeyboardPadState>();
         // With the keyboard in the pad, port 0 is always there; a gamepad-only pad follows the hardware.
-        tox2::setPadProvider(
-                tox2::makeKeyboardPadProvider(opt.keyboard, {}, {.always_connected = opt.pad != "gamepad"}));
+        tox2::setPadProvider(tox2::makeKeyboardPadProvider(keyboard, {}, {.always_connected = opt.pad != "gamepad"}));
         std::string where;
         if (opt.window) where += " (window)";
         if (!opt.pad_script.empty()) {
-            where += std::format(" (script {}, {} events)", std::filesystem::path(opt.pad_script).filename().string(),
+            where += std::format(" (script {}, {} events)", opt.pad_script.filename().string(),
                                  opt.pad_script_data.events.size());
         }
         tox2::logInfo("tox2: pad: {}{}", opt.pad, where);
@@ -1152,13 +811,14 @@ int main(int argc, char** argv) {
 
     // The device is created on the RSX thread when it starts, so it belongs to that thread.
     if (opt.render_vulkan) {
-        tox2::setRsxExecutorFactory([opt](std::string& error) { return createVulkanExecutor(opt, error); });
+        tox2::setRsxExecutorFactory(
+                [opt, keyboard](std::string& error) { return createVulkanExecutor(opt, keyboard, error); });
     }
 
     // RPCS3 passes this VFS path as argv[0] (`Emu/System.cpp` `Emulator::Load`, "Fake arg").
     // A seconds script starts here so that it matches --seconds within a few milliseconds; a flip script
     // follows the process-wide flip count.
-    if (opt.keyboard && !opt.pad_script.empty()) tox2::startPadScript(opt.pad_script_data, opt.keyboard);
+    if (keyboard && !opt.pad_script.empty()) tox2::startPadScript(opt.pad_script_data, keyboard);
     // GameInput takes about a second to initialise, so the gamepad thread creates the backend itself.
     // The probe alone (no gamepad in the pad) runs the thread without a state to write.
     if (padUsesGamepad(opt.pad) || opt.pad_probe) {
@@ -1166,7 +826,7 @@ int main(int argc, char** argv) {
                 []() -> std::expected<std::shared_ptr<tox2::GamepadBackend>, std::string> {
                     return tox2::makeGameInputBackend({});
                 },
-                padUsesGamepad(opt.pad) ? opt.keyboard : nullptr,
+                padUsesGamepad(opt.pad) ? keyboard : nullptr,
                 {.is_foreground = tox2::processOwnsForegroundWindow,
                  .detect_steam = tox2::detectSteamContext,
                  .probe = opt.pad_probe});
