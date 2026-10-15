@@ -52,6 +52,11 @@ std::string resultName(sl::Result result) {
 void logCallback(sl::LogType type, const char* message) {
     std::string_view text = message != nullptr ? message : "";
     while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.remove_suffix(1);
+    // Streamline warns once per process when the calling thread's id is above 65536 and switches to a slower lookup.
+    // Thread ids are the OS's choice, so the line comes and goes between runs and says nothing about our use.
+    if (type == sl::LogType::eWarn && text.find("Thread id over 65536") != std::string_view::npos) {
+        type = sl::LogType::eInfo;
+    }
     switch (type) {
         case sl::LogType::eInfo: logDebug("tox2: streamline: {}", text); break;
         case sl::LogType::eWarn: logWarn("tox2: streamline: {}", text); break;
