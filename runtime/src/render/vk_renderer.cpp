@@ -1064,7 +1064,16 @@ VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
         touch(depth);
 
         // The previous evaluation has to belong to the frame before this one for the history to apply.
-        const bool reset = recreated || !dlaa_last_flip_ || *dlaa_last_flip_ + 1 != stats_.flips || dlaa_switched_;
+        bool reset = recreated || !dlaa_last_flip_ || *dlaa_last_flip_ + 1 != stats_.flips || dlaa_switched_;
+        // Without per-object motion vectors the history is reprojected by the camera alone, from the projections of
+        // the frame's scene draws; Off and Reset describe no camera motion.
+        DlaaCameraTracker::Result camera;
+        if (options_.dlaa_debug.camera == DlaaCamera::On) {
+            camera = dlaa_camera_.resolve(options_.dlaa_debug.flip_clip_y);
+            reset = reset || camera.reset;
+        } else {
+            reset = reset || options_.dlaa_debug.camera == DlaaCamera::Reset;
+        }
 
         if (!res.motion_cleared) {
             transitionImage(res.motion.image, VK_IMAGE_ASPECT_COLOR_BIT, res.motion.layout,
@@ -1097,22 +1106,26 @@ VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
             image.usage = target.msaa->usage;
             return image;
         };
-        const SlImage color_in = describe(scene, scene.msaa->view, scene.msaa->layout);
-        const SlImage depth_in = describe(
-                *depth, depth->msaa->depth_view != VK_NULL_HANDLE ? depth->msaa->depth_view : depth->msaa->view,
-                depth->msaa->layout);
+        DlaaPass::Inputs inputs;
+        inputs.color_in = describe(scene, scene.msaa->view, scene.msaa->layout);
+        inputs.depth = describe(*depth,
+                                depth->msaa->depth_view != VK_NULL_HANDLE ? depth->msaa->depth_view : depth->msaa->view,
+                                depth->msaa->layout);
         const VkCommandBuffer cmd = outsideCmd();
-        // The alpha channel travels through DLSS: the resolve copies the scene alpha to the display buffer, and a
-        // later draw uses that alpha as a blend factor.
         // The offset the frame's perspective draws were shifted by. A frame without such a draw was not moved, so it
         // reports none. The flips only change what is reported: the geometry always moves toward +x / +y.
-        float jitter_px[2] = {0.0f, 0.0f};
         if (dlaa_jitter_frame_ == stats_.flips) {
             const std::array<float, 2> jitter = dlaaJitterPixels(stats_.flips);
-            jitter_px[0] = options_.dlaa_debug.flip_jitter_x ? -jitter[0] : jitter[0];
-            jitter_px[1] = options_.dlaa_debug.flip_jitter_y ? -jitter[1] : jitter[1];
+            inputs.jitter_px[0] = options_.dlaa_debug.flip_jitter_x ? -jitter[0] : jitter[0];
+            inputs.jitter_px[1] = options_.dlaa_debug.flip_jitter_y ? -jitter[1] : jitter[1];
         }
-        const bool evaluated = dlaa_->evaluate(cmd, color_in, depth_in, jitter_px, reset, true, error);
+        inputs.matrices = camera.matrices;
+        if (options_.dlaa_debug.mvec_invalid_zero) inputs.mvec_invalid_value = 0.0f;
+        inputs.reset = reset;
+        // The alpha channel travels through DLSS: the resolve copies the scene alpha to the display buffer, and a
+        // later draw uses that alpha as a blend factor.
+        inputs.alpha = true;
+        const bool evaluated = dlaa_->evaluate(cmd, inputs, error);
         // Streamline binds its own pipelines, descriptors and state and does not restore ours (manual hooking).
         // recordDraw re-records everything the shadow covers, and it binds vertex buffers, the index buffer and the
         // push descriptors on every draw.
@@ -2368,12 +2381,26 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     // shift would only blur the picture, so it needs one too. All shifted draws of a frame share the frame's offset,
     // which keeps passes that depth-test against each other exact.
     float jitter_ndc[2] = {0.0f, 0.0f};
-    if (sidecar_samples == VK_SAMPLE_COUNT_1_BIT && options_.dlaa_evaluate && options_.dlaa_debug.jitter &&
-        draw.vp_constants && dlaaPerspective(*draw.vp_constants)) {
-        const std::array<float, 2> jitter = dlaaJitterPixels(stats_.flips);
-        jitter_ndc[0] = 2.0f * jitter[0] / static_cast<float>(draw.surfaces.clip_w * pixel_scale.x);
-        jitter_ndc[1] = 2.0f * jitter[1] / static_cast<float>(draw.surfaces.clip_h * pixel_scale.y);
-        dlaa_jitter_frame_ = stats_.flips;
+    if (sidecar_samples == VK_SAMPLE_COUNT_1_BIT && options_.dlaa_evaluate && draw.vp_constants &&
+        dlaaPerspective(*draw.vp_constants)) {
+        // The same draws describe the camera, whether or not the jitter is on.
+        DlaaCameraKey camera_key;
+        for (std::size_t i = 0; i < camera_key.mvp.size(); i++) {
+            camera_key.mvp[i] = std::bit_cast<float>((*draw.vp_constants)[i]);
+        }
+        std::copy_n(raster.viewport_scale, 3, camera_key.viewport_scale);
+        std::copy_n(raster.viewport_offset, 3, camera_key.viewport_offset);
+        camera_key.clip_w = static_cast<float>(draw.surfaces.clip_w);
+        camera_key.clip_h = static_cast<float>(draw.surfaces.clip_h);
+        camera_key.clip_min = raster.clip_min;
+        camera_key.clip_max = raster.clip_max;
+        dlaa_camera_.record(camera_key);
+        if (options_.dlaa_debug.jitter) {
+            const std::array<float, 2> jitter = dlaaJitterPixels(stats_.flips);
+            jitter_ndc[0] = 2.0f * jitter[0] / static_cast<float>(draw.surfaces.clip_w * pixel_scale.x);
+            jitter_ndc[1] = 2.0f * jitter[1] / static_cast<float>(draw.surfaces.clip_h * pixel_scale.y);
+            dlaa_jitter_frame_ = stats_.flips;
+        }
     }
     if (set(shadow.jitter_ndc, jitter_ndc)) {
         vkCmdPushConstants(cmd, pipelines_->drawLayout(), VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(jitter_ndc),
@@ -2696,6 +2723,7 @@ bool RsxRenderer::ensureReadback(FrameSlot& slot, VkDeviceSize size) {
 // buffer that was never a render target reads back as black.
 void RsxRenderer::recordFlip(const RsxFlip& flip) {
     stats_.flips++;
+    dlaa_camera_.endFrame();
     textures_->trim();
     image_pool_->trim(stats_.flips);
     stats_.image_pool_bytes = image_pool_->bytes();

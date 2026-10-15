@@ -1,14 +1,63 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
+#include "render/dlaa_math.h"
 #include "render/streamline.h"
 #include "render/vk_context.h"
 
 namespace tox2 {
+
+// The matrices of Streamline's Constants for one evaluation (row-major, row vectors; see dlaa_math.h).
+struct DlaaMatrices {
+    Mat4 view_to_clip = mat4Identity(), clip_to_view = mat4Identity();
+    Mat4 clip_to_prev_clip = mat4Identity(), prev_clip_to_clip = mat4Identity();
+};
+
+// Describes the camera motion between two frames to DLAA without motion vectors: the perspective scene draws of a frame
+// report their projection (record), the one used by most of them is the frame's camera, and the clip-to-clip transform
+// between the cameras of two consecutive frames is what Streamline reprojects the history with. CPU only, so it
+// exists before the first evaluation, which creates DlaaPass.
+class DlaaCameraTracker {
+public:
+    // At most this many distinct cameras are counted per frame; draws with further ones are ignored.
+    static constexpr std::size_t kMaxKeys = 16;
+
+    // The result for the frame being drawn: the matrices (identity unless both frames have a camera), and whether
+    // the history must be dropped because the camera appeared, disappeared or jumped, or a matrix cannot be inverted.
+    struct Result {
+        DlaaMatrices matrices;
+        bool reset = true;
+    };
+
+    void record(const DlaaCameraKey& key);
+    // `flip_clip_y` mirrors the clip-to-clip transforms in y (a diagnostic for the sign of the clip space).
+    Result resolve(bool flip_clip_y) const;
+    // The frame is over: its camera becomes the previous one and the table starts again.
+    void endFrame();
+
+    // Of the frame being drawn, for diagnostics.
+    std::uint32_t dominantDraws() const;
+    std::uint32_t perspectiveDraws() const { return counted_draws_ + ignored_draws_; }
+    std::size_t keyCount() const { return entries_.size(); }
+
+private:
+    struct Entry {
+        DlaaCameraKey key;
+        std::uint32_t draws = 0;
+    };
+    const Entry* dominant() const;
+
+    std::vector<Entry> entries_;
+    std::uint32_t counted_draws_ = 0, ignored_draws_ = 0;
+    std::optional<DlaaCameraKey> previous_;
+};
 
 // The images and the DLSS viewport around one DLAA evaluation. The renderer records every command that is not the
 // evaluation itself (layout transitions, the motion vector clear, the widening blit) because it tracks the layouts of
@@ -54,12 +103,19 @@ public:
     // Valid after a successful prepare().
     Resources& resources() { return *resources_; }
 
-    // Records one evaluation of `color_in` and `depth` (both SHADER_READ_ONLY_OPTIMAL, the input size) into
-    // resources().output (GENERAL) with resources().motion (SHADER_READ_ONLY_OPTIMAL). `jitter_px` is the sub-pixel
-    // offset the scene was drawn with, in input pixels (x right, y down), as Streamline wants it reported. Identity
-    // matrices. All bound command buffer state is invalid afterwards.
-    bool evaluate(VkCommandBuffer cmd, const SlImage& color_in, const SlImage& depth, const float (&jitter_px)[2],
-                  bool reset, bool alpha, std::string& error);
+    struct Inputs {
+        SlImage color_in, depth;  // both SHADER_READ_ONLY_OPTIMAL, the input size
+        // The sub-pixel offset the scene was drawn with, in input pixels (x right, y down), as Streamline wants it
+        // reported.
+        float jitter_px[2] = {0.0f, 0.0f};
+        DlaaMatrices matrices;
+        std::optional<float> mvec_invalid_value;
+        bool reset = false;
+        bool alpha = false;
+    };
+    // Records one evaluation into resources().output (GENERAL) with resources().motion (SHADER_READ_ONLY_OPTIMAL). All
+    // bound command buffer state is invalid afterwards.
+    bool evaluate(VkCommandBuffer cmd, const Inputs& inputs, std::string& error);
 
 private:
     VkContext& context_;

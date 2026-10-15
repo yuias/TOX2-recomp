@@ -5760,6 +5760,9 @@ void testRendererDlaaEvaluate(tox2::VkContext& ctx) {
         tox2::rsxUnimplementedReset();
         tox2::RenderOptions options = readbackAllOptions(scale, tox2::AaMode::Dlaa);
         options.dlaa_evaluate = true;
+        // The scene has no perspective draw, so the camera rules would reset every frame; this test is about the
+        // frame-to-frame rules.
+        options.dlaa_debug.camera = tox2::DlaaCamera::Off;
         tox2::RsxRenderer renderer(ctx, options);
         CHECK(renderer.valid() && renderer.aaMode() == tox2::AaMode::Dlaa);
         RawDisplay display = runFrame(renderer, drawn);

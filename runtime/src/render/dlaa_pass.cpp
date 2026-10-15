@@ -105,21 +105,84 @@ bool DlaaPass::prepare(std::uint32_t width, std::uint32_t height, std::shared_pt
     return true;
 }
 
-bool DlaaPass::evaluate(VkCommandBuffer cmd, const SlImage& color_in, const SlImage& depth, const float (&jitter_px)[2],
-                        bool reset, bool alpha, std::string& error) {
+bool DlaaPass::evaluate(VkCommandBuffer cmd, const Inputs& inputs, std::string& error) {
     DlaaFrame frame;
     frame.viewport = viewport_;
-    frame.color_in = color_in;
-    frame.depth = depth;
+    frame.color_in = inputs.color_in;
+    frame.depth = inputs.depth;
     frame.motion = describe(resources_->motion);
     frame.color_out = describe(resources_->output);
-    frame.jitter_px[0] = jitter_px[0];
-    frame.jitter_px[1] = jitter_px[1];
-    frame.mvec_scale[0] = 1.0f / static_cast<float>(color_in.width);
-    frame.mvec_scale[1] = 1.0f / static_cast<float>(color_in.height);
-    frame.reset = reset;
-    frame.alpha = alpha;
+    frame.jitter_px[0] = inputs.jitter_px[0];
+    frame.jitter_px[1] = inputs.jitter_px[1];
+    frame.mvec_scale[0] = 1.0f / static_cast<float>(inputs.color_in.width);
+    frame.mvec_scale[1] = 1.0f / static_cast<float>(inputs.color_in.height);
+    frame.view_to_clip = inputs.matrices.view_to_clip;
+    frame.clip_to_view = inputs.matrices.clip_to_view;
+    frame.clip_to_prev_clip = inputs.matrices.clip_to_prev_clip;
+    frame.prev_clip_to_clip = inputs.matrices.prev_clip_to_clip;
+    frame.mvec_invalid_value = inputs.mvec_invalid_value;
+    frame.reset = inputs.reset;
+    frame.alpha = inputs.alpha;
     return streamline_.evaluateDlaa(cmd, frame, error);
+}
+
+void DlaaCameraTracker::record(const DlaaCameraKey& key) {
+    for (Entry& entry : entries_) {
+        if (entry.key == key) {
+            entry.draws++;
+            counted_draws_++;
+            return;
+        }
+    }
+    if (entries_.size() >= kMaxKeys) {
+        ignored_draws_++;
+        return;
+    }
+    entries_.push_back({key, 1});
+    counted_draws_++;
+}
+
+// The most drawn key; the first seen wins a tie.
+const DlaaCameraTracker::Entry* DlaaCameraTracker::dominant() const {
+    const Entry* best = nullptr;
+    for (const Entry& entry : entries_) {
+        if (best == nullptr || entry.draws > best->draws) best = &entry;
+    }
+    return best;
+}
+
+std::uint32_t DlaaCameraTracker::dominantDraws() const {
+    const Entry* best = dominant();
+    return best != nullptr ? best->draws : 0;
+}
+
+DlaaCameraTracker::Result DlaaCameraTracker::resolve(bool flip_clip_y) const {
+    Result result;  // identity matrices and a reset, until both frames have a usable camera
+    const Entry* current = dominant();
+    if (current == nullptr || !previous_) return result;
+    const Mat4 clip_current = dlaaClipMatrix(current->key);
+    const Mat4 clip_previous = dlaaClipMatrix(*previous_);
+    Mat4 inverse_current{}, inverse_previous{};
+    if (!mat4Inverse(clip_current, inverse_current) || !mat4Inverse(clip_previous, inverse_previous)) return result;
+
+    DlaaMatrices& matrices = result.matrices;
+    matrices.view_to_clip = clip_current;
+    matrices.clip_to_view = inverse_current;
+    matrices.clip_to_prev_clip = mat4Multiply(inverse_current, clip_previous);
+    matrices.prev_clip_to_clip = mat4Multiply(inverse_previous, clip_current);
+    result.reset = dlaaCameraCut(matrices.clip_to_prev_clip);
+    if (flip_clip_y) {
+        matrices.clip_to_prev_clip = dlaaFlipY(matrices.clip_to_prev_clip);
+        matrices.prev_clip_to_clip = dlaaFlipY(matrices.prev_clip_to_clip);
+    }
+    return result;
+}
+
+void DlaaCameraTracker::endFrame() {
+    const Entry* best = dominant();
+    previous_ = best != nullptr ? std::optional<DlaaCameraKey>(best->key) : std::nullopt;
+    entries_.clear();
+    counted_draws_ = ignored_draws_ = 0;
 }
 
 }  // namespace tox2

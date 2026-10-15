@@ -43,6 +43,7 @@ void printUsage() {
             "                       [--max-differing P]]\n"
             "                      [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--no-validation]\n"
             "                      [--dlaa-jitter on|off] [--dlaa-jitter-flip none|x|y|xy]\n"
+            "                      [--dlaa-camera on|off|reset] [--dlaa-clip-flip-y] [--dlaa-mv-invalid zero|unset]\n"
             "                      [--shader-cache DIR] [--repeat N] [--quiet]\n"
             "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture; several captures are replayed in\n"
             "           order through one renderer, each one a frame that must end with a flip\n"
@@ -63,6 +64,12 @@ void printUsage() {
             "  --dlaa-jitter M     diagnostic, needs --aa-mode dlaa: on (default) or off (no sub-pixel jitter)\n"
             "  --dlaa-jitter-flip F  diagnostic, needs --aa-mode dlaa: negate the jitter offset reported to DLAA on\n"
             "                      the x axis, the y axis or both (none by default); the geometry does not change\n"
+            "  --dlaa-camera M     diagnostic, needs --aa-mode dlaa: describe the camera motion between frames from the\n"
+            "                      scene draws' projections (on, default), with identity matrices (off), or drop the\n"
+            "                      history at every frame (reset)\n"
+            "  --dlaa-clip-flip-y  diagnostic, needs --aa-mode dlaa: mirror the camera's clip-to-clip matrices in y\n"
+            "  --dlaa-mv-invalid V  diagnostic, needs --aa-mode dlaa: motionVectorsInvalidValue 0 (zero, default) or the\n"
+            "                      SDK default (unset, which makes Streamline warn at every evaluation)\n"
             "  --no-validation     do not enable the Vulkan validation layer\n"
             "  --shader-cache DIR  directory of the on-disk SPIR-V cache\n"
             "  --repeat N          replay and render the capture N times (N >= 1) with one memory view, builder and\n"
@@ -470,6 +477,35 @@ int main(int argc, char** argv) {
             }
             dlaa_debug.flip_jitter_x = value == "x" || value == "xy";
             dlaa_debug.flip_jitter_y = value == "y" || value == "xy";
+            has_dlaa_option = true;
+            i++;
+            continue;
+        }
+        if (arg == "--dlaa-camera") {
+            const std::string_view value = i + 1 < argc ? std::string_view(argv[i + 1]) : std::string_view();
+            if (value != "on" && value != "off" && value != "reset") {
+                std::fputs("error: --dlaa-camera takes on|off|reset\n", stderr);
+                return 2;
+            }
+            dlaa_debug.camera = value == "on"    ? tox2::DlaaCamera::On
+                                : value == "off" ? tox2::DlaaCamera::Off
+                                                 : tox2::DlaaCamera::Reset;
+            has_dlaa_option = true;
+            i++;
+            continue;
+        }
+        if (arg == "--dlaa-clip-flip-y") {
+            dlaa_debug.flip_clip_y = true;
+            has_dlaa_option = true;
+            continue;
+        }
+        if (arg == "--dlaa-mv-invalid") {
+            const std::string_view value = i + 1 < argc ? std::string_view(argv[i + 1]) : std::string_view();
+            if (value != "zero" && value != "unset") {
+                std::fputs("error: --dlaa-mv-invalid takes zero|unset\n", stderr);
+                return 2;
+            }
+            dlaa_debug.mvec_invalid_zero = value == "zero";
             has_dlaa_option = true;
             i++;
             continue;

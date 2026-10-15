@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "render/dlaa_pass.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
 #include "render/image_pool.h"
@@ -28,9 +29,9 @@
 
 namespace tox2 {
 
-class DlaaPass;
-
-enum class DlaaCamera : std::uint8_t { On, Off, Reset };  // Off: identity matrices; Reset: reset every frame
+// On: camera matrices from the scene draws' projections; Off: identity matrices; Reset: identity matrices and a reset
+// at every evaluation (no history at all).
+enum class DlaaCamera : std::uint8_t { On, Off, Reset };
 
 // Switches for the DLAA A/B checks (tox2_rsxreplay); the defaults are the measured settings.
 struct DlaaDebug {
@@ -40,11 +41,9 @@ struct DlaaDebug {
     // left). Measured against 4x renders of the room, cutscene and effects captures, the unflipped offset scored best
     // on all three and flipping both axes worst.
     bool flip_jitter_x = false, flip_jitter_y = false;
-    // The remaining fields describe the camera matrices and the motion vector invalid value, which the evaluation does
-    // not use yet (identity matrices; the invalid value is always 0).
     DlaaCamera camera = DlaaCamera::On;
-    bool flip_clip_y = false;
-    bool mvec_invalid_zero = true;
+    bool flip_clip_y = false;       // mirror the clip-to-clip matrices in y
+    bool mvec_invalid_zero = true;  // motionVectorsInvalidValue 0; false leaves the SDK default (it warns every frame)
 };
 
 struct RenderOptions {
@@ -306,6 +305,8 @@ private:
     // stats_.flips of the latest draw that was shifted by the jitter; the evaluation reports the offset only for a
     // frame that has one.
     std::optional<std::uint64_t> dlaa_jitter_frame_;
+    // The perspective scene draws of the frame being recorded, which exist before the first evaluation creates dlaa_.
+    DlaaCameraTracker dlaa_camera_;
     std::uint32_t anisotropy_ = 1;
     bool anisotropy_unavailable_logged_ = false;
     // Always created: its worker thread only starts with the first submitted frame.
