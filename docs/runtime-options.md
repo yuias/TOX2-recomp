@@ -11,10 +11,16 @@ tox2_game [--game-dir DIR] [--vfs-config FILE] [--elf PATH] [--libsre PATH] [--h
          [--load-only] [--png-dump DIR] [--dump-guest ADDR:SIZE:FILE]...
          [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]
          [--dump-frames DIR] [--dump-frames-every K]
-         [--shader-cache DIR] [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]
+         [--shader-cache DIR] [--resolution-scale N] [--aa-mode supersample|msaa] [--anisotropic-filter off|2|4|8|16]
+         [--vk-validation] [--no-window] [--window-size 720p|1080p|1440p|2160p] [--fullscreen on|off]
          [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off] [--ppu-threads legacy|1|2]
          [--lwmutex-fast-path on|off] [--lwmutex-watch]
+         [--config FILE | --no-config]
 ```
+
+Every option except `--config` and `--no-config` can also be set in a `config.json` file, which also
+stores the settings changed in the [debug overlay](runtime.md#debug-overlay); see
+[Configuration file](#configuration-file).
 
 `tox2_game` loads the decrypted `EBOOT.elf` into a 4 GiB guest address space, sets up the main PPU
 thread the way RPCS3 does and calls the entry function through the generated code. The executable
@@ -43,6 +49,8 @@ prefix (the census lines and the register dump of a fatal stop do not).
 | Option | Meaning |
 | --- | --- |
 | `--no-window` | Run without a window, for unattended runs and tests. By default `tox2_game` shows the frames in a window (which implies `--render vulkan`), and closing it stops the run with exit code 0. An explicit `--render none` also turns the window off. Without the window GameInput is never loaded, so these runs need no gamepad or GameInput runtime. There is no [debug overlay](runtime.md#debug-overlay) either: it exists only with the window, where `F1` shows it. |
+| `--window-size 720p\|1080p\|1440p\|2160p` | Size of the window's client area, in physical pixels: 1280x720, 1920x1080, 2560x1440 or 3840x2160 (default `720p`). A size that does not fit the work area of the window's monitor (with the window frame) gets the largest 16:9 size that does. The debug overlay can change it while the game runs (`Window size` under Settings). Needs the window: a usage error with `--no-window` or `--render none`. See [Window](runtime.md#window). |
+| `--fullscreen on\|off` | Start in borderless fullscreen (`on`) or in a window (`off`, the default), with no windowed frame shown first. `Alt+Enter` and `F11` switch while the game runs; leaving fullscreen restores the window at `--window-size`. Needs the window, like `--window-size`. |
 | `--pad none\|neutral\|keyboard\|gamepad\|keyboard+gamepad` | Input source for port 0. `neutral` connects a standard pad that never changes, `none` connects no pad, `keyboard` makes the keyboard the pad, `gamepad` the connected gamepads, and `keyboard+gamepad` both at once. With `gamepad`, port 0 is connected only while a gamepad is in use; otherwise it is always connected. Default: `keyboard+gamepad` with the window; `keyboard` with `--no-window` and `--pad-script`; otherwise `neutral`. `keyboard` without the window or `--pad-script` is a usage error, and so are `gamepad` and `keyboard+gamepad` with `--no-window`: unattended runs never load GameInput. See [Input](runtime.md#input) and [Gamepads](input.md#gamepads). |
 | `--pad-script FILE` | Press pad buttons at given times (seconds, or flip numbers as `f<N>`), for runs without a person at the keyboard. The file is read and checked at start-up; an error is a usage error that names the line. It needs `--pad keyboard` or `keyboard+gamepad` (the default with the window) and cannot be combined with `none`, `neutral` or `gamepad`. See [Pad script](runtime.md#pad-script). |
 | `--pad-probe` | Diagnostic for gamepads: logs every game controller that GameInput reports, every change of their readings and what the process knows about Steam, as `tox2: pad: probe ...` lines. Needs the window (a usage error with `--no-window`) and is independent of `--pad`; it never changes the pad. See [`--pad-probe`](input.md#--pad-probe). |
@@ -60,14 +68,18 @@ prefix (the census lines and the register dump of a fatal stop do not).
 | `--shader-cache DIR` | Directory of the SPIR-V cache and the pipeline cache `pipelines.bin` (default `generated/shader_cache`). |
 | `--resolution-scale N` | Render every colour and depth target at `N` times its guest size (`N` is a whole number from 1 to 4; default 1), so the picture is `N` times sharper. The window and the `--dump-frames` PNGs are `N` times the guest frame size (2560x1440 at `N` 2 for a 1280x720 game). A target that would exceed the GPU's image size limit is rendered at a smaller scale and counted as `state surface too large for the resolution scale`. Any other value is a usage error. |
 | `--aa-mode supersample\|msaa` | How surfaces in the game's anti-aliased mode are rendered (default `msaa`). `supersample` draws them into a single-sample image in the memory layout, shaded once per sample; `msaa` is the 2-sample multisampled mode. `msaa` falls back to `supersample` (one log line and the census kind `state 2-sample multisampling unavailable`) on a device without 2-sample support. Any other value is a usage error. |
+| `--anisotropic-filter off\|2\|4\|8\|16` | Force anisotropic filtering at the given level on the mipmapped, linearly filtered samplers (default `off`, which leaves every sampler as the game set it). The level is limited to what the device supports, and the option has no effect on a device without anisotropic filtering. The debug overlay can change it while the game runs (`Anisotropic filtering` under Settings). Any other value is a usage error. See [Anisotropic filtering](rendering.md#anisotropic-filtering). |
 | `--vk-validation` | Enable the Khronos validation layer. It comes with the Vulkan SDK; if it is not installed, `tox2_game` logs a warning and goes on without it. |
 | `--rsx-capture N[,M...]` | Record the given frames (1-based flip numbers) as `.tox2cap` files. See [Capture and replay](rendering.md#capture-and-replay). The overlay's `Capture next flip` button records one more frame into the same directory, `generated/rsx/captures`, with or without this option. |
 | `--rsx-census FILE` | Count the arguments the game writes to the RSX registers (surface and texture formats, vertex layouts, primitive types, draw sizes, render state, flip and vblank rates) and write them to `FILE` as JSON when the run stops. The fragment and vertex programs the game used are written next to it as `generated/rsx/fp_<hash>.bin` and `vp_<hash>.bin` (relative to the working directory). The directories are created; the file is truncated. |
 | `--frame-limit vsync\|60\|off` | Pace the flips. `vsync` (the default) follows RPCS3's "PS3 Native" frame limit: a flip that the game made in its VSYNC flip mode (`cellGcmSetFlipMode`, which this game uses) completes at the first vertical blank after its command executes, at most one per vblank, so a game that flips once per two vblanks runs at 30 flips per second. The command holds the command FIFO until then. A flip in the HSYNC flip mode is paced as with `60`. `60` completes at most 60 flips per second whatever the flip mode, like RPCS3's default "Auto" frame limit: a flip command that arrives early holds the command FIFO until its time. `off` completes every flip as soon as its command executes, so a headless run flips as fast as the game produces frames. Any other value is a usage error. With the window, the debug overlay can switch between the three while the game runs (`Flip limiter` under Settings); the option sets the value at start-up. See [Fake RSX](rendering.md#fake-rsx). |
 
 The renderer options are a usage error (exit code 2) when the renderer is off. The window and
-`--dump-frames` switch it on; `--dump-frames-every`, `--shader-cache`, `--resolution-scale`, `--aa-mode` and
-`--vk-validation` need one of them or `--render vulkan`; an explicit `--render none` conflicts with all of them.
+`--dump-frames` switch it on; `--dump-frames-every`, `--shader-cache`, `--resolution-scale`, `--aa-mode`,
+`--anisotropic-filter` and `--vk-validation` need one of them or `--render vulkan`; an explicit `--render none`
+conflicts with all of them (`error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale,
+--aa-mode, --anisotropic-filter and --vk-validation need --render vulkan`). `--window-size` and `--fullscreen`
+need the window (`error: --window-size and --fullscreen need the window`).
 `--rsx-capture`, `--rsx-census` and `--frame-limit` do not need the renderer.
 
 Frame dumps are encoded on a worker thread, so dumping does not slow the game down. When the worker
@@ -105,6 +117,156 @@ The dump writes one line per option: `tox2: dump: 0x<addr>..0x<end> -> <file> sh
 guest memory gives `tox2: dump: 0x<addr>..0x<end> -> <file> not committed` and writes no file. A file that
 cannot be written gives `... write failed`.
 
+## Configuration file
+
+`tox2_game` reads its options from a JSON file as well as from the command line, and writes the
+settings a player changes while playing back to it. The command line wins and is never written to the
+file.
+
+| Option | Meaning |
+| --- | --- |
+| `--config FILE` | Read `FILE` (relative to the working directory) instead of looking for `config.json`, and save changes to it. The file must exist: `error: FILE: cannot open the file`, exit code 2, without the usage text. The last occurrence wins. |
+| `--no-config` | Read no file and save nothing. With `--config` it is a usage error: `error: --no-config excludes --config`. Tests and scripted runs use it so that they neither depend on nor change a player's file (the `game_boot` test does, see [Tests](tests.md)). |
+
+### Location
+
+Without `--config` and `--no-config`, `tox2_game` reads `config.json` in the working directory, or else
+`config.json` next to the executable. Exactly one file is read; files are never merged. A build configured
+with `-GameDir` writes a starter file next to the executable (see [The starter
+`config.json`](building.md#the-starter-configjson)).
+
+Changes are saved to the file that was read. When no file exists, the first saved change creates
+`config.json` next to the executable; a new file is never created in the working directory, where it
+could end up in the repository (`/config.json` is git-ignored all the same). With `--no-config`, or when
+the executable's directory is unknown and no file was found, nothing is saved. The start-up log says which
+case applies:
+
+| Log line (info) | Meaning |
+| --- | --- |
+| `tox2: config: <file>` | The file was read, and changes are saved to it. |
+| `tox2: config: none found; changes are saved to <file>` | No file exists; `<file>` is created at the first saved change. |
+| `tox2: config: none found` | No file exists and none can be created (no executable directory). |
+| `tox2: config: off (--no-config)` | `--no-config` was given. |
+
+### Keys and values
+
+The file is one JSON object in UTF-8 (a byte order mark is accepted). Comments, trailing commas, duplicate
+keys and `null` values are errors. The key of an option is its name without `--` and with `-` written as
+`_`: `--resolution-scale` is `"resolution_scale"`. `--config` and `--no-config` have no key. A value is
+written the way its kind of option needs it:
+
+| Kind | Keys | Value in the file |
+| --- | --- | --- |
+| Path | `game_dir`, `vfs_config`, `elf`, `libsre`, `hdd_dir`, `sdata_cache`, `log`, `png_dump`, `pad_script`, `audio_dump`, `rsx_census`, `dump_frames`, `shader_cache` | A non-empty string. A relative path is relative to the directory of the config file, not to the working directory (on the command line it is relative to the working directory). |
+| Text | `log_level`, `dialog_answer`, `pad`, `audio`, `render`, `ppu_threads`, `frame_limit`, `aa_mode`, `anisotropic_filter`, `window_size` | A string with the text the command line takes. A whole number is also accepted and read as its decimal text, so `"frame_limit": 60` and `"ppu_threads": 2` work. |
+| Number | `seconds`, `dump_frames_every`, `resolution_scale` | A non-negative whole number. |
+| Flag | `strict`, `quiet_hle`, `load_only`, `pad_probe`, `vk_validation`, `no_window`, `lwmutex_watch` | `true` sets the option. `false` is the same as leaving the key out. |
+| On or off | `host_priorities`, `yield_backoff`, `lwmutex_fast_path`, `fullscreen` | `true` or `false`, or the strings `"on"` or `"off"`. |
+| Frame list | `rsx_capture` | A string such as `"300,600"`, or a non-empty array of positive whole numbers. |
+| Strings | `dump_guest` | An array of strings, each one an `ADDR:SIZE:FILE` argument. |
+
+```json
+{
+  "game_dir": "../../../game/BLJS10188",
+  "elf": "../../generated/inputs/EBOOT.elf",
+  "resolution_scale": 2,
+  "aa_mode": "msaa",
+  "anisotropic_filter": "16",
+  "window_size": "1080p",
+  "fullscreen": false
+}
+```
+
+A key that is not an option is ignored with a warning, `tox2: config: <file>: unknown key "<key>" ignored`,
+and is kept when the file is rewritten. The key of an option that no longer exists is such an unknown key.
+
+### Precedence and errors
+
+The order is: command line, then `config.json`, then the `--vfs-config` file, then the defaults. A key
+acts exactly like the option, so `game_dir` in `config.json` overrides the `/dev_bdvd` mount of a VFS
+file. When an option is on the command line, the file's value for it is not used and not checked; for the
+repeatable `rsx_capture` and `dump_guest`, a command-line occurrence replaces the file's whole list.
+
+A file that is not valid JSON, has a value of the wrong type or has a value that fails the option's check
+stops the start with exit code 2. The message names the file (`<file>` is its absolute path) and the usage
+text is not printed, because the command line is not at fault:
+
+```
+error: <file>: invalid JSON: <reason> at line L, column C (byte N)
+error: <file>: duplicate key "x" in an object
+error: <file>: the top level must be an object
+error: <file>: "x": null is not a value; remove the key to use the default
+error: <file>: "resolution_scale": expected a non-negative whole number, got string
+error: <file>: resolution_scale needs a whole number from 1 to 4
+```
+
+A value is checked the same way wherever it comes from; only the label differs: the command line says
+`error: --resolution-scale needs a whole number from 1 to 4`. A check that involves several options (the
+missing `--game-dir`, the renderer and window requirements, the pad rules) keeps its usual text and, when a
+file was read, adds a last line `note: settings were also read from <file>`, because the cause may be in the
+file.
+
+Some keys only have an effect with a renderer or a window. When the file holds one and the run lacks what
+it needs, the key is ignored, with a debug-level log line `tox2: config: <file>: <key> ignored: the run has
+no renderer` (or `no window`), and is never an error. So a saved `resolution_scale` does not break a
+`--no-window` run. The same option on the command line keeps its usage error.
+
+| Needs | Keys |
+| --- | --- |
+| A renderer | `dump_frames`, `dump_frames_every`, `shader_cache`, `vk_validation`, `resolution_scale`, `aa_mode`, `anisotropic_filter` |
+| A window | `pad_probe`, `window_size`, `fullscreen` |
+
+`dump_frames` in the file switches the renderer on by itself, so it is ignored only together with an
+explicit `"render": "none"`. A key outside this table is checked like a command-line option: a hand-written
+`"pad": "gamepad"` with `--no-window` is still an error.
+
+### Saved settings
+
+A key is written when, and only when, the player changes its setting in the running window. Start-up
+values, whether from the command line, the file or the defaults, are never written by themselves.
+
+| Key | Written when |
+| --- | --- |
+| `frame_limit` | `Flip limiter` is changed in the overlay (`"vsync"`, `"60"` or `"off"`). |
+| `resolution_scale` | `Internal resolution scale` is changed (a number). |
+| `aa_mode` | `Anti-aliasing` is changed (`"supersample"` or `"msaa"`). |
+| `anisotropic_filter` | `Anisotropic filtering` is changed (`"off"`, `"2"`, `"4"`, `"8"` or `"16"`). |
+| `window_size` | `Window size` is changed to another preset (`"720p"`, `"1080p"`, `"1440p"` or `"2160p"`). |
+| `fullscreen` | `Alt+Enter` or `F11` switches fullscreen on or off (`true` or `false`). |
+
+The log level is not saved: a saved `trace` would slow down and fill the log of every later run without
+the player noticing. A `"log_level"` written by hand still applies at start-up. The volume control is a
+placeholder and saves nothing. The rule has these consequences:
+
+- A key given on the command line keeps the file's value for as long as the player does not touch that
+  setting.
+- If the player changes a setting that was given on the command line, the new value is written to the file
+  (replacing the file's value) and the run continues with it. The command-line value itself is never
+  written.
+- A value that differs from the player's choice is not written: a resolution scale that fell back because
+  the surface was too large, MSAA that fell back to supersampling, anisotropy limited by the device, or a
+  window size reduced to fit the screen. The file keeps what the player chose, so a larger monitor or a
+  different device gets it at the next start.
+- Dragging or maximising the window, and a fullscreen state given by `--fullscreen`, write nothing.
+- With `--no-config` nothing is written.
+
+The write happens in the background: half a second after the last change, and at the latest two seconds
+after the first unsaved one. It never stalls the game. When the run ends, pending changes are written
+within 250 ms, so closing the window right after a change still saves it. The log line is `tox2: config:
+saved <key>, <key> to <file>` (info).
+
+The file is read again just before each write, and only the changed keys are updated. Other keys, including
+unknown ones and edits made by hand while the game ran, are kept in their order and with their values; a new
+key is added at the end. The file is rewritten in a fixed layout (two-space indentation, a final newline, no
+byte order mark), so its spacing may change. The new text goes to `<file>.tmp` and is renamed over the file,
+so a reader sees either the old or the new file.
+
+If the file cannot be updated, nothing is written and the file stays as it was. The causes are a file that
+is not valid JSON at that moment, a duplicate key, and a file that is read-only or in a directory that is
+not writable. The changes stay pending and are tried again at the next change and when the run ends. Each
+distinct reason is logged once per run as a warning, `tox2: config: cannot save settings to <file>:
+<reason>`, and the game goes on.
+
 ## Exit codes and stop lines
 
 Every run ends with one stop line on stderr and a census (see [Census](runtime.md#census)), then
@@ -113,7 +275,7 @@ exits:
 | Code | Meaning | Stop line |
 | --- | --- | --- |
 | 0 | The guest called `sys_process_exit` or `_sys_process_exit`, the window was closed, or `--load-only` finished loading | `tox2: stop: process exit status N`, `tox2: stop: window closed` |
-| 2 | Usage error: bad option, neither `--game-dir` nor `--vfs-config`, game directory missing, log file or audio dump file not writable | `error: ...` (usage text) |
+| 2 | Usage error: bad option, neither `--game-dir` nor `--vfs-config`, game directory missing, log file or audio dump file not writable; also a config file that is missing (`--config`), not valid JSON or has a bad value (see [Configuration file](#configuration-file)) | `error: ...` (usage text, except for config file problems) |
 | 3 | Fatal error: unhandled instruction, trap, guest fault (access outside the committed guest memory), unknown dispatch target with `--strict`, guest address space cannot be reserved; a fatal stop on an SPU thread (an unknown SPU dispatch target, code that does not match its image, an unhandled SPU word, an MFC command or channel the runtime does not implement, a `stop` code or `WrOutIntrMbox` code it does not know; see [SPU usage](spu.md#log-lines-and-census)); also the stops the game or libsre itself asks for (`cellGameContentErrorDialog`, a failed trophy registration, libsre's `abort`) | `tox2: stop: fatal <kind>: ...`, or a `tox2: stop: ...` line naming the call, for example `tox2: stop: abort from 0x<address> (sysPrxForUser 0x9fb6228e)` |
 | 4 | Load error: file missing, not a PPU executable, SHA-256 different from the one in the generated code, libsre missing, not relocated, of another hash or failing its layout check, invalid VFS configuration, or no executable can be located | `error: ...` |
 | 5 | The `--seconds` watchdog elapsed | `tox2: stop: watchdog N s` |
@@ -132,36 +294,37 @@ also when it is started from a script.
 
 ## Examples by purpose
 
-A short unattended run that keeps its log and starts from an empty hdd directory, like the
-`game_boot` test (see [Status](status.md) for how far this game gets):
+Unattended runs pass `--no-config`, so a `config.json` of the player is neither read nor changed. A short
+unattended run that keeps its log and starts from an empty hdd directory, like the `game_boot` test (see
+[Status](status.md) for how far this game gets):
 
 ```sh
-tox2_game --game-dir <game-dir> --no-window --seconds 30 --hdd-dir <empty-dir> --log run.log
+tox2_game --no-config --game-dir <game-dir> --no-window --seconds 30 --hdd-dir <empty-dir> --log run.log
 ```
 
 The same run with an explicit executable, for a game directory that does not hold `EBOOT.elf`
 (libsre is looked up next to the ELF; `--libsre` names it when it is elsewhere):
 
 ```sh
-tox2_game --game-dir <game-dir> --elf <elf> --libsre <libsre.reloc.elf> --no-window --seconds 30 --hdd-dir <empty-dir>
+tox2_game --no-config --game-dir <game-dir> --elf <elf> --libsre <libsre.reloc.elf> --no-window --seconds 30 --hdd-dir <empty-dir>
 ```
 
 Every 600th flip of the first 30 s as PNG files, without a window (the fake RSX executes the game's
 flips, so files appear; the frames written in the first 30 s are still the loading screen, a plain grey):
 
 ```sh
-tox2_game --game-dir <game-dir> --no-window --seconds 30 --dump-frames out/frames --dump-frames-every 600
+tox2_game --no-config --game-dir <game-dir> --no-window --seconds 30 --dump-frames out/frames --dump-frames-every 600
 ```
 
 Recording the game's sound to a file without playing it (the game initialises `cellAudio` and its mixer
 runs, but the sound engine's SPU thread does not start yet, so the file holds silence only):
 
 ```sh
-tox2_game --game-dir <game-dir> --no-window --hdd-dir <empty-dir> --seconds 30 --audio-dump out/run.wav
+tox2_game --no-config --game-dir <game-dir> --no-window --hdd-dir <empty-dir> --seconds 30 --audio-dump out/run.wav
 ```
 
 Saving two ranges of guest memory when the run ends, 16 bytes (which are also logged) and 4 KiB:
 
 ```sh
-tox2_game --game-dir <game-dir> --no-window --seconds 30 --hdd-dir <empty-dir> --dump-guest 0x10000:16:head.bin --dump-guest 0x10000:4096:page.bin
+tox2_game --no-config --game-dir <game-dir> --no-window --seconds 30 --hdd-dir <empty-dir> --dump-guest 0x10000:16:head.bin --dump-guest 0x10000:4096:page.bin
 ```

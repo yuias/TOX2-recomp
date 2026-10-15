@@ -857,6 +857,7 @@ nothing joins them, because the process ends with `std::_Exit`.
 - `F11` and `Alt+Enter` switch the window between windowed and borderless fullscreen (a popup window
   covering the monitor the window is on); the next press restores the earlier size and position. Neither key
   is in the pad map, and the window procedure handles them before the overlay and the pad see them.
+  The state is saved (see [Window](#window)).
 - `F1` (scan code `0x3B`) is not in the pad map: it toggles the [debug overlay](#debug-overlay) and
   never reaches the pad, with any `--pad` value. While the overlay is shown and ImGui wants the
   keyboard (a text box is active), key presses (`WM_KEYDOWN`, `WM_SYSKEYDOWN`) are withheld from the
@@ -955,6 +956,37 @@ is covered by `runtime_core` (`testPadButtons`, `testKeyboardPadScanCodes`, `tes
 code by `input_core` and `input_gameinput` (see [Tests](tests.md)), and the key message conversion
 by `render_core` (`testKeyMessages`).
 
+## Window
+
+The window is created and run by one thread (the window thread), the only one that calls Win32 functions
+on it. Other threads ask it for something with `PostMessageW`, never with a call that waits.
+
+- *Size presets.* The client area is one of four presets, in physical pixels: `720p` (1280x720, the
+  default), `1080p` (1920x1080), `1440p` (2560x1440) and `2160p` (3840x2160). `--window-size` sets the
+  one at start-up and the overlay's `Window size` combo changes it while the game runs. DPI scaling does
+  not change the sizes: at a display scale of 150 % the 720p window still has a 1280x720 client area, so
+  the game's frame (1280x720 times the [resolution scale](rendering.md#resolution-scale)) maps one to one
+  onto the preset of the same size.
+- *Fit.* When the preset plus the window frame (at the window's DPI) does not fit the work area of the
+  monitor the window is on, the window gets the largest 16:9 client size that does (a width that is a
+  multiple of 16). The preset itself stays selected and saved, so a larger monitor gets the full size at
+  the next start. The invisible resize borders count as frame, so a reduced window is a few pixels
+  smaller than the work area would allow. The window keeps its top left corner and is moved just far
+  enough to lie inside the work area; one larger than the work area is aligned to its top left.
+- *Choosing a preset.* Choosing the preset that is already set sizes the window again, which snaps a
+  dragged window back. A maximised window is restored first. In fullscreen nothing changes until the
+  window leaves fullscreen, and then the preset is applied. While the window is minimised it is applied
+  when the window is restored. A window the user resized by dragging keeps that size until a preset is
+  chosen; the overlay then shows the preset with the actual size, for example `1080p (window 1500x844)`.
+- *Fullscreen.* `Alt+Enter` and `F11` switch between windowed and borderless fullscreen. `--fullscreen on`
+  starts in fullscreen: the preset is applied to the hidden window first and the window is shown
+  fullscreen, so no windowed frame appears, and leaving fullscreen returns to the preset.
+- *Saved state.* The preset (from the overlay) and the fullscreen state (from `Alt+Enter` and `F11`) are
+  saved to `config.json` as soon as the player changes them, and restored at the next start. The start-up
+  state, whatever its source, and dragging the frame are never saved. See
+  [Saved settings](runtime-options.md#saved-settings). The window position is not saved, and a move to a
+  monitor with another display scale keeps the window rectangle.
+
 ## Debug overlay
 
 With the window open, `F1` shows or hides a [Dear ImGui](https://github.com/ocornut/imgui) window
@@ -963,7 +995,7 @@ titled `tox2` over the presented image, at the top left. It has four collapsible
 | Section | Contents |
 | --- | --- |
 | Stats | The flip number (the `frame_<N>.png` and `--rsx-capture N` numbering), flips per second over the last second, draws and skipped draws of the last flip, the total of skipped draws and a graph of the last 240 flip intervals. Below, the audio counters of the engine and `cellAudio`: the output, the longest producer time against the 5.333 ms block period and its margin, blocks, periods, failed notifies, skipped periods (with a rate), underrun frames (with a rate), dropped blocks, the clock correction in ppm and the mean output fill against its target, then the unwritten port blocks (total, rate and runs, see [Audio](audio.md#cellaudio)), one row per SPU thread that receives events (`spu <name> busy` mean, 99th percentile and maximum in ms, and the number of intervals over one 5.33 ms period) and a `guest lock` table with one row per caller class (acquisitions per second, wait 99th percentile and maximum in ms, and waits over 1 ms per second). Before `cellAudioInit` the audio part says `n/a (audio not started)` |
-| Settings | The flip limiter (the `--frame-limit` choice of `vsync`, `60` or `off`, changeable at run time), the log level (the lowest level that is logged; the same filter as `--log-level`) and `Internal resolution scale` (1x to 4x, the run-time form of `--resolution-scale`; disabled when no renderer reports a scale) and `Anti-aliasing` (`Supersample` or `MSAA 2x`, the run-time form of `--aa-mode`; disabled when no renderer reports a mode, and the `MSAA 2x` item is disabled on a device without 2-sample support). A choice is applied by the renderer right after the next flip: the picture sharpens (or softens) from the following frame, and each target is rescaled when it is next drawn to (see [Resolution scale](rendering.md#resolution-scale)). A new anti-aliasing mode takes effect at the next pass over the anti-aliased surface; no target is touched at the switch (see [Anti-aliased surfaces](rendering.md#anti-aliased-surfaces)). Anisotropic filtering and volume are disabled placeholders marked `(not implemented)` |
+| Settings | The flip limiter (the `--frame-limit` choice of `vsync`, `60` or `off`, changeable at run time), the log level (the lowest level that is logged; the same filter as `--log-level`), `Internal resolution scale` (1x to 4x, the run-time form of `--resolution-scale`; disabled when no renderer reports a scale), `Anti-aliasing` (`Supersample` or `MSAA 2x`, the run-time form of `--aa-mode`; disabled when no renderer reports a mode, and the `MSAA 2x` item is disabled on a device without 2-sample support), `Anisotropic filtering` (`Off`, `2x`, `4x`, `8x` or `16x`, the run-time form of `--anisotropic-filter`; items above the device's maximum are disabled, and the whole combo is disabled, reading `unavailable on this device`, when the device lacks the feature) and `Window size` (`720p (1280x720)` to `2160p (3840x2160)`, the run-time form of `--window-size`; an item that does not fit the screen reads for example `2160p (3840x2160, fits as 2496x1404)`; while fullscreen the preview reads for example `1080p (when windowed)`; disabled when no window reports its status). A choice is applied by the renderer right after the next flip: the picture sharpens (or softens) from the following frame, and each target is rescaled when it is next drawn to (see [Resolution scale](rendering.md#resolution-scale)). A new anti-aliasing mode takes effect at the next pass over the anti-aliased surface; no target is touched at the switch (see [Anti-aliased surfaces](rendering.md#anti-aliased-surfaces)). A new anisotropy level applies to the samplers created from then on (see [Anisotropic filtering](rendering.md#anisotropic-filtering)). A new window size is applied at once (see [Window](#window)). The flip limiter, the resolution scale, anti-aliasing, anisotropic filtering and the window size are saved to `config.json` as soon as they are changed and restored at the next start; the log level is not saved (see [Saved settings](runtime-options.md#saved-settings)). Volume is a disabled placeholder marked `(not implemented)` |
 | Capture | `Capture next flip` and `Dump next flip as PNG`, each with the state of its last request, and the dump counts (written, failed, skipped) |
 | RSX unimplemented | The live `rsx unimplemented` counts (see [Rendering](rendering.md#rendering)) as a table of count and kind, with a text filter, and the number of kinds dropped because the table was full |
 
@@ -990,6 +1022,13 @@ Design notes:
   `rsx unimplemented` snapshot, the flip limiter, the capture request and status, the log level) and
   `debug_overlay.*` the Vulkan and Win32 backends. The overlay only reads atomics and locked
   snapshots and never touches guest memory.
+- `tox2_overlay` does not know about the config file. When the player picks a value in the Settings
+  section, the panel calls `OverlaySources::setting_changed` with the setting and the value in its
+  command-line form, only when the pick differs from what the combo shows (for the window size, from the
+  preset the combo shows; choosing it again still sizes the window). `tox2_game` maps the call to a config
+  key and hands it to a settings store, which does the file work on its own thread, so neither the
+  RSX thread nor the window thread waits for a file. The fullscreen state reaches the store the same way,
+  from the window's fullscreen callback.
 - ImGui is initialised on the first show, not at start-up, on the RSX thread: the log gets
   `tox2: overlay: ready (imgui 1.91.9b, scale N)` (info) and the font upload costs a one-time hitch.
   `scale` is the DPI scale of the window at that moment and is not updated later. If the setup fails,

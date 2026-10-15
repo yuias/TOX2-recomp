@@ -194,7 +194,10 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   `--frame-limit vsync` a flip in the game's VSYNC flip mode waits for the next vblank, otherwise the limit is
   60 flips per second (see [Fake RSX](#fake-rsx)); `--frame-limit off` removes the limit. With the window the displayed buffer is
   also blitted, letterboxed to 16:9, to a swapchain with the FIFO present mode, once per completed flip;
-  presenting runs outside the guest lock. The limit paces the flips before they reach the swapchain, so a
+  presenting runs outside the guest lock. The window's client area is a size preset in physical pixels
+  (`--window-size`, 720p by default; see [Window](runtime.md#window)); the swapchain follows it through
+  `WM_SIZE`, and the blit scales the frame to it, so a frame of `N` times 1280x720 maps one to one onto
+  the preset of the same size (`--resolution-scale 2` and 1440p, 3 and 2160p). The limit paces the flips before they reach the swapchain, so a
   display that refreshes faster than 60 Hz does not speed the game up; with `--frame-limit off` the display's
   refresh paces the RSX thread instead. Without a window nothing waits for a vertical blank in the renderer.
   The [debug overlay](runtime.md#debug-overlay) is drawn on the swapchain image after that blit, in a
@@ -757,8 +760,34 @@ filter is one of the four mip filters (NEAREST_NEAREST, LINEAR_NEAREST, NEAREST_
 LINEAR_LINEAR) and the texture has more than one level. The level range is the min and max LOD of
 SET_TEXTURE_CONTROL0 clamped to the last level, the bias is the signed 5.8 field of
 SET_TEXTURE_FILTER (rounded to half a level for a NEAREST mip mode), and the mip mode is LINEAR for
-NEAREST_LINEAR and LINEAR_LINEAR. Otherwise the sampler reads level 0 only. Anisotropic filtering
-and texels around the image (`CELL_GCM_TEXTURE_BORDER_TEXTURE`) are not modelled.
+NEAREST_LINEAR and LINEAR_LINEAR. Otherwise the sampler reads level 0 only. The guest's own anisotropy
+field of SET_TEXTURE_CONTROL0 and texels around the image (`CELL_GCM_TEXTURE_BORDER_TEXTURE`) are not
+modelled; the player can force anisotropic filtering instead (below).
+
+#### Anisotropic filtering
+
+`--anisotropic-filter off|2|4|8|16` (default `off`), or `Anisotropic filtering` in the
+[debug overlay](runtime.md#debug-overlay), sets one fixed level that replaces "no anisotropy" on the
+samplers that qualify. It does not combine with a guest value, because the guest's field is not modelled,
+so there is none to combine with. This rule is this project's own choice; no RPCS3 parity is claimed. With
+`off`, every sampler is exactly what `update_fragment_sampler` made of the game's state.
+
+- *Qualifying samplers.* After the fallback for formats the device cannot filter linearly, the min filter
+  is `VK_FILTER_LINEAR` and the sampler reads more than level 0. Point-sampled textures, single-level
+  textures (the user interface, fonts and sprites, render targets read as textures, depth read as
+  A8R8G8B8) and the placeholder texture keep their samplers, so 2D elements and post-processing reads are
+  unchanged. Ground and wall textures seen at a flat angle are what gets sharper.
+- *Level.* The sampler gets `min(level, maxSamplerAnisotropy)` of the device. The effective level is what
+  the overlay shows and what the start-up line `tox2: render: anisotropic filtering Nx` (written when it is
+  above 1) reports; the setting that is saved stays the player's choice.
+- *No device support.* Without the `samplerAnisotropy` feature, which the device context enables when it is
+  there, every sampler is unchanged, the renderer reports level 1, the log gets `tox2: render: anisotropic
+  filtering unavailable on this device` once when a level above 1 was asked for, and the overlay combo is
+  disabled with `unavailable on this device`.
+- *Changing the level.* The level is part of the sampler cache key. A change made in the overlay applies
+  right after the next flip, as the resolution scale does; samplers created afterwards use it and cached
+  ones stay (they may be in use by frames in flight). A texture therefore gets its new sampler at
+  its next lookup.
 
 #### Sampler types
 

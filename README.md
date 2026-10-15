@@ -147,6 +147,13 @@ title screen with a gamepad or the keyboard, with sound. [Status](docs/status.md
 saves are written to `build/release/hdd`; `tools/build.ps1 -Clean` deletes them together with the
 rest of `build/release`.
 
+`config.json` also holds the settings changed while playing. The debug overlay (`F1`, Settings)
+changes the frame limiter, the internal resolution scale, anti-aliasing, anisotropic filtering and the
+window size (720p to 2160p), and `Alt+Enter` or `F11` switches fullscreen. Each change is saved to the file
+as it is made and restored at the next start. Options given on the command line win and are never saved,
+and `--no-config` ignores the file. The format, the lookup and the rules for saving are in
+[Configuration file](docs/runtime-options.md#configuration-file).
+
 Every option of `tox2_game` is described in [`tox2_game` options](docs/runtime-options.md).
 
 ### Keyboard
