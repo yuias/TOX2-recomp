@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -13,15 +14,38 @@ inline constexpr std::uint64_t kTimebaseFrequency = 79800000;
 // Microseconds since the runtime started (a monotonic host clock).
 std::uint64_t systemTimeUs();
 
-// Run statistics printed on every stop path. Counters are updated under the guest lock; the
-// census keeps its own mutex as well so that the supervisor can print without holding it.
+// Run statistics printed on every stop path. The census keeps its own mutex so that the supervisor can print without
+// the guest lock; call counts are atomics, so counting through a CensusSlot takes no lock at all.
+
+struct CensusCallStat;
+
+// A call site's cached handle to its counter. The first call through a slot looks the counter up under the census
+// mutex; later calls add to it with one relaxed atomic increment and take no lock, so PPU threads in the split modes do
+// not serialise on the mutex for every import and syscall. resetCensus() invalidates every slot through a generation
+// number. A slot belongs to one (module, name) pair or one syscall number for its whole life, and a copy starts empty.
+class CensusSlot {
+public:
+    CensusSlot() = default;
+    CensusSlot(const CensusSlot&) {}
+    CensusSlot& operator=(const CensusSlot&) { return *this; }
+
+private:
+    friend CensusCallStat* censusCachedStat(const CensusSlot& slot);
+    friend void censusCacheStat(CensusSlot& slot, CensusCallStat* stat, std::uint32_t generation);
+
+    std::atomic<CensusCallStat*> stat_{nullptr};
+    std::atomic<std::uint32_t> generation_{0};
+};
 
 // Counts one syscall. `name` may be null (printed as "?"). `implemented` is false for calls that
 // went through the default handler. The first call of each number logs "tox2: first sc N name".
 void censusSyscall(std::uint32_t number, const char* name, bool implemented);
+// The same through a call site's slot: the lock-free path once the slot is filled.
+void censusSyscall(CensusSlot& slot, std::uint32_t number, const char* name, bool implemented);
 
 // Counts one HLE import call; the first call logs "tox2: first hle module::name".
 void censusHle(const char* module, const char* name, bool implemented);
+void censusHle(CensusSlot& slot, const char* module, const char* name, bool implemented);
 
 // Counts a call of an import that was bound to an export of a recompiled module (`image`, e.g.
 // "libsre"). Counts like censusHle; the census line ends in "[image]" instead of "[impl]".

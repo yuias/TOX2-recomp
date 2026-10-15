@@ -1,6 +1,8 @@
 #include "core/census.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <format>
 #include <map>
 #include <mutex>
@@ -13,15 +15,49 @@
 #include "core/log.h"
 
 namespace tox2 {
+
+// The count is split into one cache line per stripe and a thread always uses the same stripe: two PPU threads calling
+// the same import in parallel would otherwise bounce one line between cores on every call, which is the cost of the
+// whole uncontended lwmutex call (measured: a shared counter doubled the time per lock + unlock pair with two holders).
+// Threads beyond the stripe count share stripes, which is still exact, only slower.
 namespace {
 
-struct CallStat {
+constexpr std::size_t kCensusStripes = 8;
+
+std::size_t censusStripe() {
+    static std::atomic<std::uint32_t> next{0};
+    thread_local const std::size_t stripe = next.fetch_add(1, std::memory_order_relaxed) % kCensusStripes;
+    return stripe;
+}
+
+}  // namespace
+
+// The strings are written under the census mutex before the first count; only the stripes are touched without it.
+struct CensusCallStat {
+    struct alignas(64) Stripe {
+        std::atomic<std::uint64_t> count{0};
+    };
+
+    void add() { stripes[censusStripe()].count.fetch_add(1, std::memory_order_relaxed); }
+    std::uint64_t total() const {
+        std::uint64_t sum = 0;
+        for (const Stripe& stripe : stripes) sum += stripe.count.load(std::memory_order_relaxed);
+        return sum;
+    }
+
     std::string name;
-    std::uint64_t count = 0;
+    std::array<Stripe, kCensusStripes> stripes;
     bool implemented = false;
     std::string note;
     std::string image;  // set for imports bound to a recompiled module's export
 };
+
+namespace {
+
+using CallStat = CensusCallStat;
+
+// Bumped by resetCensus() under the mutex; a slot filled in an earlier generation points at a destroyed counter.
+std::atomic<std::uint32_t> g_generation{1};
 
 struct CensusState {
     std::mutex mutex;
@@ -89,29 +125,42 @@ std::string section(std::string_view title, std::uint64_t calls, const Lines& li
 
 }  // namespace
 
-void censusSyscall(std::uint32_t number, const char* name, bool implemented) {
+CensusCallStat* censusCachedStat(const CensusSlot& slot) {
+    // The acquire pairs with the release in censusCacheStat, so a matching generation implies the counter is set up.
+    if (slot.generation_.load(std::memory_order_acquire) != g_generation.load(std::memory_order_relaxed))
+        return nullptr;
+    return slot.stat_.load(std::memory_order_relaxed);
+}
+
+void censusCacheStat(CensusSlot& slot, CensusCallStat* stat, std::uint32_t generation) {
+    slot.stat_.store(stat, std::memory_order_relaxed);
+    slot.generation_.store(generation, std::memory_order_release);
+}
+
+namespace {
+
+void countSyscall(CensusSlot* slot, std::uint32_t number, const char* name, bool implemented) {
     CensusState& s = state();
     bool first = false;
     std::string shown;
     {
         std::lock_guard lock(s.mutex);
         CallStat& stat = s.syscalls[number];
-        if (stat.count == 0) {
+        if (stat.total() == 0) {
             stat.name = name != nullptr ? name : "?";
             stat.implemented = implemented;
             first = true;
             shown = stat.name;
         }
-        stat.count++;
+        stat.add();
+        if (slot != nullptr) censusCacheStat(*slot, &stat, g_generation.load(std::memory_order_relaxed));
     }
     if (first) {
         logInfo("tox2: first sc {} {}", number, shown);
     }
 }
 
-namespace {
-
-void countHle(const char* module, const char* name, bool implemented, const char* image) {
+void countHle(CensusSlot* cache, const char* module, const char* name, bool implemented, const char* image) {
     CensusState& s = state();
     const char* module_text = module != nullptr ? module : "?";
     const char* name_text = name != nullptr ? name : "?";
@@ -124,14 +173,15 @@ void countHle(const char* module, const char* name, bool implemented, const char
             slot.module = module_text;
             slot.name = name_text;
             slot.stat = &s.hle[key];
-            if (slot.stat->count == 0) {
+            if (slot.stat->total() == 0) {
                 slot.stat->name = std::move(key);
                 slot.stat->implemented = implemented;
                 if (image != nullptr) slot.stat->image = image;
                 first_key = slot.stat->name;
             }
         }
-        slot.stat->count++;
+        slot.stat->add();
+        if (cache != nullptr) censusCacheStat(*cache, slot.stat, g_generation.load(std::memory_order_relaxed));
     }
     if (!first_key.empty()) {
         logInfo("tox2: first hle {}", first_key);
@@ -140,10 +190,32 @@ void countHle(const char* module, const char* name, bool implemented, const char
 
 }  // namespace
 
-void censusHle(const char* module, const char* name, bool implemented) { countHle(module, name, implemented, nullptr); }
+void censusSyscall(std::uint32_t number, const char* name, bool implemented) {
+    countSyscall(nullptr, number, name, implemented);
+}
+
+void censusSyscall(CensusSlot& slot, std::uint32_t number, const char* name, bool implemented) {
+    if (CallStat* stat = censusCachedStat(slot)) {
+        stat->add();
+        return;
+    }
+    countSyscall(&slot, number, name, implemented);
+}
+
+void censusHle(const char* module, const char* name, bool implemented) {
+    countHle(nullptr, module, name, implemented, nullptr);
+}
+
+void censusHle(CensusSlot& slot, const char* module, const char* name, bool implemented) {
+    if (CallStat* stat = censusCachedStat(slot)) {
+        stat->add();
+        return;
+    }
+    countHle(&slot, module, name, implemented, nullptr);
+}
 
 void censusHleBound(const char* module, const char* name, const char* image) {
-    countHle(module, name, true, image != nullptr ? image : "?");
+    countHle(nullptr, module, name, true, image != nullptr ? image : "?");
 }
 
 void censusHleNote(const char* module, const char* name, std::string note) {
@@ -238,8 +310,9 @@ std::string formatCensus() {
         std::vector<Line> lines;
         std::uint64_t calls = 0;
         for (const auto& [number, stat] : s.syscalls) {
-            lines.push_back({stat.count, stat.name, number, stat.implemented});
-            calls += stat.count;
+            const std::uint64_t count = stat.total();
+            lines.push_back({count, stat.name, number, stat.implemented});
+            calls += count;
         }
         sortLines(lines);
         out += section("syscalls", calls, lines);
@@ -251,8 +324,9 @@ std::string formatCensus() {
         lines.clear();
         calls = 0;
         for (const auto& [key, stat] : s.hle) {
-            lines.push_back({stat.count, stat.name, 0, stat.implemented, stat.note, stat.image});
-            calls += stat.count;
+            const std::uint64_t count = stat.total();
+            lines.push_back({count, stat.name, 0, stat.implemented, stat.note, stat.image});
+            calls += count;
         }
         sortLines(lines);
         out += "\n" + section("hle", calls, lines);
@@ -387,6 +461,9 @@ void resetCensus() {
     CensusResetFn spu_reset = nullptr;
     {
         std::lock_guard lock(s.mutex);
+        // Callers must not be counting while the census is reset (tests only); the new generation makes their next
+        // call look the counters up again.
+        g_generation.fetch_add(1, std::memory_order_relaxed);
         s.syscalls.clear();
         s.hle_slots.clear();
         s.hle.clear();

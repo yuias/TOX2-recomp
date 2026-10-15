@@ -15252,6 +15252,52 @@ void testSplitDefaultPathCount() {
     tox2::setLogSink({});
 }
 
+// Two slot holders call one implemented import and one syscall in parallel without the census mutex: both counts stay
+// exact, and a reset makes the cached counters start again from zero.
+void testCensusConcurrentCount() {
+    HangGuard guard("testCensusConcurrentCount");
+    constexpr int kCalls = 100'000;
+    BoundaryEnv env;
+    std::uint8_t* base = env.base();
+    tox2::resetCensus();
+    const Tox2ImportInfo imports[] = {{0x00800000, 0x8461e528, "sysPrxForUser", "sys_time_get_system_time"}};
+    tox2::installImports(imports, 1);
+    auto a = makeCaller(0x01000000);
+    auto b = makeCaller(0x01000001);
+
+    const auto count_line = [](std::string_view prefix, std::uint64_t count) {
+        return tox2::formatCensus().find(std::format("{}: {} [impl]", prefix, count)) != std::string::npos;
+    };
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    std::vector<std::thread> threads;
+    for (tox2::GuestThread* caller : {a.get(), b.get()}) {
+        threads.push_back(slotThread(1001, [&, caller] {
+            tox2::ppuSlots().acquire();
+            Tox2PpuContext* ctx = &caller->context();
+            for (int n = 0; n < kCalls; n++) {
+                tox2HleCall(ctx, base, 0);
+                ctx->gpr[11] = 147;
+                tox2Syscall(ctx, base, 0x10000);
+            }
+            tox2::ppuSlots().release();
+        }));
+    }
+    joinAll(threads);
+    CHECK(count_line("sysPrxForUser::sys_time_get_system_time", 2 * kCalls));
+    CHECK(count_line("sc 147 sys_time_get_timebase_frequency", 2 * kCalls));
+
+    tox2::resetCensus();
+    Tox2PpuContext* ctx = &a->context();
+    for (int n = 0; n < 5; n++) {
+        tox2HleCall(ctx, base, 0);
+        ctx->gpr[11] = 147;
+        tox2Syscall(ctx, base, 0x10000);
+    }
+    CHECK(count_line("sysPrxForUser::sys_time_get_system_time", 5));
+    CHECK(count_line("sc 147 sys_time_get_timebase_frequency", 5));
+    tox2::resetCensus();
+}
+
 TOX2_PPU_FUNC(hostRegistryProbe) {
     (void)ctx;
     (void)base;
@@ -16573,6 +16619,7 @@ int main(int argc, char** argv) {
     testSplitGuestCallbackReleasesKernel();
     testSplitSysutilCallbacks();
     testSplitDefaultPathCount();
+    testCensusConcurrentCount();
     testHostFunctionConcurrentLookup();
     testSplitGcmInterruptStart();
     testSplitSailServiceStart();

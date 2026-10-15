@@ -228,6 +228,9 @@ constexpr SyscallEntry kSyscalls[] = {
 
 static_assert(std::ranges::is_sorted(kSyscalls, {}, &SyscallEntry::number), "syscall table must be sorted by number");
 
+// One census slot per table entry, so a syscall issued by several PPU threads counts without the census mutex.
+CensusSlot g_census_slots[std::size(kSyscalls)];
+
 }  // namespace
 
 std::span<const SyscallEntry> syscallTable() { return kSyscalls; }
@@ -247,7 +250,11 @@ void tox2Syscall(Tox2PpuContext* ctx, uint8_t* base, uint32_t site) {
     const tox2::SyscallEntry* entry = tox2::findSyscall(number);
     const char* name = entry != nullptr ? entry->name : nullptr;
     const bool implemented = entry != nullptr && entry->handler != nullptr;
-    tox2::censusSyscall(number, name, implemented);
+    if (entry != nullptr) {
+        tox2::censusSyscall(tox2::g_census_slots[entry - tox2::kSyscalls], number, name, implemented);
+    } else {
+        tox2::censusSyscall(number, name, implemented);
+    }
 
     if (implemented) {
         const tox2::ActivityScope activity(name != nullptr ? name : "syscall ?");

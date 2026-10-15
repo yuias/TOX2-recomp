@@ -38,6 +38,7 @@ struct InstalledImport {
     std::uint32_t default_calls = 0;
     std::uint32_t bound_opd = 0;  // descriptor of the recompiled export this import calls; 0: not bound
     std::string bound_image;
+    CensusSlot census;  // lets concurrent PPU threads count calls without the census mutex
 };
 
 // The import table of a module other than the main executable.
@@ -202,7 +203,7 @@ void runImport(InstalledImport& import, Tox2PpuContext* ctx, std::uint8_t* base)
     }
 
     const bool implemented = import.handler != nullptr;
-    censusHle(import.module, import.name, implemented);
+    censusHle(import.census, import.module, import.name, implemented);
 
     if (implemented) {
         const ActivityScope activity(import.name != nullptr ? import.name : "hle ?");
