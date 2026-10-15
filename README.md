@@ -14,9 +14,10 @@ recompilation project of another game and are being pointed at this one. The exe
 firmware's SPURS module (`libsre`) are recovered, recompiled to C and linked, and so are the SPU
 programs (the SPURS kernels and policy modules in libsre and the game's 8 embedded SPU images). `tox2_game`
 runs the game's start-up code, SPURS on recompiled SPU code, the Edge LZMA task that inflates the game's
-archive items and the engine tasks, and reaches the game's frame loop; the game cannot be played. A
-headless run stops at about 53 s at a gap in the recovered PPU jump tables, the sound engine's SPU thread
-(raw SPU thread group) does not start, and the Bink movies are not decoded. See [Status](docs/status.md).
+archive items and the engine tasks, and runs the game's frame loop. The game can be started from the
+title screen and played, with picture and sound; a full play-through has not been checked. The Bink
+movies are decoded by the game's own recompiled code; the attract movie is still drawn with a
+placeholder texture. See [Status](docs/status.md).
 
 ## Prerequisites
 
@@ -126,10 +127,11 @@ executable, so with `--elf generated/inputs/EBOOT.elf` it is the file the build 
 explicitly.
 
 In the headless runs so far the game ran its start-up code, libsre built its SPURS instance, the SPURS
-kernels and the game's SPU tasks ran, and the game reached its frame loop; a run with `--seconds 30` ends
-at the watchdog and a longer one stops at about 53 s. Nothing visible has been drawn (the frames dumped
-so far are blank) and nothing has been heard.
-[Status](docs/status.md) has the details. Closing the window ends the run. Game data and
+kernels and the game's SPU tasks ran, and the game reached its frame loop; a run with `--seconds 30` or
+`--seconds 180` ends at the watchdog. The renderer draws the game's frames: the frames dumped in the first
+30 s are a plain grey loading screen, and those of longer runs show the legal notice, the
+downloadable-content dialog and the title screen. In a windowed run the game can be played past the
+title screen with a gamepad or the keyboard, with sound. [Status](docs/status.md) has the details. Closing the window ends the run. Game data and
 saves are written to `build/release/hdd`; `tools/build.ps1 -Clean` deletes them together with the
 rest of `build/release`.
 

@@ -3,11 +3,13 @@
 What works on the pinned executable today, and what does not. The [top-level README](../README.md)
 has the short version.
 
-The game does not run in any useful sense yet. `tox2_game` loads the executable and the firmware's SPURS
+The game can be started and played; a full play-through has not been checked. `tox2_game` loads the executable and the firmware's SPURS
 module (`libsre`), runs the game's start-up code on real guest threads, runs SPURS (libsre's recompiled
 PPU code and the recompiled SPU programs of the kernels and the game's tasks), loads the first archive
-items and reaches the game's frame loop. Headless runs of 30 s and of 180 s end at the watchdog (no longer run has
-been made). Nothing visible has been drawn and nothing has been heard.
+items and reaches the game's frame loop. Headless runs of 30 s and of 180 s end at the watchdog. The renderer draws
+the game's frames: dumped frames show the legal notice, the downloadable-content dialog, the "Presented By" cards and
+the title screen (see [Components](#components)), and in a windowed run the game is played past the title screen
+with picture and sound.
 This is work in progress.
 The code was taken over from an earlier recompilation project of another game and is being pointed
 at *Tales of Xillia 2* (BLJS10188); the parts that this game has not reached have never run against
@@ -44,7 +46,7 @@ The headless run (`--no-window --seconds 30`; the `game_boot` test uses the same
 - The main thread passes the LZMA load and writes `tox2: first hle cellSpurs::cellSpursEventFlagTryWait`
   (at 12 to 14 s with the installed data, 14 to 16 s from an empty `--hdd-dir`). That is the `game_boot`
   milestone. The game then runs its frame loop: 8,208 flips and 7,794 `cellPadGetData` calls in the 30 s
-  run, executed by the fake RSX. No renderer runs in a headless run.
+  run, executed by the fake RSX. The renderer is off in this run (`--no-window` without `--dump-frames`).
 - A PPU worker busy-waits for the whole run (`sys_ppu_thread_yield`, `sys_lwmutex_lock` and
   `sys_lwmutex_unlock` are about 62 million calls each in 30 s). The SPU side of the run is described in
   [SPU usage](spu.md#what-the-current-run-reaches), which also quotes the whole `census: spu` block.
@@ -153,7 +155,7 @@ depend on scheduling):
 
 ## Components
 
-These exist and are generic, but were written for and checked against the earlier game only:
+These exist and are generic. They came from the earlier game; each entry says what has been run with this game:
 
 - Analysis tools for the PPU executable: ELF summary, SPU probe, disassembler, Ghidra cross-check,
   NID and syscall name tables, function recovery (see [Analysis tools](analysis-tools.md) and
