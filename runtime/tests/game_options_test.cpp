@@ -470,13 +470,19 @@ void testOptionTable() {
     for (const OptionSpec& spec : specs) {
         if (spec.persisted) persisted.push_back(spec.name);
     }
-    CHECK((persisted == std::vector<std::string_view>{"frame-limit", "resolution-scale", "aa-mode"}));
+    CHECK((persisted == std::vector<std::string_view>{"frame-limit", "resolution-scale", "aa-mode",
+                                                      "anisotropic-filter", "window-size", "fullscreen"}));
     for (const OptionSpec& spec : specs) {
         if (spec.name == "frame-limit") CHECK(spec.kind == OptionKind::String && spec.needs == OptionNeeds::Nothing);
         if (spec.name == "resolution-scale") {
             CHECK(spec.kind == OptionKind::Unsigned && spec.needs == OptionNeeds::Renderer);
         }
         if (spec.name == "aa-mode") CHECK(spec.kind == OptionKind::String && spec.needs == OptionNeeds::Renderer);
+        if (spec.name == "anisotropic-filter") {
+            CHECK(spec.kind == OptionKind::String && spec.needs == OptionNeeds::Renderer);
+        }
+        if (spec.name == "window-size") CHECK(spec.kind == OptionKind::String && spec.needs == OptionNeeds::Window);
+        if (spec.name == "fullscreen") CHECK(spec.kind == OptionKind::Switch && spec.needs == OptionNeeds::Window);
         if (spec.name == "rsx-capture") CHECK(spec.kind == OptionKind::FrameList);
         if (spec.name == "dump-guest") CHECK(spec.kind == OptionKind::StringList);
     }
@@ -484,14 +490,19 @@ void testOptionTable() {
     for (const OptionSpec& spec : specs) {
         const bool renderer = spec.name == "dump-frames" || spec.name == "dump-frames-every" ||
                               spec.name == "shader-cache" || spec.name == "vk-validation" ||
-                              spec.name == "resolution-scale" || spec.name == "aa-mode";
-        const OptionNeeds expected = renderer                   ? OptionNeeds::Renderer
-                                     : spec.name == "pad-probe" ? OptionNeeds::Window
-                                                                : OptionNeeds::Nothing;
+                              spec.name == "resolution-scale" || spec.name == "aa-mode" ||
+                              spec.name == "anisotropic-filter";
+        const bool window = spec.name == "pad-probe" || spec.name == "window-size" || spec.name == "fullscreen";
+        const OptionNeeds expected = renderer ? OptionNeeds::Renderer
+                                     : window ? OptionNeeds::Window
+                                              : OptionNeeds::Nothing;
         CHECK(spec.needs == expected);
     }
     CHECK(tox2::gameOptionsUsage().starts_with("usage: tox2_game "));
     CHECK(tox2::gameOptionsUsage().find("--config FILE | --no-config") != std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--anisotropic-filter off|2|4|8|16]") != std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--window-size 720p|1080p|1440p|2160p]") != std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--fullscreen on|off]") != std::string_view::npos);
 }
 
 void testDefaultLines() {
@@ -506,6 +517,8 @@ void testDefaultLines() {
         CHECK(windowed->host_priorities && windowed->yield_backoff && windowed->lwmutex_fast_path);
         CHECK(windowed->dump_frames_every == 1 && windowed->seconds == 0 && !windowed->log_level);
         CHECK(windowed->dialog_answer.empty() && windowed->rsx_capture_frames.empty() && windowed->dumps.empty());
+        CHECK(windowed->anisotropy == 1 && windowed->window_size == tox2::WindowSizePreset::Size720p &&
+              !windowed->fullscreen);
     }
 
     const auto headless = parseLine(std::vector<std::string>{"--vfs-config", "v.json", "--no-window"});
@@ -615,8 +628,8 @@ void testErrorMessages() {
     CHECK(rejectedLine({}, "error: --game-dir or --vfs-config is required\n"));
     CHECK(rejectedLine({"--hdd-dir", "h"}, "error: --game-dir or --vfs-config is required\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--render", "none", "--aa-mode", "msaa"},
-                       "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode and "
-                       "--vk-validation need --render vulkan\n"));
+                       "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode, "
+                       "--anisotropic-filter and --vk-validation need --render vulkan\n"));
     // The frame list reports its format after the missing value, as it always has.
     CHECK(rejectedLine({"--game-dir", "g", "--rsx-capture"},
                        "error: --rsx-capture needs a value\n"
@@ -656,8 +669,8 @@ void testErrorMessages() {
 void testCheckOrder() {
     // The first combined check in the fixed order wins.
     CHECK(rejectedLine({"--game-dir", "g", "--render", "none", "--aa-mode", "msaa", "--pad", "keyboard"},
-                       "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode and "
-                       "--vk-validation need --render vulkan\n"));
+                       "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode, "
+                       "--anisotropic-filter and --vk-validation need --render vulkan\n"));
     // A bad option value is found before a combined check.
     CHECK(rejectedLine({"--game-dir", "g", "--render", "none", "--aa-mode", "bogus"},
                        "error: --aa-mode needs supersample|msaa\n"));
@@ -893,8 +906,8 @@ void testConfigFileErrors() {
     // The note is about the file that was read, not about where the problem is.
     writeFile(file, R"({"game_dir": "g"})");
     CHECK(dirs.error({"--no-window", "--resolution-scale", "2"}).message ==
-          "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode and "
-          "--vk-validation need --render vulkan\n" +
+          "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode, "
+          "--anisotropic-filter and --vk-validation need --render vulkan\n" +
                   note);
     // A check on a single option gets no note.
     writeFile(file, R"({"seconds": 1})");
@@ -951,6 +964,88 @@ void testConfigFileDroppedKeys() {
     CHECK(dirs.error({}).message == "error: " + file.string() + ": dump_frames_every needs a positive integer\n");
 }
 
+void testWindowAndFilterOptions() {
+    for (const auto& [text, level] :
+         {std::pair<const char*, std::uint32_t>{"off", 1}, {"2", 2}, {"4", 4}, {"8", 8}, {"16", 16}}) {
+        const auto parsed = parseLine({"--game-dir", "g", "--anisotropic-filter", text});
+        CHECK(parsed && parsed->anisotropy == level);
+    }
+    for (const auto& [text, preset] :
+         {std::pair<const char*, tox2::WindowSizePreset>{"720p", tox2::WindowSizePreset::Size720p},
+          {"1080p", tox2::WindowSizePreset::Size1080p},
+          {"1440p", tox2::WindowSizePreset::Size1440p},
+          {"2160p", tox2::WindowSizePreset::Size2160p}}) {
+        const auto parsed = parseLine({"--game-dir", "g", "--window-size", text});
+        CHECK(parsed && parsed->window_size == preset);
+    }
+    const auto on = parseLine({"--game-dir", "g", "--fullscreen", "on"});
+    CHECK(on && on->fullscreen);
+    const auto off = parseLine({"--game-dir", "g", "--fullscreen", "off"});
+    CHECK(off && !off->fullscreen);
+    // The last occurrence wins, like the other single-value options.
+    const auto repeated = parseLine({"--game-dir", "g", "--window-size", "1080p", "--window-size", "1440p"});
+    CHECK(repeated && repeated->window_size == tox2::WindowSizePreset::Size1440p);
+
+    CHECK(rejectedLine({"--game-dir", "g", "--anisotropic-filter", "3"},
+                       "error: --anisotropic-filter needs off, 2, 4, 8 or 16\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--anisotropic-filter", "1"},
+                       "error: --anisotropic-filter needs off, 2, 4, 8 or 16\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--window-size", "1080P"},
+                       "error: --window-size needs 720p, 1080p, 1440p or 2160p\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--window-size", "4k"},
+                       "error: --window-size needs 720p, 1080p, 1440p or 2160p\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--fullscreen", "yes"}, "error: --fullscreen needs on or off\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--fullscreen"}, "error: --fullscreen needs a value\n"));
+
+    // The window options need the window, even when they only restate the defaults.
+    const char* const need_window = "error: --window-size and --fullscreen need the window\n";
+    CHECK(rejectedLine({"--game-dir", "g", "--fullscreen", "on", "--no-window"}, need_window));
+    CHECK(rejectedLine({"--game-dir", "g", "--fullscreen", "off", "--no-window"}, need_window));
+    CHECK(rejectedLine({"--game-dir", "g", "--window-size", "1080p", "--no-window"}, need_window));
+    CHECK(rejectedLine({"--game-dir", "g", "--window-size", "1080p", "--render", "none"}, need_window));
+    // The filter is a renderer option.
+    CHECK(rejectedLine({"--game-dir", "g", "--anisotropic-filter", "16", "--no-window"},
+                       "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode, "
+                       "--anisotropic-filter and --vk-validation need --render vulkan\n"));
+    const auto dumping =
+            parseLine({"--game-dir", "g", "--no-window", "--dump-frames", "d", "--anisotropic-filter", "4"});
+    CHECK(dumping && dumping->anisotropy == 4);
+
+    // A saved setting is dropped, not rejected, by a run that cannot use it.
+    ConfigDirs dirs("tox2_game_options_cfg_new_options_");
+    const stdfs::path file = dirs.work / "config.json";
+    writeFile(file, R"({"game_dir": "g", "anisotropic_filter": 16, "window_size": "1440p", "fullscreen": true})");
+    const auto windowed = dirs.parse({});
+    CHECK(windowed && windowed->anisotropy == 16 && windowed->window_size == tox2::WindowSizePreset::Size1440p &&
+          windowed->fullscreen && windowed->config_ignored.empty());
+    const auto headless = dirs.parse({"--no-window"});
+    CHECK(headless && headless->anisotropy == 1 && headless->window_size == tox2::WindowSizePreset::Size720p &&
+          !headless->fullscreen);
+    if (headless) {
+        CHECK((headless->config_ignored ==
+               std::vector<std::string>{"anisotropic_filter ignored: the run has no renderer",
+                                        "window_size ignored: the run has no window",
+                                        "fullscreen ignored: the run has no window"}));
+    }
+    // A renderer without a window keeps the filter and drops the window keys.
+    const auto frames = dirs.parse({"--no-window", "--dump-frames", "d"});
+    CHECK(frames && frames->anisotropy == 16 && !frames->fullscreen && frames->config_ignored.size() == 2);
+    // The same options on the command line keep their errors, and the file's values are checked like any other.
+    CHECK(dirs.error({"--no-window", "--fullscreen", "on"}).print_usage);
+    writeFile(file, R"({"game_dir": "g", "anisotropic_filter": 3})");
+    CHECK(dirs.error({}).message == "error: " + file.string() + ": anisotropic_filter needs off, 2, 4, 8 or 16\n");
+    writeFile(file, R"({"game_dir": "g", "anisotropic_filter": "off", "window_size": "huge"})");
+    const tox2::OptionsError bad_size = dirs.error({});
+    CHECK(bad_size.message == "error: " + file.string() + ": window_size needs 720p, 1080p, 1440p or 2160p\n" &&
+          !bad_size.print_usage);
+    writeFile(file, R"({"game_dir": "g", "fullscreen": "maybe"})");
+    CHECK(dirs.error({}).message.starts_with("error: " + file.string() + ": "));
+    // A key given on the command line replaces the file's value.
+    writeFile(file, R"({"game_dir": "g", "window_size": "2160p", "fullscreen": true})");
+    const auto over = dirs.parse({"--window-size", "1080p", "--fullscreen", "off"});
+    CHECK(over && over->window_size == tox2::WindowSizePreset::Size1080p && !over->fullscreen);
+}
+
 void testConfigApply() {
     // Only the process state changes here; the lines themselves go to the log.
     ConfigDirs dirs("tox2_game_options_cfg_apply_");
@@ -997,6 +1092,7 @@ int main() {
     testConfigFileLookup();
     testConfigFileErrors();
     testConfigFileDroppedKeys();
+    testWindowAndFilterOptions();
     testConfigApply();
     std::printf("game options tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;

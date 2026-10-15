@@ -28,6 +28,8 @@ constexpr std::string_view kUsage =
         "                [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]\n"
         "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
         "                [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]\n"
+        "                [--anisotropic-filter off|2|4|8|16] [--window-size 720p|1080p|1440p|2160p]\n"
+        "                [--fullscreen on|off]\n"
         "                [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off]\n"
         "                [--ppu-threads legacy|1|2] [--lwmutex-fast-path on|off] [--lwmutex-watch]\n"
         "                [--dump-guest ADDR:SIZE:FILE]...\n"
@@ -56,6 +58,8 @@ struct ParseState {
     bool dump_every_given = false;
     bool resolution_scale_given = false;
     bool aa_mode_given = false;
+    bool anisotropy_given = false;
+    bool window_option_given = false;  // --window-size or --fullscreen
     bool pad_given = false;
     bool audio_given = false;
     std::string pad_script_text;
@@ -274,6 +278,28 @@ bool setAaMode(ParseState& state, std::string_view label, const RawItem& item, s
     return true;
 }
 
+bool setAnisotropicFilter(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    const std::optional<std::uint32_t> level = parseAnisotropy(item.text);
+    if (!level) return fail(error, std::format("error: {} needs off, 2, 4, 8 or 16\n", label));
+    state.options.anisotropy = *level;
+    state.anisotropy_given = true;
+    return true;
+}
+
+bool setWindowSize(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    const std::optional<WindowSizePreset> preset = parseWindowSize(item.text);
+    if (!preset) return fail(error, std::format("error: {} needs 720p, 1080p, 1440p or 2160p\n", label));
+    state.options.window_size = *preset;
+    state.window_option_given = true;
+    return true;
+}
+
+bool setFullscreen(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    if (!setSwitch<&GameOptions::fullscreen>(state, label, item, error)) return false;
+    state.window_option_given = true;
+    return true;
+}
+
 // Value errors are reported in this order. An option that takes a value is any kind but Flag. `needs` is also
 // set on options that are not persisted: a key of the config file that the run cannot use is left out.
 constexpr auto kEntries = std::to_array<OptionEntry>({
@@ -313,6 +339,9 @@ constexpr auto kEntries = std::to_array<OptionEntry>({
         {{"frame-limit", OptionKind::String, true, OptionNeeds::Nothing}, setFrameLimit},
         {{"resolution-scale", OptionKind::Unsigned, true, OptionNeeds::Renderer}, setResolutionScale},
         {{"aa-mode", OptionKind::String, true, OptionNeeds::Renderer}, setAaMode},
+        {{"anisotropic-filter", OptionKind::String, true, OptionNeeds::Renderer}, setAnisotropicFilter},
+        {{"window-size", OptionKind::String, true, OptionNeeds::Window}, setWindowSize},
+        {{"fullscreen", OptionKind::Switch, true, OptionNeeds::Window}, setFullscreen},
 });
 
 constexpr auto kSpecs = [] {
@@ -524,14 +553,18 @@ std::optional<OptionsError> settle(ParseState& state, const std::string& file_no
     opt.window = shape.window;
     opt.render_vulkan = shape.render_vulkan;
     const bool render_option = !opt.dump_frames.empty() || state.dump_every_given || !opt.shader_cache.empty() ||
-                               opt.vk_validation || state.resolution_scale_given || state.aa_mode_given;
+                               opt.vk_validation || state.resolution_scale_given || state.aa_mode_given ||
+                               state.anisotropy_given;
     if (render_option && !opt.render_vulkan) {
         return combined(
-                "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode and "
-                "--vk-validation need --render vulkan\n");
+                "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode, "
+                "--anisotropic-filter and --vk-validation need --render vulkan\n");
     }
     // GameInput delivers readings to the foreground window only, so unattended runs have nothing to probe.
     if (opt.pad_probe && !opt.window) return combined("error: --pad-probe needs the window\n");
+    if (state.window_option_given && !opt.window) {
+        return combined("error: --window-size and --fullscreen need the window\n");
+    }
     // A window or a script is what makes a keyboard pad useful, so either one selects it by default.
     const bool pad_input = opt.window || !opt.pad_script.empty();
     if (!state.pad_given) opt.pad = opt.window ? "keyboard+gamepad" : pad_input ? "keyboard" : "neutral";

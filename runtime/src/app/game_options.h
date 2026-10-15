@@ -18,6 +18,7 @@
 #include "core/threads.h"
 #include "input/pad_script.h"
 #include "render/render_scale.h"
+#include "render/window_size.h"
 #include "rsx/rsx_thread.h"
 
 namespace tox2 {
@@ -41,6 +42,9 @@ struct GameOptions {
     std::uint32_t dump_frames_every = 1;
     std::uint32_t resolution_scale = 1;
     AaMode aa_mode = AaMode::Msaa;
+    std::uint32_t anisotropy = 1;  // 1 = off, else 2, 4, 8, 16
+    WindowSizePreset window_size = WindowSizePreset::Size720p;
+    bool fullscreen = false;
     std::vector<std::uint32_t> rsx_capture_frames;
     std::vector<GuestDumpSpec> dumps;
 
