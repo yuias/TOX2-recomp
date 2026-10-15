@@ -605,6 +605,9 @@ void testValues() {
         CHECK(all->resolution_scale == 3 && all->aa_mode == tox2::AaMode::Supersample && all->dump_frames_every == 4);
         CHECK(all->dialog_answer == "no");
     }
+    // dlaa parses in every build; whether it can run is the renderer's decision.
+    const auto dlaa = parseLine(std::vector<std::string>{"--game-dir", "g", "--aa-mode", "dlaa"});
+    CHECK(dlaa && dlaa->aa_mode == tox2::AaMode::Dlaa);
     const auto one = parseLine(std::vector<std::string>{"--game-dir", "g", "--ppu-threads", "1"});
     CHECK(one && one->ppu_threads == tox2::PpuThreadsMode::Split1);
     const auto two = parseLine(std::vector<std::string>{"--game-dir", "g", "--ppu-threads", "2"});
@@ -661,7 +664,8 @@ void testErrorMessages() {
                        "error: --pad needs none, neutral, keyboard, gamepad or keyboard+gamepad\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--audio", "alsa"}, "error: --audio needs none or wasapi\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--render", "opengl"}, "error: --render needs none or vulkan\n"));
-    CHECK(rejectedLine({"--game-dir", "g", "--aa-mode", "none"}, "error: --aa-mode needs supersample|msaa\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--aa-mode", "none"}, "error: --aa-mode needs supersample|msaa|dlaa\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--aa-mode", "foo"}, "error: --aa-mode needs supersample|msaa|dlaa\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--host-priorities", "maybe"},
                        "error: --host-priorities needs on or off\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--yield-backoff", "1"}, "error: --yield-backoff needs on or off\n"));
@@ -688,7 +692,7 @@ void testCheckOrder() {
                        "--anisotropic-filter and --vk-validation need --render vulkan\n"));
     // A bad option value is found before a combined check.
     CHECK(rejectedLine({"--game-dir", "g", "--render", "none", "--aa-mode", "bogus"},
-                       "error: --aa-mode needs supersample|msaa\n"));
+                       "error: --aa-mode needs supersample|msaa|dlaa\n"));
     // An unknown argument is found while the line is collected, before any value is checked.
     CHECK(rejectedLine({"--game-dir", "g", "--log-level", "loud", "--bogus"}, "error: unknown argument --bogus\n"));
     // Every given occurrence is checked, so an invalid value is not hidden by a later valid one.
@@ -955,6 +959,9 @@ void testConfigFileDroppedKeys() {
     CHECK(dirs.error({"--no-window", "--resolution-scale", "2"})
                   .message.starts_with("error: --dump-frames, --dump-frames-every,"));
     CHECK(dirs.error({"--render", "none", "--aa-mode", "msaa"}).print_usage);
+    writeFile(file, R"({"game_dir": "g", "aa_mode": "dlaa"})");
+    const auto saved_dlaa = dirs.parse({"--no-window", "--dump-frames", "d"});
+    CHECK(saved_dlaa && saved_dlaa->aa_mode == tox2::AaMode::Dlaa && saved_dlaa->config_ignored.empty());
 
     // The rule covers every renderer-only and window-only key, hand-written ones included.
     writeFile(file, R"({"game_dir": "g", "shader_cache": "sc", "vk_validation": true, "dump_frames_every": 2,

@@ -27,7 +27,7 @@ constexpr std::string_view kUsage =
         "                [--pad-script FILE] [--pad-probe] [--audio none|wasapi] [--audio-dump FILE]\n"
         "                [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]\n"
         "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
-        "                [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]\n"
+        "                [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--vk-validation] [--no-window]\n"
         "                [--anisotropic-filter off|2|4|8|16] [--window-size 720p|1080p|1440p|2160p]\n"
         "                [--fullscreen on|off]\n"
         "                [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off]\n"
@@ -272,7 +272,7 @@ bool setResolutionScale(ParseState& state, std::string_view label, const RawItem
 
 bool setAaMode(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
     const std::optional<AaMode> mode = parseAaMode(item.text);
-    if (!mode) return fail(error, std::format("error: {} needs supersample|msaa\n", label));
+    if (!mode) return fail(error, std::format("error: {} needs supersample|msaa|dlaa\n", label));
     state.options.aa_mode = *mode;
     state.aa_mode_given = true;
     return true;

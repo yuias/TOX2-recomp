@@ -40,7 +40,7 @@ void printUsage() {
             "usage: tox2_rsxreplay CAPTURE [--out DIR]\n"
             "                      [--compare PNG [--compare-rect X,Y,W,H] [--max-diff N] [--max-mean X]\n"
             "                       [--max-differing P]]\n"
-            "                      [--resolution-scale N] [--aa-mode supersample|msaa] [--no-validation]\n"
+            "                      [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--no-validation]\n"
             "                      [--shader-cache DIR] [--repeat N] [--quiet]\n"
             "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture\n"
             "  --out DIR           write the displayed frame as DIR/<capture name>.png\n"
@@ -52,9 +52,10 @@ void printUsage() {
             "  --max-differing P   with --compare: fail when more than P percent of the pixels differ\n"
             "  --resolution-scale N  render every target at N times its guest size (1..4, default 1); the PNG is\n"
             "                      written at that size\n"
-            "  --aa-mode M         how anti-aliased surfaces are drawn: msaa (2-sample multisampling, default) or\n"
-            "                      supersample (one sample per memory-layout pixel); msaa falls back to supersample\n"
-            "                      on a device without 2-sample support\n"
+            "  --aa-mode M         how anti-aliased surfaces are drawn: msaa (2-sample multisampling, default),\n"
+            "                      supersample (one sample per memory-layout pixel) or dlaa (NVIDIA DLAA through\n"
+            "                      Streamline); dlaa falls back to msaa when it is unavailable, and msaa falls back\n"
+            "                      to supersample on a device without 2-sample support\n"
             "  --no-validation     do not enable the Vulkan validation layer\n"
             "  --shader-cache DIR  directory of the on-disk SPIR-V cache\n"
             "  --repeat N          replay and render the capture N times (N >= 1) with one memory view, builder and\n"
@@ -309,11 +310,18 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
 
 // The closing lines of every run: the replay summary, the unimplemented census and the validation result.
 int printSummary(std::size_t commands, std::size_t draws, std::size_t skipped, std::uint32_t resolution_scale,
-                 tox2::AaMode effective_aa_mode, const std::string& diff_text, const std::string& png_text,
-                 bool validation, bool validation_active, std::uint32_t validation_errors, int exit_code) {
+                 tox2::AaMode requested_aa_mode, tox2::AaMode effective_aa_mode, const std::string& diff_text,
+                 const std::string& png_text, bool validation, bool validation_active, std::uint32_t validation_errors,
+                 int exit_code) {
     const std::string scale_text = resolution_scale > 1 ? std::format(", resolution scale {}", resolution_scale) : "";
-    // The default (msaa) is not mentioned; a fallback to supersample is, so a log shows which mode drew the frame.
-    const std::string aa_text = effective_aa_mode == tox2::AaMode::Supersample ? ", aa supersample" : "";
+    // The default (msaa) is not mentioned unless it replaced a requested dlaa; any other effective mode is, so a log
+    // shows which mode drew the frame.
+    std::string aa_text;
+    if (requested_aa_mode == tox2::AaMode::Dlaa && effective_aa_mode != tox2::AaMode::Dlaa) {
+        aa_text = std::format(", aa {} (dlaa unavailable)", tox2::aaModeName(effective_aa_mode));
+    } else if (effective_aa_mode != tox2::AaMode::Msaa) {
+        aa_text = std::format(", aa {}", tox2::aaModeName(effective_aa_mode));
+    }
     std::printf("replay: %zu commands, %zu draws, %zu skipped%s%s%s\n", commands, draws, skipped, scale_text.c_str(),
                 aa_text.c_str(), diff_text.c_str());
     // The game's census omits an empty section; a replay says so explicitly.
@@ -379,7 +387,7 @@ int main(int argc, char** argv) {
         if (arg == "--aa-mode") {
             const std::optional<tox2::AaMode> mode = i + 1 < argc ? tox2::parseAaMode(argv[i + 1]) : std::nullopt;
             if (!mode) {
-                std::fputs("error: --aa-mode takes supersample|msaa\n", stderr);
+                std::fputs("error: --aa-mode takes supersample|msaa|dlaa\n", stderr);
                 return 2;
             }
             aa_mode = *mode;
@@ -445,6 +453,7 @@ int main(int argc, char** argv) {
     if (repeat != 0) {
         tox2::VkContextOptions timed_context_options;
         timed_context_options.validation = validation;
+        timed_context_options.streamline = aa_mode == tox2::AaMode::Dlaa;
         std::unique_ptr<tox2::VkContext> timed_context = tox2::createVkContext(timed_context_options, error);
         if (!timed_context) {
             std::fprintf(stderr, "error: --repeat needs a Vulkan device: %s\n", error.c_str());
@@ -458,8 +467,8 @@ int main(int argc, char** argv) {
         const std::string capture_name = std::filesystem::path(capture_path).stem().string();
         const bool ok = runTimedReplay(reader, capture_name, repeat, *timed_context, timed_options, timed);
         // The renderer is gone by now, so errors from its teardown are counted.
-        return printSummary(timed.commands, timed.draws, timed.skipped, resolution_scale, timed.aa_mode, {}, {},
-                            validation, timed_context->validationEnabled(), timed_context->validationErrorCount(),
+        return printSummary(timed.commands, timed.draws, timed.skipped, resolution_scale, aa_mode, timed.aa_mode, {},
+                            {}, validation, timed_context->validationEnabled(), timed_context->validationErrorCount(),
                             ok ? 0 : 1);
     }
 
@@ -484,6 +493,7 @@ int main(int argc, char** argv) {
     // Without a Vulkan device the replay still prints the command list and counts every draw as skipped.
     tox2::VkContextOptions context_options;
     context_options.validation = validation;
+    context_options.streamline = aa_mode == tox2::AaMode::Dlaa;
     std::unique_ptr<tox2::VkContext> context = tox2::createVkContext(context_options, error);
     if (!context) std::printf("render: unavailable: %s\n", error.c_str());
 
@@ -589,6 +599,6 @@ int main(int argc, char** argv) {
         validation_errors = context->validationErrorCount();
     }
 
-    return printSummary(commands.size(), draws, skipped, resolution_scale, effective_aa_mode, diff_text, png_text,
-                        validation, validation_active, validation_errors, exit_code);
+    return printSummary(commands.size(), draws, skipped, resolution_scale, aa_mode, effective_aa_mode, diff_text,
+                        png_text, validation, validation_active, validation_errors, exit_code);
 }
