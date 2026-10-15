@@ -386,7 +386,8 @@ struct LwmutexWatchState {
     std::vector<std::uint32_t> live;  // sorted struct addresses
     std::uint64_t max_live = 0;
     std::array<std::atomic<std::uint64_t>, kLwmutexWatchKindCount> hits{};
-    std::atomic<std::uint32_t> logged{0};
+    // Per kind so frequent harmless getllar hits cannot use up the log lines a write kind needs.
+    std::array<std::atomic<std::uint32_t>, kLwmutexWatchKindCount> logged{};
 };
 
 LwmutexWatchState& watchState() {
@@ -394,7 +395,7 @@ LwmutexWatchState& watchState() {
     return state;
 }
 
-constexpr std::uint32_t kWatchLogLimit = 16;
+constexpr std::uint32_t kWatchLogLimit = 16;  // per kind
 
 const char* watchKindName(LwmutexWatchKind kind) {
     switch (kind) {
@@ -429,7 +430,9 @@ void recordWatchHit(LwmutexWatchKind kind, std::uint32_t ea, std::uint32_t size,
                     std::optional<std::uint32_t> lwmutex) {
     LwmutexWatchState& state = watchState();
     state.hits[static_cast<std::size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
-    if (state.logged.fetch_add(1, std::memory_order_relaxed) >= kWatchLogLimit) return;
+    if (state.logged[static_cast<std::size_t>(kind)].fetch_add(1, std::memory_order_relaxed) >= kWatchLogLimit) {
+        return;
+    }
     std::string where = "no live struct";
     if (lwmutex) where = std::format("lwmutex {:#010x} offset {}", *lwmutex, static_cast<std::int64_t>(ea) - *lwmutex);
     const std::string lr_text = lr != 0 ? std::format("{:#x}", lr) : "unknown";
