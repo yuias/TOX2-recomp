@@ -122,7 +122,7 @@ Headless runs (`--no-window --seconds 20`) of the build from the generated code,
 - The `game_boot` test pinned the main thread's `first sc 350` line, the last `tox2: first ...` line
   it wrote in both kinds of run. It later pinned the SPU stop line and now pins the main thread's
   `cellSpursEventFlagTryWait` line (see [Tests](tests.md#the-game_boot-test)). The run goes past the
-  install copy, so the test run writes the 3 GB copy into the build directory's `game_hdd`.
+  install copy, so the test run writes the 3 GB copy into the build directory's `hdd`.
 - Worker `0x01000003` pushes four entries with the default-handled `_cellSpursLFQueuePushBody` and then
   calls `cellSpursEventFlagWait` (default-handled, returns success without writing anything) in a
   loop: 154 to 164 million calls in 20 s. `cellSpursQueuePushBody` was not called. `TLFILE.TLDAT` was

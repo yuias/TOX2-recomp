@@ -52,7 +52,7 @@ which of them is empty. `-EbootBin` also sets `TOX2_EBOOT_ELF`, to the produced
 `generated/inputs/EBOOT.elf`, unless `-EbootElf` is given. `-Pup` is needed because the run loads libsre:
 the test passes `--libsre generated/inputs/libsre.reloc.elf`. It runs
 `tox2_game --game-dir <dir> --elf <elf> --libsre <libsre.reloc.elf>` with the arguments from the pin
-file (the run keeps its game data in `build/<preset>/game_hdd`), with a 60 s time limit, and passes when
+file (the run keeps its game data in `build/<preset>/hdd`), with a 60 s time limit, and passes when
 the output matches the milestone regular expression. The exit code is not checked. The pin file passes
 `--no-config`, so a `config.json` in the working directory or next to `tox2_game` never changes the
 run; do the same in every other scripted run of `tox2_game`.
@@ -60,7 +60,7 @@ run; do the same in every other scripted run of `tox2_game`.
 The pin file `cmake/game_boot.cmake` holds the arguments and the milestone:
 
 ```cmake
-set(TOX2_GAME_BOOT_ARGS "--no-config --no-window --seconds 30 --hdd-dir \"${CMAKE_BINARY_DIR}/game_hdd\"")
+set(TOX2_GAME_BOOT_ARGS "--no-config --no-window --seconds 30 --hdd-dir \"${CMAKE_BINARY_DIR}/hdd\"")
 set(TOX2_GAME_BOOT_MILESTONE "\\[t 01000000\\] tox2: first hle cellSpurs::cellSpursEventFlagTryWait")
 ```
 
