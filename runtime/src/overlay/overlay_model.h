@@ -64,7 +64,7 @@ struct OverlayLockRate {
 };
 
 // A Settings choice the user made. The value is the option's command-line form.
-enum class OverlaySetting : std::uint8_t { FrameLimit, ResolutionScale, AaMode };
+enum class OverlaySetting : std::uint8_t { FrameLimit, ResolutionScale, AaMode, Anisotropy };
 
 // Every member may be empty: the panel then shows "n/a" or disables the control. The providers are
 // called on the renderer's thread and must be safe from any thread.
@@ -144,6 +144,9 @@ struct OverlayState {
     std::optional<AaMode> aa_mode;               // last effective mode the renderer reported; unset = unknown
     bool msaa_available = false;                 // last value the renderer reported; AaMode::Msaa is selectable
     std::optional<AaMode> aa_mode_request;       // set by the panel, taken by DebugOverlay::onFlip; unset = none
+    std::uint32_t anisotropy = 0;                // last effective level the renderer reported (1 = off); 0 = unknown
+    float max_anisotropy = 0.0f;                 // device maximum the renderer reported; 0 = unsupported or unknown
+    std::uint32_t anisotropy_request = 0;        // set by the panel, taken by DebugOverlay::onFlip; 0 = none
 
     // Calls the providers: audio at most every 250 ms, unimplemented every 500 ms, the rest every call.
     // The audio and unimplemented snapshots take locks or copy maps, which a per-frame call would not need.

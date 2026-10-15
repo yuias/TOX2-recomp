@@ -122,9 +122,11 @@ PresentOverlayRequests takePresentRequests(OverlayState& state) {
     requests.dump_display = state.dump_requested;
     requests.resolution_scale = state.resolution_scale_request;
     requests.aa_mode = state.aa_mode_request;
+    requests.anisotropy = state.anisotropy_request;
     state.dump_requested = false;
     state.resolution_scale_request = 0;
     state.aa_mode_request.reset();
+    state.anisotropy_request = 0;
     return requests;
 }
 

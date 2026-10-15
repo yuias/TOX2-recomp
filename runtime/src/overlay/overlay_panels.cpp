@@ -152,6 +152,39 @@ void drawAntiAliasing(OverlayState& state, const OverlaySources& sources) {
     ImGui::EndDisabled();
 }
 
+const char* anisotropyLabel(std::uint32_t level) {
+    switch (level) {
+        case 1: return "Off";
+        case 2: return "2x";
+        case 4: return "4x";
+        case 8: return "8x";
+        case 16: return "16x";
+        default: return "?";
+    }
+}
+
+// Same pending-request display as the scale combo. A level of 0 means no renderer reports one; a device maximum
+// below 2 means the samplerAnisotropy feature is missing.
+void drawAnisotropy(OverlayState& state, const OverlaySources& sources) {
+    const bool unsupported = state.anisotropy != 0 && state.max_anisotropy < 2.0f;
+    ImGui::BeginDisabled(state.anisotropy == 0 || unsupported);
+    const std::uint32_t shown = state.anisotropy_request != 0 ? state.anisotropy_request : state.anisotropy;
+    const char* preview = unsupported ? "unavailable on this device" : shown != 0 ? anisotropyLabel(shown) : "n/a";
+    if (ImGui::BeginCombo("Anisotropic filtering", preview)) {
+        for (const std::uint32_t level : kAnisotropyLevels) {
+            const bool selectable = level == 1 || static_cast<float>(level) <= state.max_anisotropy;
+            ImGui::BeginDisabled(!selectable);
+            if (ImGui::Selectable(anisotropyLabel(level), level == shown) && level != shown) {
+                state.anisotropy_request = level;
+                if (sources.setting_changed) sources.setting_changed(OverlaySetting::Anisotropy, anisotropyName(level));
+            }
+            ImGui::EndDisabled();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+}
+
 const char* flipLimitLabel(RsxFlipLimit limit) {
     switch (limit) {
         case RsxFlipLimit::Vsync: return "VSync (game flip mode)";
@@ -192,13 +225,12 @@ void drawSettings(OverlayState& state, const OverlaySources& sources) {
 
     drawResolutionScale(state, sources);
     drawAntiAliasing(state, sources);
+    drawAnisotropy(state, sources);
 
     // Not wired to anything yet; shown so the layout of the finished panel is visible.
     ImGui::SeparatorText("(not implemented)");
     ImGui::BeginDisabled();
-    int anisotropy = 1;
     float volume = 1.0f;
-    ImGui::SliderInt("Anisotropic filtering", &anisotropy, 1, 16, "%dx");
     ImGui::SliderFloat("Volume", &volume, 0.0f, 1.0f, "%.2f");
     ImGui::EndDisabled();
 }

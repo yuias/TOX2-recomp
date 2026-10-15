@@ -100,6 +100,8 @@ PresentOverlayRequests DebugOverlay::onFlip(const PresentFrameInfo& info) {
     state_.resolution_scale = info.resolution_scale;
     state_.aa_mode = info.aa_mode;
     state_.msaa_available = info.msaa_available;
+    state_.anisotropy = info.anisotropy;
+    state_.max_anisotropy = info.max_anisotropy;
     return takePresentRequests(state_);
 }
 

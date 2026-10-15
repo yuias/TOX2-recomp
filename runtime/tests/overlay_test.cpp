@@ -583,23 +583,116 @@ void testAntiAliasingPanel() {
     }
 }
 
+void testAnisotropyPanel() {
+    SettingCalls recorded;
+    tox2::OverlaySources sources = makeFakeSources();
+    recorded.attach(sources);
+    constexpr float kProbeX = 60.0f;
+    constexpr float kWindowBottom = 720.0f;
+
+    {
+        // Not reported, or reported as unsupported: the combo is disabled and nothing can be requested.
+        struct Case {
+            std::uint32_t level;
+            float max;
+        };
+        for (const Case disabled : {Case{0, 0.0f}, Case{0, 16.0f}, Case{1, 0.0f}}) {
+            tox2::OverlayState state;
+            state.anisotropy = disabled.level;
+            state.max_anisotropy = disabled.max;
+            SettingsProbe probe(state, sources);
+            if (probe.window() == nullptr) continue;
+            CHECK(!probe.findHovered(probe.window()->GetID("Anisotropic filtering"), kProbeX, 10.0f, kWindowBottom));
+            CHECK(!probe.window()->ScrollbarY && !probe.window()->ScrollbarX);
+            CHECK(state.anisotropy_request == 0);
+            CHECK(recorded.calls.empty());
+        }
+    }
+
+    for (const float max_anisotropy : {16.0f, 8.0f}) {
+        tox2::OverlayState state;
+        state.anisotropy = 1;
+        state.max_anisotropy = max_anisotropy;
+        SettingsProbe probe(state, sources);
+        if (probe.window() == nullptr) return;
+        const std::optional<ImVec2> combo =
+                probe.findHovered(probe.window()->GetID("Anisotropic filtering"), kProbeX, 10.0f, kWindowBottom);
+        CHECK(combo.has_value());
+        if (!combo) return;
+        // The combo sits outside the group of unimplemented settings, which only keeps Volume.
+        CHECK(!probe.window()->ScrollbarY && !probe.window()->ScrollbarX);
+
+        probe.click(*combo);
+        ImGuiContext& g = *ImGui::GetCurrentContext();
+        CHECK(g.OpenPopupStack.Size == 1);
+        if (g.OpenPopupStack.Size != 1 || g.OpenPopupStack[0].Window == nullptr) return;
+        ImGuiWindow* popup = g.OpenPopupStack[0].Window;
+        CHECK(recorded.calls.empty());  // opening the list changes nothing
+        const auto find = [&](const char* label) {
+            return probe.findHovered(popup->GetID(label), popup->Pos.x + 10.0f, popup->Pos.y,
+                                     popup->Pos.y + popup->Size.y);
+        };
+
+        // Levels above the device maximum cannot be picked; the current level is not a change.
+        const std::optional<ImVec2> sixteen = find("16x");
+        CHECK(sixteen.has_value() == (max_anisotropy >= 16.0f));
+        CHECK(find("8x").has_value());
+        const std::optional<ImVec2> off = find("Off");
+        CHECK(off.has_value());
+        if (off) {
+            probe.click(*off);
+            CHECK(state.anisotropy_request == 0 && recorded.calls.empty());
+            probe.click(*combo);
+        }
+        if (g.OpenPopupStack.Size != 1 || g.OpenPopupStack[0].Window == nullptr) return;
+        popup = g.OpenPopupStack[0].Window;
+
+        const std::optional<ImVec2> pick = max_anisotropy >= 16.0f ? find("16x") : find("8x");
+        CHECK(pick.has_value());
+        if (!pick) return;
+        probe.click(*pick);
+        const std::uint32_t expected = max_anisotropy >= 16.0f ? 16 : 8;
+        CHECK(state.anisotropy_request == expected);
+        CHECK(recorded.calls.size() == 1);
+        if (recorded.calls.size() == 1) {
+            CHECK(recorded.calls[0].first == tox2::OverlaySetting::Anisotropy);
+            CHECK(recorded.calls[0].second == std::to_string(expected));
+        }
+        // The request is taken once; the renderer reports the level it applied on a later flip.
+        const tox2::PresentOverlayRequests requests = tox2::takePresentRequests(state);
+        CHECK(requests.anisotropy == expected);
+        CHECK(state.anisotropy_request == 0);
+        recorded.calls.clear();
+    }
+}
+
 void testPresentRequests() {
     tox2::OverlayState state;
     state.dump_requested = true;
     state.resolution_scale_request = 3;
     state.aa_mode_request = tox2::AaMode::Supersample;
+    state.anisotropy_request = 4;
     tox2::PresentOverlayRequests requests = tox2::takePresentRequests(state);
     CHECK(requests.dump_display);
     CHECK(requests.resolution_scale == 3);
     CHECK(requests.aa_mode == tox2::AaMode::Supersample);
+    CHECK(requests.anisotropy == 4);
     CHECK(!state.dump_requested);
     CHECK(state.resolution_scale_request == 0);
     CHECK(!state.aa_mode_request);
+    CHECK(state.anisotropy_request == 0);
 
     requests = tox2::takePresentRequests(state);
     CHECK(!requests.dump_display);
     CHECK(requests.resolution_scale == 0);
     CHECK(!requests.aa_mode);
+    CHECK(requests.anisotropy == 0);
+
+    // The reported level is a status, not a request.
+    state.anisotropy = 8;
+    requests = tox2::takePresentRequests(state);
+    CHECK(requests.anisotropy == 0);
+    CHECK(state.anisotropy == 8);
 
     // The reported mode is a status, not a request.
     state.aa_mode = tox2::AaMode::Msaa;
@@ -1008,6 +1101,7 @@ int main() {
     testResolutionScalePanel();
     testFlipLimiterPanel();
     testAntiAliasingPanel();
+    testAnisotropyPanel();
     testRuntimeSources();
 
     tox2::VkContextOptions options;

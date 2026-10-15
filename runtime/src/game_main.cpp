@@ -210,6 +210,7 @@ void saveOverlaySetting(tox2::OverlaySetting setting, std::string_view value) {
         case tox2::OverlaySetting::FrameLimit: g_settings_store->set("frame_limit", value); break;
         case tox2::OverlaySetting::ResolutionScale: g_settings_store->set("resolution_scale", value); break;
         case tox2::OverlaySetting::AaMode: g_settings_store->set("aa_mode", value); break;
+        case tox2::OverlaySetting::Anisotropy: g_settings_store->set("anisotropic_filter", value); break;
     }
 }
 
@@ -236,6 +237,7 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions&
     render_options.dump_every = opt.dump_frames_every;
     render_options.resolution_scale = opt.resolution_scale;
     render_options.aa_mode = opt.aa_mode;
+    render_options.anisotropy = opt.anisotropy;
     render_options.shader_cache =
             opt.shader_cache.empty() ? std::filesystem::path("generated") / "shader_cache" : opt.shader_cache;
     // Requested PNG dumps follow --dump-frames so they land next to the periodic ones.
