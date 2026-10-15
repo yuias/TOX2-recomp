@@ -42,6 +42,7 @@ void printUsage() {
             "                      [--compare PNG [--compare-rect X,Y,W,H] [--max-diff N] [--max-mean X]\n"
             "                       [--max-differing P]]\n"
             "                      [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--no-validation]\n"
+            "                      [--dlaa-jitter on|off] [--dlaa-jitter-flip none|x|y|xy]\n"
             "                      [--shader-cache DIR] [--repeat N] [--quiet]\n"
             "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture; several captures are replayed in\n"
             "           order through one renderer, each one a frame that must end with a flip\n"
@@ -59,6 +60,9 @@ void printUsage() {
             "                      supersample (one sample per memory-layout pixel) or dlaa (NVIDIA DLAA through\n"
             "                      Streamline); dlaa falls back to msaa when it is unavailable, and msaa falls back\n"
             "                      to supersample on a device without 2-sample support\n"
+            "  --dlaa-jitter M     diagnostic, needs --aa-mode dlaa: on (default) or off (no sub-pixel jitter)\n"
+            "  --dlaa-jitter-flip F  diagnostic, needs --aa-mode dlaa: negate the jitter offset reported to DLAA on\n"
+            "                      the x axis, the y axis or both (none by default); the geometry does not change\n"
             "  --no-validation     do not enable the Vulkan validation layer\n"
             "  --shader-cache DIR  directory of the on-disk SPIR-V cache\n"
             "  --repeat N          replay and render the capture N times (N >= 1) with one memory view, builder and\n"
@@ -210,10 +214,19 @@ std::string memoryFlagNames(VkMemoryPropertyFlags flags) {
     return text;
 }
 
+// The DLAA counters of a replay, for the line after the summary; empty unless the renderer runs DLAA.
+std::string dlaaStatsText(const tox2::RsxRenderer& renderer) {
+    if (renderer.aaMode() != tox2::AaMode::Dlaa) return {};
+    const tox2::RendererStats& stats = renderer.stats();
+    return std::format("dlaa: {} evaluations, {} resets, {} failures", stats.dlaa_evaluations, stats.dlaa_resets,
+                       stats.dlaa_failures);
+}
+
 // What the closing lines need from a --repeat run (the last iteration's figures).
 struct TimedResult {
     std::size_t commands = 0, draws = 0, skipped = 0;
     tox2::AaMode aa_mode = tox2::AaMode::Msaa;
+    std::string dlaa_text;  // the "dlaa:" line, empty unless the effective mode is dlaa
 };
 
 // Replays and renders the capture `repeat` times with one memory view, builder and renderer, so the texture cache,
@@ -308,14 +321,15 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
             toUll(median(samples, &IterationSample::state_skipped)),
             toUll(median(samples, &IterationSample::uploads_reused)),
             memoryFlagNames(renderer.stats().upload_memory_flags).c_str());
+    result.dlaa_text = dlaaStatsText(renderer);
     return true;
 }
 
 // The closing lines of every run: the replay summary, the unimplemented census and the validation result.
 int printSummary(std::size_t commands, std::size_t draws, std::size_t skipped, std::size_t frames,
                  std::uint32_t resolution_scale, tox2::AaMode requested_aa_mode, tox2::AaMode effective_aa_mode,
-                 const std::string& diff_text, const std::string& png_text, bool validation, bool validation_active,
-                 std::uint32_t validation_errors, int exit_code) {
+                 const std::string& diff_text, const std::string& dlaa_text, const std::string& png_text,
+                 bool validation, bool validation_active, std::uint32_t validation_errors, int exit_code) {
     const std::string frames_text = frames > 1 ? std::format(", frames {}", frames) : "";
     const std::string scale_text = resolution_scale > 1 ? std::format(", resolution scale {}", resolution_scale) : "";
     // The default (msaa) is not mentioned unless it replaced a requested dlaa; any other effective mode is, so a log
@@ -328,6 +342,7 @@ int printSummary(std::size_t commands, std::size_t draws, std::size_t skipped, s
     }
     std::printf("replay: %zu commands, %zu draws, %zu skipped%s%s%s%s\n", commands, draws, skipped, frames_text.c_str(),
                 scale_text.c_str(), aa_text.c_str(), diff_text.c_str());
+    if (!dlaa_text.empty()) std::printf("%s\n", dlaa_text.c_str());
     // The game's census omits an empty section; a replay says so explicitly.
     const std::string section = unimplementedSection();
     std::printf("%s\n", section.empty() ? "census: rsx unimplemented 0 kinds" : section.c_str());
@@ -374,7 +389,9 @@ int main(int argc, char** argv) {
     bool has_loop = false;
     std::uint32_t resolution_scale = 1;
     tox2::AaMode aa_mode = tox2::AaMode::Msaa;
-    std::uint32_t rect[4] = {};  // --compare-rect: x, y, width, height
+    tox2::DlaaDebug dlaa_debug;
+    bool has_dlaa_option = false;  // a --dlaa-* option was given, which needs --aa-mode dlaa
+    std::uint32_t rect[4] = {};    // --compare-rect: x, y, width, height
     bool has_rect = false;
     // Thresholds of --compare; a NaN limit is not checked.
     double max_diff = std::nan(""), max_mean = std::nan(""), max_differing = std::nan("");
@@ -434,6 +451,29 @@ int main(int argc, char** argv) {
             i++;
             continue;
         }
+        if (arg == "--dlaa-jitter") {
+            const std::string_view value = i + 1 < argc ? std::string_view(argv[i + 1]) : std::string_view();
+            if (value != "on" && value != "off") {
+                std::fputs("error: --dlaa-jitter takes on|off\n", stderr);
+                return 2;
+            }
+            dlaa_debug.jitter = value == "on";
+            has_dlaa_option = true;
+            i++;
+            continue;
+        }
+        if (arg == "--dlaa-jitter-flip") {
+            const std::string_view value = i + 1 < argc ? std::string_view(argv[i + 1]) : std::string_view();
+            if (value != "none" && value != "x" && value != "y" && value != "xy") {
+                std::fputs("error: --dlaa-jitter-flip takes none|x|y|xy\n", stderr);
+                return 2;
+            }
+            dlaa_debug.flip_jitter_x = value == "x" || value == "xy";
+            dlaa_debug.flip_jitter_y = value == "y" || value == "xy";
+            has_dlaa_option = true;
+            i++;
+            continue;
+        }
         if (arg == "--compare-rect") {
             if (i + 1 >= argc || !parseRect(argv[i + 1], rect)) {
                 std::fputs("error: --compare-rect takes X,Y,W,H, four whole numbers with W and H above 0\n", stderr);
@@ -474,6 +514,10 @@ int main(int argc, char** argv) {
         printUsage();
         return 2;
     }
+    if (has_dlaa_option && aa_mode != tox2::AaMode::Dlaa) {
+        std::fputs("error: the --dlaa-* options need --aa-mode dlaa\n", stderr);
+        return 2;
+    }
     if (repeat != 0 && (!out_dir.empty() || !compare_path.empty())) {
         // Later iterations draw over the previous iteration's targets, so the image is not the capture's frame.
         std::fputs("error: --repeat cannot be combined with --out or --compare\n", stderr);
@@ -510,13 +554,14 @@ int main(int argc, char** argv) {
         timed_options.shader_cache = shader_cache;
         timed_options.resolution_scale = resolution_scale;
         timed_options.aa_mode = aa_mode;
+        timed_options.dlaa_debug = dlaa_debug;
         TimedResult timed;
         const bool ok = runTimedReplay(frames.front()->reader, frames.front()->name, repeat, *timed_context,
                                        timed_options, timed);
         // The renderer is gone by now, so errors from its teardown are counted.
         return printSummary(timed.commands, timed.draws, timed.skipped, 1, resolution_scale, aa_mode, timed.aa_mode, {},
-                            {}, validation, timed_context->validationEnabled(), timed_context->validationErrorCount(),
-                            ok ? 0 : 1);
+                            timed.dlaa_text, {}, validation, timed_context->validationEnabled(),
+                            timed_context->validationErrorCount(), ok ? 0 : 1);
     }
 
     // The first pass over the list is built and printed before the device is created; later passes are rebuilt
@@ -561,6 +606,7 @@ int main(int argc, char** argv) {
     std::size_t skipped = draws;
     std::string diff_text;
     std::string png_text;
+    std::string dlaa_text;
     std::uint32_t validation_errors = 0;
     bool validation_active = false;
     tox2::AaMode effective_aa_mode = aa_mode;
@@ -569,6 +615,7 @@ int main(int argc, char** argv) {
         render_options.shader_cache = shader_cache;
         render_options.resolution_scale = resolution_scale;
         render_options.aa_mode = aa_mode;
+        render_options.dlaa_debug = dlaa_debug;
         render_options.readback_all = true;  // the replay reads the display after its last flip
         {
             tox2::RsxRenderer renderer(*context, render_options);
@@ -612,6 +659,7 @@ int main(int argc, char** argv) {
             commands_total = executed_commands;
             draws = executed_draws;
             skipped = renderer.stats().draws_skipped;
+            dlaa_text = dlaaStatsText(renderer);
 
             if (renderer.valid() && renderer.readDisplay(bgra, width, height)) {
                 const tox2::RgbImage image = tox2::rgbFromBgra(bgra, width, height);
@@ -690,5 +738,5 @@ int main(int argc, char** argv) {
     }
 
     return printSummary(commands_total, draws, skipped, frame_count, resolution_scale, aa_mode, effective_aa_mode,
-                        diff_text, png_text, validation, validation_active, validation_errors, exit_code);
+                        diff_text, dlaa_text, png_text, validation, validation_active, validation_errors, exit_code);
 }

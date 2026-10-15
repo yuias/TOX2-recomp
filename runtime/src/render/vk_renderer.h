@@ -30,6 +30,19 @@ namespace tox2 {
 
 class DlaaPass;
 
+enum class DlaaCamera : std::uint8_t { On, Off, Reset };  // Off: identity matrices; Reset: reset every frame
+
+// Switches for the DLAA A/B checks (tox2_rsxreplay); the defaults are the measured settings.
+struct DlaaDebug {
+    bool jitter = true;                                 // shift perspective scene draws and report the offset
+    bool flip_jitter_x = false, flip_jitter_y = false;  // negate the reported jitterOffset only, never the geometry
+    // The remaining fields describe the camera matrices and the motion vector invalid value, which the evaluation does
+    // not use yet (identity matrices; the invalid value is always 0).
+    DlaaCamera camera = DlaaCamera::On;
+    bool flip_clip_y = false;
+    bool mvec_invalid_zero = true;
+};
+
 struct RenderOptions {
     // Every dump_every-th flip (counted from 1) is written to `<dump_dir>/frame_<flip number>.png`. An
     // empty directory disables dumping.
@@ -54,6 +67,7 @@ struct RenderOptions {
     // Dlaa mode only: false draws the one-sample scene image but never evaluates DLAA, so the game's resolve reads it
     // through the layout copy. For tests of the scene image itself.
     bool dlaa_evaluate = true;
+    DlaaDebug dlaa_debug;
     // Forced anisotropic filtering level: 1 (off), 2, 4, 8 or 16; anything else makes the renderer invalid. A device
     // without the samplerAnisotropy feature keeps 1; a lower device maximum clamps the level (see anisotropy()).
     std::uint32_t anisotropy = 1;
@@ -285,6 +299,9 @@ private:
     const RenderTarget* dlaa_output_owner_ = nullptr;  // the scene target whose evaluation the widened image holds
     std::optional<std::uint64_t> dlaa_last_flip_;      // stats_.flips when the last evaluation was recorded
     bool dlaa_switched_ = false;                       // the mode was set to Dlaa since the last evaluation
+    // stats_.flips of the latest draw that was shifted by the jitter; the evaluation reports the offset only for a
+    // frame that has one.
+    std::optional<std::uint64_t> dlaa_jitter_frame_;
     std::uint32_t anisotropy_ = 1;
     bool anisotropy_unavailable_logged_ = false;
     // Always created: its worker thread only starts with the first submitted frame.

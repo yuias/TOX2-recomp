@@ -105,14 +105,16 @@ bool DlaaPass::prepare(std::uint32_t width, std::uint32_t height, std::shared_pt
     return true;
 }
 
-bool DlaaPass::evaluate(VkCommandBuffer cmd, const SlImage& color_in, const SlImage& depth, bool reset, bool alpha,
-                        std::string& error) {
+bool DlaaPass::evaluate(VkCommandBuffer cmd, const SlImage& color_in, const SlImage& depth, const float (&jitter_px)[2],
+                        bool reset, bool alpha, std::string& error) {
     DlaaFrame frame;
     frame.viewport = viewport_;
     frame.color_in = color_in;
     frame.depth = depth;
     frame.motion = describe(resources_->motion);
     frame.color_out = describe(resources_->output);
+    frame.jitter_px[0] = jitter_px[0];
+    frame.jitter_px[1] = jitter_px[1];
     frame.mvec_scale[0] = 1.0f / static_cast<float>(color_in.width);
     frame.mvec_scale[1] = 1.0f / static_cast<float>(color_in.height);
     frame.reset = reset;

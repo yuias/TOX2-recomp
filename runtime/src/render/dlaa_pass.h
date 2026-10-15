@@ -55,10 +55,11 @@ public:
     Resources& resources() { return *resources_; }
 
     // Records one evaluation of `color_in` and `depth` (both SHADER_READ_ONLY_OPTIMAL, the input size) into
-    // resources().output (GENERAL) with resources().motion (SHADER_READ_ONLY_OPTIMAL). No jitter and identity
+    // resources().output (GENERAL) with resources().motion (SHADER_READ_ONLY_OPTIMAL). `jitter_px` is the sub-pixel
+    // offset the scene was drawn with, in input pixels (x right, y down), as Streamline wants it reported. Identity
     // matrices. All bound command buffer state is invalid afterwards.
-    bool evaluate(VkCommandBuffer cmd, const SlImage& color_in, const SlImage& depth, bool reset, bool alpha,
-                  std::string& error);
+    bool evaluate(VkCommandBuffer cmd, const SlImage& color_in, const SlImage& depth, const float (&jitter_px)[2],
+                  bool reset, bool alpha, std::string& error);
 
 private:
     VkContext& context_;

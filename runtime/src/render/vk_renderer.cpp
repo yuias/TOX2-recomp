@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "core/log.h"
+#include "render/dlaa_math.h"
 #include "render/dlaa_pass.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
@@ -1103,7 +1104,15 @@ VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
         const VkCommandBuffer cmd = outsideCmd();
         // The alpha channel travels through DLSS: the resolve copies the scene alpha to the display buffer, and a
         // later draw uses that alpha as a blend factor.
-        const bool evaluated = dlaa_->evaluate(cmd, color_in, depth_in, reset, true, error);
+        // The offset the frame's perspective draws were shifted by. A frame without such a draw was not moved, so it
+        // reports none. The flips only change what is reported: the geometry always moves toward +x / +y.
+        float jitter_px[2] = {0.0f, 0.0f};
+        if (dlaa_jitter_frame_ == stats_.flips) {
+            const std::array<float, 2> jitter = dlaaJitterPixels(stats_.flips);
+            jitter_px[0] = options_.dlaa_debug.flip_jitter_x ? -jitter[0] : jitter[0];
+            jitter_px[1] = options_.dlaa_debug.flip_jitter_y ? -jitter[1] : jitter[1];
+        }
+        const bool evaluated = dlaa_->evaluate(cmd, color_in, depth_in, jitter_px, reset, true, error);
         // Streamline binds its own pipelines, descriptors and state and does not restore ours (manual hooking).
         // recordDraw re-records everything the shadow covers, and it binds vertex buffers, the index buffer and the
         // push descriptors on every draw.
@@ -2354,7 +2363,18 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     if (set(shadow.blend_constants, constants)) vkCmdSetBlendConstants(cmd, constants);
 
     // Always a value, never left unset: a stale or missing push constant would shift a draw by a sub-pixel amount.
-    const float jitter_ndc[2] = {0.0f, 0.0f};
+    // Only perspective draws into the one-sample scene image move: orthographic ones are screen-space and 2D, and the
+    // shift is exactly zero everywhere else, so other modes render bit for bit as before. Without an evaluation the
+    // shift would only blur the picture, so it needs one too. All shifted draws of a frame share the frame's offset,
+    // which keeps passes that depth-test against each other exact.
+    float jitter_ndc[2] = {0.0f, 0.0f};
+    if (sidecar_samples == VK_SAMPLE_COUNT_1_BIT && options_.dlaa_evaluate && options_.dlaa_debug.jitter &&
+        draw.vp_constants && dlaaPerspective(*draw.vp_constants)) {
+        const std::array<float, 2> jitter = dlaaJitterPixels(stats_.flips);
+        jitter_ndc[0] = 2.0f * jitter[0] / static_cast<float>(draw.surfaces.clip_w * pixel_scale.x);
+        jitter_ndc[1] = 2.0f * jitter[1] / static_cast<float>(draw.surfaces.clip_h * pixel_scale.y);
+        dlaa_jitter_frame_ = stats_.flips;
+    }
     if (set(shadow.jitter_ndc, jitter_ndc)) {
         vkCmdPushConstants(cmd, pipelines_->drawLayout(), VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(jitter_ndc),
                            jitter_ndc);

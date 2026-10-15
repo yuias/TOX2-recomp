@@ -5741,7 +5741,8 @@ void testRendererDlaaSceneImage(tox2::VkContext& ctx) {
 }
 
 // The game's resolve read of the scene runs DLAA once per scene write: the first evaluation starts a history, the
-// second (the next frame) continues it, nothing fails, and the picture keeps the scene's colours.
+// second (the next frame) continues it, nothing fails, and the picture keeps the scene's colours. The history is
+// reset by a frame without an evaluation and by a switch away from Dlaa and back.
 void testRendererDlaaEvaluate(tox2::VkContext& ctx) {
     using namespace tox2::rsx_synthetic;
     {
@@ -5754,6 +5755,7 @@ void testRendererDlaaEvaluate(tox2::VkContext& ctx) {
     }
     const std::uint32_t errors_before = ctx.validationErrorCount();
     const std::vector<tox2::RsxCommand> drawn = replaySynthetic(makeMsaaLayoutCapture(MsaaRead::Linear));
+    const std::vector<tox2::RsxCommand> cleared = replaySynthetic(makeClearCapture(0xFF102030));
     for (const std::uint32_t scale : {1u, 2u}) {
         tox2::rsxUnimplementedReset();
         tox2::RenderOptions options = readbackAllOptions(scale, tox2::AaMode::Dlaa);
@@ -5766,6 +5768,20 @@ void testRendererDlaaEvaluate(tox2::VkContext& ctx) {
         CHECK(renderer.stats().dlaa_evaluations == 2 && renderer.stats().dlaa_resets == 1);
         CHECK(renderer.stats().dlaa_failures == 0 && renderer.stats().draws_skipped == 0);
         CHECK(tox2::rsxUnimplementedSnapshot().empty());
+        // The history only continues from the immediately preceding frame: a frame that evaluates nothing (a plain
+        // clear) in between starts a new one ...
+        runFrame(renderer, cleared);
+        runFrame(renderer, drawn);
+        CHECK(renderer.stats().dlaa_evaluations == 3 && renderer.stats().dlaa_resets == 2);
+        runFrame(renderer, drawn);
+        CHECK(renderer.stats().dlaa_evaluations == 4 && renderer.stats().dlaa_resets == 2);
+        // ... and so does a switch away from Dlaa and back, even between consecutive frames.
+        CHECK(renderer.setAaMode(tox2::AaMode::Msaa) && renderer.setAaMode(tox2::AaMode::Dlaa));
+        runFrame(renderer, drawn);
+        CHECK(renderer.stats().dlaa_evaluations == 5 && renderer.stats().dlaa_resets == 3);
+        runFrame(renderer, drawn);
+        CHECK(renderer.stats().dlaa_evaluations == 6 && renderer.stats().dlaa_resets == 3);
+        CHECK(renderer.stats().dlaa_failures == 0 && renderer.stats().draws_skipped == 0);
         CHECK(display.width == kAaSize * scale && display.height == kAaSize * scale);
         if (display.width != kAaSize * scale || display.height != kAaSize * scale) continue;
         // Well inside the red rectangle and well outside it: DLAA may soften edges but not change flat areas much.
