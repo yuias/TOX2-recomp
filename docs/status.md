@@ -309,6 +309,8 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   `--ppu-threads 2` runs two PPU threads at once, like the two hardware threads of an lv2 console; `1` runs one with
   the host threads beside it, and `legacy` runs one at a time under the guest lock (see
   [Threads](runtime.md#threads)). In `2` a plain store of one PPU thread does not cancel the other's reservation on
-  another word of the same line, and every lightweight mutex call still takes the kernel lock, which is the largest
-  remaining cost of the mode. Closing a `cellPngDec` decoder from one thread while another
+  another word of the same line. The lightweight mutex calls take the kernel lock only on contention (or for a
+  lwmutex at an address that is not 8-byte aligned, which this game has none of); in 140 s runs the kernel lock still
+  costs PPU threads about 7 % of their slot time, mostly in other handlers (see [Threads](runtime.md#threads)).
+  Closing a `cellPngDec` decoder from one thread while another
   decodes with it is not guarded in `1` and `2`. lv2 interrupt threads and savestates are not implemented.

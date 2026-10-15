@@ -212,9 +212,13 @@ state (`cellGcmAddressToOffset`, `cellGcmGetLabelAddress`, `cellGcmGetControlReg
 command handlers, the time stamp and the tiled pitch), the string and memory functions of sysPrxForUser
 (`_sys_memcpy`, `_sys_memset`, `_sys_strlen` and the other `_sys_str*`, `_sys_snprintf` and `_sys_vsnprintf`),
 `sys_time_get_system_time`, `sys_ppu_thread_get_id`, `cellRtcGetCurrentTick`, `cellRtcConvertUtcToLocalTime`,
-`cellSysutilGetBgmPlaybackStatus`, `cellVideoOutGetResolution` and `cellVideoOutSetGamma`. Every other handler holds
-the kernel lock. The lightweight mutex calls (`sys_lwmutex_lock`, `sys_lwmutex_unlock`) are the largest remaining cost
-there; see the measurements below.
+`cellSysutilGetBgmPlaybackStatus`, `cellVideoOutGetResolution` and `cellVideoOutSetGamma`. The lightweight mutex
+calls `sys_lwmutex_lock`, `sys_lwmutex_trylock` and `sys_lwmutex_unlock` are kernel-free in a different sense: they
+do use lv2 state, but an uncontended call is a compare-and-swap on the guest struct and needs no kernel lock, and a
+call enters a kernel section itself only when it finds the lwmutex owned by another thread (lock) or finds waiters
+(unlock); see the hand-off paragraph below. With `--lwmutex-fast-path off` they run inside one kernel section like
+every other handler. Every other handler holds the kernel lock, including `sys_lwmutex_create`, `sys_lwmutex_destroy`
+and the `sys_lwcond_*` calls; see the measurements below for what the kernel lock still costs.
 
 Running two guest threads at once exposed a race in the game's own ATRAC stream code: its loader and the decoder setup
 of the player thread could interleave and misalign the stream. Two guest functions are replaced by hand-written
@@ -317,6 +321,57 @@ take it first; the hand-off here is stricter and cannot deadlock. The perf `lock
 hand-offs (`lwmutex wait <n> handoff <n> mutex wait <n> handoff <n>`; every wait of a run of this game ended in a
 hand-off).
 
+The state of a lightweight mutex is the `owner` and `waiter` word pair at the start of the guest `sys_lwmutex_t`,
+which the runtime reads and writes as one 8-byte unit (`runtime/src/lv2/lwmutex_word.h`: sequentially consistent
+compare-and-swaps and acquire loads on the doubleword). `{Free, 0}` is a free lwmutex with no waiter. An uncontended
+`sys_lwmutex_lock` is one compare-and-swap `{Free, 0}` to `{thread id, 0}` and an uncontended `sys_lwmutex_unlock`
+one `{thread id, 0}` to `{Free, 0}`, with no kernel lock; the recursion count is touched only by the owner, and
+`sys_lwmutex_trylock` never leaves the compare-and-swap path. Only two cases enter a kernel section: a lock that
+finds another owner, and an unlock whose compare-and-swap fails because a waiter is published. In the section the
+lock queues its node and publishes the new waiter count together (or takes the lwmutex if the owner released it
+meanwhile), and the unlock chooses between `Free` and the reserved value for the chosen waiter. Whenever the kernel
+lock is free, the `waiter` word therefore equals the length of the object's wait list (a granted node still counts),
+`Free` always comes with `waiter` 0, and the reserved value lasts exactly while a granted waiter has not resumed.
+A fast lock succeeds only on `{Free, 0}`, so it never passes a queued or granted waiter; it can take the lwmutex
+ahead of others only when nobody is queued. Because the waiter is published and queued in one section, the runtime
+needs no stored wake-up token for an unlock that found no sleeper yet (RPCS3 keeps one for its user-side protocol).
+`sys_lwmutex_destroy` stays a kernel handler and ends with a compare-and-swap `{Free, 0}` to `{Dead, 0}`, so a lock
+that got in meanwhile makes it return `EBUSY`. The time-out and grant race and the `SYS_SYNC_RETRY` hand-off are
+decided in the kernel section, as before.
+
+A lightweight mutex whose address is not 8-byte aligned cannot use the atomic pair. Each of its calls runs inside a
+kernel section with plain accesses, is counted, and the first call per address logs `tox2: lwmutex: <addr> is not
+8-byte aligned; its calls use the kernel lock`. The process's own lightweight mutexes and all those of this game are
+aligned.
+
+The kernel lock used to give lwmutex users an ordering edge between the two PPU threads. The pair gives it now: a
+successful lock compare-and-swap synchronises with the owner's releasing write of the pair (the unlock
+compare-and-swap, or the reserved value written under the kernel lock followed by the granted waiter's update under
+the same lock). Guest loads and stores inside the critical section are generated before and after the opaque HLE
+call, which the compiler cannot move them across, and on x86-64 the locked operation orders them in hardware.
+
+`--lwmutex-fast-path on|off` (default `on`) selects this behaviour. It stays as the fallback and the switch for
+comparing runs: `off` runs the same protocol with every access inside one kernel section. When any call left the
+compare-and-swap path in a second, the perf `lock` line ends with `lwmutex slow lock <n> unlock <n>` (and `misaligned
+<n>` when non-zero). Uncontended calls count nothing there, so their number is the census call count minus these. In
+140 s runs of this game about 0.017 % of the calls were slow (about 4,100 slow locks and 700 slow unlocks against 28.6
+million calls). Slow locks outnumber the blocking waits (about 700, each with a hand-off) because roughly 3,400 of
+them took the lwmutex inside the section without blocking, when its owner released it between the failed
+compare-and-swap and the kernel lock.
+
+From the reservation table's point of view the compare-and-swap is a plain host store: it moves no stripe version and
+the PPU `stwcx.` compare is not atomic against it. That is harmless only while no generated code touches the words of
+a lwmutex other than through the sysPrxForUser imports. `--lwmutex-watch` (default off) checks that: it registers
+every lwmutex that is created and counts the PPU `lwarx`, `ldarx`, `stwcx.`, `stdcx.` and `dcbz` accesses, the SPU
+`GETLLAR`, `PUTLLC` (only the 8-byte chunks it changes), `PUTLLUC` and `PUT` accesses and the `_sys_memcpy` and
+`_sys_memset` destinations that fall on a live struct, plus owner words that are neither a lwmutex state nor a thread
+id and waiter words that disagree with the wait list. It logs the first 16 hits of each kind and prints a `census:
+lwmutex watch` line; with the option off each hook costs one relaxed load. Runs of this game with it, 140 s and 420 s
+with `--ppu-threads 2` and 140 s with `legacy`, found no hit of any writing kind (up to 55 lwmutexes live), and the
+game neither issued the lv2 lwmutex system calls 95 to 99 nor contains a call site for them. The only hits were the
+read-only `GETLLAR` of an SPU counter in the same 128-byte line as a lwmutex, whose `PUTLLC` writes only the
+counter's own 8-byte chunk (see [SPU usage](spu.md)).
+
 `tox2_game` holds a 1 ms system timer resolution for the whole run (`timeBeginPeriod`,
 `runtime/src/core/timer_resolution.*`). Timed waits (`sys_timer_usleep`, lock and queue time-outs)
 are host condition variable waits, and Windows rounds them to its timer tick (15.6 ms by default),
@@ -367,30 +422,53 @@ In `1` and `2` the census omits `ppu overlap` and adds two lines after the class
 
 ```
 census: ppu slots 2: held 36.4 s, parallel 7.4 s, full with waiters 3.2 s, wait n 2230000 avg 0.00 p99 0.01 max 2.38 ms >1.00ms 3 high n 0 avg 0.00 p99 0.00 max 0.00 ms >1.00ms 0
-census: ppu kernel wait by call: lwmutex 5085.0 ms 1660000, timer 1207.0 ms 120000, gcm 44.0 ms 4700, other 1163.0 ms 90000, none 380.0 ms 20000
+census: ppu kernel wait by call: lwmutex 10.0 ms 1990, timer 0.0 ms 0, gcm 11.0 ms 11, other 770.0 ms 75700, none 284.0 ms 25000
 ```
 
 (Invented numbers, for the shape.) `held` is the slot-seconds of completed holds; a wait for the kernel lock inside a
 handler counts as held, because the thread still has its slot. `parallel` is the wall time with two slots held, `full
 with waiters` the wall time with every slot held and at least one thread queued for one, and the two `wait` groups are
-the slot wait of `ppu` and `ppu-high` threads. The perf `lock` line ends with `slots par <x> ms full <y> ms` for the
-same two times over the last second. `ppu kernel wait by call` splits the contended kernel-lock acquisitions of guest
-threads by the call that waited (`sys_lwmutex_*`, the two timed sleeps, `cellGcm*` and `_cellGcm*`, any other call,
+the slot wait of `ppu` and `ppu-high` threads. The perf `lock` line has `slots par <x> ms full <y> ms` for the same
+two times over the last second (the `lwmutex slow` field described above comes after it). `ppu kernel wait by call`
+splits the contended kernel-lock acquisitions of guest threads by the call that waited (`sys_lwmutex_*`, the two timed sleeps, `cellGcm*` and `_cellGcm*`, any other call,
 and none) as the waited ms and the number of waits. In both modes the census has a `census: ppu reservations lwarx <n>
 stwcx <n> failed <n>` line and the perf `lock` line a `stwcx <n> fail <n>` field with the per-second counts; `lwarx` and
 `stwcx` count the doubleword forms too, and `failed` includes store-conditionals that fail before reaching the
 reservation table.
 
-Measured on this game, 140 s and 420 s runs at the same revision and in the same session, `--ppu-threads 2` against
-`legacy`: the RSX thread waited 0.27 to 0.30 ms per flip for the lock where `legacy` waited 2.00 ms, and its idle time
+Measured on this game before the lightweight mutex fast path (`--lwmutex-fast-path off` reproduces these figures; its
+lwmutex wait was within 6 % of the one quoted), 140 s and 420 s runs at the same revision and in the same session,
+`--ppu-threads 2` against `legacy`: the RSX thread waited 0.27 to 0.30 ms per flip for the lock where `legacy` waited 2.00 ms, and its idle time
 per flip rose by 2.6, 2.0 and 1.9 ms in the three heavy windows of the run, each above the spread between repeated
 `legacy` runs. The flip rate was the same (60 flips per second in the first window and 30 in the others, capped by the
 frame limit), the unwritten audio blocks were 0 against at most 1, process CPU time was 1.06 to 1.09 times that of
 `legacy`, and the `stwcx.` failure rate was not higher. Both slots were held for 7.4 s of 140 s, and
 for 3.2 s of those a third thread was waiting. Guest threads spent about 21.5 % of their slot time waiting for the
 kernel lock, of which 64 % was in the lightweight mutex calls; the kernel-free handlers above lowered that share from
-38.6 %, and the GCM handlers alone had been 40 % of the wait. A fast path for the lightweight mutex that takes the
-kernel lock only under contention is not implemented.
+38.6 %, and the GCM handlers alone had been 40 % of the wait.
+
+The fast path removed most of that wait. Same session, 140 s and 420 s runs, `--ppu-threads 2` with the fast path on
+against `--lwmutex-fast-path off` (medians of two 140 s runs; the 420 s runs agree):
+
+| Per 140 s | off | on |
+| --- | --- | --- |
+| kernel wait of PPU threads in the lightweight mutex calls | 5,350 ms (71 % of their kernel wait, 17.1 % of slot time) | 10 ms (1.0 %, 0.07 %) |
+| kernel wait of PPU threads, all calls | 23.9 % of slot time | 7.05 % of slot time |
+| contended kernel acquisitions of PPU threads | 1.63 million | 0.105 million |
+| slot-seconds held | 31.4 s | 14.8 s |
+| blocking lwmutex waits | 11,000 | 700 |
+| kernel hand-offs, all classes | 2.1 million | 0.22 million |
+
+Process CPU time fell from 1.00 to 1.06 times that of `legacy` to 0.91 to 0.95 times. In the two heavy windows capped
+at 30 flips per second the RSX thread's idle time per flip was 0.54 and 0.62 ms longer than with the fast path off,
+beyond the spread between repeated runs, and its wait for the kernel lock fell from 0.46 and 0.48 to 0.16 ms; in the
+60-flip window the idle time did not change (0.05 ms shorter, inside the 0.21 ms spread), as that window is bound by
+the RSX thread. The flip rate, the audio census (no underruns, no decode errors, at most 7 unwritten blocks in 420 s,
+each a single block, against up to 13 in `legacy`) and the game's path through the title scene did not change. The game's yield-polling loops
+iterate about 10 % more often per second, because less of their time goes into kernel waits; the backoff absorbs that
+and the CPU time still falls. What remains of the PPU kernel wait is in other handlers (70 to 75 %) and in calls with
+no label (23 to 27 %). The mean contended wait of a PPU thread rose from about 4.6 to about 10 us, because the many
+short lwmutex waits are gone, and the 99th percentile of the kernel hand-off stayed at or below 0.02 ms.
 
 A hold of 5 ms or more is counted and logged as a warning, so a stall can be traced to its holder:
 `tox2: guest lock long hold: <x> ms holder <class> thread <id> prio <p> (<name>) at release: <a> last in hold: <b>
@@ -417,8 +495,9 @@ old value is not seen either (ABA), as before. Generated code reads and writes g
 x86-64 the compiler barrier of every `sync` kind gives `lwsync`, `eieio` and `isync` their ordering and a heavy `sync`
 adds a host fence. A polling loop without a `sync` can keep a loaded value in a register until its next opaque call,
 and the back-edge budget (4096 iterations) bounds that, as it already does for flags that SPU and RSX threads write.
-Kernel sections give HLE-based synchronisation (lightweight mutex, mutex, condition variable, semaphore, event) an
-ordering edge between the two PPU threads through the kernel lock.
+Kernel sections give HLE-based synchronisation (mutex, condition variable, semaphore, event) an ordering edge between
+the two PPU threads through the kernel lock. The lightweight mutex gets its edge from the owner and waiter pair, as
+described with the hand-off above.
 
 Two limits of `1` and `2` are accepted. When a fatal stop dumps the registers and prints the census, the other slot
 holder keeps running, so the dump is not a consistent snapshot; a second failing thread waits in the stop and may hold
