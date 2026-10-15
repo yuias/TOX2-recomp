@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "core/log.h"
+#include "render/dlaa_pass.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
 #include "render/render_scale.h"
@@ -194,6 +195,7 @@ struct RsxRenderer::RenderTarget {
         VkImageView depth_view = VK_NULL_HANDLE;
         VkImageView stencil_view = VK_NULL_HANDLE;
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImageUsageFlags usage = 0;
         // The image goes back to the pool: the owner is destroyed only after its slots' fences, so the GPU is done.
         std::shared_ptr<ImagePool> pool;
         PooledImageKey pool_key{};
@@ -214,6 +216,13 @@ struct RsxRenderer::RenderTarget {
     bool layout_stale = false;    // msaa holds writes the layout image lacks
     bool msaa_stale = false;      // the layout image holds writes msaa lacks
     bool layout_written = false;  // the layout image was written after its initial clear
+
+    // Dlaa mode, colour targets: the depth target bound by the latest draw or clear that wrote the sidecar, which DLAA
+    // needs beside the colour. Held as a pointer because the game's resolve rebinds the same depth address as another
+    // surface, which replaces the target in the cache. Dropped when the evaluation has used it.
+    std::shared_ptr<RenderTarget> dlaa_depth;
+    // The sidecar has been through DLAA since its latest write (and no layout pass has written the layout image since).
+    bool dlaa_evaluated = false;
 
     // Extent of the image a pass over this target draws into.
     std::uint32_t passWidth(bool sidecar) const { return sidecar ? layout_width / 2 * scale : image_width; }
@@ -289,8 +298,8 @@ static std::string dlaaGap(const VkContext& context) {
             {VK_FORMAT_D16_UNORM, kBlit, "blit"},
             {VK_FORMAT_R8G8B8A8_UNORM,
              VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
-                     VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT,
-             "storage and linear sampling"},
+                     VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT | kBlit,
+             "storage, linear sampling and blit"},
             {VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT,
              "sampling and transfer"},
     };
@@ -374,6 +383,7 @@ RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(c
 RsxRenderer::~RsxRenderer() {
     const VkDevice device = context_.device();
     vkDeviceWaitIdle(device);
+    dlaa_.reset();  // frees the DLSS viewport; the device is idle
     for (std::unique_ptr<FrameSlot>& slot : slots_) {
         if (!slot) continue;
         slot->in_use.clear();
@@ -658,6 +668,7 @@ bool RsxRenderer::setResolutionScale(std::uint32_t scale) {
 bool RsxRenderer::setAaMode(AaMode mode) {
     if (mode == AaMode::Msaa && !msaaAvailable()) return false;
     if (mode == AaMode::Dlaa && !dlaaAvailable()) return false;
+    if (mode == AaMode::Dlaa && aa_mode_ != AaMode::Dlaa) dlaa_switched_ = true;
     aa_mode_ = mode;
     return true;
 }
@@ -813,6 +824,7 @@ bool RsxRenderer::ensureSidecar(RenderTarget& target, VkSampleCountFlagBits samp
     // The 1-sample image reaches the layout image by a blit; a 2-sample one by a shader pass.
     if (samples == VK_SAMPLE_COUNT_1_BIT) image_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    sidecar->usage = image_info.usage;
     sidecar->pool_bytes = static_cast<std::uint64_t>(image_info.extent.width) * image_info.extent.height *
                           static_cast<std::uint64_t>(samples) * targetTexelBytes(target.format);
     if (!obtainImage(RenderImageKind::Sidecar, image_info, sidecar->pool_bytes, sidecar->pool_key, sidecar->image,
@@ -848,6 +860,8 @@ bool RsxRenderer::ensureSidecar(RenderTarget& target, VkSampleCountFlagBits samp
         }
     }
     target.msaa = std::move(sidecar);
+    target.dlaa_evaluated = false;
+    target.dlaa_depth.reset();
     // The layout image may already hold guest data the sidecar does not; a pass that does not replace all of it is
     // counted (beginSidecarPass).
     target.msaa_stale = target.layout_written;
@@ -1004,6 +1018,136 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
     return true;
 }
 
+// The tap rule: the game's resolve is the draw that samples the whole layout of a one-sample A8R8G8B8 scene image from
+// a pass that is not a sidecar pass (it writes the plain display buffer). Identified by these properties, never by
+// address. A read from inside the scene pass, a feedback read and a sample of a layout that DLAA has not seen all use
+// the layout image as before.
+bool RsxRenderer::dlaaTap(const RenderTarget& scene, const RenderTarget& drawing, bool sidecar_pass,
+                          const RsxTextureDesc& texture) const {
+    return options_.dlaa_evaluate && !sidecar_pass && &scene != &drawing && scene.format == VK_FORMAT_B8G8R8A8_UNORM &&
+           scene.msaa && scene.msaa->samples == VK_SAMPLE_COUNT_1_BIT && texture.width == scene.layout_width &&
+           texture.height == scene.layout_height && (scene.layout_stale || scene.dlaa_evaluated);
+}
+
+// Evaluates DLAA on the scene image: colour sidecar and the depth that went with it in, the anti-aliased scene out,
+// then widened by a NEAREST blit to the 2W x H the resolve samples. The resolve's texcoords carry a -0.5 / (2W) offset
+// that puts a sample at the centre of layout texel 2X, so a W-wide image sampled directly would blend in the
+// neighbouring pixel; the widened image reproduces the layout's two equal columns per pixel.
+VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
+    const auto failed = [&](const std::string& reason) -> VkImageView {
+        logOnce(LogLevel::Warn, "render-dlaa-failed",
+                "tox2: render: DLAA evaluation failed ({}); scene read unfiltered", reason);
+        rsxNoteUnimplemented("state", "DLAA evaluation failed");
+        stats_.dlaa_failures++;
+        return VK_NULL_HANDLE;
+    };
+    const std::uint32_t width = scene.passWidth(true), height = scene.passHeight(true);
+
+    if (!(scene.dlaa_evaluated && dlaa_output_owner_ == &scene)) {
+        // A second scene target would overwrite the shared output; only one is expected.
+        if (scene.dlaa_evaluated) return failed("another scene target owns the DLAA output");
+        const std::shared_ptr<RenderTarget> depth = scene.dlaa_depth;
+        if (!depth || !depth->msaa || depth->msaa->samples != VK_SAMPLE_COUNT_1_BIT ||
+            depth->passWidth(true) != width || depth->passHeight(true) != height) {
+            return failed("no matching depth image for the scene");
+        }
+        if (!dlaa_) dlaa_ = std::make_unique<DlaaPass>(context_, *context_.streamline());
+
+        std::string error;
+        std::shared_ptr<void> retired;
+        bool recreated = false;
+        if (!dlaa_->prepare(width, height, retired, recreated, error)) return failed(error);
+        // Frames in flight may still read the previous images.
+        if (retired) slots_[current_slot_]->keep_alive.push_back(std::move(retired));
+        DlaaPass::Resources& res = dlaa_->resources();
+        touch(depth);
+
+        // The previous evaluation has to belong to the frame before this one for the history to apply.
+        const bool reset = recreated || !dlaa_last_flip_ || *dlaa_last_flip_ + 1 != stats_.flips || dlaa_switched_;
+
+        if (!res.motion_cleared) {
+            transitionImage(res.motion.image, VK_IMAGE_ASPECT_COLOR_BIT, res.motion.layout,
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            const VkClearColorValue zero{};
+            const VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdClearColorImage(outsideCmd(), res.motion.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1,
+                                 &range);
+            transitionImage(res.motion.image, VK_IMAGE_ASPECT_COLOR_BIT, res.motion.layout,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            res.motion_cleared = true;
+        }
+        // Streamline samples the depth in a compute pass, so it is tagged as a shader-read image, not as a
+        // depth-stencil read-only attachment.
+        transitionSidecar(scene, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        transitionSidecar(*depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        transitionImage(res.output.image, VK_IMAGE_ASPECT_COLOR_BIT, res.output.layout, VK_IMAGE_LAYOUT_GENERAL);
+
+        const auto describe = [&](const RenderTarget& target, VkImageView view, VkImageLayout layout) {
+            SlImage image;
+            image.image = target.msaa->image;
+            VmaAllocationInfo allocated{};
+            vmaGetAllocationInfo(context_.allocator(), target.msaa->allocation, &allocated);
+            image.memory = allocated.deviceMemory;
+            image.view = view;
+            image.layout = layout;
+            image.width = target.passWidth(true);
+            image.height = target.passHeight(true);
+            image.format = target.format;
+            image.usage = target.msaa->usage;
+            return image;
+        };
+        const SlImage color_in = describe(scene, scene.msaa->view, scene.msaa->layout);
+        const SlImage depth_in = describe(
+                *depth, depth->msaa->depth_view != VK_NULL_HANDLE ? depth->msaa->depth_view : depth->msaa->view,
+                depth->msaa->layout);
+        const VkCommandBuffer cmd = outsideCmd();
+        // The alpha channel travels through DLSS: the resolve copies the scene alpha to the display buffer, and a
+        // later draw uses that alpha as a blend factor.
+        const bool evaluated = dlaa_->evaluate(cmd, color_in, depth_in, reset, true, error);
+        // Streamline binds its own pipelines, descriptors and state and does not restore ours (manual hooking).
+        // recordDraw re-records everything the shadow covers, and it binds vertex buffers, the index buffer and the
+        // push descriptors on every draw.
+        invalidateDrawState();
+        if (!evaluated) return failed(error);
+
+        // Streamline returns the output to the layout it was told.
+        transitionImage(res.output.image, VK_IMAGE_ASPECT_COLOR_BIT, res.output.layout,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        transitionImage(res.expanded.image, VK_IMAGE_ASPECT_COLOR_BIT, res.expanded.layout,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageBlit region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.srcOffsets[1] = {static_cast<std::int32_t>(width), static_cast<std::int32_t>(height), 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstOffsets[1] = {static_cast<std::int32_t>(res.expanded.width), static_cast<std::int32_t>(height), 1};
+        vkCmdBlitImage(outsideCmd(), res.output.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, res.expanded.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_NEAREST);
+        transitionImage(res.expanded.image, VK_IMAGE_ASPECT_COLOR_BIT, res.expanded.layout,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+        scene.dlaa_evaluated = true;
+        scene.dlaa_depth.reset();
+        dlaa_output_owner_ = &scene;
+        dlaa_last_flip_ = stats_.flips;
+        dlaa_switched_ = false;
+        stats_.dlaa_evaluations++;
+        if (reset) stats_.dlaa_resets++;
+        logOnce(LogLevel::Info, std::format("render-dlaa-evaluating-{}x{}", width, height),
+                "tox2: render: DLAA evaluating {}x{}", width, height);
+    }
+
+    DlaaPass::Image& expanded = dlaa_->resources().expanded;
+    VkImageView& view = expanded.sampled_views[remap];
+    if (view == VK_NULL_HANDLE) {
+        view = textures_->createView(expanded.image, expanded.format, remap);
+        if (view == VK_NULL_HANDLE) {
+            expanded.sampled_views.erase(remap);
+            fail(textures_->error());
+        }
+    }
+    return view;
+}
+
 // A single-sample pass is about to use the layout image of `target`: brings it up to date with the sidecar first
 // (unless the pass replaces all of it), and records that the sidecar is behind when the pass writes.
 bool RsxRenderer::beginLayoutPass(RenderTarget& target, bool writes, bool overwrites_all) {
@@ -1016,6 +1160,7 @@ bool RsxRenderer::beginLayoutPass(RenderTarget& target, bool writes, bool overwr
     }
     if (writes) {
         target.layout_written = true;
+        target.dlaa_evaluated = false;
         if (target.msaa) target.msaa_stale = true;
     }
     return true;
@@ -1031,7 +1176,10 @@ void RsxRenderer::beginSidecarPass(RenderTarget& target, bool writes, bool overw
         rsxNoteUnimplemented("state", "anti-aliased pass over layout data");
         target.msaa_stale = false;
     }
-    if (writes) target.layout_stale = true;
+    if (writes) {
+        target.layout_stale = true;
+        target.dlaa_evaluated = false;
+    }
 }
 
 namespace {
@@ -1626,8 +1774,15 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
             }
             sampled_format = wanted;
 
+            VkImageView dlaa_view = VK_NULL_HANDLE;
+            if (dlaaTap(*target, color, sidecar_pass, *texture)) {
+                dlaa_view = dlaaView(*target, texture->remap & 0xFFFF);
+                if (!valid()) return false;
+            }
             // A draw into the sidecar can sample the layout image of its own target directly once that is up to date.
-            if (target.get() == &color && !sidecar_pass) {
+            if (dlaa_view != VK_NULL_HANDLE) {
+                view = dlaa_view;
+            } else if (target.get() == &color && !sidecar_pass) {
                 // The copy is a B8G8R8A8 image; there is none for a float target.
                 if (wanted != VK_FORMAT_B8G8R8A8_UNORM) {
                     rsxNoteUnimplemented("texture", "placeholder: feedback copy unavailable");
@@ -1973,6 +2128,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     if (sidecar) {
         const auto samples = static_cast<VkSampleCountFlagBits>(sidecar_samples);
         if (!ensureSidecar(*color, samples) || (depth && !ensureSidecar(*depth, samples))) return;
+        if (samples == VK_SAMPLE_COUNT_1_BIT && color_written && depth) color->dlaa_depth = depth;
     } else {
         if (!beginLayoutPass(*color, color_written, false) ||
             (depth_used && !beginLayoutPass(*depth, depth_written, false))) {
@@ -2292,6 +2448,8 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
     const bool sidecar = sidecar_samples != 0;
     if (color && color_bits != kColorBits) {
         recordMaskedColorClear(clear, *color, color_bits, sidecar_samples);
+        // After the clear: creating the sidecar inside it drops any earlier depth link.
+        if (sidecar_samples == VK_SAMPLE_COUNT_1_BIT && depth) color->dlaa_depth = depth;
         color.reset();
     }
     if (!valid()) return;
@@ -2301,6 +2459,7 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
     if (sidecar) {
         const auto samples = static_cast<VkSampleCountFlagBits>(sidecar_samples);
         if ((color && !ensureSidecar(*color, samples)) || (depth && !ensureSidecar(*depth, samples))) return;
+        if (samples == VK_SAMPLE_COUNT_1_BIT && color && depth) color->dlaa_depth = depth;
         if (color) beginSidecarPass(*color, true, color_overwritten);
         if (depth) beginSidecarPass(*depth, true, depth_overwritten);
     } else {

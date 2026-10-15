@@ -936,6 +936,8 @@ tox2::RenderOptions readbackAllOptions(std::uint32_t resolution_scale = 1, tox2:
     options.readback_all = true;
     options.resolution_scale = resolution_scale;
     options.aa_mode = aa_mode;
+    // The scene-image tests read the layout path; the evaluation has its own test.
+    options.dlaa_evaluate = false;
     return options;
 }
 
@@ -5738,6 +5740,45 @@ void testRendererDlaaSceneImage(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// The game's resolve read of the scene runs DLAA once per scene write: the first evaluation starts a history, the
+// second (the next frame) continues it, nothing fails, and the picture keeps the scene's colours.
+void testRendererDlaaEvaluate(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    {
+        tox2::RsxRenderer probe(ctx, readbackAllOptions(1, tox2::AaMode::Dlaa));
+        if (!probe.dlaaAvailable()) {
+            std::printf("DLAA evaluate: skipped (%s)\n", probe.dlaaUnavailableReason().c_str());
+            tox2::rsxUnimplementedReset();
+            return;
+        }
+    }
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    const std::vector<tox2::RsxCommand> drawn = replaySynthetic(makeMsaaLayoutCapture(MsaaRead::Linear));
+    for (const std::uint32_t scale : {1u, 2u}) {
+        tox2::rsxUnimplementedReset();
+        tox2::RenderOptions options = readbackAllOptions(scale, tox2::AaMode::Dlaa);
+        options.dlaa_evaluate = true;
+        tox2::RsxRenderer renderer(ctx, options);
+        CHECK(renderer.valid() && renderer.aaMode() == tox2::AaMode::Dlaa);
+        RawDisplay display = runFrame(renderer, drawn);
+        CHECK(renderer.stats().dlaa_evaluations == 1 && renderer.stats().dlaa_resets == 1);
+        display = runFrame(renderer, drawn);
+        CHECK(renderer.stats().dlaa_evaluations == 2 && renderer.stats().dlaa_resets == 1);
+        CHECK(renderer.stats().dlaa_failures == 0 && renderer.stats().draws_skipped == 0);
+        CHECK(tox2::rsxUnimplementedSnapshot().empty());
+        CHECK(display.width == kAaSize * scale && display.height == kAaSize * scale);
+        if (display.width != kAaSize * scale || display.height != kAaSize * scale) continue;
+        // Well inside the red rectangle and well outside it: DLAA may soften edges but not change flat areas much.
+        const std::uint32_t inside = pixelArgb(display.bgra, display.width, 10 * scale, 8 * scale);
+        const std::uint32_t outside = pixelArgb(display.bgra, display.width, scale, scale);
+        CHECK(((inside >> 16) & 0xFF) > 192 && ((inside >> 8) & 0xFF) < 64 && (inside & 0xFF) < 64);
+        CHECK(((outside >> 16) & 0xFF) < 64 && ((outside >> 8) & 0xFF) < 64 && (outside & 0xFF) < 64);
+        CHECK((inside >> 24) == 0xFF && (outside >> 24) == 0xFF);
+    }
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
 // ---- Point size ----
 
 // One red point at the centre of the 64x64 surface (a pixel corner), SET_POINT_SIZE `size`.
@@ -6450,6 +6491,7 @@ int main() {
     testRendererMsaaDepthAsArgb(*ctx);
     testRendererMsaaInherit(*ctx);
     testRendererDlaaSceneImage(*ctx);
+    testRendererDlaaEvaluate(*ctx);
     testRendererPointSize(*ctx);
     testForcedAnisotropySampler(*ctx);
     testRendererAnisotropy(*ctx);

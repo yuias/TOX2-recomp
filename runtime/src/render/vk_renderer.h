@@ -28,6 +28,8 @@
 
 namespace tox2 {
 
+class DlaaPass;
+
 struct RenderOptions {
     // Every dump_every-th flip (counted from 1) is written to `<dump_dir>/frame_<flip number>.png`. An
     // empty directory disables dumping.
@@ -49,6 +51,9 @@ struct RenderOptions {
     // 2-sample support; Dlaa falls back to Msaa (then Supersample) when DLAA is unavailable. aaMode() reports the
     // effective mode.
     AaMode aa_mode = AaMode::Msaa;
+    // Dlaa mode only: false draws the one-sample scene image but never evaluates DLAA, so the game's resolve reads it
+    // through the layout copy. For tests of the scene image itself.
+    bool dlaa_evaluate = true;
     // Forced anisotropic filtering level: 1 (off), 2, 4, 8 or 16; anything else makes the renderer invalid. A device
     // without the samplerAnisotropy feature keeps 1; a lower device maximum clamps the level (see anisotropy()).
     std::uint32_t anisotropy = 1;
@@ -74,6 +79,9 @@ struct RendererStats {
     std::uint64_t depth_conversions = 0;  // depth surfaces rewritten as A8R8G8B8 texels for a draw that reads them
     std::uint64_t surface_inherits = 0;   // copies of an old target's contents into a resized one
     std::uint64_t layout_copies = 0;      // sidecars copied into their memory layout for a read
+    std::uint64_t dlaa_evaluations = 0;   // DLAA evaluations recorded
+    std::uint64_t dlaa_resets = 0;        // ... that started a new history
+    std::uint64_t dlaa_failures = 0;      // scene reads that fell back to the layout image after a failed evaluation
     // GPU images and upload blocks created, by RenderImageKind, with their size in bytes (width x height x samples x
     // texel size). The Texture entries follow the texture cache as of the end of the last execute() or flip.
     std::array<std::uint64_t, kRenderImageKindCount> images_created{};
@@ -233,6 +241,14 @@ private:
     bool sidecarPass(const RsxSurface& surface) const { return sidecarSamples(surface) != 0; }
     bool ensureSidecar(RenderTarget& target, VkSampleCountFlagBits samples);
     bool syncLayout(RenderTarget& target);
+    // True when a draw into `drawing` that samples the colour target `scene` as `texture` reads the DLAA-processed
+    // scene (see dlaaView).
+    bool dlaaTap(const RenderTarget& scene, const RenderTarget& drawing, bool sidecar_pass,
+                 const RsxTextureDesc& texture) const;
+    // Runs DLAA over the one-sample scene image (once per scene write) and returns a view of the anti-aliased scene,
+    // widened to the 2W layout columns the game's resolve expects, with the texture remap applied. Null after a counted
+    // failure; the caller then reads the layout image instead.
+    VkImageView dlaaView(RenderTarget& scene, std::uint32_t remap);
     bool beginLayoutPass(RenderTarget& target, bool writes, bool overwrites_all);
     void beginSidecarPass(RenderTarget& target, bool writes, bool overwrites_all);
 
@@ -264,6 +280,11 @@ private:
     std::uint32_t resolution_scale_ = 1;
     AaMode aa_mode_ = AaMode::Supersample;
     std::string dlaa_gap_;  // empty when DLAA is available
+    // DLAA state, created by the first evaluation.
+    std::unique_ptr<DlaaPass> dlaa_;
+    const RenderTarget* dlaa_output_owner_ = nullptr;  // the scene target whose evaluation the widened image holds
+    std::optional<std::uint64_t> dlaa_last_flip_;      // stats_.flips when the last evaluation was recorded
+    bool dlaa_switched_ = false;                       // the mode was set to Dlaa since the last evaluation
     std::uint32_t anisotropy_ = 1;
     bool anisotropy_unavailable_logged_ = false;
     // Always created: its worker thread only starts with the first submitted frame.
