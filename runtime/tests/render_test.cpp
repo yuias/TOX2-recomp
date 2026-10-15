@@ -4,6 +4,7 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -25,6 +26,7 @@
 #include "render/image_pool.h"
 #include "render/render_scale.h"
 #include "render/shader_compiler.h"
+#include "render/streamline.h"
 #include "render/vertex_convert.h"
 #include "render/window_size.h"
 #include "render/vk_context.h"
@@ -5608,6 +5610,35 @@ void testPresenterTypes() {
     CHECK(target.view != VK_NULL_HANDLE && target.format == VK_FORMAT_B8G8R8A8_UNORM);
 }
 
+// Number of enabled members of a Vulkan feature struct; every member after sType and pNext is a VkBool32.
+template <typename Features>
+std::uint32_t countEnabledFeatures(const Features& features) {
+    const auto* flags = reinterpret_cast<const VkBool32*>(&features.pNext + 1);
+    const std::size_t count = (sizeof(Features) - offsetof(Features, pNext) - sizeof(void*)) / sizeof(VkBool32);
+    std::uint32_t enabled = 0;
+    for (std::size_t i = 0; i < count; i++) enabled += flags[i] != VK_FALSE ? 1 : 0;
+    return enabled;
+}
+
+// Loads Streamline before any Vulkan context exists and reports what DLSS asks of the instance and device.
+void testStreamlineLoad() {
+    std::string reason;
+    std::unique_ptr<tox2::Streamline> streamline = tox2::Streamline::load(reason);
+    tox2::StreamlineRequirements requirements;
+    if (streamline && !streamline->requirements(requirements, reason)) streamline.reset();
+    if (!streamline) {
+        std::printf("streamline: unavailable: %s\n", reason.c_str());
+        return;
+    }
+    std::printf(
+            "streamline: loaded %s; DLSS needs %zu instance extension(s), %zu device extension(s), %u 1.2 feature(s), "
+            "%u extra queue(s)\n",
+            std::string(streamline->version()).c_str(), requirements.instance_extensions.size(),
+            requirements.device_extensions.size(), countEnabledFeatures(requirements.features12),
+            requirements.graphics_queues + requirements.compute_queues);
+    CHECK(streamline->version() == "2.14.1");
+}
+
 }  // namespace
 
 int main() {
@@ -5634,6 +5665,7 @@ int main() {
     testAnisotropyNames();
     testForcedAnisotropy();
     testLayoutSource();
+    testStreamlineLoad();
 
     tox2::VkContextOptions options;
     options.validation = true;

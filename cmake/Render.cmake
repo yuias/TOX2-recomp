@@ -52,11 +52,98 @@ function(tox2_render_add_shaderc)
   message(STATUS "TOX2: shaderc: shaderc_combined.lib / shaderc_combinedd.lib from $VULKAN_SDK/Lib")
 endfunction()
 
+# NVIDIA Streamline (DLSS) is optional. TOX2_ENABLE_DLSS: AUTO uses the SDK under TOX2_STREAMLINE_DIR when
+# present, ON requires it, OFF compiles the stub. The SDK is never linked: sl.interposer.dll is loaded at run
+# time (its import library exports the same Vulkan names as volk's global function pointers). Sets
+# TOX2_STREAMLINE_ENABLED and TOX2_STREAMLINE_RESOLVED_DIR in the caller's scope.
+function(tox2_render_find_streamline)
+  include("${CMAKE_SOURCE_DIR}/cmake/streamline.cmake")
+  set(TOX2_ENABLE_DLSS "AUTO" CACHE STRING "Use the NVIDIA Streamline SDK for DLAA (AUTO, ON or OFF)")
+  set_property(CACHE TOX2_ENABLE_DLSS PROPERTY STRINGS AUTO ON OFF)
+  set(TOX2_STREAMLINE_DIR "${CMAKE_SOURCE_DIR}/externals/Streamline" CACHE PATH
+    "Root of the unpacked NVIDIA Streamline SDK")
+
+  string(TOUPPER "${TOX2_ENABLE_DLSS}" mode)
+  if(NOT mode MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR "TOX2: TOX2_ENABLE_DLSS must be AUTO, ON or OFF (got '${TOX2_ENABLE_DLSS}')")
+  endif()
+
+  set(enabled FALSE)
+  if(mode STREQUAL "OFF")
+    message(STATUS "TOX2: Streamline: off (TOX2_ENABLE_DLSS=OFF)")
+  else()
+    set(sdk "${TOX2_STREAMLINE_DIR}")
+    set(found TRUE)
+    foreach(file include/sl.h bin/x64/sl.interposer.dll bin/x64/sl.common.dll bin/x64/sl.dlss.dll
+                 bin/x64/nvngx_dlss.dll)
+      if(NOT EXISTS "${sdk}/${file}")
+        set(found FALSE)
+      endif()
+    endforeach()
+    if(found)
+      set(enabled TRUE)
+      set(marker "${sdk}/.verified-sha256")
+      set(note ", not verified by tools/fetch-streamline.ps1")
+      if(EXISTS "${marker}")
+        file(READ "${marker}" marker_hash)
+        string(STRIP "${marker_hash}" marker_hash)
+        if(marker_hash STREQUAL "${TOX2_STREAMLINE_SHA256}")
+          set(note "")
+        endif()
+        # Re-fetching another pin must re-run the configure step. A missing file would make Ninja re-run it on
+        # every build, so only an existing marker is a dependency.
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${marker}")
+      endif()
+      message(STATUS "TOX2: Streamline: ${sdk} (v${TOX2_STREAMLINE_VERSION})${note}")
+    else()
+      set(hint "${sdk}/include/sl.h); DLAA disabled. Run: pwsh -NoProfile -File tools/fetch-streamline.ps1")
+      if(mode STREQUAL "ON")
+        message(FATAL_ERROR "TOX2: Streamline: not found (${hint}")
+      endif()
+      message(STATUS "TOX2: Streamline: not found (${hint}")
+    endif()
+  endif()
+
+  set(TOX2_STREAMLINE_ENABLED ${enabled} PARENT_SCOPE)
+  set(TOX2_STREAMLINE_RESOLVED_DIR "${TOX2_STREAMLINE_DIR}" PARENT_SCOPE)
+endfunction()
+
+# Copies the Streamline runtime next to the executables, with the licence texts the redistribution terms ask
+# for. The DLLs are needed from the first use of the loader on, so every test target depends on the copy.
+function(tox2_render_add_streamline_runtime)
+  set(sdk "${TOX2_STREAMLINE_RESOLVED_DIR}")
+  set(bin_dir "${CMAKE_BINARY_DIR}/bin")
+  set(licence_dir "${bin_dir}/licenses/streamline")
+  set(copied "")
+  foreach(name sl.interposer.dll sl.common.dll sl.dlss.dll nvngx_dlss.dll)
+    add_custom_command(OUTPUT "${bin_dir}/${name}"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${bin_dir}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${sdk}/bin/x64/${name}" "${bin_dir}/${name}"
+      DEPENDS "${sdk}/bin/x64/${name}"
+      VERBATIM)
+    list(APPEND copied "${bin_dir}/${name}")
+  endforeach()
+  foreach(pair "license.txt|LICENSE.txt" "bin/x64/nvngx_dlss.license.txt|nvngx_dlss.license.txt"
+               "3rd-party-licenses.md|3rd-party-licenses.md")
+    string(REPLACE "|" ";" pair "${pair}")
+    list(GET pair 0 from)
+    list(GET pair 1 to)
+    add_custom_command(OUTPUT "${licence_dir}/${to}"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${licence_dir}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${sdk}/${from}" "${licence_dir}/${to}"
+      DEPENDS "${sdk}/${from}"
+      VERBATIM)
+    list(APPEND copied "${licence_dir}/${to}")
+  endforeach()
+  add_custom_target(tox2_streamline_runtime ALL DEPENDS ${copied})
+endfunction()
+
 # The renderer library. tox2_runtime_core stays GPU-free: only targets that link tox2_render see
 # Vulkan. Call after tox2_runtime_add_core() and enable_testing().
 function(tox2_render_add)
   tox2_render_add_libraries()
   tox2_render_add_shaderc()
+  tox2_render_find_streamline()
 
   add_library(tox2_render STATIC
     runtime/src/render/fp_translator.cpp
@@ -86,6 +173,14 @@ function(tox2_render_add)
   target_link_libraries(tox2_render PRIVATE imm32)
   # PRIVATE: libpng types stay inside frame_dump.cpp.
   target_link_libraries(tox2_render PRIVATE png_static)
+  if(TOX2_STREAMLINE_ENABLED)
+    target_sources(tox2_render PRIVATE runtime/src/render/streamline.cpp)
+    target_include_directories(tox2_render SYSTEM PRIVATE "${TOX2_STREAMLINE_RESOLVED_DIR}/include")
+    target_compile_definitions(tox2_render PUBLIC TOX2_HAS_STREAMLINE=1)
+  else()
+    target_sources(tox2_render PRIVATE runtime/src/render/streamline_off.cpp)
+    target_compile_definitions(tox2_render PUBLIC TOX2_HAS_STREAMLINE=0)
+  endif()
 
   add_executable(tox2_render_tests runtime/tests/render_test.cpp)
   target_compile_options(tox2_render_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
@@ -120,6 +215,12 @@ function(tox2_render_add)
   add_executable(tox2_rsxreplay tools/tox2_rsxreplay/main.cpp)
   target_compile_options(tox2_rsxreplay PRIVATE -march=x86-64-v3 -Wall -Wextra)
   target_link_libraries(tox2_rsxreplay PRIVATE tox2_render)
+
+  if(TOX2_STREAMLINE_ENABLED)
+    tox2_render_add_streamline_runtime()
+    add_dependencies(tox2_render_tests tox2_streamline_runtime)
+    add_dependencies(tox2_rsxreplay tox2_streamline_runtime)
+  endif()
 
   include("${CMAKE_SOURCE_DIR}/cmake/rsx_replay.cmake")
   set(replay_capture
