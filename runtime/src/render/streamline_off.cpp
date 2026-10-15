@@ -33,4 +33,13 @@ bool Streamline::setDevice(const StreamlineDevice& /*device*/, std::string& reas
 
 PFN_vkVoidFunction Streamline::instanceProxy(const char* /*name*/) const { return nullptr; }
 
+std::uint32_t Streamline::newViewport() { return 0; }
+
+bool Streamline::evaluateDlaa(VkCommandBuffer /*cmd*/, const DlaaFrame& /*frame*/, std::string& error) {
+    error = "built without the Streamline SDK";
+    return false;
+}
+
+void Streamline::freeViewport(std::uint32_t /*viewport*/) {}
+
 }  // namespace tox2

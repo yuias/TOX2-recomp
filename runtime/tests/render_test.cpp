@@ -22,6 +22,7 @@
 #include <system_error>
 #include <vector>
 
+#include "core/log.h"
 #include "render/dlaa_math.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
@@ -6014,6 +6015,352 @@ void testStreamlineContext(tox2::VkContext& ctx) {
 #endif
 }
 
+struct SlTestImage {
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    VkImageView view = VK_NULL_HANDLE;
+    tox2::SlImage sl;
+};
+
+bool createSlTestImage(tox2::VkContext& ctx, VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect,
+                       std::uint32_t width, std::uint32_t height, SlTestImage& out) {
+    VkImageCreateInfo image_info{};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = format;
+    image_info.extent = {width, height, 1};
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = usage;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo alloc_info{};
+    alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    // Streamline is told the device memory, so the image owns a whole allocation.
+    alloc_info.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+    VmaAllocationInfo allocated{};
+    if (vmaCreateImage(ctx.allocator(), &image_info, &alloc_info, &out.image, &out.allocation, &allocated) !=
+        VK_SUCCESS) {
+        return false;
+    }
+    VkImageViewCreateInfo view_info{};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = out.image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = format;
+    view_info.subresourceRange = {aspect, 0, 1, 0, 1};
+    if (vkCreateImageView(ctx.device(), &view_info, nullptr, &out.view) != VK_SUCCESS) return false;
+    out.sl.image = out.image;
+    out.sl.memory = allocated.deviceMemory;
+    out.sl.view = out.view;
+    out.sl.width = width;
+    out.sl.height = height;
+    out.sl.format = format;
+    out.sl.usage = usage;
+    return true;
+}
+
+void destroySlTestImage(tox2::VkContext& ctx, SlTestImage& image) {
+    if (image.view != VK_NULL_HANDLE) vkDestroyImageView(ctx.device(), image.view, nullptr);
+    if (image.image != VK_NULL_HANDLE) vmaDestroyImage(ctx.allocator(), image.image, image.allocation);
+    image = {};
+}
+
+// Moves the whole image between layouts with full-pipeline barriers; the test is about Streamline, not barrier cost.
+void slTestBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
+                   VkAccessFlags2 src_access, VkAccessFlags2 dst_access) {
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.srcAccessMask = src_access;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.dstAccessMask = dst_access;
+    barrier.oldLayout = from;
+    barrier.newLayout = to;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange = {aspect, 0, 1, 0, 1};
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.imageMemoryBarrierCount = 1;
+    dependency.pImageMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+}
+
+void slTestMemoryBarrier(VkCommandBuffer cmd) {
+    VkMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+}
+
+// Two DLAA evaluations through the frame API on synthetic images: a hard black/white diagonal edge must come out
+// anti-aliased with the same mean brightness, with no validation error and no Streamline warning.
+void testStreamlineEvaluate(tox2::VkContext& ctx) {
+    tox2::Streamline* streamline = ctx.streamline();
+    if (streamline == nullptr) {
+        std::printf("streamline evaluate: skipped: %s\n", ctx.streamlineStatus().c_str());
+        return;
+    }
+    constexpr std::uint32_t kWidth = 640;
+    constexpr std::uint32_t kHeight = 360;
+    constexpr VkDeviceSize kPixels = static_cast<VkDeviceSize>(kWidth) * kHeight;
+    VkDevice device = ctx.device();
+    const VkFormat depth_format = ctx.depthStencilFormat();
+
+    // The formats and usages a DLAA pass needs; a device without them cannot run DLAA at all.
+    struct FormatNeed {
+        VkFormat format;
+        VkFormatFeatureFlags features;
+    };
+    const FormatNeed needs[] = {
+            {VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT},
+            {depth_format, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT},
+            {VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT},
+            {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                               VK_FORMAT_FEATURE_TRANSFER_SRC_BIT},
+    };
+    for (const FormatNeed& need : needs) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(ctx.physicalDevice(), need.format, &properties);
+        if ((properties.optimalTilingFeatures & need.features) != need.features) {
+            std::printf("streamline evaluate: skipped: format %d lacks features\n", static_cast<int>(need.format));
+            return;
+        }
+    }
+
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    std::vector<std::string> sl_lines;
+    tox2::setLogSink([&sl_lines](std::string_view line) {
+        if (line.find("tox2: streamline:") != std::string_view::npos) sl_lines.emplace_back(line);
+    });
+
+    constexpr VkImageUsageFlags kInputUsage =
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    SlTestImage color, depth, motion, output;
+    bool ok = createSlTestImage(ctx, VK_FORMAT_B8G8R8A8_UNORM, kInputUsage | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                                VK_IMAGE_ASPECT_COLOR_BIT, kWidth, kHeight, color) &&
+              createSlTestImage(ctx, depth_format, kInputUsage | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                VK_IMAGE_ASPECT_DEPTH_BIT, kWidth, kHeight, depth) &&
+              createSlTestImage(ctx, VK_FORMAT_R16G16_SFLOAT, kInputUsage | VK_IMAGE_USAGE_STORAGE_BIT,
+                                VK_IMAGE_ASPECT_COLOR_BIT, kWidth, kHeight, motion) &&
+              createSlTestImage(ctx, VK_FORMAT_R8G8B8A8_UNORM,
+                                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                VK_IMAGE_ASPECT_COLOR_BIT, kWidth, kHeight, output);
+    CHECK(ok);
+
+    // One host-visible buffer holds the input pixels first and the read-back output second.
+    VkBufferCreateInfo buffer_info{};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = kPixels * 4 * 2;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationCreateInfo buffer_alloc_info{};
+    buffer_alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+    buffer_alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation buffer_alloc = nullptr;
+    VmaAllocationInfo mapped{};
+    ok = ok && vmaCreateBuffer(ctx.allocator(), &buffer_info, &buffer_alloc_info, &buffer, &buffer_alloc, &mapped) ==
+                       VK_SUCCESS;
+    CHECK(ok && mapped.pMappedData != nullptr);
+
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    std::uint32_t viewport = 0;
+    bool viewport_made = false;
+    if (ok && mapped.pMappedData != nullptr) {
+        auto* bytes = static_cast<std::uint8_t*>(mapped.pMappedData);
+        // B8G8R8A8: black above the diagonal from the top left to the bottom right, white below it.
+        double input_sum = 0.0;
+        for (std::uint32_t y = 0; y < kHeight; y++) {
+            for (std::uint32_t x = 0; x < kWidth; x++) {
+                const std::uint8_t value =
+                        static_cast<std::uint64_t>(x) * kHeight >= static_cast<std::uint64_t>(y) * kWidth ? 255 : 0;
+                std::uint8_t* pixel = bytes + (static_cast<std::size_t>(y) * kWidth + x) * 4;
+                pixel[0] = pixel[1] = pixel[2] = value;
+                pixel[3] = 255;
+                input_sum += value;
+            }
+        }
+        const double input_mean = input_sum / static_cast<double>(kPixels);
+        vmaFlushAllocation(ctx.allocator(), buffer_alloc, 0, VK_WHOLE_SIZE);
+
+        VkCommandPoolCreateInfo pool_info{};
+        pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        pool_info.queueFamilyIndex = ctx.graphicsQueueFamily();
+        CHECK(vkCreateCommandPool(device, &pool_info, nullptr, &pool) == VK_SUCCESS);
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        CHECK(vkCreateFence(device, &fence_info, nullptr, &fence) == VK_SUCCESS);
+
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo cmd_info{};
+        cmd_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cmd_info.commandPool = pool;
+        cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        CHECK(vkAllocateCommandBuffers(device, &cmd_info, &cmd) == VK_SUCCESS);
+
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd, &begin);
+
+        constexpr VkImageAspectFlags kColorAspect = VK_IMAGE_ASPECT_COLOR_BIT;
+        // Colour: upload from the host buffer.
+        slTestBarrier(cmd, color.image, kColorAspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      0, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        VkBufferImageCopy upload{};
+        upload.imageSubresource = {kColorAspect, 0, 0, 1};
+        upload.imageExtent = {kWidth, kHeight, 1};
+        vkCmdCopyBufferToImage(cmd, buffer, color.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &upload);
+        slTestBarrier(cmd, color.image, kColorAspect, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                      VK_ACCESS_2_SHADER_READ_BIT);
+        // Depth: a constant 0.5.
+        const VkImageAspectFlags depth_aspect = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        slTestBarrier(cmd, depth.image, depth_aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      0, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        const VkClearDepthStencilValue depth_clear = {0.5f, 0};
+        const VkImageSubresourceRange depth_range = {depth_aspect, 0, 1, 0, 1};
+        vkCmdClearDepthStencilImage(cmd, depth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &depth_clear, 1,
+                                    &depth_range);
+        slTestBarrier(cmd, depth.image, depth_aspect, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                      VK_ACCESS_2_SHADER_READ_BIT);
+        // Motion vectors: zero.
+        slTestBarrier(cmd, motion.image, kColorAspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      0, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        const VkClearColorValue zero{};
+        const VkImageSubresourceRange color_range = {kColorAspect, 0, 1, 0, 1};
+        vkCmdClearColorImage(cmd, motion.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &color_range);
+        slTestBarrier(cmd, motion.image, kColorAspect, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                      VK_ACCESS_2_SHADER_READ_BIT);
+        // Output: written by Streamline as a storage image.
+        slTestBarrier(cmd, output.image, kColorAspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0,
+                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+        viewport = streamline->newViewport();
+        viewport_made = true;
+        tox2::DlaaFrame frame;
+        frame.viewport = viewport;
+        frame.color_in = color.sl;
+        frame.color_in.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        frame.depth = depth.sl;
+        frame.depth.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        frame.motion = motion.sl;
+        frame.motion.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        frame.color_out = output.sl;
+        frame.color_out.layout = VK_IMAGE_LAYOUT_GENERAL;
+        frame.mvec_scale[0] = 1.0f / kWidth;
+        frame.mvec_scale[1] = 1.0f / kHeight;
+        frame.alpha = true;
+        frame.mvec_invalid_value = 0.0f;
+        bool evaluated = true;
+        for (std::uint64_t i = 0; i < 2; i++) {
+            // The first evaluation starts the history, the second uses it.
+            frame.reset = i == 0;
+            const std::array<float, 2> jitter = tox2::dlaaJitterPixels(i);
+            frame.jitter_px[0] = jitter[0];
+            frame.jitter_px[1] = jitter[1];
+            std::string error;
+            if (!streamline->evaluateDlaa(cmd, frame, error)) {
+                std::printf("streamline evaluate: evaluation %llu failed: %s\n", static_cast<unsigned long long>(i),
+                            error.c_str());
+                evaluated = false;
+                break;
+            }
+            // Streamline leaves no bound state behind that the test relies on; make its writes visible to the
+            // next evaluation and to the read-back.
+            slTestMemoryBarrier(cmd);
+        }
+        CHECK(evaluated);
+
+        slTestBarrier(cmd, output.image, kColorAspect, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        VkBufferImageCopy readback{};
+        readback.bufferOffset = kPixels * 4;
+        readback.imageSubresource = {kColorAspect, 0, 0, 1};
+        readback.imageExtent = {kWidth, kHeight, 1};
+        vkCmdCopyImageToBuffer(cmd, output.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &readback);
+        VkMemoryBarrier2 host_barrier{};
+        host_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        host_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        host_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        host_barrier.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+        host_barrier.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+        VkDependencyInfo dependency{};
+        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.memoryBarrierCount = 1;
+        dependency.pMemoryBarriers = &host_barrier;
+        vkCmdPipelineBarrier2(cmd, &dependency);
+        CHECK(vkEndCommandBuffer(cmd) == VK_SUCCESS);
+
+        VkCommandBufferSubmitInfo cmd_submit{};
+        cmd_submit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        cmd_submit.commandBuffer = cmd;
+        VkSubmitInfo2 submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submit.commandBufferInfoCount = 1;
+        submit.pCommandBufferInfos = &cmd_submit;
+        CHECK(vkQueueSubmit2(ctx.graphicsQueue(), 1, &submit, fence) == VK_SUCCESS);
+        CHECK(vkWaitForFences(device, 1, &fence, VK_TRUE, 30'000'000'000ull) == VK_SUCCESS);
+
+        if (evaluated) {
+            vmaInvalidateAllocation(ctx.allocator(), buffer_alloc, 0, VK_WHOLE_SIZE);
+            const std::uint8_t* out = bytes + kPixels * 4;
+            double sum[3] = {0.0, 0.0, 0.0};
+            std::uint64_t nonzero = 0;
+            std::uint64_t edge_pixels = 0;
+            for (VkDeviceSize i = 0; i < kPixels; i++) {
+                const std::uint8_t* pixel = out + i * 4;
+                for (int c = 0; c < 3; c++) sum[c] += pixel[c];
+                if (pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 || pixel[3] != 0) nonzero++;
+                if (pixel[0] > 0 && pixel[0] < 255) edge_pixels++;
+            }
+            const double mean_r = sum[0] / static_cast<double>(kPixels);
+            const double mean_g = sum[1] / static_cast<double>(kPixels);
+            const double mean_b = sum[2] / static_cast<double>(kPixels);
+            std::printf(
+                    "streamline evaluate: input mean %.2f, output mean %.2f/%.2f/%.2f, %llu non-black, %llu partial\n",
+                    input_mean, mean_r, mean_g, mean_b, static_cast<unsigned long long>(nonzero),
+                    static_cast<unsigned long long>(edge_pixels));
+            CHECK(nonzero > 0);
+            CHECK(std::abs(mean_r - input_mean) <= 8.0);
+            CHECK(std::abs(mean_g - input_mean) <= 8.0);
+            CHECK(std::abs(mean_b - input_mean) <= 8.0);
+            CHECK(edge_pixels >= 16);
+        }
+    }
+
+    if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
+    if (pool != VK_NULL_HANDLE) vkDestroyCommandPool(device, pool, nullptr);
+    if (buffer != VK_NULL_HANDLE) vmaDestroyBuffer(ctx.allocator(), buffer, buffer_alloc);
+    vkDeviceWaitIdle(device);
+    if (viewport_made) streamline->freeViewport(viewport);
+    destroySlTestImage(ctx, output);
+    destroySlTestImage(ctx, motion);
+    destroySlTestImage(ctx, depth);
+    destroySlTestImage(ctx, color);
+
+    tox2::setLogSink({});
+    for (const std::string& line : sl_lines) std::printf("streamline evaluate: log: %s\n", line.c_str());
+    CHECK(sl_lines.empty());
+    CHECK(ctx.validationErrorCount() == errors_before);
+}
+
 }  // namespace
 
 int main() {
@@ -6065,6 +6412,7 @@ int main() {
     CHECK(layer == ctx->validationEnabled());
 
     testStreamlineContext(*ctx);
+    testStreamlineEvaluate(*ctx);
     testClearAndReadback(*ctx);
     testTwoSampleSupport(*ctx);
     testRendererAaMode(*ctx);
