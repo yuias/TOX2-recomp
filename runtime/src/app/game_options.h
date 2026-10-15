@@ -43,24 +43,43 @@ struct GameOptions {
     AaMode aa_mode = AaMode::Msaa;
     std::vector<std::uint32_t> rsx_capture_frames;
     std::vector<GuestDumpSpec> dumps;
+
+    bool no_config = false;               // --no-config was given
+    std::filesystem::path config_file;    // absolute; the file that was read, empty when none
+    std::filesystem::path settings_file;  // absolute; where changes are saved, empty when they are not
+    std::vector<std::string> config_warnings;
+    // Keys of the file that were left out because the run lacks the renderer or the window they need. Logged by
+    // applyGameOptions, because the log level is not applied while parsing.
+    std::vector<std::string> config_ignored;
+};
+
+// Where config.json is looked for when neither --config nor --no-config is given.
+struct ConfigSearch {
+    std::filesystem::path working_dir;     // checked first
+    std::filesystem::path executable_dir;  // checked second, and where a new file is created; may be empty
 };
 
 struct OptionsError {
     int exit_code = 2;        // ExitCode::Usage
     std::string message;      // complete, one or more lines, each ending in '\n'
-    bool print_usage = true;  // command-line mistakes
+    bool print_usage = true;  // command-line mistakes; false for config file problems
 };
 
 // The persisted and typed description of every option, in the order value errors are reported.
 std::span<const OptionSpec> gameOptionSpecs();
 std::string_view gameOptionsUsage();
 
-// `args` excludes argv[0] and is in the ANSI code page, as argv is. Reads the files named by --pad-script and
-// --audio-dump (the latter is created and truncated, to turn a bad path into a usage error); nothing else is
-// touched, so the process state only changes in applyGameOptions.
-std::expected<GameOptions, OptionsError> parseGameOptions(std::span<const std::string> args);
+bool padUsesKeyboard(std::string_view pad);
+bool padUsesGamepad(std::string_view pad);
 
-// Log level first, then the dialog answer: the settings that take effect in the process at once.
+// `args` excludes argv[0] and is in the ANSI code page, as argv is; the config file is UTF-8. Reads the config
+// file and the files named by --pad-script and --audio-dump (the latter is created and truncated, to turn a bad
+// path into a usage error); nothing else is touched, so the process state only changes in applyGameOptions.
+// A relative --config is resolved against `search.working_dir`.
+std::expected<GameOptions, OptionsError> parseGameOptions(std::span<const std::string> args,
+                                                          const ConfigSearch& search);
+
+// Log level first, then the dialog answer, then the config lines.
 void applyGameOptions(const GameOptions& options);
 
 }  // namespace tox2

@@ -436,9 +436,20 @@ void testWriteFileAtomic() {
     stdfs::remove_all(dir, ec);
 }
 
+// Directories that do not exist, so that a line without --config never reads the player's config.json.
+tox2::ConfigSearch noConfigSearch() {
+    static const stdfs::path root =
+            stdfs::temp_directory_path() / ("tox2_game_options_absent_" + std::to_string(GetCurrentProcessId()));
+    return {root / "work", root / "exe"};
+}
+
+std::expected<tox2::GameOptions, tox2::OptionsError> parseLine(const std::vector<std::string>& args) {
+    return tox2::parseGameOptions(args, noConfigSearch());
+}
+
 // Parses `args` and returns the error, or an error with an empty message when the line is accepted.
 tox2::OptionsError parseError(const std::vector<std::string>& args) {
-    const auto result = tox2::parseGameOptions(args);
+    const auto result = parseLine(args);
     return result ? tox2::OptionsError{.message = {}} : result.error();
 }
 
@@ -469,11 +480,22 @@ void testOptionTable() {
         if (spec.name == "rsx-capture") CHECK(spec.kind == OptionKind::FrameList);
         if (spec.name == "dump-guest") CHECK(spec.kind == OptionKind::StringList);
     }
+    // Options a file value can not use without a renderer or a window are left out of such runs.
+    for (const OptionSpec& spec : specs) {
+        const bool renderer = spec.name == "dump-frames" || spec.name == "dump-frames-every" ||
+                              spec.name == "shader-cache" || spec.name == "vk-validation" ||
+                              spec.name == "resolution-scale" || spec.name == "aa-mode";
+        const OptionNeeds expected = renderer                   ? OptionNeeds::Renderer
+                                     : spec.name == "pad-probe" ? OptionNeeds::Window
+                                                                : OptionNeeds::Nothing;
+        CHECK(spec.needs == expected);
+    }
     CHECK(tox2::gameOptionsUsage().starts_with("usage: tox2_game "));
+    CHECK(tox2::gameOptionsUsage().find("--config FILE | --no-config") != std::string_view::npos);
 }
 
 void testDefaultLines() {
-    const auto windowed = tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g"});
+    const auto windowed = parseLine(std::vector<std::string>{"--game-dir", "g"});
     CHECK(windowed.has_value());
     if (windowed) {
         CHECK(windowed->game_dir == stdfs::path("g"));
@@ -486,7 +508,7 @@ void testDefaultLines() {
         CHECK(windowed->dialog_answer.empty() && windowed->rsx_capture_frames.empty() && windowed->dumps.empty());
     }
 
-    const auto headless = tox2::parseGameOptions(std::vector<std::string>{"--vfs-config", "v.json", "--no-window"});
+    const auto headless = parseLine(std::vector<std::string>{"--vfs-config", "v.json", "--no-window"});
     CHECK(headless.has_value());
     if (headless) {
         CHECK(headless->vfs_config == stdfs::path("v.json") && headless->game_dir.empty());
@@ -495,56 +517,55 @@ void testDefaultLines() {
     }
 
     // A frame dump implies the renderer without a window.
-    const auto dumping =
-            tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--no-window", "--dump-frames", "d"});
+    const auto dumping = parseLine(std::vector<std::string>{"--game-dir", "g", "--no-window", "--dump-frames", "d"});
     CHECK(dumping && !dumping->window && dumping->render_vulkan && dumping->dump_frames == stdfs::path("d"));
     // An explicit pad and audio are kept.
-    const auto explicit_pad = tox2::parseGameOptions(
-            std::vector<std::string>{"--game-dir", "g", "--no-window", "--pad", "none", "--audio", "wasapi"});
+    const auto explicit_pad =
+            parseLine(std::vector<std::string>{"--game-dir", "g", "--no-window", "--pad", "none", "--audio", "wasapi"});
     CHECK(explicit_pad && explicit_pad->pad == "none" && explicit_pad->audio == "wasapi");
 }
 
 void testValues() {
-    const auto all = tox2::parseGameOptions(std::vector<std::string>{"--game-dir",
-                                                                     "g",
-                                                                     "--elf",
-                                                                     "e.elf",
-                                                                     "--libsre",
-                                                                     "l.elf",
-                                                                     "--hdd-dir",
-                                                                     "h",
-                                                                     "--sdata-cache",
-                                                                     "s",
-                                                                     "--png-dump",
-                                                                     "p",
-                                                                     "--rsx-census",
-                                                                     "c.json",
-                                                                     "--log",
-                                                                     "l.log",
-                                                                     "--seconds",
-                                                                     "30",
-                                                                     "--strict",
-                                                                     "--quiet-hle",
-                                                                     "--load-only",
-                                                                     "--lwmutex-watch",
-                                                                     "--frame-limit",
-                                                                     "60",
-                                                                     "--host-priorities",
-                                                                     "off",
-                                                                     "--yield-backoff",
-                                                                     "off",
-                                                                     "--lwmutex-fast-path",
-                                                                     "off",
-                                                                     "--ppu-threads",
-                                                                     "legacy",
-                                                                     "--resolution-scale",
-                                                                     "3",
-                                                                     "--aa-mode",
-                                                                     "supersample",
-                                                                     "--dump-frames-every",
-                                                                     "4",
-                                                                     "--dialog-answer",
-                                                                     "no"});
+    const auto all = parseLine(std::vector<std::string>{"--game-dir",
+                                                        "g",
+                                                        "--elf",
+                                                        "e.elf",
+                                                        "--libsre",
+                                                        "l.elf",
+                                                        "--hdd-dir",
+                                                        "h",
+                                                        "--sdata-cache",
+                                                        "s",
+                                                        "--png-dump",
+                                                        "p",
+                                                        "--rsx-census",
+                                                        "c.json",
+                                                        "--log",
+                                                        "l.log",
+                                                        "--seconds",
+                                                        "30",
+                                                        "--strict",
+                                                        "--quiet-hle",
+                                                        "--load-only",
+                                                        "--lwmutex-watch",
+                                                        "--frame-limit",
+                                                        "60",
+                                                        "--host-priorities",
+                                                        "off",
+                                                        "--yield-backoff",
+                                                        "off",
+                                                        "--lwmutex-fast-path",
+                                                        "off",
+                                                        "--ppu-threads",
+                                                        "legacy",
+                                                        "--resolution-scale",
+                                                        "3",
+                                                        "--aa-mode",
+                                                        "supersample",
+                                                        "--dump-frames-every",
+                                                        "4",
+                                                        "--dialog-answer",
+                                                        "no"});
     CHECK(all.has_value());
     if (all) {
         CHECK(all->elf == stdfs::path("e.elf") && all->libsre == stdfs::path("l.elf") && all->hdd_dir == "h");
@@ -556,24 +577,23 @@ void testValues() {
         CHECK(all->resolution_scale == 3 && all->aa_mode == tox2::AaMode::Supersample && all->dump_frames_every == 4);
         CHECK(all->dialog_answer == "no");
     }
-    const auto one = tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--ppu-threads", "1"});
+    const auto one = parseLine(std::vector<std::string>{"--game-dir", "g", "--ppu-threads", "1"});
     CHECK(one && one->ppu_threads == tox2::PpuThreadsMode::Split1);
-    const auto two = tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--ppu-threads", "2"});
+    const auto two = parseLine(std::vector<std::string>{"--game-dir", "g", "--ppu-threads", "2"});
     CHECK(two && two->ppu_threads == tox2::PpuThreadsMode::Split2);
-    const auto off = tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--frame-limit", "off"});
+    const auto off = parseLine(std::vector<std::string>{"--game-dir", "g", "--frame-limit", "off"});
     CHECK(off && off->frame_limit == tox2::RsxFlipLimit::Off);
-    const auto none = tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--render", "none"});
+    const auto none = parseLine(std::vector<std::string>{"--game-dir", "g", "--render", "none"});
     CHECK(none && !none->window && !none->render_vulkan && none->pad == "neutral" && none->audio == "none");
 
     // The last value of a repeated option wins; the list options accumulate.
-    const auto repeated =
-            tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--seconds", "5", "--seconds", "10"});
+    const auto repeated = parseLine(std::vector<std::string>{"--game-dir", "g", "--seconds", "5", "--seconds", "10"});
     CHECK(repeated && repeated->seconds == 10);
-    const auto frames = tox2::parseGameOptions(
-            std::vector<std::string>{"--game-dir", "g", "--rsx-capture", "1,2", "--rsx-capture", "3"});
+    const auto frames =
+            parseLine(std::vector<std::string>{"--game-dir", "g", "--rsx-capture", "1,2", "--rsx-capture", "3"});
     CHECK(frames && frames->rsx_capture_frames == (std::vector<std::uint32_t>{1, 2, 3}));
-    const auto dumps = tox2::parseGameOptions(std::vector<std::string>{
-            "--game-dir", "g", "--dump-guest", "0x1000:16:a.bin", "--dump-guest", "0x2000:8:b.bin"});
+    const auto dumps = parseLine(std::vector<std::string>{"--game-dir", "g", "--dump-guest", "0x1000:16:a.bin",
+                                                          "--dump-guest", "0x2000:8:b.bin"});
     CHECK(dumps && dumps->dumps.size() == 2);
     if (dumps && dumps->dumps.size() == 2) {
         CHECK(dumps->dumps[0].addr == 0x1000 && dumps->dumps[0].size == 16 && dumps->dumps[0].file == "a.bin");
@@ -665,8 +685,8 @@ void testPadScriptAndAudioDump() {
     const std::string bad_text = bad.string();
 
     // A script selects the keyboard pad for an unattended run.
-    const auto scripted = tox2::parseGameOptions(
-            std::vector<std::string>{"--game-dir", "g", "--no-window", "--pad-script", good_text});
+    const auto scripted =
+            parseLine(std::vector<std::string>{"--game-dir", "g", "--no-window", "--pad-script", good_text});
     CHECK(scripted && scripted->pad == "keyboard" && scripted->pad_script == good &&
           scripted->pad_script_data.events.size() == 2);
     const tox2::OptionsError broken = parseError({"--game-dir", "g", "--pad-script", bad_text});
@@ -679,8 +699,7 @@ void testPadScriptAndAudioDump() {
 
     // The audio dump probe creates the file; a path in a missing directory is a usage error.
     const stdfs::path wav = dir / "dump.wav";
-    const auto dumping =
-            tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--audio-dump", wav.string()});
+    const auto dumping = parseLine(std::vector<std::string>{"--game-dir", "g", "--audio-dump", wav.string()});
     CHECK(dumping && dumping->audio_dump == wav && stdfs::exists(wav));
     const std::string no_dir_text = (dir / "nodir" / "x.wav").string();
     const tox2::OptionsError no_dir = parseError({"--game-dir", "g", "--audio-dump", no_dir_text});
@@ -692,8 +711,8 @@ void testPadScriptAndAudioDump() {
 void testApplyOptions() {
     // Parsing only records the level and the answer; applyGameOptions is what changes the process.
     const bool debug_before = tox2::logEnabled(tox2::LogLevel::Debug);
-    const auto parsed = tox2::parseGameOptions(
-            std::vector<std::string>{"--game-dir", "g", "--log-level", "debug", "--dialog-answer", "no"});
+    const auto parsed =
+            parseLine(std::vector<std::string>{"--game-dir", "g", "--log-level", "debug", "--dialog-answer", "no"});
     CHECK(parsed && parsed->log_level == tox2::LogLevel::Debug && parsed->dialog_answer == "no");
     CHECK(tox2::logEnabled(tox2::LogLevel::Debug) == debug_before);
     if (parsed) {
@@ -701,6 +720,242 @@ void testApplyOptions() {
         CHECK(tox2::logEnabled(tox2::LogLevel::Debug));
         tox2::setLogLevel(tox2::LogLevel::Info);
     }
+}
+
+// A working and an executable directory under a per-process temporary directory.
+struct ConfigDirs {
+    stdfs::path root, work, exe;
+
+    explicit ConfigDirs(const char* name) {
+        root = stdfs::temp_directory_path() / (std::string(name) + std::to_string(GetCurrentProcessId()));
+        work = root / "work";
+        exe = root / "exe";
+        std::error_code ec;
+        stdfs::remove_all(root, ec);
+        stdfs::create_directories(work);
+        stdfs::create_directories(exe);
+    }
+    ~ConfigDirs() {
+        std::error_code ec;
+        stdfs::remove_all(root, ec);
+    }
+    ConfigDirs(const ConfigDirs&) = delete;
+    ConfigDirs& operator=(const ConfigDirs&) = delete;
+
+    std::expected<tox2::GameOptions, tox2::OptionsError> parse(const std::vector<std::string>& args) const {
+        return tox2::parseGameOptions(args, tox2::ConfigSearch{work, exe});
+    }
+    // The error of a line, or an error with an empty message when it is accepted.
+    tox2::OptionsError error(const std::vector<std::string>& args) const {
+        const auto result = parse(args);
+        return result ? tox2::OptionsError{.message = {}} : result.error();
+    }
+};
+
+bool samePath(const stdfs::path& a, const stdfs::path& b) { return a.lexically_normal() == b.lexically_normal(); }
+
+void testConfigFileValues() {
+    ConfigDirs dirs("tox2_game_options_cfg_values_");
+    const stdfs::path file = dirs.work / "config.json";
+    writeFile(file,
+              R"({"game_dir": "g", "elf": "bin/e.elf", "resolution_scale": 2, "frame_limit": 60, "strict": true,
+                  "seconds": 7, "rsx_capture": "1,2", "dump_guest": ["0x1000:16:a.bin"], "my_note": "keep"})");
+
+    const auto opt = dirs.parse({});
+    CHECK(opt.has_value());
+    if (opt) {
+        // Paths of the file resolve against its directory, so a file used from any working directory works.
+        CHECK(samePath(opt->game_dir, dirs.work / "g") && samePath(opt->elf, dirs.work / "bin" / "e.elf"));
+        CHECK(opt->resolution_scale == 2 && opt->frame_limit == tox2::RsxFlipLimit::Hz60 && opt->strict);
+        CHECK(opt->seconds == 7 && opt->rsx_capture_frames == (std::vector<std::uint32_t>{1, 2}));
+        CHECK(opt->dumps.size() == 1 && opt->dumps[0].file == "a.bin");
+        CHECK(opt->config_file == file && opt->settings_file == file && !opt->no_config);
+        CHECK(opt->config_warnings == std::vector<std::string>{"unknown key \"my_note\" ignored"});
+        CHECK(opt->window && opt->render_vulkan && opt->config_ignored.empty());
+    }
+
+    // The command line wins, option by option; the rest of the file still applies.
+    const auto over = dirs.parse(
+            {"--resolution-scale", "3", "--game-dir", "cli", "--rsx-capture", "9", "--dump-guest", "0x2000:8:b.bin"});
+    CHECK(over.has_value());
+    if (over) {
+        CHECK(over->resolution_scale == 3 && over->game_dir == stdfs::path("cli"));
+        CHECK(over->frame_limit == tox2::RsxFlipLimit::Hz60 && over->seconds == 7);
+        // A list on the command line replaces the file's whole list.
+        CHECK(over->rsx_capture_frames == std::vector<std::uint32_t>{9});
+        CHECK(over->dumps.size() == 1 && over->dumps[0].file == "b.bin");
+    }
+
+    // A file value that the command line replaces has no effect, so it is not checked.
+    writeFile(file, R"({"game_dir": "g", "resolution_scale": 9})");
+    CHECK(dirs.parse({"--resolution-scale", "2"}).has_value());
+
+    // A flag set to false is the same as no key; "no_window" and "render" from the file shape the run.
+    writeFile(file, R"({"game_dir": "g", "strict": false, "no_window": true})");
+    const auto flags = dirs.parse({});
+    CHECK(flags && !flags->strict && flags->no_window && !flags->window && flags->pad == "neutral");
+    writeFile(file, R"({"game_dir": "g", "render": "none", "resolution_scale": 2})");
+    const auto none = dirs.parse({});
+    CHECK(none && !none->render_vulkan && !none->window && none->resolution_scale == 1);
+
+    // A non-ASCII path keeps its characters.
+    writeFile(file, "{\"game_dir\": \"\xE3\x82\xB2\xE3\x83\xBC\xE3\x83\xA0\"}");
+    const auto utf8 = dirs.parse({});
+    CHECK(utf8 && samePath(utf8->game_dir, dirs.work / stdfs::path(u8"ゲーム")));
+}
+
+void testConfigFileLookup() {
+    ConfigDirs dirs("tox2_game_options_cfg_lookup_");
+    const stdfs::path work_file = dirs.work / "config.json";
+    const stdfs::path exe_file = dirs.exe / "config.json";
+
+    // Neither directory has a file: nothing is read, and the executable directory is where one will be created.
+    const auto none = dirs.parse({"--game-dir", "g"});
+    CHECK(none && none->config_file.empty() && none->settings_file == exe_file && !none->no_config);
+    // Without an executable directory there is nowhere to save.
+    const auto no_exe =
+            tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g"}, tox2::ConfigSearch{dirs.work, {}});
+    CHECK(no_exe && no_exe->config_file.empty() && no_exe->settings_file.empty());
+
+    writeFile(exe_file, R"({"game_dir": "g", "seconds": 9})");
+    const auto exe_only = dirs.parse({});
+    CHECK(exe_only && exe_only->seconds == 9 && exe_only->config_file == exe_file &&
+          exe_only->settings_file == exe_file);
+
+    // The working directory comes first, and the two files are never merged.
+    writeFile(work_file, R"({"game_dir": "g", "strict": true, "seconds": 7})");
+    const auto both = dirs.parse({});
+    CHECK(both && both->seconds == 7 && both->strict && both->config_file == work_file);
+    writeFile(exe_file, R"({"game_dir": "g", "load_only": true})");
+    const auto unmerged = dirs.parse({});
+    CHECK(unmerged && !unmerged->load_only && unmerged->config_file == work_file);
+
+    // --config names the file read and saved; a relative name is relative to the working directory.
+    writeFile(dirs.work / "other.json", R"({"game_dir": "g", "seconds": 5})");
+    const auto named = dirs.parse({"--config", "other.json"});
+    CHECK(named && named->seconds == 5 && !named->strict && named->config_file == dirs.work / "other.json" &&
+          named->settings_file == named->config_file);
+    const auto last = dirs.parse({"--config", "missing.json", "--config", "other.json"});
+    CHECK(last && last->seconds == 5);
+    const auto absolute = dirs.parse({"--config", (dirs.work / "other.json").string()});
+    CHECK(absolute && absolute->seconds == 5);
+
+    const tox2::OptionsError missing = dirs.error({"--config", "missing.json"});
+    CHECK(missing.message == "error: missing.json: cannot open the file\n" && missing.exit_code == 2 &&
+          !missing.print_usage);
+    CHECK(dirs.error({"--config", "."}).message == "error: .: cannot open the file\n");
+    const tox2::OptionsError no_value = dirs.error({"--game-dir", "g", "--config"});
+    CHECK(no_value.message == "error: --config needs a value\n" && no_value.print_usage);
+
+    // --no-config reads and saves nothing, and does not look at a broken file.
+    writeFile(work_file, "{");
+    const auto off = dirs.parse({"--game-dir", "g", "--no-config"});
+    CHECK(off && off->config_file.empty() && off->settings_file.empty() && off->no_config);
+    const tox2::OptionsError excluded = dirs.error({"--no-config", "--config", "other.json"});
+    CHECK(excluded.message == "error: --no-config excludes --config\n" && excluded.exit_code == 2 &&
+          excluded.print_usage);
+    CHECK(dirs.error({"--config", "other.json", "--no-config"}).message == excluded.message);
+}
+
+void testConfigFileErrors() {
+    ConfigDirs dirs("tox2_game_options_cfg_errors_");
+    const stdfs::path file = dirs.work / "config.json";
+    const std::string name = file.string();
+    const std::string note = "note: settings were also read from " + name + "\n";
+
+    // A file that cannot be parsed stops the start and names the file; the usage text is for the command line.
+    writeFile(file, "{");
+    const tox2::OptionsError broken = dirs.error({"--game-dir", "g"});
+    CHECK(broken.message.starts_with("error: " + name + ": ") && broken.exit_code == 2 && !broken.print_usage);
+    writeFile(file, R"({"game_dir": null})");
+    CHECK(dirs.error({}).message.starts_with("error: " + name + ": "));
+
+    // A value that fails validation names the key.
+    writeFile(file, R"({"game_dir": "g", "resolution_scale": 9})");
+    const tox2::OptionsError scale = dirs.error({});
+    CHECK(scale.message == "error: " + name + ": resolution_scale needs a whole number from 1 to 4\n" &&
+          scale.exit_code == 2 && !scale.print_usage);
+    writeFile(file, R"({"game_dir": "g", "pad": "joystick", "frame_limit": 30})");
+    CHECK(dirs.error({}).message ==
+          "error: " + name + ": pad needs none, neutral, keyboard, gamepad or keyboard+gamepad\n");
+    writeFile(file, R"({"game_dir": "g", "rsx_capture": "0"})");
+    CHECK(dirs.error({}).message == "error: " + name + ": rsx_capture needs frame numbers (1-based), e.g. 300,600\n");
+    // The same value on the command line keeps its message and the usage text.
+    CHECK(rejectedLine({"--game-dir", "g", "--no-config", "--resolution-scale", "9"},
+                       "error: --resolution-scale needs a whole number from 1 to 4\n"));
+
+    // A combined check keeps its text and adds where settings were also read from.
+    writeFile(file, R"({"game_dir": "g", "pad": "gamepad"})");
+    const tox2::OptionsError pad = dirs.error({"--no-window"});
+    CHECK(pad.message == "error: --pad gamepad needs the window\n" + note && pad.print_usage);
+    writeFile(file, R"({"seconds": 1})");
+    CHECK(dirs.error({}).message == "error: --game-dir or --vfs-config is required\n" + note);
+    // The note is about the file that was read, not about where the problem is.
+    writeFile(file, R"({"game_dir": "g"})");
+    CHECK(dirs.error({"--no-window", "--resolution-scale", "2"}).message ==
+          "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode and "
+          "--vk-validation need --render vulkan\n" +
+                  note);
+    // Command-line mistakes found while collecting stay as they are.
+    CHECK(dirs.error({"--bogus"}).message == "error: unknown argument --bogus\n");
+}
+
+void testConfigFileDroppedKeys() {
+    ConfigDirs dirs("tox2_game_options_cfg_dropped_");
+    const stdfs::path file = dirs.work / "config.json";
+
+    // A saved setting must not break an unattended run, so file values the run cannot use are left out.
+    writeFile(file, R"({"game_dir": "g", "resolution_scale": 2, "aa_mode": "supersample"})");
+    const auto headless = dirs.parse({"--no-window"});
+    CHECK(headless.has_value());
+    if (headless) {
+        CHECK(headless->resolution_scale == 1 && headless->aa_mode == tox2::AaMode::Msaa);
+        CHECK((headless->config_ignored == std::vector<std::string>{"resolution_scale ignored: the run has no renderer",
+                                                                    "aa_mode ignored: the run has no renderer"}));
+    }
+    // With a renderer they apply again.
+    const auto frames = dirs.parse({"--no-window", "--dump-frames", "d"});
+    CHECK(frames && frames->resolution_scale == 2 && frames->aa_mode == tox2::AaMode::Supersample &&
+          frames->config_ignored.empty());
+    // The same option on the command line keeps the usage error.
+    CHECK(dirs.error({"--no-window", "--resolution-scale", "2"})
+                  .message.starts_with("error: --dump-frames, --dump-frames-every,"));
+    CHECK(dirs.error({"--render", "none", "--aa-mode", "msaa"}).print_usage);
+
+    // The rule covers every renderer-only and window-only key, hand-written ones included.
+    writeFile(file, R"({"game_dir": "g", "shader_cache": "sc", "vk_validation": true, "dump_frames_every": 2,
+                        "pad_probe": true})");
+    const auto unattended = dirs.parse({"--no-window"});
+    CHECK(unattended && unattended->shader_cache.empty() && !unattended->vk_validation && !unattended->pad_probe &&
+          unattended->dump_frames_every == 1 && unattended->config_ignored.size() == 4);
+    const auto windowed = dirs.parse({});
+    CHECK(windowed && windowed->vk_validation && windowed->pad_probe && windowed->dump_frames_every == 2 &&
+          samePath(windowed->shader_cache, dirs.work / "sc") && windowed->config_ignored.empty());
+
+    // A frame dump from the file is a renderer option too: it implies the renderer unless the run says none.
+    writeFile(file, R"({"game_dir": "g", "dump_frames": "d"})");
+    const auto dumping = dirs.parse({"--no-window"});
+    CHECK(dumping && dumping->render_vulkan && !dumping->window && samePath(dumping->dump_frames, dirs.work / "d"));
+    const auto render_none = dirs.parse({"--render", "none"});
+    CHECK(render_none && !render_none->render_vulkan && render_none->dump_frames.empty() &&
+          render_none->config_ignored.size() == 1);
+    // A bad value that is left out is not reported.
+    writeFile(file, R"({"game_dir": "g", "dump_frames_every": 0})");
+    CHECK(dirs.parse({"--no-window"}).has_value());
+    CHECK(dirs.error({}).message == "error: " + file.string() + ": dump_frames_every needs a positive integer\n");
+}
+
+void testConfigApply() {
+    // Only the process state changes here; the lines themselves go to the log.
+    ConfigDirs dirs("tox2_game_options_cfg_apply_");
+    writeFile(dirs.work / "config.json", R"({"game_dir": "g", "unknown": 1, "resolution_scale": 2})");
+    const auto read = dirs.parse({"--no-window"});
+    CHECK(read && read->config_warnings.size() == 1 && read->config_ignored.size() == 1);
+    if (read) tox2::applyGameOptions(*read);
+    const auto none = tox2::parseGameOptions(std::vector<std::string>{"--game-dir", "g", "--no-config"},
+                                             tox2::ConfigSearch{dirs.work, dirs.exe});
+    CHECK(none.has_value());
+    if (none) tox2::applyGameOptions(*none);
 }
 
 }  // namespace
@@ -732,6 +987,11 @@ int main() {
     testCheckOrder();
     testPadScriptAndAudioDump();
     testApplyOptions();
+    testConfigFileValues();
+    testConfigFileLookup();
+    testConfigFileErrors();
+    testConfigFileDroppedKeys();
+    testConfigApply();
     std::printf("game options tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }

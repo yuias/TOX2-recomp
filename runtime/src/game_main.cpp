@@ -115,9 +115,6 @@ bool gameTimeMapped() {
 
 float readGameDt() { return std::bit_cast<float>(tox2Read32(tox2::process().memory.base(), kGameTimeBlock)); }
 
-bool padUsesKeyboard(std::string_view pad) { return pad == "keyboard" || pad == "keyboard+gamepad"; }
-bool padUsesGamepad(std::string_view pad) { return pad == "gamepad" || pad == "keyboard+gamepad"; }
-
 // The Vulkan device and the renderer for the RSX thread. Built and destroyed on that thread; the
 // counters are published for the census, which reads them from another one.
 class VulkanExecutor final : public tox2::RsxExecutor {
@@ -239,7 +236,7 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions&
         presenter_options.on_close = [] {
             tox2::stopProcess(tox2::ExitCode::ProcessExit, "tox2: stop: window closed");
         };
-        if (keyboard && padUsesKeyboard(opt.pad)) {
+        if (keyboard && tox2::padUsesKeyboard(opt.pad)) {
             // These run on the window thread; the state is lock-free, so the guest never waits on it.
             // Focus loss releases the keyboard source only: the gamepad thread is the sole writer of its own.
             presenter_options.on_key = [keyboard](const tox2::KeyMessage& key) {
@@ -584,7 +581,9 @@ int main(int argc, char** argv) {
 
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i) args.emplace_back(argv[i]);
-    auto parsed = tox2::parseGameOptions(args);
+    std::error_code cwd_ec;
+    const tox2::ConfigSearch search{std::filesystem::current_path(cwd_ec), tox2::executableDirectory()};
+    auto parsed = tox2::parseGameOptions(args, search);
     if (!parsed) {
         const tox2::OptionsError& error = parsed.error();
         std::fputs(error.message.c_str(), stderr);
@@ -620,7 +619,9 @@ int main(int argc, char** argv) {
 
     tox2::startPerfLog({audioPerfSource(), gamePerfSource(), rsxPerfSource(), lockPerfSource(), spuPerfSource()});
 
-    // Precedence: command-line options, then the configuration file, then the defaults.
+    // Precedence: command-line options, then config.json, then the --vfs-config file, then the defaults. Keys in
+    // config.json act exactly like command-line options, so its game_dir overrides the /dev_bdvd mount of the
+    // VFS file.
     std::optional<tox2::VfsConfigFile> vfs_file;
     if (!opt.vfs_config.empty()) {
         auto loaded = tox2::loadVfsConfig(opt.vfs_config);
@@ -792,7 +793,7 @@ int main(int argc, char** argv) {
     // thread, the script thread and the gamepad thread each write their own source of it. The executor
     // factory below copies it, so it is created first.
     std::shared_ptr<tox2::KeyboardPadState> keyboard;
-    if (padUsesKeyboard(opt.pad) || padUsesGamepad(opt.pad)) {
+    if (tox2::padUsesKeyboard(opt.pad) || tox2::padUsesGamepad(opt.pad)) {
         keyboard = std::make_shared<tox2::KeyboardPadState>();
         // With the keyboard in the pad, port 0 is always there; a gamepad-only pad follows the hardware.
         tox2::setPadProvider(tox2::makeKeyboardPadProvider(keyboard, {}, {.always_connected = opt.pad != "gamepad"}));
@@ -821,12 +822,12 @@ int main(int argc, char** argv) {
     if (keyboard && !opt.pad_script.empty()) tox2::startPadScript(opt.pad_script_data, keyboard);
     // GameInput takes about a second to initialise, so the gamepad thread creates the backend itself.
     // The probe alone (no gamepad in the pad) runs the thread without a state to write.
-    if (padUsesGamepad(opt.pad) || opt.pad_probe) {
+    if (tox2::padUsesGamepad(opt.pad) || opt.pad_probe) {
         tox2::startGamepadHub(
                 []() -> std::expected<std::shared_ptr<tox2::GamepadBackend>, std::string> {
                     return tox2::makeGameInputBackend({});
                 },
-                padUsesGamepad(opt.pad) ? keyboard : nullptr,
+                tox2::padUsesGamepad(opt.pad) ? keyboard : nullptr,
                 {.is_foreground = tox2::processOwnsForegroundWindow,
                  .detect_steam = tox2::detectSteamContext,
                  .probe = opt.pad_probe});

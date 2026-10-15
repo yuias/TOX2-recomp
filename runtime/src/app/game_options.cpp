@@ -4,6 +4,8 @@
 #include <charconv>
 #include <cstddef>
 #include <format>
+#include <fstream>
+#include <iterator>
 #include <system_error>
 #include <utility>
 
@@ -28,9 +30,23 @@ constexpr std::string_view kUsage =
         "                [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]\n"
         "                [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off]\n"
         "                [--ppu-threads legacy|1|2] [--lwmutex-fast-path on|off] [--lwmutex-watch]\n"
-        "                [--dump-guest ADDR:SIZE:FILE]...\n";
+        "                [--dump-guest ADDR:SIZE:FILE]...\n"
+        "                [--config FILE | --no-config]\n";
 
-constexpr std::string_view kRsxCaptureError = "error: --rsx-capture needs frame numbers (1-based), e.g. 300,600\n";
+std::string rsxCaptureError(std::string_view label) {
+    return std::format("error: {} needs frame numbers (1-based), e.g. 300,600\n", label);
+}
+
+// One occurrence of an option, from the command line or from the config file.
+struct RawItem {
+    std::string text;  // what the messages quote
+    bool from_file = false;
+    std::filesystem::path path;  // file Path values; their UTF-8 text must not go through `text`
+};
+
+std::filesystem::path itemPath(const RawItem& item) {
+    return item.from_file ? item.path : std::filesystem::path(item.text);
+}
 
 // What the validators settle besides the GameOptions members: facts about which options were given, and the
 // text of the values whose messages quote it.
@@ -46,15 +62,14 @@ struct ParseState {
     std::string audio_dump_text;
 };
 
-// Checks one command-line occurrence of an option and stores it. On failure sets `error` to the complete message.
-using ValidateFn = bool (*)(ParseState& state, std::string_view option, std::string_view text, std::string& error);
+// Checks one occurrence of an option and stores it. `label` names the option in messages: "--name" for the
+// command line, "<file>: key" for the config file. On failure sets `error` to the complete message.
+using ValidateFn = bool (*)(ParseState& state, std::string_view label, const RawItem& item, std::string& error);
 
 struct OptionEntry {
     OptionSpec spec;
     ValidateFn validate;
 };
-
-std::string optionLabel(std::string_view option) { return std::format("--{}", option); }
 
 bool fail(std::string& error, std::string message) {
     error = std::move(message);
@@ -91,167 +106,176 @@ std::optional<LogLevel> parseLogLevel(std::string_view name) {
     return std::nullopt;
 }
 
-bool padUsesKeyboard(std::string_view pad) { return pad == "keyboard" || pad == "keyboard+gamepad"; }
-bool padUsesGamepad(std::string_view pad) { return pad == "gamepad" || pad == "keyboard+gamepad"; }
+// The window and renderer a run gets. Playing is the default, so the window is on unless the run asks for none:
+// --no-window for unattended runs, or an explicit "--render none", which leaves nothing to show. --dump-frames
+// and the window imply vulkan; an explicit "--render none" (anywhere on the line) overrides that.
+struct RunShape {
+    bool window = false;
+    bool render_vulkan = false;
+};
+
+RunShape runShape(bool no_window, std::optional<bool> render_flag, bool dump_frames) {
+    RunShape shape;
+    shape.window = !no_window && render_flag.value_or(true);
+    shape.render_vulkan = render_flag.value_or(dump_frames || shape.window);
+    return shape;
+}
 
 // Validators. Each one's message is the text the option has always printed.
 
 template <std::filesystem::path GameOptions::* Member>
-bool setPath(ParseState& state, std::string_view, std::string_view text, std::string&) {
-    state.options.*Member = std::filesystem::path(text);
+bool setPath(ParseState& state, std::string_view, const RawItem& item, std::string&) {
+    state.options.*Member = itemPath(item);
     return true;
 }
 
 template <bool GameOptions::* Member>
-bool setFlag(ParseState& state, std::string_view, std::string_view, std::string&) {
+bool setFlag(ParseState& state, std::string_view, const RawItem&, std::string&) {
     state.options.*Member = true;
     return true;
 }
 
 template <bool GameOptions::* Member>
-bool setSwitch(ParseState& state, std::string_view option, std::string_view text, std::string& error) {
-    if (text != "on" && text != "off")
-        return fail(error, std::format("error: {} needs on or off\n", optionLabel(option)));
-    state.options.*Member = text == "on";
+bool setSwitch(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    if (item.text != "on" && item.text != "off") return fail(error, std::format("error: {} needs on or off\n", label));
+    state.options.*Member = item.text == "on";
     return true;
 }
 
-bool setPadScript(ParseState& state, std::string_view option, std::string_view text, std::string& error) {
-    state.pad_script_text = text;
-    state.options.pad_script = std::filesystem::path(text);
+bool setPadScript(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    state.pad_script_text = item.text;
+    state.options.pad_script = itemPath(item);
     auto script = loadPadScript(state.options.pad_script);
     if (!script) {
-        return fail(error,
-                    std::format("error: {} {}: {}\n", optionLabel(option), state.pad_script_text, script.error()));
+        return fail(error, std::format("error: {} {}: {}\n", label, state.pad_script_text, script.error()));
     }
     state.options.pad_script_data = std::move(*script);
     return true;
 }
 
-bool setAudioDump(ParseState& state, std::string_view, std::string_view text, std::string&) {
-    state.audio_dump_text = text;
-    state.options.audio_dump = std::filesystem::path(text);
+bool setAudioDump(ParseState& state, std::string_view, const RawItem& item, std::string&) {
+    state.audio_dump_text = item.text;
+    state.options.audio_dump = itemPath(item);
     return true;
 }
 
-bool setLogLevelOption(ParseState& state, std::string_view option, std::string_view text, std::string& error) {
-    const std::optional<LogLevel> level = parseLogLevel(text);
-    if (!level) {
-        return fail(error, std::format("error: {} needs trace, debug, info, warn or error\n", optionLabel(option)));
-    }
+bool setLogLevelOption(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    const std::optional<LogLevel> level = parseLogLevel(item.text);
+    if (!level) return fail(error, std::format("error: {} needs trace, debug, info, warn or error\n", label));
     state.options.log_level = level;
     return true;
 }
 
-bool setDialogAnswerOption(ParseState& state, std::string_view option, std::string_view text, std::string& error) {
-    if (text != "yes" && text != "no" && text != "ok") {
-        return fail(error, std::format("error: {} needs yes, no or ok\n", optionLabel(option)));
+bool setDialogAnswerOption(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    if (item.text != "yes" && item.text != "no" && item.text != "ok") {
+        return fail(error, std::format("error: {} needs yes, no or ok\n", label));
     }
-    state.options.dialog_answer = text;
+    state.options.dialog_answer = item.text;
     return true;
 }
 
-bool setPad(ParseState& state, std::string_view option, std::string_view text, std::string& error) {
+bool setPad(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    const std::string& text = item.text;
     if (text != "none" && text != "neutral" && text != "keyboard" && text != "gamepad" && text != "keyboard+gamepad") {
-        return fail(error, std::format("error: {} needs none, neutral, keyboard, gamepad or keyboard+gamepad\n",
-                                       optionLabel(option)));
+        return fail(error,
+                    std::format("error: {} needs none, neutral, keyboard, gamepad or keyboard+gamepad\n", label));
     }
     state.options.pad = text;
     state.pad_given = true;
     return true;
 }
 
-bool setAudio(ParseState& state, std::string_view option, std::string_view text, std::string& error) {
-    if (text != "none" && text != "wasapi") {
-        return fail(error, std::format("error: {} needs none or wasapi\n", optionLabel(option)));
+bool setAudio(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    if (item.text != "none" && item.text != "wasapi") {
+        return fail(error, std::format("error: {} needs none or wasapi\n", label));
     }
-    state.options.audio = text;
+    state.options.audio = item.text;
     state.audio_given = true;
     return true;
 }
 
-bool setRender(ParseState& state, std::string_view option, std::string_view text, std::string& error) {
-    if (text != "none" && text != "vulkan") {
-        return fail(error, std::format("error: {} needs none or vulkan\n", optionLabel(option)));
+bool setRender(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    if (item.text != "none" && item.text != "vulkan") {
+        return fail(error, std::format("error: {} needs none or vulkan\n", label));
     }
-    state.render_flag = text == "vulkan";
+    state.render_flag = item.text == "vulkan";
     return true;
 }
 
-bool setPpuThreads(ParseState& state, std::string_view option, std::string_view text, std::string& error) {
-    if (text == "legacy") {
+bool setPpuThreads(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    if (item.text == "legacy") {
         state.options.ppu_threads = PpuThreadsMode::Legacy;
-    } else if (text == "1") {
+    } else if (item.text == "1") {
         state.options.ppu_threads = PpuThreadsMode::Split1;
-    } else if (text == "2") {
+    } else if (item.text == "2") {
         state.options.ppu_threads = PpuThreadsMode::Split2;
     } else {
-        return fail(error, std::format("error: {} needs legacy, 1 or 2\n", optionLabel(option)));
+        return fail(error, std::format("error: {} needs legacy, 1 or 2\n", label));
     }
     return true;
 }
 
-bool setSeconds(ParseState& state, std::string_view option, std::string_view text, std::string& error) {
-    if (!parseUnsigned(text, state.options.seconds)) {
-        return fail(error, std::format("error: {} needs a non-negative integer\n", optionLabel(option)));
+bool setSeconds(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    if (!parseUnsigned(item.text, state.options.seconds)) {
+        return fail(error, std::format("error: {} needs a non-negative integer\n", label));
     }
     return true;
 }
 
-bool setDumpFramesEvery(ParseState& state, std::string_view option, std::string_view text, std::string& error) {
-    if (!parseUnsigned(text, state.options.dump_frames_every) || state.options.dump_frames_every == 0) {
-        return fail(error, std::format("error: {} needs a positive integer\n", optionLabel(option)));
+bool setDumpFramesEvery(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    if (!parseUnsigned(item.text, state.options.dump_frames_every) || state.options.dump_frames_every == 0) {
+        return fail(error, std::format("error: {} needs a positive integer\n", label));
     }
     state.dump_every_given = true;
     return true;
 }
 
-bool setRsxCapture(ParseState& state, std::string_view, std::string_view text, std::string& error) {
+bool setRsxCapture(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
     // The frames of every occurrence accumulate, and a later list only has to be valid, not non-empty.
-    if (!parseFrameList(text, state.options.rsx_capture_frames)) return fail(error, std::string(kRsxCaptureError));
+    if (!parseFrameList(item.text, state.options.rsx_capture_frames)) return fail(error, rsxCaptureError(label));
     return true;
 }
 
-bool addDumpGuest(ParseState& state, std::string_view option, std::string_view text, std::string& error) {
+bool addDumpGuest(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
     std::string parse_error;
-    auto spec = parseGuestDumpSpec(text, parse_error);
-    if (!spec) return fail(error, std::format("error: {} {}: {}\n", optionLabel(option), text, parse_error));
+    auto spec = parseGuestDumpSpec(item.text, parse_error);
+    if (!spec) return fail(error, std::format("error: {} {}: {}\n", label, item.text, parse_error));
     state.options.dumps.push_back(std::move(*spec));
     return true;
 }
 
-bool setFrameLimit(ParseState& state, std::string_view option, std::string_view text, std::string& error) {
-    if (text == "vsync") {
+bool setFrameLimit(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    if (item.text == "vsync") {
         state.options.frame_limit = RsxFlipLimit::Vsync;
-    } else if (text == "60") {
+    } else if (item.text == "60") {
         state.options.frame_limit = RsxFlipLimit::Hz60;
-    } else if (text == "off") {
+    } else if (item.text == "off") {
         state.options.frame_limit = RsxFlipLimit::Off;
     } else {
-        return fail(error, std::format("error: {} needs vsync, 60 or off\n", optionLabel(option)));
+        return fail(error, std::format("error: {} needs vsync, 60 or off\n", label));
     }
     return true;
 }
 
-bool setResolutionScale(ParseState& state, std::string_view option, std::string_view text, std::string& error) {
-    if (!parseUnsigned(text, state.options.resolution_scale) || state.options.resolution_scale < 1 ||
+bool setResolutionScale(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    if (!parseUnsigned(item.text, state.options.resolution_scale) || state.options.resolution_scale < 1 ||
         state.options.resolution_scale > kMaxResolutionScale) {
-        return fail(error, std::format("error: {} needs a whole number from 1 to {}\n", optionLabel(option),
-                                       kMaxResolutionScale));
+        return fail(error, std::format("error: {} needs a whole number from 1 to {}\n", label, kMaxResolutionScale));
     }
     state.resolution_scale_given = true;
     return true;
 }
 
-bool setAaMode(ParseState& state, std::string_view option, std::string_view text, std::string& error) {
-    const std::optional<AaMode> mode = parseAaMode(text);
-    if (!mode) return fail(error, std::format("error: {} needs supersample|msaa\n", optionLabel(option)));
+bool setAaMode(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    const std::optional<AaMode> mode = parseAaMode(item.text);
+    if (!mode) return fail(error, std::format("error: {} needs supersample|msaa\n", label));
     state.options.aa_mode = *mode;
     state.aa_mode_given = true;
     return true;
 }
 
-// Value errors are reported in this order. An option that takes a value is any kind but Flag.
+// Value errors are reported in this order. An option that takes a value is any kind but Flag. `needs` is also
+// set on options that are not persisted: a key of the config file that the run cannot use is left out.
 constexpr auto kEntries = std::to_array<OptionEntry>({
         {{"game-dir", OptionKind::Path}, setPath<&GameOptions::game_dir>},
         {{"vfs-config", OptionKind::Path}, setPath<&GameOptions::vfs_config>},
@@ -264,8 +288,8 @@ constexpr auto kEntries = std::to_array<OptionEntry>({
         {{"pad-script", OptionKind::Path}, setPadScript},
         {{"audio-dump", OptionKind::Path}, setAudioDump},
         {{"rsx-census", OptionKind::Path}, setPath<&GameOptions::rsx_census>},
-        {{"dump-frames", OptionKind::Path}, setPath<&GameOptions::dump_frames>},
-        {{"shader-cache", OptionKind::Path}, setPath<&GameOptions::shader_cache>},
+        {{"dump-frames", OptionKind::Path, false, OptionNeeds::Renderer}, setPath<&GameOptions::dump_frames>},
+        {{"shader-cache", OptionKind::Path, false, OptionNeeds::Renderer}, setPath<&GameOptions::shader_cache>},
         {{"log-level", OptionKind::String}, setLogLevelOption},
         {{"dialog-answer", OptionKind::String}, setDialogAnswerOption},
         {{"pad", OptionKind::String}, setPad},
@@ -273,12 +297,12 @@ constexpr auto kEntries = std::to_array<OptionEntry>({
         {{"render", OptionKind::String}, setRender},
         {{"ppu-threads", OptionKind::String}, setPpuThreads},
         {{"seconds", OptionKind::Unsigned}, setSeconds},
-        {{"dump-frames-every", OptionKind::Unsigned}, setDumpFramesEvery},
+        {{"dump-frames-every", OptionKind::Unsigned, false, OptionNeeds::Renderer}, setDumpFramesEvery},
         {{"strict", OptionKind::Flag}, setFlag<&GameOptions::strict>},
         {{"quiet-hle", OptionKind::Flag}, setFlag<&GameOptions::quiet_hle>},
         {{"load-only", OptionKind::Flag}, setFlag<&GameOptions::load_only>},
-        {{"pad-probe", OptionKind::Flag}, setFlag<&GameOptions::pad_probe>},
-        {{"vk-validation", OptionKind::Flag}, setFlag<&GameOptions::vk_validation>},
+        {{"pad-probe", OptionKind::Flag, false, OptionNeeds::Window}, setFlag<&GameOptions::pad_probe>},
+        {{"vk-validation", OptionKind::Flag, false, OptionNeeds::Renderer}, setFlag<&GameOptions::vk_validation>},
         {{"no-window", OptionKind::Flag}, setFlag<&GameOptions::no_window>},
         {{"lwmutex-watch", OptionKind::Flag}, setFlag<&GameOptions::lwmutex_watch>},
         {{"host-priorities", OptionKind::Switch}, setSwitch<&GameOptions::host_priorities>},
@@ -297,32 +321,54 @@ constexpr auto kSpecs = [] {
     return specs;
 }();
 
-// The command-line text of every occurrence of each option, indexed like kEntries.
-using RawValues = std::array<std::vector<std::string>, kEntries.size()>;
+constexpr std::size_t entryIndex(std::string_view name) {
+    for (std::size_t e = 0; e < kEntries.size(); ++e) {
+        if (kEntries[e].spec.name == name) return e;
+    }
+    return kEntries.size();
+}
+
+constexpr std::size_t kDumpFramesEntry = entryIndex("dump-frames");
+constexpr std::size_t kRenderEntry = entryIndex("render");
+constexpr std::size_t kNoWindowEntry = entryIndex("no-window");
+static_assert(kDumpFramesEntry < kEntries.size() && kRenderEntry < kEntries.size() && kNoWindowEntry < kEntries.size());
+
+// What phase 1 finds on the command line. `raw` holds the text of every occurrence of each table option, indexed
+// like kEntries; --config and --no-config are not table options, so a "config" key in the file is just unknown.
+struct CommandLine {
+    std::array<std::vector<std::string>, kEntries.size()> raw;
+    std::optional<std::string> config;
+    bool no_config = false;
+};
 
 // Phase 1: finds the options and their values in argument order.
-std::optional<OptionsError> collectCommandLine(std::span<const std::string> args, RawValues& raw) {
+std::optional<OptionsError> collectCommandLine(std::span<const std::string> args, CommandLine& line) {
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string_view arg = args[i];
-        std::size_t index = kEntries.size();
-        if (arg.starts_with("--")) {
-            for (std::size_t e = 0; e < kEntries.size(); ++e) {
-                if (arg.substr(2) == kEntries[e].spec.name) index = e;
-            }
+        if (arg == "--no-config") {
+            line.no_config = true;
+            continue;
         }
+        if (arg == "--config") {
+            if (i + 1 >= args.size()) return OptionsError{.message = "error: --config needs a value\n"};
+            line.config = args[++i];  // the last one wins
+            continue;
+        }
+        std::size_t index = kEntries.size();
+        if (arg.starts_with("--")) index = entryIndex(arg.substr(2));
         if (index == kEntries.size()) return OptionsError{.message = std::format("error: unknown argument {}\n", arg)};
         const OptionSpec& spec = kEntries[index].spec;
         if (spec.kind == OptionKind::Flag) {
-            raw[index].emplace_back();
+            line.raw[index].emplace_back();
             continue;
         }
         if (i + 1 >= args.size()) {
             std::string message = std::format("error: {} needs a value\n", arg);
             // The frame list has always reported its format after the missing value as well.
-            if (spec.kind == OptionKind::FrameList) message += kRsxCaptureError;
+            if (spec.kind == OptionKind::FrameList) message += rsxCaptureError("--rsx-capture");
             return OptionsError{.message = std::move(message)};
         }
-        raw[index].push_back(args[++i]);
+        line.raw[index].push_back(args[++i]);
     }
     return std::nullopt;
 }
@@ -331,18 +377,150 @@ OptionsError usageError(std::string message) {
     return OptionsError{.exit_code = static_cast<int>(ExitCode::Usage), .message = std::move(message)};
 }
 
+// A problem with the config file itself: no usage text, the command line is not at fault.
+OptionsError fileError(std::string_view file, std::string_view what) {
+    return OptionsError{.exit_code = static_cast<int>(ExitCode::Usage),
+                        .message = std::format("error: {}: {}\n", file, what),
+                        .print_usage = false};
+}
+
+struct ConfigLocation {
+    std::filesystem::path file;      // empty when none is read
+    std::filesystem::path settings;  // empty when changes are not saved
+};
+
+bool isRegularFile(const std::filesystem::path& path) {
+    std::error_code ec;
+    return std::filesystem::is_regular_file(path, ec);
+}
+
+std::filesystem::path absolutePath(const std::filesystem::path& path) {
+    std::error_code ec;
+    std::filesystem::path result = std::filesystem::absolute(path, ec);
+    return ec ? path : result;
+}
+
+std::expected<ConfigLocation, OptionsError> locateConfig(const CommandLine& line, const ConfigSearch& search) {
+    ConfigLocation location;
+    if (line.no_config) return location;
+    constexpr std::string_view kFileName = "config.json";
+    if (line.config) {
+        std::filesystem::path file(*line.config);
+        // Relative to the directory the caller treats as the working directory, so that the lookup does not
+        // depend on the process state.
+        if (file.is_relative() && !search.working_dir.empty()) file = search.working_dir / file;
+        file = absolutePath(file);
+        if (!isRegularFile(file)) return std::unexpected(fileError(*line.config, "cannot open the file"));
+        location.file = file;
+        location.settings = file;
+        return location;
+    }
+    for (const std::filesystem::path& dir : {search.working_dir, search.executable_dir}) {
+        if (dir.empty()) continue;
+        const std::filesystem::path candidate = absolutePath(dir / kFileName);
+        if (isRegularFile(candidate)) {
+            location.file = candidate;
+            location.settings = candidate;
+            return location;
+        }
+    }
+    // A new file is never created in the working directory, where it would end up in the repository.
+    if (!search.executable_dir.empty()) location.settings = absolutePath(search.executable_dir / kFileName);
+    return location;
+}
+
+std::optional<std::string> readBinaryFile(const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return std::nullopt;
+    std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    if (stream.bad()) return std::nullopt;
+    return text;
+}
+
+// The occurrences of each option that take effect: those of the command line when it has any (they replace the
+// file's value as a whole), else the file's value. A file value that a command-line occurrence replaces is
+// not checked, because it has no effect on this run.
+struct Chosen {
+    std::vector<RawItem> items;
+    bool from_file = false;
+};
+using ChosenValues = std::array<Chosen, kEntries.size()>;
+
+void addFileItems(const OptionSpec& spec, const ConfigValue& value, Chosen& chosen) {
+    chosen.from_file = true;
+    const auto text_item = [](std::string text) {
+        return RawItem{.text = std::move(text), .from_file = true, .path = {}};
+    };
+    switch (spec.kind) {
+        case OptionKind::Path:
+            chosen.items.push_back({.text = value.path.string(), .from_file = true, .path = value.path});
+            break;
+        case OptionKind::String:
+        case OptionKind::Unsigned:
+        case OptionKind::Switch: chosen.items.push_back(text_item(value.text)); break;
+        case OptionKind::Flag:
+            // false is the same as leaving the key out.
+            if (value.flag) chosen.items.push_back(text_item({}));
+            break;
+        case OptionKind::FrameList:
+        case OptionKind::StringList:
+            for (const std::string& item : value.items) chosen.items.push_back(text_item(item));
+            break;
+    }
+}
+
+ChosenValues chooseValues(const CommandLine& line, const ConfigFileContents& file) {
+    ChosenValues chosen;
+    for (std::size_t e = 0; e < kEntries.size(); ++e) {
+        for (const std::string& text : line.raw[e])
+            chosen[e].items.push_back({.text = text, .from_file = false, .path = {}});
+    }
+    for (const ConfigValue& value : file.values) {
+        const std::size_t e = entryIndex(value.option);
+        if (e == kEntries.size() || !line.raw[e].empty()) continue;
+        addFileItems(kEntries[e].spec, value, chosen[e]);
+    }
+    return chosen;
+}
+
+// The window and renderer of the run, read off the chosen values before any of them is checked: whether a
+// file value that needs them survives depends on it, and a bad value is still reported in table order.
+RunShape peekRunShape(const ChosenValues& chosen) {
+    std::optional<bool> render_flag;
+    if (!chosen[kRenderEntry].items.empty()) {
+        const std::string& text = chosen[kRenderEntry].items.back().text;
+        if (text == "vulkan") render_flag = true;
+        if (text == "none") render_flag = false;
+    }
+    const bool dump_frames =
+            !chosen[kDumpFramesEntry].items.empty() && !chosen[kDumpFramesEntry].items.back().text.empty();
+    return runShape(!chosen[kNoWindowEntry].items.empty(), render_flag, dump_frames);
+}
+
+// Leaves out the file values whose renderer or window the run lacks, so a saved setting never breaks an
+// unattended run. The same option on the command line keeps its usage error.
+void dropUnusableFileValues(ChosenValues& chosen, const RunShape& shape, std::vector<std::string>& ignored) {
+    for (std::size_t e = 0; e < kEntries.size(); ++e) {
+        const OptionSpec& spec = kEntries[e].spec;
+        if (!chosen[e].from_file || chosen[e].items.empty()) continue;
+        const char* reason = nullptr;
+        if (spec.needs == OptionNeeds::Renderer && !shape.render_vulkan) reason = "the run has no renderer";
+        if (spec.needs == OptionNeeds::Window && !shape.window) reason = "the run has no window";
+        if (!reason) continue;
+        ignored.push_back(std::format("{} ignored: {}", configKeyFor(spec.name), reason));
+        chosen[e].items.clear();
+    }
+}
+
 // Checks that depend on several options, in the order they have always run.
 std::optional<OptionsError> settle(ParseState& state) {
     GameOptions& opt = state.options;
     if (opt.game_dir.empty() && opt.vfs_config.empty()) {
         return usageError("error: --game-dir or --vfs-config is required\n");
     }
-    // Playing is the default, so the window is on unless the run asks for none: --no-window for
-    // unattended runs, or an explicit "--render none", which leaves nothing to show.
-    opt.window = !opt.no_window && state.render_flag.value_or(true);
-    // --dump-frames and the window imply vulkan; an explicit "--render none" (anywhere on the line)
-    // overrides that and then conflicts with it. The other options have no effect without a renderer.
-    opt.render_vulkan = state.render_flag.value_or(!opt.dump_frames.empty() || opt.window);
+    const RunShape shape = runShape(opt.no_window, state.render_flag, !opt.dump_frames.empty());
+    opt.window = shape.window;
+    opt.render_vulkan = shape.render_vulkan;
     const bool render_option = !opt.dump_frames.empty() || state.dump_every_given || !opt.shader_cache.empty() ||
                                opt.vk_validation || state.resolution_scale_given || state.aa_mode_given;
     if (render_option && !opt.render_vulkan) {
@@ -380,35 +558,85 @@ std::optional<OptionsError> settle(ParseState& state) {
 
 }  // namespace
 
+bool padUsesKeyboard(std::string_view pad) { return pad == "keyboard" || pad == "keyboard+gamepad"; }
+bool padUsesGamepad(std::string_view pad) { return pad == "gamepad" || pad == "keyboard+gamepad"; }
+
 std::span<const OptionSpec> gameOptionSpecs() { return kSpecs; }
 
 std::string_view gameOptionsUsage() { return kUsage; }
 
-std::expected<GameOptions, OptionsError> parseGameOptions(std::span<const std::string> args) {
-    RawValues raw;
-    if (std::optional<OptionsError> error = collectCommandLine(args, raw)) {
+std::expected<GameOptions, OptionsError> parseGameOptions(std::span<const std::string> args,
+                                                          const ConfigSearch& search) {
+    CommandLine line;
+    if (std::optional<OptionsError> error = collectCommandLine(args, line)) {
         error->exit_code = static_cast<int>(ExitCode::Usage);
         return std::unexpected(std::move(*error));
     }
+    if (line.no_config && line.config) return std::unexpected(usageError("error: --no-config excludes --config\n"));
 
-    // Phase 2: every given occurrence is checked, so a bad value is reported even when a later one replaces it.
+    auto location = locateConfig(line, search);
+    if (!location) return std::unexpected(std::move(location.error()));
+    const std::string file_name = location->file.string();
+    ConfigFileContents file;
+    if (!location->file.empty()) {
+        const std::optional<std::string> text = readBinaryFile(location->file);
+        if (!text) return std::unexpected(fileError(file_name, "cannot open the file"));
+        auto parsed = parseConfigFile(*text, location->file.parent_path(), kSpecs);
+        if (!parsed) return std::unexpected(fileError(file_name, parsed.error()));
+        file = std::move(*parsed);
+    }
+
+    ChosenValues chosen = chooseValues(line, file);
     ParseState state;
+    dropUnusableFileValues(chosen, peekRunShape(chosen), state.options.config_ignored);
+
+    // Phase 2: every occurrence that takes effect is checked, so a bad value is reported even when a later one
+    // on the command line replaces it.
     for (std::size_t e = 0; e < kEntries.size(); ++e) {
-        for (const std::string& text : raw[e]) {
+        const std::string_view name = kEntries[e].spec.name;
+        for (const RawItem& item : chosen[e].items) {
+            const std::string label =
+                    item.from_file ? std::format("{}: {}", file_name, configKeyFor(name)) : std::format("--{}", name);
             std::string message;
-            if (!kEntries[e].validate(state, kEntries[e].spec.name, text, message)) {
-                return std::unexpected(usageError(std::move(message)));
+            if (!kEntries[e].validate(state, label, item, message)) {
+                OptionsError error = usageError(std::move(message));
+                // A bad value in the file is a file problem; the usage text describes the command line.
+                error.print_usage = !item.from_file;
+                return std::unexpected(std::move(error));
             }
         }
     }
-    if (std::optional<OptionsError> error = settle(state)) return std::unexpected(std::move(*error));
-    return std::move(state.options);
+    if (std::optional<OptionsError> error = settle(state)) {
+        if (!location->file.empty()) {
+            error->message += std::format("note: settings were also read from {}\n", file_name);
+        }
+        return std::unexpected(std::move(*error));
+    }
+    GameOptions& options = state.options;
+    options.no_config = line.no_config;
+    options.config_file = std::move(location->file);
+    options.settings_file = std::move(location->settings);
+    options.config_warnings = std::move(file.warnings);
+    return std::move(options);
 }
 
 void applyGameOptions(const GameOptions& options) {
     // Before anything else logs, so that nothing later in startup logs at the wrong level.
     if (options.log_level) setLogLevel(*options.log_level);
     if (!options.dialog_answer.empty()) setDialogAnswer(options.dialog_answer);
+
+    if (!options.config_file.empty()) {
+        const std::string file = options.config_file.string();
+        logInfo("tox2: config: {}", file);
+        for (const std::string& warning : options.config_warnings) logWarn("tox2: config: {}: {}", file, warning);
+        for (const std::string& ignored : options.config_ignored) logDebug("tox2: config: {}: {}", file, ignored);
+    } else if (options.no_config) {
+        logInfo("tox2: config: off (--no-config)");
+    } else if (!options.settings_file.empty()) {
+        logInfo("tox2: config: none found; changes are saved to {}", options.settings_file.string());
+    } else {
+        logInfo("tox2: config: none found");
+    }
 }
 
 }  // namespace tox2

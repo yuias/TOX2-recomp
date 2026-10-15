@@ -23,8 +23,9 @@ enum class OptionKind : std::uint8_t {
     StringList,  // JSON array of strings, one per command-line occurrence (dump-guest)
 };
 
-// What a persisted option needs to have an effect. A persisted key read from the file is dropped,
-// without a message, when the run lacks it; on the command line the usual usage error stays.
+// What an option needs to have an effect. A key read from the file is dropped, with a debug log line only,
+// when the run lacks it, so a saved setting never breaks an unattended run; on the command line the usual
+// usage error stays.
 enum class OptionNeeds : std::uint8_t { Nothing, Renderer, Window };
 
 struct OptionSpec {
