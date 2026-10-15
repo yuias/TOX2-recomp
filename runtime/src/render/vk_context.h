@@ -11,14 +11,20 @@
 #include <volk.h>
 #include <vk_mem_alloc.h>
 
+#include "render/streamline.h"
+
 namespace tox2 {
 
 struct VkContextOptions {
     bool validation = false;  // enable VK_LAYER_KHRONOS_validation when it is installed
     bool window = false;      // also enable the surface and swapchain extensions
+    // Load Streamline and create the instance and device with what DLSS asks for. Failing is not an error: the
+    // context is created without it and streamlineStatus() says why.
+    bool streamline = false;
 };
 
-// Instance, physical device, logical device with one graphics queue, and the VMA allocator.
+// Instance, physical device, logical device whose graphics queue 0 is the renderer's (Streamline may add more),
+// and the VMA allocator.
 // Requires Vulkan 1.3 (dynamic rendering, synchronization2, shader demote to helper invocation,
 // extended dynamic state) and VK_KHR_push_descriptor.
 class VkContext {
@@ -63,6 +69,13 @@ public:
     bool validationEnabled() const { return messenger_ != VK_NULL_HANDLE; }
     std::uint32_t validationErrorCount() const { return validation_errors_.load(std::memory_order_relaxed); }
 
+    // Null when DLAA is unavailable: not requested, or Streamline or DLSS cannot be used (see streamlineStatus()).
+    Streamline* streamline() const { return streamline_.get(); }
+    // "Streamline 2.14.1, DLSS supported", or the reason Streamline is off; empty when it was not requested.
+    const std::string& streamlineStatus() const { return streamline_status_; }
+    // The instance-level function `name`: Streamline's proxy when it hooks it, else the loader's.
+    PFN_vkVoidFunction instanceProc(const char* name) const;
+
 private:
     friend std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std::string& error);
     VkContext() = default;
@@ -81,6 +94,8 @@ private:
     bool has_large_points_ = false;
     bool has_sampler_anisotropy_ = false;
     std::string two_sample_gap_;
+    std::unique_ptr<Streamline> streamline_;
+    std::string streamline_status_;
     std::atomic<std::uint32_t> validation_errors_{0};
 };
 

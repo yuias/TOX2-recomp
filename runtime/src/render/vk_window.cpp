@@ -405,8 +405,8 @@ std::unique_ptr<Presenter> Presenter::create(VkContext& context, PresenterOption
     presenter->window_ = Window::create(options, error);
     if (!presenter->window_) return nullptr;
 
-    const auto create_surface = reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(
-            vkGetInstanceProcAddr(context.instance(), "vkCreateWin32SurfaceKHR"));
+    const auto create_surface =
+            reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(context.instanceProc("vkCreateWin32SurfaceKHR"));
     if (create_surface == nullptr) {
         error = "vkCreateWin32SurfaceKHR is not available";
         return nullptr;

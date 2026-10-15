@@ -26,7 +26,6 @@
 #include "render/image_pool.h"
 #include "render/render_scale.h"
 #include "render/shader_compiler.h"
-#include "render/streamline.h"
 #include "render/vertex_convert.h"
 #include "render/window_size.h"
 #include "render/vk_context.h"
@@ -5610,33 +5609,19 @@ void testPresenterTypes() {
     CHECK(target.view != VK_NULL_HANDLE && target.format == VK_FORMAT_B8G8R8A8_UNORM);
 }
 
-// Number of enabled members of a Vulkan feature struct; every member after sType and pNext is a VkBool32.
-template <typename Features>
-std::uint32_t countEnabledFeatures(const Features& features) {
-    const auto* flags = reinterpret_cast<const VkBool32*>(&features.pNext + 1);
-    const std::size_t count = (sizeof(Features) - offsetof(Features, pNext) - sizeof(void*)) / sizeof(VkBool32);
-    std::uint32_t enabled = 0;
-    for (std::size_t i = 0; i < count; i++) enabled += flags[i] != VK_FALSE ? 1 : 0;
-    return enabled;
-}
-
-// Loads Streamline before any Vulkan context exists and reports what DLSS asks of the instance and device.
-void testStreamlineLoad() {
-    std::string reason;
-    std::unique_ptr<tox2::Streamline> streamline = tox2::Streamline::load(reason);
-    tox2::StreamlineRequirements requirements;
-    if (streamline && !streamline->requirements(requirements, reason)) streamline.reset();
-    if (!streamline) {
-        std::printf("streamline: unavailable: %s\n", reason.c_str());
-        return;
-    }
-    std::printf(
-            "streamline: loaded %s; DLSS needs %zu instance extension(s), %zu device extension(s), %u 1.2 feature(s), "
-            "%u extra queue(s)\n",
-            std::string(streamline->version()).c_str(), requirements.instance_extensions.size(),
-            requirements.device_extensions.size(), countEnabledFeatures(requirements.features12),
-            requirements.graphics_queues + requirements.compute_queues);
-    CHECK(streamline->version() == "2.14.1");
+// Streamline is optional: the status line says why it is off, and when it is on the hooks must be installed.
+void testStreamlineContext(tox2::VkContext& ctx) {
+    std::printf("streamline: %s\n", ctx.streamlineStatus().c_str());
+#if TOX2_HAS_STREAMLINE
+    if (ctx.streamlineStatus().find("DLSS supported") == std::string::npos) return;
+    CHECK(ctx.streamline() != nullptr);
+    const PFN_vkVoidFunction loader_surface = vkGetInstanceProcAddr(ctx.instance(), "vkCreateWin32SurfaceKHR");
+    const PFN_vkVoidFunction surface = ctx.instanceProc("vkCreateWin32SurfaceKHR");
+    CHECK(surface != nullptr && surface != loader_surface);
+    // Streamline's proxy replaces the volk global; the loader still returns the driver's function.
+    const PFN_vkVoidFunction loader_present = vkGetDeviceProcAddr(ctx.device(), "vkQueuePresentKHR");
+    CHECK(reinterpret_cast<PFN_vkVoidFunction>(vkQueuePresentKHR) != loader_present);
+#endif
 }
 
 }  // namespace
@@ -5665,10 +5650,10 @@ int main() {
     testAnisotropyNames();
     testForcedAnisotropy();
     testLayoutSource();
-    testStreamlineLoad();
 
     tox2::VkContextOptions options;
     options.validation = true;
+    options.streamline = true;
     std::string error;
     std::unique_ptr<tox2::VkContext> ctx = tox2::createVkContext(options, error);
     if (!ctx) {
@@ -5685,6 +5670,7 @@ int main() {
                 ctx->hasLargePoints() ? "supported" : "unsupported", ctx->validationEnabled() ? "active" : "inactive");
     CHECK(layer == ctx->validationEnabled());
 
+    testStreamlineContext(*ctx);
     testClearAndReadback(*ctx);
     testTwoSampleSupport(*ctx);
     testRendererAaMode(*ctx);
