@@ -130,7 +130,7 @@ The code is in `runtime/src/spu/` (threads, dispatch, MFC, channels, census), `r
   LS. A thread ends when it reaches its exit address, executes a `stop` that ends it, or is halted: group
   termination and `stop 0x101` set a halt flag that generated code checks at backward branches and that
   wakes channel waits.
-- **Guest lock.** SPU threads run outside the guest lock, in parallel with the PPU threads and with each
+- **Guest lock.** SPU threads run outside the guest lock (the kernel lock in `--ppu-threads 1|2`, see [Threads](runtime.md#threads)), in parallel with the PPU threads and with each
   other. Generated SPU code never sees guest memory; only MFC commands reach it. An SPU thread takes the
   guest lock only around the lv2 state its callbacks touch (sending an event, replying in the inbound
   mailbox, group bookkeeping when a thread stops or ends), and never while it waits on a channel. The

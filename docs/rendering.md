@@ -39,7 +39,7 @@ drawn; with `--render vulkan` the same thread also feeds a renderer (see [Render
     flip.
   - `off` completes a flip as soon as its command executes.
 
-  The wait happens with the guest lock released. The RSX thread sleeps until the flip's deadline or
+  The wait happens with the guest lock (the kernel lock in `--ppu-threads 1|2`, see [Threads](runtime.md#threads)) released. The RSX thread sleeps until the flip's deadline or
   the next vblank, whichever is first, and a flip held for a vblank sleeps until the next one, so
   vblanks are still delivered on time while a flip is held. The vblank is due on a 1/60 s deadline
   that is checked between slices of the command buffer too, so a consumer that is behind (a long draw

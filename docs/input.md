@@ -175,7 +175,7 @@ missing or does not match the pin. The build uses the package's `GameInput.h` an
 
 ### Threads and the guest lock
 
-`PadProvider::poll` and `setVibration` run on guest threads under the guest lock, so they never
+`PadProvider::poll` and `setVibration` run on guest threads under the guest lock (the kernel lock in `--ppu-threads 1|2`, see [Threads](runtime.md#threads)), so they never
 block, never call GameInput and never take a lock that another thread holds. The Gamepad source of
 `KeyboardPadState` is therefore lock-free like the keyboard and script sources: atomic button masks
 and press times, the sticks and trigger pressure packed into one atomic, the connection flag, and the
