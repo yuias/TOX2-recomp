@@ -62,6 +62,10 @@ struct ConfigChange {
     std::string value;  // command-line form, e.g. "msaa", "2", "on"
 };
 
+// Fails with the reason updateConfigText would give when `change` names a key that is not persisted or has a
+// value its kind cannot hold. Needs no file, so callers can reject a bad change before queueing it.
+std::expected<void, std::string> checkConfigChange(const ConfigChange& change, std::span<const OptionSpec> specs);
+
 // The text of `original` with each change applied: an existing member keeps its position and gets the
 // new value, a new member is appended. Every other member keeps its key, order and value. `original`
 // empty or only whitespace counts as "{}". The output is yyjson's two-space pretty form with a final

@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "app/game_options.h"
+#include "app/settings_store.h"
 #include "audio/audio_engine.h"
 #include "audio/audio_output.h"
 #include "audio/wasapi_output.h"
@@ -573,6 +574,16 @@ void applyBuildDirDefaults(tox2::VfsLayout& layout) {
     }
 }
 
+// The process ends without running destructors on the stop paths, so the pending settings are written from a
+// stop hook. The store is created only when changes can be saved (not with --no-config). It is never destroyed:
+// a stop can arrive after main has returned and static destruction has begun, and the hook must not reach a
+// freed object.
+tox2::SettingsStore* g_settings_store = nullptr;
+
+void flushSettingsStore() {
+    if (g_settings_store != nullptr) g_settings_store->flush(std::chrono::milliseconds(250));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -620,6 +631,13 @@ int main(int argc, char** argv) {
     if (!opt.log_file.empty() && !tox2::setLogFile(opt.log_file.string())) {
         std::fprintf(stderr, "error: cannot open log file %s\n", opt.log_file.string().c_str());
         return static_cast<int>(tox2::ExitCode::Usage);
+    }
+
+    if (!opt.settings_file.empty()) {
+        g_settings_store = new tox2::SettingsStore(opt.settings_file, tox2::gameOptionSpecs());
+        if (!tox2::addStopHook(&flushSettingsStore)) {
+            tox2::logWarn("tox2: config: no free stop hook; settings changed just before the end may be lost");
+        }
     }
 
     tox2::startPerfLog({audioPerfSource(), gamePerfSource(), rsxPerfSource(), lockPerfSource(), spuPerfSource()});

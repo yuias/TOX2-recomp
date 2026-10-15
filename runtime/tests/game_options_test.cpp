@@ -6,18 +6,22 @@
 #include <windows.h>
 
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <expected>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "app/config_file.h"
 #include "app/game_options.h"
+#include "app/settings_store.h"
 #include "core/log.h"
 
 namespace {
@@ -358,6 +362,17 @@ void testUpdateKeepsOtherMembers() {
           "{\n  \"x\": 1,\n  \"resolution_scale\": 3,\n  \"fullscreen\": true\n}\n");
     // No change gives the normalised text.
     CHECK(tox2::updateConfigText("{\"x\":1}", {}, kSpecs) == "{\n  \"x\": 1\n}\n");
+}
+
+void testCheckConfigChange() {
+    CHECK(tox2::checkConfigChange({"resolution_scale", "2"}, kSpecs).has_value());
+    CHECK(tox2::checkConfigChange({"frame_limit", "anything"}, kSpecs).has_value());
+    CHECK(tox2::checkConfigChange({"fullscreen", "off"}, kSpecs).has_value());
+    const auto bad_kind = tox2::checkConfigChange({"fullscreen", "maybe"}, kSpecs);
+    CHECK(!bad_kind && bad_kind.error() == "\"fullscreen\": \"maybe\" is not on or off");
+    const auto bad_number = tox2::checkConfigChange({"resolution_scale", "-1"}, kSpecs);
+    CHECK(!bad_number && bad_number.error().find("not a non-negative whole number") != std::string::npos);
+    CHECK(!tox2::checkConfigChange({"elf", "x"}, kSpecs).has_value());
 }
 
 void testUpdateFailures() {
@@ -1059,6 +1074,221 @@ void testConfigApply() {
     if (none) tox2::applyGameOptions(*none);
 }
 
+// A per-process directory for one store test; the file inside may be read-only when the test ends.
+struct StoreDir {
+    stdfs::path dir;
+    stdfs::path file;
+
+    explicit StoreDir(const std::string& name)
+        : dir(stdfs::temp_directory_path() / (name + std::to_string(GetCurrentProcessId()))),
+          file(dir / "config.json") {
+        std::error_code ec;
+        stdfs::remove_all(dir, ec);
+        stdfs::create_directories(dir);
+    }
+    ~StoreDir() {
+        std::error_code ec;
+        SetFileAttributesW(file.c_str(), FILE_ATTRIBUTE_NORMAL);
+        stdfs::remove_all(dir, ec);
+    }
+};
+
+// Collects the log lines of the writer thread.
+class LogCapture {
+public:
+    LogCapture() {
+        tox2::resetLogOnce();
+        tox2::setLogSink([this](std::string_view line) {
+            std::lock_guard lock(mutex_);
+            lines_.emplace_back(line);
+        });
+    }
+    ~LogCapture() { tox2::setLogSink({}); }
+
+    std::size_t count(std::string_view needle) {
+        std::lock_guard lock(mutex_);
+        std::size_t found = 0;
+        for (const std::string& line : lines_) found += line.find(needle) != std::string::npos ? 1 : 0;
+        return found;
+    }
+
+private:
+    std::mutex mutex_;
+    std::vector<std::string> lines_;
+};
+
+// Polls for at most two seconds.
+template <typename Pred>
+bool waitFor(Pred pred) {
+    const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!pred()) {
+        if (std::chrono::steady_clock::now() > limit) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return true;
+}
+
+constexpr tox2::SettingsStore::Timing kFastTiming{std::chrono::milliseconds(20), std::chrono::milliseconds(100)};
+// The writer never fires inside a test, so flush() is the only writer.
+constexpr tox2::SettingsStore::Timing kSlowTiming{std::chrono::seconds(5), std::chrono::seconds(10)};
+
+void testStoreWrites() {
+    LogCapture log;
+    StoreDir dir("tox2_settings_store_write_");
+    {
+        // No file yet: the first change creates it.
+        tox2::SettingsStore store(dir.file, kSpecs, kFastTiming);
+        CHECK(store.file() == dir.file);
+        CHECK(!stdfs::exists(dir.file));
+        store.set("resolution_scale", "2");
+        CHECK(waitFor([&] { return store.writes() >= 1; }));
+        CHECK(readFile(dir.file) == "{\n  \"resolution_scale\": 2\n}\n");
+        CHECK(log.count("saved resolution_scale to ") == 1);
+    }
+
+    // Ten quick changes of one key are one write with the last value, and unknown members survive. The quiet
+    // time is longer than kFastTiming's so that a stalled test thread cannot split the burst.
+    writeFile(dir.file, "{\"my_note\": \"keep\", \"nested\": {\"a\": [1, 2]}}");
+    {
+        tox2::SettingsStore store(dir.file, kSpecs,
+                                  tox2::SettingsStore::Timing{std::chrono::milliseconds(100), std::chrono::seconds(1)});
+        const std::array<const char*, 4> values = {"1", "2", "4", "3"};
+        for (std::size_t i = 0; i < 10; ++i) store.set("resolution_scale", values[i % 4]);
+        CHECK(waitFor([&] { return store.writes() >= 1; }));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        CHECK(store.writes() == 1);
+        CHECK(readFile(dir.file) ==
+              "{\n  \"my_note\": \"keep\",\n  \"nested\": {\n    \"a\": [\n      1,\n      2\n    ]\n  },\n"
+              "  \"resolution_scale\": 2\n}\n");
+    }
+
+    // A change that keeps coming is still written after max_delay.
+    writeFile(dir.file, "{}");
+    {
+        tox2::SettingsStore store(
+                dir.file, kSpecs,
+                tox2::SettingsStore::Timing{std::chrono::milliseconds(200), std::chrono::milliseconds(300)});
+        for (int i = 0; i < 60; ++i) {
+            store.set("resolution_scale", i % 2 != 0 ? "2" : "3");
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        CHECK(store.writes() >= 1);
+    }
+}
+
+void testStoreFailures() {
+    LogCapture log;
+    StoreDir dir("tox2_settings_store_fail_");
+    const std::string broken = "{ oops";
+    writeFile(dir.file, broken);
+    tox2::SettingsStore store(dir.file, kSpecs, kFastTiming);
+    store.set("resolution_scale", "2");
+    CHECK(waitFor([&] { return log.count("cannot save settings to ") == 1; }));
+    CHECK(readFile(dir.file) == broken);
+    CHECK(store.writes() == 0);
+
+    // The change stays pending and the same failure is not logged again.
+    store.set("frame_limit", "off");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(log.count("cannot save settings to ") == 1);
+    CHECK(readFile(dir.file) == broken);
+    CHECK(store.writes() == 0);
+
+    // Once the file is repaired the next change writes all of them.
+    writeFile(dir.file, "{\"my_note\": \"keep\"}");
+    store.set("fullscreen", "on");
+    CHECK(waitFor([&] { return store.writes() >= 1; }));
+    CHECK(readFile(dir.file) ==
+          "{\n  \"my_note\": \"keep\",\n  \"resolution_scale\": 2,\n  \"frame_limit\": \"off\",\n"
+          "  \"fullscreen\": true\n}\n");
+    CHECK(store.flush(std::chrono::milliseconds(500)));
+    CHECK(store.writes() == 1);
+}
+
+void testStoreReadOnlyFile() {
+    LogCapture log;
+    StoreDir dir("tox2_settings_store_ro_");
+    const std::string original = "{\"my_note\": \"keep\"}";
+    writeFile(dir.file, original);
+    tox2::SettingsStore store(dir.file, kSpecs, kSlowTiming);
+    store.set("resolution_scale", "2");
+
+    SetFileAttributesW(dir.file.c_str(), FILE_ATTRIBUTE_READONLY);
+    CHECK(!store.flush(std::chrono::seconds(1)));
+    CHECK(readFile(dir.file) == original);
+    CHECK(!stdfs::exists(dir.file.string() + ".tmp"));
+    CHECK(store.writes() == 0);
+    CHECK(log.count("cannot save settings to ") == 1);
+    // A second attempt fails the same way and stays quiet.
+    CHECK(!store.flush(std::chrono::seconds(1)));
+    CHECK(log.count("cannot save settings to ") == 1);
+
+    // The change was kept.
+    SetFileAttributesW(dir.file.c_str(), FILE_ATTRIBUTE_NORMAL);
+    CHECK(store.flush(std::chrono::seconds(1)));
+    CHECK(store.writes() == 1);
+    CHECK(readFile(dir.file) == "{\n  \"my_note\": \"keep\",\n  \"resolution_scale\": 2\n}\n");
+}
+
+void testStoreFlush() {
+    LogCapture log;
+    StoreDir dir("tox2_settings_store_flush_");
+    {
+        tox2::SettingsStore store(dir.file, kSpecs, kSlowTiming);
+        CHECK(store.flush(std::chrono::seconds(1)));  // nothing pending
+        CHECK(store.writes() == 0 && !stdfs::exists(dir.file));
+
+        // A flush writes at once instead of waiting for the quiet time.
+        store.set("frame_limit", "60");
+        CHECK(store.flush(std::chrono::seconds(1)));
+        CHECK(store.writes() == 1);
+        CHECK(readFile(dir.file) == "{\n  \"frame_limit\": \"60\"\n}\n");
+        CHECK(store.flush(std::chrono::seconds(1)));
+        CHECK(store.writes() == 1);
+
+        // Keys that are not saved are ignored, and reported once.
+        store.set("elf", "x");
+        store.set("elf", "y");
+        store.set("nothing", "z");
+        CHECK(store.flush(std::chrono::seconds(1)));
+        CHECK(store.writes() == 1);
+        CHECK(readFile(dir.file) == "{\n  \"frame_limit\": \"60\"\n}\n");
+        CHECK(log.count("\"elf\" is not a setting that is saved") == 1);
+        CHECK(log.count("\"nothing\" is not a setting that is saved") == 1);
+
+        store.set("fullscreen", "on");
+    }
+    // The destructor flushes what is still pending.
+    CHECK(readFile(dir.file) == "{\n  \"frame_limit\": \"60\",\n  \"fullscreen\": true\n}\n");
+}
+
+void testStoreRejectsBadValue() {
+    LogCapture log;
+    StoreDir dir("tox2_settings_store_bad_");
+    tox2::SettingsStore store(dir.file, kSpecs, kSlowTiming);
+    // A bad value is dropped when set, so it cannot block the changes after it.
+    store.set("fullscreen", "maybe");
+    store.set("frame_limit", "off");
+    CHECK(store.flush(std::chrono::seconds(1)));
+    CHECK(store.writes() == 1);
+    CHECK(readFile(dir.file) == "{\n  \"frame_limit\": \"off\"\n}\n");
+    CHECK(log.count("cannot save fullscreen: ") == 1);
+
+    // An earlier valid value of the same key stays pending.
+    store.set("resolution_scale", "2");
+    store.set("resolution_scale", "x");
+    CHECK(store.flush(std::chrono::seconds(1)));
+    CHECK(readFile(dir.file) == "{\n  \"frame_limit\": \"off\",\n  \"resolution_scale\": 2\n}\n");
+}
+
+void testSettingsStore() {
+    testStoreWrites();
+    testStoreFailures();
+    testStoreReadOnlyFile();
+    testStoreFlush();
+    testStoreRejectsBadValue();
+}
+
 }  // namespace
 
 int main() {
@@ -1079,6 +1309,7 @@ int main() {
     testUpdateNewFile();
     testUpdateKinds();
     testUpdateKeepsOtherMembers();
+    testCheckConfigChange();
     testUpdateFailures();
     testWriteFileAtomic();
     testOptionTable();
@@ -1094,6 +1325,7 @@ int main() {
     testConfigFileDroppedKeys();
     testWindowAndFilterOptions();
     testConfigApply();
+    testSettingsStore();
     std::printf("game options tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }

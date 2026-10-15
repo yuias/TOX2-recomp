@@ -285,33 +285,41 @@ const OptionSpec* findPersistedSpec(std::string_view key, std::span<const Option
     return spec == specs.end() ? nullptr : &*spec;
 }
 
-// Builds the JSON value for `change` in `doc`; null with `error` set when the kind cannot hold the text.
-yyjson_mut_val* makeValue(yyjson_mut_doc* doc, const OptionSpec& spec, const ConfigChange& change, std::string& error) {
+// The reason the kind of `spec` cannot hold the text of `change`; empty when it can.
+std::string checkValue(const OptionSpec& spec, const ConfigChange& change) {
     switch (spec.kind) {
         case OptionKind::Unsigned: {
             std::uint64_t number = 0;
             const char* end = change.value.data() + change.value.size();
             const auto [ptr, ec] = std::from_chars(change.value.data(), end, number);
             if (ec != std::errc() || ptr != end) {
-                error = std::format("\"{}\": \"{}\" is not a non-negative whole number", change.key, change.value);
-                return nullptr;
+                return std::format("\"{}\": \"{}\" is not a non-negative whole number", change.key, change.value);
             }
-            return yyjson_mut_uint(doc, number);
+            return {};
         }
-        case OptionKind::String: return yyjson_mut_strncpy(doc, change.value.data(), change.value.size());
+        case OptionKind::String: return {};
         case OptionKind::Switch:
             if (change.value != "on" && change.value != "off") {
-                error = std::format("\"{}\": \"{}\" is not on or off", change.key, change.value);
-                return nullptr;
+                return std::format("\"{}\": \"{}\" is not on or off", change.key, change.value);
             }
-            return yyjson_mut_bool(doc, change.value == "on");
+            return {};
         case OptionKind::Path:
         case OptionKind::Flag:
         case OptionKind::FrameList:
         case OptionKind::StringList: break;
     }
-    error = std::format("\"{}\": this kind of setting cannot be saved", change.key);
-    return nullptr;
+    return std::format("\"{}\": this kind of setting cannot be saved", change.key);
+}
+
+// Builds the JSON value for `change` in `doc`; null with `error` set when the kind cannot hold the text.
+yyjson_mut_val* makeValue(yyjson_mut_doc* doc, const OptionSpec& spec, const ConfigChange& change, std::string& error) {
+    error = checkValue(spec, change);
+    if (!error.empty()) return nullptr;
+    switch (spec.kind) {
+        case OptionKind::Unsigned: return yyjson_mut_uint(doc, std::stoull(change.value));
+        case OptionKind::String: return yyjson_mut_strncpy(doc, change.value.data(), change.value.size());
+        default: return yyjson_mut_bool(doc, change.value == "on");
+    }
 }
 
 bool isBlank(std::string_view text) {
@@ -319,6 +327,16 @@ bool isBlank(std::string_view text) {
 }
 
 }  // namespace
+
+std::expected<void, std::string> checkConfigChange(const ConfigChange& change, std::span<const OptionSpec> specs) {
+    const OptionSpec* spec = findPersistedSpec(change.key, specs);
+    if (spec == nullptr) {
+        return fail("\"{}\" is not a setting that is saved", change.key);
+    }
+    const std::string error = checkValue(*spec, change);
+    if (!error.empty()) return std::unexpected(error);
+    return {};
+}
 
 std::expected<std::string, std::string> updateConfigText(std::string_view original,
                                                          std::span<const ConfigChange> changes,
