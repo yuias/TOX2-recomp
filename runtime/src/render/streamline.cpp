@@ -61,6 +61,9 @@ void logCallback(sl::LogType type, const char* message) {
                                        text.find("Hook sl.common:Vulkan:") != std::string_view::npos)) {
         type = sl::LogType::eInfo;
     }
+    // sl.common tries to load the Reflex DLL at start-up. It is not shipped (its licence does not list it as
+    // distributable) and DLAA does not use it, so the failure is expected.
+    if (type != sl::LogType::eInfo && text.find("NvLowLatencyVk") != std::string_view::npos) type = sl::LogType::eInfo;
     switch (type) {
         case sl::LogType::eInfo: logDebug("tox2: streamline: {}", text); break;
         case sl::LogType::eWarn: logWarn("tox2: streamline: {}", text); break;

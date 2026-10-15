@@ -40,7 +40,7 @@ SDK, <https://github.com/NVIDIA-RTX/Streamline>. The SDK is not part of this rep
 it is committed. `tools/fetch-streamline.ps1` downloads the pinned release into `externals/Streamline`
 (git-ignored) and verifies its SHA-256 (`-From <zip>` takes a local copy and applies the same check);
 the pin is in `cmake/streamline.cmake`. The build uses the SDK's headers at compile time and, when
-the SDK is present, copies five DLLs and the licence texts next to the executables (`bin/` of the
+the SDK is present, copies four DLLs and the licence texts next to the executables (`bin/` of the
 build directory, the licences under `bin/licenses/streamline/`). `TOX2_ENABLE_DLSS=OFF` builds
 without any of this.
 
@@ -49,9 +49,8 @@ without any of this.
 | Version | Streamline 2.14.1 (`streamline-sdk-v2.14.1.zip`, SHA-256 `92c4d954631a1710da86ca3fa8d5034f2b9503838c95fc4ae977ae149319781b`) |
 | Source | <https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.1/streamline-sdk-v2.14.1.zip> |
 | Streamline itself: the headers (build time only) and `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll` | MIT License, Copyright (c) 2023 NVIDIA CORPORATION (the SDK's `license.txt`, copied as `LICENSE.txt`) |
-| Runtime DLLs copied next to the executables | `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll`, `nvngx_dlss.dll`, `NvLowLatencyVk.dll` |
+| Runtime DLLs copied next to the executables | `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll`, `nvngx_dlss.dll` |
 | DLSS runtime and `nvngx_dlss.dll` | NVIDIA RTX SDKs LICENSE (v. March 14, 2024) with the NVIDIA RTX supplement (the SDK's `bin/x64/nvngx_dlss.license.txt`, copied as `nvngx_dlss.license.txt`) |
-| `NvLowLatencyVk.dll` | The licence that the SDK ships beside it, `bin/x64/reflex.license.txt`, "License Agreement for NVIDIA Software Development Kits" with the Reflex Low Latency SDK supplement (copied as `reflex.license.txt`) |
 | SDK third-party components | `3rd-party-licenses.md` of the SDK (copied unchanged) |
 
 ### Licences
@@ -79,10 +78,9 @@ themselves are authoritative:
   open source software license (one that requires, as a condition of use, modification or distribution, that
   the SDK be disclosed or distributed in source code form, licensed for making derivative works, or
   redistributable at no charge).
-- `reflex.license.txt` states, in its Reflex supplement, that the distributable portions of that SDK
-  are "the NVAPIs, .lib and .h files, Linux wrapper, and samples", and that use of the SDK in a
-  product is to be attributed with a NVIDIA Reflex reference. It does not name `NvLowLatencyVk.dll`.
-  The DLL is copied because `sl.common.dll` loads it at start-up; the project does not call Reflex.
+- The SDK also ships `NvLowLatencyVk.dll` (NVIDIA Reflex), which `sl.common.dll` tries to load at
+  start-up. It is not copied: its licence, `bin/x64/reflex.license.txt`, lists only "the NVAPIs, .lib
+  and .h files, Linux wrapper, and samples" as distributable, and DLAA does not use Reflex.
 - `3rd-party-licenses.md` lists the third-party software that the SDK includes, with the licence of
   each.
 

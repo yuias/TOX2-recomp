@@ -223,13 +223,15 @@ loader already defines. `sl.interposer.dll` is loaded at run time instead (see
 
 | File | Source in the SDK |
 | --- | --- |
-| `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll`, `nvngx_dlss.dll`, `NvLowLatencyVk.dll` | `bin/x64/` (the production DLLs, not `bin/x64/development`) |
+| `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll`, `nvngx_dlss.dll` | `bin/x64/` (the production DLLs, not `bin/x64/development`) |
 | `licenses/streamline/LICENSE.txt` | `license.txt` |
-| `licenses/streamline/nvngx_dlss.license.txt`, `licenses/streamline/reflex.license.txt` | `bin/x64/` |
+| `licenses/streamline/nvngx_dlss.license.txt` | `bin/x64/` |
 | `licenses/streamline/3rd-party-licenses.md` | `3rd-party-licenses.md` |
 
-`sl.common.dll` loads `NvLowLatencyVk.dll` at start-up and logs an error when it is missing, so it is
-copied although the renderer uses no Reflex feature. The licences of these files, which must accompany
+`NvLowLatencyVk.dll` (Reflex), which `sl.common.dll` tries to load at start-up, is not copied: its licence
+does not list it as distributable and DLAA does not use it; the load failure is logged at debug level.
+Streamline's own signature check still prints `File '...NvLowLatencyVk.dll' is NOT correctly signed` to
+standard output, which only means the file is absent. The licences of these files, which must accompany
 a redistributed copy, are listed in [Third-party notices](../THIRD_PARTY_NOTICES.md). At run time DLAA is
 off, with one log line that gives the reason, when the DLLs are missing or not signed by NVIDIA, or the GPU
 is not an RTX GPU that supports DLSS, or the driver is too old.

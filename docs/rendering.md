@@ -597,8 +597,8 @@ times `--resolution-scale`. DLSS is reached through the NVIDIA Streamline SDK; b
 
 - **Availability.** `sl.interposer.dll` is loaded at run time from the directory of the executable, after its NVIDIA
   signature has been checked; it is never linked. Over-the-air updates and downloaded plugins are switched off, so
-  only the DLLs next to the executable are used (`sl.interposer`, `sl.common`, `sl.dlss`, `nvngx_dlss` and
-  `NvLowLatencyVk`, which `sl.common` loads at start-up). The Vulkan device is created with the instance and device
+  only the DLLs next to the executable are used (`sl.interposer`, `sl.common`, `sl.dlss` and
+  `nvngx_dlss`). The Vulkan device is created with the instance and device
   extensions, features and queues that DLSS asks for; the rest of the creation is unchanged. DLAA is available when
   all of this works, Streamline reports DLSS supported on the GPU and driver, and the device has the image formats the
   pass uses (blit support for the formats of the scene image's layout copy, storage, linear sampling and blit for the
