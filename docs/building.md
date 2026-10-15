@@ -45,6 +45,8 @@ These can also be passed to `cmake` directly (`cmake --preset release -D<name>=<
 | `TOX2_RPCS3_CRYPTO_DIR` | empty | Set by `-Rpcs3CryptoDir`. |
 | `TOX2_FFMPEG_DIR` | empty | An extracted FFmpeg build to use instead of `generated/deps/ffmpeg/<pinned build>` (see [Movies](movies.md); FFmpeg is used for ATRAC3plus decoding and by the inherited movie code). |
 | `TOX2_GAMEINPUT_DIR` | empty | An extracted `Microsoft.GameInput` package to use instead of `generated/deps/gameinput/<pinned version>` (see [Input](input.md#the-gameinput-package)). Configure needs the package from `tools/fetch-gameinput.ps1`. |
+| `TOX2_ENABLE_DLSS` | `AUTO` | `AUTO`, `ON` or `OFF`: whether to build the DLAA anti-aliasing mode on NVIDIA Streamline (see [NVIDIA Streamline (DLAA)](#nvidia-streamline-dlaa)). |
+| `TOX2_STREAMLINE_DIR` | `externals/Streamline` | The unpacked Streamline SDK to build against. |
 | `TOX2_PPU_WERROR` | `ON` | Add `-Werror` for generated code and the code that mirrors it (header check, semantics harness, link test). Every such target is compiled with `-O1 -march=x86-64-v3 -ffp-contract=off -fpatchable-function-entry=8 -Wall -Wextra`, whatever the preset's optimization level; the generated SPU tree and the SPU tests that run generated code (`spu_semantics`, `spu_programs`) use `-O3` instead of `-O1` (`TOX2_SPU_CODEGEN_OPT_LEVEL` in `cmake/SpuCodegen.cmake`), because the game's SPU decode loops run several times faster at that level. |
 
 No tracked file contains a game path: they are command-line arguments, CMake cache variables, a
@@ -184,6 +186,56 @@ the target that writes `generated/inputs`, exists only with `-EbootBin` or `-Pup
 of the executable and of libsre are compiled together into `tox2_ppu_generated`, and the generated SPU code
 of the game and of libsre into `tox2_spu_generated`. The stub runtimes `tox2_ppu_stub` and `tox2_spu_stub`
 supply the hooks for the link checks and the header and semantics tests; `tox2_game` links the runtime core instead.
+
+## NVIDIA Streamline (DLAA)
+
+The `dlaa` anti-aliasing mode (`--aa-mode dlaa`, see [DLAA](rendering.md#dlaa)) runs NVIDIA
+DLSS in its DLAA mode through the NVIDIA Streamline SDK. The SDK is optional and is not part of the
+repository. Without it the build succeeds, DLAA is compiled out and a requested `dlaa` falls back to `msaa`.
+
+```powershell
+pwsh -NoProfile -File tools/fetch-streamline.ps1 [-From <zip>] [-Force]
+```
+
+The script downloads the pinned release, `v2.14.1` (the version, file name and SHA-256 are in
+`cmake/streamline.cmake`), from <https://github.com/NVIDIA-RTX/Streamline/releases>, checks its SHA-256
+and extracts it into `externals/Streamline`, which is git-ignored. It writes
+`externals/Streamline/.verified-sha256` and prints `streamline: up to date` and does nothing when that marker
+already matches the pin. `-From <zip>` uses a local copy of the release zip instead of downloading it, with the
+same check, and `-Force` extracts again over a tree that is up to date. A tree without a matching marker, for
+example one unpacked by hand, is not replaced unless `-Force` or `-From` is given. The exit code is 0 on success, 1 on a failure and 2 on a
+usage error. It needs PowerShell 7.
+
+Configuration looks for the SDK in `TOX2_STREAMLINE_DIR` and prints one status line:
+
+| `TOX2_ENABLE_DLSS` | Result |
+| --- | --- |
+| `AUTO` (default) | With `include/sl.h` and the DLLs below present: `TOX2: Streamline: <dir> (v2.14.1)`, plus `, not verified by tools/fetch-streamline.ps1` when the marker is missing or differs from the pin. Otherwise `TOX2: Streamline: not found (<dir>/include/sl.h); DLAA disabled. Run: pwsh -NoProfile -File tools/fetch-streamline.ps1`, and the build goes on without it. |
+| `ON` | As `AUTO`, but a missing SDK is a configuration error with the same hint. |
+| `OFF` | `TOX2: Streamline: off (TOX2_ENABLE_DLSS=OFF)`; the SDK is not used even when present. |
+
+With the SDK, the renderer is built with its headers (`TOX2_HAS_STREAMLINE=1`). Nothing is linked: the
+SDK's import library is not used, because it exports the Vulkan entry points that the renderer's function
+loader already defines. `sl.interposer.dll` is loaded at run time instead (see
+[DLAA](rendering.md#dlaa)). The build copies the DLLs next to the executables, in
+`bin/` of the build directory, by the target `tox2_streamline_runtime` (a dependency of `tox2_game`,
+`tox2_rsxreplay` and the render tests):
+
+| File | Source in the SDK |
+| --- | --- |
+| `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll`, `nvngx_dlss.dll`, `NvLowLatencyVk.dll` | `bin/x64/` (the production DLLs, not `bin/x64/development`) |
+| `licenses/streamline/LICENSE.txt` | `license.txt` |
+| `licenses/streamline/nvngx_dlss.license.txt`, `licenses/streamline/reflex.license.txt` | `bin/x64/` |
+| `licenses/streamline/3rd-party-licenses.md` | `3rd-party-licenses.md` |
+
+`sl.common.dll` loads `NvLowLatencyVk.dll` at start-up and logs an error when it is missing, so it is
+copied although the renderer uses no Reflex feature. The licences of these files, which must accompany
+a redistributed copy, are listed in [Third-party notices](../THIRD_PARTY_NOTICES.md). At run time DLAA is
+off, with one log line that gives the reason, when the DLLs are missing or not signed by NVIDIA, or the GPU
+is not an RTX GPU that supports DLSS, or the driver is too old.
+
+The DLAA tests print a skip line instead of failing when DLAA is unavailable. To check the build without the
+SDK, configure a second build directory with `-DTOX2_ENABLE_DLSS=OFF`.
 
 ## Test builds
 

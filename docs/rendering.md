@@ -521,9 +521,9 @@ control word 0xFFFF0001 (multisampling on, no alpha to coverage, no alpha to one
 frame and drawn by the 3D passes. A later resolve pass samples the colour surface as a 2560x720 texture, and
 the depth surface is read as a 2560x720 A8R8G8B8 texture inside and after the pass.
 
-The renderer has two ways to draw such a surface, chosen by `--aa-mode` (see
+The renderer has three ways to draw such a surface, chosen by `--aa-mode` (see
 [Capture and replay](#capture-and-replay) and the overlay's Settings, [Debug overlay](runtime.md#debug-overlay)).
-Both apply to mode 3, the only one the game uses; the 2x2 modes (4 and 5) are always drawn as supersampled
+All apply to mode 3, the only one the game uses; the 2x2 modes (4 and 5) are always drawn as supersampled
 single-sample images, 2W x 2H in memory. Other values of the AA field are counted (`state antialiasing 0x<n>`) and
 drawn with one sample per pixel.
 
@@ -565,6 +565,9 @@ drawn with one sample per pixel.
   multisampling unavailable (<reason>)` warning and the census kind `state 2-sample multisampling unavailable`.
   The multisampled images use the standard sample positions, since no position of the hardware is known to
   match.
+- **`dlaa`.** Colour and depth are drawn into one-sample images of the clip size times the resolution scale, with a
+  sub-pixel jitter, and NVIDIA DLSS in its DLAA mode anti-aliases the colour before the game's resolve reads it. It
+  needs an NVIDIA RTX GPU and the Streamline DLLs and falls back to `msaa` without them; see [DLAA](#dlaa).
 
 Differences from the hardware:
 
@@ -583,6 +586,131 @@ Differences from the hardware:
   counted when a draw uses them on an anti-aliased surface (`state alpha to coverage`, `state alpha to one`,
   `state sample mask 0x<mask>`); the game writes none of them.
 - Custom sample positions (`VK_EXT_sample_locations`) are not used.
+
+##### DLAA
+
+`--aa-mode dlaa` draws the game's anti-aliased scene (the mode-3 colour and depth pair) with one sample per pixel and a
+sub-pixel jitter, and lets NVIDIA DLSS in its DLAA mode (anti-aliasing at the input resolution, no upscaling) produce
+the anti-aliased picture that the game's resolve pass then reads. It runs at the scaled scene resolution: the clip size
+times `--resolution-scale`. DLSS is reached through the NVIDIA Streamline SDK; building with the SDK is described in
+[NVIDIA Streamline (DLAA)](building.md#nvidia-streamline-dlaa).
+
+- **Availability.** `sl.interposer.dll` is loaded at run time from the directory of the executable, after its NVIDIA
+  signature has been checked; it is never linked. Over-the-air updates and downloaded plugins are switched off, so
+  only the DLLs next to the executable are used (`sl.interposer`, `sl.common`, `sl.dlss`, `nvngx_dlss` and
+  `NvLowLatencyVk`, which `sl.common` loads at start-up). The Vulkan device is created with the instance and device
+  extensions, features and queues that DLSS asks for; the rest of the creation is unchanged. DLAA is available when
+  all of this works, Streamline reports DLSS supported on the GPU and driver, and the device has the image formats the
+  pass uses (blit support for the formats of the scene image's layout copy, storage, linear sampling and blit for the
+  R8G8B8A8 output, and sampling and transfer for the R16G16 motion vector image). Otherwise it is unavailable for one reason, which is logged, and a requested `dlaa` falls back to
+  `msaa` (or `supersample` on a device without 2-sample support): the build has no Streamline SDK, the DLLs are
+  missing or not signed by NVIDIA, the GPU is not an NVIDIA RTX GPU or the driver is too old, or a format is
+  missing. The executables start without the DLLs. `tox2_game` loads Streamline on every Vulkan start, because
+  availability is fixed when the context is created and the overlay may switch to DLAA later; the overlay lists
+  DLAA only when it is available. `tox2_rsxreplay` loads it only with `--aa-mode dlaa`. In a windowed run the
+  swapchain, present, surface-creation and wait-idle calls go through Streamline's proxies, which its manual-hooking
+  mode requires. The present call is where Streamline runs its resource garbage collection; a run without a window
+  (`--no-window`, the replay, the tests) never presents, so that step does not run there. This is a known gap, and
+  its effect on long windowless runs has not been measured.
+- **The scene image.** A mode-3 pass in `dlaa` mode draws into a one-sample sidecar of the clip size times the
+  resolution scale (the same sidecar machinery as `msaa`, with 1 sample). The target keeps its 2W x H layout image,
+  because the edge effect's depth reads, the rebinding of the depth surface as a 1280x720 plain surface and the
+  cache identity depend on it, and that image is written only when something reads it: by one NEAREST blit from
+  the sidecar in which texel `x` of the layout takes pixel `x >> 1`, so both columns of a pixel hold the same value.
+  A depth surface read as A8R8G8B8 is brought up to date by the same blit first and then converted from the layout
+  image like a plain surface. Switching the mode while the game runs retires the sidecars of the other sample count
+  into the frame slot's keep-alive list, which is released when the slot's fence has signalled, and the next pass
+  creates new ones.
+- **Where DLAA runs.** DLAA is evaluated once per scene write, at the first draw that reads the scene as a texture
+  from outside the scene pass. That draw is found by its properties, never by an address: it samples a one-sample
+  A8R8G8B8 anti-aliased colour target as a texture of exactly the target's layout size (2W x H), its own pass is not
+  an anti-aliased pass (it writes the plain display buffer, which excludes a feedback read and any read inside the
+  scene), and the target holds content that DLAA has not processed yet. In all the captures this is the game's
+  resolve pass, and no other draw reads the anti-aliased colour. The inputs are the colour sidecar, the depth sidecar
+  of the depth target that the latest colour-writing draw or clear of the scene had bound (the colour target keeps it
+  alive after the resolve has rebound the depth address as a non-anti-aliased surface), an all-zero motion vector
+  image, the jitter and the camera matrices described below. The scene pass of a dialog or menu frame is a clear
+  and screen-space draws without a perspective draw; its depth of 1.0 is a valid input, so those frames are
+  evaluated too. The output is an R8G8B8A8 image of the input size. Later reads of the same scene reuse it. If the
+  evaluation cannot run (no matching depth image, or a Streamline error), one warning `tox2: render: DLAA evaluation
+  failed (<reason>); scene read unfiltered` is logged, the census counts `state DLAA evaluation failed`, the failure
+  counter of the renderer is incremented, and the resolve reads the layout image written from the one-sample scene,
+  without anti-aliasing. The first evaluation logs `tox2: render: DLAA evaluating <w>x<h>`.
+- **The output is widened to 2W.** The resolve samples the scene with a texture coordinate offset of -0.5 / 2W (the
+  centre of layout texel 2X), so a W-wide output sampled directly would mix a quarter of the pixel to the left into
+  every result. The output is therefore expanded by a NEAREST blit into a 2W x H image, which has the layout's two
+  equal columns per pixel, and the resolve samples that image.
+- **Alpha is kept.** The resolve copies the scene's alpha into the display buffer, and a later translucent draw uses
+  that alpha as a blend weight. Alpha upscaling is therefore on, so the alpha channel goes through DLSS. The scene's
+  alpha is a constant 1.0 in all captures, and the display alpha after the resolve stays 1.0. DLSS runs with SDR
+  colour, automatic exposure and its default preset.
+- **State after the evaluation.** Streamline's hooks for command-buffer state (pipeline, descriptor and
+  begin-command-buffer) are not active in version 2.14.1: it logs at debug level that they are not supported, and it
+  neither tracks nor restores what is bound. Streamline binds its own pipelines and descriptors during the
+  evaluation, so the renderer invalidates its shadow of the draw state after each one, and the next draw records
+  pipeline, descriptors, push constants and dynamic state again. The depth image is tagged as a shader-read image,
+  because Streamline samples it in a compute pass.
+- **Jitter.** Every translated vertex program ends with `pos.xy += jitter_ndc * pos.w`, where `jitter_ndc` is a
+  vertex push constant of two floats that the renderer keeps current for every draw. It is 0.0 for every draw outside
+  the gate below, so all other draws and the other anti-aliasing modes render bit for bit as before. The gate: the
+  draw is in a `dlaa` scene pass and its transform is a perspective one, that is one of `c0.w`, `c1.w` and `c2.w`
+  (floats 3, 7 and 11 of the vertex constants `c0` to `c3`) is not zero. An orthographic matrix has all three at 0,
+  and 2D and screen-space draws must not move. All gated draws of a frame share one offset, which keeps passes that
+  depth-test against each other exact. The offset is Halton(2, 3) over 8 phases (the DLSS guide asks for at least 8
+  at the ratio 1 of DLAA): the values at index `(flip % 8) + 1` minus 0.5 in each axis, in input pixels, x to the
+  right and y down. A frame without a gated draw moves nothing and reports no offset.
+- **The reported offset is not flipped.** Streamline is told the offset the geometry was moved by. The viewport has
+  no y flip, so a positive offset moves the content right and down, which is the direction DLSS expects in its
+  motion-vector space (origin at the top left). All four sign combinations were measured against 4x renders (see
+  below) and the unflipped offset scored best.
+- **Camera motion.** There is no per-object motion vector image: it is all zero and `cameraMotionIncluded` is false,
+  so DLSS reprojects the history from the clip-to-previous-clip matrix alone. Every gated draw reports its transform
+  (`c0` to `c3`, the viewport scale and offset, the clip size and the depth range) to a per-frame table of at most
+  16 distinct cameras. The camera of most draws is the frame's camera (the first seen on a tie), and only the draws
+  before the resolve count, because those are what the evaluation sees. The renderer builds from it the matrix that
+  maps a guest vertex to the clip space whose depth is stored in the buffer (the transform, the translator's
+  viewport mapping and the depth range remap), and passes Streamline the clip matrices and the clip-to-previous-clip
+  matrix and its inverse. The guest rows are used as they are: Streamline's matrices are row-major with row
+  vectors, like the guest's.
+- **The y mirror.** Streamline's motion-vector shader builds a y-up clip position, while the renderer's clip space is
+  y-down (the viewport height is positive and the vertex epilogue does not flip). The two clip-to-clip matrices are
+  therefore mirrored in y (`F * C * F` with `F = diag(1, -1, 1, 1)`). The jitter is in pixels and needs no mirror.
+  `motionVectorsInvalidValue` is set to 0; the value does not change the picture, and leaving it unset makes
+  Streamline warn once per process.
+- **When the history is dropped.** The evaluation is told to reset the history on the first evaluation, when the
+  input size changed (a new resolution scale or target size), when the previous evaluation was not in the
+  immediately preceding flip, when the mode was switched to `dlaa` since the last evaluation, when this frame or the
+  previous one has no camera (a dialog or menu frame has no perspective draw) or a matrix cannot be inverted, when a
+  camera appears or disappears between consecutive frames, and on a camera cut. A cut is detected by mapping nine
+  probe points (x and y in {-0.5, 0, 0.5}, z 0.5, w 1) through the clip-to-previous-clip matrix: a probe with
+  w <= 0, or one that lands more than 0.5 NDC from where it started, is a cut. The probe depth of 0.5 is about
+  twice the near plane, so a dolly back of 20 units puts the probe behind the previous camera. The rule therefore
+  fires for the effects pair 9100 then 9101 although the content is continuous, and not for 9101 then 9100. Keeping
+  the history over that step ghosts the screen-space effects, so the rule is kept as it is.
+- **Known limits.** One scene target per frame: there is one DLSS viewport and one output per renderer, and a second
+  anti-aliased scene target would fail the evaluation (the game has one). Only camera motion is described, so moving
+  objects, skinned meshes, scrolling textures and screen-space effects that move on their own can ghost. The camera
+  table keeps 16 distinct cameras per frame, and a dominant one first seen after 16 others would be missed (no
+  capture has so many). In `dlaa` mode the edge effect, which reads the anti-aliased depth as a 2560-wide texture and
+  compares the two samples of a pixel, sees equal samples, so it loses the half-intensity steps that `msaa` gives:
+  at most 25 to 31 of 255 on 0.3 to 0.7 % of the pixels, about the spread between `msaa` and `supersample`. The
+  anti-aliasing is DLSS's, not the hardware's sample pattern, and because it uses history it also differs from
+  frame to frame.
+- **Measured.** The checks compare a 1x frame with the 4x `msaa` render of the same capture, box-downsampled
+  (`tox2_rsxreplay <capture> --resolution-scale 4 --aa-mode msaa --compare <1x png>`); a lower mean difference is
+  closer to the 4x render. For the jitter sign, the room, effects and cutscene captures were replayed 16 times and the
+  mean difference was: room 1.016 without jitter, 0.989 unflipped, 1.171 with x flipped, 1.109 with y flipped and
+  1.294 with both; effects 0.293, 0.290, 0.346, 0.311 and 0.362; cutscene 0.961, 0.875, 0.950, 0.950 and 1.039. Over
+  the edge pixels alone the unflipped offset was 5.8 (room), 4.3 (effects) and 6.3 % (cutscene) below no jitter.
+  Most of the full-frame mean is texture and mip detail that the jitter cannot change: the 1x `msaa` reference
+  scores 1.040 on the room and the 1x `supersample` one 0.761, so on that capture DLAA is closer to the 4x render than
+  `msaa` and farther than `supersample`. For the camera, the
+  cutscene pair 8700 then 8701 was replayed 8 times and its last frame compared: 3.538 with the camera off, 1.072
+  with a reset at every frame, 3.325 with the camera on, and 0.967 with the camera on and the y mirror, which is the
+  default.
+- **Not done.** Per-object motion vectors (matching the draws of two frames, the previous frame's vertex data,
+  skinned meshes, scrolling textures) would remove the ghosting named under the known limits, and are future work.
+  DLSS upscaling, a render scale per phase and HDR colour are not used.
 
 #### Stencil
 
@@ -839,26 +967,34 @@ no renderer and no window. Captures are derived from the game, so they are git-i
 `tox2_rsxreplay` replays a capture through the frame builder and the renderer without the game:
 
 ```sh
-tox2_rsxreplay CAPTURE [--out DIR]
+tox2_rsxreplay CAPTURE [CAPTURE...] [--loop N] [--out DIR]
                       [--compare PNG [--compare-rect X,Y,W,H] [--max-diff N] [--max-mean X] [--max-differing P]]
-                      [--resolution-scale N] [--aa-mode supersample|msaa] [--no-validation] [--shader-cache DIR]
+                      [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--no-validation] [--shader-cache DIR]
+                      [--dlaa-jitter on|off] [--dlaa-jitter-flip none|x|y|xy] [--dlaa-camera on|off|reset]
+                      [--dlaa-clip-flip-y on|off] [--dlaa-mv-invalid zero|unset]
                       [--repeat N] [--quiet]
 ```
 
 | Option | Meaning |
 | --- | --- |
-| `CAPTURE` | A `.tox2cap` file. |
-| `--out DIR` | Write the displayed frame of the last flip as `DIR/<capture name>.png`. |
-| `--compare PNG` | Compare that frame with a reference image. The sizes must match, except that a frame whose width and height are whole multiples of the reference's is box-averaged down to it first (the summary line then ends with `; downsampled <fx>x<fy>`). |
+| `CAPTURE` | A `.tox2cap` file. Several captures are replayed in the order given, each one a frame, through one renderer, so the state one frame leaves in the targets and caches is there for the next (see below). |
+| `--loop N` | Play the list of captures `N` times in order (1 to 1000, default 1). Together with several captures this is how the temporal behaviour of DLAA is tested. |
+| `--out DIR` | Write the displayed frame of the last flip as `DIR/<capture name>.png`. With several frames it is written after every frame, so a later frame of the same capture overwrites the earlier file. |
+| `--compare PNG` | Compare the last frame (of the last capture of the last pass) with a reference image. The sizes must match, except that a frame whose width and height are whole multiples of the reference's is box-averaged down to it first (the summary line then ends with `; downsampled <fx>x<fy>`). |
 | `--compare-rect X,Y,W,H` | With `--compare`: diff only the `W` x `H` rectangle at `(X, Y)`, in the reference's pixels (the rectangle is cut from both images after the downsample, and the summary line gets `; rect <W>x<H>+<X>+<Y>`). A malformed value is a usage error; a rectangle that is empty or outside the image is an error (exit code 1). |
 | `--max-diff N` | With `--compare`: fail when the largest per-channel difference exceeds `N`. |
 | `--max-mean X` | With `--compare`: fail when the mean per-channel difference exceeds `X`. |
 | `--max-differing P` | With `--compare`: fail when more than `P` percent of the pixels differ (by more than 2 in any channel). |
 | `--resolution-scale N` | Render every target at `N` times its guest size (1 to 4, default 1; see [Resolution scale](#resolution-scale)). The PNG is `N` times the guest size, and the summary line ends with `resolution scale N` when `N` is above 1. |
-| `--aa-mode supersample\|msaa` | How surfaces in the game's anti-aliased mode are rendered (default `msaa`; see [Anti-aliased surfaces](#anti-aliased-surfaces)). `supersample` is the single-sample memory-layout image shaded per sample. `msaa` falls back to it on a device without 2-sample support (`state 2-sample multisampling unavailable` in the census). The summary line gets `, aa supersample` when the effective mode is `supersample`, and nothing for `msaa`. Any other value is a usage error. |
+| `--aa-mode supersample\|msaa\|dlaa` | How surfaces in the game's anti-aliased mode are rendered (default `msaa`; see [Anti-aliased surfaces](#anti-aliased-surfaces)). `supersample` is the single-sample memory-layout image shaded per sample. `msaa` falls back to it on a device without 2-sample support (`state 2-sample multisampling unavailable` in the census). `dlaa` runs NVIDIA DLAA (see [DLAA](#dlaa)) and needs an NVIDIA RTX GPU and the Streamline DLLs; the tool loads Streamline only with this value. When DLAA is unavailable it uses `msaa` (or `supersample`), prints the warning `tox2: render: DLAA unavailable (<reason>); anti-aliased surfaces use <mode>` and counts `state DLAA unavailable`. The summary line gets `, aa <mode>` when the effective mode is not `msaa`, and `, aa <mode> (dlaa unavailable)` when `dlaa` was asked for and another mode replaced it. Any other value is a usage error. |
+| `--dlaa-jitter on\|off` | Diagnostic for the DLAA checks, needs `--aa-mode dlaa` (a usage error otherwise, like the four options below). `off` draws without the sub-pixel jitter. Default `on`. |
+| `--dlaa-jitter-flip none\|x\|y\|xy` | Negate the jitter offset reported to DLAA on the given axes. Only the reported value changes, never the geometry. Default `none`, the measured winner. |
+| `--dlaa-camera on\|off\|reset` | `on` (default) describes the camera motion between frames from the scene draws' projections. `off` passes identity matrices. `reset` passes identity matrices and drops the history at every frame. |
+| `--dlaa-clip-flip-y on\|off` | Whether the camera's clip-to-clip matrices are mirrored in y for Streamline's y-up clip space. Default `on`. |
+| `--dlaa-mv-invalid zero\|unset` | Set `motionVectorsInvalidValue` to 0 (`zero`, default) or leave the SDK default (`unset`, which makes Streamline warn once per process). It does not change the picture. |
 | `--no-validation` | Do not enable the Vulkan validation layer, which is on by default. |
 | `--shader-cache DIR` | SPIR-V cache directory. Without it nothing is cached. |
-| `--repeat N` | Replay and render the capture `N` times (1 to 100000) and print the median time of each phase (see below). A usage error together with `--out` or `--compare`; exit code 1 without a Vulkan device. |
+| `--repeat N` | Replay and render the capture `N` times (1 to 100000) and print the median time of each phase (see below). A usage error together with `--out`, `--compare`, more than one capture or `--loop`; exit code 1 without a Vulkan device. |
 | `--quiet` | Do not print the per-command lines (`clear`, `draw`, `flip`); everything else is printed. |
 
 The thresholds are optional and unchecked unless given, and they need `--compare`. The tool prints
@@ -870,6 +1006,18 @@ the PNG, and `validation: active|inactive|disabled, N errors`. The exit code is 
 threshold is exceeded, a file cannot be read or written, there is no frame to display or the
 validation layer reported an error, and 2 for a usage error. Without a usable Vulkan device it
 still prints the command list and counts every draw as skipped.
+
+With several captures or `--loop`, each capture has its own file reader, memory view and frame builder, so one
+frame's guest memory never leaks into the next, and all frames execute on one renderer. A frame is replayed
+(`replayCapture`, `takeCommands`, `recycle`, as `--repeat` does) and executed, and the list is played `N` times in
+order. The frames are separated by their flips, so every capture must end with a flip when more than one frame is
+replayed (otherwise a usage error names the capture). The command lines are printed for the first pass over the
+list only. `--out` writes `<capture name>.png` after every frame, `--compare` and its thresholds apply to the last
+frame, and the summary line counts the commands and draws of all frames and ends its counts with `, frames F` when
+`F` is above 1 (the order is `frames`, `resolution scale`, `aa`, then the diff figures). When the effective
+anti-aliasing mode is `dlaa`, one more line follows the summary:
+`dlaa: <n> evaluations, <n> resets, <n> failures`. For example, the two consecutive captures of the cutscene,
+replayed 8 times, are `tox2_rsxreplay frame_8700_cutscene.tox2cap frame_8701_cutscene.tox2cap --loop 8 --aa-mode dlaa`.
 
 `--repeat N` measures the frame builder and the renderer without the game. One process runs the capture `N` times
 with one memory view, one frame builder and one renderer, so the texture cache, the program caches and the pipelines
