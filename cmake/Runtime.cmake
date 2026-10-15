@@ -78,6 +78,7 @@ function(tox2_runtime_add_core)
   tox2_runtime_add_yyjson()
 
   add_library(tox2_runtime_core STATIC
+    runtime/src/app/config_file.cpp
     runtime/src/audio/audio_engine.cpp
     runtime/src/audio/audio_output.cpp
     runtime/src/audio/wav_file.cpp
@@ -170,7 +171,7 @@ function(tox2_runtime_add_core)
   target_link_libraries(tox2_runtime_core PRIVATE spdlog::spdlog)
   # PRIVATE as well: the PNG codec stays inside cell_png_dec.cpp.
   target_link_libraries(tox2_runtime_core PRIVATE png_static)
-  # PRIVATE as well: JSON types stay inside vfs_config.cpp and rsx_census.cpp.
+  # PRIVATE as well: JSON types stay inside config_file.cpp, vfs_config.cpp and rsx_census.cpp.
   target_link_libraries(tox2_runtime_core PRIVATE yyjson)
 
   add_executable(tox2_runtime_tests runtime/tests/runtime_core_test.cpp)
@@ -198,4 +199,12 @@ function(tox2_runtime_add_core)
   add_test(NAME spu_runtime COMMAND tox2_spu_runtime_tests)
   set_tests_properties(spu_runtime PROPERTIES
     PASS_REGULAR_EXPRESSION "spu runtime tests: [0-9]+ passed, 0 failed")
+
+  add_executable(tox2_game_options_tests runtime/tests/game_options_test.cpp)
+  target_compile_options(tox2_game_options_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_link_libraries(tox2_game_options_tests PRIVATE tox2_runtime_core)
+
+  add_test(NAME game_options COMMAND tox2_game_options_tests)
+  set_tests_properties(game_options PROPERTIES
+    PASS_REGULAR_EXPRESSION "game options tests: [0-9]+ passed, 0 failed")
 endfunction()
