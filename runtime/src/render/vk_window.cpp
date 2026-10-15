@@ -213,6 +213,9 @@ private:
                 self->width_.store(wparam == SIZE_MINIMIZED ? 0 : LOWORD(lparam));
                 self->height_.store(wparam == SIZE_MINIMIZED ? 0 : HIWORD(lparam));
                 self->refreshAvailable(hwnd);
+                // A preset chosen while minimised applies once the window is back. Fullscreen waits for its own exit
+                // (the WM_SIZE of leaving it arrives while fullscreen_ is still set).
+                if (self->preset_pending_ && wparam != SIZE_MINIMIZED && !self->fullscreen_.load()) self->applyPreset();
                 return 0;
             // The work area or the frame width can change with the window's monitor, its DPI, the taskbar or the
             // display layout. The window keeps its rectangle (a size the user dragged stays).
@@ -290,10 +293,7 @@ private:
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
         fullscreen_.store(false);
         // A preset chosen while fullscreen replaces the remembered placement (and leaves a maximised one).
-        if (preset_pending_) {
-            preset_pending_ = false;
-            applyPreset();
-        }
+        if (preset_pending_) applyPreset();
     }
 
     void toggleFullscreen() {
@@ -337,18 +337,18 @@ private:
     void setPreset(WPARAM value) {
         if (value >= kWindowSizePresets.size()) return;
         preset_.store(static_cast<std::uint8_t>(value));
-        // Fullscreen keeps the monitor-sized window; the preset applies when it is left.
-        if (fullscreen_.load()) {
-            preset_pending_ = true;
-        } else {
-            applyPreset();
-        }
+        applyPreset();
     }
 
     // Windowed only. Sizes the frame for the current preset, fitted to the work area of the window's monitor, and
     // keeps its top-left corner unless the window would stick out of the work area.
     void applyPreset() {
-        if (fullscreen_.load() || IsIconic(hwnd_)) return;
+        // Neither state can be sized now; the next WM_SIZE that is not a minimise, or leaving fullscreen, retries.
+        if (fullscreen_.load() || IsIconic(hwnd_)) {
+            preset_pending_ = true;
+            return;
+        }
+        preset_pending_ = false;
         // Resizing a maximised window only changes the rectangle it returns to, so restore it first.
         if (IsZoomed(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
         FrameMetrics metrics;

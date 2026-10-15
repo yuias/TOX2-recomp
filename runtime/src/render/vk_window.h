@@ -118,8 +118,8 @@ public:
     // Any thread; read from atomics the UI thread keeps current.
     WindowStatus windowStatus() const;
 
-    // Any thread; posts to the UI thread, which resizes the window (immediately when windowed, when leaving
-    // fullscreen otherwise). Choosing the preset that is already set re-applies it.
+    // Any thread; posts to the UI thread, which resizes the window (immediately when windowed; when leaving
+    // fullscreen or when restored from minimised otherwise). Choosing the preset that is already set re-applies it.
     void requestWindowSize(WindowSizePreset preset);
 
 private:
