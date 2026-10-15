@@ -2,7 +2,10 @@
 
 // lv2 synchronisation objects that live on the host side, addressed by guest ids, plus the native
 // entry points shared by the syscall and HLE handlers. Everything here runs under the kernel lock
-// (guestLock(), which in legacy mode is also the right to run guest code), so none of it needs atomics.
+// (guestLock(), which in legacy mode is also the right to run guest code), so none of it needs atomics. The one
+// exception is the owner/waiter word pair of an lwmutex: its uncontended lock and unlock are single compare-and-swaps
+// on the guest struct (lwmutex_word.h), and the kernel lock covers only the contended paths. The native lwmutex entry
+// points enter a kernel section themselves when they need it, so they work with or without the kernel lock held.
 
 #include <array>
 #include <atomic>
@@ -94,11 +97,16 @@ std::uint32_t mutexUnlock(const Tox2PpuContext* ctx, std::uint32_t id);
 // Blocking lock calls and unlocks that gave the object to a waiter, since start. An unlock hands the mutex or
 // lwmutex directly to the waiter its protocol chooses; the count of hand-offs includes those of the release inside
 // a condition variable wait. Any thread.
+// The lwmutex_slow_* and lwmutex_misaligned counters count only the calls that left the compare-and-swap path: a lock
+// that found another owner, an unlock that found a waiter, and each call on a lwmutex that is not 8-byte aligned.
 struct SyncHandoffStats {
     std::uint64_t mutex_waits = 0;
     std::uint64_t mutex_handoffs = 0;
     std::uint64_t lwmutex_waits = 0;
     std::uint64_t lwmutex_handoffs = 0;
+    std::uint64_t lwmutex_slow_locks = 0;
+    std::uint64_t lwmutex_slow_unlocks = 0;
+    std::uint64_t lwmutex_misaligned = 0;
 };
 SyncHandoffStats syncHandoffStats();
 

@@ -1,22 +1,38 @@
 // lv2 mutexes and condition variables (syscalls 100-109) and the lightweight mutex of
 // sysPrxForUser. Behaviour follows RPCS3 `Emu/Cell/lv2/sys_mutex.cpp`, `sys_cond.cpp` and
-// `Modules/sys_lwmutex_.cpp`. Handlers run under the kernel lock; a blocking call waits through
-// blockingWait, which gives the lock up. An unlock hands the mutex or lwmutex straight to the waiter its protocol
-// chooses (FIFO: the longest waiter; otherwise the lowest priority number, then the longest waiter), so the unlocking
-// thread cannot take it back first. Deferred: cond and lwcond waiters still wake in no particular order.
+// `Modules/sys_lwmutex_.cpp`. Mutex and condition variable handlers run under the kernel lock; a blocking call waits
+// through blockingWait, which gives the lock up. An unlock hands the mutex or lwmutex straight to the waiter its
+// protocol chooses (FIFO: the longest waiter; otherwise the lowest priority number, then the longest waiter), so the
+// unlocking thread cannot take it back first. Deferred: cond and lwcond waiters still wake in no particular order.
+//
+// The lwmutex is driven by the {owner, waiter} pair in the guest struct (lwmutex_word.h): an uncontended lock is one
+// compare-and-swap {Free, 0} -> {tid, 0} and an uncontended unlock one {tid, 0} -> {Free, 0}, neither needs the kernel
+// lock. The kernel lock covers only the slow paths: a lock that finds another owner and an unlock that finds a waiter.
+// Invariants (aligned lwmutex):
+//   - owner == Free implies waiter == 0, so a fast lock never passes a queued or granted waiter.
+//   - With the kernel lock free, waiter == the length of the host wait list (granted nodes included). Both change only
+//     inside one kernel section, which is why an unlock that sees waiter != 0 can decide Free or Reserved there without
+//     losing a wake-up.
+//   - owner == Reserved exactly while one list node is granted and its thread has not resumed.
+// A lwmutex whose address is not 8-byte aligned cannot use the atomic pair; its calls run under the kernel lock.
 
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <format>
 #include <iterator>
 #include <list>
 #include <memory>
+#include <optional>
 
+#include "core/fatal.h"
 #include "core/guest_memory.h"
+#include "core/log.h"
 #include "core/reservation.h"
 #include "core/threads.h"
 #include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
+#include "lv2/lwmutex_word.h"
 #include "lv2/sys_sync.h"
 
 namespace tox2 {
@@ -80,6 +96,8 @@ ProcessSyncObjects g_process_objects;
 
 // Read by the perf thread, written under the kernel lock.
 std::atomic<std::uint64_t> g_mutex_waits{0}, g_mutex_handoffs{0}, g_lwmutex_waits{0}, g_lwmutex_handoffs{0};
+// Slow-path entries and misaligned calls only; the uncontended calls count nothing here.
+std::atomic<std::uint64_t> g_lwmutex_slow_locks{0}, g_lwmutex_slow_unlocks{0}, g_lwmutex_misaligned{0};
 
 // The waiter an unlock gives the object to (RPCS3 `lv2_obj::schedule`): the longest waiter for FIFO, otherwise the
 // lowest priority number and among equals the longest waiter. Waiters that were already granted are skipped.
@@ -158,11 +176,27 @@ void watchOwnerValue(std::uint32_t lwmutex, std::uint32_t owner) {
 
 // --lwmutex-watch: under the kernel lock the waiter word equals the length of the wait list. A guest store to the word
 // breaks that without passing through any hook.
-void watchWaiterValue(const std::uint8_t* base, std::uint32_t lwmutex, const Lwmutex& object) {
+void watchWaiterValue(const LwmutexWord& word, std::uint32_t lwmutex, const Lwmutex& object) {
     if (!lwmutexWatchEnabled()) return;
-    if (tox2Read32(base, lwmutex + kLwmutexWaiter) == object.waiters.size()) return;
+    if (word.load().waiter == object.waiters.size()) return;
     lwmutexWatchHit(LwmutexWatchKind::WaiterValue, lwmutex + kLwmutexWaiter, 4, 0);
 }
+
+// Calls on a lwmutex that is not 8-byte aligned cannot use the atomic pair; they run in a kernel section instead,
+// which makes the plain accesses of LwmutexWord safe. The section is opened for the whole call.
+class MisalignedSection {
+public:
+    MisalignedSection(const LwmutexWord& word, std::uint32_t lwmutex) {
+        if (word.aligned()) return;
+        section_.emplace();
+        g_lwmutex_misaligned.fetch_add(1, std::memory_order_relaxed);
+        logOnce(LogLevel::Warn, std::format("lwmutex-misaligned:{:08x}", lwmutex),
+                "tox2: lwmutex: {:#010x} is not 8-byte aligned; its calls use the kernel lock", lwmutex);
+    }
+
+private:
+    std::optional<KernelSection> section_;
+};
 
 }  // namespace
 
@@ -235,61 +269,94 @@ std::uint32_t lwmutexCreateObject(std::uint8_t* base, std::uint32_t lwmutex, std
     return kCellOk;
 }
 
+// Gives up an lwmutex whose recursion count is already 0, under the kernel lock. With a waiter the owner word becomes
+// kLwmutexReserved, as RPCS3's user-side unlock leaves it, and the waiter writes its own id when it resumes; nobody
+// else can take the lwmutex in between because a fast lock only succeeds on {Free, 0}. Without one the lwmutex is free
+// and, by the invariants, the waiter word is 0.
+void releaseLwmutexLocked(std::uint8_t* base, std::uint32_t lwmutex) {
+    // The wait list and the waiter word are kept in step only under the kernel lock; the lwmutex fast paths are
+    // meant to run without it, so a caller that forgot its KernelSection would race them silently.
+    if (splitPpuMode() && !guestLock().heldByCurrentThread()) {
+        fatal(FatalKind::Internal, "lwmutex: release without the kernel lock");
+    }
+    LwmutexWord word(base, lwmutex);
+    const auto object = g_lwmutexes.find(tox2Read32(base, lwmutex + kLwmutexSleepQueue));
+    if (object != nullptr) watchWaiterValue(word, lwmutex, *object);
+    // The protocol is the low nibble of the attribute word; the recursive flag sits above it.
+    SyncWaiter* next = object != nullptr
+                               ? chooseWaiter(object->waiters, tox2Read32(base, lwmutex + kLwmutexAttribute) & 0xf)
+                               : nullptr;
+    if (next == nullptr) {
+        word.update([](LwmutexPair pair) { return LwmutexPair{kLwmutexFree, pair.waiter}; });
+        return;
+    }
+    next->granted = true;
+    word.update([](LwmutexPair pair) { return LwmutexPair{kLwmutexReserved, pair.waiter}; });
+    g_lwmutex_handoffs.fetch_add(1, std::memory_order_relaxed);
+    object->cv.notify_all();
+}
+
+// The lock path after the compare-and-swap found another owner: queues behind it and waits for a grant. Everything
+// that decides between taking the lwmutex, queueing and giving up happens under the kernel lock, so the waiter word
+// and the wait list change together.
+std::uint32_t lwmutexAcquireSlow(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex,
+                                 std::uint64_t timeout_us) {
+    KernelSection section;
+    g_lwmutex_slow_locks.fetch_add(1, std::memory_order_relaxed);
+    const std::uint32_t tid = callerThreadId(ctx);
+    LwmutexWord word(base, lwmutex);
+    const auto object = g_lwmutexes.find(tox2Read32(base, lwmutex + kLwmutexSleepQueue));
+    if (object == nullptr) return kCellEsrch;
+    watchWaiterValue(word, lwmutex, *object);
+    object->waiters.push_back({callerThread(ctx), tid, false});
+    const auto self = std::prev(object->waiters.end());
+    // The owner may have changed since the compare-and-swap: take a free lwmutex now, queue behind any other owner.
+    const auto queued = static_cast<std::uint32_t>(object->waiters.size());
+    const LwmutexPair seen = word.update([&](LwmutexPair pair) {
+        if (pair.owner == kLwmutexFree) return LwmutexPair{tid, 0};
+        if (pair.owner == kLwmutexDead) return pair;
+        return LwmutexPair{pair.owner, queued};
+    });
+    if (seen.owner == kLwmutexFree || seen.owner == kLwmutexDead) {
+        object->waiters.erase(self);
+        return seen.owner == kLwmutexFree ? kCellOk : kCellEinval;
+    }
+    g_lwmutex_waits.fetch_add(1, std::memory_order_relaxed);
+    blockingWait(object->cv, [&self] { return self->granted; }, "sys_lwmutex_lock", waitTimeout(timeout_us));
+    // The unlock left the owner word reserved for a granted waiter, so a timeout that raced with it loses.
+    const bool owns = self->granted;
+    object->waiters.erase(self);
+    const auto remaining = static_cast<std::uint32_t>(object->waiters.size());
+    word.update([&](LwmutexPair pair) {
+        if (!owns) return LwmutexPair{pair.owner, remaining};
+        if (pair.owner != kLwmutexReserved) {
+            fatal(FatalKind::Internal,
+                  std::format("lwmutex {:#010x}: a granted waiter found owner {:#010x}", lwmutex, pair.owner));
+        }
+        return LwmutexPair{tid, remaining};
+    });
+    return owns ? kCellOk : kCellEtimedout;
+}
+
 // The two lock paths differ only in what happens when another thread owns the lwmutex.
 std::uint32_t lwmutexAcquire(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex, bool block,
                              std::uint64_t timeout_us) {
     const std::uint32_t tid = callerThreadId(ctx);
-    const std::uint32_t owner = tox2Read32(base, lwmutex + kLwmutexOwner);
-    watchOwnerValue(lwmutex, owner);
-    if (owner == kLwmutexFree) {
-        tox2Write32(base, lwmutex + kLwmutexOwner, tid);
-        return kCellOk;
-    }
-    if (owner == tid) {
+    LwmutexWord word(base, lwmutex);
+    const MisalignedSection misaligned(word, lwmutex);
+    LwmutexPair seen{kLwmutexFree, 0};
+    if (word.compareExchange(seen, {tid, 0})) return kCellOk;
+    watchOwnerValue(lwmutex, seen.owner);
+    if (seen.owner == tid) {
         std::uint32_t count = tox2Read32(base, lwmutex + kLwmutexRecursiveCount);
         const std::uint32_t result =
                 recurse((tox2Read32(base, lwmutex + kLwmutexAttribute) & kSyncRecursive) != 0, count);
         if (result == kCellOk) tox2Write32(base, lwmutex + kLwmutexRecursiveCount, count);
         return result;
     }
-    if (owner == kLwmutexDead) return kCellEinval;
+    if (seen.owner == kLwmutexDead) return kCellEinval;
     if (!block) return kCellEbusy;
-
-    const auto object = g_lwmutexes.find(tox2Read32(base, lwmutex + kLwmutexSleepQueue));
-    if (object == nullptr) return kCellEsrch;
-    watchWaiterValue(base, lwmutex, *object);
-    object->waiters.push_back({callerThread(ctx), tid, false});
-    const auto self = std::prev(object->waiters.end());
-    g_lwmutex_waits.fetch_add(1, std::memory_order_relaxed);
-    tox2Write32(base, lwmutex + kLwmutexWaiter, static_cast<std::uint32_t>(object->waiters.size()));
-    blockingWait(object->cv, [&self] { return self->granted; }, "sys_lwmutex_lock", waitTimeout(timeout_us));
-    // The unlock left the owner word reserved for a granted waiter, so a timeout that raced with it loses.
-    const bool owns = self->granted;
-    object->waiters.erase(self);
-    tox2Write32(base, lwmutex + kLwmutexWaiter, static_cast<std::uint32_t>(object->waiters.size()));
-    if (!owns) return kCellEtimedout;
-    tox2Write32(base, lwmutex + kLwmutexOwner, tid);
-    return kCellOk;
-}
-
-// Gives up an lwmutex whose recursion count is already 0. With a waiter the owner word becomes kLwmutexReserved, as
-// RPCS3's user-side unlock leaves it, and the waiter writes its own id when it resumes; nobody else can take the
-// lwmutex in between.
-void releaseLwmutex(std::uint8_t* base, std::uint32_t lwmutex) {
-    const auto object = g_lwmutexes.find(tox2Read32(base, lwmutex + kLwmutexSleepQueue));
-    if (object != nullptr) watchWaiterValue(base, lwmutex, *object);
-    // The protocol is the low nibble of the attribute word; the recursive flag sits above it.
-    SyncWaiter* next = object != nullptr
-                               ? chooseWaiter(object->waiters, tox2Read32(base, lwmutex + kLwmutexAttribute) & 0xf)
-                               : nullptr;
-    if (next == nullptr) {
-        tox2Write32(base, lwmutex + kLwmutexOwner, kLwmutexFree);
-        return;
-    }
-    next->granted = true;
-    tox2Write32(base, lwmutex + kLwmutexOwner, kLwmutexReserved);
-    g_lwmutex_handoffs.fetch_add(1, std::memory_order_relaxed);
-    object->cv.notify_all();
+    return lwmutexAcquireSlow(ctx, base, lwmutex, timeout_us);
 }
 
 }  // namespace
@@ -306,17 +373,20 @@ std::uint32_t lwmutexCreate(std::uint8_t* base, std::uint32_t lwmutex, std::uint
 }
 
 std::uint32_t lwmutexDestroy(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex) {
-    const std::uint32_t owner = tox2Read32(base, lwmutex + kLwmutexOwner);
-    watchOwnerValue(lwmutex, owner);
-    if (owner == callerThreadId(ctx)) return kCellEbusy;
-    if (owner == kLwmutexDead) return kCellEinval;
-    if (owner != kLwmutexFree) return kCellEbusy;
+    LwmutexWord word(base, lwmutex);
+    const LwmutexPair pair = word.load();
+    watchOwnerValue(lwmutex, pair.owner);
+    if (pair.owner == callerThreadId(ctx)) return kCellEbusy;
+    if (pair.owner == kLwmutexDead) return kCellEinval;
+    if (pair.owner != kLwmutexFree) return kCellEbusy;
     const std::uint32_t id = tox2Read32(base, lwmutex + kLwmutexSleepQueue);
     const auto object = g_lwmutexes.find(id);
     if (object == nullptr) return kCellEsrch;
     if (!object->waiters.empty()) return kCellEbusy;
+    // A fast lock that got in since the load makes the lwmutex busy again.
+    LwmutexPair expected{kLwmutexFree, 0};
+    if (!word.compareExchange(expected, {kLwmutexDead, 0})) return kCellEbusy;
     g_lwmutexes.erase(id);
-    tox2Write32(base, lwmutex + kLwmutexOwner, kLwmutexDead);
     if (lwmutexWatchEnabled()) lwmutexWatchRemove(lwmutex);
     return kCellOk;
 }
@@ -331,15 +401,24 @@ std::uint32_t lwmutexTryLock(const Tox2PpuContext* ctx, std::uint8_t* base, std:
 }
 
 std::uint32_t lwmutexUnlock(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex) {
-    const std::uint32_t owner = tox2Read32(base, lwmutex + kLwmutexOwner);
+    const std::uint32_t tid = callerThreadId(ctx);
+    LwmutexWord word(base, lwmutex);
+    const MisalignedSection misaligned(word, lwmutex);
+    const std::uint32_t owner = word.load().owner;
     watchOwnerValue(lwmutex, owner);
-    if (owner != callerThreadId(ctx)) return kCellEperm;
+    if (owner != tid) return kCellEperm;
     const std::uint32_t count = tox2Read32(base, lwmutex + kLwmutexRecursiveCount);
     if (count != 0) {
         tox2Write32(base, lwmutex + kLwmutexRecursiveCount, count - 1);
         return kCellOk;
     }
-    releaseLwmutex(base, lwmutex);
+    LwmutexPair expected{tid, 0};
+    if (word.compareExchange(expected, {kLwmutexFree, 0})) return kCellOk;
+    // Only the owner changes the owner word, so the compare-and-swap failed because of a waiter. Whether the lwmutex
+    // becomes free or reserved for it is decided where the wait list and the waiter word agree.
+    KernelSection section;
+    g_lwmutex_slow_unlocks.fetch_add(1, std::memory_order_relaxed);
+    releaseLwmutexLocked(base, lwmutex);
     return kCellOk;
 }
 
@@ -369,7 +448,8 @@ std::uint32_t lwcondWait(const Tox2PpuContext* ctx, std::uint8_t* base, std::uin
     const std::uint32_t lwmutex = tox2Read32(base, lwcond + kLwcondMutex);
     const std::uint32_t tid = callerThreadId(ctx);
     if (lwmutex == 0) return kCellEperm;
-    const std::uint32_t owner = tox2Read32(base, lwmutex + kLwmutexOwner);
+    const LwmutexWord word(base, lwmutex);
+    const std::uint32_t owner = word.load().owner;
     watchOwnerValue(lwmutex, owner);
     if (owner != tid) return kCellEperm;
 
@@ -377,7 +457,7 @@ std::uint32_t lwcondWait(const Tox2PpuContext* ctx, std::uint8_t* base, std::uin
     // anything can run so a signal sent right after cannot be missed.
     const std::uint32_t saved_count = tox2Read32(base, lwmutex + kLwmutexRecursiveCount);
     tox2Write32(base, lwmutex + kLwmutexRecursiveCount, 0);
-    releaseLwmutex(base, lwmutex);
+    releaseLwmutexLocked(base, lwmutex);
 
     object->waiters.emplace_back();
     const auto self = std::prev(object->waiters.end());
@@ -407,8 +487,13 @@ std::uint32_t lwcondSignal(std::uint8_t* base, std::uint32_t lwcond) {
 }
 
 SyncHandoffStats syncHandoffStats() {
-    return {g_mutex_waits.load(std::memory_order_relaxed), g_mutex_handoffs.load(std::memory_order_relaxed),
-            g_lwmutex_waits.load(std::memory_order_relaxed), g_lwmutex_handoffs.load(std::memory_order_relaxed)};
+    return {g_mutex_waits.load(std::memory_order_relaxed),
+            g_mutex_handoffs.load(std::memory_order_relaxed),
+            g_lwmutex_waits.load(std::memory_order_relaxed),
+            g_lwmutex_handoffs.load(std::memory_order_relaxed),
+            g_lwmutex_slow_locks.load(std::memory_order_relaxed),
+            g_lwmutex_slow_unlocks.load(std::memory_order_relaxed),
+            g_lwmutex_misaligned.load(std::memory_order_relaxed)};
 }
 
 const ProcessSyncObjects& processSyncObjects() { return g_process_objects; }

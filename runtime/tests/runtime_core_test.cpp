@@ -52,6 +52,7 @@
 #include "input/pad_script.h"
 #include "png.h"
 #include "lv2/cell_error.h"
+#include "lv2/lwmutex_word.h"
 #include "lv2/sys_memory.h"
 #include "lv2/sys_ppu_thread.h"
 #include "lv2/sys_spu.h"
@@ -13881,6 +13882,229 @@ void testSplitSyscallStress() {
     }
 }
 
+// The operations of LwmutexWord on the pair at `addr`; the same results are expected for an aligned address (atomic
+// 64-bit accesses) and a misaligned one (plain accesses, which need the kernel lock in the split modes).
+void checkLwmutexWordOps(std::uint8_t* base, std::uint32_t addr) {
+    using tox2::LwmutexPair;
+    tox2::LwmutexWord word(base, addr);
+    CHECK(word.aligned() == ((addr & 7) == 0));
+    const auto stored = [&] { return LwmutexPair{tox2Read32(base, addr), tox2Read32(base, addr + 4)}; };
+
+    tox2Write32(base, addr, 0x01000001);
+    tox2Write32(base, addr + 4, 7);
+    CHECK(word.load() == (LwmutexPair{0x01000001, 7}));
+
+    // A failed compare-and-swap reports the current pair and writes nothing.
+    LwmutexPair expected{0x01000001, 8};
+    CHECK(!word.compareExchange(expected, {1, 2}));
+    CHECK(expected == (LwmutexPair{0x01000001, 7}));
+    CHECK(stored() == (LwmutexPair{0x01000001, 7}));
+    CHECK(word.compareExchange(expected, {tox2::kLwmutexFree, 0}));
+    CHECK(stored() == (LwmutexPair{tox2::kLwmutexFree, 0}));
+
+    // update() leaves the word alone when the function returns the pair it was given: the function writes a different
+    // waiter value behind its back, which a store of the old pair would overwrite.
+    int calls = 0;
+    LwmutexPair seen = word.update([&](LwmutexPair pair) {
+        calls++;
+        tox2Write32(base, addr + 4, 5);
+        return pair;
+    });
+    CHECK(calls == 1 && seen == (LwmutexPair{tox2::kLwmutexFree, 0}));
+    CHECK(stored() == (LwmutexPair{tox2::kLwmutexFree, 5}));
+
+    // A change between the load and the swap makes update() run the function again on the new pair.
+    calls = 0;
+    bool raced = false;
+    seen = word.update([&](LwmutexPair pair) {
+        calls++;
+        if (!raced) {
+            raced = true;
+            tox2Write32(base, addr + 4, 9);
+        }
+        return LwmutexPair{pair.owner, pair.waiter + 1};
+    });
+    CHECK(calls == 2 && seen == (LwmutexPair{tox2::kLwmutexFree, 9}));
+    CHECK(stored() == (LwmutexPair{tox2::kLwmutexFree, 10}));
+}
+
+void testLwmutexWord() {
+    using tox2::LwmutexPair;
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+
+    // The packed value is the host u64 whose bytes in memory are the big-endian owner, then the big-endian waiter.
+    const LwmutexPair pair{0x01000001, 0x00000007};
+    tox2Write32(base, scratch, pair.owner);
+    tox2Write32(base, scratch + 4, pair.waiter);
+    std::uint64_t raw = 0;
+    std::memcpy(&raw, base + scratch, sizeof raw);
+    CHECK(tox2::packLwmutexPair(pair) == raw);
+    CHECK(tox2::unpackLwmutexPair(raw) == pair);
+    CHECK(tox2::unpackLwmutexPair(tox2::packLwmutexPair({tox2::kLwmutexReserved, 0xfffffffe})) ==
+          (LwmutexPair{tox2::kLwmutexReserved, 0xfffffffe}));
+
+    checkLwmutexWordOps(base, scratch + 0x40);
+    checkLwmutexWordOps(base, scratch + 0x84);  // 4 mod 8
+    {
+        HangGuard guard("testLwmutexWord");
+        SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+        checkLwmutexWordOps(base, scratch + 0x40);  // the atomic variant needs no kernel lock
+        std::lock_guard<tox2::GuestLock> kernel(tox2::guestLock());
+        checkLwmutexWordOps(base, scratch + 0x84);
+        checkLwmutexWordOps(base, scratch + 0x40);
+    }
+    p.main.free(scratch);
+}
+
+// The lwmutex protocol through the native entry points, one case per ppu-threads mode. Every call opens a kernel
+// section, which is a no-op in legacy mode, so the same sequences run in both.
+void lwmutexProtocolCase(tox2::PpuThreadsMode mode) {
+    using tox2::LwmutexPair;
+    std::vector<std::string> lines;
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::resetLogOnce();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t lw = scratch, lw_odd = scratch + 0x104, attr = scratch + 0x80;
+    auto a = makeCaller(0x01000000);
+    auto b = makeCaller(0x01000001);
+    auto e = makeCaller(0x01000004);
+
+    SplitModeScope scope(mode);
+    const auto ctxOf = [](tox2::GuestThread& caller) { return &caller.context(); };
+    const auto create = [&](std::uint32_t addr, std::uint32_t protocol, std::uint32_t recursive) {
+        tox2::KernelSection section;
+        tox2Write32(base, attr, protocol);
+        tox2Write32(base, attr + 4, recursive);
+        return tox2::lwmutexCreate(base, addr, attr);
+    };
+    const auto lock = [&](tox2::GuestThread& who, std::uint32_t addr, std::uint64_t timeout_us = 0) {
+        tox2::KernelSection section;
+        return tox2::lwmutexLock(ctxOf(who), base, addr, timeout_us);
+    };
+    const auto tryLock = [&](tox2::GuestThread& who, std::uint32_t addr) {
+        tox2::KernelSection section;
+        return tox2::lwmutexTryLock(ctxOf(who), base, addr);
+    };
+    const auto unlock = [&](tox2::GuestThread& who, std::uint32_t addr) {
+        tox2::KernelSection section;
+        return tox2::lwmutexUnlock(ctxOf(who), base, addr);
+    };
+    const auto destroy = [&](tox2::GuestThread& who, std::uint32_t addr) {
+        tox2::KernelSection section;
+        return tox2::lwmutexDestroy(ctxOf(who), base, addr);
+    };
+    const auto pairAt = [&](std::uint32_t addr) {
+        return LwmutexPair{tox2Read32(base, addr), tox2Read32(base, addr + 4)};
+    };
+    const auto idle = LwmutexPair{tox2::kLwmutexFree, 0};
+    const tox2::SyncHandoffStats before = tox2::syncHandoffStats();
+
+    // Uncontended use never queues: the pair goes {Free,0} -> {tid,0} -> {Free,0} and the slow counters stay put.
+    CHECK(create(lw, tox2::kSyncRetry, tox2::kSyncRecursive) == 0);
+    CHECK(pairAt(lw) == idle);
+    CHECK(lock(*a, lw) == 0 && pairAt(lw) == (LwmutexPair{0x01000000, 0}));
+    CHECK(lock(*a, lw) == 0 && tryLock(*a, lw) == 0 && tox2Read32(base, lw + 12) == 2);
+    CHECK(tryLock(*b, lw) == tox2::kCellEbusy);
+    CHECK(unlock(*b, lw) == tox2::kCellEperm);
+    CHECK(destroy(*a, lw) == tox2::kCellEbusy && destroy(*b, lw) == tox2::kCellEbusy);
+    CHECK(unlock(*a, lw) == 0 && unlock(*a, lw) == 0 && pairAt(lw) == (LwmutexPair{0x01000000, 0}));
+    CHECK(unlock(*a, lw) == 0 && pairAt(lw) == idle);
+    CHECK(unlock(*a, lw) == tox2::kCellEperm);
+    CHECK(tox2::syncHandoffStats().lwmutex_slow_locks == before.lwmutex_slow_locks);
+    CHECK(tox2::syncHandoffStats().lwmutex_slow_unlocks == before.lwmutex_slow_unlocks);
+
+    // A RETRY lwmutex still hands off: with a blocked waiter the unlock leaves the owner word reserved for it.
+    CHECK(lock(*a, lw) == 0);
+    std::uint32_t b_result = ~0u;
+    std::thread waiter([&] {
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        b_result = lock(*b, lw);
+        unlock(*b, lw);
+    });
+    CHECK(waitUnderGuestLock([&] { return pairAt(lw) == (LwmutexPair{0x01000000, 1}); }));
+    {
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        CHECK(unlock(*a, lw) == 0);
+        CHECK(pairAt(lw) == (LwmutexPair{tox2::kLwmutexReserved, 1}));
+        CHECK(tryLock(*a, lw) == tox2::kCellEbusy);
+    }
+    waiter.join();
+    CHECK(b_result == 0 && pairAt(lw) == idle);
+    CHECK(tox2::syncHandoffStats().lwmutex_handoffs - before.lwmutex_handoffs == 1);
+
+    // A grant that races with the waiter's timeout still makes it the owner and it reports success.
+    CHECK(lock(*a, lw) == 0);
+    std::uint32_t e_result = ~0u;
+    std::thread timed([&] {
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        e_result = lock(*e, lw, 20'000);
+    });
+    CHECK(waitUnderGuestLock([&] { return pairAt(lw) == (LwmutexPair{0x01000000, 1}); }));
+    {
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        CHECK(unlock(*a, lw) == 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    timed.join();
+    CHECK(e_result == 0 && pairAt(lw) == (LwmutexPair{0x01000004, 0}));
+    CHECK(unlock(*e, lw) == 0 && pairAt(lw) == idle);
+
+    // A timeout without a grant takes the waiter out of the count again and leaves the owner alone.
+    CHECK(lock(*a, lw) == 0);
+    {
+        std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
+        CHECK(lock(*b, lw, 1000) == tox2::kCellEtimedout);
+    }
+    CHECK(pairAt(lw) == (LwmutexPair{0x01000000, 0}));
+    CHECK(unlock(*a, lw) == 0 && pairAt(lw) == idle);
+
+    // Only the contended calls took the slow paths: three locks that queued, two unlocks that found a waiter.
+    const tox2::SyncHandoffStats contended = tox2::syncHandoffStats();
+    CHECK(contended.lwmutex_slow_locks - before.lwmutex_slow_locks == 3);
+    CHECK(contended.lwmutex_slow_unlocks - before.lwmutex_slow_unlocks == 2);
+    CHECK(contended.lwmutex_misaligned == before.lwmutex_misaligned);
+
+    // Destroy on a free lwmutex writes Dead, and a dead lwmutex refuses everything.
+    CHECK(destroy(*a, lw) == 0 && pairAt(lw) == (LwmutexPair{tox2::kLwmutexDead, 0}));
+    CHECK(lock(*a, lw) == tox2::kCellEinval && tryLock(*a, lw) == tox2::kCellEinval);
+    CHECK(destroy(*a, lw) == tox2::kCellEinval);
+    CHECK(pairAt(lw) == (LwmutexPair{tox2::kLwmutexDead, 0}));
+
+    // A lwmutex that is not 8-byte aligned works through the kernel lock, is counted per call and is reported once.
+    CHECK(create(lw_odd, tox2::kSyncFifo, tox2::kSyncRecursive) == 0);
+    CHECK(lock(*a, lw_odd) == 0 && pairAt(lw_odd) == (LwmutexPair{0x01000000, 0}));
+    CHECK(lock(*a, lw_odd) == 0 && tox2Read32(base, lw_odd + 12) == 1);
+    CHECK(tryLock(*b, lw_odd) == tox2::kCellEbusy);
+    CHECK(unlock(*a, lw_odd) == 0 && unlock(*a, lw_odd) == 0 && pairAt(lw_odd) == idle);
+    CHECK(unlock(*a, lw_odd) == tox2::kCellEperm);
+    CHECK(tox2::syncHandoffStats().lwmutex_misaligned - contended.lwmutex_misaligned == 6);
+    CHECK(countContaining(lines, "not 8-byte aligned") == 1);
+    CHECK(destroy(*a, lw_odd) == 0 && pairAt(lw_odd) == (LwmutexPair{tox2::kLwmutexDead, 0}));
+
+    p.main.free(scratch);
+    tox2::resetSyncObjects();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+    tox2::resetLogOnce();
+}
+
+void testLwmutexProtocol() {
+    HangGuard guard("testLwmutexProtocol");
+    lwmutexProtocolCase(tox2::PpuThreadsMode::Legacy);
+    lwmutexProtocolCase(tox2::PpuThreadsMode::Split2);
+}
+
 // An initialised gcm state (no consumer thread) with the imports the kernel-free tests call through tox2HleCall:
 // cellGcmSys and the libc, sysPrxForUser, sysutil and rtc handlers marked kernel_free. The IO area is mapped at IO
 // offset 0, so `area() + n` has the offset n.
@@ -15835,6 +16059,8 @@ int main(int argc, char** argv) {
     testSplitYieldInsideKernel();
     testSplitReservationCounter();
     testSplitSyscallStress();
+    testLwmutexWord();
+    testLwmutexProtocol();
     testKernelFreeHandlers();
     testMemcpyNeighbourWrites();
     testGcmAddressToOffsetConcurrent();
