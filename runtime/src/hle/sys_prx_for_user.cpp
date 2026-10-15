@@ -1,12 +1,15 @@
 // HLE handlers of the sysPrxForUser module. Behaviour follows RPCS3 `Modules/sysPrxForUser.cpp`,
 // `sys_ppu_thread_.cpp`, `sys_lwmutex_.cpp`, `sys_heap.cpp`, `sys_prx_.cpp` and `sys_spu_.cpp`. Handlers run under the
 // kernel lock, except the ones marked kernel_free, which touch only the context, guest memory, immutable data, the
-// host clock and the caller's own thread id.
+// host clock and the caller's own thread id. sys_lwmutex_lock, _trylock and _unlock are marked kernel_free too, though
+// they touch lv2 state: their uncontended paths are compare-and-swaps on the guest struct, and on contention they enter
+// a kernel section themselves.
 
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -118,16 +121,25 @@ void sysLwmutexDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
     setResultCode(ctx, lwmutexDestroy(ctx, base, static_cast<std::uint32_t>(ctx->gpr[3])));
 }
 
+// The lock, try-lock and unlock handlers are kernel_free: the uncontended paths are compare-and-swaps on the guest
+// struct and the contended ones open their own kernel section. With the fast path off the whole call runs in one
+// section instead; it nests, so the native functions behave the same either way.
 // sys_lwmutex_lock(sys_lwmutex_t* lwmutex, u64 timeout)
 void sysLwmutexLock(Tox2PpuContext* ctx, std::uint8_t* base) {
+    std::optional<KernelSection> section;
+    if (!lwmutexFastPathEnabled()) section.emplace();
     setResultCode(ctx, lwmutexLock(ctx, base, static_cast<std::uint32_t>(ctx->gpr[3]), ctx->gpr[4]));
 }
 
 void sysLwmutexTryLock(Tox2PpuContext* ctx, std::uint8_t* base) {
+    std::optional<KernelSection> section;
+    if (!lwmutexFastPathEnabled()) section.emplace();
     setResultCode(ctx, lwmutexTryLock(ctx, base, static_cast<std::uint32_t>(ctx->gpr[3])));
 }
 
 void sysLwmutexUnlock(Tox2PpuContext* ctx, std::uint8_t* base) {
+    std::optional<KernelSection> section;
+    if (!lwmutexFastPathEnabled()) section.emplace();
     setResultCode(ctx, lwmutexUnlock(ctx, base, static_cast<std::uint32_t>(ctx->gpr[3])));
 }
 
@@ -273,8 +285,8 @@ void returnOk(Tox2PpuContext* ctx, std::uint8_t* base) {
 }
 
 constexpr HleEntry kHandlers[] = {
-        {kModule, 0x1573dc3f, "sys_lwmutex_lock", sysLwmutexLock},
-        {kModule, 0x1bc200f4, "sys_lwmutex_unlock", sysLwmutexUnlock},
+        {kModule, 0x1573dc3f, "sys_lwmutex_lock", sysLwmutexLock, true},
+        {kModule, 0x1bc200f4, "sys_lwmutex_unlock", sysLwmutexUnlock, true},
         {kModule, 0x1c9a942c, "sys_lwcond_destroy", sysLwcondDestroy},
         {kModule, 0x24a1ea07, "sys_ppu_thread_create", sysPpuThreadCreate},
         {kModule, 0x2a6d9d51, "sys_lwcond_wait", sysLwcondWait},
@@ -292,7 +304,7 @@ constexpr HleEntry kHandlers[] = {
         {kModule, 0x96328741, "_sys_process_at_Exitspawn", returnOk, true},
         {kModule, 0xa2c7ba64, "sys_prx_exitspawn_with_level", returnOk},
         {kModule, 0xa3e3be68, "sys_ppu_thread_once", sysPpuThreadOnce},
-        {kModule, 0xaeb78725, "sys_lwmutex_trylock", sysLwmutexTryLock},
+        {kModule, 0xaeb78725, "sys_lwmutex_trylock", sysLwmutexTryLock, true},
         {kModule, 0xaede4b03, "_sys_heap_delete_heap", sysHeapDeleteHeap},
         {kModule, 0xaff080a4, "sys_ppu_thread_exit", sysPpuThreadExit},
         {kModule, 0xb2fcf2c8, "_sys_heap_create_heap", sysHeapCreateHeap},

@@ -98,6 +98,7 @@ struct Options {
     tox2::RsxFlipLimit frame_limit = tox2::RsxFlipLimit::Vsync;       // --frame-limit vsync (default), 60 or off
     bool host_priorities = true;                                      // --host-priorities on (default) or off
     bool yield_backoff = true;                                        // --yield-backoff on (default) or off
+    bool lwmutex_fast_path = true;                                    // --lwmutex-fast-path on (default) or off
     bool lwmutex_watch = false;                                       // --lwmutex-watch
     tox2::PpuThreadsMode ppu_threads = tox2::PpuThreadsMode::Split2;  // --ppu-threads legacy, 1 or 2 (default)
     bool window = false;                                              // settled after all arguments
@@ -349,7 +350,7 @@ void printUsage() {
             "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
             "                [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]\n"
             "                [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off]\n"
-            "                [--ppu-threads legacy|1|2] [--lwmutex-watch]\n"
+            "                [--ppu-threads legacy|1|2] [--lwmutex-fast-path on|off] [--lwmutex-watch]\n"
             "                [--dump-guest ADDR:SIZE:FILE]...\n",
             stderr);
 }
@@ -522,6 +523,14 @@ bool parseArgs(int argc, char** argv, Options& opt) {
                 return false;
             }
             opt.yield_backoff = name == "on";
+        } else if (arg == "--lwmutex-fast-path") {
+            std::string name;
+            if (!value(name)) return false;
+            if (name != "on" && name != "off") {
+                std::fprintf(stderr, "error: --lwmutex-fast-path needs on or off\n");
+                return false;
+            }
+            opt.lwmutex_fast_path = name == "on";
         } else if (arg == "--lwmutex-watch") {
             opt.lwmutex_watch = true;
         } else if (arg == "--ppu-threads") {
@@ -755,7 +764,7 @@ bool isAudioPathClass(tox2::GuestLockClass cls) {
 tox2::PerfSource lockPerfSource() {
     return [prev = tox2::GuestLockStats{}, prev_yields = tox2::PpuYieldStats{},
             prev_handoffs = tox2::SyncHandoffStats{}, prev_reservations = tox2::PpuReservationStats{},
-            prev_slots = tox2::PpuSlotStats{}]() mutable -> std::string {
+            prev_slots = tox2::PpuSlotStats{}, prev_slow = tox2::SyncHandoffStats{}]() mutable -> std::string {
         const tox2::GuestLockStats now = tox2::guestLock().stats();
         std::string body;
         for (std::size_t i = 0; i < tox2::kGuestLockClassCount; i++) {
@@ -838,6 +847,17 @@ tox2::PerfSource lockPerfSource() {
                                 static_cast<double>(slots.parallel_us - prev_slots.parallel_us) / 1000.0,
                                 static_cast<double>(slots.full_waiting_us - prev_slots.full_waiting_us) / 1000.0);
             prev_slots = slots;
+        }
+        // Last, so the fields above keep their positions for the scripts that parse them. The uncontended calls count
+        // nothing; these are the calls that left the compare-and-swap path.
+        const std::uint64_t slow_locks = handoffs.lwmutex_slow_locks - prev_slow.lwmutex_slow_locks;
+        const std::uint64_t slow_unlocks = handoffs.lwmutex_slow_unlocks - prev_slow.lwmutex_slow_unlocks;
+        const std::uint64_t misaligned = handoffs.lwmutex_misaligned - prev_slow.lwmutex_misaligned;
+        if (slow_locks != 0 || slow_unlocks != 0 || misaligned != 0) {
+            body += std::format("{}lwmutex slow lock {} unlock {}", body.empty() ? "lock " : " | ", slow_locks,
+                                slow_unlocks);
+            if (misaligned != 0) body += std::format(" misaligned {}", misaligned);
+            prev_slow = handoffs;
         }
         prev = now;
         return body;
@@ -983,6 +1003,7 @@ int main(int argc, char** argv) {
     tox2::setRsxFlipLimit(opt.frame_limit);
     tox2::setHostPrioritiesEnabled(opt.host_priorities);
     tox2::setYieldBackoffEnabled(opt.yield_backoff);
+    tox2::setLwmutexFastPathEnabled(opt.lwmutex_fast_path);
     // Before boot creates the process lwmutexes, which the watch has to register.
     tox2::setLwmutexWatchEnabled(opt.lwmutex_watch);
     // Before any guest thread exists: the mode fixes the slot capacity and the lock rules those threads start with.

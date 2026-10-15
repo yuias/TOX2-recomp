@@ -14105,6 +14105,506 @@ void testLwmutexProtocol() {
     lwmutexProtocolCase(tox2::PpuThreadsMode::Split2);
 }
 
+// The lwmutex imports of sysPrxForUser, called through tox2HleCall like generated code does.
+class LwmutexHleEnv {
+public:
+    enum Import : std::uint32_t { Create, Lock, TryLock, Unlock, Destroy, ImportCount };
+
+    LwmutexHleEnv() {
+        static const Tox2ImportInfo kImports[] = {
+                {0x00800000, 0x2f85c0ef, "sysPrxForUser", "sys_lwmutex_create"},
+                {0x00800010, 0x1573dc3f, "sysPrxForUser", "sys_lwmutex_lock"},
+                {0x00800020, 0xaeb78725, "sysPrxForUser", "sys_lwmutex_trylock"},
+                {0x00800030, 0x1bc200f4, "sysPrxForUser", "sys_lwmutex_unlock"},
+                {0x00800040, 0xc3476d0c, "sysPrxForUser", "sys_lwmutex_destroy"},
+        };
+        tox2::installImports(kImports, ImportCount);
+    }
+    LwmutexHleEnv(const LwmutexHleEnv&) = delete;
+    LwmutexHleEnv& operator=(const LwmutexHleEnv&) = delete;
+
+    std::uint8_t* base() const { return env_.base(); }
+    // Guest address of the lwmutex with this index; the structs are 8-byte aligned and do not overlap.
+    std::uint32_t lwmutex(std::uint32_t index) const { return env_.data() + 0x100 * index; }
+    // Plain 32-bit counters that the tests increment inside a critical section.
+    std::uint32_t counter(std::uint32_t index) const { return env_.data() + 0x4000 + 4 * index; }
+
+    // The result of the call as the 32-bit error code the guest sees.
+    std::uint32_t call(tox2::GuestThread& caller, Import index, std::uint64_t r3 = 0, std::uint64_t r4 = 0) const {
+        Tox2PpuContext* ctx = &caller.context();
+        ctx->gpr[3] = r3;
+        ctx->gpr[4] = r4;
+        tox2HleCall(ctx, base(), index);
+        return static_cast<std::uint32_t>(ctx->gpr[3]);
+    }
+    bool create(tox2::GuestThread& caller, std::uint32_t index, std::uint32_t protocol, std::uint32_t recursive) const {
+        const std::uint32_t attr = env_.data() + 0x3000;
+        tox2Write32(base(), attr, protocol);
+        tox2Write32(base(), attr + 4, recursive);
+        return call(caller, Create, lwmutex(index), attr) == 0;
+    }
+    bool idle(std::uint32_t index) const {
+        return tox2Read32(base(), lwmutex(index)) == tox2::kLwmutexFree && tox2Read32(base(), lwmutex(index) + 4) == 0;
+    }
+
+private:
+    BoundaryEnv env_;
+};
+
+// In Split2, a slot holder's uncontended lwmutex calls return while a host thread holds the kernel lock; with the fast
+// path off the same calls wait for it.
+void testLwmutexKernelFree() {
+    HangGuard guard("testLwmutexKernelFree");
+    LwmutexHleEnv env;
+    auto caller = makeCaller(0x01000000);
+    CHECK(env.create(*caller, 0, tox2::kSyncFifo, tox2::kSyncRecursive));
+    const std::uint32_t lw = env.lwmutex(0);
+
+    const auto phase = [&](bool fast_path) {
+        tox2::setLwmutexFastPathEnabled(fast_path);
+        SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+        tox2::PpuSlots& slots = tox2::ppuSlots();
+        enum Step { kLock, kTryLock, kUnlock, kUnlockLast, kStepCount };
+        std::array<std::uint32_t, kStepCount> results{};
+        std::array<std::chrono::steady_clock::time_point, kStepCount> returned{};
+        std::atomic<bool> go{false};
+        std::thread holder = slotThread(1001, [&] {
+            slots.acquire();
+            CHECK(pollUntil([&] { return go.load(); }));
+            const LwmutexHleEnv::Import calls[kStepCount] = {LwmutexHleEnv::Lock, LwmutexHleEnv::TryLock,
+                                                             LwmutexHleEnv::Unlock, LwmutexHleEnv::Unlock};
+            for (int i = 0; i < kStepCount; i++) {
+                results[i] = env.call(*caller, calls[i], lw, 0);
+                returned[i] = std::chrono::steady_clock::now();
+            }
+            slots.release();
+        });
+        std::chrono::steady_clock::time_point hold_end;
+        {
+            std::lock_guard<tox2::GuestLock> host(tox2::guestLock());
+            go = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            hold_end = std::chrono::steady_clock::now();
+        }
+        holder.join();
+        for (int i = 0; i < kStepCount; i++) {
+            CHECK(results[i] == 0);
+            // The calls run in order: with the lock held by the host the first one waits, and the rest follow it.
+            if (fast_path) {
+                CHECK(returned[i] < hold_end);
+            } else {
+                CHECK(returned[i] >= hold_end);
+            }
+        }
+        CHECK(env.idle(0));
+    };
+    phase(true);
+    phase(false);
+    tox2::setLwmutexFastPathEnabled(true);
+}
+
+// Runs `body(caller, index, preemption_point)` on one thread per priority and returns the wall time. Each thread holds
+// the guest lock for its whole run in legacy mode and a PPU slot in the split modes, as guest code does; a host thread
+// takes the kernel lock in 300 us slices throughout. The preemption point is where a legacy or one-slot thread would
+// lose the CPU in the middle of a critical section: it gives up the guest lock (legacy) or yields (Split1), and it is
+// empty in Split2, where the other slot runs in parallel anyway.
+using LwmutexThreadBody =
+        std::function<void(tox2::GuestThread&, std::size_t, const std::function<void()>& preemption_point)>;
+std::chrono::milliseconds runLwmutexThreads(tox2::PpuThreadsMode mode, std::span<const std::int32_t> priorities,
+                                            const LwmutexThreadBody& body) {
+    const bool legacy = mode == tox2::PpuThreadsMode::Legacy;
+    SplitModeScope scope(mode);
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+    std::vector<std::unique_ptr<tox2::GuestThread>> callers;
+    for (std::size_t i = 0; i < priorities.size(); i++) {
+        callers.push_back(makeCaller(0x01000000 + static_cast<std::uint32_t>(i)));
+    }
+    std::atomic<bool> stop{false};
+    std::thread host([&] {
+        while (!stop.load()) {
+            {
+                std::lock_guard<tox2::GuestLock> lock(tox2::guestLock());
+                const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(300);
+                while (std::chrono::steady_clock::now() < until) {
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+    });
+    const auto start = std::chrono::steady_clock::now();
+    std::vector<std::thread> threads;
+    for (std::size_t i = 0; i < priorities.size(); i++) {
+        threads.push_back(slotThread(priorities[i], [&, i] {
+            std::unique_lock<tox2::GuestLock> guest_lock(tox2::guestLock(), std::defer_lock);
+            if (legacy) {
+                guest_lock.lock();
+            } else {
+                slots.acquire();
+            }
+            const std::function<void()> preemption_point = [&] {
+                if (legacy) {
+                    guest_lock.unlock();
+                    std::this_thread::yield();
+                    guest_lock.lock();
+                } else if (mode == tox2::PpuThreadsMode::Split1) {
+                    syscallAs(*callers[i], 43);
+                }
+            };
+            body(*callers[i], i, preemption_point);
+            if (legacy) {
+                guest_lock.unlock();
+            } else {
+                slots.release();
+            }
+        }));
+    }
+    joinAll(threads);
+    const auto elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    stop = true;
+    host.join();
+    return elapsed;
+}
+
+const char* modeName(tox2::PpuThreadsMode mode) {
+    return mode == tox2::PpuThreadsMode::Legacy ? "legacy" : splitName(mode);
+}
+
+// Every case below counts with plain loads and stores inside the critical section: only the lwmutex (its compare-and-
+// swap on the owner/waiter pair and the hand-off through the kernel lock) keeps the counts exact.
+void lwmutexContentionCase(tox2::PpuThreadsMode mode) {
+    constexpr int kIterations = 50'000;
+    constexpr std::chrono::seconds kLimit{30};
+    LwmutexHleEnv env;
+    using Env = LwmutexHleEnv;
+    std::uint8_t* base = env.base();
+    auto setup = makeCaller(0x01000100);
+    std::atomic<int> failures{0};
+    const auto ok = [&](std::uint32_t code) {
+        if (code != 0) failures++;
+    };
+    const auto bump = [&](std::uint32_t counter) { tox2Write32(base, counter, tox2Read32(base, counter) + 1); };
+    // Every lwmutex ends free with no waiter and destroys cleanly.
+    const auto finish = [&](std::uint32_t count) {
+        for (std::uint32_t i = 0; i < count; i++) {
+            CHECK(env.idle(i));
+            CHECK(env.call(*setup, Env::Destroy, env.lwmutex(i)) == 0);
+        }
+    };
+    const auto begin = [&](std::uint32_t count, std::uint32_t protocol, std::uint32_t recursive) {
+        failures = 0;
+        for (std::uint32_t i = 0; i < count; i++) {
+            CHECK(env.create(*setup, i, protocol, recursive));
+            tox2Write32(base, env.counter(i), 0);
+        }
+        return tox2::syncHandoffStats();
+    };
+    const auto report = [&](const char* name, std::chrono::milliseconds elapsed, const tox2::SyncHandoffStats& before) {
+        const tox2::SyncHandoffStats after = tox2::syncHandoffStats();
+        CHECK(failures == 0);
+        CHECK(elapsed < kLimit);
+        // Slow locks that did not wait took the lwmutex, or found it dead, in the kernel section: the owner had
+        // unlocked between the failed compare-and-swap and the queueing.
+        const std::uint64_t slow_locks = after.lwmutex_slow_locks - before.lwmutex_slow_locks;
+        const std::uint64_t waits = after.lwmutex_waits - before.lwmutex_waits;
+        std::printf(
+                "lwmutex contention %s (%s): %lld ms, slow locks %llu unlocks %llu, waits %llu hand-offs %llu, "
+                "slow locks - waits %llu\n",
+                name, modeName(mode), static_cast<long long>(elapsed.count()),
+                static_cast<unsigned long long>(slow_locks),
+                static_cast<unsigned long long>(after.lwmutex_slow_unlocks - before.lwmutex_slow_unlocks),
+                static_cast<unsigned long long>(waits),
+                static_cast<unsigned long long>(after.lwmutex_handoffs - before.lwmutex_handoffs),
+                static_cast<unsigned long long>(slow_locks - waits));
+    };
+    constexpr std::array<std::int32_t, 4> kFour{1001, 1001, 500, 100};
+    constexpr std::array<std::int32_t, 4> kEqualFour{1001, 1001, 1001, 1001};
+    constexpr std::array<std::int32_t, 2> kTwo{1001, 1001};
+
+    {  // (a) four threads on one FIFO lwmutex
+        const auto before = begin(1, tox2::kSyncFifo, tox2::kSyncNotRecursive);
+        const auto elapsed = runLwmutexThreads(mode, kFour, [&](tox2::GuestThread& caller, std::size_t, auto& preempt) {
+            for (int n = 0; n < kIterations; n++) {
+                ok(env.call(caller, Env::Lock, env.lwmutex(0), 0));
+                bump(env.counter(0));
+                if (n % 64 == 63) preempt();
+                ok(env.call(caller, Env::Unlock, env.lwmutex(0)));
+            }
+        });
+        report("fifo", elapsed, before);
+        CHECK(tox2Read32(base, env.counter(0)) == 4 * kIterations);
+        finish(1);
+    }
+    {  // (b) the same on one recursive PRIORITY lwmutex, every 8th iteration locking twice
+        const auto before = begin(1, tox2::kSyncPriority, tox2::kSyncRecursive);
+        const auto elapsed = runLwmutexThreads(mode, kFour, [&](tox2::GuestThread& caller, std::size_t, auto& preempt) {
+            for (int n = 0; n < kIterations; n++) {
+                const bool twice = n % 8 == 0;
+                ok(env.call(caller, Env::Lock, env.lwmutex(0), 0));
+                if (twice) ok(env.call(caller, Env::Lock, env.lwmutex(0), 0));
+                bump(env.counter(0));
+                if (n % 64 == 63) preempt();
+                if (twice) ok(env.call(caller, Env::Unlock, env.lwmutex(0)));
+                ok(env.call(caller, Env::Unlock, env.lwmutex(0)));
+            }
+        });
+        report("priority recursive", elapsed, before);
+        CHECK(tox2Read32(base, env.counter(0)) == 4 * kIterations);
+        finish(1);
+    }
+    {  // (c) two threads over 8 lwmutexes in round-robin order
+        const auto before = begin(8, tox2::kSyncFifo, tox2::kSyncNotRecursive);
+        const auto elapsed = runLwmutexThreads(mode, kTwo, [&](tox2::GuestThread& caller, std::size_t, auto& preempt) {
+            for (int n = 0; n < kIterations; n++) {
+                const std::uint32_t k = static_cast<std::uint32_t>(n % 8);
+                ok(env.call(caller, Env::Lock, env.lwmutex(k), 0));
+                bump(env.counter(k));
+                if (n % 64 == 63) preempt();
+                ok(env.call(caller, Env::Unlock, env.lwmutex(k)));
+            }
+        });
+        report("round-robin", elapsed, before);
+        for (std::uint32_t k = 0; k < 8; k++) CHECK(tox2Read32(base, env.counter(k)) == 2 * kIterations / 8);
+        finish(8);
+    }
+    {  // (d) two threads spinning on try-lock against two locking with a 100 us timeout
+        const auto before = begin(1, tox2::kSyncFifo, tox2::kSyncNotRecursive);
+        const auto elapsed =
+                runLwmutexThreads(mode, kEqualFour, [&](tox2::GuestThread& caller, std::size_t index, auto& preempt) {
+                    const bool try_lock = index < 2;
+                    for (int done = 0; done < kIterations;) {
+                        const std::uint32_t result = try_lock ? env.call(caller, Env::TryLock, env.lwmutex(0))
+                                                              : env.call(caller, Env::Lock, env.lwmutex(0), 100);
+                        if (result == 0) {
+                            bump(env.counter(0));
+                            // Only the timed lockers lose the CPU while they own the lwmutex; the try-lock spinners
+                            // yield on EBUSY instead, so a preempted owner always gets to run again.
+                            if (!try_lock && done % 64 == 63) preempt();
+                            ok(env.call(caller, Env::Unlock, env.lwmutex(0)));
+                            done++;
+                        } else if (try_lock && result == tox2::kCellEbusy) {
+                            // The owner may be waiting for a slot that this spinner holds.
+                            syscallAs(caller, 43);
+                        } else if (!try_lock && result == tox2::kCellEtimedout) {
+                            continue;
+                        } else {
+                            failures++;
+                            break;
+                        }
+                    }
+                });
+        report("try-lock against timed lock", elapsed, before);
+        CHECK(tox2Read32(base, env.counter(0)) == 4 * kIterations);
+        finish(1);
+    }
+}
+
+void testLwmutexContentionStress() {
+    HangGuard guard("testLwmutexContentionStress");
+    for (const tox2::PpuThreadsMode mode :
+         {tox2::PpuThreadsMode::Legacy, tox2::PpuThreadsMode::Split1, tox2::PpuThreadsMode::Split2}) {
+        lwmutexContentionCase(mode);
+    }
+}
+
+// Busy-waits for about `ns` nanoseconds without a system call, so the caller stays on its CPU.
+void spinFor(std::int64_t ns) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds(ns);
+    while (std::chrono::steady_clock::now() < until) {
+    }
+}
+
+// Destroy against a fast lock (Split2): the holder locks and unlocks in a loop while the main thread destroys the
+// lwmutex. Destroy is EBUSY while the holder owns it or wins the compare-and-swap race, and once it succeeds the next
+// lock must see the lwmutex dead. The compare-and-swap in destroy is what keeps a lock from slipping in after it.
+void testLwmutexDestroyRace() {
+    HangGuard guard("testLwmutexDestroyRace");
+    LwmutexHleEnv env;
+    using Env = LwmutexHleEnv;
+    std::uint8_t* base = env.base();
+    auto setup = makeCaller(0x01000100);
+    auto holder_caller = makeCaller(0x01000000);
+    CHECK(env.create(*setup, 0, tox2::kSyncFifo, tox2::kSyncNotRecursive));
+    const std::uint32_t lw = env.lwmutex(0), counter = env.counter(0);
+    tox2Write32(base, counter, 0);
+
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+    std::atomic<std::uint32_t> locks{0};
+    std::atomic<int> failures{0};
+    std::atomic<bool> stop{false};
+    std::uint32_t last_result = 0;
+    std::thread holder = slotThread(1001, [&] {
+        slots.acquire();
+        while (!stop.load()) {
+            last_result = env.call(*holder_caller, Env::Lock, lw, 0);
+            if (last_result != 0) break;
+            tox2Write32(base, counter, tox2Read32(base, counter) + 1);
+            locks++;
+            if (env.call(*holder_caller, Env::Unlock, lw) != 0) failures++;
+        }
+        slots.release();
+    });
+    CHECK(pollUntil([&] { return locks.load() >= 1000; }));
+
+    std::uint64_t busy = 0;
+    bool destroyed = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!destroyed && std::chrono::steady_clock::now() < deadline) {
+        const std::uint32_t result = env.call(*setup, Env::Destroy, lw);
+        if (result == 0) {
+            destroyed = true;
+        } else if (result == tox2::kCellEbusy) {
+            busy++;
+        } else {
+            failures++;
+            break;
+        }
+    }
+    stop = true;
+    holder.join();
+    CHECK(destroyed);
+    CHECK(failures == 0);
+    CHECK(last_result == tox2::kCellEinval);
+    CHECK(tox2Read32(base, lw) == tox2::kLwmutexDead && tox2Read32(base, lw + 4) == 0);
+    CHECK(tox2Read32(base, counter) == locks.load());
+    std::printf("lwmutex destroy against fast lock (split2): %llu locks, destroy EBUSY %llu times\n",
+                static_cast<unsigned long long>(locks.load()), static_cast<unsigned long long>(busy));
+}
+
+// Fast unlocks against slow-path publishing (Split2): two slot holders lock and unlock one lwmutex with a short,
+// varying pause outside the critical section, so an unlock lands at every point of the other thread's failed
+// compare-and-swap, queueing and wait. A host thread tries the lock now and then. No unlock may miss a waiter.
+void testLwmutexPublishRace() {
+    HangGuard guard("testLwmutexPublishRace");
+    constexpr int kIterations = 20'000;
+    LwmutexHleEnv env;
+    using Env = LwmutexHleEnv;
+    std::uint8_t* base = env.base();
+    auto setup = makeCaller(0x01000100);
+    auto try_caller = makeCaller(0x01000010);
+    std::array<std::unique_ptr<tox2::GuestThread>, 2> callers{makeCaller(0x01000000), makeCaller(0x01000001)};
+    CHECK(env.create(*setup, 0, tox2::kSyncFifo, tox2::kSyncNotRecursive));
+    const std::uint32_t lw = env.lwmutex(0), counter = env.counter(0);
+    tox2Write32(base, counter, 0);
+    const tox2::SyncHandoffStats before = tox2::syncHandoffStats();
+
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+    std::atomic<int> failures{0};
+    std::atomic<bool> stop{false};
+    std::array<std::uint32_t, 2> bumps{};
+    std::uint32_t try_bumps = 0;
+    const auto start = std::chrono::steady_clock::now();
+    std::vector<std::thread> threads;
+    for (std::size_t i = 0; i < 2; i++) {
+        threads.push_back(slotThread(1001, [&, i] {
+            slots.acquire();
+            for (int n = 0; n < kIterations; n++) {
+                if (env.call(*callers[i], Env::Lock, lw, 0) != 0) failures++;
+                // No critical-section work on half of the iterations, one increment on the rest.
+                if ((n + i) % 2 == 0) {
+                    tox2Write32(base, counter, tox2Read32(base, counter) + 1);
+                    bumps[i]++;
+                }
+                if (env.call(*callers[i], Env::Unlock, lw) != 0) failures++;
+                spinFor((n % 7) * 20);
+            }
+            slots.release();
+        }));
+    }
+    std::thread try_locker([&] {
+        while (!stop.load()) {
+            const std::uint32_t result = env.call(*try_caller, Env::TryLock, lw);
+            if (result == 0) {
+                tox2Write32(base, counter, tox2Read32(base, counter) + 1);
+                try_bumps++;
+                if (env.call(*try_caller, Env::Unlock, lw) != 0) failures++;
+            } else if (result != tox2::kCellEbusy) {
+                failures++;
+            }
+            spinFor(20'000);
+        }
+    });
+    joinAll(threads);
+    stop = true;
+    try_locker.join();
+    const auto elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    CHECK(failures == 0);
+    CHECK(elapsed < std::chrono::seconds(10));
+    CHECK(tox2Read32(base, counter) == bumps[0] + bumps[1] + try_bumps);
+    CHECK(env.idle(0));
+    CHECK(env.call(*setup, Env::Destroy, lw) == 0);
+    const tox2::SyncHandoffStats after = tox2::syncHandoffStats();
+    const std::uint64_t slow_locks = after.lwmutex_slow_locks - before.lwmutex_slow_locks;
+    const std::uint64_t waits = after.lwmutex_waits - before.lwmutex_waits;
+    std::printf(
+            "lwmutex publish race (split2): %lld ms, slow locks %llu unlocks %llu, waits %llu, "
+            "slow locks - waits %llu, try-lock successes %u\n",
+            static_cast<long long>(elapsed.count()), static_cast<unsigned long long>(slow_locks),
+            static_cast<unsigned long long>(after.lwmutex_slow_unlocks - before.lwmutex_slow_unlocks),
+            static_cast<unsigned long long>(waits), static_cast<unsigned long long>(slow_locks - waits), try_bumps);
+}
+
+// Nanoseconds per uncontended lock + unlock pair through tox2HleCall with `holders` slot holders in parallel, each on
+// its own lwmutex. Includes the census mutex that every import call takes, so it is a trend figure, not a bound.
+double lwmutexPairNs(LwmutexHleEnv& env, std::uint32_t holders, bool fast_path) {
+    constexpr int kPairs = 200'000;
+    tox2::setLwmutexFastPathEnabled(fast_path);
+    SplitModeScope mode(tox2::PpuThreadsMode::Split2);
+    tox2::PpuSlots& slots = tox2::ppuSlots();
+    std::vector<std::unique_ptr<tox2::GuestThread>> callers;
+    for (std::uint32_t i = 0; i < holders; i++) callers.push_back(makeCaller(0x01000000 + i));
+    std::atomic<std::uint32_t> ready{0};
+    std::atomic<bool> go{false};
+    std::vector<std::thread> threads;
+    for (std::uint32_t i = 0; i < holders; i++) {
+        threads.push_back(slotThread(1001, [&, i] {
+            slots.acquire();
+            ready++;
+            pollUntil([&] { return go.load(); });
+            for (int n = 0; n < kPairs; n++) {
+                env.call(*callers[i], LwmutexHleEnv::Lock, env.lwmutex(i), 0);
+                env.call(*callers[i], LwmutexHleEnv::Unlock, env.lwmutex(i));
+            }
+            slots.release();
+        }));
+    }
+    CHECK(pollUntil([&] { return ready.load() == holders; }));
+    const auto start = std::chrono::steady_clock::now();
+    go = true;
+    joinAll(threads);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    tox2::setLwmutexFastPathEnabled(true);
+    return std::chrono::duration<double, std::nano>(elapsed).count() / kPairs;
+}
+
+// Report only: how the cost of an uncontended pair changes when a second slot holder works on another lwmutex.
+void testLwmutexPairBenchmark() {
+    HangGuard guard("testLwmutexPairBenchmark");
+    constexpr int kRuns = 5;
+    LwmutexHleEnv env;
+    auto setup = makeCaller(0x01000100);
+    for (std::uint32_t i = 0; i < 2; i++) CHECK(env.create(*setup, i, tox2::kSyncFifo, tox2::kSyncNotRecursive));
+    const auto median = [&](std::uint32_t holders, bool fast_path) {
+        std::array<double, kRuns> samples{};
+        lwmutexPairNs(env, holders, fast_path);  // warm-up
+        for (double& sample : samples) sample = lwmutexPairNs(env, holders, fast_path);
+        std::ranges::sort(samples);
+        return samples[kRuns / 2];
+    };
+    const double one_on = median(1, true), two_on = median(2, true);
+    const double one_off = median(1, false), two_off = median(2, false);
+    CHECK(env.idle(0) && env.idle(1));
+    std::printf(
+            "lwmutex lock+unlock pair, ns per pair (split2): fast path on: 1 holder %.0f, 2 holders %.0f; "
+            "off: 1 holder %.0f, 2 holders %.0f\n",
+            one_on, two_on, one_off, two_off);
+    std::printf("lwmutex pair ratio two holders / one holder: fast path on %.2f, off %.2f\n", two_on / one_on,
+                two_off / one_off);
+}
+
 // An initialised gcm state (no consumer thread) with the imports the kernel-free tests call through tox2HleCall:
 // cellGcmSys and the libc, sysPrxForUser, sysutil and rtc handlers marked kernel_free. The IO area is mapped at IO
 // offset 0, so `area() + n` has the offset n.
@@ -16061,6 +16561,11 @@ int main(int argc, char** argv) {
     testSplitSyscallStress();
     testLwmutexWord();
     testLwmutexProtocol();
+    testLwmutexKernelFree();
+    testLwmutexContentionStress();
+    testLwmutexDestroyRace();
+    testLwmutexPublishRace();
+    testLwmutexPairBenchmark();
     testKernelFreeHandlers();
     testMemcpyNeighbourWrites();
     testGcmAddressToOffsetConcurrent();

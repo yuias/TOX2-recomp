@@ -110,6 +110,19 @@ struct SyncHandoffStats {
 };
 SyncHandoffStats syncHandoffStats();
 
+namespace detail {
+inline std::atomic<bool> g_lwmutex_fast_path{true};
+}  // namespace detail
+
+// --lwmutex-fast-path on|off; on by default. On, the sys_lwmutex_lock, _trylock and _unlock imports run without the
+// kernel lock and enter a kernel section only on contention. Off, they run inside one kernel section for the whole
+// call, which is the same protocol with every compare-and-swap under the lock; it is the fallback and the A/B switch.
+// Set it before guest threads start.
+inline void setLwmutexFastPathEnabled(bool enabled) {
+    detail::g_lwmutex_fast_path.store(enabled, std::memory_order_relaxed);
+}
+inline bool lwmutexFastPathEnabled() { return detail::g_lwmutex_fast_path.load(std::memory_order_relaxed); }
+
 // `lwmutex` is the guest address of a `sys_lwmutex_t`, `attr` that of a `sys_lwmutex_attribute_t`.
 std::uint32_t lwmutexCreate(std::uint8_t* base, std::uint32_t lwmutex, std::uint32_t attr);
 std::uint32_t lwmutexDestroy(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex);
