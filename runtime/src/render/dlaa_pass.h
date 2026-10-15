@@ -37,15 +37,13 @@ public:
     };
 
     void record(const DlaaCameraKey& key);
-    // `flip_clip_y` mirrors the clip-to-clip transforms in y (a diagnostic for the sign of the clip space).
-    Result resolve(bool flip_clip_y) const;
-    // The frame is over: its camera becomes the previous one and the table starts again.
+    // The result for the draws recorded so far, which are the ones the evaluation sees. The camera used (or its
+    // absence) is remembered as the next frame's previous camera. `flip_clip_y` mirrors the clip-to-clip transforms
+    // in y (the sign of the clip space relative to Streamline's).
+    Result resolve(bool flip_clip_y);
+    // The frame is over: its camera becomes the previous one and the table starts again. That camera is the one
+    // resolve() used; a frame without a resolve() contributes its own dominant key.
     void endFrame();
-
-    // Of the frame being drawn, for diagnostics.
-    std::uint32_t dominantDraws() const;
-    std::uint32_t perspectiveDraws() const { return counted_draws_ + ignored_draws_; }
-    std::size_t keyCount() const { return entries_.size(); }
 
 private:
     struct Entry {
@@ -55,8 +53,10 @@ private:
     const Entry* dominant() const;
 
     std::vector<Entry> entries_;
-    std::uint32_t counted_draws_ = 0, ignored_draws_ = 0;
     std::optional<DlaaCameraKey> previous_;
+    // Set by resolve(); the key it used, if it found one.
+    bool resolved_ = false;
+    std::optional<DlaaCameraKey> resolved_key_;
 };
 
 // The images and the DLSS viewport around one DLAA evaluation. The renderer records every command that is not the

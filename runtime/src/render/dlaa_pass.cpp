@@ -130,16 +130,11 @@ void DlaaCameraTracker::record(const DlaaCameraKey& key) {
     for (Entry& entry : entries_) {
         if (entry.key == key) {
             entry.draws++;
-            counted_draws_++;
             return;
         }
     }
-    if (entries_.size() >= kMaxKeys) {
-        ignored_draws_++;
-        return;
-    }
+    if (entries_.size() >= kMaxKeys) return;
     entries_.push_back({key, 1});
-    counted_draws_++;
 }
 
 // The most drawn key; the first seen wins a tie.
@@ -151,14 +146,11 @@ const DlaaCameraTracker::Entry* DlaaCameraTracker::dominant() const {
     return best;
 }
 
-std::uint32_t DlaaCameraTracker::dominantDraws() const {
-    const Entry* best = dominant();
-    return best != nullptr ? best->draws : 0;
-}
-
-DlaaCameraTracker::Result DlaaCameraTracker::resolve(bool flip_clip_y) const {
+DlaaCameraTracker::Result DlaaCameraTracker::resolve(bool flip_clip_y) {
     Result result;  // identity matrices and a reset, until both frames have a usable camera
     const Entry* current = dominant();
+    resolved_ = true;
+    resolved_key_ = current != nullptr ? std::optional<DlaaCameraKey>(current->key) : std::nullopt;
     if (current == nullptr || !previous_) return result;
     const Mat4 clip_current = dlaaClipMatrix(current->key);
     const Mat4 clip_previous = dlaaClipMatrix(*previous_);
@@ -179,10 +171,18 @@ DlaaCameraTracker::Result DlaaCameraTracker::resolve(bool flip_clip_y) const {
 }
 
 void DlaaCameraTracker::endFrame() {
-    const Entry* best = dominant();
-    previous_ = best != nullptr ? std::optional<DlaaCameraKey>(best->key) : std::nullopt;
+    // The evaluation saw only the draws before the resolve, and its history was produced with that camera, so that
+    // is what the next frame's motion is measured from. Without an evaluation nothing was produced; the whole
+    // frame's camera is kept anyway, and the next evaluation resets because it does not follow one.
+    if (resolved_) {
+        previous_ = resolved_key_;
+    } else {
+        const Entry* best = dominant();
+        previous_ = best != nullptr ? std::optional<DlaaCameraKey>(best->key) : std::nullopt;
+    }
     entries_.clear();
-    counted_draws_ = ignored_draws_ = 0;
+    resolved_ = false;
+    resolved_key_.reset();
 }
 
 }  // namespace tox2

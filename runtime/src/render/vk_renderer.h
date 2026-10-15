@@ -42,8 +42,14 @@ struct DlaaDebug {
     // on all three and flipping both axes worst.
     bool flip_jitter_x = false, flip_jitter_y = false;
     DlaaCamera camera = DlaaCamera::On;
-    bool flip_clip_y = false;       // mirror the clip-to-clip matrices in y
-    bool mvec_invalid_zero = true;  // motionVectorsInvalidValue 0; false leaves the SDK default (it warns every frame)
+    // Mirror the clip-to-clip matrices in y (F * C * F). Streamline's mvec kernel builds a y-up clip position
+    // (`1 - 2v` in shaders/mvec.hlsl) while our clip space is y-down: the viewport height is positive and the vertex
+    // epilogue has no y flip. Mean difference of 8701 against a 4x render: 0.967 with the flip, 3.325 without,
+    // 3.538 with the camera off.
+    bool flip_clip_y = true;
+    // motionVectorsInvalidValue 0. The value does not change the output; left unset, Streamline warns once per
+    // process.
+    bool mvec_invalid_zero = true;
 };
 
 struct RenderOptions {

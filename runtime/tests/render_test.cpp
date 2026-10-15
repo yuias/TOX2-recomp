@@ -24,6 +24,7 @@
 
 #include "core/log.h"
 #include "render/dlaa_math.h"
+#include "render/dlaa_pass.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
 #include "render/image_pool.h"
@@ -730,6 +731,167 @@ void testDlaaCameraCut() {
     tox2::Mat4 not_a_number = tox2::mat4Identity();
     not_a_number[0] = std::numeric_limits<float>::quiet_NaN();
     CHECK(tox2::dlaaCameraCut(not_a_number));
+}
+
+// A camera that differs from the others by `shift`: a perspective projection behind a translation.
+tox2::DlaaCameraKey trackerKey(float shift) {
+    tox2::DlaaCameraKey key;
+    key.mvp = tox2::mat4Multiply(translationMatrix(shift, 0.2f, 1.0f), perspectiveMatrix(1.2f, 2.1f, 0.5f, 100.0f));
+    key.viewport_scale[0] = 640.0f;
+    key.viewport_scale[1] = -360.0f;
+    key.viewport_scale[2] = 0.5f;
+    key.viewport_offset[0] = 640.0f;
+    key.viewport_offset[1] = 360.0f;
+    key.viewport_offset[2] = 0.5f;
+    key.clip_w = 1280.0f;
+    key.clip_h = 720.0f;
+    return key;
+}
+
+// One frame whose camera is `key`, ended without an evaluation.
+void trackerFrame(tox2::DlaaCameraTracker& tracker, const tox2::DlaaCameraKey& key, int draws = 1) {
+    for (int i = 0; i < draws; ++i) tracker.record(key);
+    tracker.endFrame();
+}
+
+bool isIdentityResult(const tox2::DlaaCameraTracker::Result& result) {
+    const tox2::DlaaMatrices& m = result.matrices;
+    const tox2::Mat4 identity = tox2::mat4Identity();
+    return m.view_to_clip == identity && m.clip_to_view == identity && m.clip_to_prev_clip == identity &&
+           m.prev_clip_to_clip == identity;
+}
+
+// The clip-to-clip transforms the tracker must report for a current and a previous camera.
+void expectTransitions(const tox2::DlaaCameraTracker::Result& result, const tox2::DlaaCameraKey& current,
+                       const tox2::DlaaCameraKey& previous) {
+    const tox2::Mat4 clip_current = tox2::dlaaClipMatrix(current);
+    const tox2::Mat4 clip_previous = tox2::dlaaClipMatrix(previous);
+    tox2::Mat4 inverse_current{}, inverse_previous{};
+    CHECK(tox2::mat4Inverse(clip_current, inverse_current) && tox2::mat4Inverse(clip_previous, inverse_previous));
+    CHECK(result.matrices.view_to_clip == clip_current);
+    CHECK(result.matrices.clip_to_prev_clip == tox2::mat4Multiply(inverse_current, clip_previous));
+    CHECK(result.matrices.prev_clip_to_clip == tox2::mat4Multiply(inverse_previous, clip_current));
+}
+
+// Needs no Vulkan device.
+void testDlaaCameraTracker() {
+    const tox2::DlaaCameraKey a = trackerKey(-0.30f), b = trackerKey(-0.31f), c = trackerKey(-0.32f);
+
+    // No previous camera: identity matrices and a reset, whatever the current frame drew.
+    {
+        tox2::DlaaCameraTracker tracker;
+        tracker.record(a);
+        const tox2::DlaaCameraTracker::Result result = tracker.resolve(false);
+        CHECK(result.reset && isIdentityResult(result));
+    }
+    // A previous camera but none in the current frame: the same.
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        const tox2::DlaaCameraTracker::Result result = tracker.resolve(false);
+        CHECK(result.reset && isIdentityResult(result));
+    }
+    // Two consecutive cameras: the transforms between them, no reset, and the y flip mirrors both.
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        tracker.record(b);
+        const tox2::DlaaCameraTracker::Result result = tracker.resolve(false);
+        CHECK(!result.reset);
+        expectTransitions(result, b, a);
+        const tox2::DlaaCameraTracker::Result flipped = tracker.resolve(true);
+        CHECK(!flipped.reset);
+        CHECK(flipped.matrices.view_to_clip == result.matrices.view_to_clip);
+        CHECK(flipped.matrices.clip_to_prev_clip == tox2::dlaaFlipY(result.matrices.clip_to_prev_clip));
+        CHECK(flipped.matrices.prev_clip_to_clip == tox2::dlaaFlipY(result.matrices.prev_clip_to_clip));
+    }
+
+    // A singular camera, as the current or the previous one, resets with identity matrices.
+    tox2::DlaaCameraKey singular = a;
+    singular.mvp = tox2::Mat4{};
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        tracker.record(singular);
+        const tox2::DlaaCameraTracker::Result result = tracker.resolve(false);
+        CHECK(result.reset && isIdentityResult(result));
+    }
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, singular);
+        tracker.record(a);
+        const tox2::DlaaCameraTracker::Result result = tracker.resolve(false);
+        CHECK(result.reset && isIdentityResult(result));
+    }
+
+    // The most drawn camera wins; on a tie the first one seen does.
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        tracker.record(b);
+        tracker.record(c);
+        tracker.record(c);
+        expectTransitions(tracker.resolve(false), c, a);
+    }
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        tracker.record(b);
+        tracker.record(c);
+        tracker.record(b);
+        tracker.record(c);
+        expectTransitions(tracker.resolve(false), b, a);
+    }
+
+    // Only kMaxKeys distinct cameras are counted: a further one is ignored however often it is drawn, while the
+    // counted ones keep counting.
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        std::vector<tox2::DlaaCameraKey> counted;
+        for (std::size_t i = 0; i < tox2::DlaaCameraTracker::kMaxKeys; ++i) {
+            counted.push_back(trackerKey(-0.5f - 0.01f * static_cast<float>(i)));
+            tracker.record(counted.back());
+        }
+        const tox2::DlaaCameraKey extra = trackerKey(-0.9f);
+        for (int i = 0; i < 5; ++i) tracker.record(extra);
+        expectTransitions(tracker.resolve(false), counted.front(), a);
+        tracker.record(counted.back());
+        expectTransitions(tracker.resolve(false), counted.back(), a);
+    }
+
+    // The camera the evaluation used, not the whole frame's, is the next frame's previous one.
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        tracker.record(b);
+        CHECK(!tracker.resolve(false).reset);           // the evaluation: b is all it has seen
+        for (int i = 0; i < 3; ++i) tracker.record(c);  // drawn after the evaluation, and the more drawn
+        tracker.endFrame();
+        tracker.record(a);
+        const tox2::DlaaCameraTracker::Result result = tracker.resolve(false);
+        CHECK(!result.reset);
+        expectTransitions(result, a, b);
+        tracker.endFrame();
+        // A frame without an evaluation hands on its own dominant camera.
+        tracker.record(b);
+        tracker.record(c);
+        tracker.record(c);
+        tracker.endFrame();
+        tracker.record(a);
+        expectTransitions(tracker.resolve(false), a, c);
+    }
+    // An evaluation that saw no camera leaves none, even if one is drawn later in the frame.
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        CHECK(tracker.resolve(false).reset);
+        tracker.record(b);
+        tracker.endFrame();
+        tracker.record(c);
+        const tox2::DlaaCameraTracker::Result result = tracker.resolve(false);
+        CHECK(result.reset && isIdentityResult(result));
+    }
 }
 
 // Needs no Vulkan device.
@@ -6446,6 +6608,7 @@ int main() {
     testDlaaPerspective();
     testDlaaMatrices();
     testDlaaCameraCut();
+    testDlaaCameraTracker();
     testWindowSizePresets();
     testPlaceInWorkArea();
     testAnisotropyNames();

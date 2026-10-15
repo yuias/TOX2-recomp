@@ -43,7 +43,7 @@ void printUsage() {
             "                       [--max-differing P]]\n"
             "                      [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--no-validation]\n"
             "                      [--dlaa-jitter on|off] [--dlaa-jitter-flip none|x|y|xy]\n"
-            "                      [--dlaa-camera on|off|reset] [--dlaa-clip-flip-y] [--dlaa-mv-invalid zero|unset]\n"
+            "                      [--dlaa-camera on|off|reset] [--dlaa-clip-flip-y on|off][--dlaa-mv-invalid zero|unset]\n"
             "                      [--shader-cache DIR] [--repeat N] [--quiet]\n"
             "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture; several captures are replayed in\n"
             "           order through one renderer, each one a frame that must end with a flip\n"
@@ -67,9 +67,10 @@ void printUsage() {
             "  --dlaa-camera M     diagnostic, needs --aa-mode dlaa: describe the camera motion between frames from the\n"
             "                      scene draws' projections (on, default), with identity matrices (off), or drop the\n"
             "                      history at every frame (reset)\n"
-            "  --dlaa-clip-flip-y  diagnostic, needs --aa-mode dlaa: mirror the camera's clip-to-clip matrices in y\n"
+            "  --dlaa-clip-flip-y M  diagnostic, needs --aa-mode dlaa: on (default) or off, whether the camera's\n"
+            "                      clip-to-clip matrices are mirrored in y for Streamline's y-up clip space\n"
             "  --dlaa-mv-invalid V  diagnostic, needs --aa-mode dlaa: motionVectorsInvalidValue 0 (zero, default) or the\n"
-            "                      SDK default (unset, which makes Streamline warn at every evaluation)\n"
+            "                      SDK default (unset, which makes Streamline warn once per process)\n"
             "  --no-validation     do not enable the Vulkan validation layer\n"
             "  --shader-cache DIR  directory of the on-disk SPIR-V cache\n"
             "  --repeat N          replay and render the capture N times (N >= 1) with one memory view, builder and\n"
@@ -495,8 +496,14 @@ int main(int argc, char** argv) {
             continue;
         }
         if (arg == "--dlaa-clip-flip-y") {
-            dlaa_debug.flip_clip_y = true;
+            const std::string_view value = i + 1 < argc ? std::string_view(argv[i + 1]) : std::string_view();
+            if (value != "on" && value != "off") {
+                std::fputs("error: --dlaa-clip-flip-y takes on|off\n", stderr);
+                return 2;
+            }
+            dlaa_debug.flip_clip_y = value == "on";
             has_dlaa_option = true;
+            i++;
             continue;
         }
         if (arg == "--dlaa-mv-invalid") {
