@@ -1,13 +1,19 @@
 # RSX and rendering
 
-Everything on this page is inherited from the project this one was derived from, and it was
-written against that game. For *Tales of Xillia 2* the fake RSX has run only until the game's
-start-up ends (see [Status](status.md)): in the three headless runs the game initialised GCM,
-produced 939 or 563 FIFO headers and issued 5 or 3 flips, which the fake RSX executed; no renderer
-ran, so no frame was built, drawn or displayed. The frame builder, the renderer, the shader translators and the capture and replay
-tools have not been exercised with this game's commands. The statements below about what the
-game does (frame rate, flips, vblank waits) describe the inherited behaviour and are unverified
-for this game.
+This page describes the fake RSX, the frame builder, the Vulkan renderer, the shader translators
+and the capture and replay tools. The code was taken over from the project this one was derived
+from and has run with *Tales of Xillia 2* since (see [Status](status.md)): the game's flips run in
+the fake RSX, and the renderer draws the frames into the window or, with `--dump-frames`, into PNG
+files. The dumped frames show the game's legal notice, dialog, "Presented By" and title screens,
+`tox2_rsxreplay` replays frames recorded from the game, and the resolution scale, the anti-aliased
+surfaces and the flip rate with the renderer on have been run and measured with this game (see
+[Image reuse](#image-reuse), [Resolution scale](#resolution-scale) and [Anti-aliased
+surfaces](#anti-aliased-surfaces)). A warm 260 s run lists one `rsx unimplemented` kind and skips
+no draw.
+
+The output has not been compared with the console's. The methods, the frame limits and the surface
+handling follow RPCS3's sources, and the hardware details that those sources do not give, such as
+the sample positions of the anti-aliased surfaces, are marked below as not known.
 
 ## Fake RSX
 
@@ -883,8 +889,8 @@ the earlier game's reference image does not apply here, so the test only replays
 passes when the summary line is printed and the validation layer reports no error. With a SHA-256
 set, the reference image must exist and match it, and the thresholds apply. To make a capture, run
 `tox2_game` with `--rsx-capture` on the frame you want and copy the file to
-`generated/rsx/captures/title.tox2cap`. No capture of this game exists yet: its flips have only run
-without a renderer.
+`generated/rsx/captures/title.tox2cap`. Captures of this game have been recorded (see the default
+`frame_<N>.tox2cap` names above), so the test stays unregistered until one is copied to that name.
 
 Three further renderer tests are registered: `render_core` (renders synthetic command lists, and
 skips itself when there is no Vulkan device), and `vp_translator` and `fp_translator` (need no
