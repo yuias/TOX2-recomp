@@ -13,6 +13,7 @@
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <random>
@@ -21,6 +22,7 @@
 #include <system_error>
 #include <vector>
 
+#include "render/dlaa_math.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
 #include "render/image_pool.h"
@@ -491,6 +493,242 @@ void testAaModeNames() {
     CHECK(!tox2::parseAaMode("msaa ").has_value());
     CHECK(!tox2::parseAaMode("DLAA").has_value());
     CHECK(!tox2::parseAaMode("dlaa ").has_value());
+}
+
+bool nearlyEqual(float a, float b, float tolerance) { return std::abs(a - b) <= tolerance; }
+
+// Needs no Vulkan device.
+void testDlaaJitter() {
+    constexpr float kX[8] = {0.0f, -0.25f, 0.25f, -0.375f, 0.125f, -0.125f, 0.375f, -0.4375f};
+    constexpr float kY[8] = {-1.0f / 6, 1.0f / 6, -7.0f / 18, -1.0f / 18, 5.0f / 18, -5.0f / 18, 1.0f / 18, 7.0f / 18};
+    for (std::uint32_t frame = 0; frame < tox2::kDlaaJitterPhases; ++frame) {
+        const std::array<float, 2> jitter = tox2::dlaaJitterPixels(frame);
+        CHECK(nearlyEqual(jitter[0], kX[frame], 1e-6f));
+        CHECK(nearlyEqual(jitter[1], kY[frame], 1e-6f));
+    }
+    // The sequence repeats, including far past 32 bits.
+    for (const std::uint64_t frame : {std::uint64_t{8}, std::uint64_t{13}, std::uint64_t{1} << 40}) {
+        const std::array<float, 2> wrapped = tox2::dlaaJitterPixels(frame);
+        const std::array<float, 2> base = tox2::dlaaJitterPixels(frame % tox2::kDlaaJitterPhases);
+        CHECK(wrapped[0] == base[0] && wrapped[1] == base[1]);
+    }
+    CHECK(tox2::dlaaJitterPixels(8) == tox2::dlaaJitterPixels(0));
+    // Every offset stays inside the pixel.
+    for (std::uint32_t frame = 0; frame < tox2::kDlaaJitterPhases; ++frame) {
+        const std::array<float, 2> jitter = tox2::dlaaJitterPixels(frame);
+        CHECK(jitter[0] >= -0.5f && jitter[0] < 0.5f && jitter[1] >= -0.5f && jitter[1] < 0.5f);
+    }
+    CHECK(nearlyEqual(tox2::halton(1, 2), 0.5f, 1e-7f));
+    CHECK(nearlyEqual(tox2::halton(3, 2), 0.75f, 1e-7f));
+    CHECK(nearlyEqual(tox2::halton(4, 3), 4.0f / 9, 1e-6f));
+}
+
+// c0..c3 as the 16 vertex-constant words of a draw.
+std::array<std::uint32_t, 16> constantWords(const tox2::Mat4& m) {
+    std::array<std::uint32_t, 16> words{};
+    for (std::size_t i = 0; i < 16; ++i) words[i] = std::bit_cast<std::uint32_t>(m[i]);
+    return words;
+}
+
+// Needs no Vulkan device.
+void testDlaaPerspective() {
+    // A 2D screen-space matrix: x, y scale and offset, no w contribution from x, y or z.
+    const tox2::Mat4 ortho = {2.0f / 1280, 0, 0, 0, 0, -2.0f / 720, 0, 0, 0, 0, 1, 0, -1, 1, 0, 1};
+    const std::array<std::uint32_t, 16> ortho_words = constantWords(ortho);
+    CHECK(!tox2::dlaaPerspective(ortho_words));
+    CHECK(!tox2::dlaaPerspective(constantWords(tox2::mat4Identity())));
+    CHECK(!tox2::dlaaPerspective(std::span<const std::uint32_t>(ortho_words).first(0)));
+
+    // clip.w = z: c2.w = 1.
+    const tox2::Mat4 perspective = {1.2f, 0, 0, 0, 0, 2.1f, 0, 0, 0, 0, 1.01f, 1, 0, 0, -0.1f, 0};
+    const std::array<std::uint32_t, 16> perspective_words = constantWords(perspective);
+    CHECK(tox2::dlaaPerspective(perspective_words));
+    // Any of the three rows that scale an input component into w is enough.
+    for (const std::size_t word : {std::size_t{3}, std::size_t{7}, std::size_t{11}}) {
+        tox2::Mat4 m = ortho;
+        m[word] = 0.5f;
+        CHECK(tox2::dlaaPerspective(constantWords(m)));
+    }
+    // Only c3.w (a constant w) is not a perspective divide.
+    tox2::Mat4 constant_w = ortho;
+    constant_w[15] = 2.0f;
+    CHECK(!tox2::dlaaPerspective(constantWords(constant_w)));
+    // Fewer than 16 words never qualifies, even when the words present would.
+    CHECK(!tox2::dlaaPerspective(std::span<const std::uint32_t>(perspective_words).first(13)));
+}
+
+// Row-vector perspective projection: clip.w = view z.
+tox2::Mat4 perspectiveMatrix(float fx, float fy, float near_plane, float far_plane) {
+    const float a = far_plane / (far_plane - near_plane);
+    const float b = -near_plane * far_plane / (far_plane - near_plane);
+    return {fx, 0, 0, 0, 0, fy, 0, 0, 0, 0, a, 1, 0, 0, b, 0};
+}
+
+tox2::Mat4 translationMatrix(float x, float y, float z) {
+    tox2::Mat4 m = tox2::mat4Identity();
+    m[12] = x;
+    m[13] = y;
+    m[14] = z;
+    return m;
+}
+
+// Needs no Vulkan device.
+void testDlaaMatrices() {
+    std::mt19937 rng(1234);
+    std::uniform_real_distribution<float> dist(-2.0f, 2.0f);
+
+    // p * M is the guest's clip position x*c0 + y*c1 + z*c2 + w*c3.
+    tox2::Mat4 random_matrix{};
+    for (float& value : random_matrix) value = dist(rng);
+    const std::array<float, 4> point = {0.5f, -1.5f, 2.0f, 1.0f};
+    const std::array<float, 4> clip = tox2::mat4Transform(point, random_matrix);
+    for (std::size_t lane = 0; lane < 4; ++lane) {
+        const float expected = point[0] * random_matrix[lane] + point[1] * random_matrix[4 + lane] +
+                               point[2] * random_matrix[8 + lane] + point[3] * random_matrix[12 + lane];
+        CHECK(nearlyEqual(clip[lane], expected, 1e-5f));
+    }
+
+    // mat4Multiply applies the left matrix first.
+    const tox2::Mat4 move = translationMatrix(1.0f, 2.0f, 3.0f);
+    tox2::Mat4 scale = tox2::mat4Identity();
+    scale[0] = 2.0f;
+    const std::array<float, 4> moved_then_scaled = tox2::mat4Transform({1, 1, 1, 1}, tox2::mat4Multiply(move, scale));
+    CHECK(nearlyEqual(moved_then_scaled[0], 4.0f, 1e-6f) && nearlyEqual(moved_then_scaled[1], 3.0f, 1e-6f) &&
+          nearlyEqual(moved_then_scaled[2], 4.0f, 1e-6f));
+
+    // Inverse round trip on well-conditioned random matrices (a dominant diagonal keeps them invertible).
+    for (int trial = 0; trial < 8; ++trial) {
+        tox2::Mat4 m{};
+        for (float& value : m) value = dist(rng);
+        for (std::size_t i = 0; i < 4; ++i) m[i * 5] += 6.0f;
+        tox2::Mat4 inverse{};
+        CHECK(tox2::mat4Inverse(m, inverse));
+        const tox2::Mat4 product = tox2::mat4Multiply(m, inverse);
+        const tox2::Mat4 identity = tox2::mat4Identity();
+        for (std::size_t i = 0; i < 16; ++i) CHECK(nearlyEqual(product[i], identity[i], 1e-5f));
+    }
+    // Singular and non-finite matrices fail and leave the output alone.
+    tox2::Mat4 untouched = tox2::mat4Identity();
+    untouched[5] = 7.0f;
+    tox2::Mat4 out = untouched;
+    tox2::Mat4 singular = tox2::mat4Identity();
+    singular[10] = 0.0f;
+    CHECK(!tox2::mat4Inverse(singular, out) && out == untouched);
+    CHECK(!tox2::mat4Inverse(tox2::Mat4{}, out) && out == untouched);
+    tox2::Mat4 not_finite = tox2::mat4Identity();
+    not_finite[3] = std::numeric_limits<float>::infinity();
+    CHECK(!tox2::mat4Inverse(not_finite, out) && out == untouched);
+
+    // Two cameras differing by a translation: the current clip position carried through clip_to_prev_clip lands
+    // where the previous camera projects the same world point.
+    tox2::DlaaCameraKey current;
+    tox2::DlaaCameraKey previous;
+    const tox2::Mat4 projection = perspectiveMatrix(1.2f, 2.1f, 0.5f, 100.0f);
+    current.mvp = tox2::mat4Multiply(translationMatrix(-0.3f, 0.2f, 1.0f), projection);
+    previous.mvp = tox2::mat4Multiply(translationMatrix(-0.5f, 0.25f, 0.5f), projection);
+    for (tox2::DlaaCameraKey* key : {&current, &previous}) {
+        key->viewport_scale[0] = 640.0f;
+        key->viewport_scale[1] = -360.0f;
+        key->viewport_scale[2] = 0.5f;
+        key->viewport_offset[0] = 640.0f;
+        key->viewport_offset[1] = 360.0f;
+        key->viewport_offset[2] = 0.5f;
+        key->clip_w = 1280.0f;
+        key->clip_h = 720.0f;
+    }
+    // Both the raw MVPs and the clip matrices (viewport mapping included) must satisfy the identity.
+    const std::pair<tox2::Mat4, tox2::Mat4> pairs[] = {{current.mvp, previous.mvp},
+                                                       {tox2::dlaaClipMatrix(current), tox2::dlaaClipMatrix(previous)}};
+    for (const auto& [m_current, m_previous] : pairs) {
+        tox2::Mat4 current_inverse{}, previous_inverse{};
+        CHECK(tox2::mat4Inverse(m_current, current_inverse));
+        CHECK(tox2::mat4Inverse(m_previous, previous_inverse));
+        const tox2::Mat4 clip_to_prev_clip = tox2::mat4Multiply(current_inverse, m_previous);
+        const tox2::Mat4 prev_clip_to_clip = tox2::mat4Multiply(previous_inverse, m_current);
+        for (const std::array<float, 4>& world :
+             {std::array<float, 4>{1.0f, 2.0f, 10.0f, 1.0f}, std::array<float, 4>{-3.0f, 0.5f, 25.0f, 1.0f}}) {
+            const std::array<float, 4> p_current = tox2::mat4Transform(world, m_current);
+            const std::array<float, 4> p_previous = tox2::mat4Transform(world, m_previous);
+            const std::array<float, 4> carried = tox2::mat4Transform(p_current, clip_to_prev_clip);
+            CHECK(p_previous[3] > 0.0f && carried[3] > 0.0f);
+            for (std::size_t lane = 0; lane < 3; ++lane) {
+                CHECK(nearlyEqual(carried[lane] / carried[3], p_previous[lane] / p_previous[3], 1e-4f));
+            }
+            // And back again.
+            const std::array<float, 4> back = tox2::mat4Transform(p_previous, prev_clip_to_clip);
+            for (std::size_t lane = 0; lane < 3; ++lane) {
+                CHECK(nearlyEqual(back[lane] / back[3], p_current[lane] / p_current[3], 1e-4f));
+            }
+        }
+    }
+
+    // dlaaClipMatrix reproduces the vertex epilogue's arithmetic (vp_translator.cpp): viewport transform
+    // normalised to the clip size, then the depth range remap.
+    tox2::DlaaCameraKey key = current;
+    key.viewport_scale[0] = 600.0f;
+    key.viewport_scale[1] = -340.0f;
+    key.viewport_scale[2] = 0.45f;
+    key.viewport_offset[0] = 650.0f;
+    key.viewport_offset[1] = 350.0f;
+    key.viewport_offset[2] = 0.55f;
+    key.clip_min = 0.1f;
+    key.clip_max = 0.9f;
+    const tox2::Mat4 clip_matrix = tox2::dlaaClipMatrix(key);
+    for (const std::array<float, 4>& world :
+         {std::array<float, 4>{0.2f, -0.1f, 4.0f, 1.0f}, std::array<float, 4>{-1.0f, 0.8f, 9.0f, 1.0f},
+          std::array<float, 4>{2.5f, 1.5f, 2.0f, 1.0f}}) {
+        const std::array<float, 4> guest = tox2::mat4Transform(world, key.mvp);
+        const float half_w = 0.5f * key.clip_w;
+        const float half_h = 0.5f * key.clip_h;
+        float x = guest[0] * (key.viewport_scale[0] / half_w) + guest[3] * ((key.viewport_offset[0] - half_w) / half_w);
+        float y = guest[1] * (key.viewport_scale[1] / half_h) + guest[3] * ((key.viewport_offset[1] - half_h) / half_h);
+        float z = guest[2] * key.viewport_scale[2] + guest[3] * key.viewport_offset[2];
+        const float depth_near = std::min(key.clip_min, key.clip_max);
+        const float range = std::max(key.clip_min, key.clip_max) - depth_near;
+        z = ((z - depth_near * guest[3]) / (range * guest[3])) * guest[3];
+        const std::array<float, 4> got = tox2::mat4Transform(world, clip_matrix);
+        CHECK(nearlyEqual(got[0], x, 1e-5f * std::max(1.0f, std::abs(x))));
+        CHECK(nearlyEqual(got[1], y, 1e-5f * std::max(1.0f, std::abs(y))));
+        CHECK(nearlyEqual(got[2], z, 1e-5f * std::max(1.0f, std::abs(z))));
+        CHECK(nearlyEqual(got[3], guest[3], 1e-5f * std::max(1.0f, std::abs(guest[3]))));
+    }
+    // The identity range leaves depth as viewport_scale.z * z + viewport_offset.z * w.
+    key.clip_min = 0.0f;
+    key.clip_max = 1.0f;
+    const std::array<float, 4> world = {0.2f, -0.1f, 4.0f, 1.0f};
+    const std::array<float, 4> guest = tox2::mat4Transform(world, key.mvp);
+    const std::array<float, 4> identity_range = tox2::mat4Transform(world, tox2::dlaaClipMatrix(key));
+    CHECK(nearlyEqual(identity_range[2], guest[2] * key.viewport_scale[2] + guest[3] * key.viewport_offset[2], 1e-5f));
+
+    // F * m * F flips the sign of the y row and column pairs, and is its own inverse.
+    const tox2::Mat4 flipped = tox2::dlaaFlipY(random_matrix);
+    for (std::size_t row = 0; row < 4; ++row) {
+        for (std::size_t col = 0; col < 4; ++col) {
+            const float sign = ((row == 1) != (col == 1)) ? -1.0f : 1.0f;
+            CHECK(flipped[row * 4 + col] == sign * random_matrix[row * 4 + col]);
+        }
+    }
+    CHECK(tox2::dlaaFlipY(flipped) == random_matrix);
+}
+
+// Needs no Vulkan device.
+void testDlaaCameraCut() {
+    CHECK(!tox2::dlaaCameraCut(tox2::mat4Identity()));
+    // The centre moves by 0.6 NDC: a cut. By 0.3: the history is still usable.
+    CHECK(tox2::dlaaCameraCut(translationMatrix(0.6f, 0.0f, 0.0f)));
+    CHECK(tox2::dlaaCameraCut(translationMatrix(0.0f, -0.6f, 0.0f)));
+    CHECK(!tox2::dlaaCameraCut(translationMatrix(0.3f, 0.0f, 0.0f)));
+    CHECK(!tox2::dlaaCameraCut(translationMatrix(0.0f, 0.2f, 0.2f)));
+    // A matrix that sends the test points behind the camera (w <= 0).
+    tox2::Mat4 behind = tox2::mat4Identity();
+    behind[15] = -1.0f;
+    CHECK(tox2::dlaaCameraCut(behind));
+    tox2::Mat4 at_camera = tox2::mat4Identity();
+    at_camera[15] = 0.0f;
+    CHECK(tox2::dlaaCameraCut(at_camera));
+    tox2::Mat4 not_a_number = tox2::mat4Identity();
+    not_a_number[0] = std::numeric_limits<float>::quiet_NaN();
+    CHECK(tox2::dlaaCameraCut(not_a_number));
 }
 
 // Needs no Vulkan device.
@@ -5667,6 +5905,10 @@ int main() {
     testVertexConvertMatchesReference();
     testConvertIndicesChecked();
     testAaModeNames();
+    testDlaaJitter();
+    testDlaaPerspective();
+    testDlaaMatrices();
+    testDlaaCameraCut();
     testWindowSizePresets();
     testPlaceInWorkArea();
     testAnisotropyNames();
