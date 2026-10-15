@@ -266,6 +266,40 @@ struct RsxRenderer::FrameSlot {
     VkDeviceSize readback_size = 0;
 };
 
+// Empty when DLAA can run; else the Streamline status or the first image format the pass cannot use. The blit
+// formats are the scene image's layout copy, the storage and sampled ones are DLSS's output and motion vectors.
+static std::string dlaaGap(const VkContext& context) {
+    if (context.streamline() == nullptr) {
+        return context.streamlineStatus().empty() ? "Streamline was not requested" : context.streamlineStatus();
+    }
+    struct FormatNeed {
+        VkFormat format;
+        VkFormatFeatureFlags features;
+        const char* what;
+    };
+    constexpr VkFormatFeatureFlags kBlit = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    const FormatNeed needs[] = {
+            {VK_FORMAT_B8G8R8A8_UNORM, kBlit, "blit"},
+            {VK_FORMAT_R32_SFLOAT, kBlit, "blit"},
+            {context.depthStencilFormat(), kBlit, "blit"},
+            {VK_FORMAT_D16_UNORM, kBlit, "blit"},
+            {VK_FORMAT_R8G8B8A8_UNORM,
+             VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                     VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT,
+             "storage and linear sampling"},
+            {VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT,
+             "sampling and transfer"},
+    };
+    for (const FormatNeed& need : needs) {
+        VkFormatProperties props{};
+        vkGetPhysicalDeviceFormatProperties(context.physicalDevice(), need.format, &props);
+        if ((props.optimalTilingFeatures & need.features) != need.features) {
+            return std::format("format {} lacks {} support", static_cast<int>(need.format), need.what);
+        }
+    }
+    return {};
+}
+
 RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(context), options_(std::move(options)) {
     if (!options_.shader_cache.empty()) setShaderCacheDir(options_.shader_cache);
     dumper_ = std::make_unique<FrameDumper>();
@@ -279,6 +313,12 @@ RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(c
     }
     resolution_scale_ = options_.resolution_scale;
     aa_mode_ = options_.aa_mode;
+    dlaa_gap_ = dlaaGap(context_);
+    if (aa_mode_ == AaMode::Dlaa && !dlaaAvailable()) {
+        aa_mode_ = msaaAvailable() ? AaMode::Msaa : AaMode::Supersample;
+        logWarn("tox2: render: DLAA unavailable ({}); anti-aliased surfaces use {}", dlaa_gap_, aaModeName(aa_mode_));
+        rsxNoteUnimplemented("state", "DLAA unavailable");
+    }
     if (aa_mode_ == AaMode::Msaa && !msaaAvailable()) {
         aa_mode_ = AaMode::Supersample;
         logWarn("tox2: render: 2-sample multisampling unavailable ({}); anti-aliased surfaces are supersampled",
@@ -611,6 +651,7 @@ bool RsxRenderer::setResolutionScale(std::uint32_t scale) {
 
 bool RsxRenderer::setAaMode(AaMode mode) {
     if (mode == AaMode::Msaa && !msaaAvailable()) return false;
+    if (mode == AaMode::Dlaa && !dlaaAvailable()) return false;
     aa_mode_ = mode;
     return true;
 }
@@ -727,7 +768,8 @@ std::shared_ptr<RsxRenderer::RenderTarget> RsxRenderer::createTarget(bool depth,
 }
 
 // The anti-aliased surface of mode 3 (two samples side by side) is drawn into a 2-sample image in Msaa mode; modes 4
-// and 5 (2x2 layouts) stay on the single-sample layout image.
+// and 5 (2x2 layouts) stay on the single-sample layout image. Dlaa draws through the layout image until its
+// single-sample scene image exists.
 bool RsxRenderer::multisampledPass(const RsxSurface& surface) const {
     return aa_mode_ == AaMode::Msaa && surface.samples_x == 2 && surface.samples_y == 1;
 }
@@ -2447,6 +2489,7 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
                 .resolution_scale = resolution_scale_,
                 .aa_mode = aa_mode_,
                 .msaa_available = msaaAvailable(),
+                .dlaa_available = dlaaAvailable(),
                 .anisotropy = anisotropy_,
                 .max_anisotropy = maxAnisotropy(),
                 .window = presenter_->windowStatus(),

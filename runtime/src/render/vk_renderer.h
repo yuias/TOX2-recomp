@@ -46,7 +46,8 @@ struct RenderOptions {
     // scale that fits (and counted).
     std::uint32_t resolution_scale = 1;
     // How anti-aliased surfaces are drawn. Msaa falls back to Supersample (and is counted) on a device without
-    // 2-sample support; aaMode() reports the effective mode.
+    // 2-sample support; Dlaa falls back to Msaa (then Supersample) when DLAA is unavailable. aaMode() reports the
+    // effective mode.
     AaMode aa_mode = AaMode::Msaa;
     // Forced anisotropic filtering level: 1 (off), 2, 4, 8 or 16; anything else makes the renderer invalid. A device
     // without the samplerAnisotropy feature keeps 1; a lower device maximum clamps the level (see anisotropy()).
@@ -122,10 +123,14 @@ public:
 
     std::uint32_t resolutionScale() const { return resolution_scale_; }
 
-    // The effective anti-aliasing mode: the requested one, except Supersample when the device lacks 2 samples.
+    // The effective anti-aliasing mode: the requested one, except the fallbacks documented at RenderOptions::aa_mode.
     AaMode aaMode() const { return aa_mode_; }
     // True when the device supports 2-sample colour and depth/stencil surfaces.
     bool msaaAvailable() const { return context_.twoSampleSupportGap().empty(); }
+    // True when Streamline can run DLSS on this device and the device has the image formats the DLAA pass needs.
+    bool dlaaAvailable() const { return dlaa_gap_.empty(); }
+    // Why dlaaAvailable() is false: the context's Streamline status or the first missing format feature.
+    const std::string& dlaaUnavailableReason() const { return dlaa_gap_; }
 
     // Changes the scale of the targets created or bound from now on; false and no change outside
     // 1..kMaxResolutionScale. A target keeps its image until a draw or clear binds it again, then it is replaced by a
@@ -133,9 +138,9 @@ public:
     bool setResolutionScale(std::uint32_t scale);
 
     // Changes how the next pass over an anti-aliased surface is drawn; false and no change for Msaa when the device
-    // lacks 2-sample support. No target is touched: a read brings the memory layout up to date from the 2-sample image
-    // (syncLayout), and a pass that finds the other representation newer and does not replace all of it is counted
-    // (see beginSidecarPass). Renderer thread, between commands.
+    // lacks 2-sample support, and for Dlaa when dlaaAvailable() is false. No target is touched: a read brings the
+    // memory layout up to date from the 2-sample image (syncLayout), and a pass that finds the other representation
+    // newer and does not replace all of it is counted (see beginSidecarPass). Renderer thread, between commands.
     bool setAaMode(AaMode mode);
 
     // The effective forced anisotropy level: 1 when off or unsupported, else the requested level clamped to the
@@ -255,6 +260,7 @@ private:
     RendererStats logged_stats_;  // stats_ at the last image-creation log line
     std::uint32_t resolution_scale_ = 1;
     AaMode aa_mode_ = AaMode::Supersample;
+    std::string dlaa_gap_;  // empty when DLAA is available
     std::uint32_t anisotropy_ = 1;
     bool anisotropy_unavailable_logged_ = false;
     // Always created: its worker thread only starts with the first submitted frame.

@@ -479,15 +479,18 @@ void testFrameDump() {
 
 // Needs no Vulkan device.
 void testAaModeNames() {
-    for (const tox2::AaMode mode : {tox2::AaMode::Supersample, tox2::AaMode::Msaa}) {
+    for (const tox2::AaMode mode : {tox2::AaMode::Supersample, tox2::AaMode::Msaa, tox2::AaMode::Dlaa}) {
         const std::optional<tox2::AaMode> parsed = tox2::parseAaMode(tox2::aaModeName(mode));
         CHECK(parsed.has_value() && *parsed == mode);
     }
     CHECK(tox2::aaModeName(tox2::AaMode::Supersample) == "supersample");
     CHECK(tox2::aaModeName(tox2::AaMode::Msaa) == "msaa");
+    CHECK(tox2::aaModeName(tox2::AaMode::Dlaa) == "dlaa");
     CHECK(!tox2::parseAaMode("").has_value());
     CHECK(!tox2::parseAaMode("MSAA2").has_value());
     CHECK(!tox2::parseAaMode("msaa ").has_value());
+    CHECK(!tox2::parseAaMode("DLAA").has_value());
+    CHECK(!tox2::parseAaMode("dlaa ").has_value());
 }
 
 // Needs no Vulkan device.
@@ -717,6 +720,25 @@ void testRendererAaMode(tox2::VkContext& ctx) {
             CHECK(renderer.aaMode() == tox2::AaMode::Supersample);
             CHECK(unimplementedCount("state 2-sample multisampling unavailable") == 1);
         }
+    }
+    {
+        tox2::rsxUnimplementedReset();
+        tox2::RsxRenderer renderer(ctx, readbackAllOptions(1, tox2::AaMode::Dlaa));
+        CHECK(renderer.valid());
+        CHECK(renderer.dlaaAvailable() == renderer.dlaaUnavailableReason().empty());
+        if (renderer.dlaaAvailable()) {
+            CHECK(renderer.aaMode() == tox2::AaMode::Dlaa);
+            CHECK(unimplementedCount("state DLAA unavailable") == 0);
+        } else {
+            CHECK(renderer.aaMode() == (renderer.msaaAvailable() ? tox2::AaMode::Msaa : tox2::AaMode::Supersample));
+            CHECK(unimplementedCount("state DLAA unavailable") == 1);
+        }
+        // A switch to Dlaa succeeds exactly when it is available and leaves the mode alone otherwise.
+        const tox2::AaMode before = renderer.aaMode();
+        CHECK(renderer.setAaMode(tox2::AaMode::Dlaa) == renderer.dlaaAvailable());
+        CHECK(renderer.aaMode() == (renderer.dlaaAvailable() ? tox2::AaMode::Dlaa : before));
+        std::printf("render: DLAA %s\n",
+                    renderer.dlaaAvailable() ? "available" : renderer.dlaaUnavailableReason().c_str());
     }
     tox2::rsxUnimplementedReset();
 }

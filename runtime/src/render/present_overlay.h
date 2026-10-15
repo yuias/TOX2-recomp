@@ -23,6 +23,7 @@ struct PresentFrameInfo {
     std::uint32_t resolution_scale = 0;         // the renderer's current internal resolution scale; 0 = unknown
     std::optional<AaMode> aa_mode;              // the renderer's effective anti-aliasing mode; unset = unknown
     bool msaa_available = false;                // the device can draw 2-sample surfaces (AaMode::Msaa is selectable)
+    bool dlaa_available = false;                // Streamline and the device can run DLAA (AaMode::Dlaa is selectable)
     std::uint32_t anisotropy = 0;               // the effective forced anisotropy level (1 = off); 0 = unknown
     float max_anisotropy = 0.0f;                // the device maximum; 0 = unsupported or unknown
     std::optional<WindowStatus> window;         // the presenter's window; unset = unknown
