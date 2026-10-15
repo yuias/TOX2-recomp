@@ -538,7 +538,8 @@ void RsxConsumer::flip(std::uint32_t buffer) {
     }
     std::atomic_ref(state.flip_status).store(kRsxFlipStatusDone, std::memory_order_relaxed);
     const std::uint64_t now = systemTimeUs();
-    state.last_flip_time = now > kFlipTimeOffsetUs ? now - kFlipTimeOffsetUs : 0;
+    std::atomic_ref(state.last_flip_time)
+            .store(now > kFlipTimeOffsetUs ? now - kFlipTimeOffsetUs : 0, std::memory_order_relaxed);
     if (arg_census_ != nullptr) arg_census_->onFlip(now);
     std::memset(base_ + kRsxLabelAddr + kFlipSemaphoreOffset, 0, 16);
     // RPCS3 resets the method registers on every flip; the context DMA objects are the ones that matter.

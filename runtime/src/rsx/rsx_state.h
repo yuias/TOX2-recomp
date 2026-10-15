@@ -100,7 +100,8 @@ struct RsxState {
     bool requested_vsync = true;
     std::uint32_t flip_status = kRsxFlipStatusDone;
     // Microseconds on the system-time clock, set back by one second as RPCS3 does at RSX thread start
-    // and after every flip (`last_guest_flip_timestamp`).
+    // and after every flip (`last_guest_flip_timestamp`). Written by the RSX thread without the kernel lock and
+    // read by cellGcmGetLastFlipTime, so both go through std::atomic_ref.
     std::uint64_t last_flip_time = 0;
     std::uint64_t vblank_count = 0;
     std::uint32_t flip_handler = 0, vblank_handler = 0, user_handler = 0;  // guest OPDs, 0 = none

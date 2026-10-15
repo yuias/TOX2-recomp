@@ -312,7 +312,9 @@ void gcmGetLabelAddress(Tox2PpuContext* ctx, std::uint8_t*) {
 }
 
 // cellGcmGetLastFlipTime(): u64
-void gcmGetLastFlipTime(Tox2PpuContext* ctx, std::uint8_t*) { ctx->gpr[3] = rsxState().last_flip_time; }
+void gcmGetLastFlipTime(Tox2PpuContext* ctx, std::uint8_t*) {
+    ctx->gpr[3] = std::atomic_ref(rsxState().last_flip_time).load(std::memory_order_relaxed);
+}
 
 // cellGcmSetFlipHandler(handler), cellGcmSetVBlankHandler(handler), cellGcmSetUserHandler(handler):
 // void; the handler is ignored before initialisation, as RPCS3 does.
@@ -443,7 +445,7 @@ constexpr HleEntry kHandlers[] = {
         {kModule, 0x4ae8d215, "cellGcmSetFlipMode", gcmSetFlipMode, true},
         {kModule, 0x5a41c10f, "cellGcmGetTimeStamp", gcmGetTimeStamp, true},
         {kModule, 0x5e2ee0f0, "cellGcmGetDefaultCommandWordSize", gcmGetDefaultCommandWordSize},
-        {kModule, 0x63387071, "cellGcmGetLastFlipTime", gcmGetLastFlipTime},
+        {kModule, 0x63387071, "cellGcmGetLastFlipTime", gcmGetLastFlipTime, true},
         {kModule, 0x72a577ce, "cellGcmGetFlipStatus", gcmGetFlipStatus, true},
         {kModule, 0x8cdf8c70, "cellGcmGetDefaultSegmentWordSize", gcmGetDefaultSegmentWordSize},
         {kModule, 0x9ba451e4, "cellGcmSetDefaultFifoSize", gcmSetDefaultFifoSize},
@@ -541,7 +543,8 @@ std::uint32_t gcmInitBody(std::uint8_t* base, std::uint32_t context_pp, std::uin
     state.wrap_callback = registerHostFunction("cellGcmCallback", gcmCallback);
     // RPCS3 starts the clock at the RSX thread start, one second in the past.
     const std::uint64_t now = systemTimeUs();
-    state.last_flip_time = now > kFlipTimeOffsetUs ? now - kFlipTimeOffsetUs : 0;
+    std::atomic_ref(state.last_flip_time)
+            .store(now > kFlipTimeOffsetUs ? now - kFlipTimeOffsetUs : 0, std::memory_order_relaxed);
 
     tox2Write32(base, kRsxDeviceAddr + kContextBegin, io_address + kFragmentReserved);
     tox2Write32(base, kRsxDeviceAddr + kContextEnd, io_address + kFragmentSize - 4);
