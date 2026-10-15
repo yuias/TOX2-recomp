@@ -5421,6 +5421,62 @@ void testForcedAnisotropySampler(tox2::VkContext& ctx) {
     CHECK(ctx.validationErrorCount() == 0);
 }
 
+// The level is validated, clamped to the device and changeable at run time; a mip-reading draw with forced
+// anisotropy renders without validation errors.
+void testRendererAnisotropy(tox2::VkContext& ctx) {
+    tox2::rsxUnimplementedReset();
+    const std::uint64_t errors_before = ctx.validationErrorCount();
+    const auto options = [](std::uint32_t level) {
+        tox2::RenderOptions render_options = readbackAllOptions();
+        render_options.anisotropy = level;
+        return render_options;
+    };
+    const std::uint32_t supported =
+            ctx.maxSamplerAnisotropy() >= 2.0f
+                    ? std::min<std::uint32_t>(16, static_cast<std::uint32_t>(ctx.maxSamplerAnisotropy()))
+                    : 1;
+
+    {
+        tox2::RsxRenderer renderer(ctx, options(1));
+        CHECK(renderer.valid() && renderer.anisotropy() == 1);
+        CHECK(renderer.maxAnisotropy() == ctx.maxSamplerAnisotropy());
+    }
+    {
+        // Not a level: the renderer is invalid.
+        tox2::RsxRenderer renderer(ctx, options(3));
+        CHECK(!renderer.valid());
+    }
+    {
+        tox2::RsxRenderer renderer(ctx, options(16));
+        CHECK(renderer.valid() && renderer.anisotropy() == supported);
+
+        TextureOptions chain;
+        chain.scene = TextureScene::Chain;
+        chain.min_filter = 6;  // LINEAR_LINEAR: reads the mip chain
+        std::vector<tox2::RsxCommand> commands = replaySynthetic(makeTexturedCapture(chain));
+        tox2::rsxUnimplementedReset();
+        renderer.execute(commands);
+        CHECK(renderer.valid() && renderer.stats().draws_skipped == 0);
+        std::vector<std::uint8_t> bgra;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        CHECK(renderer.readDisplay(bgra, width, height) && width == 64 && height == 64);
+
+        // Run-time changes: an unknown level changes nothing, a level is clamped to what the device offers.
+        CHECK(!renderer.setAnisotropy(0) && renderer.anisotropy() == supported);
+        CHECK(!renderer.setAnisotropy(5) && renderer.anisotropy() == supported);
+        CHECK(renderer.setAnisotropy(1) && renderer.anisotropy() == 1);
+        CHECK(renderer.setAnisotropy(2) && renderer.anisotropy() == std::min<std::uint32_t>(2, supported));
+        CHECK(renderer.setAnisotropy(16) && renderer.anisotropy() == supported);
+        renderer.execute(commands);
+        CHECK(renderer.valid() && renderer.stats().draws_skipped == 0);
+        CHECK(renderer.readDisplay(bgra, width, height));
+    }
+    CHECK(tox2::rsxUnimplementedSnapshot().empty());
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
 bool sameRect(const tox2::PixelRect& rect, std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
     return rect.x == x && rect.y == y && rect.width == width && rect.height == height;
 }
@@ -5597,6 +5653,7 @@ int main() {
     testRendererMsaaInherit(*ctx);
     testRendererPointSize(*ctx);
     testForcedAnisotropySampler(*ctx);
+    testRendererAnisotropy(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
     ctx.reset();

@@ -48,6 +48,9 @@ struct RenderOptions {
     // How anti-aliased surfaces are drawn. Msaa falls back to Supersample (and is counted) on a device without
     // 2-sample support; aaMode() reports the effective mode.
     AaMode aa_mode = AaMode::Msaa;
+    // Forced anisotropic filtering level: 1 (off), 2, 4, 8 or 16; anything else makes the renderer invalid. A device
+    // without the samplerAnisotropy feature keeps 1; a lower device maximum clamps the level (see anisotropy()).
+    std::uint32_t anisotropy = 1;
 };
 
 // What a created GPU image or upload block was for (see RendererStats::images_created).
@@ -134,6 +137,16 @@ public:
     // (syncLayout), and a pass that finds the other representation newer and does not replace all of it is counted
     // (see beginSidecarPass). Renderer thread, between commands.
     bool setAaMode(AaMode mode);
+
+    // The effective forced anisotropy level: 1 when off or unsupported, else the requested level clamped to the
+    // device maximum.
+    std::uint32_t anisotropy() const { return anisotropy_; }
+    // The device's maximum sampler anisotropy; 0 without the samplerAnisotropy feature.
+    float maxAnisotropy() const { return context_.maxSamplerAnisotropy(); }
+
+    // Changes the level of the samplers created from now on; existing ones stay cached because frames in flight may
+    // use them. False and no change for a level not in kAnisotropyLevels. Renderer thread, between commands.
+    bool setAnisotropy(std::uint32_t level);
 
     // Frames written, failed or dropped by the dump worker so far (dump_dir and requested dumps). Any thread.
     DumpCounts dumpCounts() const;
@@ -242,6 +255,8 @@ private:
     RendererStats logged_stats_;  // stats_ at the last image-creation log line
     std::uint32_t resolution_scale_ = 1;
     AaMode aa_mode_ = AaMode::Supersample;
+    std::uint32_t anisotropy_ = 1;
+    bool anisotropy_unavailable_logged_ = false;
     // Always created: its worker thread only starts with the first submitted frame.
     std::unique_ptr<FrameDumper> dumper_;
     bool dump_requested_ = false;  // requestDisplayDump() was called and no flip has taken it yet

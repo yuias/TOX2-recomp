@@ -273,6 +273,10 @@ RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(c
         fail(std::format("resolution scale {} is outside 1..{}", options_.resolution_scale, kMaxResolutionScale));
         return;
     }
+    if (anisotropyName(options_.anisotropy).empty()) {
+        fail(std::format("anisotropy level {} is not off, 2, 4, 8 or 16", options_.anisotropy));
+        return;
+    }
     resolution_scale_ = options_.resolution_scale;
     aa_mode_ = options_.aa_mode;
     if (aa_mode_ == AaMode::Msaa && !msaaAvailable()) {
@@ -290,6 +294,8 @@ RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(c
     }
     image_pool_ = std::make_shared<ImagePool>(context_);
     textures_ = std::make_unique<TextureCache>(context_, image_pool_);
+    setAnisotropy(options_.anisotropy);
+    if (anisotropy_ > 1) logInfo("tox2: render: anisotropic filtering {}x", anisotropy_);
     const VkDevice device = context_.device();
     for (std::unique_ptr<FrameSlot>& slot_ptr : slots_) {
         slot_ptr = std::make_unique<FrameSlot>();
@@ -606,6 +612,22 @@ bool RsxRenderer::setResolutionScale(std::uint32_t scale) {
 bool RsxRenderer::setAaMode(AaMode mode) {
     if (mode == AaMode::Msaa && !msaaAvailable()) return false;
     aa_mode_ = mode;
+    return true;
+}
+
+bool RsxRenderer::setAnisotropy(std::uint32_t level) {
+    if (anisotropyName(level).empty()) return false;
+    const float device_max = context_.maxSamplerAnisotropy();
+    if (device_max < 2.0f) {
+        if (level > 1 && !anisotropy_unavailable_logged_) {
+            anisotropy_unavailable_logged_ = true;
+            logInfo("tox2: render: anisotropic filtering unavailable on this device");
+        }
+        anisotropy_ = 1;
+    } else {
+        anisotropy_ = std::min(level, static_cast<std::uint32_t>(device_max));
+    }
+    if (textures_) textures_->setAnisotropy(anisotropy_);
     return true;
 }
 
@@ -2414,12 +2436,22 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     // Asked before the readback decision so a request made for this very flip is honoured.
     std::uint32_t requested_scale = 0;
     std::optional<AaMode> requested_aa_mode;
+    std::uint32_t requested_anisotropy = 0;
     if (presenter_ != nullptr && overlay_ != nullptr) {
         const PresentOverlayRequests requests = overlay_->onFlip(PresentFrameInfo{
-                &stats_, dumper_->counts(), last_requested_dump_, resolution_scale_, aa_mode_, msaaAvailable()});
+                .stats = &stats_,
+                .dumps = dumper_->counts(),
+                .last_requested_dump = last_requested_dump_,
+                .resolution_scale = resolution_scale_,
+                .aa_mode = aa_mode_,
+                .msaa_available = msaaAvailable(),
+                .anisotropy = anisotropy_,
+                .max_anisotropy = maxAnisotropy(),
+        });
         if (requests.dump_display) dump_this_flip_ = true;
         requested_scale = requests.resolution_scale;
         requested_aa_mode = requests.aa_mode;
+        requested_anisotropy = requests.anisotropy;
     }
     const bool read_back = options_.readback_all || dumpDue() || dump_this_flip_;
     display_copied_ = false;
@@ -2463,9 +2495,10 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     if (submitFrame()) has_flip_ = true;
     // Applied only now: this flip, its readback and the present blit were all recorded at the old scale, and
     // targets rescale lazily when the next frame binds them. The mode follows the same rule so a frame is never
-    // recorded in both.
+    // recorded in both. The anisotropy level follows the same rule; only samplers created afterwards use it.
     if (requested_scale != 0 && valid()) setResolutionScale(requested_scale);
     if (requested_aa_mode && valid()) setAaMode(*requested_aa_mode);
+    if (requested_anisotropy != 0 && valid()) setAnisotropy(requested_anisotropy);
 }
 
 // Acquires a swapchain image and records the copy of the display buffer into it (a black frame when

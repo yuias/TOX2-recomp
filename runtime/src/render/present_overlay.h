@@ -22,6 +22,8 @@ struct PresentFrameInfo {
     std::uint32_t resolution_scale = 0;         // the renderer's current internal resolution scale; 0 = unknown
     std::optional<AaMode> aa_mode;              // the renderer's effective anti-aliasing mode; unset = unknown
     bool msaa_available = false;                // the device can draw 2-sample surfaces (AaMode::Msaa is selectable)
+    std::uint32_t anisotropy = 0;               // the effective forced anisotropy level (1 = off); 0 = unknown
+    float max_anisotropy = 0.0f;                // the device maximum; 0 = unsupported or unknown
 };
 
 struct PresentOverlayRequests {
@@ -32,6 +34,8 @@ struct PresentOverlayRequests {
     // New anti-aliasing mode; unset = no change. Applied after the flip is submitted, like the scale; the next pass
     // over an anti-aliased surface uses it.
     std::optional<AaMode> aa_mode;
+    // New forced anisotropy level; 0 = no change. Applied after the flip is submitted, like the scale.
+    std::uint32_t anisotropy = 0;
 };
 
 // Drawn over the presented swapchain image only. Never called without a presenter, so it cannot reach
