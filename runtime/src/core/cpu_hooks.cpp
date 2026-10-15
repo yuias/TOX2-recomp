@@ -125,6 +125,7 @@ void tox2Trap(Tox2PpuContext* ctx, uint8_t* base, uint32_t site) {
 // atomic against SPU GETLLAR/PUTLLC and PUT on the same line even though SPU threads run without the guest lock.
 uint32_t tox2Lwarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
     ReservationCounters::bump(threadCounters().lwarx);
+    if (tox2::lwmutexWatchEnabled()) tox2::lwmutexWatchCheck(tox2::LwmutexWatchKind::Lwarx, ea, 4, ctx->lr);
     uint64_t value;
     tox2::reservations().loadReserved(base, ea, 4, value, ctx->reserve_version);
     ctx->reserve_addr = ea;
@@ -135,6 +136,7 @@ uint32_t tox2Lwarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
 
 uint64_t tox2Ldarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
     ReservationCounters::bump(threadCounters().lwarx);
+    if (tox2::lwmutexWatchEnabled()) tox2::lwmutexWatchCheck(tox2::LwmutexWatchKind::Lwarx, ea, 8, ctx->lr);
     uint64_t value;
     tox2::reservations().loadReserved(base, ea, 8, value, ctx->reserve_version);
     ctx->reserve_addr = ea;
@@ -143,7 +145,10 @@ uint64_t tox2Ldarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
     return value;
 }
 
+// The store-conditional checks run on every attempt, not only on success: a guest loop that retries on a word of
+// an lwmutex is the evidence the watch looks for, whether or not a given store lands.
 bool tox2Stwcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint32_t value) {
+    if (tox2::lwmutexWatchEnabled()) tox2::lwmutexWatchCheck(tox2::LwmutexWatchKind::Stwcx, ea, 4, ctx->lr);
     const bool ok = ctx->reserve_valid && ctx->reserve_addr == ea &&
                     tox2::reservations().storeConditional(base, ea, 4, ctx->reserve_value, ctx->reserve_version, value);
     ctx->reserve_valid = 0;
@@ -152,6 +157,7 @@ bool tox2Stwcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint32_t value) 
 }
 
 bool tox2Stdcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint64_t value) {
+    if (tox2::lwmutexWatchEnabled()) tox2::lwmutexWatchCheck(tox2::LwmutexWatchKind::Stwcx, ea, 8, ctx->lr);
     const bool ok = ctx->reserve_valid && ctx->reserve_addr == ea &&
                     tox2::reservations().storeConditional(base, ea, 8, ctx->reserve_value, ctx->reserve_version, value);
     ctx->reserve_valid = 0;
@@ -160,8 +166,11 @@ bool tox2Stdcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint64_t value) 
 }
 
 void tox2Dcbz(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
-    (void)ctx;
-    std::memset(base + (ea & ~static_cast<uint32_t>(kTox2DcbzLine - 1)), 0, kTox2DcbzLine);
+    const uint32_t line = ea & ~static_cast<uint32_t>(kTox2DcbzLine - 1);
+    if (tox2::lwmutexWatchEnabled()) {
+        tox2::lwmutexWatchCheck(tox2::LwmutexWatchKind::Dcbz, line, kTox2DcbzLine, ctx->lr);
+    }
+    std::memset(base + line, 0, kTox2DcbzLine);
 }
 
 uint64_t tox2Mftb(Tox2PpuContext* ctx) {

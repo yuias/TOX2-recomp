@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -179,5 +180,51 @@ struct PpuReservationStats {
 };
 
 PpuReservationStats ppuReservationStats();
+
+// Diagnostic that finds guest code touching a live sys_lwmutex_t other than through the lwmutex calls. The
+// lwmutex fast path updates the owner/waiter pair with host compare-and-swap, which is only sound while no
+// recompiled PPU or SPU code reads or writes those words itself (the reservation hooks do not see the pair).
+// Off by default; when off, each hook costs one relaxed load.
+enum class LwmutexWatchKind : std::uint8_t {
+    Lwarx,  // lwarx and ldarx
+    Stwcx,  // stwcx. and stdcx.
+    Dcbz,
+    SpuGetllar,  // read-only, reported but not a write
+    SpuPutllc,
+    SpuPutlluc,
+    SpuPut,
+    HleCopy,
+    OwnerValue,
+    WaiterValue
+};
+inline constexpr std::size_t kLwmutexWatchKindCount = 10;
+// Size of sys_lwmutex_t. Kept here so core/ does not depend on lv2/.
+inline constexpr std::uint32_t kLwmutexWatchSize = 24;
+
+namespace detail {
+inline std::atomic<bool> g_lwmutex_watch{false};
+}  // namespace detail
+
+void setLwmutexWatchEnabled(bool enabled);  // before boot
+inline bool lwmutexWatchEnabled() { return detail::g_lwmutex_watch.load(std::memory_order_relaxed); }
+
+// The live set is the structs between create and destroy; a re-add of a live address is ignored.
+void lwmutexWatchAdd(std::uint32_t lwmutex);
+void lwmutexWatchRemove(std::uint32_t lwmutex);
+
+// Counts one hit of `kind` unconditionally and logs the first 16 (kind, address, struct, offset, ctx lr when
+// known; the log prefix names the calling thread). The value checks use it, since they have already decided.
+void lwmutexWatchHit(LwmutexWatchKind kind, std::uint32_t ea, std::uint32_t size, std::uint64_t lr);
+// lwmutexWatchHit() when [ea, ea + size) overlaps a live struct. Returns whether it did. Only call it when
+// lwmutexWatchEnabled(); it takes a mutex.
+bool lwmutexWatchCheck(LwmutexWatchKind kind, std::uint32_t ea, std::uint32_t size, std::uint64_t lr);
+
+struct LwmutexWatchStats {
+    std::uint64_t live = 0;
+    std::uint64_t max_live = 0;
+    std::array<std::uint64_t, kLwmutexWatchKindCount> hits{};
+};
+
+LwmutexWatchStats lwmutexWatchStats();
 
 }  // namespace tox2

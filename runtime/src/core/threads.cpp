@@ -261,6 +261,17 @@ std::vector<std::string> guestLockCensus() {
     const PpuReservationStats reservation = ppuReservationStats();
     lines.push_back(std::format("census: ppu reservations lwarx {} stwcx {} failed {}", reservation.lwarx,
                                 reservation.stwcx, reservation.stwcx_failed));
+    if (lwmutexWatchEnabled()) {
+        const LwmutexWatchStats watch = lwmutexWatchStats();
+        const auto hit = [&](LwmutexWatchKind kind) { return watch.hits[static_cast<std::size_t>(kind)]; };
+        lines.push_back(std::format(
+                "census: lwmutex watch live {} max {}, hits lwarx {} stwcx {} dcbz {} getllar {} putllc {} putlluc {} "
+                "put {} hle-copy {} owner {} waiter {}",
+                watch.live, watch.max_live, hit(LwmutexWatchKind::Lwarx), hit(LwmutexWatchKind::Stwcx),
+                hit(LwmutexWatchKind::Dcbz), hit(LwmutexWatchKind::SpuGetllar), hit(LwmutexWatchKind::SpuPutllc),
+                hit(LwmutexWatchKind::SpuPutlluc), hit(LwmutexWatchKind::SpuPut), hit(LwmutexWatchKind::HleCopy),
+                hit(LwmutexWatchKind::OwnerValue), hit(LwmutexWatchKind::WaiterValue)));
+    }
     FILETIME created, exited, kernel, user;
     if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
         // FILETIME counts 100 ns units.

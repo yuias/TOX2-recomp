@@ -15080,6 +15080,123 @@ void testReservationAndDcbz() {
     CHECK(tox2Mffs(ctx.get()) == 0x70000001u);
 }
 
+// The watch counts guest-side accesses to a live sys_lwmutex_t. Every kind is checked as a delta, because the
+// counters are process-wide.
+void testLwmutexWatchHooks() {
+    using Kind = tox2::LwmutexWatchKind;
+    std::unique_ptr<tox2::GuestMemory> memory(newMemory());
+    std::uint8_t* base = memory->base();
+    CHECK(memory->commit(0x20000, 0x1000));
+    auto ctx = std::make_unique<Tox2PpuContext>();
+    auto table = std::make_unique<tox2::ReservationTable>();
+    constexpr std::uint32_t kLwmutex = 0x20100;  // [0x20100, 0x20118)
+    constexpr std::uint32_t kOther = 0x20400;    // no struct
+
+    std::vector<std::string> log_lines;
+    tox2::setLogSink([&](std::string_view line) { log_lines.emplace_back(line); });
+
+    auto snapshot = [] { return tox2::lwmutexWatchStats(); };
+    tox2::LwmutexWatchStats last = snapshot();
+    // Returns the per-kind hit growth since the previous call.
+    auto growth = [&] {
+        const tox2::LwmutexWatchStats now = snapshot();
+        std::array<std::uint64_t, tox2::kLwmutexWatchKindCount> delta{};
+        for (std::size_t i = 0; i < delta.size(); i++) delta[i] = now.hits[i] - last.hits[i];
+        last = now;
+        return delta;
+    };
+    auto only = [](const std::array<std::uint64_t, tox2::kLwmutexWatchKindCount>& delta, Kind kind) {
+        for (std::size_t i = 0; i < delta.size(); i++) {
+            if (delta[i] != (i == static_cast<std::size_t>(kind) ? 1u : 0u)) return false;
+        }
+        return true;
+    };
+    auto none = [](const std::array<std::uint64_t, tox2::kLwmutexWatchKindCount>& delta) {
+        for (const std::uint64_t value : delta) {
+            if (value != 0) return false;
+        }
+        return true;
+    };
+
+    // Runs the seven PPU and SPU accesses on the line at `line` (the struct, when registered, sits at its start).
+    // `hits` receives the delta of each call in this order.
+    auto exercise = [&](std::uint32_t line, std::array<std::uint64_t, tox2::kLwmutexWatchKindCount>(&hits)[8]) {
+        alignas(16) std::uint8_t data[tox2::kReservationLineSize];
+        tox2::Reservation res;
+        tox2Lwarx(ctx.get(), base, line);
+        hits[0] = growth();
+        tox2Stwcx(ctx.get(), base, line, 1);
+        hits[1] = growth();
+        tox2Dcbz(ctx.get(), base, line + 4);
+        hits[2] = growth();
+        table->getllar(base, line + 0x40, data, res);
+        hits[3] = growth();
+        data[0] ^= 1;  // chunk 0 overlaps the struct
+        table->putllc(base, line, data, res);
+        hits[4] = growth();
+        table->putlluc(base, line, data);
+        hits[5] = growth();
+        table->put(base, line + 4, data, 4);
+        hits[6] = growth();
+        // The docs/spu.md case: an SPU atomic on a chunk of the line that is outside the struct.
+        table->getllar(base, line, data, res);
+        growth();
+        data[0x40] ^= 1;
+        table->putllc(base, line, data, res);
+        hits[7] = growth();
+    };
+
+    std::array<std::uint64_t, tox2::kLwmutexWatchKindCount> hits[8];
+
+    tox2::setLwmutexWatchEnabled(true);
+    tox2::lwmutexWatchAdd(kLwmutex);
+    tox2::lwmutexWatchAdd(kLwmutex);  // a second add of a live address is ignored
+    CHECK(tox2::lwmutexWatchStats().live >= 1);
+    const std::uint64_t live_with = tox2::lwmutexWatchStats().live;
+    growth();
+
+    exercise(kLwmutex, hits);
+    CHECK(only(hits[0], Kind::Lwarx));
+    CHECK(only(hits[1], Kind::Stwcx));
+    CHECK(only(hits[2], Kind::Dcbz));
+    CHECK(only(hits[3], Kind::SpuGetllar));
+    CHECK(only(hits[4], Kind::SpuPutllc));  // the line changed, so the PUTLLC reached the chunk store
+    CHECK(only(hits[5], Kind::SpuPutlluc));
+    CHECK(only(hits[6], Kind::SpuPut));
+    CHECK(none(hits[7]));  // the changed chunk is outside the struct
+    CHECK(!log_lines.empty());
+
+    // A neighbouring word is not a hit: the struct ends at +24.
+    tox2Lwarx(ctx.get(), base, kLwmutex + 24);
+    CHECK(none(growth()));
+    tox2Lwarx(ctx.get(), base, kLwmutex + 20);  // the last word of the struct
+    CHECK(only(growth(), Kind::Lwarx));
+
+    // Direct use of the value-check entry points.
+    tox2::lwmutexWatchHit(Kind::OwnerValue, kLwmutex, 4, 0);
+    CHECK(only(growth(), Kind::OwnerValue));
+    CHECK(!tox2::lwmutexWatchCheck(Kind::HleCopy, kOther, 16, 0));
+    CHECK(tox2::lwmutexWatchCheck(Kind::HleCopy, kLwmutex + 16, 16, 0));
+    CHECK(only(growth(), Kind::HleCopy));
+
+    exercise(kOther, hits);
+    for (const auto& delta : hits) CHECK(none(delta));
+
+    tox2::lwmutexWatchRemove(kLwmutex);
+    CHECK(tox2::lwmutexWatchStats().live == live_with - 1);
+    CHECK(tox2::lwmutexWatchStats().max_live >= live_with);
+    exercise(kLwmutex, hits);
+    for (const auto& delta : hits) CHECK(none(delta));
+
+    tox2::lwmutexWatchAdd(kLwmutex);
+    tox2::setLwmutexWatchEnabled(false);
+    exercise(kLwmutex, hits);
+    for (const auto& delta : hits) CHECK(none(delta));
+    tox2::lwmutexWatchRemove(kLwmutex);
+
+    tox2::setLogSink({});
+}
+
 // The counters are process-wide, so the test compares against totals taken before it.
 void testPpuReservationStats() {
     std::unique_ptr<tox2::GuestMemory> memory(newMemory());
@@ -15641,6 +15758,7 @@ int main(int argc, char** argv) {
     testRsxBusyFormat();
     testReservationAndDcbz();
     testPpuReservationStats();
+    testLwmutexWatchHooks();
     testGuestStackWalk();
     testFaultChild();
     testOverflowChild();

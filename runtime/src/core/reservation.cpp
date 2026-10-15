@@ -4,9 +4,16 @@
 #include <bit>
 #include <chrono>
 #include <cstring>
+#include <format>
+#include <mutex>
+#include <optional>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include <immintrin.h>
+
+#include "core/log.h"
 
 namespace tox2 {
 
@@ -187,6 +194,7 @@ bool ReservationTable::hasWatcher(std::uint32_t first_line, std::uint32_t last_l
 
 void ReservationTable::getllar(const std::uint8_t* base, std::uint32_t ea, std::uint8_t* dst, Reservation& res) {
     const std::uint32_t line = ea & ~(kReservationLineSize - 1);
+    if (lwmutexWatchEnabled()) lwmutexWatchCheck(LwmutexWatchKind::SpuGetllar, line, kReservationLineSize, 0);
     const std::uint8_t* host = base + line;
     const std::atomic<std::uint64_t>& s = stripe(line);
     std::uint32_t spins = 0;
@@ -233,9 +241,14 @@ bool ReservationTable::putllc(std::uint8_t* base, std::uint32_t ea, const std::u
         }
     }
     if (compare_hook_ != nullptr) compare_hook_(compare_hook_arg_);
+    // Only the chunks written are checked: a line can hold an lwmutex next to an SPU atomic target, and an
+    // update of the neighbour never touches the lwmutex words. One hit per PUTLLC, however many chunks it writes.
+    bool watch_hit = !lwmutexWatchEnabled();
     for (std::uint32_t i = 0; i < kChunkCount; i++) {
         const std::uint64_t value = readBuffer(src + 8 * i);
-        if (value != readBuffer(res.snapshot + 8 * i)) storeChunk(host + 8 * i, value);
+        if (value == readBuffer(res.snapshot + 8 * i)) continue;
+        if (!watch_hit) watch_hit = lwmutexWatchCheck(LwmutexWatchKind::SpuPutllc, line + 8 * i, 8, 0);
+        storeChunk(host + 8 * i, value);
     }
     unlockWithWrite(s, line);
     return true;
@@ -243,6 +256,7 @@ bool ReservationTable::putllc(std::uint8_t* base, std::uint32_t ea, const std::u
 
 void ReservationTable::putlluc(std::uint8_t* base, std::uint32_t ea, const std::uint8_t* src) {
     const std::uint32_t line = ea & ~(kReservationLineSize - 1);
+    if (lwmutexWatchEnabled()) lwmutexWatchCheck(LwmutexWatchKind::SpuPutlluc, line, kReservationLineSize, 0);
     std::atomic<std::uint64_t>& s = stripe(line);
     lock(s);
     storeBytes(base + line, src, kReservationLineSize);
@@ -251,6 +265,7 @@ void ReservationTable::putlluc(std::uint8_t* base, std::uint32_t ea, const std::
 
 void ReservationTable::put(std::uint8_t* base, std::uint32_t ea, const std::uint8_t* src, std::uint32_t size) {
     if (size == 0) return;
+    if (lwmutexWatchEnabled()) lwmutexWatchCheck(LwmutexWatchKind::SpuPut, ea, size, 0);
     // Last line touched, without overflowing at the top of the address space.
     const std::uint32_t first_line = ea & ~(kReservationLineSize - 1);
     const std::uint32_t last_line =
@@ -362,6 +377,119 @@ ReservationStats ReservationTable::stats() const {
 ReservationTable& reservations() {
     static ReservationTable table;
     return table;
+}
+
+namespace {
+
+struct LwmutexWatchState {
+    std::mutex mutex;
+    std::vector<std::uint32_t> live;  // sorted struct addresses
+    std::uint64_t max_live = 0;
+    std::array<std::atomic<std::uint64_t>, kLwmutexWatchKindCount> hits{};
+    std::atomic<std::uint32_t> logged{0};
+};
+
+LwmutexWatchState& watchState() {
+    static LwmutexWatchState state;
+    return state;
+}
+
+constexpr std::uint32_t kWatchLogLimit = 16;
+
+const char* watchKindName(LwmutexWatchKind kind) {
+    switch (kind) {
+        case LwmutexWatchKind::Lwarx: return "lwarx";
+        case LwmutexWatchKind::Stwcx: return "stwcx";
+        case LwmutexWatchKind::Dcbz: return "dcbz";
+        case LwmutexWatchKind::SpuGetllar: return "getllar";
+        case LwmutexWatchKind::SpuPutllc: return "putllc";
+        case LwmutexWatchKind::SpuPutlluc: return "putlluc";
+        case LwmutexWatchKind::SpuPut: return "put";
+        case LwmutexWatchKind::HleCopy: return "hle-copy";
+        case LwmutexWatchKind::OwnerValue: return "owner";
+        case LwmutexWatchKind::WaiterValue: return "waiter";
+    }
+    return "?";
+}
+
+// The live struct that overlaps [ea, ea + size), if any. Structs do not overlap each other, so the one with the
+// largest start at or below the last byte is the only candidate. Caller holds the mutex.
+bool findOverlap(const LwmutexWatchState& state, std::uint32_t ea, std::uint32_t size, std::uint32_t& lwmutex) {
+    if (size == 0 || state.live.empty()) return false;
+    const std::uint64_t last = std::uint64_t{ea} + size - 1;
+    auto it = std::upper_bound(state.live.begin(), state.live.end(), last);
+    if (it == state.live.begin()) return false;
+    --it;
+    if (std::uint64_t{*it} + kLwmutexWatchSize <= ea) return false;
+    lwmutex = *it;
+    return true;
+}
+
+void recordWatchHit(LwmutexWatchKind kind, std::uint32_t ea, std::uint32_t size, std::uint64_t lr,
+                    std::optional<std::uint32_t> lwmutex) {
+    LwmutexWatchState& state = watchState();
+    state.hits[static_cast<std::size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
+    if (state.logged.fetch_add(1, std::memory_order_relaxed) >= kWatchLogLimit) return;
+    std::string where = "no live struct";
+    if (lwmutex) where = std::format("lwmutex {:#010x} offset {}", *lwmutex, static_cast<std::int64_t>(ea) - *lwmutex);
+    const std::string lr_text = lr != 0 ? std::format("{:#x}", lr) : "unknown";
+    logWarn("tox2: lwmutex watch: {} at {:#010x} size {}, {}, lr {}", watchKindName(kind), ea, size, where, lr_text);
+}
+
+}  // namespace
+
+void setLwmutexWatchEnabled(bool enabled) { detail::g_lwmutex_watch.store(enabled, std::memory_order_relaxed); }
+
+void lwmutexWatchAdd(std::uint32_t lwmutex) {
+    LwmutexWatchState& state = watchState();
+    std::lock_guard guard(state.mutex);
+    const auto it = std::lower_bound(state.live.begin(), state.live.end(), lwmutex);
+    if (it != state.live.end() && *it == lwmutex) return;
+    state.live.insert(it, lwmutex);
+    state.max_live = std::max<std::uint64_t>(state.max_live, state.live.size());
+}
+
+void lwmutexWatchRemove(std::uint32_t lwmutex) {
+    LwmutexWatchState& state = watchState();
+    std::lock_guard guard(state.mutex);
+    const auto it = std::lower_bound(state.live.begin(), state.live.end(), lwmutex);
+    if (it != state.live.end() && *it == lwmutex) state.live.erase(it);
+}
+
+void lwmutexWatchHit(LwmutexWatchKind kind, std::uint32_t ea, std::uint32_t size, std::uint64_t lr) {
+    std::optional<std::uint32_t> lwmutex;
+    {
+        LwmutexWatchState& state = watchState();
+        std::lock_guard guard(state.mutex);
+        std::uint32_t found;
+        if (findOverlap(state, ea, size, found)) lwmutex = found;
+    }
+    recordWatchHit(kind, ea, size, lr, lwmutex);
+}
+
+bool lwmutexWatchCheck(LwmutexWatchKind kind, std::uint32_t ea, std::uint32_t size, std::uint64_t lr) {
+    std::uint32_t found;
+    {
+        LwmutexWatchState& state = watchState();
+        std::lock_guard guard(state.mutex);
+        if (!findOverlap(state, ea, size, found)) return false;
+    }
+    recordWatchHit(kind, ea, size, lr, found);
+    return true;
+}
+
+LwmutexWatchStats lwmutexWatchStats() {
+    LwmutexWatchState& state = watchState();
+    LwmutexWatchStats stats;
+    {
+        std::lock_guard guard(state.mutex);
+        stats.live = state.live.size();
+        stats.max_live = state.max_live;
+    }
+    for (std::size_t i = 0; i < kLwmutexWatchKindCount; i++) {
+        stats.hits[i] = state.hits[i].load(std::memory_order_relaxed);
+    }
+    return stats;
 }
 
 }  // namespace tox2
