@@ -59,6 +59,7 @@ struct SamplerSettings {
     // otherwise the range is level 0 alone.
     VkSamplerMipmapMode mipmap_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     float min_lod = 0.0f, max_lod = 0.0f, lod_bias = 0.0f;
+    float max_anisotropy = 1.0f;  // > 1 enables anisotropic filtering; part of the cache key
 
     auto operator<=>(const SamplerSettings&) const = default;
 };
@@ -67,6 +68,11 @@ struct SamplerSettings {
 // features the device does not enable (mirror-once wrap, custom border colours) are counted with
 // rsxNoteUnimplemented and replaced by the closest supported state.
 SamplerSettings samplerSettings(const RsxTextureDesc& texture);
+
+// The anisotropy for `settings` when the user forces `level` (1 = off): the level clamped to `device_max` for a
+// sampler that minifies linearly and reads more than level 0; 1 for every other sampler and when device_max < 2.
+// Point-sampled and single-level textures (UI, fonts, render targets read as textures) are left alone.
+float forcedAnisotropy(const SamplerSettings& settings, std::uint32_t level, float device_max);
 
 struct TextureImage {
     VkContext* context = nullptr;
@@ -137,6 +143,10 @@ public:
     // device cannot filter that format linearly (R32_SFLOAT is such a format on some devices).
     VkSampler sampler(const RsxTextureDesc& texture, VkFormat format = VK_FORMAT_UNDEFINED);
 
+    // Forced anisotropy level (1 = off) for samplers created afterwards. Existing samplers stay cached because
+    // frames in flight may still use them.
+    void setAnisotropy(std::uint32_t level) { anisotropy_ = level; }
+
     // Copies every level (and cube face) of the image from the staging buffer, which holds them tightly packed
     // at the offsets of `levels` (the packed layout of rsx_texture_layout.h) from `offset`. The image ends in
     // SHADER_READ_ONLY. The previous contents are discarded. The staging texels must already be byte
@@ -168,6 +178,7 @@ private:
     std::map<VkFormat, bool> format_usable_;
     std::map<VkFormat, bool> linear_filterable_;
     std::string error_;
+    std::uint32_t anisotropy_ = 1;
     std::uint64_t tick_ = 0;
     std::uint64_t images_created_ = 0;
     std::uint64_t image_bytes_created_ = 0;

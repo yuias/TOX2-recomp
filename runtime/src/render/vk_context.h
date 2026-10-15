@@ -43,6 +43,12 @@ public:
     bool hasClipDistance() const { return has_clip_distance_; }
     // True when the device was created with largePoints (gl_PointSize above 1).
     bool hasLargePoints() const { return has_large_points_; }
+    // True when the device was created with samplerAnisotropy.
+    bool hasSamplerAnisotropy() const { return has_sampler_anisotropy_; }
+    // 0 without the feature, else limits.maxSamplerAnisotropy.
+    float maxSamplerAnisotropy() const {
+        return has_sampler_anisotropy_ ? properties_.limits.maxSamplerAnisotropy : 0.0f;
+    }
     // D24_UNORM_S8_UINT when usable as an attachment, else D32_SFLOAT_S8_UINT (one of the two is
     // mandatory for Vulkan implementations).
     VkFormat depthStencilFormat() const {
@@ -73,6 +79,7 @@ private:
     bool has_texture_bc_ = false;
     bool has_clip_distance_ = false;
     bool has_large_points_ = false;
+    bool has_sampler_anisotropy_ = false;
     std::string two_sample_gap_;
     std::atomic<std::uint32_t> validation_errors_{0};
 };

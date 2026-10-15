@@ -30,6 +30,7 @@
 #include "render/vk_context.h"
 #include "render/vk_pipelines.h"
 #include "render/vk_renderer.h"
+#include "render/vk_textures.h"
 #include "render/vk_window.h"
 #include "rsx/rsx_capture.h"
 #include "rsx/rsx_decode.h"
@@ -529,6 +530,33 @@ void testAnisotropyNames() {
     CHECK(!tox2::parseAnisotropy("3").has_value());
     CHECK(!tox2::parseAnisotropy("Off").has_value());
     CHECK(!tox2::parseAnisotropy("16x").has_value());
+}
+
+// Needs no Vulkan device.
+void testForcedAnisotropy() {
+    tox2::SamplerSettings mipped;
+    mipped.min_filter = VK_FILTER_LINEAR;
+    mipped.max_lod = 3.0f;
+    CHECK(tox2::forcedAnisotropy(mipped, 16, 16.0f) == 16.0f);
+    CHECK(tox2::forcedAnisotropy(mipped, 4, 16.0f) == 4.0f);
+    CHECK(tox2::forcedAnisotropy(mipped, 16, 8.0f) == 8.0f);  // clamped to the device maximum
+    CHECK(tox2::forcedAnisotropy(mipped, 1, 16.0f) == 1.0f);  // off
+    CHECK(tox2::forcedAnisotropy(mipped, 0, 16.0f) == 1.0f);
+    CHECK(tox2::forcedAnisotropy(mipped, 16, 0.0f) == 1.0f);  // no samplerAnisotropy feature
+    CHECK(tox2::forcedAnisotropy(mipped, 16, 1.0f) == 1.0f);
+
+    tox2::SamplerSettings nearest = mipped;
+    nearest.min_filter = VK_FILTER_NEAREST;
+    CHECK(tox2::forcedAnisotropy(nearest, 16, 16.0f) == 1.0f);
+
+    tox2::SamplerSettings single_level = mipped;
+    single_level.max_lod = 0.0f;
+    CHECK(tox2::forcedAnisotropy(single_level, 16, 16.0f) == 1.0f);
+
+    // The magnification filter does not matter; only a linear minification that reads mip levels qualifies.
+    tox2::SamplerSettings nearest_mag = mipped;
+    nearest_mag.mag_filter = VK_FILTER_NEAREST;
+    CHECK(tox2::forcedAnisotropy(nearest_mag, 8, 16.0f) == 8.0f);
 }
 
 // Needs no Vulkan device: texel x of a layout row comes from pixel x / 2, alternating between the two samples.
@@ -5352,6 +5380,47 @@ void testRendererPointSize(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// The sampler cache keys on the forced level: a mip-reading linear sampler differs between level 1 and 16, a
+// point-sampled or single-level one does not.
+void testForcedAnisotropySampler(tox2::VkContext& ctx) {
+    tox2::TextureCache cache(ctx);
+    CHECK(cache.valid());
+
+    tox2::RsxTextureDesc linear;
+    linear.format = 0x85;  // A8R8G8B8
+    linear.width = linear.height = 4;
+    linear.mips = 3;
+    linear.filter = (6u << 16) | (2u << 24);  // LINEAR_LINEAR, LINEAR
+    linear.control0 = (2u * 256u) << 7;       // max LOD 2
+    tox2::RsxTextureDesc nearest = linear;
+    nearest.filter = (3u << 16) | (1u << 24);  // NEAREST_LINEAR, NEAREST
+    tox2::RsxTextureDesc single = linear;
+    single.mips = 1;
+
+    const VkSampler linear_off = cache.sampler(linear);
+    const VkSampler nearest_off = cache.sampler(nearest);
+    const VkSampler single_off = cache.sampler(single);
+    CHECK(linear_off != VK_NULL_HANDLE && nearest_off != VK_NULL_HANDLE && single_off != VK_NULL_HANDLE);
+
+    cache.setAnisotropy(16);
+    const VkSampler linear_16 = cache.sampler(linear);
+    CHECK(linear_16 != VK_NULL_HANDLE);
+    if (ctx.hasSamplerAnisotropy() && ctx.maxSamplerAnisotropy() >= 2.0f) {
+        CHECK(linear_16 != linear_off);
+    } else {
+        std::printf("skipping the anisotropic sampler comparison: the device has no sampler anisotropy\n");
+        CHECK(linear_16 == linear_off);
+    }
+    CHECK(cache.sampler(nearest) == nearest_off);
+    CHECK(cache.sampler(single) == single_off);
+    // The same level again hits the cache; the earlier sampler is still there for frames in flight.
+    CHECK(cache.sampler(linear) == linear_16);
+
+    cache.setAnisotropy(1);
+    CHECK(cache.sampler(linear) == linear_off);
+    CHECK(ctx.validationErrorCount() == 0);
+}
+
 bool sameRect(const tox2::PixelRect& rect, std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
     return rect.x == x && rect.y == y && rect.width == width && rect.height == height;
 }
@@ -5469,6 +5538,7 @@ int main() {
     testAaModeNames();
     testWindowSizePresets();
     testAnisotropyNames();
+    testForcedAnisotropy();
     testLayoutSource();
 
     tox2::VkContextOptions options;
@@ -5526,6 +5596,7 @@ int main() {
     testRendererMsaaDepthAsArgb(*ctx);
     testRendererMsaaInherit(*ctx);
     testRendererPointSize(*ctx);
+    testForcedAnisotropySampler(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
     ctx.reset();

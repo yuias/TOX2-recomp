@@ -319,6 +319,9 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
     // Without largePoints gl_PointSize is clamped to 1, so points shrink as the resolution scale grows.
     ctx->has_large_points_ = supported_features.largePoints == VK_TRUE;
     enabled_features.largePoints = ctx->has_large_points_ ? VK_TRUE : VK_FALSE;
+    // Optional: forced anisotropic filtering (an overlay/command-line setting) is unavailable without it.
+    ctx->has_sampler_anisotropy_ = supported_features.samplerAnisotropy == VK_TRUE;
+    enabled_features.samplerAnisotropy = ctx->has_sampler_anisotropy_ ? VK_TRUE : VK_FALSE;
 
     const float priority = 1.0f;
     VkDeviceQueueCreateInfo queue_info{};

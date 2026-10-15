@@ -415,6 +415,12 @@ bool TextureCache::linearFilterable(VkFormat format) {
     return filterable;
 }
 
+float forcedAnisotropy(const SamplerSettings& settings, std::uint32_t level, float device_max) {
+    if (level < 2 || device_max < 2.0f) return 1.0f;
+    if (settings.min_filter != VK_FILTER_LINEAR || settings.max_lod <= 0.0f) return 1.0f;
+    return std::min(static_cast<float>(level), device_max);
+}
+
 VkSampler TextureCache::sampler(const RsxTextureDesc& texture, VkFormat format) {
     SamplerSettings settings = samplerSettings(texture);
     if (format != VK_FORMAT_UNDEFINED && !linearFilterable(format)) {
@@ -425,6 +431,8 @@ VkSampler TextureCache::sampler(const RsxTextureDesc& texture, VkFormat format) 
         settings.min_filter = settings.mag_filter = VK_FILTER_NEAREST;
         settings.mipmap_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     }
+    // After the filterable fallback, so a sampler downgraded to NEAREST does not qualify.
+    settings.max_anisotropy = forcedAnisotropy(settings, anisotropy_, context_.maxSamplerAnisotropy());
     const auto it = samplers_.find(settings);
     if (it != samplers_.end()) return it->second;
 
@@ -440,6 +448,8 @@ VkSampler TextureCache::sampler(const RsxTextureDesc& texture, VkFormat format) 
                                  context_.deviceProperties().limits.maxSamplerLodBias);
     info.minLod = settings.min_lod;
     info.maxLod = settings.max_lod;
+    info.anisotropyEnable = settings.max_anisotropy > 1.0f ? VK_TRUE : VK_FALSE;
+    info.maxAnisotropy = settings.max_anisotropy;
     info.borderColor = settings.border;
     VkSampler created = VK_NULL_HANDLE;
     if (vkCreateSampler(context_.device(), &info, nullptr, &created) != VK_SUCCESS) {
