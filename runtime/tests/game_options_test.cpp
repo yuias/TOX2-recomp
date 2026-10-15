@@ -896,6 +896,12 @@ void testConfigFileErrors() {
           "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode and "
           "--vk-validation need --render vulkan\n" +
                   note);
+    // A check on a single option gets no note.
+    writeFile(file, R"({"seconds": 1})");
+    const std::string no_dir_text = (dirs.work / "nodir" / "x.wav").string();
+    const tox2::OptionsError no_dir = dirs.error({"--game-dir", "g", "--audio-dump", no_dir_text});
+    CHECK(no_dir.message.starts_with("error: --audio-dump " + no_dir_text + ": ") &&
+          no_dir.message.find("note:") == std::string::npos);
     // Command-line mistakes found while collecting stay as they are.
     CHECK(dirs.error({"--bogus"}).message == "error: unknown argument --bogus\n");
 }

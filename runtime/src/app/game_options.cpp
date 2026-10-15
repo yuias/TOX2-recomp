@@ -513,10 +513,12 @@ void dropUnusableFileValues(ChosenValues& chosen, const RunShape& shape, std::ve
 }
 
 // Checks that depend on several options, in the order they have always run.
-std::optional<OptionsError> settle(ParseState& state) {
+// `file_note` is appended to the combined checks, whose cause may be in the config file.
+std::optional<OptionsError> settle(ParseState& state, const std::string& file_note) {
     GameOptions& opt = state.options;
+    const auto combined = [&file_note](std::string message) { return usageError(std::move(message) + file_note); };
     if (opt.game_dir.empty() && opt.vfs_config.empty()) {
-        return usageError("error: --game-dir or --vfs-config is required\n");
+        return combined("error: --game-dir or --vfs-config is required\n");
     }
     const RunShape shape = runShape(opt.no_window, state.render_flag, !opt.dump_frames.empty());
     opt.window = shape.window;
@@ -524,24 +526,24 @@ std::optional<OptionsError> settle(ParseState& state) {
     const bool render_option = !opt.dump_frames.empty() || state.dump_every_given || !opt.shader_cache.empty() ||
                                opt.vk_validation || state.resolution_scale_given || state.aa_mode_given;
     if (render_option && !opt.render_vulkan) {
-        return usageError(
+        return combined(
                 "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode and "
                 "--vk-validation need --render vulkan\n");
     }
     // GameInput delivers readings to the foreground window only, so unattended runs have nothing to probe.
-    if (opt.pad_probe && !opt.window) return usageError("error: --pad-probe needs the window\n");
+    if (opt.pad_probe && !opt.window) return combined("error: --pad-probe needs the window\n");
     // A window or a script is what makes a keyboard pad useful, so either one selects it by default.
     const bool pad_input = opt.window || !opt.pad_script.empty();
     if (!state.pad_given) opt.pad = opt.window ? "keyboard+gamepad" : pad_input ? "keyboard" : "neutral";
     if (opt.pad == "keyboard" && !pad_input) {
-        return usageError("error: --pad keyboard needs the window or --pad-script\n");
+        return combined("error: --pad keyboard needs the window or --pad-script\n");
     }
     // GameInput delivers readings to the foreground window only.
     if (padUsesGamepad(opt.pad) && !opt.window) {
-        return usageError(std::format("error: --pad {} needs the window\n", opt.pad));
+        return combined(std::format("error: --pad {} needs the window\n", opt.pad));
     }
     if (!opt.pad_script.empty() && !padUsesKeyboard(opt.pad)) {
-        return usageError("error: --pad-script needs --pad keyboard or keyboard+gamepad\n");
+        return combined("error: --pad-script needs --pad keyboard or keyboard+gamepad\n");
     }
     // A window means somebody is listening; unattended runs must not need a sound device.
     if (!state.audio_given) opt.audio = opt.window ? "wasapi" : "none";
@@ -606,12 +608,9 @@ std::expected<GameOptions, OptionsError> parseGameOptions(std::span<const std::s
             }
         }
     }
-    if (std::optional<OptionsError> error = settle(state)) {
-        if (!location->file.empty()) {
-            error->message += std::format("note: settings were also read from {}\n", file_name);
-        }
-        return std::unexpected(std::move(*error));
-    }
+    const std::string file_note =
+            location->file.empty() ? std::string() : std::format("note: settings were also read from {}\n", file_name);
+    if (std::optional<OptionsError> error = settle(state, file_note)) return std::unexpected(std::move(*error));
     GameOptions& options = state.options;
     options.no_config = line.no_config;
     options.config_file = std::move(location->file);

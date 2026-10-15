@@ -595,6 +595,11 @@ int main(int argc, char** argv) {
     }
     tox2::GameOptions opt = std::move(*parsed);
     tox2::applyGameOptions(opt);
+    if (cwd_ec) {
+        // Without a working directory the lookup silently falls back to the executable's directory.
+        tox2::logWarn("tox2: config: no working directory ({}); only the executable's directory is searched",
+                      cwd_ec.message());
+    }
 
     std::error_code ec;
     tox2::VfsCliOptions cli;
