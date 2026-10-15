@@ -292,7 +292,9 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   and copied into their memory layout when something reads them, so the game's resolve pass averages the two
   samples of a pixel; `--aa-mode supersample` draws them per sample in the layout instead (see
   [Rendering](rendering.md#anti-aliased-surfaces) for how both differ from the hardware: its sample positions
-  are not known, and the standard Vulkan ones are used). A warm 260 s run lists only `state zpass report constant`,
+  are not known, and the standard Vulkan ones are used). `--aa-mode dlaa` draws them with one sample and
+  anti-aliases the scene with NVIDIA DLAA at the game's resolve, on RTX GPUs with the Streamline SDK (see
+  [DLAA](rendering.md#dlaa)). A warm 260 s run lists only `state zpass report constant`,
   with no skipped draw. The 30 s headless run counts 6.9 million FIFO headers, 238 distinct methods and 8,208 flips in the
   fake RSX. With `--dump-frames` the dumped frames of the first 30 s are the plain grey loading screen.
 - Audio: WASAPI is the only device output, in shared mode on the default device. The output is
