@@ -26,6 +26,7 @@
 #include "render/render_scale.h"
 #include "render/shader_compiler.h"
 #include "render/vertex_convert.h"
+#include "render/window_size.h"
 #include "render/vk_context.h"
 #include "render/vk_pipelines.h"
 #include "render/vk_renderer.h"
@@ -485,6 +486,49 @@ void testAaModeNames() {
     CHECK(!tox2::parseAaMode("").has_value());
     CHECK(!tox2::parseAaMode("MSAA2").has_value());
     CHECK(!tox2::parseAaMode("msaa ").has_value());
+}
+
+// Needs no Vulkan device.
+void testWindowSizePresets() {
+    for (const tox2::WindowSizePreset preset : tox2::kWindowSizePresets) {
+        const std::optional<tox2::WindowSizePreset> parsed = tox2::parseWindowSize(tox2::windowSizeName(preset));
+        CHECK(parsed.has_value() && *parsed == preset);
+    }
+    CHECK(tox2::windowSizeName(tox2::WindowSizePreset::Size720p) == "720p");
+    CHECK(tox2::windowSizeName(tox2::WindowSizePreset::Size2160p) == "2160p");
+    CHECK(!tox2::parseWindowSize("").has_value());
+    CHECK(!tox2::parseWindowSize("1080P").has_value());
+    CHECK(!tox2::parseWindowSize("1080p ").has_value());
+    CHECK(!tox2::parseWindowSize("900p").has_value());
+    static_assert(tox2::presetClientSize(tox2::WindowSizePreset::Size720p) == tox2::ClientSize{1280, 720});
+    static_assert(tox2::presetClientSize(tox2::WindowSizePreset::Size1080p) == tox2::ClientSize{1920, 1080});
+    static_assert(tox2::presetClientSize(tox2::WindowSizePreset::Size1440p) == tox2::ClientSize{2560, 1440});
+    static_assert(tox2::presetClientSize(tox2::WindowSizePreset::Size2160p) == tox2::ClientSize{3840, 2160});
+
+    CHECK(tox2::fitClientSize({1920, 1080}, {1906, 1009}) == (tox2::ClientSize{1792, 1008}));
+    CHECK(tox2::fitClientSize({1280, 720}, {2000, 2000}) == (tox2::ClientSize{1280, 720}));
+    CHECK(tox2::fitClientSize({1280, 720}, {1280, 720}) == (tox2::ClientSize{1280, 720}));
+    CHECK(tox2::fitClientSize({3840, 2160}, {8, 8}) == (tox2::ClientSize{16, 9}));
+    // Width is the limiting side here, so the result is a multiple of 16 below the available width.
+    CHECK(tox2::fitClientSize({3840, 2160}, {2500, 2000}) == (tox2::ClientSize{2496, 1404}));
+}
+
+// Needs no Vulkan device.
+void testAnisotropyNames() {
+    for (const std::uint32_t level : tox2::kAnisotropyLevels) {
+        const std::optional<std::uint32_t> parsed = tox2::parseAnisotropy(tox2::anisotropyName(level));
+        CHECK(parsed.has_value() && *parsed == level);
+    }
+    CHECK(tox2::anisotropyName(1) == "off");
+    CHECK(tox2::anisotropyName(16) == "16");
+    CHECK(tox2::anisotropyName(0).empty() && tox2::anisotropyName(3).empty() && tox2::anisotropyName(32).empty());
+    CHECK(*tox2::parseAnisotropy("off") == 1);
+    CHECK(*tox2::parseAnisotropy("8") == 8);
+    CHECK(!tox2::parseAnisotropy("").has_value());
+    CHECK(!tox2::parseAnisotropy("1").has_value());
+    CHECK(!tox2::parseAnisotropy("3").has_value());
+    CHECK(!tox2::parseAnisotropy("Off").has_value());
+    CHECK(!tox2::parseAnisotropy("16x").has_value());
 }
 
 // Needs no Vulkan device: texel x of a layout row comes from pixel x / 2, alternating between the two samples.
@@ -5423,6 +5467,8 @@ int main() {
     testVertexConvertMatchesReference();
     testConvertIndicesChecked();
     testAaModeNames();
+    testWindowSizePresets();
+    testAnisotropyNames();
     testLayoutSource();
 
     tox2::VkContextOptions options;

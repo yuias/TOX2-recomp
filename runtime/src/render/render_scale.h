@@ -10,6 +10,7 @@
 //    centre or box-average it), never the image itself.
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -28,6 +29,29 @@ constexpr std::string_view aaModeName(AaMode mode) { return mode == AaMode::Msaa
 constexpr std::optional<AaMode> parseAaMode(std::string_view text) {
     if (text == "supersample") return AaMode::Supersample;
     if (text == "msaa") return AaMode::Msaa;
+    return std::nullopt;
+}
+
+// Levels of forced anisotropic filtering; 1 means off.
+inline constexpr std::array<std::uint32_t, 5> kAnisotropyLevels = {1, 2, 4, 8, 16};
+
+// "off", "2", "4", "8" or "16"; empty for a value that is not a level.
+constexpr std::string_view anisotropyName(std::uint32_t level) {
+    switch (level) {
+        case 1: return "off";
+        case 2: return "2";
+        case 4: return "4";
+        case 8: return "8";
+        case 16: return "16";
+        default: return "";
+    }
+}
+
+// The names above ("off" gives 1); nullopt for anything else (the match is exact).
+constexpr std::optional<std::uint32_t> parseAnisotropy(std::string_view text) {
+    for (const std::uint32_t level : kAnisotropyLevels) {
+        if (text == anisotropyName(level)) return level;
+    }
     return std::nullopt;
 }
 
