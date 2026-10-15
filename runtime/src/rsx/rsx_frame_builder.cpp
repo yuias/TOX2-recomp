@@ -473,7 +473,7 @@ bool RsxFrameBuilder::fillVertices(const RsxRegisters& regs, RsxDraw& draw, std:
     return true;
 }
 
-// Texture bytes are copied for 2D, 3D and cube map A8R8G8B8 and DXT1/DXT23/DXT45 textures, linear or
+// Texture bytes are copied for 2D, 3D and cube map A8R8G8B8, B8 and DXT1/DXT23/DXT45 textures, linear or
 // swizzled, with their whole mip chain. The copy is converted to what the renderer uploads: every level in
 // tightly packed rows and slices (padding removed), de-swizzled, and a cube map as six faces one after the
 // other; see rsx_texture_layout.h for the guest layout rules. The converted bytes are a shared blob kept in

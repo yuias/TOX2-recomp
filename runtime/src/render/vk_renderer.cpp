@@ -1596,7 +1596,9 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                 rsxNoteUnimplemented("state", "texture data short");
                 continue;
             }
+            // Blocks and single-byte texels have no word order to fix.
             const bool compressed = rsxTextureBlockBytes(texture->format) != 0;
+            const bool as_stored = compressed || (texture->format & kRsxTextureBaseMask) == kRsxTextureB8;
             const std::shared_ptr<TextureImage> image = textures_->acquire(*texture);
             if (!textures_->valid()) {
                 fail(textures_->error());
@@ -1615,8 +1617,8 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
                 UploadRef staging;
                 if (!allocUpload(layout.packed_bytes, staging)) return false;
                 const std::uint8_t* source = blob.data();
-                if (compressed) {
-                    // Blocks are stored the way Vulkan expects them.
+                if (as_stored) {
+                    // Blocks and bytes are stored the way Vulkan expects them.
                     std::memcpy(staging.data, source, layout.packed_bytes);
                 } else {
                     // Guest texels are big-endian words A, R, G, B in memory; byte swapped they are B8G8R8A8 texels.

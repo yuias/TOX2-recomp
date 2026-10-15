@@ -67,8 +67,11 @@ bool rsxTextureLayout(std::uint32_t format, bool linear, std::uint32_t width, st
                       std::uint32_t pitch, std::uint32_t layers, RsxTextureLayout& out, std::uint32_t depth) {
     const std::uint32_t dxt_bytes = rsxTextureBlockBytes(format);
     const bool compressed = dxt_bytes != 0;
-    const std::uint32_t block_bytes =
-            compressed ? dxt_bytes : ((format & kRsxTextureBaseMask) == kRsxTextureA8R8G8B8 ? 4 : 0);
+    std::uint32_t block_bytes = dxt_bytes;
+    if (!compressed) {
+        const std::uint32_t base = format & kRsxTextureBaseMask;
+        block_bytes = base == kRsxTextureA8R8G8B8 ? 4 : (base == kRsxTextureB8 ? 1 : 0);
+    }
     if (block_bytes == 0 || width == 0 || height == 0 || layers == 0 || depth == 0) return false;
 
     const bool swizzled = !compressed && !linear;

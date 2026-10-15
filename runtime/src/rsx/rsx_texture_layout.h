@@ -18,7 +18,7 @@
 //    texture whose width and height are powers of two and whose depth is above 1 is stored in the NVIDIA VTC
 //    order: blocks of the same position in 4 consecutive slices are adjacent (a final group of 1 to 3 slices
 //    holds that many), which the extraction undoes.
-// Only textures of 4-byte texels (A8R8G8B8) and DXT1/DXT23/DXT45 are described.
+// Only textures of 4-byte texels (A8R8G8B8), 1-byte texels (B8) and DXT1/DXT23/DXT45 are described.
 
 #include <cstdint>
 #include <span>
@@ -41,7 +41,7 @@ struct RsxTextureLevel {
 
 struct RsxTextureLayout {
     std::uint32_t mip_count = 0, layer_count = 0;
-    std::uint32_t block_bytes = 0;  // bytes of one texel (A8R8G8B8) or of one 4x4 block (DXT)
+    std::uint32_t block_bytes = 0;  // bytes of one texel (A8R8G8B8, B8) or of one 4x4 block (DXT)
     std::uint64_t guest_bytes = 0;  // guest range [0, guest_bytes) the levels read
     std::uint64_t packed_bytes = 0;
     std::vector<RsxTextureLevel> levels;  // layer by layer, level 0 first
@@ -54,7 +54,7 @@ std::uint32_t rsxTextureMipCount(std::uint32_t format, std::uint32_t width, std:
 // Layout of `layers` (1, or 6 for a cube map) images of `depth` slices (1 unless the texture is 3D) with
 // `mips` levels. `format` is the 8-bit texture format field; the layout comes from `linear`, not from the
 // flag bit in `format`. pitch 0 stands for the row size of level 0. False (and `out` untouched) for a format
-// other than A8R8G8B8 and DXT, an empty size, a pitch smaller than a row of level 0, or a swizzled texture
+// other than A8R8G8B8, B8 and DXT, an empty size, a pitch smaller than a row of level 0, or a swizzled texture
 // (DXT excepted) whose size, or depth when above 1, is not a power of two.
 bool rsxTextureLayout(std::uint32_t format, bool linear, std::uint32_t width, std::uint32_t height, std::uint32_t mips,
                       std::uint32_t pitch, std::uint32_t layers, RsxTextureLayout& out, std::uint32_t depth = 1);

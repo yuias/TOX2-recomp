@@ -1797,6 +1797,17 @@ void testTextureMapping() {
     CHECK(same(tox2::singleChannelComponentMapping(0xA9E4), kR, kR, kR, kOne));
     CHECK(same(tox2::singleChannelComponentMapping(0x0000), kZero, kZero, kZero, kZero));
 
+    // A B8 image (R8_UNORM) has the base channels {1, byte, byte, byte}: the identity remap reads (R, R, R, ONE).
+    CHECK(tox2::textureVkFormat(0x81 | 0x20) == VK_FORMAT_R8_UNORM);
+    CHECK(same(tox2::b8ComponentMapping(0xAAE4), kR, kR, kR, kOne));
+    // The remap applies on top: alpha reads the byte, green is forced to zero, alpha is forced to zero.
+    CHECK(same(tox2::b8ComponentMapping(0xAAE5), kR, kR, kR, kR));
+    CHECK(same(tox2::b8ComponentMapping(0x8AE4), kR, kZero, kR, kOne));
+    CHECK(same(tox2::b8ComponentMapping(0xA8E4), kR, kR, kR, kZero));
+    CHECK(same(tox2::b8ComponentMapping(0x0000), kZero, kZero, kZero, kZero));
+    // A colour channel that selects the A source reads the base alpha, which is one.
+    CHECK(same(tox2::b8ComponentMapping(0xAAE0), kOne, kR, kR, kOne));
+
     // The border word (ARGB) goes through the same remap.
     CHECK(tox2::remapBorderColor(0x80402010, 0xAAE4) == 0x80402010);
     CHECK(tox2::remapBorderColor(0x80402010, 0xAA6C) == 0x80102040);  // R and B exchanged

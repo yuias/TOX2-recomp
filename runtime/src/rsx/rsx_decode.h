@@ -38,6 +38,8 @@ inline constexpr std::uint32_t kRsxTextureBaseMask = 0x9F;
 inline constexpr std::uint32_t kRsxTextureLinearFlag = 0x20;  // CELL_GCM_TEXTURE_LN; clear = swizzled
 inline constexpr std::uint32_t kRsxTextureUnnormalizedFlag =
         0x40;  // CELL_GCM_TEXTURE_UN; clear = _NR (normalized coords)
+// One unsigned byte per texel (the planes of the game's decoded movies).
+inline constexpr std::uint32_t kRsxTextureB8 = 0x81;
 inline constexpr std::uint32_t kRsxTextureA8R8G8B8 = 0x85;
 inline constexpr std::uint32_t kRsxTextureDxt1 = 0x86;   // S3TC BC1, 8-byte blocks
 inline constexpr std::uint32_t kRsxTextureDxt23 = 0x87;  // BC2, 16-byte blocks
@@ -68,7 +70,8 @@ constexpr std::uint64_t rsxCompressedSize(std::uint32_t format, std::uint32_t wi
 
 // Formats whose bytes the frame builder copies and the renderer samples.
 constexpr bool rsxTextureFormatSampleable(std::uint32_t format) {
-    return (format & kRsxTextureBaseMask) == kRsxTextureA8R8G8B8 || rsxTextureBlockBytes(format) != 0;
+    const std::uint32_t base = format & kRsxTextureBaseMask;
+    return base == kRsxTextureA8R8G8B8 || base == kRsxTextureB8 || rsxTextureBlockBytes(format) != 0;
 }
 
 // Formats that only a render target can supply: the renderer reads them from the GPU image of the target at

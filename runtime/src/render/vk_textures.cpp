@@ -60,25 +60,38 @@ VkSamplerAddressMode wrapMode(std::uint32_t gcm) {
     }
 }
 
-}  // namespace
-
 // Facts from RPCS3: `Emu/RSX/Utils/color_utils.hpp` `decode_remap_encoding` (channel and control tables)
 // and `texture_channel_remap_t::remap` (a control of 2 reads the channel, 0 forces zero, 1 forces one),
-// `Emu/RSX/VK/VKFormats.cpp` `get_component_mapping` (A8R8G8B8 base order A, R, G, B) and
 // `Emu/RSX/VK/vkutils/image_helpers.cpp` `apply_swizzle_remap` (the mapping is {final[1], final[2],
-// final[3], final[0]}). The images are B8G8R8A8, so the base channels read as they are.
-VkComponentMapping textureComponentMapping(std::uint32_t remap) {
-    constexpr VkComponentSwizzle kBase[4] = {VK_COMPONENT_SWIZZLE_A, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G,
-                                             VK_COMPONENT_SWIZZLE_B};
+// final[3], final[0]}). `base` is what the texture's channels A, R, G, B read from the image, in that order.
+VkComponentMapping remappedComponents(std::uint32_t remap, const VkComponentSwizzle (&base)[4]) {
     VkComponentSwizzle final_map[4];
     for (std::uint32_t channel = 0; channel < 4; channel++) {
         const std::uint32_t from = (remap >> (channel * 2)) & 3;
         const std::uint32_t control = (remap >> (8 + channel * 2)) & 3;
         final_map[channel] = control == 0   ? VK_COMPONENT_SWIZZLE_ZERO
                              : control == 1 ? VK_COMPONENT_SWIZZLE_ONE
-                                            : kBase[from];
+                                            : base[from];
     }
     return {final_map[1], final_map[2], final_map[3], final_map[0]};
+}
+
+}  // namespace
+
+// `Emu/RSX/VK/VKFormats.cpp` `get_component_mapping`: A8R8G8B8 has the base order A, R, G, B. The images are
+// B8G8R8A8, so the base channels read as they are.
+VkComponentMapping textureComponentMapping(std::uint32_t remap) {
+    constexpr VkComponentSwizzle kBase[4] = {VK_COMPONENT_SWIZZLE_A, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G,
+                                             VK_COMPONENT_SWIZZLE_B};
+    return remappedComponents(remap, kBase);
+}
+
+// The same function gives B8 the base {ONE, R, R, R}: alpha is 1 and the byte (an R8_UNORM image) fills the
+// three colour channels.
+VkComponentMapping b8ComponentMapping(std::uint32_t remap) {
+    constexpr VkComponentSwizzle kBase[4] = {VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R,
+                                             VK_COMPONENT_SWIZZLE_R};
+    return remappedComponents(remap, kBase);
 }
 
 VkComponentMapping singleChannelComponentMapping(std::uint32_t remap) {
@@ -207,6 +220,7 @@ void TextureCache::fail(std::string message) {
 
 VkFormat textureVkFormat(std::uint32_t rsx_format) {
     switch (rsx_format & kRsxTextureBaseMask) {
+        case kRsxTextureB8: return VK_FORMAT_R8_UNORM;
         case kRsxTextureA8R8G8B8: return VK_FORMAT_B8G8R8A8_UNORM;
         case kRsxTextureDxt1: return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
         case kRsxTextureDxt23: return VK_FORMAT_BC2_UNORM_BLOCK;
@@ -263,12 +277,13 @@ std::shared_ptr<TextureImage> TextureCache::create(std::uint32_t width, std::uin
     const std::uint32_t block_bytes = format == VK_FORMAT_BC1_RGBA_UNORM_BLOCK                                     ? 8
                                       : format == VK_FORMAT_BC2_UNORM_BLOCK || format == VK_FORMAT_BC3_UNORM_BLOCK ? 16
                                                                                                                    : 0;
+    const std::uint32_t texel_bytes = format == VK_FORMAT_R8_UNORM ? 1 : 4;
     texture->levels = levels;
     texture->bytes = 0;
     for (std::uint32_t level = 0, w = width, h = height, d = depth; level < levels;
          level++, w = std::max(w / 2, 1u), h = std::max(h / 2, 1u), d = std::max(d / 2, 1u)) {
         texture->bytes += (block_bytes != 0 ? static_cast<VkDeviceSize>((w + 3) / 4) * ((h + 3) / 4) * block_bytes
-                                            : static_cast<VkDeviceSize>(w) * h * 4) *
+                                            : static_cast<VkDeviceSize>(w) * h * texel_bytes) *
                           d * layers;
     }
 
@@ -385,8 +400,9 @@ VkImageView TextureCache::createView(VkImage image, VkFormat format, std::uint32
     view_info.image = image;
     view_info.viewType = type;
     view_info.format = format;
-    view_info.components =
-            format == VK_FORMAT_R32_SFLOAT ? singleChannelComponentMapping(remap) : textureComponentMapping(remap);
+    view_info.components = format == VK_FORMAT_R32_SFLOAT ? singleChannelComponentMapping(remap)
+                           : format == VK_FORMAT_R8_UNORM ? b8ComponentMapping(remap)
+                                                          : textureComponentMapping(remap);
     view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, layers};
     VkImageView view = VK_NULL_HANDLE;
     if (vkCreateImageView(context_.device(), &view_info, nullptr, &view) != VK_SUCCESS) {

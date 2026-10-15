@@ -120,8 +120,8 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   [Render targets](#render-targets)). A texture whose address is
   a known render target is sampled from that target (render target aliasing), and a draw that
   samples the target it renders to reads a copy of it. Other textures are uploaded from the
-  guest bytes into B8G8R8A8 images (A8R8G8B8, linear or swizzled) or BC1/BC2/BC3 images
-  (DXT1/DXT23/DXT45), as 2D, 3D or cube images with the whole mip chain (see [Textures](#textures));
+  guest bytes into B8G8R8A8 images (A8R8G8B8, linear or swizzled), R8 images (B8, one byte per texel,
+  the planes of the game's decoded movies) or BC1/BC2/BC3 images (DXT1/DXT23/DXT45), as 2D, 3D or cube images with the whole mip chain (see [Textures](#textures));
   a unit without a usable texture reads a 1x1 magenta image of the type the fragment program samples
   (2D, 3D or cube).
   Cull mode, depth state, viewport, scissor, topology, blend constants and the whole stencil state (test
@@ -671,7 +671,7 @@ Differences from RPCS3:
 
 ### Textures
 
-The frame builder converts the bytes of every 2D, 3D and cube A8R8G8B8 and DXT1/DXT23/DXT45 texture a
+The frame builder converts the bytes of every 2D, 3D and cube A8R8G8B8, B8 and DXT1/DXT23/DXT45 texture a
 draw has enabled (`rsx_texture_layout.cpp`), and the renderer uploads them (`vk_textures.cpp`). The
 dimension is the field in bits 4 to 7 of SET_TEXTURE_FORMAT (1 = 1D, 2 = 2D, 3 = 3D) and the cube bit is
 bit 2. As in RPCS3 (`get_extended_texture_dimension`), dimension 3 is a 3D texture whatever the cube bit
@@ -690,6 +690,10 @@ bits); a depth of 0 counts as 1. The guest layout follows RPCS3 (`Emu/RSX/Common
   the x and y bits are interleaved up to the shorter side and the remaining bits of the longer side
   count above them (an 8x2 texture holds `x0 | y0 << 1 | (x >> 1) << 2`). The size must be a power
   of two; other sizes are counted as `texture layout swizzled non-power-of-two`.
+- **B8.** One byte per texel in the same layouts as A8R8G8B8 (the Morton order and the pitch rule do not
+  depend on the texel size). The image is `R8_UNORM`; its view has the base channels A = 1 and R = G = B =
+  the byte (RPCS3 `get_component_mapping`: ONE, R, R, R), and the texture's remap applies on top as for
+  any other format. A B8 texture at a render target address is not supported (`texture format B8`).
 - **DXT.** Never swizzled. Without the LN flag the block rows of a level are contiguous (the pitch
   register is ignored); with it they use the pitch register like a linear texture.
 - **Cube maps.** Six faces, each with its own mip chain, in the order +X, -X, +Y, -Y, +Z, -Z (the
@@ -697,7 +701,7 @@ bits); a depth of 0 counts as 1. The guest layout follows RPCS3 (`Emu/RSX/Common
   faces must be square.
 - **3D textures.** A level is `depth` slices of the 2D level one after the other (a linear level keeps
   the pitch of level 0 for every row of every slice), and the depth halves, to at least 1, from one
-  level to the next like the sides. A swizzled A8R8G8B8 level interleaves one bit of x, y and z per
+  level to the next like the sides. A swizzled A8R8G8B8 or B8 level interleaves one bit of x, y and z per
   round (x first) while a coordinate has bits left (`calculate_z_index`), so its width, height and depth
   must be powers of two (otherwise `texture layout swizzled non-power-of-two`). A DXT level whose width
   and height are powers of two and whose depth is above 1 is stored in the NVIDIA VTC order, which
@@ -712,8 +716,8 @@ The converted texture, `RsxTextureDesc::data`, is a blob shared between draws: l
 only the texture size, depth, kind and mip count to find them. It uploads all levels in one
 `vkCmdCopyBufferToImage` into an image with the full chain: a 2D image, a 3D image (`VK_IMAGE_TYPE_3D`, a
 copy region per level with the level's depth) or a cube map (a 2D image of six array layers with
-`CUBE_COMPATIBLE`, a region per face and level and a cube view). A8R8G8B8 words are byte swapped first and
-DXT blocks are copied as stored. The image cache key includes the depth and the kind, so a 3D and a 2D
+`CUBE_COMPATIBLE`, a region per face and level and a cube view). A8R8G8B8 words are byte swapped first;
+B8 bytes and DXT blocks are copied as stored. The image cache key includes the depth and the kind, so a 3D and a 2D
 texture at one address do not share an image. A texture of the render target cache has one level; a 3D or
 cube texture at a render target address is counted (`texture layout render target alias of a 3D or cube
 texture`) and reads the placeholder.

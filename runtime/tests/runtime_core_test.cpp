@@ -7725,6 +7725,8 @@ void testRsxDecode() {
     CHECK(tox2::rsxCompressedSize(0x87, 1, 1) == 16 && tox2::rsxCompressedSize(0x85, 16, 16) == 0);
     CHECK(tox2::rsxTextureFormatSampleable(0x85 | 0x20) && tox2::rsxTextureFormatSampleable(0x88));
     CHECK(!tox2::rsxTextureFormatSampleable(0x84));
+    CHECK(tox2::rsxTextureFormatSampleable(0x81 | 0x20) && tox2::rsxTextureFormatSampleable(0x81));
+    CHECK(tox2::rsxTextureBlockBytes(0x81) == 0);
     regs->apply(0x1A04, 1u | (2u << 4) | ((0x85u | 0x20u | 0x40u) << 8) | (1u << 16));
     CHECK(!tox2::decodeTexture(*regs, 0).normalized);
     CHECK(unimplementedCount("texture format A8R8G8B8_LN_UN") == 0);  // the renderer scales the coordinates
@@ -8022,7 +8024,45 @@ void testRsxTextureLayout() {
               layout.levels[1].packed_offset == 64);
         CHECK(tox2::rsxTextureLayout(0xA5, true, 4, 4, 1, 0, 6, layout) && layout.levels[1].guest_offset == 64);
     }
-    // Formats other than A8R8G8B8 and DXT have no layout.
+    // B8 linear: one byte per texel, the pitch register may exceed the row (6x3 texels in a 16-byte pitch).
+    {
+        tox2::RsxTextureLayout layout;
+        CHECK(tox2::rsxTextureLayout(0x81 | 0x20, true, 6, 3, 1, 16, 1, layout));
+        CHECK(layout.block_bytes == 1 && layout.levels.size() == 1 && !layout.levels[0].swizzled);
+        CHECK(layout.levels[0].row_bytes == 6 && layout.levels[0].guest_pitch == 16);
+        CHECK(layout.levels[0].guest_bytes == 16 * 2 + 6 && layout.guest_bytes == 38 && layout.packed_bytes == 18);
+        std::vector<std::uint8_t> guest(layout.guest_bytes), packed(layout.packed_bytes, 0xEE);
+        for (std::size_t i = 0; i < guest.size(); i++) guest[i] = static_cast<std::uint8_t>(i);
+        CHECK(tox2::rsxExtractTextureLevel(layout.levels[0], layout.block_bytes, guest, packed));
+        // Rows start at guest bytes 0, 16 and 32; the padding is dropped.
+        const std::uint8_t expected[18] = {0, 1, 2, 3, 4, 5, 16, 17, 18, 19, 20, 21, 32, 33, 34, 35, 36, 37};
+        CHECK(std::equal(packed.begin(), packed.end(), expected));
+        // A pitch of 0 stands for the row size; a pitch below one row has no layout.
+        CHECK(tox2::rsxTextureLayout(0xA1, true, 6, 3, 1, 0, 1, layout) && layout.levels[0].guest_pitch == 6);
+        CHECK(!tox2::rsxTextureLayout(0xA1, true, 6, 3, 1, 5, 1, layout));
+        // Mip levels keep the pitch of level 0: 8x4 in a 12-byte pitch gives levels at 0, 48 and 72.
+        CHECK(tox2::rsxTextureLayout(0xA1, true, 8, 4, 3, 12, 1, layout) && layout.levels.size() == 3);
+        CHECK(layout.levels[1].guest_offset == 48 && layout.levels[2].guest_offset == 72 &&
+              layout.levels[1].packed_offset == 32 && layout.levels[2].packed_offset == 40);
+    }
+    // B8 swizzled: the Morton order of 4-byte texels with one byte per texel, 8x4 and a 4x4 cube map.
+    {
+        tox2::RsxTextureLayout layout;
+        CHECK(tox2::rsxTextureLayout(0x81, false, 8, 4, 1, 0, 1, layout));
+        CHECK(layout.block_bytes == 1 && layout.levels[0].swizzled && layout.guest_bytes == 32);
+        std::vector<std::uint8_t> guest(32), packed(32, 0xEE);
+        for (std::uint32_t k = 0; k < 32; k++) guest[k] = static_cast<std::uint8_t>(k);
+        CHECK(tox2::rsxExtractTextureLevel(layout.levels[0], layout.block_bytes, guest, packed));
+        // Row y of 8 texels: x and y bits interleave up to the shorter side (2 bits), x2 counts above them.
+        const std::uint8_t row0[8] = {0, 1, 4, 5, 16, 17, 20, 21};
+        const std::uint8_t row3[8] = {10, 11, 14, 15, 26, 27, 30, 31};
+        CHECK(std::equal(packed.begin(), packed.begin() + 8, row0) &&
+              std::equal(packed.begin() + 24, packed.end(), row3));
+        CHECK(tox2::rsxTextureLayout(0x81, false, 4, 4, 1, 0, 6, layout) && layout.levels.size() == 6);
+        CHECK(layout.levels[1].guest_offset == 128 && layout.levels[5].guest_offset == 640 &&
+              layout.levels[1].packed_offset == 16 && layout.packed_bytes == 96);
+    }
+    // Formats other than A8R8G8B8, B8 and DXT have no layout.
     {
         tox2::RsxTextureLayout layout;
         CHECK(!tox2::rsxTextureLayout(0x84, true, 4, 4, 1, 0, 1, layout));

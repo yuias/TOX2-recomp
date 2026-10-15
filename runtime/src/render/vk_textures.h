@@ -21,7 +21,8 @@ namespace tox2 {
 
 // Sampled images are B8G8R8A8 for render targets and A8R8G8B8 guest textures (after a 32-bit byte swap
 // of each texel on upload, guest bytes A, R, G, B become B, G, R, A), and BC1/BC2/BC3 for DXT1/DXT23/DXT45
-// guest textures (block bytes uploaded as stored). Their channels read as the guest's R, G, B, A, and the
+// guest textures (block bytes uploaded as stored), and R8 for B8 guest textures (one byte per texel, uploaded
+// as stored; see b8ComponentMapping). Their channels read as the guest's R, G, B, A, and the
 // identity remap gives an identity view (which keeps border colours defined). A guest texture has its whole
 // mip chain (rsxTextureMipCount levels); render targets and their copies have one level.
 //
@@ -40,6 +41,10 @@ VkComponentMapping textureComponentMapping(std::uint32_t remap);
 // `get_component_mapping`, X32_FLOAT: R, R, R, R; `RSXTexture.cpp` `decoded_remap` ignores the channel
 // selects of float textures).
 VkComponentMapping singleChannelComponentMapping(std::uint32_t remap);
+
+// The same for a B8 texture (an R8_UNORM image): the base channels A, R, G, B read {1, byte, byte, byte}
+// (RPCS3 `VKFormats.cpp` `get_component_mapping`, B8: ONE, R, R, R), and the remap applies on top.
+VkComponentMapping b8ComponentMapping(std::uint32_t remap);
 
 // Vulkan format of the image that holds a guest texture of RSX format `rsx_format` (flag bits ignored);
 // UNDEFINED for a format that is not sampled.
