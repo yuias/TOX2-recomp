@@ -15197,6 +15197,101 @@ void testLwmutexWatchHooks() {
     tox2::setLogSink({});
 }
 
+// With the watch on, the lwmutex calls register their struct, count an owner word that is no lwmutex state or thread
+// id, and the HLE copies count a destination that overlaps a live struct.
+void testLwmutexWatchRegistration() {
+    using Kind = tox2::LwmutexWatchKind;
+    tox2::setLogSink([](std::string_view) {});
+    tox2::resetCensus();
+    tox2::resetSyncObjects();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t lw = scratch, attr = scratch + 0x40;
+
+    constexpr const char* kModule = "sysPrxForUser";
+    const Tox2ImportInfo imports[] = {
+            {0x00800000, 0x2f85c0ef, kModule, "sys_lwmutex_create"},
+            {0x00800010, 0xc3476d0c, kModule, "sys_lwmutex_destroy"},
+            {0x00800030, 0xaeb78725, kModule, "sys_lwmutex_trylock"},
+            {0x00800040, 0x1bc200f4, kModule, "sys_lwmutex_unlock"},
+            {0x00800070, 0x68b9b011, kModule, "_sys_memset"},
+    };
+    tox2::installImports(imports, 5);
+    enum { kCreate, kDestroy, kTryLock, kUnlock, kMemset };
+    auto caller = makeCaller(0x01000000);
+    auto call = [&](std::uint32_t index, std::uint64_t r3, std::uint64_t r4 = 0, std::uint64_t r5 = 0) {
+        Tox2PpuContext* ctx = &caller->context();
+        ctx->gpr[3] = r3;
+        ctx->gpr[4] = r4;
+        ctx->gpr[5] = r5;
+        tox2HleCall(ctx, base, index);
+        return ctx->gpr[3];
+    };
+    auto hits = [](Kind kind) { return tox2::lwmutexWatchStats().hits[static_cast<std::size_t>(kind)]; };
+
+    // Off: nothing is registered and nothing counted.
+    tox2Write32(base, attr, 2);
+    tox2Write32(base, attr + 4, 0x10);
+    const std::uint64_t live_before = tox2::lwmutexWatchStats().live;
+    CHECK(call(kCreate, lw, attr) == 0);
+    CHECK(tox2::lwmutexWatchStats().live == live_before);
+    CHECK(call(kDestroy, lw) == 0);
+
+    tox2::setLwmutexWatchEnabled(true);
+    CHECK(call(kCreate, lw, attr) == 0);
+    CHECK(tox2::lwmutexWatchStats().live == live_before + 1);
+
+    // Writing the pad word through the HLE copy is a hit; the lwmutex calls themselves are not.
+    const std::uint64_t copy_before = hits(Kind::HleCopy);
+    CHECK(call(kMemset, lw + 20, 0, 4) == lw + 20);
+    CHECK(hits(Kind::HleCopy) == copy_before + 1);
+    CHECK(call(kMemset, lw + 24, 0, 4) == lw + 24);  // the word after the struct
+    CHECK(hits(Kind::HleCopy) == copy_before + 1);
+
+    // Lwmutex states and thread ids are valid owner words; anything else is a hit.
+    const std::uint64_t owner_before = hits(Kind::OwnerValue);
+    CHECK(call(kTryLock, lw) == 0);
+    CHECK(call(kTryLock, lw) == 0);  // recursion step on the thread's own id
+    CHECK(call(kUnlock, lw) == 0);
+    CHECK(call(kUnlock, lw) == 0);
+    CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree);
+    CHECK(hits(Kind::OwnerValue) == owner_before);
+    tox2Write32(base, lw, 0x12345678);
+    CHECK(call(kTryLock, lw) == err(tox2::kCellEbusy));
+    CHECK(hits(Kind::OwnerValue) == owner_before + 1);
+    tox2Write32(base, lw, tox2::kLwmutexFree);
+
+    // A waiter word that differs from the (empty) wait list is a hit when the unlock enters the release path.
+    const std::uint64_t waiter_before = hits(Kind::WaiterValue);
+    CHECK(call(kTryLock, lw) == 0);
+    CHECK(call(kUnlock, lw) == 0);
+    CHECK(hits(Kind::WaiterValue) == waiter_before);
+    CHECK(call(kTryLock, lw) == 0);
+    tox2Write32(base, lw + 4, 3);
+    CHECK(call(kUnlock, lw) == 0);
+    CHECK(hits(Kind::WaiterValue) == waiter_before + 1);
+    tox2Write32(base, lw + 4, 0);
+
+    CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree);
+    CHECK(call(kDestroy, lw) == 0);
+    CHECK(tox2::lwmutexWatchStats().live == live_before);
+    CHECK(tox2::lwmutexWatchStats().max_live >= live_before + 1);
+
+    // The destroyed struct no longer counts.
+    const std::uint64_t copy_after_destroy = hits(Kind::HleCopy);
+    CHECK(call(kMemset, lw + 20, 0, 4) == lw + 20);
+    CHECK(hits(Kind::HleCopy) == copy_after_destroy);
+
+    tox2::setLwmutexWatchEnabled(false);
+    p.main.free(scratch);
+    tox2::resetSyncObjects();
+    tox2::setLogSink({});
+    tox2::resetCensus();
+}
+
 // The counters are process-wide, so the test compares against totals taken before it.
 void testPpuReservationStats() {
     std::unique_ptr<tox2::GuestMemory> memory(newMemory());
@@ -15759,6 +15854,7 @@ int main(int argc, char** argv) {
     testReservationAndDcbz();
     testPpuReservationStats();
     testLwmutexWatchHooks();
+    testLwmutexWatchRegistration();
     testGuestStackWalk();
     testFaultChild();
     testOverflowChild();

@@ -13,6 +13,7 @@
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
+#include "core/reservation.h"
 #include "tox2/ppu_context.h"
 #include "hle/guest_printf.h"
 #include "hle/hle.h"
@@ -98,9 +99,15 @@ void sysMemcmp(Tox2PpuContext* ctx, std::uint8_t* base) {
     ctx->gpr[3] = signExtend32(diff);
 }
 
+// --lwmutex-watch: a copy into a live sys_lwmutex_t bypasses the lwmutex calls. Both copies take (dst, _, n).
+void watchCopyDestination(const Tox2PpuContext* ctx, std::uint32_t dst) {
+    if (lwmutexWatchEnabled()) lwmutexWatchCheck(LwmutexWatchKind::HleCopy, dst, argU32(ctx, 2), ctx->lr);
+}
+
 // _sys_memset(dst, c, n): the low byte of c is stored.
 void sysMemset(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t dst = argU32(ctx, 0);
+    watchCopyDestination(ctx, dst);
     std::memset(base + dst, static_cast<int>(ctx->gpr[4] & 0xFF), argU32(ctx, 2));
     ctx->gpr[3] = dst;
 }
@@ -108,6 +115,7 @@ void sysMemset(Tox2PpuContext* ctx, std::uint8_t* base) {
 // _sys_memcpy(dst, src, n): memmove semantics, because callers do not always keep the ranges apart.
 void sysMemcpy(Tox2PpuContext* ctx, std::uint8_t* base) {
     const std::uint32_t dst = argU32(ctx, 0);
+    watchCopyDestination(ctx, dst);
     std::memmove(base + dst, base + argU32(ctx, 1), argU32(ctx, 2));
     ctx->gpr[3] = dst;
 }

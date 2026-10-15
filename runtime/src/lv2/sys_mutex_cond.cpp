@@ -13,6 +13,7 @@
 #include <memory>
 
 #include "core/guest_memory.h"
+#include "core/reservation.h"
 #include "core/threads.h"
 #include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
@@ -23,6 +24,10 @@ namespace {
 
 // Owner value of a thread that is not a guest thread (host-side callers such as tests).
 constexpr std::uint32_t kHostCallerId = 0x01ffffff;
+
+// Thread ids (guest threads and kHostCallerId) all have this top byte; the lwmutex watch uses it to tell an owner word
+// holding a thread id from garbage without looking the thread up.
+constexpr std::uint32_t kThreadIdTopByte = 0x01;
 
 // Priority of a waiter that is not a guest thread (host-side callers such as tests): behind every guest thread.
 constexpr std::int32_t kHostWaiterPriority = 3071;
@@ -142,6 +147,23 @@ std::uint32_t recurse(bool recursive, std::uint32_t& count) {
     return kCellOk;
 }
 
+// --lwmutex-watch: an owner word that is neither a lwmutex state nor a thread id was written by something other than
+// the lwmutex calls.
+void watchOwnerValue(std::uint32_t lwmutex, std::uint32_t owner) {
+    if (!lwmutexWatchEnabled()) return;
+    if (owner == kLwmutexFree || owner == kLwmutexDead || owner == kLwmutexReserved) return;
+    if ((owner >> 24) == kThreadIdTopByte) return;
+    lwmutexWatchHit(LwmutexWatchKind::OwnerValue, lwmutex + kLwmutexOwner, 4, 0);
+}
+
+// --lwmutex-watch: under the kernel lock the waiter word equals the length of the wait list. A guest store to the word
+// breaks that without passing through any hook.
+void watchWaiterValue(const std::uint8_t* base, std::uint32_t lwmutex, const Lwmutex& object) {
+    if (!lwmutexWatchEnabled()) return;
+    if (tox2Read32(base, lwmutex + kLwmutexWaiter) == object.waiters.size()) return;
+    lwmutexWatchHit(LwmutexWatchKind::WaiterValue, lwmutex + kLwmutexWaiter, 4, 0);
+}
+
 }  // namespace
 
 std::uint32_t callerThreadId(const Tox2PpuContext* ctx) {
@@ -209,6 +231,7 @@ std::uint32_t lwmutexCreateObject(std::uint8_t* base, std::uint32_t lwmutex, std
     tox2Write32(base, lwmutex + kLwmutexAttribute, recursive | protocol);
     tox2Write32(base, lwmutex + kLwmutexRecursiveCount, 0);
     tox2Write32(base, lwmutex + kLwmutexSleepQueue, g_lwmutexes.add(std::make_shared<Lwmutex>()));
+    if (lwmutexWatchEnabled()) lwmutexWatchAdd(lwmutex);
     return kCellOk;
 }
 
@@ -217,6 +240,7 @@ std::uint32_t lwmutexAcquire(const Tox2PpuContext* ctx, std::uint8_t* base, std:
                              std::uint64_t timeout_us) {
     const std::uint32_t tid = callerThreadId(ctx);
     const std::uint32_t owner = tox2Read32(base, lwmutex + kLwmutexOwner);
+    watchOwnerValue(lwmutex, owner);
     if (owner == kLwmutexFree) {
         tox2Write32(base, lwmutex + kLwmutexOwner, tid);
         return kCellOk;
@@ -233,6 +257,7 @@ std::uint32_t lwmutexAcquire(const Tox2PpuContext* ctx, std::uint8_t* base, std:
 
     const auto object = g_lwmutexes.find(tox2Read32(base, lwmutex + kLwmutexSleepQueue));
     if (object == nullptr) return kCellEsrch;
+    watchWaiterValue(base, lwmutex, *object);
     object->waiters.push_back({callerThread(ctx), tid, false});
     const auto self = std::prev(object->waiters.end());
     g_lwmutex_waits.fetch_add(1, std::memory_order_relaxed);
@@ -252,6 +277,7 @@ std::uint32_t lwmutexAcquire(const Tox2PpuContext* ctx, std::uint8_t* base, std:
 // lwmutex in between.
 void releaseLwmutex(std::uint8_t* base, std::uint32_t lwmutex) {
     const auto object = g_lwmutexes.find(tox2Read32(base, lwmutex + kLwmutexSleepQueue));
+    if (object != nullptr) watchWaiterValue(base, lwmutex, *object);
     // The protocol is the low nibble of the attribute word; the recursive flag sits above it.
     SyncWaiter* next = object != nullptr
                                ? chooseWaiter(object->waiters, tox2Read32(base, lwmutex + kLwmutexAttribute) & 0xf)
@@ -281,6 +307,7 @@ std::uint32_t lwmutexCreate(std::uint8_t* base, std::uint32_t lwmutex, std::uint
 
 std::uint32_t lwmutexDestroy(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex) {
     const std::uint32_t owner = tox2Read32(base, lwmutex + kLwmutexOwner);
+    watchOwnerValue(lwmutex, owner);
     if (owner == callerThreadId(ctx)) return kCellEbusy;
     if (owner == kLwmutexDead) return kCellEinval;
     if (owner != kLwmutexFree) return kCellEbusy;
@@ -290,6 +317,7 @@ std::uint32_t lwmutexDestroy(const Tox2PpuContext* ctx, std::uint8_t* base, std:
     if (!object->waiters.empty()) return kCellEbusy;
     g_lwmutexes.erase(id);
     tox2Write32(base, lwmutex + kLwmutexOwner, kLwmutexDead);
+    if (lwmutexWatchEnabled()) lwmutexWatchRemove(lwmutex);
     return kCellOk;
 }
 
@@ -303,7 +331,9 @@ std::uint32_t lwmutexTryLock(const Tox2PpuContext* ctx, std::uint8_t* base, std:
 }
 
 std::uint32_t lwmutexUnlock(const Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t lwmutex) {
-    if (tox2Read32(base, lwmutex + kLwmutexOwner) != callerThreadId(ctx)) return kCellEperm;
+    const std::uint32_t owner = tox2Read32(base, lwmutex + kLwmutexOwner);
+    watchOwnerValue(lwmutex, owner);
+    if (owner != callerThreadId(ctx)) return kCellEperm;
     const std::uint32_t count = tox2Read32(base, lwmutex + kLwmutexRecursiveCount);
     if (count != 0) {
         tox2Write32(base, lwmutex + kLwmutexRecursiveCount, count - 1);
@@ -338,7 +368,10 @@ std::uint32_t lwcondWait(const Tox2PpuContext* ctx, std::uint8_t* base, std::uin
     if (object == nullptr) return kCellEsrch;
     const std::uint32_t lwmutex = tox2Read32(base, lwcond + kLwcondMutex);
     const std::uint32_t tid = callerThreadId(ctx);
-    if (lwmutex == 0 || tox2Read32(base, lwmutex + kLwmutexOwner) != tid) return kCellEperm;
+    if (lwmutex == 0) return kCellEperm;
+    const std::uint32_t owner = tox2Read32(base, lwmutex + kLwmutexOwner);
+    watchOwnerValue(lwmutex, owner);
+    if (owner != tid) return kCellEperm;
 
     // Release the lwmutex completely, as an unlock of the last recursion level does, and queue before
     // anything can run so a signal sent right after cannot be missed.

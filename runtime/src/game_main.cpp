@@ -35,6 +35,7 @@
 #include "core/log.h"
 #include "core/param_sfo.h"
 #include "core/perf_log.h"
+#include "core/reservation.h"
 #include "core/threads.h"
 #include "core/timer_resolution.h"
 #include "tox2/ppu_context.h"
@@ -97,6 +98,7 @@ struct Options {
     tox2::RsxFlipLimit frame_limit = tox2::RsxFlipLimit::Vsync;       // --frame-limit vsync (default), 60 or off
     bool host_priorities = true;                                      // --host-priorities on (default) or off
     bool yield_backoff = true;                                        // --yield-backoff on (default) or off
+    bool lwmutex_watch = false;                                       // --lwmutex-watch
     tox2::PpuThreadsMode ppu_threads = tox2::PpuThreadsMode::Split2;  // --ppu-threads legacy, 1 or 2 (default)
     bool window = false;                                              // settled after all arguments
     bool pad_probe = false;
@@ -347,7 +349,7 @@ void printUsage() {
             "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
             "                [--resolution-scale N] [--aa-mode supersample|msaa] [--vk-validation] [--no-window]\n"
             "                [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off]\n"
-            "                [--ppu-threads legacy|1|2]\n"
+            "                [--ppu-threads legacy|1|2] [--lwmutex-watch]\n"
             "                [--dump-guest ADDR:SIZE:FILE]...\n",
             stderr);
 }
@@ -520,6 +522,8 @@ bool parseArgs(int argc, char** argv, Options& opt) {
                 return false;
             }
             opt.yield_backoff = name == "on";
+        } else if (arg == "--lwmutex-watch") {
+            opt.lwmutex_watch = true;
         } else if (arg == "--ppu-threads") {
             std::string name;
             if (!value(name)) return false;
@@ -979,6 +983,8 @@ int main(int argc, char** argv) {
     tox2::setRsxFlipLimit(opt.frame_limit);
     tox2::setHostPrioritiesEnabled(opt.host_priorities);
     tox2::setYieldBackoffEnabled(opt.yield_backoff);
+    // Before boot creates the process lwmutexes, which the watch has to register.
+    tox2::setLwmutexWatchEnabled(opt.lwmutex_watch);
     // Before any guest thread exists: the mode fixes the slot capacity and the lock rules those threads start with.
     tox2::setPpuThreadsMode(opt.ppu_threads);
     tox2::logInfo("tox2: ppu threads: {}", opt.ppu_threads == tox2::PpuThreadsMode::Legacy   ? "legacy"
