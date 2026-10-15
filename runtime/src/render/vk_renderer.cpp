@@ -2353,6 +2353,13 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     blendConstants(raster.blend_color, constants);
     if (set(shadow.blend_constants, constants)) vkCmdSetBlendConstants(cmd, constants);
 
+    // Always a value, never left unset: a stale or missing push constant would shift a draw by a sub-pixel amount.
+    const float jitter_ndc[2] = {0.0f, 0.0f};
+    if (set(shadow.jitter_ndc, jitter_ndc)) {
+        vkCmdPushConstants(cmd, pipelines_->drawLayout(), VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(jitter_ndc),
+                           jitter_ndc);
+    }
+
     for (std::uint32_t slot = 0; slot < kPipelineVertexSlots; slot++) {
         if (vertex_buffers[slot] != VK_NULL_HANDLE)
             vkCmdBindVertexBuffers(cmd, slot, 1, &vertex_buffers[slot], &vertex_offsets[slot]);

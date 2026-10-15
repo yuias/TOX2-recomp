@@ -5161,7 +5161,7 @@ void testRendererAaModeSwitch(tox2::VkContext& ctx) {
 // state on the command buffer, and a new frame, makes the next draw record all of it.
 void testDrawStateShadow(tox2::VkContext& ctx) {
     using namespace tox2::rsx_synthetic;
-    constexpr std::uint64_t kDrawStateCalls = 20;  // pipeline bind and 19 dynamic state commands
+    constexpr std::uint64_t kDrawStateCalls = 21;  // pipeline bind, 19 dynamic state commands, the jitter push
     tox2::rsxUnimplementedReset();
     const std::uint32_t errors_before = ctx.validationErrorCount();
     TextureOptions alias;

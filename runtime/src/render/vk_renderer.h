@@ -97,7 +97,7 @@ struct RendererStats {
     std::uint64_t barriers = 0;                     // image barriers recorded by transitionImage
     std::uint64_t barriers_skipped = 0;             // transitions that needed no barrier
     std::uint64_t rendering_instances = 0;          // vkCmdBeginRendering calls, all paths
-    std::uint64_t state_calls = 0;                  // vkCmdSet* and vkCmdBindPipeline calls recorded by recordDraw
+    std::uint64_t state_calls = 0;                  // vkCmdSet*/BindPipeline/PushConstants calls from recordDraw
     std::uint64_t state_calls_skipped = 0;          // ... that were not recorded because the value was already set
     std::uint64_t vp_constant_uploads_reused = 0;   // vertex constant uploads shared by draws with equal constants
     VkMemoryPropertyFlags upload_memory_flags = 0;  // of the first upload block (vmaGetAllocationMemoryProperties)
@@ -358,6 +358,7 @@ private:
             std::uint32_t compare_mask = 0, write_mask = 0, reference = 0;
         } faces[2];
         float blend_constants[4] = {};
+        float jitter_ndc[2] = {};  // push constant of the draw layout
     };
     // Empty: the command buffer's state is unknown and the next draw records all of it. Cleared by beginFrame and by
     // every other site that binds a pipeline or sets state, since a pipeline that does not declare a state as dynamic
