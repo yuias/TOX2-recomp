@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "render/vk_context.h"
+#include "render/window_size.h"
 
 namespace tox2 {
 
@@ -67,8 +68,11 @@ struct PresenterOptions {
     std::function<void(const KeyMessage&)> on_key;
     // Called when the window loses keyboard focus (key-up messages are not delivered to it afterwards).
     std::function<void()> on_focus_lost;
-    std::uint32_t client_width = 1280;
-    std::uint32_t client_height = 720;
+    // The client size in physical pixels the window opens with, fitted to the monitor's work area.
+    WindowSizePreset window_size = WindowSizePreset::Size720p;
+    bool fullscreen = false;  // start in borderless fullscreen
+    // Called on the UI thread after the user toggled fullscreen (Alt+Enter, F11); not for the start-up state.
+    std::function<void(bool fullscreen)> on_fullscreen_changed;
     // Frame slots of the renderer: one acquire semaphore each.
     std::size_t frame_slots = 2;
 };
@@ -110,6 +114,13 @@ public:
 
     // The window's HWND. Any thread; it is valid for the presenter's lifetime.
     void* nativeWindowHandle() const;
+
+    // Any thread; read from atomics the UI thread keeps current.
+    WindowStatus windowStatus() const;
+
+    // Any thread; posts to the UI thread, which resizes the window (immediately when windowed, when leaving
+    // fullscreen otherwise). Choosing the preset that is already set re-applies it.
+    void requestWindowSize(WindowSizePreset preset);
 
 private:
     class Window;

@@ -514,6 +514,31 @@ void testWindowSizePresets() {
     CHECK(tox2::fitClientSize({3840, 2160}, {2500, 2000}) == (tox2::ClientSize{2496, 1404}));
 }
 
+// Needs no window.
+void testPlaceInWorkArea() {
+    using tox2::ScreenRect;
+    const ScreenRect work{0, 0, 1920, 1040};
+    // A rectangle that fits stays where it is.
+    CHECK(tox2::placeInWorkArea({100, 50, 900, 650}, work) == (ScreenRect{100, 50, 900, 650}));
+    CHECK(tox2::placeInWorkArea({0, 0, 1920, 1040}, work) == (ScreenRect{0, 0, 1920, 1040}));
+    // Each side that sticks out is pulled in by the least distance, keeping the size.
+    CHECK(tox2::placeInWorkArea({-30, 50, 770, 650}, work) == (ScreenRect{0, 50, 800, 650}));
+    CHECK(tox2::placeInWorkArea({1500, 50, 2300, 650}, work) == (ScreenRect{1120, 50, 1920, 650}));
+    CHECK(tox2::placeInWorkArea({100, -20, 900, 580}, work) == (ScreenRect{100, 0, 900, 600}));
+    CHECK(tox2::placeInWorkArea({100, 700, 900, 1300}, work) == (ScreenRect{100, 440, 900, 1040}));
+    CHECK(tox2::placeInWorkArea({1500, 700, 2300, 1300}, work) == (ScreenRect{1120, 440, 1920, 1040}));
+    // A work area that does not start at the origin (a monitor left of or above the primary one).
+    const ScreenRect second{-1920, -200, 0, 880};
+    CHECK(tox2::placeInWorkArea({-100, 500, 700, 1100}, second) == (ScreenRect{-800, 280, 0, 880}));
+    CHECK(tox2::placeInWorkArea({200, 0, 1000, 600}, second) == (ScreenRect{-800, 0, 0, 600}));
+    // Larger than the work area: aligned to the left and top edges.
+    CHECK(tox2::placeInWorkArea({300, 200, 2300, 1400}, work) == (ScreenRect{0, 0, 2000, 1200}));
+    CHECK(tox2::placeInWorkArea({-50, -50, 1950, 1150}, work) == (ScreenRect{0, 0, 2000, 1200}));
+    // Wider only, or taller only.
+    CHECK(tox2::placeInWorkArea({300, 200, 2300, 800}, work) == (ScreenRect{0, 200, 2000, 800}));
+    CHECK(tox2::placeInWorkArea({300, 200, 900, 1400}, work) == (ScreenRect{300, 0, 900, 1200}));
+}
+
 // Needs no Vulkan device.
 void testAnisotropyNames() {
     for (const std::uint32_t level : tox2::kAnisotropyLevels) {
@@ -5550,7 +5575,8 @@ void testPresenterTypes() {
     CHECK(!none.handled && none.result == 0 && !none.withhold_key);
 
     tox2::PresenterOptions options;
-    CHECK(!options.on_message);
+    CHECK(!options.on_message && !options.on_fullscreen_changed);
+    CHECK(options.window_size == tox2::WindowSizePreset::Size720p && !options.fullscreen);
     int calls = 0;
     options.on_message = [&calls](const tox2::WindowMessage& message) {
         calls++;
@@ -5593,6 +5619,7 @@ int main() {
     testConvertIndicesChecked();
     testAaModeNames();
     testWindowSizePresets();
+    testPlaceInWorkArea();
     testAnisotropyNames();
     testForcedAnisotropy();
     testLayoutSource();

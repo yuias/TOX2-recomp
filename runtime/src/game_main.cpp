@@ -255,6 +255,11 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions&
             return overlay->onWindowMessage(message);
         };
         presenter_options.frame_slots = tox2::RsxRenderer::kFramesInFlight;
+        presenter_options.window_size = opt.window_size;
+        presenter_options.fullscreen = opt.fullscreen;
+        presenter_options.on_fullscreen_changed = [](bool fullscreen) {
+            if (g_settings_store != nullptr) g_settings_store->set("fullscreen", fullscreen ? "on" : "off");
+        };
         presenter_options.on_close = [] {
             tox2::stopProcess(tox2::ExitCode::ProcessExit, "tox2: stop: window closed");
         };

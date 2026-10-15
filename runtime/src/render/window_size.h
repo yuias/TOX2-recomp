@@ -66,4 +66,32 @@ constexpr ClientSize fitClientSize(ClientSize wanted, ClientSize available) {
     return {width, width / 16 * 9};
 }
 
+// Screen coordinates, edges as in a Win32 RECT (right and bottom are exclusive).
+struct ScreenRect {
+    std::int32_t left = 0, top = 0, right = 0, bottom = 0;
+    bool operator==(const ScreenRect&) const = default;
+};
+
+// `window` moved, keeping its size, the least distance that puts it inside `work`; a window larger than `work`
+// is aligned to its left and top edges.
+constexpr ScreenRect placeInWorkArea(ScreenRect window, ScreenRect work) {
+    // 64 bits so extreme coordinates cannot wrap.
+    const std::int64_t width = std::int64_t{window.right} - window.left;
+    const std::int64_t height = std::int64_t{window.bottom} - window.top;
+    // Pull the right and bottom edges in first; the left and top edges then win for an oversized window.
+    const std::int64_t left =
+            std::max<std::int64_t>(work.left, std::min<std::int64_t>(window.left, work.right - width));
+    const std::int64_t top = std::max<std::int64_t>(work.top, std::min<std::int64_t>(window.top, work.bottom - height));
+    return {static_cast<std::int32_t>(left), static_cast<std::int32_t>(top), static_cast<std::int32_t>(left + width),
+            static_cast<std::int32_t>(top + height)};
+}
+
+// What the window reports to the overlay. Written on the UI thread, read from any thread.
+struct WindowStatus {
+    WindowSizePreset preset = WindowSizePreset::Size720p;  // the last preset applied or requested
+    ClientSize client;                                     // current client area (0x0 while minimised)
+    ClientSize available;  // client pixels the work area allows with the windowed frame at the window's DPI
+    bool fullscreen = false;
+};
+
 }  // namespace tox2

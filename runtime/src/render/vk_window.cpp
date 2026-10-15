@@ -29,6 +29,7 @@ constexpr wchar_t kWindowTitle[] = L"Tales of Xillia 2";
 constexpr std::uint64_t kAcquireTimeoutNs = 1'000'000'000ull;
 constexpr std::chrono::seconds kReportInterval{10};
 constexpr int kMaxSwapchainFailures = 3;
+constexpr DWORD kWindowedStyle = WS_OVERLAPPEDWINDOW;
 
 double toMs(std::chrono::nanoseconds duration) { return std::chrono::duration<double, std::milli>(duration).count(); }
 
@@ -103,17 +104,38 @@ public:
     VkExtent2D clientSize() const {
         return {width_.load(std::memory_order_relaxed), height_.load(std::memory_order_relaxed)};
     }
+    WindowStatus status() const {
+        WindowStatus status;
+        status.preset = static_cast<WindowSizePreset>(preset_.load(std::memory_order_relaxed));
+        status.client = {width_.load(std::memory_order_relaxed), height_.load(std::memory_order_relaxed)};
+        status.available = {available_width_.load(std::memory_order_relaxed),
+                            available_height_.load(std::memory_order_relaxed)};
+        status.fullscreen = fullscreen_.load(std::memory_order_relaxed);
+        return status;
+    }
+    // Only PostMessageW: window functions belong to the UI thread.
+    void requestSize(WindowSizePreset preset) {
+        if (hwnd_ != nullptr) PostMessageW(hwnd_, kSetSizeMessage, static_cast<WPARAM>(preset), 0);
+    }
 
 private:
     static constexpr UINT kDestroyMessage = WM_APP;
+    static constexpr UINT kSetSizeMessage = WM_APP + 1;
+
+    // What sizing a window needs to know about the monitor it is on.
+    struct FrameMetrics {
+        ScreenRect work;       // rcWork of the window's monitor
+        ClientSize available;  // client pixels that fit `work` with the windowed frame at the window's DPI
+    };
 
     explicit Window(const PresenterOptions& options)
         : on_close_(options.on_close),
           on_message_(options.on_message),
           on_key_(options.on_key),
           on_focus_lost_(options.on_focus_lost),
-          client_width_(options.client_width),
-          client_height_(options.client_height) {}
+          on_fullscreen_changed_(options.on_fullscreen_changed),
+          start_fullscreen_(options.fullscreen),
+          preset_(static_cast<std::uint8_t>(options.window_size)) {}
 
     void run() {
         const HINSTANCE instance = GetModuleHandleW(nullptr);
@@ -127,18 +149,13 @@ private:
             ready_.set_value(std::format("RegisterClassExW failed ({})", GetLastError()));
             return;
         }
-        const DWORD style = WS_OVERLAPPEDWINDOW;
-        // The frame is sized for the DPI of the monitor the window opens on, so the client area is
-        // client_width_ x client_height_ physical pixels.
-        const auto frameSize = [&](UINT dpi) {
-            RECT frame = {0, 0, static_cast<LONG>(client_width_), static_cast<LONG>(client_height_)};
-            AdjustWindowRectExForDpi(&frame, style, FALSE, 0, dpi);
-            return SIZE{frame.right - frame.left, frame.bottom - frame.top};
-        };
-        const UINT system_dpi = GetDpiForSystem();
-        const SIZE initial = frameSize(system_dpi);
-        hwnd_ = CreateWindowExW(0, kWindowClass, kWindowTitle, style, CW_USEDEFAULT, CW_USEDEFAULT, initial.cx,
-                                initial.cy, nullptr, nullptr, instance, this);
+        // The monitor is not known before the window exists, so it is created with the preset's frame at the
+        // system DPI at the default position; applyPreset below fits and moves it before it is shown.
+        const ClientSize wanted = presetClientSize(static_cast<WindowSizePreset>(preset_.load()));
+        RECT frame = {0, 0, static_cast<LONG>(wanted.width), static_cast<LONG>(wanted.height)};
+        AdjustWindowRectExForDpi(&frame, kWindowedStyle, FALSE, 0, GetDpiForSystem());
+        hwnd_ = CreateWindowExW(0, kWindowClass, kWindowTitle, kWindowedStyle, CW_USEDEFAULT, CW_USEDEFAULT,
+                                frame.right - frame.left, frame.bottom - frame.top, nullptr, nullptr, instance, this);
         if (hwnd_ == nullptr) {
             ready_.set_value(std::format("CreateWindowExW failed ({})", GetLastError()));
             UnregisterClassW(kWindowClass, instance);
@@ -147,10 +164,14 @@ private:
         // No IME for the game window: an open Japanese IME would otherwise show a composition window over
         // the game and turn keys into composition input. Keys still arrive as plain key messages.
         ImmAssociateContext(hwnd_, nullptr);
-        if (const UINT window_dpi = GetDpiForWindow(hwnd_); window_dpi != 0 && window_dpi != system_dpi) {
-            const SIZE adjusted = frameSize(window_dpi);
-            SetWindowPos(hwnd_, nullptr, 0, 0, adjusted.cx, adjusted.cy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        applyPreset();
+        // Fullscreen is entered while the window is hidden, after the preset, so the windowed placement it
+        // remembers is the preset and no windowed frame is ever shown.
+        if (start_fullscreen_ && enterFullscreen()) {
+            // A window that was never shown reports SW_HIDE; leaving fullscreen must show the window.
+            windowed_placement_.showCmd = SW_SHOWNORMAL;
         }
+        refreshAvailable(hwnd_);
         RECT client{};
         GetClientRect(hwnd_, &client);
         width_.store(static_cast<std::uint32_t>(client.right - client.left));
@@ -191,7 +212,15 @@ private:
                 // A minimised window reports a 0x0 client area.
                 self->width_.store(wparam == SIZE_MINIMIZED ? 0 : LOWORD(lparam));
                 self->height_.store(wparam == SIZE_MINIMIZED ? 0 : HIWORD(lparam));
+                self->refreshAvailable(hwnd);
                 return 0;
+            // The work area or the frame width can change with the window's monitor, its DPI, the taskbar or the
+            // display layout. The window keeps its rectangle (a size the user dragged stays).
+            case WM_MOVE:
+            case WM_DPICHANGED:
+            case WM_DISPLAYCHANGE:
+            case WM_SETTINGCHANGE: self->refreshAvailable(hwnd); break;
+            case kSetSizeMessage: self->setPreset(wparam); return 0;
             case WM_KEYDOWN:
             case WM_KEYUP:
             case WM_SYSKEYDOWN:
@@ -236,45 +265,131 @@ private:
 
     // Borderless fullscreen: a popup window covering the monitor it is on. The swapchain follows the
     // client size through WM_SIZE, so nothing on the Vulkan side changes here.
-    void toggleFullscreen() {
-        if (!fullscreen_) {
-            MONITORINFO monitor{};
-            monitor.cbSize = sizeof(monitor);
-            windowed_placement_.length = sizeof(windowed_placement_);
-            if (!GetWindowPlacement(hwnd_, &windowed_placement_) ||
-                !GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &monitor)) {
-                return;
-            }
-            windowed_style_ = GetWindowLongW(hwnd_, GWL_STYLE);
-            SetWindowLongW(hwnd_, GWL_STYLE, (windowed_style_ & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
-            const RECT& r = monitor.rcMonitor;
-            SetWindowPos(hwnd_, HWND_TOP, r.left, r.top, r.right - r.left, r.bottom - r.top,
-                         SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
-            fullscreen_ = true;
-        } else {
-            SetWindowLongW(hwnd_, GWL_STYLE, windowed_style_);
-            // The placement restores a maximised window as maximised.
-            SetWindowPlacement(hwnd_, &windowed_placement_);
-            SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-            fullscreen_ = false;
+    bool enterFullscreen() {
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        windowed_placement_.length = sizeof(windowed_placement_);
+        if (!GetWindowPlacement(hwnd_, &windowed_placement_) ||
+            !GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &monitor)) {
+            return false;
         }
+        windowed_style_ = GetWindowLongW(hwnd_, GWL_STYLE);
+        SetWindowLongW(hwnd_, GWL_STYLE, (windowed_style_ & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+        const RECT& r = monitor.rcMonitor;
+        SetWindowPos(hwnd_, HWND_TOP, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+        fullscreen_.store(true);
+        return true;
+    }
+
+    void leaveFullscreen() {
+        SetWindowLongW(hwnd_, GWL_STYLE, windowed_style_);
+        // The placement restores a maximised window as maximised.
+        SetWindowPlacement(hwnd_, &windowed_placement_);
+        SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+        fullscreen_.store(false);
+        // A preset chosen while fullscreen replaces the remembered placement (and leaves a maximised one).
+        if (preset_pending_) {
+            preset_pending_ = false;
+            applyPreset();
+        }
+    }
+
+    void toggleFullscreen() {
+        if (fullscreen_.load()) {
+            leaveFullscreen();
+        } else if (!enterFullscreen()) {
+            return;
+        }
+        if (on_fullscreen_changed_) on_fullscreen_changed_(fullscreen_.load());
+    }
+
+    // `hwnd` is a parameter because messages arrive inside CreateWindowExW, before hwnd_ is set.
+    static bool queryFrameMetrics(HWND hwnd, FrameMetrics& metrics) {
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) return false;
+        UINT dpi = GetDpiForWindow(hwnd);
+        if (dpi == 0) dpi = GetDpiForSystem();
+        // An empty client rectangle grows to just the frame (the invisible resize borders count as frame).
+        RECT frame{};
+        AdjustWindowRectExForDpi(&frame, kWindowedStyle, FALSE, 0, dpi);
+        const RECT& work = monitor.rcWork;
+        metrics.work = {work.left, work.top, work.right, work.bottom};
+        const auto room = [](LONG work_size, LONG frame_size) {
+            return static_cast<std::uint32_t>(std::max<LONG>(0, work_size - frame_size));
+        };
+        metrics.available = {room(work.right - work.left, frame.right - frame.left),
+                             room(work.bottom - work.top, frame.bottom - frame.top)};
+        return true;
+    }
+
+    void refreshAvailable(HWND hwnd) {
+        // A minimised window sits at (-32000, -32000), which says nothing about its monitor.
+        if (IsIconic(hwnd)) return;
+        FrameMetrics metrics;
+        if (!queryFrameMetrics(hwnd, metrics)) return;
+        available_width_.store(metrics.available.width);
+        available_height_.store(metrics.available.height);
+    }
+
+    void setPreset(WPARAM value) {
+        if (value >= kWindowSizePresets.size()) return;
+        preset_.store(static_cast<std::uint8_t>(value));
+        // Fullscreen keeps the monitor-sized window; the preset applies when it is left.
+        if (fullscreen_.load()) {
+            preset_pending_ = true;
+        } else {
+            applyPreset();
+        }
+    }
+
+    // Windowed only. Sizes the frame for the current preset, fitted to the work area of the window's monitor, and
+    // keeps its top-left corner unless the window would stick out of the work area.
+    void applyPreset() {
+        if (fullscreen_.load() || IsIconic(hwnd_)) return;
+        // Resizing a maximised window only changes the rectangle it returns to, so restore it first.
+        if (IsZoomed(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
+        FrameMetrics metrics;
+        if (!queryFrameMetrics(hwnd_, metrics)) return;
+        available_width_.store(metrics.available.width);
+        available_height_.store(metrics.available.height);
+
+        const ClientSize client =
+                fitClientSize(presetClientSize(static_cast<WindowSizePreset>(preset_.load())), metrics.available);
+        UINT dpi = GetDpiForWindow(hwnd_);
+        if (dpi == 0) dpi = GetDpiForSystem();
+        RECT frame = {0, 0, static_cast<LONG>(client.width), static_cast<LONG>(client.height)};
+        AdjustWindowRectExForDpi(&frame, kWindowedStyle, FALSE, 0, dpi);
+        RECT current{};
+        if (!GetWindowRect(hwnd_, &current)) return;
+        const LONG width = frame.right - frame.left;
+        const LONG height = frame.bottom - frame.top;
+        const ScreenRect placed =
+                placeInWorkArea({current.left, current.top, current.left + width, current.top + height}, metrics.work);
+        SetWindowPos(hwnd_, nullptr, placed.left, placed.top, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
     std::function<void()> on_close_;
     std::function<MessageRoute(const WindowMessage&)> on_message_;
     std::function<void(const KeyMessage&)> on_key_;
     std::function<void()> on_focus_lost_;
-    std::uint32_t client_width_;
-    std::uint32_t client_height_;
+    std::function<void(bool)> on_fullscreen_changed_;
+    bool start_fullscreen_;
     HWND hwnd_ = nullptr;
     std::thread thread_;
     std::promise<std::string> ready_;  // empty string: the window exists
     std::atomic<bool> closing_{false};
     std::atomic<std::uint32_t> width_{0};
     std::atomic<std::uint32_t> height_{0};
+    // Written on the UI thread, read by Presenter::windowStatus.
+    std::atomic<std::uint8_t> preset_;
+    std::atomic<std::uint32_t> available_width_{0};
+    std::atomic<std::uint32_t> available_height_{0};
+    std::atomic<bool> fullscreen_{false};
     // UI thread only.
-    bool fullscreen_ = false;
+    bool preset_pending_ = false;  // a preset was chosen while fullscreen
     LONG windowed_style_ = 0;
     WINDOWPLACEMENT windowed_placement_{};
 };
@@ -339,6 +454,12 @@ Presenter::~Presenter() {
 }
 
 void* Presenter::nativeWindowHandle() const { return window_ ? window_->hwnd() : nullptr; }
+
+WindowStatus Presenter::windowStatus() const { return window_ ? window_->status() : WindowStatus{}; }
+
+void Presenter::requestWindowSize(WindowSizePreset preset) {
+    if (window_) window_->requestSize(preset);
+}
 
 void Presenter::destroySwapchainResources() {
     const VkDevice device = context_.device();
