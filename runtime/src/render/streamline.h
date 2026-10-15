@@ -35,6 +35,9 @@ struct StreamlineDevice {
     VkDevice device = VK_NULL_HANDLE;
     std::uint32_t graphics_family = 0, graphics_first_queue = 0;  // first queue index Streamline may use
     std::uint32_t compute_family = 0, compute_first_queue = 0;
+    // The context has a window and presents. Streamline reports a "presentCommon() was not observed" error when no
+    // present passes its proxy; that is expected only when nothing presents.
+    bool presents = false;
 };
 
 // One image as Streamline must be told about it under manual hooking: it cannot look the handles up itself.

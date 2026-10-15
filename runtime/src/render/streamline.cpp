@@ -12,6 +12,7 @@
 
 #include "render/streamline.h"
 
+#include <atomic>
 #include <cassert>
 #include <cstring>
 #include <filesystem>
@@ -49,9 +50,20 @@ std::string resultName(sl::Result result) {
     return std::string(name);
 }
 
+// Read by Streamline's logging threads; set by setDevice(). True until then so that the message below is never
+// hidden by accident.
+std::atomic<bool> g_context_presents{true};
+
 void logCallback(sl::LogType type, const char* message) {
     std::string_view text = message != nullptr ? message : "";
     while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.remove_suffix(1);
+    // Streamline reports once, after 60 evaluations, that presentCommon() was never observed and so its garbage
+    // collection will not run. A windowless context never presents, and its tags are eValidUntilEvaluate so nothing
+    // waits for that collection. With a window the line is the only sign that presents bypass Streamline's proxy.
+    if (type != sl::LogType::eInfo && !g_context_presents.load(std::memory_order_relaxed) &&
+        text.find("presentCommon() was not observed") != std::string_view::npos) {
+        type = sl::LogType::eInfo;
+    }
     // Streamline warns once per process when the calling thread's id is above 65536 and switches to a slower lookup.
     // Thread ids are the OS's choice, so the line comes and goes between runs and says nothing about our use.
     // sl.common's plugin config asks for CmdBindPipeline, CmdBindDescriptorSets and BeginCommandBuffer hooks that the
@@ -324,6 +336,7 @@ bool Streamline::setDevice(const StreamlineDevice& device, std::string& reason) 
         return false;
     }
     impl.device_set = true;
+    g_context_presents.store(device.presents, std::memory_order_relaxed);
 
     // Every proxy is looked up before any volk global is replaced, so a failure leaves them untouched. A missing
     // proxy is tolerated only where volk has no pointer either (the extension is not enabled on this device).

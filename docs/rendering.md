@@ -610,8 +610,12 @@ times `--resolution-scale`. DLSS is reached through the NVIDIA Streamline SDK; b
   DLAA only when it is available. `tox2_rsxreplay` loads it only with `--aa-mode dlaa`. In a windowed run the
   swapchain, present, surface-creation and wait-idle calls go through Streamline's proxies, which its manual-hooking
   mode requires. The present call is where Streamline runs its resource garbage collection; a run without a window
-  (`--no-window`, the replay, the tests) never presents, so that step does not run there. This is a known gap, and
-  its effect on long windowless runs has not been measured.
+  (`--no-window`, the replay, the tests) never presents, so that step does not run there. The effect was measured by
+  replaying a two-capture cutscene pair for 2000 DLAA evaluations: private memory went from 990 to 991 MB and
+  dedicated VRAM stayed at 487 MB (the `msaa` control went from 582 to 587 MB, with 284 MB of VRAM). The resource
+  tags are valid only until the evaluation, so nothing waits for the collection. After 60 evaluations Streamline
+  logs that `presentCommon()` was not observed; the runtime logs that notice at debug level in windowless runs, and it
+  stays an error in windowed runs, where it is the only sign that presents bypass Streamline's proxy.
 - **The scene image.** A mode-3 pass in `dlaa` mode draws into a one-sample sidecar of the clip size times the
   resolution scale (the same sidecar machinery as `msaa`, with 1 sample). The target keeps its 2W x H layout image,
   because the edge effect's depth reads, the rebinding of the depth surface as a 1280x720 plain surface and the

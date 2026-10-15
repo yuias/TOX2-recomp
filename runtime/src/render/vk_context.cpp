@@ -441,6 +441,10 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
             wanted.push_back(name.c_str());
         }
         if (ctx->streamline_) {
+            // Streamline names its objects and marks command ranges through VK_EXT_debug_utils and warns at start-up
+            // when the instance lacks it, validation or not. No messenger is needed for that.
+            if (hasName(available, VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
+                wanted.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
             for (const char* name : wanted) {
                 const bool listed = std::any_of(instance_exts.begin(), instance_exts.end(),
                                                 [name](const char* have) { return std::strcmp(have, name) == 0; });
@@ -623,6 +627,7 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
         sl_device.graphics_first_queue = streamline_plan.graphics_first_queue;
         sl_device.compute_family = streamline_plan.compute_family;
         sl_device.compute_first_queue = streamline_plan.compute_first_queue;
+        sl_device.presents = options.window;
         std::string reason;
         if (ctx->streamline_->setDevice(sl_device, reason)) {
             ctx->streamline_status_ = std::format("Streamline {}, DLSS supported", ctx->streamline_->version());
