@@ -54,7 +54,10 @@ void logCallback(sl::LogType type, const char* message) {
     while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.remove_suffix(1);
     // Streamline warns once per process when the calling thread's id is above 65536 and switches to a slower lookup.
     // Thread ids are the OS's choice, so the line comes and goes between runs and says nothing about our use.
-    if (type == sl::LogType::eWarn && text.find("Thread id over 65536") != std::string_view::npos) {
+    // Under manual hooking sl.common cannot hook command-buffer state tracking and says so at start-up; the renderer
+    // rebinds all state after each evaluation instead, so the notice is expected.
+    if (type == sl::LogType::eWarn && (text.find("Thread id over 65536") != std::string_view::npos ||
+                                       text.find("Hook sl.common:Vulkan:") != std::string_view::npos)) {
         type = sl::LogType::eInfo;
     }
     switch (type) {
