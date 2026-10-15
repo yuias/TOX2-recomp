@@ -34,8 +34,12 @@ enum class DlaaCamera : std::uint8_t { On, Off, Reset };  // Off: identity matri
 
 // Switches for the DLAA A/B checks (tox2_rsxreplay); the defaults are the measured settings.
 struct DlaaDebug {
-    bool jitter = true;                                 // shift perspective scene draws and report the offset
-    bool flip_jitter_x = false, flip_jitter_y = false;  // negate the reported jitterOffset only, never the geometry
+    bool jitter = true;  // shift perspective scene draws and report the offset
+    // Negate the reported jitterOffset only, never the geometry. Off: the draw viewport has no y flip, so a positive
+    // offset moves content right and down, which is the direction DLSS expects (its motion-vector space, origin top
+    // left). Measured against 4x renders of the room, cutscene and effects captures, the unflipped offset scored best
+    // on all three and flipping both axes worst.
+    bool flip_jitter_x = false, flip_jitter_y = false;
     // The remaining fields describe the camera matrices and the motion vector invalid value, which the evaluation does
     // not use yet (identity matrices; the invalid value is always 0).
     DlaaCamera camera = DlaaCamera::On;
