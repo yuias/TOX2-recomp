@@ -1,4 +1,5 @@
-// config.json support: reading the file into raw option values. JSON types stay in config_file.cpp.
+// config.json support: reading the file into raw option values and rewriting it with changed settings.
+// JSON types stay in config_file.cpp.
 
 #pragma once
 
@@ -54,5 +55,26 @@ struct ConfigFileContents {
 std::expected<ConfigFileContents, std::string> parseConfigFile(std::string_view text,
                                                                const std::filesystem::path& base_dir,
                                                                std::span<const OptionSpec> specs);
+
+struct ConfigChange {
+    std::string key;    // a persisted key, e.g. "aa_mode"
+    std::string value;  // command-line form, e.g. "msaa", "2", "on"
+};
+
+// The text of `original` with each change applied: an existing member keeps its position and gets the
+// new value, a new member is appended. Every other member keeps its key, order and value. `original`
+// empty or only whitespace counts as "{}". The output is yyjson's two-space pretty form with a final
+// newline, UTF-8 without BOM. Value encoding by kind: Unsigned -> JSON integer, String -> JSON string,
+// Switch -> true/false. Fails (and nothing must be written) when `original` is not valid JSON, its top
+// level is not an object, it has a duplicate key, or a change names a key that is not persisted or has
+// a value its kind cannot hold.
+std::expected<std::string, std::string> updateConfigText(std::string_view original,
+                                                         std::span<const ConfigChange> changes,
+                                                         std::span<const OptionSpec> specs);
+
+// Writes `<path>.tmp` and renames it over `path`, so a reader sees either the old or the new file.
+// On failure the temp file is removed and `path` is untouched; the error names the step and the system
+// message.
+std::expected<void, std::string> writeFileAtomic(const std::filesystem::path& path, std::string_view text);
 
 }  // namespace tox2

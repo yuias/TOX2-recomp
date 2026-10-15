@@ -1,12 +1,17 @@
-// config.json support: reading the file into raw option values.
+// config.json support: reading the file into raw option values, and rewriting it with changed settings.
 
 #include "app/config_file.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <charconv>
+#include <cstdlib>
 #include <exception>
 #include <format>
+#include <fstream>
 #include <memory>
 #include <optional>
+#include <system_error>
 #include <utility>
 
 #include <yyjson.h>
@@ -72,6 +77,23 @@ std::optional<std::string> findDuplicateKey(Json root) {
         }
     }
     return std::nullopt;
+}
+
+using DocPtr = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
+
+// A UTF-8 BOM is skipped, as Windows editors write one. Comments and trailing commas stay errors.
+std::expected<DocPtr, std::string> readDocument(std::string_view text, yyjson_read_flag flags) {
+    // The input is not modified without YYJSON_READ_INSITU; the API just has no const overload.
+    yyjson_read_err read_err;
+    DocPtr doc(yyjson_read_opts(const_cast<char*>(text.data()), text.size(), flags, nullptr, &read_err),
+               &yyjson_doc_free);
+    if (!doc) {
+        const std::string_view before = text.substr(0, std::min(read_err.pos, text.size()));
+        const auto line = 1 + std::ranges::count(before, '\n');
+        const std::size_t column = before.size() - (before.rfind('\n') + 1);  // npos + 1 wraps to 0
+        return fail("invalid JSON: {} at line {}, column {} (byte {})", read_err.msg, line, column + 1, read_err.pos);
+    }
+    return doc;
 }
 
 std::expected<void, std::string> readPath(Json value, const stdfs::path& base_dir, ConfigValue& out) {
@@ -219,19 +241,11 @@ std::string configKeyFor(std::string_view option_name) {
 
 std::expected<ConfigFileContents, std::string> parseConfigFile(std::string_view text, const stdfs::path& base_dir,
                                                                std::span<const OptionSpec> specs) {
-    // The input is not modified without YYJSON_READ_INSITU; the API just has no const overload.
-    // A UTF-8 BOM is skipped, as Windows editors write one. Comments and trailing commas stay errors.
-    yyjson_read_err read_err;
-    const std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> doc(
-            yyjson_read_opts(const_cast<char*>(text.data()), text.size(), YYJSON_READ_ALLOW_BOM, nullptr, &read_err),
-            &yyjson_doc_free);
+    auto doc = readDocument(text, YYJSON_READ_ALLOW_BOM);
     if (!doc) {
-        const std::string_view before = text.substr(0, std::min(read_err.pos, text.size()));
-        const auto line = 1 + std::ranges::count(before, '\n');
-        const std::size_t column = before.size() - (before.rfind('\n') + 1);  // npos + 1 wraps to 0
-        return fail("invalid JSON: {} at line {}, column {} (byte {})", read_err.msg, line, column + 1, read_err.pos);
+        return std::unexpected(std::move(doc.error()));
     }
-    const Json root = yyjson_doc_get_root(doc.get());
+    const Json root = yyjson_doc_get_root(doc->get());
     if (const auto duplicate = findDuplicateKey(root)) {
         return fail("duplicate key \"{}\" in an object", *duplicate);
     }
@@ -259,6 +273,134 @@ std::expected<ConfigFileContents, std::string> parseConfigFile(std::string_view 
         return std::unexpected(std::move(*error));
     }
     return contents;
+}
+
+namespace {
+
+using MutDocPtr = std::unique_ptr<yyjson_mut_doc, decltype(&yyjson_mut_doc_free)>;
+
+const OptionSpec* findPersistedSpec(std::string_view key, std::span<const OptionSpec> specs) {
+    const auto spec = std::ranges::find_if(
+            specs, [&](const OptionSpec& s) { return s.persisted && configKeyFor(s.name) == key; });
+    return spec == specs.end() ? nullptr : &*spec;
+}
+
+// Builds the JSON value for `change` in `doc`; null with `error` set when the kind cannot hold the text.
+yyjson_mut_val* makeValue(yyjson_mut_doc* doc, const OptionSpec& spec, const ConfigChange& change, std::string& error) {
+    switch (spec.kind) {
+        case OptionKind::Unsigned: {
+            std::uint64_t number = 0;
+            const char* end = change.value.data() + change.value.size();
+            const auto [ptr, ec] = std::from_chars(change.value.data(), end, number);
+            if (ec != std::errc() || ptr != end) {
+                error = std::format("\"{}\": \"{}\" is not a non-negative whole number", change.key, change.value);
+                return nullptr;
+            }
+            return yyjson_mut_uint(doc, number);
+        }
+        case OptionKind::String: return yyjson_mut_strncpy(doc, change.value.data(), change.value.size());
+        case OptionKind::Switch:
+            if (change.value != "on" && change.value != "off") {
+                error = std::format("\"{}\": \"{}\" is not on or off", change.key, change.value);
+                return nullptr;
+            }
+            return yyjson_mut_bool(doc, change.value == "on");
+        case OptionKind::Path:
+        case OptionKind::Flag:
+        case OptionKind::FrameList:
+        case OptionKind::StringList: break;
+    }
+    error = std::format("\"{}\": this kind of setting cannot be saved", change.key);
+    return nullptr;
+}
+
+bool isBlank(std::string_view text) {
+    return std::ranges::all_of(text, [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; });
+}
+
+}  // namespace
+
+std::expected<std::string, std::string> updateConfigText(std::string_view original,
+                                                         std::span<const ConfigChange> changes,
+                                                         std::span<const OptionSpec> specs) {
+    // A file that is empty (or holds only a BOM) is a fresh file, not a syntax error.
+    constexpr std::string_view kBom = "\xEF\xBB\xBF";
+    const std::string_view without_bom = original.starts_with(kBom) ? original.substr(kBom.size()) : original;
+    const std::string_view source = isBlank(without_bom) ? std::string_view("{}") : original;
+
+    // Numbers are kept as their source text so that rewriting does not reformat values it does not own.
+    auto doc = readDocument(source, YYJSON_READ_ALLOW_BOM | YYJSON_READ_NUMBER_AS_RAW);
+    if (!doc) {
+        return std::unexpected(std::move(doc.error()));
+    }
+    const Json read_root = yyjson_doc_get_root(doc->get());
+    if (const auto duplicate = findDuplicateKey(read_root)) {
+        return fail("duplicate key \"{}\" in an object", *duplicate);
+    }
+    if (!yyjson_is_obj(read_root)) {
+        return fail("the top level must be an object");
+    }
+
+    MutDocPtr out(yyjson_doc_mut_copy(doc->get(), nullptr), &yyjson_mut_doc_free);
+    if (!out) {
+        return fail("out of memory");
+    }
+    yyjson_mut_val* root = yyjson_mut_doc_get_root(out.get());
+    for (const ConfigChange& change : changes) {
+        const OptionSpec* spec = findPersistedSpec(change.key, specs);
+        if (spec == nullptr) {
+            return fail("\"{}\" is not a setting that is saved", change.key);
+        }
+        std::string error;
+        yyjson_mut_val* value = makeValue(out.get(), *spec, change, error);
+        if (value == nullptr) {
+            return std::unexpected(std::move(error));
+        }
+        yyjson_mut_val* key = yyjson_mut_strncpy(out.get(), change.key.data(), change.key.size());
+        // Replacing in place keeps the member's position; a new member goes to the end.
+        const bool done = yyjson_mut_obj_getn(root, change.key.data(), change.key.size()) != nullptr
+                                  ? yyjson_mut_obj_replace(root, key, value)
+                                  : yyjson_mut_obj_add(root, key, value);
+        if (!done) {
+            return fail("out of memory");
+        }
+    }
+
+    size_t length = 0;
+    const std::unique_ptr<char, decltype(&std::free)> text(
+            yyjson_mut_write(out.get(), YYJSON_WRITE_PRETTY_TWO_SPACES | YYJSON_WRITE_NEWLINE_AT_END, &length),
+            &std::free);
+    if (!text) {
+        return fail("cannot encode the JSON text");
+    }
+    return std::string(text.get(), length);
+}
+
+std::expected<void, std::string> writeFileAtomic(const stdfs::path& path, std::string_view text) {
+    stdfs::path temp = path;
+    temp += ".tmp";
+    std::error_code ec;
+    {
+        std::ofstream file(temp, std::ios::binary | std::ios::trunc);
+        if (!file) {
+            return fail("cannot create {}: {}", temp.string(), std::generic_category().message(errno));
+        }
+        file.write(text.data(), static_cast<std::streamsize>(text.size()));
+        file.flush();
+        if (!file) {
+            const std::string reason = std::generic_category().message(errno);
+            file.close();
+            stdfs::remove(temp, ec);
+            return fail("cannot write {}: {}", temp.string(), reason);
+        }
+    }
+    stdfs::rename(temp, path, ec);
+    if (ec) {
+        const std::string reason = ec.message();
+        stdfs::remove(temp, ec);
+        return fail("cannot replace {}: {}", path.string(), reason);
+    }
+    return {};
 }
 
 }  // namespace tox2
