@@ -50,3 +50,6 @@ CMakeUserPresets.json
 EBOOT.BIN
 __pycache__/
 *.pyc
+
+# Streamline SDK (NVIDIA DLSS/DLAA) is unpacked from the upstream release archive, not vendored
+/externals/Streamline/
