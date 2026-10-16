@@ -51,7 +51,7 @@ executables (`bin/` of the build directory, the licences under `bin/licenses/str
 | Source | <https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.1/streamline-sdk-v2.14.1.zip> |
 | Streamline itself: the headers (build time only) and `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll`, `sl.reflex.dll`, `sl.pcl.dll` | MIT License, Copyright (c) 2023 NVIDIA CORPORATION (the SDK's `license.txt`, copied as `LICENSE.txt`) |
 | Runtime DLLs copied next to the executables | `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll`, `nvngx_dlss.dll`; for frame generation `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`, `nvngx_dlssg.dll` |
-| DLSS Frame Generation: `sl.dlss_g.dll` (a prebuilt plugin; its source is not in the SDK) and `nvngx_dlssg.dll` | No licence text of their own ships with them in the SDK. They are treated as covered by the NVIDIA RTX SDKs LICENSE below, the licence of the SDK's other NVIDIA runtime files |
+| DLSS Frame Generation: `sl.dlss_g.dll` (a prebuilt plugin; its source is not in the SDK) and `nvngx_dlssg.dll` | No licence text of their own ships with them in the SDK. The build only copies them from the SDK the developer downloaded into the local build output; this project does not distribute build output, so it does not distribute these DLLs |
 | DLSS runtime and `nvngx_dlss.dll` | NVIDIA RTX SDKs LICENSE (v. March 14, 2024) with the NVIDIA RTX supplement (the SDK's `bin/x64/nvngx_dlss.license.txt`, copied as `nvngx_dlss.license.txt`) |
 | SDK third-party components | `3rd-party-licenses.md` of the SDK (copied unchanged) |
 
