@@ -367,7 +367,9 @@ The SPU's own floating-point rules are emitted as written (the full list of devi
   missed audio block. The sampled share of that thread's time in host synchronisation dropped from 46 % to
   12 %.
 - With `--log-level debug` the same receive statistics, and `rsv-wait epoch <n> timeout <n> lost-after-timeout
-  <n>`, are logged every second as `tox2: perf:` lines (see [Audio](audio.md#log-lines)).
+  <n> pre-sleep <n> woken <n>`, are logged every second as `tox2: perf:` lines (see [Audio](audio.md#log-lines)). `epoch`
+  is the sum of `pre-sleep` (the wait returned without sleeping because the store epoch had already moved) and
+  `woken` (a write to a watched line or a wake ended the sleep).
 
 ## What the current run reaches
 
