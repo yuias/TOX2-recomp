@@ -32,12 +32,19 @@ std::vector<std::string> spuCensusLines();
 // reservation: that is what `lost_wait` counts (and times, from the start of the wait that timed out). Monotonic;
 // not cleared by the census reset, so take deltas.
 struct SpuReservationWaits {
-    std::uint64_t epoch = 0, timeout = 0, halt = 0;
+    std::uint64_t epoch = 0;               // epoch_before_sleep + epoch_woken
+    std::uint64_t epoch_before_sleep = 0;  // Epoch from the global-epoch check before the first sleep
+    std::uint64_t epoch_woken = 0;         // Epoch after sleeping: the waiter's wake word changed
+    std::uint64_t timeout = 0, halt = 0;
     LatencySnapshot lost_wait;  // count = Timeout returns after which the reservation was found lost
 };
-void spuCountReservationWait(StoreWait reason);
+// `slept` is what waitStoreEpoch() reported; it only splits the Epoch returns.
+void spuCountReservationWait(StoreWait reason, bool slept);
 void spuCountLostAfterTimeout(std::chrono::microseconds waited);
 SpuReservationWaits spuReservationWaitSnapshot();
+// The perf-line segment for the waits between two snapshots; empty when epoch, timeout and lost_wait.count are all
+// unchanged.
+std::string spuReservationWaitSegment(const SpuReservationWaits& now, const SpuReservationWaits& before);
 
 // The blocking-receive timing of one thread (see SpuThread::receiveBusy), summed over its runs.
 struct SpuReceiveRow {

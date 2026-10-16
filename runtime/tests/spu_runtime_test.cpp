@@ -2447,6 +2447,32 @@ void testChanReservationWaitCounts() {
     }
 }
 
+// Epoch returns are counted by whether the wait slept; the perf-line segment prints the deltas.
+void testReservationWaitSplit() {
+    const tox2::SpuReservationWaits before = tox2::spuReservationWaitSnapshot();
+    tox2::spuCountReservationWait(tox2::StoreWait::Epoch, false);
+    tox2::spuCountReservationWait(tox2::StoreWait::Epoch, true);
+    tox2::spuCountReservationWait(tox2::StoreWait::Timeout, true);
+    const tox2::SpuReservationWaits after = tox2::spuReservationWaitSnapshot();
+    CHECK(after.epoch_before_sleep - before.epoch_before_sleep == 1);
+    CHECK(after.epoch_woken - before.epoch_woken == 1);
+    CHECK(after.epoch - before.epoch == 2);
+    CHECK(after.timeout - before.timeout == 1);
+    CHECK(after.halt == before.halt);
+    CHECK(after.epoch == after.epoch_before_sleep + after.epoch_woken);
+
+    tox2::SpuReservationWaits some;
+    some.epoch = 7;
+    some.epoch_before_sleep = 5;
+    some.epoch_woken = 2;
+    some.timeout = 3;
+    some.lost_wait.count = 1;
+    CHECK(tox2::spuReservationWaitSegment(some, {}) ==
+          "rsv-wait epoch 7 timeout 3 lost-after-timeout 1 pre-sleep 5 woken 2");
+    CHECK(tox2::spuReservationWaitSegment(some, some).empty());
+    CHECK(tox2::spuReservationWaitSegment({}, {}).empty());
+}
+
 // The inbound mailbox can be replaced by one value, whatever it holds.
 void testChanReplaceInMbox() {
     ChanFixture f;
@@ -3778,6 +3804,7 @@ int main(int argc, char** argv) {
     testChanLevelEvents();
     testChanLockLineLost();
     testChanReservationWaitCounts();
+    testReservationWaitSplit();
     testChanReplaceInMbox();
     testChanHaltOnCondvar();
     testChanStopChildren();

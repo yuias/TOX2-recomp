@@ -95,7 +95,7 @@ Registry& registry() {
 constexpr std::uint64_t kReservationWaitOverUs = 2000;
 
 struct ReservationWaitCounters {
-    std::atomic<std::uint64_t> epoch{0}, timeout{0}, halt{0};
+    std::atomic<std::uint64_t> epoch_before_sleep{0}, epoch_woken{0}, timeout{0}, halt{0};
     LatencyStats lost_wait{kReservationWaitOverUs};
 };
 
@@ -172,10 +172,13 @@ void spuCensusRemove(SpuThread& thread) {
     r.live.erase(it);
 }
 
-void spuCountReservationWait(StoreWait reason) {
+void spuCountReservationWait(StoreWait reason, bool slept) {
     ReservationWaitCounters& c = reservationWaits();
     switch (reason) {
-        case StoreWait::Epoch: c.epoch.fetch_add(1, std::memory_order_relaxed); break;
+        // One counter per return, as before the split: the wait path adds no atomic operation.
+        case StoreWait::Epoch:
+            (slept ? c.epoch_woken : c.epoch_before_sleep).fetch_add(1, std::memory_order_relaxed);
+            break;
         case StoreWait::Timeout: c.timeout.fetch_add(1, std::memory_order_relaxed); break;
         case StoreWait::Halt: c.halt.fetch_add(1, std::memory_order_relaxed); break;
     }
@@ -188,11 +191,21 @@ void spuCountLostAfterTimeout(std::chrono::microseconds waited) {
 SpuReservationWaits spuReservationWaitSnapshot() {
     const ReservationWaitCounters& c = reservationWaits();
     SpuReservationWaits out;
-    out.epoch = c.epoch.load(std::memory_order_relaxed);
+    out.epoch_before_sleep = c.epoch_before_sleep.load(std::memory_order_relaxed);
+    out.epoch_woken = c.epoch_woken.load(std::memory_order_relaxed);
+    out.epoch = out.epoch_before_sleep + out.epoch_woken;
     out.timeout = c.timeout.load(std::memory_order_relaxed);
     out.halt = c.halt.load(std::memory_order_relaxed);
     out.lost_wait = c.lost_wait.snapshot();
     return out;
+}
+
+std::string spuReservationWaitSegment(const SpuReservationWaits& now, const SpuReservationWaits& before) {
+    const std::uint64_t lost = now.lost_wait.count - before.lost_wait.count;
+    if (now.epoch == before.epoch && now.timeout == before.timeout && lost == 0) return {};
+    return std::format("rsv-wait epoch {} timeout {} lost-after-timeout {} pre-sleep {} woken {}",
+                       now.epoch - before.epoch, now.timeout - before.timeout, lost,
+                       now.epoch_before_sleep - before.epoch_before_sleep, now.epoch_woken - before.epoch_woken);
 }
 
 std::vector<SpuReceiveRow> spuReceiveSnapshot() {

@@ -194,9 +194,10 @@ bool SpuChannels::readEventStat(std::uint32_t site, std::uint32_t* value) {
             }
             // Only a write to the reserved line matters here; the mailbox push and the halt wake the table.
             const Clock::time_point wait_start = Clock::now();
-            const StoreWait reason =
-                    reservations().waitStoreEpoch(seen, &thread_.context().halt, timeout, mfc_.reservationLine());
-            spuCountReservationWait(reason);
+            bool slept = false;
+            const StoreWait reason = reservations().waitStoreEpoch(seen, &thread_.context().halt, timeout,
+                                                                   mfc_.reservationLine(), &slept);
+            spuCountReservationWait(reason, slept);
             if (reason == StoreWait::Timeout) {
                 after_timeout = true;
                 timeout_waited = std::chrono::duration_cast<microseconds>(Clock::now() - wait_start);

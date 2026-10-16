@@ -590,11 +590,8 @@ tox2::PerfSource spuPerfSource() {
             prev[row.id] = row;
         }
         const tox2::SpuReservationWaits waits = tox2::spuReservationWaitSnapshot();
-        const std::uint64_t lost = waits.lost_wait.count - prev_waits.lost_wait.count;
-        if (waits.epoch != prev_waits.epoch || waits.timeout != prev_waits.timeout || lost != 0) {
-            body += std::format("{}rsv-wait epoch {} timeout {} lost-after-timeout {}", body.empty() ? "" : " | ",
-                                waits.epoch - prev_waits.epoch, waits.timeout - prev_waits.timeout, lost);
-        }
+        const std::string segment = tox2::spuReservationWaitSegment(waits, prev_waits);
+        if (!segment.empty()) body += std::format("{}{}", body.empty() ? "" : " | ", segment);
         prev_waits = waits;
         return body;
     };
