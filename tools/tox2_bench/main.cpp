@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <string>
@@ -20,7 +21,9 @@
 #include <vector>
 
 #include "core/thread_cpu.h"
+#include "spu/spu_thread.h"
 #include "spu_lzma_fixture.h"
+#include "tox2/spu_context.h"
 
 namespace {
 
@@ -86,6 +89,109 @@ int runSpuLzma(const Case& self, const Options& options) {
     });
 }
 
+// Layout of the spu-dma-ls case. The synthetic image has a 32 KiB code segment and a 16 KiB data segment behind it;
+// the copy sources that belong to no image sit in a separate range of the guest buffer.
+constexpr std::uint32_t kDmaGuestSize = 4u << 20;
+constexpr std::uint32_t kDmaCodeEa = 0x00100000;
+constexpr std::uint32_t kDmaCodeLs = 0x08000;
+constexpr std::uint32_t kDmaCodeSize = 0x8000;
+constexpr std::uint32_t kDmaDataSegmentSize = 0x4000;
+constexpr std::uint32_t kDmaSourceEa = 0x00200000;
+constexpr std::uint32_t kDmaSourceSize = 0x40000;
+constexpr std::uint32_t kDmaBulkLs = 0x20000;
+constexpr std::uint32_t kDmaBulkSlots = 4;
+constexpr std::uint32_t kDmaBulkSize = 0x4000;
+constexpr std::uint32_t kDmaBulkCopies = 64;
+constexpr std::uint32_t kDmaInCodeLs = 0x0a000;
+constexpr std::uint32_t kDmaInCodeSize = 0x1000;
+constexpr std::uint32_t kDmaInCodeCopies = 16;
+constexpr std::uint32_t kDmaCodeRepeats = 16;
+constexpr std::uint32_t kDmaCodeUnits = kDmaCodeSize / tox2::kSpuTagUnit;
+
+// Never called: the image only has to be registered so that the copies tag and untag.
+TOX2_SPU_FUNC(dmaStubEntry) {
+    (void)ctx;
+    (void)ls;
+}
+
+const Tox2SpuSegment kDmaSegments[] = {
+        {kDmaCodeEa, kDmaCodeLs, kDmaCodeSize, 1},
+        {kDmaCodeEa + kDmaCodeSize, kDmaCodeLs + kDmaCodeSize, kDmaDataSegmentSize, 0},
+};
+const Tox2SpuEntry kDmaEntries[] = {{kDmaCodeLs, 1, {0}, dmaStubEntry}};
+constexpr char kDmaNoHash[] = "0000000000000000000000000000000000000000000000000000000000000000";
+const Tox2SpuImageInfo kDmaImages[] = {
+        {"bench_dma", kDmaCodeEa, kDmaCodeSize + kDmaDataSegmentSize, kDmaNoHash, kDmaCodeLs, 2, kDmaSegments, 1,
+         kDmaEntries},
+};
+
+// Fixed-seed bytes, so the copies change bytes (and untag) the same way in every run. A zero-filled buffer would leave
+// the untag path unexercised.
+void fillPattern(std::uint8_t* out, std::size_t size, std::uint64_t seed) {
+    std::uint64_t x = seed;
+    for (std::size_t i = 0; i < size; i++) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        out[i] = static_cast<std::uint8_t>(x >> 32);
+    }
+}
+
+// The LS holds the image bytes and the last bulk data, and exactly the code units are tagged, all at their link
+// address.
+bool checkDmaLs(const tox2::SpuThread& thread, const std::vector<std::uint8_t>& guest) {
+    if (std::memcmp(thread.ls() + kDmaCodeLs, guest.data() + kDmaCodeEa, kDmaCodeSize) != 0) return false;
+    // Each bulk slot was written last by one of the final kDmaBulkSlots copies of the bulk loop.
+    for (std::uint32_t slot = 0; slot < kDmaBulkSlots; slot++) {
+        const std::uint32_t copy = kDmaBulkCopies - kDmaBulkSlots + slot;
+        const std::uint32_t ea = kDmaSourceEa + kDmaBulkSize * (copy % (kDmaSourceSize / kDmaBulkSize));
+        if (std::memcmp(thread.ls() + kDmaBulkLs + kDmaBulkSize * slot, guest.data() + ea, kDmaBulkSize) != 0) {
+            return false;
+        }
+    }
+    std::uint32_t tagged = 0;
+    for (std::uint32_t unit = 0; unit < tox2::kSpuTagCount; unit++) {
+        const std::uint32_t lsa = unit * tox2::kSpuTagUnit;
+        const auto tracked = tox2::trackedImageAt(thread, lsa);
+        const bool in_code = lsa >= kDmaCodeLs && lsa < kDmaCodeLs + kDmaCodeSize;
+        if (tracked.has_value() != in_code) return false;
+        if (!tracked) continue;
+        if (tracked->image_index != 0 || tracked->segment != 0 || tracked->delta != 0) return false;
+        tagged++;
+    }
+    return tagged == kDmaCodeUnits;
+}
+
+// The cycles of the copyToLs calls that the MFC GET makes: bulk data into untagged LS, the code segment onto itself
+// (equal bytes, tags kept), and data into the middle of the tagged code (changed bytes, units untagged) each time
+// followed by the code segment again (tags set again).
+int runSpuDmaLs(const Case& self, const Options& options) {
+    std::vector<std::uint8_t> guest(kDmaGuestSize);
+    fillPattern(guest.data() + kDmaCodeEa, kDmaCodeSize + kDmaDataSegmentSize, 0x9e3779b97f4a7c15ull);
+    fillPattern(guest.data() + kDmaSourceEa, kDmaSourceSize, 0xd1b54a32d192ed03ull);
+    tox2::registerSpuImages(kDmaImages, 1);
+    tox2::SpuThread thread(0, "bench-dma", nullptr);
+    const std::uint8_t* base = guest.data();
+    tox2::copyToLs(thread, base, kDmaCodeEa, kDmaCodeLs, kDmaCodeSize);
+
+    return runMeasured(self, options, [&](std::uint64_t* cycles) {
+        const std::uint64_t start = tox2::currentThreadCycles();
+        for (std::uint32_t i = 0; i < kDmaBulkCopies; i++) {
+            tox2::copyToLs(thread, base, kDmaSourceEa + kDmaBulkSize * (i % (kDmaSourceSize / kDmaBulkSize)),
+                           kDmaBulkLs + kDmaBulkSize * (i % kDmaBulkSlots), kDmaBulkSize);
+        }
+        for (std::uint32_t i = 0; i < kDmaCodeRepeats; i++) {
+            tox2::copyToLs(thread, base, kDmaCodeEa, kDmaCodeLs, kDmaCodeSize);
+        }
+        for (std::uint32_t i = 0; i < kDmaInCodeCopies; i++) {
+            tox2::copyToLs(thread, base, kDmaSourceEa + kDmaInCodeSize * i, kDmaInCodeLs, kDmaInCodeSize);
+            tox2::copyToLs(thread, base, kDmaCodeEa, kDmaCodeLs, kDmaCodeSize);
+        }
+        *cycles = tox2::currentThreadCycles() - start;
+        return checkDmaLs(thread, guest);
+    });
+}
+
 const std::vector<Case>& cases() {
     static const std::vector<Case> kCases = {
             {"spu-lzma",
@@ -94,6 +200,12 @@ const std::vector<Case>& cases() {
              3,
              {"game-dir", "elf"},
              runSpuLzma},
+            {"spu-dma-ls",
+             "DMA into the SPU local store: bulk data, equal code, data over tagged code",
+             20,
+             2,
+             {},
+             runSpuDmaLs},
     };
     return kCases;
 }

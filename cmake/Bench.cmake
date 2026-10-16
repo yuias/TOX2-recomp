@@ -20,4 +20,9 @@ function(tox2_bench_add)
       PASS_REGULAR_EXPRESSION "bench spu-lzma: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
       TIMEOUT 120)
   endif()
+
+  add_test(NAME bench_spu_dma_ls COMMAND tox2_bench spu-dma-ls --iterations 2 --warmup 1)
+  set_tests_properties(bench_spu_dma_ls PROPERTIES
+    PASS_REGULAR_EXPRESSION "bench spu-dma-ls: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
+    TIMEOUT 120)
 endfunction()
