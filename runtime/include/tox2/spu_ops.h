@@ -507,12 +507,18 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuShufb(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
 // The mask for inserting an element of `size` bytes (1, 2, 4 or 8) at the aligned position of `addr`:
 // bytes 0x10..0x1f select RB-side data (the old quadword), the element's own bytes select the
 // right-aligned bytes of the preferred slot (the leftmost eight for a doubleword).
+// Built with a lane compare and blend: byte stores at a variable index into the vector make the compiler spill it to
+// the stack and reload it, and the reload cannot be forwarded from the byte stores.
 TOX2_FORCEINLINE Tox2Vr tox2SpuGenControl(uint32_t addr, uint32_t size) {
-    uint32_t t = addr & (16u - size);
-    uint32_t first = size < 8u ? 4u - size : 0u;
+    // Host lane h holds architected byte 15 - h (TOX2_VR_B), so `byte` is the architected index of each lane.
+    const Tox2U8x16 byte = {15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0};
+    const uint8_t t = (uint8_t)(addr & (16u - size));
+    const uint8_t first = (uint8_t)(size < 8u ? 4u - size : 0u);
+    // Bytes before t wrap above 15, so one unsigned compare finds the element's own bytes.
+    const Tox2U8x16 pos = byte - t;
+    const Tox2U8x16 inside = (Tox2U8x16)(pos < (uint8_t)size);
     Tox2Vr r;
-    for (uint32_t j = 0; j < 16; j++) TOX2_VR_B(r, j) = (uint8_t)(0x10u + j);
-    for (uint32_t i = 0; i < size; i++) TOX2_VR_B(r, t + i) = (uint8_t)(first + i);
+    r.u8 = (inside & (pos + first)) | (~inside & (byte + (uint8_t)0x10));
     return r;
 }
 

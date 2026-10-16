@@ -276,8 +276,40 @@ static int checkShufb(void) {
     return bad == 0;
 }
 
+// The previous definition of the insertion mask: a byte store at a variable index per element byte.
+static Tox2Vr genControlReference(uint32_t addr, uint32_t size) {
+    uint32_t t = addr & (16u - size);
+    uint32_t first = size < 8u ? 4u - size : 0u;
+    Tox2Vr r;
+    for (uint32_t j = 0; j < 16; j++) TOX2_VR_B(r, j) = (uint8_t)(0x10u + j);
+    for (uint32_t i = 0; i < size; i++) TOX2_VR_B(r, t + i) = (uint8_t)(first + i);
+    return r;
+}
+
+// Every size and every address class: 0..31 and the top 32 addresses cover each `addr & 15` with and without high bits.
+static int checkGenControl(void) {
+    long cases = 0;
+    long bad = 0;
+    for (uint32_t size = 1; size <= 8; size <<= 1) {
+        for (uint32_t k = 0; k < 64; k++) {
+            const uint32_t addr = k < 32 ? k : 0xffffffe0u + (k - 32);
+            const Tox2Vr got = tox2SpuGenControl(addr, size);
+            const Tox2Vr want = genControlReference(addr, size);
+            cases++;
+            for (int i = 0; i < 16; i++) {
+                if (got.u8[i] != want.u8[i] && bad++ < 10) {
+                    printf("genControl addr %08x size %u lane %d: %02x, expected %02x\n", (unsigned)addr,
+                           (unsigned)size, i, got.u8[i], want.u8[i]);
+                }
+            }
+        }
+    }
+    printf("genControl: %ld cases (4 sizes x 64 addresses), %ld mismatches\n", cases, bad);
+    return bad == 0;
+}
+
 int main(void) {
-    const int ok = checkFloat() & checkEdges() & checkRoundedHelpers() & checkShufb();
+    const int ok = checkFloat() & checkEdges() & checkRoundedHelpers() & checkShufb() & checkGenControl();
     if (ok) printf("spu vector helpers ok\n");
     return ok ? 0 : 1;
 }
