@@ -35,6 +35,8 @@ constexpr std::string_view kUsage =
         "                [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off]\n"
         "                [--ppu-threads legacy|1|2] [--lwmutex-fast-path on|off] [--lwmutex-watch]\n"
         "                [--dump-guest ADDR:SIZE:FILE]...\n"
+        "                [--spu-capture IMAGE:S[+S...]:E[:dispatches=N]]... [--spu-capture-dir DIR]\n"
+        "                [--spu-capture-after SECONDS] [--spu-capture-count N] [--spu-capture-every K]\n"
         "                [--config FILE | --no-config]\n";
 
 std::string rsxCaptureError(std::string_view label) {
@@ -252,6 +254,38 @@ bool addDumpGuest(ParseState& state, std::string_view label, const RawItem& item
     return true;
 }
 
+bool addSpuCapture(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    std::string parse_error;
+    auto selector = parseSpuCaptureSelector(item.text, parse_error);
+    if (!selector) return fail(error, std::format("error: {} {}: {}\n", label, item.text, parse_error));
+    state.options.spu_captures.push_back(std::move(*selector));
+    return true;
+}
+
+bool setSpuCaptureDir(ParseState& state, std::string_view, const RawItem& item, std::string&) {
+    state.options.spu_capture.dir = itemPath(item).string();
+    return true;
+}
+
+bool setSpuCaptureAfter(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    std::uint32_t seconds = 0;
+    if (!parseUnsigned(item.text, seconds)) {
+        return fail(error, std::format("error: {} needs a non-negative integer\n", label));
+    }
+    state.options.spu_capture.after_seconds = seconds;
+    return true;
+}
+
+template <std::uint32_t SpuCaptureSettings::* Member>
+bool setSpuCapturePositive(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    std::uint32_t value = 0;
+    if (!parseUnsigned(item.text, value) || value == 0) {
+        return fail(error, std::format("error: {} needs a positive integer\n", label));
+    }
+    state.options.spu_capture.*Member = value;
+    return true;
+}
+
 bool setFrameLimit(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
     if (item.text == "vsync") {
         state.options.frame_limit = RsxFlipLimit::Vsync;
@@ -384,6 +418,11 @@ constexpr auto kEntries = std::to_array<OptionEntry>({
         {{"lwmutex-fast-path", OptionKind::Switch}, setSwitch<&GameOptions::lwmutex_fast_path>},
         {{"rsx-capture", OptionKind::FrameList}, setRsxCapture},
         {{"dump-guest", OptionKind::StringList}, addDumpGuest},
+        {{"spu-capture", OptionKind::StringList}, addSpuCapture},
+        {{"spu-capture-dir", OptionKind::Path}, setSpuCaptureDir},
+        {{"spu-capture-after", OptionKind::Unsigned}, setSpuCaptureAfter},
+        {{"spu-capture-count", OptionKind::Unsigned}, setSpuCapturePositive<&SpuCaptureSettings::count>},
+        {{"spu-capture-every", OptionKind::Unsigned}, setSpuCapturePositive<&SpuCaptureSettings::every>},
         {{"frame-limit", OptionKind::String, true, OptionNeeds::Nothing}, setFrameLimit},
         {{"resolution-scale", OptionKind::Unsigned, true, OptionNeeds::Renderer}, setResolutionScale},
         {{"aa-mode", OptionKind::String, true, OptionNeeds::Renderer}, setAaMode},
@@ -612,6 +651,9 @@ std::optional<OptionsError> settle(ParseState& state, const std::string& file_no
         return combined(
                 "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode, "
                 "--anisotropic-filter and --vk-validation need --render vulkan\n");
+    }
+    if (!opt.spu_captures.empty() && opt.spu_capture.dir.empty()) {
+        return combined("error: --spu-capture needs --spu-capture-dir\n");
     }
     // GameInput delivers readings to the foreground window only, so unattended runs have nothing to probe.
     if (opt.pad_probe && !opt.window) return combined("error: --pad-probe needs the window\n");

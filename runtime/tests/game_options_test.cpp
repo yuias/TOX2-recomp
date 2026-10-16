@@ -505,6 +505,11 @@ void testOptionTable() {
         if (spec.name == "fg-cycle") CHECK(spec.kind == OptionKind::Unsigned && !spec.persisted);
         if (spec.name == "rsx-capture") CHECK(spec.kind == OptionKind::FrameList);
         if (spec.name == "dump-guest") CHECK(spec.kind == OptionKind::StringList);
+        if (spec.name == "spu-capture") CHECK(spec.kind == OptionKind::StringList && !spec.persisted);
+        if (spec.name == "spu-capture-dir") CHECK(spec.kind == OptionKind::Path && !spec.persisted);
+        if (spec.name.starts_with("spu-capture-") && spec.name != "spu-capture-dir") {
+            CHECK(spec.kind == OptionKind::Unsigned && !spec.persisted);
+        }
     }
     // Options a file value can not use without a renderer or a window are left out of such runs.
     for (const OptionSpec& spec : specs) {
@@ -528,6 +533,12 @@ void testOptionTable() {
     CHECK(tox2::gameOptionsUsage().find("[--fg-present-mode mailbox|immediate|fifo]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--fg-reflex on|off] [--fg-only-generated]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--fg-cycle SECONDS]") != std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--spu-capture IMAGE:S[+S...]:E[:dispatches=N]]...") !=
+          std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--spu-capture-dir DIR]") != std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--spu-capture-after SECONDS] [--spu-capture-count N]") !=
+          std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--spu-capture-every K]") != std::string_view::npos);
 }
 
 void testDefaultLines() {
@@ -547,6 +558,9 @@ void testDefaultLines() {
         CHECK(windowed->frame_gen == tox2::FrameGenTarget::Off &&
               windowed->fg_present_mode == tox2::FgPresentMode::Mailbox && windowed->fg_reflex &&
               !windowed->fg_only_generated && windowed->fg_cycle_seconds == 0);
+        CHECK(windowed->spu_captures.empty() && windowed->spu_capture.dir.empty() &&
+              windowed->spu_capture.after_seconds == 0 && windowed->spu_capture.count == 4 &&
+              windowed->spu_capture.every == 1);
     }
 
     const auto headless = parseLine(std::vector<std::string>{"--vfs-config", "v.json", "--no-window"});
@@ -642,6 +656,28 @@ void testValues() {
     if (dumps && dumps->dumps.size() == 2) {
         CHECK(dumps->dumps[0].addr == 0x1000 && dumps->dumps[0].size == 16 && dumps->dumps[0].file == "a.bin");
         CHECK(dumps->dumps[1].addr == 0x2000 && dumps->dumps[1].file == "b.bin");
+    }
+
+    // The capture of the three hot SPU functions, as the capture run passes it.
+    const auto capture = parseLine(std::vector<std::string>{
+            "--game-dir", "g", "--spu-capture", "eboot_skin:0x04cdc:0x05710:dispatches=1", "--spu-capture",
+            "eboot_animation:0x05628+0x05680+0x056b0:0x04910:dispatches=1", "--spu-capture",
+            "eboot_bnuscore:088d0:088e8", "--spu-capture-dir", "caps", "--spu-capture-after", "110",
+            "--spu-capture-count", "6", "--spu-capture-every", "20"});
+    CHECK(capture && capture->spu_captures.size() == 3);
+    if (capture && capture->spu_captures.size() == 3) {
+        const auto& skin = capture->spu_captures[0];
+        CHECK(skin.image == "eboot_skin" && skin.starts == std::vector<std::uint32_t>{0x4cdc} && skin.end == 0x5710 &&
+              skin.max_dispatches == 1);
+        const auto& animation = capture->spu_captures[1];
+        CHECK(animation.image == "eboot_animation" &&
+              animation.starts == (std::vector<std::uint32_t>{0x5628, 0x5680, 0x56b0}) && animation.end == 0x4910 &&
+              animation.max_dispatches == 1);
+        const auto& bnuscore = capture->spu_captures[2];
+        CHECK(bnuscore.image == "eboot_bnuscore" && bnuscore.starts == std::vector<std::uint32_t>{0x88d0} &&
+              bnuscore.end == 0x88e8 && bnuscore.max_dispatches == 0);
+        CHECK(capture->spu_capture.dir == "caps" && capture->spu_capture.after_seconds == 110 &&
+              capture->spu_capture.count == 6 && capture->spu_capture.every == 20);
     }
 }
 
@@ -804,7 +840,8 @@ void testConfigFileValues() {
     const stdfs::path file = dirs.work / "config.json";
     writeFile(file,
               R"({"game_dir": "g", "elf": "bin/e.elf", "resolution_scale": 2, "frame_limit": 60, "strict": true,
-                  "seconds": 7, "rsx_capture": "1,2", "dump_guest": ["0x1000:16:a.bin"], "my_note": "keep"})");
+                  "seconds": 7, "rsx_capture": "1,2", "dump_guest": ["0x1000:16:a.bin"], "my_note": "keep",
+                  "spu_capture": ["eboot_skin:4cdc:5710"], "spu_capture_dir": "caps", "spu_capture_count": 2})");
 
     const auto opt = dirs.parse({});
     CHECK(opt.has_value());
@@ -814,6 +851,8 @@ void testConfigFileValues() {
         CHECK(opt->resolution_scale == 2 && opt->frame_limit == tox2::RsxFlipLimit::Hz60 && opt->strict);
         CHECK(opt->seconds == 7 && opt->rsx_capture_frames == (std::vector<std::uint32_t>{1, 2}));
         CHECK(opt->dumps.size() == 1 && opt->dumps[0].file == "a.bin");
+        CHECK(opt->spu_captures.size() == 1 && opt->spu_captures[0].image == "eboot_skin" &&
+              samePath(opt->spu_capture.dir, dirs.work / "caps") && opt->spu_capture.count == 2);
         CHECK(opt->config_file == file && opt->settings_file == file && !opt->no_config);
         CHECK(opt->config_warnings == std::vector<std::string>{"unknown key \"my_note\" ignored"});
         CHECK(opt->window && opt->render_vulkan && opt->config_ignored.empty());

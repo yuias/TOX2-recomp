@@ -65,6 +65,7 @@
 #include "render/vk_renderer.h"
 #include "render/vk_window.h"
 #include "rsx/rsx_thread.h"
+#include "spu/spu_capture.h"
 #include "spu/spu_census.h"
 #include "spu/spu_thread.h"
 
@@ -846,7 +847,19 @@ int main(int argc, char** argv) {
 
     // The SPU tables hold hashes of the blobs inside the two images; a mismatch means they were emitted from
     // other inputs, so this stops before an SPU thread can run code the tables do not describe.
-    tox2::registerSpuImages(kTox2SpuImages, kTox2SpuImageCount);
+    // With a capture selector the SPU runtime gets a patched copy of the tables; without one it gets the generated
+    // tables themselves. The capture's start time counts from here.
+    const Tox2SpuImageInfo* spu_images = kTox2SpuImages;
+    if (!opt.spu_captures.empty()) {
+        std::string capture_error;
+        spu_images = tox2::installSpuCapture(kTox2SpuImages, kTox2SpuImageCount, opt.spu_captures, opt.spu_capture,
+                                             capture_error);
+        if (!spu_images) {
+            std::fprintf(stderr, "error: --spu-capture: %s\n", capture_error.c_str());
+            return static_cast<int>(tox2::ExitCode::Usage);
+        }
+    }
+    tox2::registerSpuImages(spu_images, kTox2SpuImageCount);
     if (!tox2::checkSpuImages(process.memory.base())) return static_cast<int>(tox2::ExitCode::LoadError);
 
     tox2RegisterFuncs(kTox2PpuFuncMappings, kTox2PpuFuncMappingCount);

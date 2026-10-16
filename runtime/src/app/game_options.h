@@ -21,6 +21,7 @@
 #include "render/render_scale.h"
 #include "render/window_size.h"
 #include "rsx/rsx_thread.h"
+#include "spu/spu_capture.h"
 
 namespace tox2 {
 
@@ -59,6 +60,10 @@ struct GameOptions {
     std::uint32_t fg_cycle_seconds = 0;  // 0 = off, else 1..600
     std::vector<std::uint32_t> rsx_capture_frames;
     std::vector<GuestDumpSpec> dumps;
+    // SPU span capture (debug): the spans to capture and where, when and how many files to write. Settled: the
+    // selectors come with a directory.
+    std::vector<SpuCaptureSelector> spu_captures;
+    SpuCaptureSettings spu_capture;
 
     bool no_config = false;               // --no-config was given
     std::filesystem::path config_file;    // absolute; the file that was read, empty when none
