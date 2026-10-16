@@ -237,7 +237,7 @@ struct Streamline::Impl {
         bool alpha = false;
     };
     std::unordered_map<std::uint32_t, ViewportOptions> viewport_options;
-    std::uint32_t next_viewport = 0;
+    std::uint32_t next_viewport = 1;  // 0 is kFrameGenViewport
     PFun_slDLSSSetOptions* dlss_set_options = nullptr;
 
     // Frame generation. The plugins are loaded by default when slInit was asked for them; the functions are resolved
@@ -640,6 +640,10 @@ bool Streamline::evaluateDlaa(VkCommandBuffer cmd, const DlaaFrame& frame, std::
         error = "the input image has no size";
         return false;
     }
+    if (frame.frame_index == 0) {
+        error = "the frame has no index";
+        return false;
+    }
 
     if (impl.dlss_set_options == nullptr) {
         void* function = nullptr;
@@ -674,11 +678,19 @@ bool Streamline::evaluateDlaa(VkCommandBuffer cmd, const DlaaFrame& frame, std::
         impl.viewport_options[frame.viewport] = wanted;
     }
 
-    sl::FrameToken* token = nullptr;
-    sl::Result result = impl.api.get_new_frame_token(token, nullptr);
-    if (result != sl::Result::eOk || token == nullptr) {
-        error = "slGetNewFrameToken failed: " + resultName(result);
-        return false;
+    // The token belongs to the guest frame, not to this evaluation: the frame's other calls (markers, frame
+    // generation tags) must find the same one. Asking again for the same index returns the same ring slot.
+    sl::FrameToken* token = impl.frame_index == frame.frame_index ? impl.frame_token : nullptr;
+    sl::Result result = sl::Result::eOk;
+    if (token == nullptr) {
+        std::uint32_t index = frame.frame_index;
+        result = impl.api.get_new_frame_token(token, &index);
+        if (result != sl::Result::eOk || token == nullptr) {
+            error = "slGetNewFrameToken failed: " + resultName(result);
+            return false;
+        }
+        impl.frame_token = token;
+        impl.frame_index = frame.frame_index;
     }
 
     sl::Constants constants;

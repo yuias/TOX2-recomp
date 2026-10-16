@@ -71,6 +71,9 @@ struct SlImage {
 // Everything one DLAA evaluation consumes.
 struct DlaaFrame {
     std::uint32_t viewport = 0;  // from Streamline::newViewport()
+    // The renderer's index of the guest frame (>= 1); the same value for every call of one frame, so they all share
+    // one Streamline frame token.
+    std::uint32_t frame_index = 0;
     SlImage color_in, depth, motion, color_out;
     float jitter_px[2] = {0.0f, 0.0f};   // Constants::jitterOffset
     float mvec_scale[2] = {1.0f, 1.0f};  // 1 / input width, 1 / input height (pixel-space vectors)
@@ -158,7 +161,8 @@ public:
 
     // Frame API, for the thread that records commands. Valid after a successful setDevice().
 
-    // A new DLSS viewport id; each viewport keeps its own temporal history.
+    // A new DLSS viewport id, counted from 1 (kFrameGenViewport is reserved); each viewport keeps its own temporal
+    // history.
     std::uint32_t newViewport();
     // Records one DLAA evaluation (colour in, depth, motion vectors -> colour out, all the same size) into `cmd`.
     // The images must already be in the layouts named by their SlImage and must not change until `cmd` has

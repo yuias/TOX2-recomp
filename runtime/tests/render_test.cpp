@@ -6533,8 +6533,11 @@ void testStreamlineEvaluate(tox2::VkContext& ctx) {
 
         viewport = streamline->newViewport();
         viewport_made = true;
+        // Viewport 0 is reserved for frame generation.
+        CHECK(viewport == 1);
         tox2::DlaaFrame frame;
         frame.viewport = viewport;
+        frame.frame_index = 7;
         frame.color_in = color.sl;
         frame.color_in.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         frame.depth = depth.sl;
@@ -6548,10 +6551,13 @@ void testStreamlineEvaluate(tox2::VkContext& ctx) {
         frame.alpha = true;
         frame.mvec_invalid_value = 0.0f;
         bool evaluated = true;
-        for (std::uint64_t i = 0; i < 2; i++) {
-            // The first evaluation starts the history, the second uses it.
-            frame.reset = i == 0;
-            const std::array<float, 2> jitter = tox2::dlaaJitterPixels(i);
+        const void* first_handle = nullptr;
+        for (std::uint64_t i = 0; i < 3; i++) {
+            // Evaluations 0 and 1 are the same frame (index 7) with identical constants, which Streamline requires
+            // within a frame; evaluation 2 is the next frame and uses the history evaluation 0 started.
+            frame.frame_index = i < 2 ? 7 : 8;
+            frame.reset = i < 2;
+            const std::array<float, 2> jitter = tox2::dlaaJitterPixels(i < 2 ? 0 : 1);
             frame.jitter_px[0] = jitter[0];
             frame.jitter_px[1] = jitter[1];
             std::string error;
@@ -6564,8 +6570,15 @@ void testStreamlineEvaluate(tox2::VkContext& ctx) {
             // Streamline leaves no bound state behind that the test relies on; make its writes visible to the
             // next evaluation and to the read-back.
             slTestMemoryBarrier(cmd);
+            if (i == 0) first_handle = streamline->frameHandle();
+            if (i == 1) {
+                // The frame's second evaluation reuses its token.
+                CHECK(streamline->frameIndex() == 7);
+                CHECK(first_handle != nullptr && streamline->frameHandle() == first_handle);
+            }
         }
         CHECK(evaluated);
+        CHECK(streamline->frameIndex() == 8);
 
         slTestBarrier(cmd, output.image, kColorAspect, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);

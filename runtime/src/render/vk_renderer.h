@@ -348,6 +348,9 @@ private:
     std::array<std::unique_ptr<FrameSlot>, kFramesInFlight> slots_;
     std::size_t current_slot_ = 0;
     bool recording_ = false;
+    // Index of the guest frame being recorded (flips completed + 1), fixed when its recording starts: recordFlip
+    // increments stats_.flips while the same frame's commands are still being recorded.
+    std::uint32_t frame_index_ = 0;
     // The vertex constant upload of the last draw in this frame, for the next draw with the same constants id.
     struct VpConstantUpload {
         std::uint64_t id = 0;

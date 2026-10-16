@@ -530,6 +530,7 @@ bool RsxRenderer::beginFrame() {
         return false;
     }
     recording_ = true;
+    frame_index_ = static_cast<std::uint32_t>(stats_.flips) + 1;
     return true;
 }
 
@@ -1111,6 +1112,7 @@ VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
         inputs.depth = describe(*depth,
                                 depth->msaa->depth_view != VK_NULL_HANDLE ? depth->msaa->depth_view : depth->msaa->view,
                                 depth->msaa->layout);
+        inputs.frame_index = frame_index_;
         const VkCommandBuffer cmd = outsideCmd();
         // The offset the frame's perspective draws were shifted by. A frame without such a draw was not moved, so it
         // reports none. The flips only change what is reported: the geometry always moves toward +x / +y.

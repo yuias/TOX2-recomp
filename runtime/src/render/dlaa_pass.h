@@ -104,7 +104,8 @@ public:
     Resources& resources() { return *resources_; }
 
     struct Inputs {
-        SlImage color_in, depth;  // both SHADER_READ_ONLY_OPTIMAL, the input size
+        SlImage color_in, depth;        // both SHADER_READ_ONLY_OPTIMAL, the input size
+        std::uint32_t frame_index = 0;  // the renderer's index of this guest frame (>= 1), see DlaaFrame
         // The sub-pixel offset the scene was drawn with, in input pixels (x right, y down), as Streamline wants it
         // reported.
         float jitter_px[2] = {0.0f, 0.0f};
