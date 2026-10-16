@@ -32,12 +32,6 @@ Registry& registry() {
 
 thread_local bool t_registered = false;
 
-std::uint64_t currentThreadCycles() {
-    ULONG64 cycles = 0;
-    QueryThreadCycleTime(GetCurrentThread(), &cycles);
-    return cycles;
-}
-
 // The thread spins for a millisecond a few times and the highest cycles/ms ratio wins, since a spin the host preempted
 // counts fewer cycles than wall time.
 double calibrateCyclesPerMs() {
@@ -61,6 +55,19 @@ double calibrateCyclesPerMs() {
 double hostCyclesPerMs() {
     static const double cycles_per_ms = calibrateCyclesPerMs();
     return cycles_per_ms;
+}
+
+std::uint64_t currentThreadCycles() {
+    ULONG64 cycles = 0;
+    QueryThreadCycleTime(GetCurrentThread(), &cycles);
+    return cycles;
+}
+
+CycleStats summarizeCycles(std::span<const std::uint64_t> samples) {
+    if (samples.empty()) return {};
+    std::vector<std::uint64_t> sorted(samples.begin(), samples.end());
+    std::sort(sorted.begin(), sorted.end());
+    return {sorted.size(), sorted.front(), sorted[sorted.size() / 2], sorted.back()};
 }
 
 void registerHostThreadCpu(std::string label) {

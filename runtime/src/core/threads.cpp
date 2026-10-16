@@ -79,11 +79,7 @@ std::atomic<SpuHealthFn> g_spu_health{nullptr};
 // CPU cycles the calling thread has run. About 250 ns per call, which is a noticeable share of the many short holds of
 // the RSX thread (40k+ acquisitions/s, rsx lock ms/flip +0.3), so only PPU-class holders read it, once per hold plus
 // once more when the hold turns out to be long.
-std::uint64_t threadCycles() {
-    ULONG64 cycles = 0;
-    QueryThreadCycleTime(GetCurrentThread(), &cycles);
-    return cycles;
-}
+std::uint64_t threadCycles() { return currentThreadCycles(); }
 
 // Calibrated during static initialisation (the calibration itself is shared, see hostCyclesPerMs) because a lazy
 // calibration would run inside a hold.

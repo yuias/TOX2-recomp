@@ -12594,6 +12594,39 @@ void testHostThreadCpu() {
     CHECK(tox2::processCpuUs() > 0);
 }
 
+void testCycleStats() {
+    const auto summarize = [](std::initializer_list<std::uint64_t> values) {
+        const std::vector<std::uint64_t> samples(values);
+        return tox2::summarizeCycles(samples);
+    };
+    const tox2::CycleStats three = summarize({5, 1, 3});
+    CHECK(three.count == 3 && three.min == 1 && three.median == 3 && three.max == 5);
+    // Even counts take the upper median.
+    const tox2::CycleStats four = summarize({4, 1, 3, 2});
+    CHECK(four.count == 4 && four.min == 1 && four.median == 3 && four.max == 4);
+    const tox2::CycleStats one = summarize({7});
+    CHECK(one.count == 1 && one.min == 7 && one.median == 7 && one.max == 7);
+    const tox2::CycleStats empty = summarize({});
+    CHECK(empty.count == 0 && empty.min == 0 && empty.median == 0 && empty.max == 0);
+
+    // Spinning advances the thread's cycles at about the calibrated rate; sleeping hardly advances them.
+    const double expected = 50.0 * tox2::hostCyclesPerMs();
+    std::uint64_t spun = 0, slept = 0;
+    std::thread helper([&] {
+        const std::uint64_t spin_start = tox2::currentThreadCycles();
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(50)) {
+        }
+        spun = tox2::currentThreadCycles() - spin_start;
+        const std::uint64_t sleep_start = tox2::currentThreadCycles();
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        slept = tox2::currentThreadCycles() - sleep_start;
+    });
+    helper.join();
+    CHECK(static_cast<double>(spun) >= 0.5 * expected && static_cast<double>(spun) <= 3.0 * expected);
+    CHECK(static_cast<double>(slept) < 0.1 * expected);
+}
+
 void testPerfLine() {
     CHECK(tox2::formatPerfLine(212.04, "x") == "tox2: perf: t 212.0 s: x");
 
@@ -16960,6 +16993,7 @@ int main(int argc, char** argv) {
     testPpuYieldSemantics();
     testPerfLine();
     testHostThreadCpu();
+    testCycleStats();
     testRsxBusyFormat();
     testReservationAndDcbz();
     testPpuReservationStats();

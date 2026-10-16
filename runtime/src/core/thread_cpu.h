@@ -12,6 +12,19 @@ namespace tox2 {
 // so callers during static initialisation are safe). The unit of the cycle count is not documented as time.
 double hostCyclesPerMs();
 
+// Cycles the calling thread has run so far (QueryThreadCycleTime): CPU time at the time-stamp counter rate; time the
+// thread is not scheduled does not count.
+std::uint64_t currentThreadCycles();
+
+struct CycleStats {
+    std::size_t count = 0;
+    std::uint64_t min = 0;
+    std::uint64_t median = 0;  // element count / 2 of the sorted samples (the upper median for even counts)
+    std::uint64_t max = 0;
+};
+// All fields 0 for an empty span.
+CycleStats summarizeCycles(std::span<const std::uint64_t> samples);
+
 // Registers the calling host thread for the perf `cpu` line under `label` (no spaces: "rsx", "audio",
 // "ppu.01000006", "spu.06000200"). The thread handle stays open for the life of the process, so a thread that exits
 // keeps its final time. A second call from the same thread is ignored. Logs "tox2: thread cpu: <label> host thread
