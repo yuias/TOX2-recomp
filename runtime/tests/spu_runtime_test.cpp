@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1608,7 +1609,7 @@ struct CapThread {
 void expectSameCapture(const tox2::SpuCapture& a, const tox2::SpuCapture& b) {
     CHECK(a.image == b.image && a.sha256 == b.sha256);
     CHECK(a.start == b.start && a.end == b.end && a.thread_id == b.thread_id);
-    CHECK(a.span_cycles == b.span_cycles && a.ms_since_boot == b.ms_since_boot);
+    CHECK(a.span_cycles == b.span_cycles && a.ms_since_install == b.ms_since_install);
     CHECK(a.dispatches == b.dispatches && a.sp_start == b.sp_start && a.sp_end == b.sp_end && a.flags == b.flags);
     CHECK(std::memcmp(a.pre_gpr.data(), b.pre_gpr.data(), sizeof(Tox2Vr) * 128) == 0);
     CHECK(std::memcmp(&a.pre_fpscr, &b.pre_fpscr, sizeof(Tox2Vr)) == 0);
@@ -1634,7 +1635,7 @@ void testSpuCaptureFormat() {
     c.end = 0x05710;
     c.thread_id = 0x0100abcd;
     c.span_cycles = 0x1122334455667788ull;
-    c.ms_since_boot = 123456789012ull;
+    c.ms_since_install = 123456789012ull;
     c.dispatches = 3;
     c.sp_start = 0x3ffd0;
     c.sp_end = 0x3ffe0;
@@ -1952,6 +1953,55 @@ void testSpuCaptureInstall() {
     CapThread v(0x01000202);
     CHECK(v.run(kCapS, kCapE) == tox2::SpuLeave::Returned);
     CHECK(std::filesystem::is_directory(dir / "c") && std::filesystem::is_empty(dir / "c"));
+
+    // A failed write does not consume the count: the directory becomes a regular file after the install, the span
+    // writes nothing, and once the directory is back the one file the count allows is still written.
+    tox2::SpuCaptureSettings failing = settings;
+    failing.dir = (dir / "d").string();
+    failing.count = 1;
+    table = tox2::installSpuCapture(kCapImages, 2, std::span(&*one, 1), failing, error);
+    CHECK(table != nullptr);
+    if (table == nullptr) return;
+    tox2::registerSpuImages(table, 2);
+    std::filesystem::remove(dir / "d");
+    {
+        std::ofstream blocker(dir / "d");
+    }
+    CapThread w(0x01000203);
+    lines.clear();
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    CHECK(w.run(kCapS, kCapE) == tox2::SpuLeave::Returned);
+    CHECK(std::filesystem::is_regular_file(dir / "d"));
+    CHECK(lines.size() == 1 && lines[0].contains("cannot write"));
+    CHECK(!lines.empty() && !lines[0].contains("complete"));
+    std::filesystem::remove(dir / "d");
+    std::filesystem::create_directories(dir / "d");
+    lines.clear();
+    for (int run = 0; run < 3; run++) CHECK(w.run(kCapS, kCapE) == tox2::SpuLeave::Returned);
+    std::size_t retried = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir / "d")) retried += entry.is_regular_file() ? 1 : 0;
+    CHECK(retried == 1);
+    std::size_t complete_lines = 0;
+    for (const std::string& line : lines) complete_lines += line.contains("complete, 1 files") ? 1 : 0;
+    CHECK(complete_lines == 1);
+    tox2::setLogSink({});
+
+    // A span that another SPU thread opened on the same host thread is not closed by this thread's end entry; the
+    // opener's own end still closes it.
+    tox2::SpuCaptureSettings shared = settings;
+    shared.dir = (dir / "e").string();
+    table = tox2::installSpuCapture(kCapImages, 2, std::span(&*one, 1), shared, error);
+    CHECK(table != nullptr);
+    if (table == nullptr) return;
+    tox2::registerSpuImages(table, 2);
+    CapThread opener(0x01000204);
+    CapThread other(0x01000205);
+    CHECK(opener.run(kCapS, kCapEaB) == tox2::SpuLeave::Returned);  // never reaches kCapE
+    CHECK(other.run(kCapE, kCapE) == tox2::SpuLeave::Returned);
+    CHECK(std::filesystem::is_empty(dir / "e"));
+    CHECK(opener.run(kCapE, kCapE) == tox2::SpuLeave::Returned);
+    const auto closed = tox2::readSpuCapture(dir / "e" / "capsyn_06000_06010_0.spucap", kCapImages, 2, error);
+    CHECK(closed && closed->thread_id == 0x01000204);
 
     registerSynthImages();
     std::filesystem::remove_all(dir);

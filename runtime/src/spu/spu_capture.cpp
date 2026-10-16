@@ -131,7 +131,11 @@ struct SelectorState {
     SpuCaptureSelector spec;
     std::uint32_t image_index = 0;
     std::atomic<std::uint32_t> accepted{0};
+    // Files written. `reserved` bounds the writers in flight so `count` is never exceeded and a failed write gives its
+    // place back; `next_file` only numbers the files, so a name is never reused.
     std::atomic<std::uint32_t> written{0};
+    std::atomic<std::uint32_t> reserved{0};
+    std::atomic<std::uint32_t> next_file{0};
     std::array<std::atomic<std::uint64_t>, kReasonCount> rejected{};
 };
 
@@ -159,12 +163,19 @@ struct Installation {
 // The live installation and the original host function of each slot. Written by installSpuCapture before any SPU
 // thread runs the table.
 Installation* g_active = nullptr;
-std::vector<std::unique_ptr<Installation>> g_installations;  // kept: a registered table points into one
 std::array<Tox2SpuFunc*, kSpuCaptureMaxSlots> g_hosts{};
 std::uint64_t g_generation = 0;
 
+// Leaked on purpose: a registered table points into an installation and must outlive static destruction, while SPU
+// host threads may still run.
+std::vector<std::unique_ptr<Installation>>& installations() {
+    static auto* v = new std::vector<std::unique_ptr<Installation>>;
+    return *v;
+}
+
 struct Pending {
     bool valid = false;
+    const SpuThread* thread = nullptr;  // that opened the span; a host thread can run several SPU threads in turn
     Totals totals;
     std::uint64_t dispatches = 0;
     std::uint64_t cycles = 0;
@@ -227,6 +238,7 @@ void startSpan(Installation& inst, std::uint32_t selector, std::uint32_t start, 
     p.dispatches = thread.dispatchCount();
     // Last, so the copies above are not part of the span's cycles.
     p.cycles = currentThreadCycles();
+    p.thread = &thread;
     p.valid = true;
 }
 
@@ -241,7 +253,8 @@ void logRejections(const SelectorState& sel) {
 void endSpan(Installation& inst, std::uint32_t selector, std::uint32_t end, SpuThread& thread,
              const Tox2SpuContext* ctx, const std::uint8_t* ls) {
     Pending& p = t_state.pending[selector];
-    if (!p.valid) return;
+    // A span another SPU thread opened on this host thread is not this thread's; leave it for its own end.
+    if (!p.valid || p.thread != &thread) return;
     // First, as at the start: the span ends at this dispatch whatever the verdict.
     const std::uint64_t cycles = currentThreadCycles();
     p.valid = false;
@@ -267,8 +280,11 @@ void endSpan(Installation& inst, std::uint32_t selector, std::uint32_t end, SpuT
 
     const std::uint32_t accepted = sel.accepted.fetch_add(1, std::memory_order_relaxed) + 1;
     if (accepted % inst.settings.every != 0) return;
-    const std::uint32_t n = sel.written.fetch_add(1, std::memory_order_relaxed);
-    if (n >= inst.settings.count) return;
+    if (sel.reserved.fetch_add(1, std::memory_order_relaxed) >= inst.settings.count) {
+        sel.reserved.fetch_sub(1, std::memory_order_relaxed);
+        return;
+    }
+    const std::uint32_t n = sel.next_file.fetch_add(1, std::memory_order_relaxed);
 
     const Tox2SpuImageInfo& image = inst.images[sel.image_index];
     SpuCapture& c = p.capture;
@@ -277,7 +293,7 @@ void endSpan(Installation& inst, std::uint32_t selector, std::uint32_t end, SpuT
     c.end = end;
     c.thread_id = thread.id();
     c.span_cycles = cycles - p.cycles;
-    c.ms_since_boot = msSince(inst.origin);
+    c.ms_since_install = msSince(inst.origin);
     c.dispatches = static_cast<std::uint32_t>(dispatches);
     c.sp_end = TOX2_VR_W(ctx->gpr[1], 0);
     c.flags = 0;
@@ -291,13 +307,15 @@ void endSpan(Installation& inst, std::uint32_t selector, std::uint32_t end, SpuT
     std::string error;
     if (!writeSpuCapture(path, c, error)) {
         logError("tox2: spu capture: cannot write {}: {}", path.string(), error);
+        sel.reserved.fetch_sub(1, std::memory_order_relaxed);
         return;
     }
+    const std::uint32_t files = sel.written.fetch_add(1, std::memory_order_relaxed) + 1;
     logInfo("tox2: spu capture: wrote {} image {} start {:#07x} end {:#07x} thread {:#010x} span cycles {} "
             "dispatches {} sp {:#x}/{:#x}",
             path.string(), c.image, c.start, c.end, c.thread_id, c.span_cycles, c.dispatches, c.sp_start, c.sp_end);
     logRejections(sel);
-    if (n + 1 == inst.settings.count) {
+    if (files == inst.settings.count) {
         logInfo("tox2: spu capture: image {} end {:#07x} complete, {} files", c.image, c.end, inst.settings.count);
     }
 }
@@ -372,7 +390,7 @@ bool serializeSpuCapture(const SpuCapture& c, std::vector<std::uint8_t>& out, st
     w.put(c.thread_id);
     w.put(static_cast<std::uint32_t>(c.tag_runs.size()));
     w.put(c.span_cycles);
-    w.put(c.ms_since_boot);
+    w.put(c.ms_since_install);
     w.put(c.dispatches);
     w.put(c.sp_start);
     w.put(c.sp_end);
@@ -429,7 +447,7 @@ std::optional<SpuCapture> parseSpuCapture(std::span<const std::uint8_t> bytes, s
         return std::nullopt;
     }
     c.span_cycles = r.get<std::uint64_t>();
-    c.ms_since_boot = r.get<std::uint64_t>();
+    c.ms_since_install = r.get<std::uint64_t>();
     c.dispatches = r.get<std::uint32_t>();
     c.sp_start = r.get<std::uint32_t>();
     c.sp_end = r.get<std::uint32_t>();
@@ -675,7 +693,7 @@ const Tox2SpuImageInfo* installSpuCapture(const Tox2SpuImageInfo* images, std::u
     inst->generation = ++g_generation;
     inst->origin = std::chrono::steady_clock::now();
     g_active = inst.get();
-    g_installations.push_back(std::move(inst));
+    installations().push_back(std::move(inst));
     return g_active->images.data();
 }
 

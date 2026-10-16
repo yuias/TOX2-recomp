@@ -17,7 +17,7 @@
 //   16      32       image name, NUL-padded
 //   48      64       image sha256 (Tox2SpuImageInfo::sha256, hex)
 //   112     4 x 4    start S, end E, thread id, tag run count
-//   128     8 x 2    span cycles (thread cycles from S to E, diagnostic), milliseconds since the capture was installed
+//   128     8 x 2    span cycles (thread cycles from S to E, diagnostic), milliseconds since installSpuCapture
 //   144     4 x 4    dispatches in the span (E included), word 0 of r1 at S, at E, flags (0)
 //   160     2080     pre state: gpr[128] (Tox2Vr in memory layout), fpscr (16), srr0 (4), int_enabled (4), pad to 16
 //           262144   pre LS
@@ -65,7 +65,7 @@ struct SpuCapture {
     std::uint32_t end = 0;
     std::uint32_t thread_id = 0;
     std::uint64_t span_cycles = 0;
-    std::uint64_t ms_since_boot = 0;
+    std::uint64_t ms_since_install = 0;  // from the installSpuCapture call to the end of the span
     std::uint32_t dispatches = 0;
     std::uint32_t sp_start = 0;
     std::uint32_t sp_end = 0;
