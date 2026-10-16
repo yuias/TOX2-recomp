@@ -159,6 +159,7 @@ function(tox2_runtime_add_core)
     runtime/src/rsx/rsx_texture_layout.cpp
     runtime/src/rsx/rsx_thread.cpp
     runtime/src/rsx/rsx_unimplemented.cpp
+    runtime/src/spu/spu_capture.cpp
     runtime/src/spu/spu_census.cpp
     runtime/src/spu/spu_channels.cpp
     runtime/src/spu/spu_dispatch.cpp

@@ -9,8 +9,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -28,6 +31,7 @@
 #include "lv2/sys_spu.h"
 #include "lv2/sys_sync.h"
 #include "spu/spu_census.h"
+#include "spu/spu_capture.h"
 #include "spu/spu_channels.h"
 #include "spu/spu_mfc.h"
 #include "spu/spu_thread.h"
@@ -1473,6 +1477,484 @@ void testCheckImages() {
     CHECK(lines.size() == 1 && lines[0].contains("image abd") && lines[0].contains("does not match"));
     tox2::setLogSink({});
     registerSynthImages();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Span capture (spu/spu_capture.h).
+// ---------------------------------------------------------------------------------------------
+
+constexpr std::uint32_t kCapS = 0x6000;     // computes on LS and returns by dispatch to r0
+constexpr std::uint32_t kCapE = 0x6010;     // ends the run itself, as a return into code that does a channel wait would
+constexpr std::uint32_t kCapGetS = 0x6020;  // issues a GET, then dispatches to r0
+constexpr std::uint32_t kCapGetE = 0x6030;
+constexpr std::uint32_t kCapS3 = 0x6040;  // dispatches to kCapMid, which dispatches to r0
+constexpr std::uint32_t kCapMid = 0x6050;
+constexpr std::uint32_t kCapE3 = 0x6060;
+constexpr std::uint32_t kCapEa = 0x6000;  // guest address of the image bytes (the LS address of the load)
+constexpr std::uint32_t kCapCodeSize = 0x70;
+constexpr std::uint32_t kCapEaB = 0x7000;
+constexpr std::uint32_t kCapWork = 0x2000;   // the words kCapS reads and writes
+constexpr std::uint32_t kCapGetLs = 0x3000;  // LS target of the GET
+constexpr std::uint32_t kCapGetEa = 0x100;   // guest source of the GET
+
+#define CAP_WR(ch, value)                                                            \
+    do {                                                                             \
+        if (!tox2SpuWriteChannel(ctx, ls, site, (ch), (value))) TOX2_SPU_SF_LEAVE(); \
+    } while (0)
+
+std::uint32_t loadLe32(const std::uint8_t* p) {
+    std::uint32_t v;
+    std::memcpy(&v, p, 4);
+    return v;
+}
+
+// What kCapS does to the registers and the LS, for the reference model.
+void capModel(std::array<Tox2Vr, 128>& gpr, std::vector<std::uint8_t>& ls) {
+    const std::uint32_t a = loadBe32(ls.data() + kCapWork);
+    storeBe32(ls.data() + kCapWork + 4, a * 3 + TOX2_VR_W(gpr[3], 0));
+    TOX2_VR_W(gpr[4], 0) = a ^ 0x5a5a;
+}
+
+TOX2_SPU_FUNC(capS) {
+    TOX2_SPU_SF_ENTER(kCapS);
+    const std::uint32_t a = loadBe32(ls + kCapWork);
+    storeBe32(ls + kCapWork + 4, a * 3 + TOX2_VR_W(ctx->gpr[3], 0));
+    TOX2_VR_W(ctx->gpr[4], 0) = a ^ 0x5a5a;
+    TOX2_SPU_SF_DISPATCH(kCapS + 8, TOX2_VR_W(ctx->gpr[0], 0));
+}
+
+TOX2_SPU_FUNC(capEnd) {
+    (void)ls;
+    TOX2_SPU_SF_ENTER(kCapE);
+    TOX2_SPU_SF_LEAVE();
+}
+
+TOX2_SPU_FUNC(capGetS) {
+    TOX2_SPU_SF_ENTER(kCapGetS);
+    const std::uint32_t site = kCapGetS + 4;
+    CAP_WR(tox2::chan::kMfcLsa, kCapGetLs);
+    CAP_WR(tox2::chan::kMfcEah, 0);
+    CAP_WR(tox2::chan::kMfcEal, kCapGetEa);
+    CAP_WR(tox2::chan::kMfcSize, 16);
+    CAP_WR(tox2::chan::kMfcTagId, 1);
+    CAP_WR(tox2::chan::kMfcCmd, tox2::mfc::kGet);
+    TOX2_SPU_SF_DISPATCH(kCapGetS + 8, TOX2_VR_W(ctx->gpr[0], 0));
+}
+
+TOX2_SPU_FUNC(capS3) {
+    TOX2_SPU_SF_ENTER(kCapS3);
+    TOX2_SPU_SF_DISPATCH(kCapS3 + 4, kCapMid);
+}
+
+TOX2_SPU_FUNC(capMid) {
+    TOX2_SPU_SF_ENTER(kCapMid);
+    TOX2_SPU_SF_DISPATCH(kCapMid + 4, TOX2_VR_W(ctx->gpr[0], 0));
+}
+
+const Tox2SpuSegment kCapSegments[] = {{kCapEa, kCapEa, kCapCodeSize, 1}};
+const Tox2SpuEntry kCapEntries[] = {
+        {kCapS, 1, {0xc0de0001}, capS},      {kCapE, 1, {0xc0de0002}, capEnd}, {kCapGetS, 1, {0xc0de0003}, capGetS},
+        {kCapGetE, 1, {0xc0de0004}, capEnd}, {kCapS3, 1, {0xc0de0005}, capS3}, {kCapMid, 1, {0xc0de0006}, capMid},
+        {kCapE3, 1, {0xc0de0007}, capEnd},
+};
+const Tox2SpuSegment kCapSegmentsB[] = {{kCapEaB, kCapEaB, 0x20, 1}};
+const Tox2SpuEntry kCapEntriesB[] = {{kCapEaB, 1, {0xc0de0008}, capEnd}};
+const Tox2SpuImageInfo kCapImages[] = {
+        {"capsyn", kCapEa, kCapCodeSize, kNoHash, kCapS, 1, kCapSegments, 7, kCapEntries},
+        {"capsyn_b", kCapEaB, 0x20, kNoHash, kCapEaB, 1, kCapSegmentsB, 1, kCapEntriesB},
+};
+
+std::vector<std::uint8_t> makeCapGuest() {
+    std::vector<std::uint8_t> guest(0x10000, 0x5a);
+    for (std::uint32_t e = 0; e < 7; e++) putBe32(guest, kCapEa + 0x10 * e, 0xc0de0001 + e);
+    putBe32(guest, kCapEaB, 0xc0de0008);
+    for (std::uint32_t i = 0; i < 16; i++) guest[kCapGetEa + i] = static_cast<std::uint8_t>(0xa0 + i);
+    return guest;
+}
+
+std::filesystem::path capTestDir() {
+    return std::filesystem::temp_directory_path() / ("tox2_spu_capture_test_" + std::to_string(GetCurrentProcessId()));
+}
+
+// A thread with the capture images loaded, the GET source in guest memory and a recognisable register and LS state.
+struct CapThread {
+    std::vector<std::uint8_t> guest = makeCapGuest();
+    std::unique_ptr<tox2::SpuThread> thread;
+
+    explicit CapThread(std::uint32_t id) {
+        thread = std::make_unique<tox2::SpuThread>(id, "cap", nullptr);
+        thread->channels().mfc().setGuestBase(guest.data());
+        for (std::uint32_t i = 0; i < tox2::kSpuTagCount * tox2::kSpuTagUnit; i++) {
+            thread->ls()[i] = static_cast<std::uint8_t>(i * 31 + (i >> 8) + 7);
+        }
+        tox2::copyToLs(*thread, guest.data(), kCapEa, kCapEa, kCapCodeSize);
+        tox2::copyToLs(*thread, guest.data(), kCapEaB, kCapEaB, 0x20);
+        Tox2SpuContext& ctx = thread->context();
+        for (std::uint32_t r = 0; r < 128; r++) {
+            for (std::uint32_t i = 0; i < 16; i++) ctx.gpr[r].u8[i] = static_cast<std::uint8_t>(r * 16 + i * 7 + 1);
+        }
+        for (std::uint32_t i = 0; i < 16; i++) ctx.fpscr.u8[i] = static_cast<std::uint8_t>(0x40 + i);
+        ctx.srr0 = 0x1234;
+        ctx.int_enabled = 1;
+    }
+
+    // Runs the span from `start`; the function there returns to `end` through r0.
+    tox2::SpuLeave run(std::uint32_t start, std::uint32_t end) {
+        TOX2_VR_W(thread->context().gpr[0], 0) = end;
+        return tox2::runSpu(*thread, start);
+    }
+};
+
+void expectSameCapture(const tox2::SpuCapture& a, const tox2::SpuCapture& b) {
+    CHECK(a.image == b.image && a.sha256 == b.sha256);
+    CHECK(a.start == b.start && a.end == b.end && a.thread_id == b.thread_id);
+    CHECK(a.span_cycles == b.span_cycles && a.ms_since_boot == b.ms_since_boot);
+    CHECK(a.dispatches == b.dispatches && a.sp_start == b.sp_start && a.sp_end == b.sp_end && a.flags == b.flags);
+    CHECK(std::memcmp(a.pre_gpr.data(), b.pre_gpr.data(), sizeof(Tox2Vr) * 128) == 0);
+    CHECK(std::memcmp(&a.pre_fpscr, &b.pre_fpscr, sizeof(Tox2Vr)) == 0);
+    CHECK(a.pre_srr0 == b.pre_srr0 && a.pre_int_enabled == b.pre_int_enabled);
+    CHECK(a.pre_ls == b.pre_ls);
+    CHECK(std::memcmp(a.post_gpr.data(), b.post_gpr.data(), sizeof(Tox2Vr) * 128) == 0);
+    CHECK(std::memcmp(&a.post_fpscr, &b.post_fpscr, sizeof(Tox2Vr)) == 0);
+    CHECK(a.post_jump_target == b.post_jump_target);
+    CHECK(a.post_ls == b.post_ls);
+    CHECK(a.tag_runs.size() == b.tag_runs.size());
+    for (std::size_t i = 0; i < std::min(a.tag_runs.size(), b.tag_runs.size()); i++) {
+        const tox2::SpuCaptureTagRun& x = a.tag_runs[i];
+        const tox2::SpuCaptureTagRun& y = b.tag_runs[i];
+        CHECK(x.image == y.image && x.segment == y.segment && x.delta == y.delta && x.lo == y.lo && x.hi == y.hi);
+    }
+}
+
+void testSpuCaptureFormat() {
+    tox2::SpuCapture c;
+    c.image = "synth";
+    c.sha256 = kNoHash;
+    c.start = 0x04cdc;
+    c.end = 0x05710;
+    c.thread_id = 0x0100abcd;
+    c.span_cycles = 0x1122334455667788ull;
+    c.ms_since_boot = 123456789012ull;
+    c.dispatches = 3;
+    c.sp_start = 0x3ffd0;
+    c.sp_end = 0x3ffe0;
+    c.flags = 0;
+    for (std::uint32_t r = 0; r < 128; r++) {
+        for (std::uint32_t i = 0; i < 16; i++) {
+            c.pre_gpr[r].u8[i] = static_cast<std::uint8_t>(r + i);
+            c.post_gpr[r].u8[i] = static_cast<std::uint8_t>(r * 3 + i * 5);
+        }
+    }
+    for (std::uint32_t i = 0; i < 16; i++) {
+        c.pre_fpscr.u8[i] = static_cast<std::uint8_t>(0x10 + i);
+        c.post_fpscr.u8[i] = static_cast<std::uint8_t>(0x90 + i);
+    }
+    c.pre_srr0 = 0x2468;
+    c.pre_int_enabled = 1;
+    c.post_jump_target = 0x05710;
+    c.pre_ls.resize(kTox2SpuLsSize);
+    c.post_ls.resize(kTox2SpuLsSize);
+    for (std::uint32_t i = 0; i < kTox2SpuLsSize; i++) {
+        c.pre_ls[i] = static_cast<std::uint8_t>(i * 7 + (i >> 9));
+        c.post_ls[i] = static_cast<std::uint8_t>(i * 13 + (i >> 11) + 1);
+    }
+    c.tag_runs = {{"synth", 0, 0, 0x3000, 0x3100},
+                  {"synth_b", 0, -0x1000, 0x5000, 0x5020},
+                  {"synth", 0, 0x20, 0x8000, 0x8040}};
+
+    std::string error;
+    std::vector<std::uint8_t> bytes;
+    CHECK(tox2::serializeSpuCapture(c, bytes, error));
+    CHECK(bytes.size() == tox2::spuCaptureFileSize(3));
+    CHECK(bytes.size() == 160u + 2 * (2080u + 262144u) + 3 * 48u);
+    CHECK(std::memcmp(bytes.data(), "TOX2SPUC", 8) == 0);
+    CHECK(loadLe32(bytes.data() + 8) == 1 && loadLe32(bytes.data() + 12) == 160);
+    CHECK(std::memcmp(bytes.data() + 16, "synth\0", 6) == 0 && bytes[16 + 31] == 0);
+    CHECK(loadLe32(bytes.data() + 112) == 0x04cdc && loadLe32(bytes.data() + 116) == 0x05710);
+    CHECK(loadLe32(bytes.data() + 120) == 0x0100abcd && loadLe32(bytes.data() + 124) == 3);
+    CHECK(std::memcmp(bytes.data() + 160, c.pre_gpr.data(), 2048) == 0);
+    CHECK(std::memcmp(bytes.data() + 160 + 2048, &c.pre_fpscr, 16) == 0);
+    CHECK(loadLe32(bytes.data() + 160 + 2064) == 0x2468 && loadLe32(bytes.data() + 160 + 2068) == 1);
+    CHECK(std::memcmp(bytes.data() + 160 + 2080, c.pre_ls.data(), 262144) == 0);
+    CHECK(loadLe32(bytes.data() + 160 + 2080 + 262144 + 2064) == 0x05710);
+    CHECK(std::memcmp(bytes.data() + 160 + 2 * 2080 + 262144, c.post_ls.data(), 262144) == 0);
+
+    const std::optional<tox2::SpuCapture> back = tox2::parseSpuCapture(bytes, error);
+    CHECK(back.has_value());
+    if (back) expectSameCapture(c, *back);
+    CHECK(back && back->tag_runs[1].delta == -0x1000);
+
+    // Through a file, validated against the table the replay would register.
+    const std::filesystem::path dir = capTestDir();
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path path = dir / "round.spucap";
+    CHECK(tox2::writeSpuCapture(path, c, error));
+    CHECK(std::filesystem::file_size(path) == bytes.size());
+    const std::optional<tox2::SpuCapture> read = tox2::readSpuCapture(path, kSynthImages, 2, error);
+    CHECK(read.has_value());
+    if (read) expectSameCapture(c, *read);
+
+    // Rejections.
+    const auto parseFails = [&](const std::vector<std::uint8_t>& data) {
+        std::string why;
+        return !tox2::parseSpuCapture(data, why).has_value() && !why.empty();
+    };
+    std::vector<std::uint8_t> broken = bytes;
+    broken[0] = 'X';
+    CHECK(parseFails(broken));
+    broken = bytes;
+    broken[8] = 2;
+    CHECK(parseFails(broken));
+    broken = bytes;
+    broken[12] = 176;
+    CHECK(parseFails(broken));
+    broken = bytes;
+    broken.pop_back();
+    CHECK(parseFails(broken));
+    broken = bytes;
+    broken.push_back(0);
+    CHECK(parseFails(broken));
+    broken = bytes;
+    broken[124] = 4;  // four tag runs announced, three present
+    CHECK(parseFails(broken));
+    CHECK(parseFails({bytes.begin(), bytes.begin() + 100}));
+
+    tox2::SpuCapture other = c;
+    other.image = "synth_c";
+    CHECK(!tox2::validateSpuCapture(other, kSynthImages, 2, error));
+    other = c;
+    other.sha256 = std::string(64, '1');
+    CHECK(!tox2::validateSpuCapture(other, kSynthImages, 2, error));
+    other = c;
+    other.tag_runs[1].image = "nowhere";
+    CHECK(!tox2::validateSpuCapture(other, kSynthImages, 2, error));
+    other = c;
+    other.tag_runs[0].segment = 1;  // a data segment
+    CHECK(!tox2::validateSpuCapture(other, kSynthImages, 2, error));
+    other = c;
+    other.tag_runs[0].hi = kTox2SpuLsSize + 16;
+    CHECK(!tox2::validateSpuCapture(other, kSynthImages, 2, error));
+    CHECK(tox2::validateSpuCapture(c, kSynthImages, 2, error));
+
+    other = c;
+    other.pre_ls.pop_back();
+    CHECK(!tox2::serializeSpuCapture(other, bytes, error));
+    other = c;
+    other.image = std::string(33, 'n');
+    CHECK(!tox2::serializeSpuCapture(other, bytes, error));
+    CHECK(!tox2::readSpuCapture(dir / "missing.spucap", kSynthImages, 2, error).has_value());
+
+    std::filesystem::remove_all(dir);
+}
+
+void testSpuCaptureSelectorParse() {
+    std::string error;
+    auto sel = tox2::parseSpuCaptureSelector("eboot_skin:0x04cdc:0x05710:dispatches=1", error);
+    CHECK(sel && sel->image == "eboot_skin" && sel->starts == std::vector<std::uint32_t>{0x4cdc} &&
+          sel->end == 0x5710 && sel->max_dispatches == 1);
+    sel = tox2::parseSpuCaptureSelector("eboot_animation:05628+0X05680+56b0:4910", error);
+    const std::vector<std::uint32_t> animation_starts = {0x5628, 0x5680, 0x56b0};
+    CHECK(sel && sel->image == "eboot_animation" && sel->starts == animation_starts && sel->end == 0x4910 &&
+          sel->max_dispatches == 0);
+
+    for (const char* bad : {"", "a", "a:5", "a:5:6:dispatches=1:x", ":5:6", "a::6", "a:5:", "a:5+:6", "a:+5:6",
+                            "a:zz:6", "a:5:0x", "a:5:6:", "a:5:6:dispatches=", "a:5:6:dispatches=x",
+                            "a:5:6:dispatches=-1", "a:5:6:count=1", "a:100000000:6"}) {
+        error.clear();
+        CHECK(!tox2::parseSpuCaptureSelector(bad, error).has_value() && !error.empty());
+    }
+}
+
+void testSpuCaptureInstall() {
+    const std::filesystem::path dir = capTestDir();
+    std::filesystem::remove_all(dir);
+    std::string error;
+
+    // No selector: the original table, whatever the settings.
+    tox2::SpuCaptureSettings settings;
+    CHECK(tox2::installSpuCapture(kCapImages, 2, {}, settings, error) == kCapImages);
+
+    std::vector<tox2::SpuCaptureSelector> selectors;
+    for (const char* text :
+         {"capsyn:6000:6010:dispatches=1", "capsyn:6020:6030", "capsyn:6040:6060:dispatches=1", "capsyn:6040:6060"}) {
+        auto sel = tox2::parseSpuCaptureSelector(text, error);
+        CHECK(sel.has_value());
+        if (sel) selectors.push_back(*sel);
+    }
+    settings.dir = (dir / "a").string();
+    settings.count = 4;
+
+    // Each failure leaves no table behind.
+    {
+        auto bad = selectors;
+        bad[0].image = "nowhere";
+        CHECK(tox2::installSpuCapture(kCapImages, 2, bad, settings, error) == nullptr && error.contains("nowhere"));
+        bad = selectors;
+        bad[0].starts = {0x6004};
+        error.clear();
+        CHECK(tox2::installSpuCapture(kCapImages, 2, bad, settings, error) == nullptr && !error.empty());
+        bad = selectors;
+        bad[0].end = 0x6014;
+        error.clear();
+        CHECK(tox2::installSpuCapture(kCapImages, 2, bad, settings, error) == nullptr && !error.empty());
+        bad = selectors;
+        bad[0].starts = {kCapS, kCapE};
+        error.clear();
+        CHECK(tox2::installSpuCapture(kCapImages, 2, bad, settings, error) == nullptr && !error.empty());
+        tox2::SpuCaptureSettings no_dir = settings;
+        no_dir.dir.clear();
+        error.clear();
+        CHECK(tox2::installSpuCapture(kCapImages, 2, selectors, no_dir, error) == nullptr && !error.empty());
+        no_dir = settings;
+        no_dir.every = 0;
+        error.clear();
+        CHECK(tox2::installSpuCapture(kCapImages, 2, selectors, no_dir, error) == nullptr && !error.empty());
+
+        // 17 starts and an end are 18 distinct entries; 16 slots exist.
+        std::vector<Tox2SpuEntry> many;
+        for (std::uint32_t i = 0; i < 18; i++) many.push_back({0x8000 + 0x10 * i, 1, {0xc0de0100 + i}, capEnd});
+        const Tox2SpuSegment seg = {0x8000, 0x8000, 0x120, 1};
+        const Tox2SpuImageInfo many_image = {"many", 0x8000, 0x120, kNoHash, 0x8000, 1, &seg, 18, many.data()};
+        tox2::SpuCaptureSelector wide;
+        wide.image = "many";
+        for (std::uint32_t i = 0; i < 17; i++) wide.starts.push_back(0x8000 + 0x10 * i);
+        wide.end = 0x8110;
+        error.clear();
+        CHECK(tox2::installSpuCapture(&many_image, 1, std::span(&wide, 1), settings, error) == nullptr &&
+              error.contains("16"));
+        wide.starts.resize(15);  // 15 starts and the end are 16 entries
+        error.clear();
+        CHECK(tox2::installSpuCapture(&many_image, 1, std::span(&wide, 1), settings, error) != nullptr);
+    }
+
+    const Tox2SpuImageInfo* table = tox2::installSpuCapture(kCapImages, 2, selectors, settings, error);
+    CHECK(table != nullptr && table != kCapImages);
+    if (table == nullptr) {
+        std::fprintf(stderr, "install failed: %s\n", error.c_str());
+        return;
+    }
+    // Same image data; only the selected entries run another function.
+    CHECK(table[1].entries == kCapEntriesB);
+    CHECK(table[0].entry_count == 7 && table[0].entries != kCapEntries);
+    for (std::uint32_t e = 0; e < 7; e++) {
+        CHECK(table[0].entries[e].ls == kCapEntries[e].ls && table[0].entries[e].check[0] == kCapEntries[e].check[0]);
+        CHECK((table[0].entries[e].host != kCapEntries[e].host) == (e != 5));
+    }
+    CHECK(std::string_view(table[0].name) == "capsyn" && table[0].segments == kCapSegments);
+
+    tox2::registerSpuImages(table, 2);
+
+    // A pure span: pre-state is the set-up state, post-state is what the reference model computes.
+    CapThread t(0x01000200);
+    TOX2_VR_W(t.thread->context().gpr[0], 0) = kCapE;
+    std::array<Tox2Vr, 128> pre_gpr;
+    std::memcpy(pre_gpr.data(), t.thread->context().gpr, sizeof pre_gpr);
+    std::array<Tox2Vr, 128> expect_gpr = pre_gpr;
+    const std::vector<std::uint8_t> pre_ls(t.thread->ls(), t.thread->ls() + kTox2SpuLsSize);
+    std::vector<std::uint8_t> expect_ls = pre_ls;
+    const Tox2Vr pre_fpscr = t.thread->context().fpscr;
+    std::vector<std::string> lines;
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    CHECK(t.run(kCapS, kCapE) == tox2::SpuLeave::Returned);
+    capModel(expect_gpr, expect_ls);
+
+    const std::filesystem::path file = dir / "a" / "capsyn_06000_06010_0.spucap";
+    CHECK(std::filesystem::exists(file));
+    const std::optional<tox2::SpuCapture> c = tox2::readSpuCapture(file, kCapImages, 2, error);
+    CHECK(c.has_value());
+    if (c) {
+        CHECK(c->image == "capsyn" && c->sha256 == kNoHash);
+        CHECK(c->start == kCapS && c->end == kCapE && c->thread_id == 0x01000200);
+        CHECK(c->dispatches == 1 && c->flags == 0 && c->span_cycles > 0);
+        CHECK(c->sp_start == TOX2_VR_W(pre_gpr[1], 0) && c->sp_end == c->sp_start);
+        CHECK(std::memcmp(c->pre_gpr.data(), pre_gpr.data(), sizeof pre_gpr) == 0);
+        CHECK(TOX2_VR_W(c->pre_gpr[4], 0) != TOX2_VR_W(c->post_gpr[4], 0));
+        CHECK(std::memcmp(&c->pre_fpscr, &pre_fpscr, sizeof pre_fpscr) == 0);
+        CHECK(c->pre_srr0 == 0x1234 && c->pre_int_enabled == 1);
+        CHECK(c->pre_ls == pre_ls);
+        CHECK(std::memcmp(c->post_gpr.data(), expect_gpr.data(), sizeof expect_gpr) == 0);
+        CHECK(std::memcmp(&c->post_fpscr, &pre_fpscr, sizeof pre_fpscr) == 0);
+        CHECK(c->post_jump_target == kCapE);
+        CHECK(c->post_ls == expect_ls);
+        CHECK(c->tag_runs.size() == 2);
+        if (c->tag_runs.size() == 2) {
+            CHECK(c->tag_runs[0].image == "capsyn" && c->tag_runs[0].segment == 0 && c->tag_runs[0].delta == 0 &&
+                  c->tag_runs[0].lo == kCapEa && c->tag_runs[0].hi == kCapEa + kCapCodeSize);
+            CHECK(c->tag_runs[1].image == "capsyn_b" && c->tag_runs[1].lo == kCapEaB &&
+                  c->tag_runs[1].hi == kCapEaB + 0x20);
+        }
+    }
+    CHECK(!lines.empty() && lines[0].contains("tox2: spu capture: wrote ") &&
+          lines[0].contains("capsyn_06000_06010_0") &&
+          lines[0].contains("image capsyn start 0x06000 end 0x06010 thread 0x01000200 span cycles "));
+    CHECK(!lines.empty() && lines[0].contains("dispatches 1 sp "));
+
+    // A span that issues a GET is not pure: no file for it.
+    lines.clear();
+    CHECK(t.run(kCapGetS, kCapGetE) == tox2::SpuLeave::Returned);
+    CHECK(t.thread->channels().mfc().counters().get == 1);
+    CHECK(!std::filesystem::exists(dir / "a" / "capsyn_06020_06030_0.spucap"));
+    CHECK(lines.empty());
+
+    // Two dispatches in the span: the selector that allows one rejects it, the one without a limit takes it. They
+    // share both entries.
+    CHECK(t.run(kCapS3, kCapE3) == tox2::SpuLeave::Returned);
+    CHECK(!std::filesystem::exists(dir / "a" / "capsyn_06040_06060_1.spucap"));
+    const std::filesystem::path file3 = dir / "a" / "capsyn_06040_06060_0.spucap";
+    const std::optional<tox2::SpuCapture> c3 = tox2::readSpuCapture(file3, kCapImages, 2, error);
+    CHECK(c3 && c3->dispatches == 2 && c3->start == kCapS3 && c3->end == kCapE3);
+    std::size_t files = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir / "a")) files += entry.is_regular_file() ? 1 : 0;
+    CHECK(files == 2);
+
+    // A run that reaches the end entry with no open span writes nothing and does not fail.
+    CHECK(t.run(kCapE, kCapE) == tox2::SpuLeave::Returned);
+    tox2::setLogSink({});
+
+    // Every second accepted span, two files at most; the third and later spans cost no file.
+    tox2::SpuCaptureSettings every = settings;
+    every.dir = (dir / "b" / "nested").string();
+    every.count = 2;
+    every.every = 2;
+    auto one = tox2::parseSpuCaptureSelector("capsyn:6000:6010", error);
+    CHECK(one.has_value());
+    if (!one) return;
+    table = tox2::installSpuCapture(kCapImages, 2, std::span(&*one, 1), every, error);
+    CHECK(table != nullptr);
+    if (table == nullptr) return;
+    tox2::registerSpuImages(table, 2);
+    CapThread u(0x01000201);
+    for (int run = 0; run < 6; run++) CHECK(u.run(kCapS, kCapE) == tox2::SpuLeave::Returned);
+    CHECK(std::filesystem::exists(dir / "b" / "nested" / "capsyn_06000_06010_0.spucap"));
+    CHECK(std::filesystem::exists(dir / "b" / "nested" / "capsyn_06000_06010_1.spucap"));
+    CHECK(!std::filesystem::exists(dir / "b" / "nested" / "capsyn_06000_06010_2.spucap"));
+    // The second file holds the fourth span, whose pre-state already carries the first three results.
+    const auto second =
+            tox2::readSpuCapture(dir / "b" / "nested" / "capsyn_06000_06010_1.spucap", kCapImages, 2, error);
+    CHECK(second && second->thread_id == 0x01000201);
+    if (second) {
+        std::array<Tox2Vr, 128> gpr = second->pre_gpr;
+        std::vector<std::uint8_t> ls_model = second->pre_ls;
+        capModel(gpr, ls_model);
+        CHECK(second->post_ls == ls_model);
+        CHECK(std::memcmp(second->post_gpr.data(), gpr.data(), sizeof gpr) == 0);
+        CHECK(!c || second->pre_ls != c->pre_ls);
+    }
+
+    // Not armed yet.
+    tox2::SpuCaptureSettings late = settings;
+    late.dir = (dir / "c").string();
+    late.after_seconds = 3600;
+    table = tox2::installSpuCapture(kCapImages, 2, std::span(&*one, 1), late, error);
+    CHECK(table != nullptr);
+    if (table == nullptr) return;
+    tox2::registerSpuImages(table, 2);
+    CapThread v(0x01000202);
+    CHECK(v.run(kCapS, kCapE) == tox2::SpuLeave::Returned);
+    CHECK(std::filesystem::is_directory(dir / "c") && std::filesystem::is_empty(dir / "c"));
+
+    registerSynthImages();
+    std::filesystem::remove_all(dir);
 }
 
 struct RecordingOwner : tox2::SpuOwner {
@@ -3786,6 +4268,9 @@ int main(int argc, char** argv) {
     testCopyWrapsAtLsEnd();
     testFirstImageLog();
     testCheckImages();
+    testSpuCaptureFormat();
+    testSpuCaptureSelectorParse();
+    testSpuCaptureInstall();
     testHostThread();
     testStopChildren();
     testMfcGetPut();
