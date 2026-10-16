@@ -72,6 +72,11 @@ void storeSkipEqual(std::uint8_t* dst, const std::uint8_t* src) {
 // Writes `size` bytes in the widest naturally aligned atomic pieces. A piece whose bytes already equal
 // the new ones is skipped, so a concurrent plain store to it is not undone by an equal-valued write.
 void storeBytes(std::uint8_t* dst, const std::uint8_t* src, std::uint32_t size) {
+    // Most PUTs are whole 8-byte multiples at an 8-byte aligned address; skip the width search for them.
+    if ((reinterpret_cast<std::uintptr_t>(dst) & 7) == 0 && (size & 7) == 0) {
+        for (; size != 0; size -= 8, dst += 8, src += 8) storeSkipEqual<std::uint64_t>(dst, src);
+        return;
+    }
     while (size != 0) {
         std::uint32_t width = 8;
         while (width > size || (reinterpret_cast<std::uintptr_t>(dst) & (width - 1)) != 0) width >>= 1;

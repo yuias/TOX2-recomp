@@ -176,6 +176,51 @@ void testPutPieces() {
     CHECK(mem.bytes[412 + 4] == 0);
 }
 
+// put() against a memcpy reference over destination offsets and sizes, covering the 8-byte fast path of
+// storeBytes and the narrower pieces. A put of bytes that are already there must change nothing but still
+// invalidate a reservation on the line.
+void testPutMatchesReference() {
+    struct alignas(128) Buffer {
+        std::uint8_t bytes[1024];
+    };
+    auto buffer = std::make_unique<Buffer>();
+    std::uint8_t* const base = buffer->bytes;
+    std::array<std::uint8_t, 1024> initial;
+    std::array<std::uint8_t, 1024> src;
+    for (std::uint32_t i = 0; i < initial.size(); i++) {
+        initial[i] = static_cast<std::uint8_t>(i * 13 + 5);
+        src[i] = static_cast<std::uint8_t>(i * 29 + 7);
+    }
+
+    tox2::ReservationTable table;
+    std::vector<std::uint32_t> sizes = {1, 2, 4, 8};
+    for (std::uint32_t size = 16; size <= 512; size += 16) sizes.push_back(size);
+    int cases_run = 0;
+    for (std::uint32_t offset = 0; offset < 16; offset++) {
+        for (const std::uint32_t size : sizes) {
+            // The small sizes are naturally aligned stores by contract.
+            if (size <= 8 && (offset & (size - 1)) != 0) continue;
+            cases_run++;
+            std::memcpy(base, initial.data(), initial.size());
+            std::array<std::uint8_t, 1024> expected = initial;
+            std::memcpy(expected.data() + offset, src.data(), size);
+
+            table.put(base, offset, src.data(), size);
+            CHECK(std::memcmp(base, expected.data(), expected.size()) == 0);
+
+            // The same bytes again: memory stays as it is, the reservation on the first line is lost.
+            tox2::Reservation res;
+            std::uint8_t ls[128];
+            table.getllar(base, offset, ls, res);
+            CHECK(!table.lost(base, res));
+            table.put(base, offset, src.data(), size);
+            CHECK(std::memcmp(base, expected.data(), expected.size()) == 0);
+            CHECK(table.lost(base, res));
+        }
+    }
+    CHECK(cases_run > 0);
+}
+
 // One 16 KB MFC PUT spans 128 lines; the epoch and the publish count must move once, not per line.
 void testPutPublishesOnce() {
     constexpr std::uint32_t kSize = 0x4000;
@@ -3634,6 +3679,7 @@ int main(int argc, char** argv) {
     testPlainWriteBeforePutllc();
     testPutInvalidatesReservation();
     testPutPieces();
+    testPutMatchesReference();
     testPutPublishesOnce();
     testStoreConditional();
     testPpuReservationIsLineGranular();
