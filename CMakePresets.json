@@ -25,16 +25,30 @@
     {
       "name": "release",
       "inherits": "clang-ninja",
-      "displayName": "Release (RelWithDebInfo)",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+      "displayName": "Release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "profile",
+      "inherits": "clang-ninja",
+      "displayName": "Profile (Release code with line tables and PDBs)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_FLAGS": "-gline-tables-only -gcodeview",
+        "CMAKE_CXX_FLAGS": "-gline-tables-only -gcodeview",
+        "CMAKE_EXE_LINKER_FLAGS": "-Wl,/DEBUG",
+        "CMAKE_SHARED_LINKER_FLAGS": "-Wl,/DEBUG"
+      }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
-    { "name": "release", "configurePreset": "release" }
+    { "name": "release", "configurePreset": "release" },
+    { "name": "profile", "configurePreset": "profile" }
   ],
   "testPresets": [
     { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
-    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } }
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
+    { "name": "profile", "configurePreset": "profile", "output": { "outputOnFailure": true } }
   ]
 }

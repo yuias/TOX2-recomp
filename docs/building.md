@@ -7,7 +7,7 @@ test runs.
 ## `tools/build.ps1`
 
 ```powershell
-pwsh -NoProfile -File tools/build.ps1 [-Preset debug|release] [-Clean] [-Test]
+pwsh -NoProfile -File tools/build.ps1 [-Preset debug|release|profile] [-Clean] [-Test]
      [-GeneratedDir <dir>] [-GameDir <dir>] [-EbootElf <path>] [-LlvmBin <dir>]
      [-EbootBin <path>] [-Pup <path>] [-Rpcs3CryptoDir <dir>]
 ```
@@ -17,7 +17,7 @@ then configures, builds, and optionally runs CTest.
 
 | Parameter | Meaning |
 | --- | --- |
-| `-Preset debug\|release` | The CMake preset (default `debug`). Build output goes to `build/<preset>/`, executables to `build/<preset>/bin/`. |
+| `-Preset debug\|release\|profile` | The CMake preset (default `debug`). Build output goes to `build/<preset>/`, executables to `build/<preset>/bin/`. `release` builds with `-O3` and no debug info; `profile` is described below. |
 | `-Clean` | Delete `build/<preset>/` before configuring. This also deletes the default hdd directory `build/<preset>/hdd` (game data and saves). |
 | `-Test` | Run CTest after the build. Which tests run depends on the other parameters; see [Tests](tests.md). |
 | `-GeneratedDir <dir>` | The directory written by `ps3tool.py emit --out <dir>`. Compiles it into `tox2_ppu_generated` and `tox2_spu_generated` and builds `tox2_game` and the link tests. This game's executable is large, so it is emitted with `--chunks 256` and a full build compiles 256 generated C files; if the compiler runs out of memory, lower the parallelism with the `CMAKE_BUILD_PARALLEL_LEVEL` environment variable. Without it only the runtime libraries, tools and unit tests are built. The directory must hold the executable's `sources.cmake`, the libsre tree `<dir>/libsre/libsre_sources.cmake` (the second `emit` command in [Emitting C](emitter.md#a-prx-module-libsre)) and the SPU tree `<dir>/spu/spu_sources.cmake` (the `spu-emit` command in [Emitting C](emitter.md#spu-images)); if one is missing, configuration fails and prints the command to run. CMake variable `TOX2_PPU_GENERATED_DIR`. |
@@ -30,6 +30,16 @@ then configures, builds, and optionally runs CTest.
 
 Relative paths are resolved against the current directory. The parameters set CMake cache
 variables, so a later build of the same preset keeps them until they are given again.
+
+### The `profile` preset
+
+`profile` compiles the same code as `release` (`-O3`, and the same per-target options for the generated
+trees) and adds line tables (`-gline-tables-only -gcodeview`) and links with `/DEBUG`, so every executable
+and DLL gets a PDB written by the same link. A sampling profiler can then resolve function names, including
+static and inlined functions, which a `release` build cannot give. Output goes to `build/profile/`; the
+cache variables of the build script (`-GeneratedDir`, `-GameDir` and so on) are given to it separately.
+Its saves are in `build/profile/hdd`; `--hdd-dir` can name another build's directory instead. Do not use
+`profile` for play: the PDBs make the build directory larger and add nothing at run time.
 
 ## CMake variables
 
