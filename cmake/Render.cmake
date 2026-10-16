@@ -115,8 +115,8 @@ function(tox2_render_add_streamline_runtime)
   set(bin_dir "${CMAKE_BINARY_DIR}/bin")
   set(licence_dir "${bin_dir}/licenses/streamline")
   set(copied "")
-  # NvLowLatencyVk.dll (Reflex) is left out: its licence does not list it as distributable, and DLAA does not need
-  # it. sl.common's error about it is logged at debug level.
+  # NvLowLatencyVk.dll (Reflex) is left out: its licence does not list it as distributable. On Vulkan Streamline
+  # uses VK_NV_low_latency2 instead; sl.common's error about the missing DLL is logged at debug level.
   foreach(name sl.interposer.dll sl.common.dll sl.dlss.dll nvngx_dlss.dll)
     add_custom_command(OUTPUT "${bin_dir}/${name}"
       COMMAND ${CMAKE_COMMAND} -E make_directory "${bin_dir}"
@@ -125,6 +125,24 @@ function(tox2_render_add_streamline_runtime)
       VERBATIM)
     list(APPEND copied "${bin_dir}/${name}")
   endforeach()
+  # Frame generation is optional: a missing DLL only makes it unavailable at run time, DLAA is unaffected.
+  set(missing_frame_gen "")
+  foreach(name sl.dlss_g.dll sl.reflex.dll sl.pcl.dll nvngx_dlssg.dll)
+    if(NOT EXISTS "${sdk}/bin/x64/${name}")
+      list(APPEND missing_frame_gen "${name}")
+      continue()
+    endif()
+    add_custom_command(OUTPUT "${bin_dir}/${name}"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${bin_dir}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${sdk}/bin/x64/${name}" "${bin_dir}/${name}"
+      DEPENDS "${sdk}/bin/x64/${name}"
+      VERBATIM)
+    list(APPEND copied "${bin_dir}/${name}")
+  endforeach()
+  if(missing_frame_gen)
+    list(JOIN missing_frame_gen ", " missing_text)
+    message(STATUS "TOX2: Streamline: frame generation DLLs missing (${missing_text})")
+  endif()
   foreach(pair "license.txt|LICENSE.txt" "bin/x64/nvngx_dlss.license.txt|nvngx_dlss.license.txt"
                "3rd-party-licenses.md|3rd-party-licenses.md")
     string(REPLACE "|" ";" pair "${pair}")

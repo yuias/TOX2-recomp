@@ -77,6 +77,12 @@ void logCallback(sl::LogType type, const char* message) {
                                        text.find("Hook sl.common:Vulkan:") != std::string_view::npos)) {
         type = sl::LogType::eInfo;
     }
+    // The interposer scans the plugin directory and warns about every plugin the host did not ask for at slInit. The
+    // frame generation DLLs sit next to the executable in every run (measured: headless runs, the replay and the
+    // tests, which load DLAA only), so the line carries no information.
+    if (type == sl::LogType::eWarn && text.find("was not requested by the host") != std::string_view::npos) {
+        type = sl::LogType::eInfo;
+    }
     // sl.common tries to load the Reflex DLL at start-up. It is not shipped (its licence does not list it as
     // distributable) and DLAA does not use it, so the failure is expected.
     if (type != sl::LogType::eInfo && text.find("NvLowLatencyVk") != std::string_view::npos) type = sl::LogType::eInfo;

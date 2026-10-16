@@ -225,6 +225,8 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions&
     context_options.window = opt.window;
     // Always loaded: availability is fixed at context creation and the overlay can switch to DLAA later.
     context_options.streamline = true;
+    // Frame generation is a property of presentation: without a window nothing is presented.
+    context_options.frame_generation = opt.window;
     std::unique_ptr<tox2::VkContext> context = tox2::createVkContext(context_options, error);
     if (!context) return nullptr;
     const std::uint32_t api = context->deviceProperties().apiVersion;
@@ -235,6 +237,13 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions&
         tox2::logInfo("tox2: render: DLAA available (Streamline {})", context->streamline()->version());
     } else {
         tox2::logInfo("tox2: render: DLAA unavailable: {}", context->streamlineStatus());
+    }
+    if (!opt.window) {
+        tox2::logInfo("tox2: render: frame generation unavailable: no window");
+    } else if (context->frameGenerationSupported()) {
+        tox2::logInfo("tox2: render: frame generation available ({})", context->frameGenerationStatus());
+    } else {
+        tox2::logInfo("tox2: render: frame generation unavailable: {}", context->frameGenerationStatus());
     }
     if (opt.vk_validation && !context->validationEnabled()) {
         tox2::logWarn("tox2: render: validation layer requested but not installed");
