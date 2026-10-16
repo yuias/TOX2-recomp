@@ -1,9 +1,10 @@
 // The SIMD forms of the SPU helpers against their lane-by-lane definitions: the single-precision
 // arithmetic of spu_fp.h, run in the SPU float environment (round toward zero, FTZ, DAZ), against the
-// scalar tox2SpuSf* functions run in round to nearest, and shufb against a byte loop that follows the
-// ISA text. Random words weighted toward the cases that differ (zero and denormal exponents, exponent
-// 255, results near Smin and Smax, cancellation), and every combination of a list of edge words. The
-// helpers that need round to nearest must give the same result in both environments.
+// scalar tox2SpuSf* functions run in round to nearest, shufb against a byte loop that follows the
+// ISA text, and the quadword shifts and rotates against their unsigned __int128 definitions. Random
+// words weighted toward the cases that differ (zero and denormal exponents, exponent 255, results near
+// Smin and Smax, cancellation), and every combination of a list of edge words. The helpers that need
+// round to nearest must give the same result in both environments.
 
 #include <stdio.h>
 
@@ -403,9 +404,148 @@ static int checkGenControl(void) {
     return bad == 0;
 }
 
+// The previous definitions of the quadword shifts and rotates, through unsigned __int128, kept as the
+// reference for the pshufb and u64 lane forms.
+__extension__ typedef unsigned __int128 RefU128;
+
+static RefU128 refToInt(Tox2Vr v) {
+    RefU128 x;
+    __builtin_memcpy(&x, &v, sizeof x);
+    return x;
+}
+
+static Tox2Vr refFromInt(RefU128 x) {
+    Tox2Vr v;
+    __builtin_memcpy(&v, &x, sizeof v);
+    return v;
+}
+
+static RefU128 refRotl128(RefU128 x, uint32_t n) { return (x << n) | (x >> ((128u - n) & 127u)); }
+
+static Tox2Vr refShlqbi(Tox2Vr a, uint32_t count) { return refFromInt(refToInt(a) << (count & 7u)); }
+
+static Tox2Vr refShlqby(Tox2Vr a, uint32_t count) {
+    uint32_t s = count & 0x1fu;
+    return refFromInt(s < 16u ? refToInt(a) << (8u * s) : (RefU128)0);
+}
+
+static Tox2Vr refShlqbybi(Tox2Vr a, uint32_t count) { return refShlqby(a, count >> 3); }
+
+static Tox2Vr refRotqbi(Tox2Vr a, uint32_t count) { return refFromInt(refRotl128(refToInt(a), count & 7u)); }
+
+static Tox2Vr refRotqby(Tox2Vr a, uint32_t count) { return refFromInt(refRotl128(refToInt(a), 8u * (count & 15u))); }
+
+static Tox2Vr refRotqbybi(Tox2Vr a, uint32_t count) { return refRotqby(a, count >> 3); }
+
+static Tox2Vr refRotqmbi(Tox2Vr a, uint32_t count) { return refFromInt(refToInt(a) >> ((0u - count) & 7u)); }
+
+static Tox2Vr refRotqmby(Tox2Vr a, uint32_t count) {
+    uint32_t s = (0u - count) & 0x1fu;
+    return refFromInt(s < 16u ? refToInt(a) >> (8u * s) : (RefU128)0);
+}
+
+static Tox2Vr refRotqmbybi(Tox2Vr a, uint32_t count) { return refRotqmby(a, count >> 3); }
+
+enum { kQuadwordHelpers = 9 };
+
+static long g_qw_bad;
+static long g_qw_cases;
+
+// All nine helpers on one vector and count. The count is read through a volatile so that the helpers
+// are compiled with a variable count, as in the register forms; the constant counts below cover the
+// immediate forms.
+static void checkQuadword(Tox2Vr v, uint32_t count) {
+    const Tox2Vr got[kQuadwordHelpers] = {
+            tox2SpuShlqbi(v, count),  tox2SpuShlqby(v, count),  tox2SpuShlqbybi(v, count),
+            tox2SpuRotqbi(v, count),  tox2SpuRotqby(v, count),  tox2SpuRotqbybi(v, count),
+            tox2SpuRotqmbi(v, count), tox2SpuRotqmby(v, count), tox2SpuRotqmbybi(v, count)};
+    const Tox2Vr want[kQuadwordHelpers] = {refShlqbi(v, count),  refShlqby(v, count),  refShlqbybi(v, count),
+                                           refRotqbi(v, count),  refRotqby(v, count),  refRotqbybi(v, count),
+                                           refRotqmbi(v, count), refRotqmby(v, count), refRotqmbybi(v, count)};
+    for (int k = 0; k < kQuadwordHelpers; k++) {
+        g_qw_cases++;
+        if ((got[k].u64[0] != want[k].u64[0] || got[k].u64[1] != want[k].u64[1]) && g_qw_bad++ < 10) {
+            printf("quadword helper %d count %08x: %016llx %016llx, expected %016llx %016llx\n", k, (unsigned)count,
+                   (unsigned long long)got[k].u64[1], (unsigned long long)got[k].u64[0],
+                   (unsigned long long)want[k].u64[1], (unsigned long long)want[k].u64[0]);
+        }
+    }
+}
+
+#define CHECK_QUADWORD_CONSTANT(v, c) checkQuadword(v, (uint32_t)(c))
+
+// Every count value the helpers read: the byte forms read bits 0 to 4 of the count, the bybi forms read
+// bits 3 to 7, and the mask forms negate first, so the full range of the low 10 bits and of the top 10
+// bits (the negation of a small count) is walked, then single-bit counts and random words.
+static int checkQuadwords(void) {
+    g_qw_bad = 0;
+    g_qw_cases = 0;
+    for (int t = 0; t < 64; t++) {
+        Tox2Vr v;
+        for (int i = 0; i < 4; i++) v.u32[i] = next();
+        if (t == 0) v.u32[0] = v.u32[1] = v.u32[2] = v.u32[3] = 0xffffffffu;
+        if (t == 1) {
+            v.u32[0] = v.u32[1] = v.u32[2] = v.u32[3] = 0;
+            v.u8[0] = 1;
+            v.u8[15] = 0x80;
+        }
+        volatile uint32_t count;
+        for (uint32_t c = 0; c < 1024; c++) {
+            count = c;
+            checkQuadword(v, count);
+        }
+        for (uint32_t c = 0xfffffc00u; c != 0; c++) {
+            count = c;
+            checkQuadword(v, count);
+        }
+        for (int bit = 0; bit < 32; bit++) {
+            count = 1u << bit;
+            checkQuadword(v, count);
+            count = ~(1u << bit);
+            checkQuadword(v, count);
+        }
+        for (int k = 0; k < 4096; k++) {
+            count = next();
+            checkQuadword(v, count);
+        }
+        // Constant counts, as the generated code writes for the immediate forms.
+        CHECK_QUADWORD_CONSTANT(v, 0);
+        CHECK_QUADWORD_CONSTANT(v, 1);
+        CHECK_QUADWORD_CONSTANT(v, 2);
+        CHECK_QUADWORD_CONSTANT(v, 3);
+        CHECK_QUADWORD_CONSTANT(v, 4);
+        CHECK_QUADWORD_CONSTANT(v, 5);
+        CHECK_QUADWORD_CONSTANT(v, 7);
+        CHECK_QUADWORD_CONSTANT(v, 8);
+        CHECK_QUADWORD_CONSTANT(v, 9);
+        CHECK_QUADWORD_CONSTANT(v, 12);
+        CHECK_QUADWORD_CONSTANT(v, 15);
+        CHECK_QUADWORD_CONSTANT(v, 16);
+        CHECK_QUADWORD_CONSTANT(v, 17);
+        CHECK_QUADWORD_CONSTANT(v, 24);
+        CHECK_QUADWORD_CONSTANT(v, 31);
+        CHECK_QUADWORD_CONSTANT(v, 32);
+        CHECK_QUADWORD_CONSTANT(v, 33);
+        CHECK_QUADWORD_CONSTANT(v, 0x18);
+        CHECK_QUADWORD_CONSTANT(v, 0x78);
+        CHECK_QUADWORD_CONSTANT(v, 0x80);
+        CHECK_QUADWORD_CONSTANT(v, 0xffffffffu);
+        CHECK_QUADWORD_CONSTANT(v, 0xfffffffeu);
+        CHECK_QUADWORD_CONSTANT(v, 0xfffffff9u);
+        CHECK_QUADWORD_CONSTANT(v, 0xfffffff8u);
+        CHECK_QUADWORD_CONSTANT(v, 0xfffffff0u);
+        CHECK_QUADWORD_CONSTANT(v, 0xffffffe1u);
+        CHECK_QUADWORD_CONSTANT(v, 0xffffffe0u);
+        CHECK_QUADWORD_CONSTANT(v, 0xffffffc0u);
+        CHECK_QUADWORD_CONSTANT(v, 0xffffff88u);
+    }
+    printf("quadword shifts: %ld results (9 helpers, 64 vectors), %ld mismatches\n", g_qw_cases, g_qw_bad);
+    return g_qw_bad == 0;
+}
+
 int main(void) {
-    const int ok =
-            checkFloat() & checkEdges() & checkExactPaths() & checkRoundedHelpers() & checkShufb() & checkGenControl();
+    const int ok = checkFloat() & checkEdges() & checkExactPaths() & checkRoundedHelpers() & checkShufb() &
+                   checkGenControl() & checkQuadwords();
     if (ok) printf("spu vector helpers ok\n");
     return ok ? 0 : 1;
 }

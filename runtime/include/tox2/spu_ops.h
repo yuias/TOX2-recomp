@@ -406,6 +406,75 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuRotmah(Tox2Vr a, Tox2Vr b) {
 // instruction names (the preferred word of RB, or the sign-extended I7) and applies its own mask, so
 // the register and immediate forms share the code.
 
+#if defined(__SSSE3__)
+// The vector forms below avoid unsigned __int128: its shifts compile to a pair of 64-bit GPR halves, which are written
+// to the register file as two 8-byte stores, and the next 16-byte load of that register cannot be forwarded from two
+// stores. The byte forms are one pshufb with a computed control; the bit forms are two-step shifts of the u64 lanes.
+typedef char Tox2SpuQwC8x16 __attribute__((vector_size(16)));
+
+// pshufb: lane h of the result is lane control[h] & 15 of a, or 0 when bit 7 of control[h] is set.
+TOX2_FORCEINLINE Tox2Vr tox2SpuQwPermute(Tox2Vr a, Tox2U8x16 control) {
+    Tox2Vr r;
+    r.u8 = (Tox2U8x16)__builtin_ia32_pshufb128((Tox2SpuQwC8x16)a.u8, (Tox2SpuQwC8x16)control);
+    return r;
+}
+
+TOX2_FORCEINLINE Tox2U8x16 tox2SpuQwLanes(void) {
+    const Tox2U8x16 lanes = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    return lanes;
+}
+
+// The bit shifts move the bits that cross from one u64 lane to the other in two steps (by 1, then by 63 - n) because a
+// vector shift by 64 gives 0, which covers n = 0 without a branch.
+TOX2_FORCEINLINE Tox2Vr tox2SpuShlqbi(Tox2Vr a, uint32_t count) {
+    const uint32_t n = count & 7u;
+    const Tox2U64x2 x = a.u64;
+    const Tox2U64x2 zero = {0, 0};
+    const Tox2U64x2 low_up = __builtin_shufflevector(zero, x, 0, 2);  // {0, lo}
+    a.u64 = (x << n) | ((low_up >> 1) >> (63u - n));
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuShlqby(Tox2Vr a, uint32_t count) {
+    // Lanes below the count wrap to 0xe1..0xff, whose bit 7 makes pshufb write zero; a count of 16 to 31 does that
+    // for every lane.
+    return tox2SpuQwPermute(a, tox2SpuQwLanes() - (uint8_t)(count & 0x1fu));
+}
+
+// The "from bit shift count" forms take the byte count from bits 24 to 28 of the word.
+TOX2_FORCEINLINE Tox2Vr tox2SpuShlqbybi(Tox2Vr a, uint32_t count) { return tox2SpuShlqby(a, count >> 3); }
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuRotqbi(Tox2Vr a, uint32_t count) {
+    const uint32_t n = count & 7u;
+    const Tox2U64x2 x = a.u64;
+    const Tox2U64x2 swapped = __builtin_shufflevector(x, x, 1, 0);
+    a.u64 = (x << n) | ((swapped >> 1) >> (63u - n));
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuRotqby(Tox2Vr a, uint32_t count) {
+    return tox2SpuQwPermute(a, (tox2SpuQwLanes() - (uint8_t)(count & 15u)) & (uint8_t)15);
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuRotqbybi(Tox2Vr a, uint32_t count) { return tox2SpuRotqby(a, count >> 3); }
+
+// The mask forms shift right by the negated count.
+TOX2_FORCEINLINE Tox2Vr tox2SpuRotqmbi(Tox2Vr a, uint32_t count) {
+    const uint32_t s = (0u - count) & 7u;
+    const Tox2U64x2 x = a.u64;
+    const Tox2U64x2 zero = {0, 0};
+    const Tox2U64x2 high_down = __builtin_shufflevector(x, zero, 1, 2);  // {hi, 0}
+    a.u64 = (x >> s) | ((high_down << 1) << (63u - s));
+    return a;
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuRotqmby(Tox2Vr a, uint32_t count) {
+    // 0x70 + lane + s keeps bit 7 clear exactly while lane + s < 16, and its low four bits are then lane + s.
+    return tox2SpuQwPermute(a, tox2SpuQwLanes() + (uint8_t)(0x70u + ((0u - count) & 0x1fu)));
+}
+
+TOX2_FORCEINLINE Tox2Vr tox2SpuRotqmbybi(Tox2Vr a, uint32_t count) { return tox2SpuRotqmby(a, count >> 3); }
+#else
 __extension__ typedef unsigned __int128 Tox2SpuU128;
 
 TOX2_FORCEINLINE Tox2SpuU128 tox2SpuToInt(Tox2Vr v) {
@@ -457,6 +526,7 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuRotqmby(Tox2Vr a, uint32_t count) {
 }
 
 TOX2_FORCEINLINE Tox2Vr tox2SpuRotqmbybi(Tox2Vr a, uint32_t count) { return tox2SpuRotqmby(a, count >> 3); }
+#endif
 
 // --- Shuffle and generate controls -----------------------------------------------------------
 
