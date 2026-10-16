@@ -667,6 +667,40 @@ void testUnrelatedPutDoesNotNotify() {
     }
 }
 
+// A write to one waiter's line ends that waiter's sleep only. The other waiter keeps sleeping, even though the epoch
+// moved, until wake().
+void testWatchLineWakesOnlyItsWaiter() {
+    constexpr std::uint32_t kLineA = 0;
+    constexpr std::uint32_t kLineB = tox2::kReservationLineSize;  // the next line: another stripe
+    tox2::ReservationTable table;
+    TestMemory mem;
+    std::uint32_t halt = 0;
+    std::uint8_t src[16] = {1};
+    constexpr int kPending = -1;
+    std::atomic<int> result_a{kPending};
+    std::atomic<int> result_b{kPending};
+    const std::uint64_t seen = table.storeEpoch();
+    std::thread waiter_a(
+            [&] { result_a.store(static_cast<int>(table.waitStoreEpoch(seen, &halt, milliseconds(3000), kLineA))); });
+    std::thread waiter_b(
+            [&] { result_b.store(static_cast<int>(table.waitStoreEpoch(seen, &halt, milliseconds(3000), kLineB))); });
+    // Both waiters have to be asleep before the write, or they return on the moved epoch without sleeping.
+    std::this_thread::sleep_for(milliseconds(100));
+
+    const auto put_at = Clock::now();
+    table.put(mem.base(), kLineA, src, 16);
+    waiter_a.join();
+    CHECK(Clock::now() - put_at < milliseconds(2000));
+    CHECK(result_a.load() == static_cast<int>(tox2::StoreWait::Epoch));
+
+    std::this_thread::sleep_for(milliseconds(200));
+    CHECK(result_b.load() == kPending);
+
+    table.wake();
+    waiter_b.join();
+    CHECK(result_b.load() == static_cast<int>(tox2::StoreWait::Epoch));
+}
+
 // A failed store-conditional locks the stripe and restores it unchanged; lost() must not report that as a
 // lost reservation, on the same line or on a line that shares the stripe.
 void testFailedWritersDoNotLoseReservation() {
@@ -3609,6 +3643,7 @@ int main(int argc, char** argv) {
     testWaitForStoreEpoch();
     testWaitersAreNotLost();
     testUnrelatedPutDoesNotNotify();
+    testWatchLineWakesOnlyItsWaiter();
     testFailedWritersDoNotLoseReservation();
     testGetllarIsNotTorn();
     testSharedTable();

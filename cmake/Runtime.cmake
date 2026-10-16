@@ -171,6 +171,8 @@ function(tox2_runtime_add_core)
   target_link_libraries(tox2_runtime_core PUBLIC bcrypt)
   # timeBeginPeriod (core/timer_resolution.cpp).
   target_link_libraries(tox2_runtime_core PRIVATE winmm)
+  # WaitOnAddress / WakeByAddressAll (core/reservation.cpp).
+  target_link_libraries(tox2_runtime_core PRIVATE synchronization)
   # PRIVATE: spdlog types stay out of core/log.h, so consumers never compile against its headers.
   target_link_libraries(tox2_runtime_core PRIVATE spdlog::spdlog)
   # PRIVATE as well: the PNG codec stays inside cell_png_dec.cpp.

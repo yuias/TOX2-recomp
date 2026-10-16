@@ -13,6 +13,10 @@
 
 #include <immintrin.h>
 
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
 #include "core/log.h"
 
 namespace tox2 {
@@ -86,18 +90,19 @@ void storeBytes(std::uint8_t* dst, const std::uint8_t* src, std::uint32_t size) 
 std::uint32_t stripeIndex(std::uint32_t line) { return (line >> 7) & (kReservationStripeCount - 1); }
 
 // Registers a waiter for the duration of a waitStoreEpoch() call: in a watch slot when it names a line and one is
-// free, as a wildcard otherwise. Both stores are seq_cst, see publish().
+// free, as a wildcard otherwise. Both registrations are seq_cst, see publish(). word() is what the waiter sleeps on.
 class WatchRegistration {
 public:
-    WatchRegistration(std::array<std::atomic<std::uint32_t>, kWatchSlots>& slots, std::atomic<std::uint32_t>& wildcards,
-                      std::uint32_t watch_line)
-        : slots_(slots), wildcards_(wildcards) {
+    WatchRegistration(std::array<WatchSlot, kWatchSlots>& slots, std::atomic<std::uint32_t>& wildcards,
+                      std::atomic<std::uint32_t>& wildcard_wake, std::uint32_t watch_line)
+        : slots_(slots), wildcards_(wildcards), word_(&wildcard_wake) {
         if (watch_line != kWatchAnyLine) {
             const std::uint32_t key = stripeIndex(watch_line) + 1;
             for (std::uint32_t i = 0; i < kWatchSlots; i++) {
                 std::uint32_t expected = 0;
-                if (slots_[i].compare_exchange_strong(expected, key, std::memory_order_seq_cst)) {
+                if (slots_[i].key.compare_exchange_strong(expected, key, std::memory_order_seq_cst)) {
                     slot_ = static_cast<int>(i);
+                    word_ = &slots_[i].wake;
                     return;
                 }
             }
@@ -106,7 +111,7 @@ public:
     }
     ~WatchRegistration() {
         if (slot_ >= 0) {
-            slots_[slot_].store(0, std::memory_order_seq_cst);
+            slots_[slot_].key.store(0, std::memory_order_seq_cst);
         } else {
             wildcards_.fetch_sub(1, std::memory_order_seq_cst);
         }
@@ -114,11 +119,21 @@ public:
     WatchRegistration(const WatchRegistration&) = delete;
     WatchRegistration& operator=(const WatchRegistration&) = delete;
 
+    std::atomic<std::uint32_t>& word() const { return *word_; }
+
 private:
-    std::array<std::atomic<std::uint32_t>, kWatchSlots>& slots_;
+    std::array<WatchSlot, kWatchSlots>& slots_;
     std::atomic<std::uint32_t>& wildcards_;
+    std::atomic<std::uint32_t>* word_;
     int slot_ = -1;
 };
+
+// Wakes the waiter that sleeps on `word` after a generation bump. Bumping first means a waiter that has not gone to
+// sleep yet finds the word changed.
+void bumpAndWake(std::atomic<std::uint32_t>& word) {
+    word.fetch_add(1, std::memory_order_seq_cst);
+    WakeByAddressAll(&word);
+}
 
 }  // namespace
 
@@ -148,48 +163,44 @@ void ReservationTable::unlockWithWrite(std::atomic<std::uint64_t>& s, std::uint3
 
 void ReservationTable::unlockClean(std::atomic<std::uint64_t>& s) { s.fetch_sub(1, std::memory_order_release); }
 
-// No wake-up is lost to the filter: a waiter stores its watch slot (seq_cst) before it reads the epoch inside
-// waitStoreEpoch(), and a writer bumps the epoch (seq_cst) before it reads the slots. In the seq_cst order
-// either the writer's slot read comes after the waiter's store, so it sees the slot and notifies (the mutex
-// orders that notify after the waiter's predicate check, which is made with the mutex held), or it comes
-// before, so the bump precedes the waiter's epoch read and the waiter does not sleep. The waiter watches the
-// stripe of its line and every written line's version moved before this call, so whatever makes lost() true
-// reaches the waiter through a stripe it watches.
+// No wake-up is lost to the filter. A waiter registers (slot key or wildcard count), then reads its wake word, then
+// reads the epoch, all seq_cst; a writer bumps the epoch, then reads the registrations, then bumps the word. If the
+// writer's registration read misses the waiter, it precedes the registration, so the epoch bump precedes the waiter's
+// epoch read and the waiter returns Epoch without sleeping. If it sees the registration, the word bump comes either
+// before the waiter's word read (then it also precedes the epoch read: Epoch) or after it, and then WaitOnAddress
+// finds the word changed or is woken by the writer's wake. A slot reused between the writer's read and its bump gets
+// a spurious Epoch, which costs nothing. The waiter watches the stripe of its line, and every written line's version
+// moved before this call, so whatever makes lost() true reaches the waiter through a stripe it watches.
 void ReservationTable::publish(std::uint32_t first_line, std::uint32_t last_line) {
     publishes_.fetch_add(1, std::memory_order_relaxed);
     epoch_.fetch_add(1, std::memory_order_seq_cst);
-    if (hasWatcher(first_line, last_line)) notifyWaiters();
+    bool woke = false;
+    if (wildcard_waiters_.load(std::memory_order_seq_cst) != 0) {
+        bumpAndWake(wildcard_wake_);
+        woke = true;
+    }
+    // Stripes of the written lines are first, first + 1, ... (mod the stripe count); a range of that many lines or
+    // more covers every stripe.
+    const std::uint32_t lines = ((last_line - first_line) >> 7) + 1;
+    const std::uint32_t first = stripeIndex(first_line);
+    for (WatchSlot& slot : watch_) {
+        const std::uint32_t key = slot.key.load(std::memory_order_seq_cst);
+        if (key == 0) continue;
+        if (lines >= kReservationStripeCount || ((key - 1 - first) & (kReservationStripeCount - 1)) < lines) {
+            bumpAndWake(slot.wake);
+            woke = true;
+        }
+    }
+    if (woke) notifies_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void ReservationTable::wake() {
     publishes_.fetch_add(1, std::memory_order_relaxed);
     epoch_.fetch_add(1, std::memory_order_seq_cst);
-    notifyWaiters();
-}
-
-void ReservationTable::notifyWaiters() {
-    // Taking the mutex orders this notify after a waiter that has checked the epoch but not yet started to wait.
-    {
-        std::lock_guard<std::mutex> guard(wait_mutex_);
-    }
+    // Every word moves, occupied or not: a slot that is claimed after this bump finds the epoch moved.
+    bumpAndWake(wildcard_wake_);
+    for (WatchSlot& slot : watch_) bumpAndWake(slot.wake);
     notifies_.fetch_add(1, std::memory_order_relaxed);
-    wait_cv_.notify_all();
-}
-
-bool ReservationTable::hasWatcher(std::uint32_t first_line, std::uint32_t last_line) const {
-    if (wildcard_waiters_.load(std::memory_order_seq_cst) != 0) return true;
-    // Stripes of the written lines are first, first + 1, ... (mod the stripe count); a range of that many lines
-    // or more covers every stripe.
-    const std::uint32_t lines = ((last_line - first_line) >> 7) + 1;
-    const std::uint32_t first = stripeIndex(first_line);
-    for (const auto& slot : watch_) {
-        const std::uint32_t key = slot.load(std::memory_order_seq_cst);
-        if (key == 0) continue;
-        if (lines >= kReservationStripeCount || ((key - 1 - first) & (kReservationStripeCount - 1)) < lines) {
-            return true;
-        }
-    }
-    return false;
 }
 
 void ReservationTable::getllar(const std::uint8_t* base, std::uint32_t ea, std::uint8_t* dst, Reservation& res) {
@@ -358,16 +369,26 @@ bool ReservationTable::lost(const std::uint8_t* base, const Reservation& res) co
 
 StoreWait ReservationTable::waitStoreEpoch(std::uint64_t seen, const std::uint32_t* halt,
                                            std::chrono::microseconds timeout, std::uint32_t watch_line) {
-    // Registered before the epoch is read for the first time, see publish().
-    const WatchRegistration registration(watch_, wildcard_waiters_, watch_line);
+    // Registered before the word and the epoch are read, see publish().
+    const WatchRegistration registration(watch_, wildcard_waiters_, wildcard_wake_, watch_line);
+    std::atomic<std::uint32_t>& word = registration.word();
+    std::uint32_t before = word.load(std::memory_order_seq_cst);
     if (haltRequested(halt)) return StoreWait::Halt;
     if (epoch_.load(std::memory_order_seq_cst) != seen) return StoreWait::Epoch;
 
-    std::unique_lock<std::mutex> guard(wait_mutex_);
-    const bool woken = wait_cv_.wait_for(
-            guard, timeout, [&] { return epoch_.load(std::memory_order_seq_cst) != seen || haltRequested(halt); });
-    if (!woken) return StoreWait::Timeout;
-    return haltRequested(halt) ? StoreWait::Halt : StoreWait::Epoch;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;) {
+        const auto left = deadline - std::chrono::steady_clock::now();
+        if (left <= std::chrono::steady_clock::duration::zero()) return StoreWait::Timeout;
+        // Rounded up: a shorter wait would return early and spin through this loop.
+        const auto left_ms = std::chrono::ceil<std::chrono::milliseconds>(left).count();
+        const DWORD wait_ms = static_cast<DWORD>(std::min<std::int64_t>(left_ms, INFINITE - 1));
+        WaitOnAddress(&word, &before, sizeof(before), wait_ms);
+        if (word.load(std::memory_order_seq_cst) != before) {
+            return haltRequested(halt) ? StoreWait::Halt : StoreWait::Epoch;
+        }
+        if (haltRequested(halt)) return StoreWait::Halt;
+    }
 }
 
 ReservationStats ReservationTable::stats() const {

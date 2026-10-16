@@ -13,11 +13,9 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 
 namespace tox2 {
 
@@ -40,6 +38,15 @@ enum class StoreWait { Epoch, Timeout, Halt };
 inline constexpr std::uint32_t kWatchAnyLine = 0xFFFFFFFF;
 // Waiters that name a line take one of these slots; the rest count as wildcards.
 inline constexpr std::uint32_t kWatchSlots = 16;
+
+// What one line-watching waiter sleeps on. A slot is claimed by at most one waiter at a time; each slot sits on its own
+// cache line so that a writer bumping one waiter's word does not disturb the others.
+struct alignas(64) WatchSlot {
+    std::atomic<std::uint32_t> key{0};   // stripe + 1 of the watched line; 0 is a free slot
+    std::atomic<std::uint32_t> wake{0};  // generation: a writer that hits the stripe bumps it and wakes the address
+};
+static_assert(sizeof(std::atomic<std::uint32_t>) == 4 && std::atomic<std::uint32_t>::is_always_lock_free,
+              "the wake words are waited on by address");
 
 // Cost counters: epoch bumps, and the bumps that found a waiter and notified.
 struct ReservationStats {
@@ -106,9 +113,14 @@ public:
     // would otherwise have reported.
     std::uint64_t storeEpoch() const { return epoch_.load(std::memory_order_acquire); }
 
-    // Blocks until the store epoch differs from `seen`, `timeout` passes, or `*halt` (may be null) is
-    // non-zero. Plain stores do not change the epoch, so a caller that waits for a plain store gets
+    // Blocks until a write to a watched stripe (any write for a wildcard), wake(), `timeout`, or a non-zero `*halt`
+    // (may be null). Plain stores do not change the epoch, so a caller that waits for a plain store gets
     // StoreWait::Timeout and must re-check lost() on every return, whatever the reason.
+    //
+    // A call that returns without sleeping reports Epoch when the epoch already differs from `seen`. After sleeping,
+    // it returns Epoch only when a write to a stripe the waiter watches (any write for a wildcard) or wake() came
+    // in; a write elsewhere moves the epoch but does not end the sleep, and at the deadline the result is Timeout
+    // even if the epoch moved. Halt is reported whenever the flag is set when the wait ends.
     //
     // Waiter protocol, in this order: `seen = storeEpoch()`, then `lost()`, then `waitStoreEpoch(seen, ...)`.
     // Reading the epoch after lost() can sleep through a write that landed in between.
@@ -152,20 +164,15 @@ private:
     // Bumps the epoch and wakes the waiters that watch a stripe of the inclusive line range (the versions are
     // already updated, see waitStoreEpoch()).
     void publish(std::uint32_t first_line, std::uint32_t last_line);
-    // Takes the wait mutex so that a waiter between its check and its sleep is ordered before the notify.
-    void notifyWaiters();
-    // Whether a waiter would have to be woken by a write to the lines [first_line, last_line].
-    bool hasWatcher(std::uint32_t first_line, std::uint32_t last_line) const;
 
     std::unique_ptr<std::atomic<std::uint64_t>[]> stripes_;  // bit 0 lock, bits 1..63 version
     std::atomic<std::uint64_t> epoch_{0};
-    // Stripe (+ 1) of the line each line-watching waiter named; 0 is a free slot.
-    std::array<std::atomic<std::uint32_t>, kWatchSlots> watch_{};
+    std::array<WatchSlot, kWatchSlots> watch_;
     std::atomic<std::uint32_t> wildcard_waiters_{0};
+    // Bumped by every publish while a wildcard waits, and by wake(); the wildcards sleep on it.
+    std::atomic<std::uint32_t> wildcard_wake_{0};
     std::atomic<std::uint64_t> publishes_{0};
     std::atomic<std::uint64_t> notifies_{0};
-    std::mutex wait_mutex_;
-    std::condition_variable wait_cv_;
     void (*compare_hook_)(void*) = nullptr;
     void* compare_hook_arg_ = nullptr;
 };
