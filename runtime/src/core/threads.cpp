@@ -291,20 +291,6 @@ void installThreadHooks() {
     setGuestLockCensusProvider(&guestLockCensus);
 }
 
-// RPCS3 fills the lowest and the highest page of every stack allocation with these strings (`vm.cpp`
-// `block_t::try_alloc`, "Fill stack guards"). The top page holds the initial frame, so guest code
-// that reads uninitialised stack sees the pattern.
-void fillStackPages(std::uint8_t* base, std::uint32_t addr, std::uint32_t size) {
-    constexpr std::uint32_t kPage = 0x1000;
-    const auto fill = [&](std::uint32_t at, std::string_view pattern) {
-        for (std::uint32_t off = 0; off < kPage; off += 8) {
-            std::memcpy(base + at + off, pattern.data(), 8);
-        }
-    };
-    fill(addr, "STACKGRD");
-    fill(addr + size - kPage, "UNDERFLO");
-}
-
 unsigned __stdcall guestThreadMain(void* arg) {
     auto* thread = static_cast<GuestThread*>(arg);
     reserveFaultStack();
@@ -1003,7 +989,10 @@ GuestThread* prepareGuestThread(const GuestThreadParams& params) {
         return nullptr;
     }
     const auto size = static_cast<std::uint32_t>(size64);
-    fillStackPages(base, addr, size);
+    // The stack is zero, as freshly committed pages are. RPCS3 (`vm.cpp` `block_t::try_alloc`) writes its
+    // "STACKGRD"/"UNDERFLO" patterns into the guard pages outside the allocation, which the guest cannot read;
+    // writing them inside would hand the initial frames' uninitialised locals non-zero values (a game's
+    // CellSaveDataSetList with an unset reserved word then fails the parameter check).
 
     // Read before taking the registry mutex: a bad descriptor faults, and the fatal path's census
     // needs that mutex.

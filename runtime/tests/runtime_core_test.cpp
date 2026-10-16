@@ -12014,7 +12014,10 @@ void testPpuThreads() {
         CHECK(thread->joinable() && thread->priority() == 500 && thread->stackSize() == 0x10000);
         CHECK(thread->tlsR13() == probe);
         CHECK(thread->context().gpr[13] == probe && thread->context().gpr[2] == 0x1234);
-        CHECK(std::memcmp(base + thread->stackAddr(), "STACKGRD", 8) == 0);
+        // No guard pattern inside the stack: the guest sees zero, as on RPCS3. The top page may already be in
+        // use by the running thread, so the lowest page is checked.
+        const std::uint8_t* low = base + thread->stackAddr();
+        CHECK(std::all_of(low, low + 0x1000, [](std::uint8_t b) { return b == 0; }));
     }
     CHECK(syscallAs(*caller, 44, id, join_out) == 0);
     CHECK(tox2Read64(base, join_out) == 107);
