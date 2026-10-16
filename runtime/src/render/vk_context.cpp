@@ -3,8 +3,11 @@
 #define VMA_IMPLEMENTATION
 #include "render/vk_context.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <format>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -168,14 +171,209 @@ std::string twoSampleGap(VkPhysicalDevice device, const VkPhysicalDeviceLimits& 
     return {};
 }
 
+// Member names of the Vulkan 1.2 and 1.3 feature structs, in declaration order, to name what Streamline asks for.
+constexpr const char* kFeatures12Names[] = {
+        "samplerMirrorClampToEdge",
+        "drawIndirectCount",
+        "storageBuffer8BitAccess",
+        "uniformAndStorageBuffer8BitAccess",
+        "storagePushConstant8",
+        "shaderBufferInt64Atomics",
+        "shaderSharedInt64Atomics",
+        "shaderFloat16",
+        "shaderInt8",
+        "descriptorIndexing",
+        "shaderInputAttachmentArrayDynamicIndexing",
+        "shaderUniformTexelBufferArrayDynamicIndexing",
+        "shaderStorageTexelBufferArrayDynamicIndexing",
+        "shaderUniformBufferArrayNonUniformIndexing",
+        "shaderSampledImageArrayNonUniformIndexing",
+        "shaderStorageBufferArrayNonUniformIndexing",
+        "shaderStorageImageArrayNonUniformIndexing",
+        "shaderInputAttachmentArrayNonUniformIndexing",
+        "shaderUniformTexelBufferArrayNonUniformIndexing",
+        "shaderStorageTexelBufferArrayNonUniformIndexing",
+        "descriptorBindingUniformBufferUpdateAfterBind",
+        "descriptorBindingSampledImageUpdateAfterBind",
+        "descriptorBindingStorageImageUpdateAfterBind",
+        "descriptorBindingStorageBufferUpdateAfterBind",
+        "descriptorBindingUniformTexelBufferUpdateAfterBind",
+        "descriptorBindingStorageTexelBufferUpdateAfterBind",
+        "descriptorBindingUpdateUnusedWhilePending",
+        "descriptorBindingPartiallyBound",
+        "descriptorBindingVariableDescriptorCount",
+        "runtimeDescriptorArray",
+        "samplerFilterMinmax",
+        "scalarBlockLayout",
+        "imagelessFramebuffer",
+        "uniformBufferStandardLayout",
+        "shaderSubgroupExtendedTypes",
+        "separateDepthStencilLayouts",
+        "hostQueryReset",
+        "timelineSemaphore",
+        "bufferDeviceAddress",
+        "bufferDeviceAddressCaptureReplay",
+        "bufferDeviceAddressMultiDevice",
+        "vulkanMemoryModel",
+        "vulkanMemoryModelDeviceScope",
+        "vulkanMemoryModelAvailabilityVisibilityChains",
+        "shaderOutputViewportIndex",
+        "shaderOutputLayer",
+        "subgroupBroadcastDynamicId",
+};
+constexpr const char* kFeatures13Names[] = {
+        "robustImageAccess",
+        "inlineUniformBlock",
+        "descriptorBindingInlineUniformBlockUpdateAfterBind",
+        "pipelineCreationCacheControl",
+        "privateData",
+        "shaderDemoteToHelperInvocation",
+        "shaderTerminateInvocation",
+        "subgroupSizeControl",
+        "computeFullSubgroups",
+        "synchronization2",
+        "textureCompressionASTC_HDR",
+        "shaderZeroInitializeWorkgroupMemory",
+        "dynamicRendering",
+        "shaderIntegerDotProduct",
+        "maintenance4",
+};
+
+template <typename Features>
+VkBool32* featureFlags(Features& features) {
+    return reinterpret_cast<VkBool32*>(&features.pNext + 1);
+}
+
+// Every member of these structs after sType and pNext is a VkBool32; the name lists must cover all of them (the
+// struct may be padded to pointer alignment after the last flag).
+template <typename Features>
+constexpr bool namesCoverFeatures(std::size_t name_count) {
+    const std::size_t flag_bytes = name_count * sizeof(VkBool32);
+    const std::size_t rest = sizeof(Features) - offsetof(Features, pNext) - sizeof(void*);
+    return rest >= flag_bytes && rest - flag_bytes < sizeof(void*);
+}
+
+static_assert(namesCoverFeatures<VkPhysicalDeviceVulkan12Features>(std::size(kFeatures12Names)));
+static_assert(namesCoverFeatures<VkPhysicalDeviceVulkan13Features>(std::size(kFeatures13Names)));
+
+// Returns the first member enabled in `wanted` and not in `supported`, or an empty string.
+template <typename Features, std::size_t N>
+std::string firstUnsupportedFeature(Features wanted, Features supported, const char* const (&names)[N]) {
+    const VkBool32* wanted_flags = featureFlags(wanted);
+    const VkBool32* supported_flags = featureFlags(supported);
+    for (std::size_t i = 0; i < N; i++) {
+        if (wanted_flags[i] != VK_FALSE && supported_flags[i] == VK_FALSE) return names[i];
+    }
+    return {};
+}
+
+// What createVkContext adds to the device for Streamline.
+struct StreamlineDevicePlan {
+    std::vector<std::string> extensions;
+    VkPhysicalDeviceVulkan12Features features12{};
+    VkPhysicalDeviceVulkan13Features features13{};
+    std::uint32_t graphics_queue_count = 1;  // queue 0 is the renderer's, the rest are Streamline's
+    // Streamline's own device proxy reports index 0 when no extra queue is requested, so this mirrors that
+    // instead of pointing past the renderer's only queue.
+    std::uint32_t graphics_first_queue = 0;
+    std::uint32_t compute_family = 0;
+    std::uint32_t compute_queue_count = 0;  // queues created in compute_family when it is not the graphics family
+    std::uint32_t compute_first_queue = 0;
+};
+
+// Checks that `device` offers everything DLSS asked for and fills `plan`; returns the reason when it does not.
+std::string planStreamlineDevice(VkPhysicalDevice device, std::uint32_t graphics_family,
+                                 const StreamlineRequirements& requirements, StreamlineDevicePlan& plan) {
+    const std::vector<VkExtensionProperties> offered = deviceExtensions(device);
+    for (const std::string& name : requirements.device_extensions) {
+        if (!hasName(offered, name.c_str())) return std::format("device extension {} is missing", name);
+    }
+
+    VkPhysicalDeviceVulkan12Features supported12{};
+    supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    VkPhysicalDeviceVulkan13Features supported13{};
+    supported13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    supported12.pNext = &supported13;
+    VkPhysicalDeviceFeatures2 supported{};
+    supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    supported.pNext = &supported12;
+    vkGetPhysicalDeviceFeatures2(device, &supported);
+    std::string missing = firstUnsupportedFeature(requirements.features12, supported12, kFeatures12Names);
+    if (!missing.empty()) return std::format("Vulkan 1.2 feature {} is not supported", missing);
+    // Streamline attaches per-object data with vkCreatePrivateDataSlot on a 1.3 device without listing the feature.
+    VkPhysicalDeviceVulkan13Features wanted13 = requirements.features13;
+    wanted13.privateData = VK_TRUE;
+    missing = firstUnsupportedFeature(wanted13, supported13, kFeatures13Names);
+    if (!missing.empty()) return std::format("Vulkan 1.3 feature {} is not supported", missing);
+
+    std::uint32_t family_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &family_count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(family_count);
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &family_count, families.data());
+    families.resize(family_count);
+
+    StreamlineDevicePlan result;
+    result.graphics_queue_count = 1 + requirements.graphics_queues;
+    result.graphics_first_queue = requirements.graphics_queues > 0 ? 1 : 0;
+    if (result.graphics_queue_count > families[graphics_family].queueCount) {
+        return std::format("the graphics queue family has {} queue(s), DLSS needs {}",
+                           families[graphics_family].queueCount, result.graphics_queue_count);
+    }
+    if (requirements.compute_queues > 0) {
+        bool found = false;
+        for (std::uint32_t i = 0; i < family_count && !found; i++) {
+            const VkQueueFlags flags = families[i].queueFlags;
+            if ((flags & VK_QUEUE_COMPUTE_BIT) != 0 && (flags & VK_QUEUE_GRAPHICS_BIT) == 0 &&
+                families[i].queueCount >= requirements.compute_queues) {
+                result.compute_family = i;
+                result.compute_queue_count = requirements.compute_queues;
+                result.compute_first_queue = 0;
+                found = true;
+            }
+        }
+        if (!found) {
+            // Share the graphics family, behind the graphics queues.
+            const std::uint32_t needed = result.graphics_queue_count + requirements.compute_queues;
+            if (needed > families[graphics_family].queueCount) {
+                return std::format("no queue family has {} compute queue(s) for DLSS", requirements.compute_queues);
+            }
+            result.compute_family = graphics_family;
+            result.compute_first_queue = result.graphics_queue_count;
+            result.graphics_queue_count = needed;
+        }
+    } else {
+        // Nothing requested: point at the last queue created in the graphics family so the indices stay valid.
+        result.compute_family = graphics_family;
+        result.compute_first_queue = result.graphics_queue_count - 1;
+    }
+
+    result.extensions = requirements.device_extensions;
+    result.features12 = requirements.features12;
+    result.features13 = wanted13;
+    if (result.features12.bufferDeviceAddress != VK_FALSE) {
+        // The feature comes from the core struct; the vkCreateDevice rules forbid the EXT extension next to it and
+        // next to the KHR one that Streamline also lists.
+        std::erase(result.extensions, std::string(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME));
+    }
+    plan = std::move(result);
+    return {};
+}
+
 }  // namespace
 
-VkContext::~VkContext() {
-    if (allocator_ != nullptr) vmaDestroyAllocator(allocator_);
-    if (device_ != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(device_);
-        vkDestroyDevice(device_, nullptr);
+PFN_vkVoidFunction VkContext::instanceProc(const char* name) const {
+    if (streamline_) {
+        if (const PFN_vkVoidFunction proxy = streamline_->instanceProxy(name)) return proxy;
     }
+    return vkGetInstanceProcAddr(instance_, name);
+}
+
+VkContext::~VkContext() {
+    if (device_ != VK_NULL_HANDLE) vkDeviceWaitIdle(device_);
+    // Streamline's proxies replace volk's device pointers, so it goes before anything uses them again.
+    streamline_.reset();
+    if (allocator_ != nullptr) vmaDestroyAllocator(allocator_);
+    if (device_ != VK_NULL_HANDLE) vkDestroyDevice(device_, nullptr);
     if (messenger_ != VK_NULL_HANDLE) vkDestroyDebugUtilsMessengerEXT(instance_, messenger_, nullptr);
     if (instance_ != VK_NULL_HANDLE) vkDestroyInstance(instance_, nullptr);
 }
@@ -197,6 +395,22 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
 
     std::unique_ptr<VkContext> ctx(new VkContext());
 
+    // Any Streamline failure only turns DLAA off: the reason is kept and creation goes on without it.
+    const auto dropStreamline = [&ctx](const std::string& reason) {
+        ctx->streamline_.reset();
+        ctx->streamline_status_ = reason;
+    };
+    StreamlineRequirements streamline_requirements;
+    if (options.streamline) {
+        std::string reason;
+        ctx->streamline_ = Streamline::load(reason);
+        if (!ctx->streamline_) {
+            ctx->streamline_status_ = reason;
+        } else if (!ctx->streamline_->requirements(streamline_requirements, reason)) {
+            dropStreamline(reason);
+        }
+    }
+
     const std::vector<VkExtensionProperties> available = instanceExtensions();
     std::vector<const char*> instance_exts;
     std::vector<const char*> layers;
@@ -215,6 +429,27 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
                 return nullptr;
             }
             instance_exts.push_back(name);
+        }
+    }
+    if (ctx->streamline_) {
+        std::vector<const char*> wanted;
+        for (const std::string& name : streamline_requirements.instance_extensions) {
+            if (!hasName(available, name.c_str())) {
+                dropStreamline(std::format("instance extension {} is missing", name));
+                break;
+            }
+            wanted.push_back(name.c_str());
+        }
+        if (ctx->streamline_) {
+            // Streamline names its objects and marks command ranges through VK_EXT_debug_utils and warns at start-up
+            // when the instance lacks it, validation or not. No messenger is needed for that.
+            if (hasName(available, VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
+                wanted.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+            for (const char* name : wanted) {
+                const bool listed = std::any_of(instance_exts.begin(), instance_exts.end(),
+                                                [name](const char* have) { return std::strcmp(have, name) == 0; });
+                if (!listed) instance_exts.push_back(name);
+            }
         }
     }
 
@@ -298,6 +533,18 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
     }
     ctx->two_sample_gap_ = twoSampleGap(chosen.device, ctx->properties_.limits, ctx->depthStencilFormat());
 
+    StreamlineDevicePlan streamline_plan;
+    if (ctx->streamline_) {
+        std::string reason;
+        if (!ctx->streamline_->dlssSupported(chosen.device, reason)) {
+            dropStreamline(reason);
+        } else {
+            reason = planStreamlineDevice(chosen.device, chosen.graphics_family, streamline_requirements,
+                                          streamline_plan);
+            if (!reason.empty()) dropStreamline(reason);
+        }
+    }
+
     std::vector<const char*> device_exts = {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
     if (options.window) device_exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 
@@ -306,6 +553,21 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
     features13.dynamicRendering = VK_TRUE;
     features13.synchronization2 = VK_TRUE;
     features13.shaderDemoteToHelperInvocation = VK_TRUE;
+    VkPhysicalDeviceVulkan12Features features12 = streamline_plan.features12;
+    features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    if (ctx->streamline_) {
+        VkBool32* flags = featureFlags(features13);
+        const VkBool32* wanted = featureFlags(streamline_plan.features13);
+        for (std::size_t i = 0; i < std::size(kFeatures13Names); i++) {
+            if (wanted[i] != VK_FALSE) flags[i] = VK_TRUE;
+        }
+        for (const std::string& name : streamline_plan.extensions) {
+            const bool listed = std::any_of(device_exts.begin(), device_exts.end(),
+                                            [&name](const char* have) { return name == have; });
+            if (!listed) device_exts.push_back(name.c_str());
+        }
+        features13.pNext = &features12;
+    }
 
     // Optional: DXT guest textures fall back to the placeholder without it. shaderClipDistance is
     // optional too: without it user clip planes are not applied (the translator emits no clip outputs).
@@ -323,19 +585,28 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
     ctx->has_sampler_anisotropy_ = supported_features.samplerAnisotropy == VK_TRUE;
     enabled_features.samplerAnisotropy = ctx->has_sampler_anisotropy_ ? VK_TRUE : VK_FALSE;
 
-    const float priority = 1.0f;
-    VkDeviceQueueCreateInfo queue_info{};
-    queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queue_info.queueFamilyIndex = chosen.graphics_family;
-    queue_info.queueCount = 1;
-    queue_info.pQueuePriorities = &priority;
+    const std::uint32_t graphics_queue_count = ctx->streamline_ ? streamline_plan.graphics_queue_count : 1;
+    const std::vector<float> priorities(std::max(graphics_queue_count, streamline_plan.compute_queue_count), 1.0f);
+    VkDeviceQueueCreateInfo queue_infos[2]{};
+    queue_infos[0].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queue_infos[0].queueFamilyIndex = chosen.graphics_family;
+    queue_infos[0].queueCount = graphics_queue_count;
+    queue_infos[0].pQueuePriorities = priorities.data();
+    std::uint32_t queue_info_count = 1;
+    if (ctx->streamline_ && streamline_plan.compute_queue_count > 0) {
+        queue_infos[1].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queue_infos[1].queueFamilyIndex = streamline_plan.compute_family;
+        queue_infos[1].queueCount = streamline_plan.compute_queue_count;
+        queue_infos[1].pQueuePriorities = priorities.data();
+        queue_info_count = 2;
+    }
 
     VkDeviceCreateInfo device_info{};
     device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     device_info.pNext = &features13;
     device_info.pEnabledFeatures = &enabled_features;
-    device_info.queueCreateInfoCount = 1;
-    device_info.pQueueCreateInfos = &queue_info;
+    device_info.queueCreateInfoCount = queue_info_count;
+    device_info.pQueueCreateInfos = queue_infos;
     device_info.enabledExtensionCount = static_cast<std::uint32_t>(device_exts.size());
     device_info.ppEnabledExtensionNames = device_exts.data();
     result = vkCreateDevice(chosen.device, &device_info, nullptr, &ctx->device_);
@@ -346,6 +617,24 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
     }
     volkLoadDevice(ctx->device_);
     vkGetDeviceQueue(ctx->device_, chosen.graphics_family, 0, &ctx->graphics_queue_);
+
+    if (ctx->streamline_) {
+        StreamlineDevice sl_device;
+        sl_device.instance = ctx->instance_;
+        sl_device.physical_device = chosen.device;
+        sl_device.device = ctx->device_;
+        sl_device.graphics_family = chosen.graphics_family;
+        sl_device.graphics_first_queue = streamline_plan.graphics_first_queue;
+        sl_device.compute_family = streamline_plan.compute_family;
+        sl_device.compute_first_queue = streamline_plan.compute_first_queue;
+        sl_device.presents = options.window;
+        std::string reason;
+        if (ctx->streamline_->setDevice(sl_device, reason)) {
+            ctx->streamline_status_ = std::format("Streamline {}, DLSS supported", ctx->streamline_->version());
+        } else {
+            dropStreamline(reason);
+        }
+    }
 
     VmaVulkanFunctions functions{};
     functions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;

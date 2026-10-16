@@ -144,6 +144,7 @@ struct OverlayState {
     std::uint32_t resolution_scale_request = 0;  // set by the panel, taken by DebugOverlay::onFlip; 0 = none
     std::optional<AaMode> aa_mode;               // last effective mode the renderer reported; unset = unknown
     bool msaa_available = false;                 // last value the renderer reported; AaMode::Msaa is selectable
+    bool dlaa_available = false;                 // last value the renderer reported; AaMode::Dlaa is listed
     std::optional<AaMode> aa_mode_request;       // set by the panel, taken by DebugOverlay::onFlip; unset = none
     std::uint32_t anisotropy = 0;                // last effective level the renderer reported (1 = off); 0 = unknown
     float max_anisotropy = 0.0f;                 // device maximum the renderer reported; 0 = unsupported or unknown
@@ -169,6 +170,10 @@ std::string windowSizeItemLabel(WindowSizePreset preset, ClientSize available);
 // when the client area differs from the size the preset fits to, "<name> (window WxH)". A minimised window
 // (empty client) shows the item text.
 std::string windowSizePreviewLabel(const WindowStatus& status);
+
+// The anti-aliasing modes the combo lists, in display order. DLAA is left out when the renderer cannot run it, because
+// it depends on the GPU and driver rather than on a device feature a disabled entry could explain.
+std::vector<AaMode> aaModeChoices(const OverlayState& state);
 
 // Moves the requests the panels made since the last flip into the reply for the renderer and clears them.
 PresentOverlayRequests takePresentRequests(OverlayState& state);

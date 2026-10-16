@@ -197,6 +197,12 @@ DrawPipelines::DrawPipelines(VkContext& context, std::filesystem::path cache_fil
     layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layout_info.setLayoutCount = 1;
     layout_info.pSetLayouts = &set_layout_;
+    // The vertex jitter offset (VpPush in the vertex program translator).
+    VkPushConstantRange jitter_push{};
+    jitter_push.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    jitter_push.size = 2 * sizeof(float);
+    layout_info.pushConstantRangeCount = 1;
+    layout_info.pPushConstantRanges = &jitter_push;
     if (vkCreatePipelineLayout(device, &layout_info, nullptr, &draw_layout_) != VK_SUCCESS) {
         draw_layout_ = VK_NULL_HANDLE;
         fail("vkCreatePipelineLayout failed");

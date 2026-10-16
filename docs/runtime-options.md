@@ -11,7 +11,7 @@ tox2_game [--game-dir DIR] [--vfs-config FILE] [--elf PATH] [--libsre PATH] [--h
          [--load-only] [--png-dump DIR] [--dump-guest ADDR:SIZE:FILE]...
          [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]
          [--dump-frames DIR] [--dump-frames-every K]
-         [--shader-cache DIR] [--resolution-scale N] [--aa-mode supersample|msaa] [--anisotropic-filter off|2|4|8|16]
+         [--shader-cache DIR] [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--anisotropic-filter off|2|4|8|16]
          [--vk-validation] [--no-window] [--window-size 720p|1080p|1440p|2160p] [--fullscreen on|off]
          [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off] [--ppu-threads legacy|1|2]
          [--lwmutex-fast-path on|off] [--lwmutex-watch]
@@ -67,7 +67,7 @@ prefix (the census lines and the register dump of a fatal stop do not).
 | `--dump-frames-every K` | Dump every `K`-th flip instead of every one (default 1). |
 | `--shader-cache DIR` | Directory of the SPIR-V cache and the pipeline cache `pipelines.bin` (default `generated/shader_cache`). |
 | `--resolution-scale N` | Render every colour and depth target at `N` times its guest size (`N` is a whole number from 1 to 4; default 1), so the picture is `N` times sharper. The window and the `--dump-frames` PNGs are `N` times the guest frame size (2560x1440 at `N` 2 for a 1280x720 game). A target that would exceed the GPU's image size limit is rendered at a smaller scale and counted as `state surface too large for the resolution scale`. Any other value is a usage error. |
-| `--aa-mode supersample\|msaa` | How surfaces in the game's anti-aliased mode are rendered (default `msaa`). `supersample` draws them into a single-sample image in the memory layout, shaded once per sample; `msaa` is the 2-sample multisampled mode. `msaa` falls back to `supersample` (one log line and the census kind `state 2-sample multisampling unavailable`) on a device without 2-sample support. Any other value is a usage error. |
+| `--aa-mode supersample\|msaa\|dlaa` | How surfaces in the game's anti-aliased mode are rendered (default `msaa`). `supersample` draws them into a single-sample image in the memory layout, shaded once per sample; `msaa` is the 2-sample multisampled mode; `dlaa` draws the scene one sample per pixel with a sub-pixel jitter and anti-aliases it with NVIDIA DLSS in DLAA mode, which needs an NVIDIA RTX GPU and the Streamline DLLs (see [DLAA](rendering.md#dlaa) and [NVIDIA Streamline (DLAA)](building.md#nvidia-streamline-dlaa)). `msaa` falls back to `supersample` (one log line and the census kind `state 2-sample multisampling unavailable`) on a device without 2-sample support. `dlaa` falls back to `msaa` (or to `supersample` on a device without 2-sample support) when DLAA is unavailable: the build has no Streamline SDK, the DLLs are missing or not signed by NVIDIA, the GPU is not a DLSS-capable RTX GPU, the driver is too old, or the device lacks an image format the pass needs. That prints one warning, `tox2: render: DLAA unavailable (<reason>); anti-aliased surfaces use <mode>`, and counts the census kind `state DLAA unavailable`; the run goes on. At start-up the log says which case applies, `tox2: render: DLAA available (Streamline <version>)` or `tox2: render: DLAA unavailable: <reason>`. The `aa_mode` key of `config.json` takes the same three names in every build, so a saved `"dlaa"` is never an error. Any other value is a usage error. |
 | `--anisotropic-filter off\|2\|4\|8\|16` | Force anisotropic filtering at the given level on the mipmapped, linearly filtered samplers (default `off`, which leaves every sampler as the game set it). The level is limited to what the device supports, and the option has no effect on a device without anisotropic filtering. The debug overlay can change it while the game runs (`Anisotropic filtering` under Settings). Any other value is a usage error. See [Anisotropic filtering](rendering.md#anisotropic-filtering). |
 | `--vk-validation` | Enable the Khronos validation layer. It comes with the Vulkan SDK; if it is not installed, `tox2_game` logs a warning and goes on without it. |
 | `--rsx-capture N[,M...]` | Record the given frames (1-based flip numbers) as `.tox2cap` files. See [Capture and replay](rendering.md#capture-and-replay). The overlay's `Capture next flip` button records one more frame into the same directory, `generated/rsx/captures`, with or without this option. |
@@ -229,7 +229,7 @@ values, whether from the command line, the file or the defaults, are never writt
 | --- | --- |
 | `frame_limit` | `Flip limiter` is changed in the overlay (`"vsync"`, `"60"` or `"off"`). |
 | `resolution_scale` | `Internal resolution scale` is changed (a number). |
-| `aa_mode` | `Anti-aliasing` is changed (`"supersample"` or `"msaa"`). |
+| `aa_mode` | `Anti-aliasing` is changed (`"supersample"`, `"msaa"` or `"dlaa"`; the overlay lists DLAA only when it is available). |
 | `anisotropic_filter` | `Anisotropic filtering` is changed (`"off"`, `"2"`, `"4"`, `"8"` or `"16"`). |
 | `window_size` | `Window size` is changed to another preset (`"720p"`, `"1080p"`, `"1440p"` or `"2160p"`). |
 | `fullscreen` | `Alt+Enter` or `F11` switches fullscreen on or off (`true` or `false`). |
@@ -244,8 +244,8 @@ placeholder and saves nothing. The rule has these consequences:
   (replacing the file's value) and the run continues with it. The command-line value itself is never
   written.
 - A value that differs from the player's choice is not written: a resolution scale that fell back because
-  the surface was too large, MSAA that fell back to supersampling, anisotropy limited by the device, or a
-  window size reduced to fit the screen. The file keeps what the player chose, so a larger monitor or a
+  the surface was too large, MSAA that fell back to supersampling, DLAA that fell back to MSAA, anisotropy
+  limited by the device, or a window size reduced to fit the screen. The file keeps what the player chose, so a larger monitor or a
   different device gets it at the next start.
 - Dragging or maximising the window, and a fullscreen state given by `--fullscreen`, write nothing.
 - With `--no-config` nothing is written.

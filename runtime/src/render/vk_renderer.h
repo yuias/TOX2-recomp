@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "render/dlaa_pass.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
 #include "render/image_pool.h"
@@ -27,6 +28,29 @@
 #include "rsx/rsx_frame.h"
 
 namespace tox2 {
+
+// On: camera matrices from the scene draws' projections; Off: identity matrices; Reset: identity matrices and a reset
+// at every evaluation (no history at all).
+enum class DlaaCamera : std::uint8_t { On, Off, Reset };
+
+// Switches for the DLAA A/B checks (tox2_rsxreplay); the defaults are the measured settings.
+struct DlaaDebug {
+    bool jitter = true;  // shift perspective scene draws and report the offset
+    // Negate the reported jitterOffset only, never the geometry. Off: the draw viewport has no y flip, so a positive
+    // offset moves content right and down, which is the direction DLSS expects (its motion-vector space, origin top
+    // left). Measured against 4x renders of the room, cutscene and effects captures, the unflipped offset scored best
+    // on all three and flipping both axes worst.
+    bool flip_jitter_x = false, flip_jitter_y = false;
+    DlaaCamera camera = DlaaCamera::On;
+    // Mirror the clip-to-clip matrices in y (F * C * F). Streamline's mvec kernel builds a y-up clip position
+    // (`1 - 2v` in shaders/mvec.hlsl) while our clip space is y-down: the viewport height is positive and the vertex
+    // epilogue has no y flip. Mean difference of 8701 against a 4x render: 0.967 with the flip, 3.325 without,
+    // 3.538 with the camera off.
+    bool flip_clip_y = true;
+    // motionVectorsInvalidValue 0. The value does not change the output; left unset, Streamline warns once per
+    // process.
+    bool mvec_invalid_zero = true;
+};
 
 struct RenderOptions {
     // Every dump_every-th flip (counted from 1) is written to `<dump_dir>/frame_<flip number>.png`. An
@@ -46,8 +70,13 @@ struct RenderOptions {
     // scale that fits (and counted).
     std::uint32_t resolution_scale = 1;
     // How anti-aliased surfaces are drawn. Msaa falls back to Supersample (and is counted) on a device without
-    // 2-sample support; aaMode() reports the effective mode.
+    // 2-sample support; Dlaa falls back to Msaa (then Supersample) when DLAA is unavailable. aaMode() reports the
+    // effective mode.
     AaMode aa_mode = AaMode::Msaa;
+    // Dlaa mode only: false draws the one-sample scene image but never evaluates DLAA, so the game's resolve reads it
+    // through the layout copy. For tests of the scene image itself.
+    bool dlaa_evaluate = true;
+    DlaaDebug dlaa_debug;
     // Forced anisotropic filtering level: 1 (off), 2, 4, 8 or 16; anything else makes the renderer invalid. A device
     // without the samplerAnisotropy feature keeps 1; a lower device maximum clamps the level (see anisotropy()).
     std::uint32_t anisotropy = 1;
@@ -56,7 +85,7 @@ struct RenderOptions {
 // What a created GPU image or upload block was for (see RendererStats::images_created).
 enum class RenderImageKind : std::uint8_t {
     Target,       // colour or depth target
-    Sidecar,      // 2-sample image of an anti-aliased target
+    Sidecar,      // 2-sample (Msaa) or 1-sample (Dlaa) image of an anti-aliased target
     DepthArgb,    // A8R8G8B8 rewrite of a depth surface
     Texture,      // texture cache image (not the DepthArgb ones)
     UploadBlock,  // host-visible draw upload buffer
@@ -72,7 +101,10 @@ struct RendererStats {
     std::uint64_t feedback_copies = 0;    // render target copies made for draws that sample their own target
     std::uint64_t depth_conversions = 0;  // depth surfaces rewritten as A8R8G8B8 texels for a draw that reads them
     std::uint64_t surface_inherits = 0;   // copies of an old target's contents into a resized one
-    std::uint64_t layout_copies = 0;      // multisampled targets copied into their memory layout for a read
+    std::uint64_t layout_copies = 0;      // sidecars copied into their memory layout for a read
+    std::uint64_t dlaa_evaluations = 0;   // DLAA evaluations recorded
+    std::uint64_t dlaa_resets = 0;        // ... that started a new history
+    std::uint64_t dlaa_failures = 0;      // scene reads that fell back to the layout image after a failed evaluation
     // GPU images and upload blocks created, by RenderImageKind, with their size in bytes (width x height x samples x
     // texel size). The Texture entries follow the texture cache as of the end of the last execute() or flip.
     std::array<std::uint64_t, kRenderImageKindCount> images_created{};
@@ -88,7 +120,7 @@ struct RendererStats {
     std::uint64_t barriers = 0;                     // image barriers recorded by transitionImage
     std::uint64_t barriers_skipped = 0;             // transitions that needed no barrier
     std::uint64_t rendering_instances = 0;          // vkCmdBeginRendering calls, all paths
-    std::uint64_t state_calls = 0;                  // vkCmdSet* and vkCmdBindPipeline calls recorded by recordDraw
+    std::uint64_t state_calls = 0;                  // vkCmdSet*/BindPipeline/PushConstants calls from recordDraw
     std::uint64_t state_calls_skipped = 0;          // ... that were not recorded because the value was already set
     std::uint64_t vp_constant_uploads_reused = 0;   // vertex constant uploads shared by draws with equal constants
     VkMemoryPropertyFlags upload_memory_flags = 0;  // of the first upload block (vmaGetAllocationMemoryProperties)
@@ -122,10 +154,14 @@ public:
 
     std::uint32_t resolutionScale() const { return resolution_scale_; }
 
-    // The effective anti-aliasing mode: the requested one, except Supersample when the device lacks 2 samples.
+    // The effective anti-aliasing mode: the requested one, except the fallbacks documented at RenderOptions::aa_mode.
     AaMode aaMode() const { return aa_mode_; }
     // True when the device supports 2-sample colour and depth/stencil surfaces.
     bool msaaAvailable() const { return context_.twoSampleSupportGap().empty(); }
+    // True when Streamline can run DLSS on this device and the device has the image formats the DLAA pass needs.
+    bool dlaaAvailable() const { return dlaa_gap_.empty(); }
+    // Why dlaaAvailable() is false: the context's Streamline status or the first missing format feature.
+    const std::string& dlaaUnavailableReason() const { return dlaa_gap_; }
 
     // Changes the scale of the targets created or bound from now on; false and no change outside
     // 1..kMaxResolutionScale. A target keeps its image until a draw or clear binds it again, then it is replaced by a
@@ -133,9 +169,9 @@ public:
     bool setResolutionScale(std::uint32_t scale);
 
     // Changes how the next pass over an anti-aliased surface is drawn; false and no change for Msaa when the device
-    // lacks 2-sample support. No target is touched: a read brings the memory layout up to date from the 2-sample image
-    // (syncLayout), and a pass that finds the other representation newer and does not replace all of it is counted
-    // (see beginSidecarPass). Renderer thread, between commands.
+    // lacks 2-sample support, and for Dlaa when dlaaAvailable() is false. No target is touched: a read brings the
+    // memory layout up to date from the sidecar image (syncLayout), and a pass that finds the other representation
+    // newer and does not replace all of it is counted (see beginSidecarPass). Renderer thread, between commands.
     bool setAaMode(AaMode mode);
 
     // The effective forced anisotropy level: 1 when off or unsupported, else the requested level clamped to the
@@ -221,10 +257,21 @@ private:
     void transitionImage(VkImage image, VkImageAspectFlags aspect, VkImageLayout& current, VkImageLayout layout);
     void transitionSidecar(RenderTarget& target, VkImageLayout layout);
 
-    // Anti-aliased surfaces in Msaa mode (see the multisampled sidecar of RenderTarget).
-    bool multisampledPass(const RsxSurface& surface) const;
-    bool ensureMultisample(RenderTarget& target);
+    // Anti-aliased surfaces in Msaa and Dlaa mode (see the sidecar of RenderTarget).
+    // Sample count of the sidecar a pass over `surface` draws into: 2 in Msaa mode, 1 in Dlaa mode, for AA mode 3
+    // only; 0 when the pass draws the layout image.
+    VkSampleCountFlags sidecarSamples(const RsxSurface& surface) const;
+    bool sidecarPass(const RsxSurface& surface) const { return sidecarSamples(surface) != 0; }
+    bool ensureSidecar(RenderTarget& target, VkSampleCountFlagBits samples);
     bool syncLayout(RenderTarget& target);
+    // True when a draw into `drawing` that samples the colour target `scene` as `texture` reads the DLAA-processed
+    // scene (see dlaaView).
+    bool dlaaTap(const RenderTarget& scene, const RenderTarget& drawing, bool sidecar_pass,
+                 const RsxTextureDesc& texture) const;
+    // Runs DLAA over the one-sample scene image (once per scene write) and returns a view of the anti-aliased scene,
+    // widened to the 2W layout columns the game's resolve expects, with the texture remap applied. Null after a counted
+    // failure; the caller then reads the layout image instead.
+    VkImageView dlaaView(RenderTarget& scene, std::uint32_t remap);
     bool beginLayoutPass(RenderTarget& target, bool writes, bool overwrites_all);
     void beginSidecarPass(RenderTarget& target, bool writes, bool overwrites_all);
 
@@ -232,7 +279,7 @@ private:
     // slot's fence has signaled. False (and fail()) when the allocation fails.
     bool allocUpload(std::size_t size, UploadRef& out);
     bool ensurePlaceholder();
-    bool prepareTextures(const RsxDraw& draw, const DrawShaders& shaders, RenderTarget& color, bool multisampled,
+    bool prepareTextures(const RsxDraw& draw, const DrawShaders& shaders, RenderTarget& color, bool sidecar_pass,
                          VkDescriptorImageInfo (&infos)[kFpTextureUnitCount], float (&scales)[kFpTextureUnitCount][4]);
     bool vertexFormatSupported(VkFormat format);
     bool blendSupported(VkFormat format);
@@ -240,7 +287,7 @@ private:
 
     void recordClear(const RsxClear& clear);
     void recordMaskedColorClear(const RsxClear& clear, RenderTarget& color, std::uint32_t color_bits,
-                                bool multisampled);
+                                VkSampleCountFlags sidecar_samples);
     void recordDraw(const RsxDraw& draw);
     void recordFlip(const RsxFlip& flip);
     void recordPresentBlit(RenderTarget* source);
@@ -255,6 +302,17 @@ private:
     RendererStats logged_stats_;  // stats_ at the last image-creation log line
     std::uint32_t resolution_scale_ = 1;
     AaMode aa_mode_ = AaMode::Supersample;
+    std::string dlaa_gap_;  // empty when DLAA is available
+    // DLAA state, created by the first evaluation.
+    std::unique_ptr<DlaaPass> dlaa_;
+    const RenderTarget* dlaa_output_owner_ = nullptr;  // the scene target whose evaluation the widened image holds
+    std::optional<std::uint64_t> dlaa_last_flip_;      // stats_.flips when the last evaluation was recorded
+    bool dlaa_switched_ = false;                       // the mode was set to Dlaa since the last evaluation
+    // stats_.flips of the latest draw that was shifted by the jitter; the evaluation reports the offset only for a
+    // frame that has one.
+    std::optional<std::uint64_t> dlaa_jitter_frame_;
+    // The perspective scene draws of the frame being recorded, which exist before the first evaluation creates dlaa_.
+    DlaaCameraTracker dlaa_camera_;
     std::uint32_t anisotropy_ = 1;
     bool anisotropy_unavailable_logged_ = false;
     // Always created: its worker thread only starts with the first submitted frame.
@@ -328,6 +386,7 @@ private:
             std::uint32_t compare_mask = 0, write_mask = 0, reference = 0;
         } faces[2];
         float blend_constants[4] = {};
+        float jitter_ndc[2] = {};  // push constant of the draw layout
     };
     // Empty: the command buffer's state is unknown and the next draw records all of it. Cleared by beginFrame and by
     // every other site that binds a pipeline or sets state, since a pipeline that does not declare a state as dynamic

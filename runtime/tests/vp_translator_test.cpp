@@ -39,6 +39,17 @@ bool hasReport(const tox2::GlslResult& result, const std::string& part) {
                        [&](const std::string& entry) { return contains(entry, part); });
 }
 
+// Every program declares the jitter push block and applies it after the viewport transform (which ends with the
+// `pos.w);` of the vec4 constructor) and before the depth range remap.
+bool hasJitterEpilogue(const std::string& glsl) {
+    const std::size_t block = glsl.find("layout(push_constant) uniform VpPush {\n  vec2 jitter_ndc;");
+    const std::size_t transform = glsl.find("      pos.w);\n");
+    const std::size_t jitter = glsl.find("  pos.xy += vp_push.jitter_ndc * pos.w;\n");
+    const std::size_t remap = glsl.find("  bool identity_depth");
+    return block != std::string::npos && transform != std::string::npos && jitter != std::string::npos &&
+           remap != std::string::npos && block < transform && transform < jitter && jitter < remap;
+}
+
 // ---- Minimal vertex program assembler (one vector and one scalar op per instruction) ----
 
 struct Src {
@@ -250,6 +261,7 @@ void testDumps() {
             continue;
         }
         translated++;
+        CHECK(hasJitterEpilogue(result.glsl));
 
         auto spirv = tox2::compileGlsl(tox2::ShaderStage::Vertex, result.glsl, 0xd0d0);
         CHECK(spirv.has_value());
@@ -375,6 +387,7 @@ void testAllOutputsCompile() {
         for (const std::string& entry : result.unimplemented) std::fprintf(stderr, "%s\n", entry.c_str());
         return;
     }
+    CHECK(hasJitterEpilogue(result.glsl));
     CHECK(contains(result.glsl, "(draw.output_mask & 16384u) != 0u ? out_7 : vec4(0.0, 0.0, 0.0, 1.0)"));
     CHECK(contains(result.glsl, "var_fog = (draw.output_mask & 16u) != 0u ? vec4(out_5.x) :"));
     // Front and back colours are exported when either of their mask bits is set.
@@ -392,6 +405,7 @@ void testUnwrittenOutputsAreDefault() {
     pos.end = true;
     const tox2::GlslResult result = translate({pos});
     CHECK(result.ok);
+    CHECK(hasJitterEpilogue(result.glsl));
     CHECK(contains(result.glsl, "  var_front_diffuse = vec4(0.0, 0.0, 0.0, 1.0);\n"));
     CHECK(contains(result.glsl, "  var_tex0 = vec4(0.0, 0.0, 0.0, 1.0);\n"));
     CHECK(contains(result.glsl, "  gl_PointSize = draw.point_size * draw.viewport_scale.w;\n"));
@@ -403,6 +417,7 @@ void testUnwrittenOutputsAreDefault() {
     color.end = true;
     const tox2::GlslResult disabled = translate({color});
     CHECK(disabled.ok);
+    CHECK(hasJitterEpilogue(disabled.glsl));
     CHECK(contains(disabled.glsl, "  var_front_diffuse = vec4(0.0, 0.0, 0.0, 1.0);\n"));
     CHECK(contains(disabled.glsl, "vec4 pos = vec4(0.0, 0.0, 0.0, 1.0);"));
     CHECK(disabled.inputs_used == 0u);

@@ -223,12 +223,19 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions&
     tox2::VkContextOptions context_options;
     context_options.validation = opt.vk_validation;
     context_options.window = opt.window;
+    // Always loaded: availability is fixed at context creation and the overlay can switch to DLAA later.
+    context_options.streamline = true;
     std::unique_ptr<tox2::VkContext> context = tox2::createVkContext(context_options, error);
     if (!context) return nullptr;
     const std::uint32_t api = context->deviceProperties().apiVersion;
     tox2::logInfo("tox2: render: vulkan device {} (api {}.{}.{}, d24s8 {})", context->deviceName(),
                   VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api), VK_API_VERSION_PATCH(api),
                   context->hasD24S8() ? "yes" : "no");
+    if (context->streamline() != nullptr) {
+        tox2::logInfo("tox2: render: DLAA available (Streamline {})", context->streamline()->version());
+    } else {
+        tox2::logInfo("tox2: render: DLAA unavailable: {}", context->streamlineStatus());
+    }
     if (opt.vk_validation && !context->validationEnabled()) {
         tox2::logWarn("tox2: render: validation layer requested but not installed");
     }

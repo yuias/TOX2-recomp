@@ -21,14 +21,24 @@ inline constexpr std::uint32_t kMaxResolutionScale = 4;
 
 // How surfaces in AA mode 3 are rendered. Supersample: a single-sample image in the memory layout, shaded per
 // sample. Msaa: a 2-sample image at the clip size, shaded per pixel, copied into the layout when read.
-enum class AaMode : std::uint8_t { Supersample, Msaa };
+// Dlaa: one sample per pixel into a clip-size scene image with a sub-pixel jitter, anti-aliased by NVIDIA DLAA
+// before the game's resolve reads it.
+enum class AaMode : std::uint8_t { Supersample, Msaa, Dlaa };
 
-constexpr std::string_view aaModeName(AaMode mode) { return mode == AaMode::Msaa ? "msaa" : "supersample"; }
+constexpr std::string_view aaModeName(AaMode mode) {
+    switch (mode) {
+        case AaMode::Msaa: return "msaa";
+        case AaMode::Dlaa: return "dlaa";
+        case AaMode::Supersample: break;
+    }
+    return "supersample";
+}
 
-// The two names above; nullopt for anything else (the match is exact).
+// The three names above; nullopt for anything else (the match is exact).
 constexpr std::optional<AaMode> parseAaMode(std::string_view text) {
     if (text == "supersample") return AaMode::Supersample;
     if (text == "msaa") return AaMode::Msaa;
+    if (text == "dlaa") return AaMode::Dlaa;
     return std::nullopt;
 }
 

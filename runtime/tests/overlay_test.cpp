@@ -292,6 +292,18 @@ void testPanels() {
     CHECK(rate_state.lock_rates.size() == rate_state.audio.locks.size());
     rate_state.refresh(sources, at(1.5));
     CHECK(drawFrames(rate_state, sources));
+
+    // The Anti-aliasing row with DLAA listed or not, and with DLAA as the reported mode and as a pending request.
+    for (const bool dlaa_available : {false, true}) {
+        tox2::OverlayState aa_state;
+        aa_state.refresh(sources, at(1.0));
+        aa_state.aa_mode = tox2::AaMode::Dlaa;
+        aa_state.msaa_available = true;
+        aa_state.dlaa_available = dlaa_available;
+        CHECK(drawFrames(aa_state, sources));
+        aa_state.aa_mode_request = tox2::AaMode::Dlaa;
+        CHECK(drawFrames(aa_state, sources));
+    }
 }
 
 void testUnwrittenRates() {
@@ -528,59 +540,90 @@ void testAntiAliasingPanel() {
     constexpr float kProbeX = 60.0f;
     constexpr float kWindowBottom = 720.0f;
 
-    const std::optional<tox2::AaMode> modes[] = {std::nullopt, tox2::AaMode::Supersample, tox2::AaMode::Msaa};
+    const std::optional<tox2::AaMode> modes[] = {std::nullopt, tox2::AaMode::Supersample, tox2::AaMode::Msaa,
+                                                 tox2::AaMode::Dlaa};
     for (const std::optional<tox2::AaMode>& mode : modes) {
         for (const bool msaa_available : {false, true}) {
-            recorded.calls.clear();
-            tox2::OverlayState state;
-            state.aa_mode = mode;
-            state.msaa_available = msaa_available;
-            SettingsProbe probe(state, sources);
-            if (probe.window() == nullptr) continue;
-            const ImGuiID id = probe.window()->GetID("Anti-aliasing");
-            const std::optional<ImVec2> combo = probe.findHovered(id, kProbeX, 10.0f, kWindowBottom);
-            // Unknown mode: the combo is disabled.
-            CHECK(combo.has_value() == mode.has_value());
-            CHECK(!probe.window()->ScrollbarY && !probe.window()->ScrollbarX);
-            CHECK(!state.aa_mode_request);
-            CHECK(recorded.calls.empty());
-            if (!combo) continue;
-
-            probe.click(*combo);
-            ImGuiContext& g = *ImGui::GetCurrentContext();
-            CHECK(g.OpenPopupStack.Size == 1);
-            if (g.OpenPopupStack.Size != 1 || g.OpenPopupStack[0].Window == nullptr) continue;
-            ImGuiWindow* popup = g.OpenPopupStack[0].Window;
-            const auto find = [&](const char* label) {
-                return probe.findHovered(popup->GetID(label), popup->Pos.x + 10.0f, popup->Pos.y,
-                                         popup->Pos.y + popup->Size.y);
-            };
-
-            // The current mode is not a change; MSAA cannot be picked when the device lacks it.
-            const std::optional<ImVec2> supersample = find("Supersample");
-            const std::optional<ImVec2> msaa = find("MSAA 2x");
-            CHECK(supersample.has_value());
-            CHECK(msaa.has_value() == msaa_available);
-            // A click closes the popup, so each state makes one.
-            if (mode == tox2::AaMode::Msaa && supersample) {
-                probe.click(*supersample);
-                CHECK(state.aa_mode_request == tox2::AaMode::Supersample);
-                CHECK(recorded.calls.size() == 1);
-                if (recorded.calls.size() == 1) {
-                    CHECK(recorded.calls[0].first == tox2::OverlaySetting::AaMode);
-                    CHECK(recorded.calls[0].second == "supersample");
-                }
-            } else if (mode == tox2::AaMode::Supersample && msaa) {
-                probe.click(*msaa);
-                CHECK(state.aa_mode_request == tox2::AaMode::Msaa);
-                CHECK(recorded.calls.size() == 1 && recorded.calls[0].second == "msaa");
-            } else if (mode == tox2::AaMode::Supersample && supersample) {
-                probe.click(*supersample);
+            for (const bool dlaa_available : {false, true}) {
+                recorded.calls.clear();
+                tox2::OverlayState state;
+                state.aa_mode = mode;
+                state.msaa_available = msaa_available;
+                state.dlaa_available = dlaa_available;
+                SettingsProbe probe(state, sources);
+                if (probe.window() == nullptr) continue;
+                const ImGuiID id = probe.window()->GetID("Anti-aliasing");
+                const std::optional<ImVec2> combo = probe.findHovered(id, kProbeX, 10.0f, kWindowBottom);
+                // Unknown mode: the combo is disabled.
+                CHECK(combo.has_value() == mode.has_value());
+                CHECK(!probe.window()->ScrollbarY && !probe.window()->ScrollbarX);
                 CHECK(!state.aa_mode_request);
                 CHECK(recorded.calls.empty());
+                if (!combo) continue;
+
+                probe.click(*combo);
+                ImGuiContext& g = *ImGui::GetCurrentContext();
+                CHECK(g.OpenPopupStack.Size == 1);
+                if (g.OpenPopupStack.Size != 1 || g.OpenPopupStack[0].Window == nullptr) continue;
+                ImGuiWindow* popup = g.OpenPopupStack[0].Window;
+                const auto find = [&](const char* label) {
+                    return probe.findHovered(popup->GetID(label), popup->Pos.x + 10.0f, popup->Pos.y,
+                                             popup->Pos.y + popup->Size.y);
+                };
+
+                // The current mode is not a change; MSAA cannot be picked when the device lacks it.
+                const std::optional<ImVec2> supersample = find("Supersample");
+                const std::optional<ImVec2> msaa = find("MSAA 2x");
+                const std::optional<ImVec2> dlaa = find("DLAA");
+                CHECK(supersample.has_value());
+                CHECK(msaa.has_value() == msaa_available);
+                // DLAA is not listed at all when unavailable, even while it is the reported mode.
+                CHECK(dlaa.has_value() == dlaa_available);
+                // A click closes the popup, so each state makes one.
+                if (mode == tox2::AaMode::Msaa && supersample) {
+                    probe.click(*supersample);
+                    CHECK(state.aa_mode_request == tox2::AaMode::Supersample);
+                    CHECK(recorded.calls.size() == 1);
+                    if (recorded.calls.size() == 1) {
+                        CHECK(recorded.calls[0].first == tox2::OverlaySetting::AaMode);
+                        CHECK(recorded.calls[0].second == "supersample");
+                    }
+                } else if (mode == tox2::AaMode::Supersample && msaa) {
+                    probe.click(*msaa);
+                    CHECK(state.aa_mode_request == tox2::AaMode::Msaa);
+                    CHECK(recorded.calls.size() == 1 && recorded.calls[0].second == "msaa");
+                } else if (mode == tox2::AaMode::Supersample && dlaa) {
+                    probe.click(*dlaa);
+                    CHECK(state.aa_mode_request == tox2::AaMode::Dlaa);
+                    CHECK(recorded.calls.size() == 1 && recorded.calls[0].first == tox2::OverlaySetting::AaMode &&
+                          recorded.calls[0].second == "dlaa");
+                } else if (mode == tox2::AaMode::Dlaa && supersample) {
+                    probe.click(*supersample);
+                    CHECK(state.aa_mode_request == tox2::AaMode::Supersample);
+                    CHECK(recorded.calls.size() == 1 && recorded.calls[0].second == "supersample");
+                } else if (mode == tox2::AaMode::Supersample && supersample) {
+                    probe.click(*supersample);
+                    CHECK(!state.aa_mode_request);
+                    CHECK(recorded.calls.empty());
+                }
             }
         }
     }
+}
+
+void testAaModeChoices() {
+    using tox2::AaMode;
+    tox2::OverlayState state;
+    CHECK((tox2::aaModeChoices(state) == std::vector<AaMode>{AaMode::Supersample, AaMode::Msaa}));
+    // MSAA availability is shown as a disabled entry, so it does not change the list.
+    state.msaa_available = true;
+    CHECK((tox2::aaModeChoices(state) == std::vector<AaMode>{AaMode::Supersample, AaMode::Msaa}));
+    state.dlaa_available = true;
+    CHECK((tox2::aaModeChoices(state) == std::vector<AaMode>{AaMode::Supersample, AaMode::Msaa, AaMode::Dlaa}));
+    // The reported mode does not decide what is listed.
+    state.dlaa_available = false;
+    state.aa_mode = AaMode::Dlaa;
+    CHECK((tox2::aaModeChoices(state) == std::vector<AaMode>{AaMode::Supersample, AaMode::Msaa}));
 }
 
 void testAnisotropyPanel() {
@@ -802,6 +845,14 @@ void testPresentRequests() {
     CHECK(!requests.aa_mode);
     CHECK(requests.anisotropy == 0);
     CHECK(!requests.window_size);
+
+    // A DLAA request is delivered once.
+    state.aa_mode_request = tox2::AaMode::Dlaa;
+    requests = tox2::takePresentRequests(state);
+    CHECK(requests.aa_mode == tox2::AaMode::Dlaa);
+    CHECK(!state.aa_mode_request);
+    requests = tox2::takePresentRequests(state);
+    CHECK(!requests.aa_mode);
 
     // The reported window status is not a request.
     state.window = tox2::WindowStatus{};
@@ -1221,6 +1272,7 @@ int main() {
     testPresentRequests();
     testResolutionScalePanel();
     testFlipLimiterPanel();
+    testAaModeChoices();
     testAntiAliasingPanel();
     testAnisotropyPanel();
     testWindowSizeLabels();

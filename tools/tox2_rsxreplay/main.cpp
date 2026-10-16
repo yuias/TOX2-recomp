@@ -18,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -37,29 +38,45 @@ namespace {
 
 void printUsage() {
     std::fputs(
-            "usage: tox2_rsxreplay CAPTURE [--out DIR]\n"
+            "usage: tox2_rsxreplay CAPTURE [CAPTURE...] [--loop N] [--out DIR]\n"
             "                      [--compare PNG [--compare-rect X,Y,W,H] [--max-diff N] [--max-mean X]\n"
             "                       [--max-differing P]]\n"
-            "                      [--resolution-scale N] [--aa-mode supersample|msaa] [--no-validation]\n"
+            "                      [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--no-validation]\n"
+            "                      [--dlaa-jitter on|off] [--dlaa-jitter-flip none|x|y|xy]\n"
+            "                      [--dlaa-camera on|off|reset] [--dlaa-clip-flip-y on|off]\n"
+            "                      [--dlaa-mv-invalid zero|unset]\n"
             "                      [--shader-cache DIR] [--repeat N] [--quiet]\n"
-            "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture\n"
-            "  --out DIR           write the displayed frame as DIR/<capture name>.png\n"
-            "  --compare PNG       diff the displayed frame against PNG (box-downsampled first when it is a whole\n"
-            "                      multiple of the PNG's size)\n"
+            "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture; several captures are replayed in\n"
+            "           order through one renderer, each one a frame that must end with a flip\n"
+            "  --loop N            play the list of captures N times in order (1..1000, default 1)\n"
+            "  --out DIR           write the displayed frame as DIR/<capture name>.png after every frame\n"
+            "  --compare PNG       diff the displayed frame of the last frame against PNG (box-downsampled first when\n"
+            "                      it is a whole multiple of the PNG's size)\n"
             "  --compare-rect X,Y,W,H  with --compare: diff only this rectangle, in the PNG's pixels\n"
             "  --max-diff N        with --compare: fail when the largest channel difference exceeds N\n"
             "  --max-mean X        with --compare: fail when the mean difference exceeds X\n"
             "  --max-differing P   with --compare: fail when more than P percent of the pixels differ\n"
             "  --resolution-scale N  render every target at N times its guest size (1..4, default 1); the PNG is\n"
             "                      written at that size\n"
-            "  --aa-mode M         how anti-aliased surfaces are drawn: msaa (2-sample multisampling, default) or\n"
-            "                      supersample (one sample per memory-layout pixel); msaa falls back to supersample\n"
-            "                      on a device without 2-sample support\n"
+            "  --aa-mode M         how anti-aliased surfaces are drawn: msaa (2-sample multisampling, default),\n"
+            "                      supersample (one sample per memory-layout pixel) or dlaa (NVIDIA DLAA through\n"
+            "                      Streamline); dlaa falls back to msaa when it is unavailable, and msaa falls back\n"
+            "                      to supersample on a device without 2-sample support\n"
+            "  --dlaa-jitter M     diagnostic, needs --aa-mode dlaa: on (default) or off (no sub-pixel jitter)\n"
+            "  --dlaa-jitter-flip F  diagnostic, needs --aa-mode dlaa: negate the jitter offset reported to DLAA on\n"
+            "                      the x axis, the y axis or both (none by default); the geometry does not change\n"
+            "  --dlaa-camera M     diagnostic, needs --aa-mode dlaa: describe the camera motion between frames from the\n"
+            "                      scene draws' projections (on, default), with identity matrices (off), or drop the\n"
+            "                      history at every frame (reset)\n"
+            "  --dlaa-clip-flip-y M  diagnostic, needs --aa-mode dlaa: on (default) or off, whether the camera's\n"
+            "                      clip-to-clip matrices are mirrored in y for Streamline's y-up clip space\n"
+            "  --dlaa-mv-invalid V  diagnostic, needs --aa-mode dlaa: motionVectorsInvalidValue 0 (zero, default) or the\n"
+            "                      SDK default (unset, which makes Streamline warn once per process)\n"
             "  --no-validation     do not enable the Vulkan validation layer\n"
             "  --shader-cache DIR  directory of the on-disk SPIR-V cache\n"
             "  --repeat N          replay and render the capture N times (N >= 1) with one memory view, builder and\n"
             "                      renderer, and print the median time per phase (the first iteration is warm-up and\n"
-            "                      left out when N >= 2); not with --out or --compare\n"
+            "                      left out when N >= 2); one capture only; not with --out, --compare or --loop\n"
             "  --quiet             do not print the per-command lines\n",
             stderr);
 }
@@ -206,10 +223,19 @@ std::string memoryFlagNames(VkMemoryPropertyFlags flags) {
     return text;
 }
 
+// The DLAA counters of a replay, for the line after the summary; empty unless the renderer runs DLAA.
+std::string dlaaStatsText(const tox2::RsxRenderer& renderer) {
+    if (renderer.aaMode() != tox2::AaMode::Dlaa) return {};
+    const tox2::RendererStats& stats = renderer.stats();
+    return std::format("dlaa: {} evaluations, {} resets, {} failures", stats.dlaa_evaluations, stats.dlaa_resets,
+                       stats.dlaa_failures);
+}
+
 // What the closing lines need from a --repeat run (the last iteration's figures).
 struct TimedResult {
     std::size_t commands = 0, draws = 0, skipped = 0;
     tox2::AaMode aa_mode = tox2::AaMode::Msaa;
+    std::string dlaa_text;  // the "dlaa:" line, empty unless the effective mode is dlaa
 };
 
 // Replays and renders the capture `repeat` times with one memory view, builder and renderer, so the texture cache,
@@ -304,18 +330,28 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
             toUll(median(samples, &IterationSample::state_skipped)),
             toUll(median(samples, &IterationSample::uploads_reused)),
             memoryFlagNames(renderer.stats().upload_memory_flags).c_str());
+    result.dlaa_text = dlaaStatsText(renderer);
     return true;
 }
 
 // The closing lines of every run: the replay summary, the unimplemented census and the validation result.
-int printSummary(std::size_t commands, std::size_t draws, std::size_t skipped, std::uint32_t resolution_scale,
-                 tox2::AaMode effective_aa_mode, const std::string& diff_text, const std::string& png_text,
+int printSummary(std::size_t commands, std::size_t draws, std::size_t skipped, std::size_t frames,
+                 std::uint32_t resolution_scale, tox2::AaMode requested_aa_mode, tox2::AaMode effective_aa_mode,
+                 const std::string& diff_text, const std::string& dlaa_text, const std::string& png_text,
                  bool validation, bool validation_active, std::uint32_t validation_errors, int exit_code) {
+    const std::string frames_text = frames > 1 ? std::format(", frames {}", frames) : "";
     const std::string scale_text = resolution_scale > 1 ? std::format(", resolution scale {}", resolution_scale) : "";
-    // The default (msaa) is not mentioned; a fallback to supersample is, so a log shows which mode drew the frame.
-    const std::string aa_text = effective_aa_mode == tox2::AaMode::Supersample ? ", aa supersample" : "";
-    std::printf("replay: %zu commands, %zu draws, %zu skipped%s%s%s\n", commands, draws, skipped, scale_text.c_str(),
-                aa_text.c_str(), diff_text.c_str());
+    // The default (msaa) is not mentioned unless it replaced a requested dlaa; any other effective mode is, so a log
+    // shows which mode drew the frame.
+    std::string aa_text;
+    if (requested_aa_mode == tox2::AaMode::Dlaa && effective_aa_mode != tox2::AaMode::Dlaa) {
+        aa_text = std::format(", aa {} (dlaa unavailable)", tox2::aaModeName(effective_aa_mode));
+    } else if (effective_aa_mode != tox2::AaMode::Msaa) {
+        aa_text = std::format(", aa {}", tox2::aaModeName(effective_aa_mode));
+    }
+    std::printf("replay: %zu commands, %zu draws, %zu skipped%s%s%s%s\n", commands, draws, skipped, frames_text.c_str(),
+                scale_text.c_str(), aa_text.c_str(), diff_text.c_str());
+    if (!dlaa_text.empty()) std::printf("%s\n", dlaa_text.c_str());
     // The game's census omits an empty section; a replay says so explicitly.
     const std::string section = unimplementedSection();
     std::printf("%s\n", section.empty() ? "census: rsx unimplemented 0 kinds" : section.c_str());
@@ -326,19 +362,45 @@ int printSummary(std::size_t commands, std::size_t draws, std::size_t skipped, s
     return exit_code;
 }
 
+// One capture of a multi-frame replay with its own memory view and builder, so the guest memory of one frame never
+// leaks into the next one; only the renderer is shared.
+struct ReplayFrame {
+    explicit ReplayFrame(std::string capture_path)
+        : path(std::move(capture_path)), name(std::filesystem::path(path).stem().string()), builder(memory) {}
+    std::string path;
+    std::string name;
+    tox2::RsxCaptureReader reader;
+    tox2::ReplayRsxMemoryView memory;
+    tox2::RsxFrameBuilder builder;
+};
+
+// Writes DIR/<capture name>.png; `png_paths` keeps each file once, in the order it was first written.
+bool writeFramePng(const tox2::RgbImage& image, const ReplayFrame& frame, const std::string& out_dir,
+                   std::vector<std::string>& png_paths, std::string& error) {
+    const std::filesystem::path png_path = std::filesystem::path(out_dir) / (frame.name + ".png");
+    if (!tox2::writePngRgb(png_path, image, error)) return false;
+    const std::string text = "png: " + png_path.generic_string();
+    if (std::find(png_paths.begin(), png_paths.end(), text) == png_paths.end()) png_paths.push_back(text);
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string capture_path;
+    std::vector<std::string> capture_paths;
     std::string out_dir;
     std::string compare_path;
     std::string shader_cache;
     bool validation = true;
     bool quiet = false;
     std::uint32_t repeat = 0;  // --repeat: 0 means a single replay with the usual output
+    std::uint32_t loop = 1;    // --loop: how many times the list of captures is played
+    bool has_loop = false;
     std::uint32_t resolution_scale = 1;
     tox2::AaMode aa_mode = tox2::AaMode::Msaa;
-    std::uint32_t rect[4] = {};  // --compare-rect: x, y, width, height
+    tox2::DlaaDebug dlaa_debug;
+    bool has_dlaa_option = false;  // a --dlaa-* option was given, which needs --aa-mode dlaa
+    std::uint32_t rect[4] = {};    // --compare-rect: x, y, width, height
     bool has_rect = false;
     // Thresholds of --compare; a NaN limit is not checked.
     double max_diff = std::nan(""), max_mean = std::nan(""), max_differing = std::nan("");
@@ -363,6 +425,18 @@ int main(int argc, char** argv) {
             i++;
             continue;
         }
+        if (arg == "--loop") {
+            char* end = nullptr;
+            const long value = i + 1 < argc ? std::strtol(argv[i + 1], &end, 10) : 0;
+            if (i + 1 >= argc || end == argv[i + 1] || *end != '\0' || value < 1 || value > 1000) {
+                std::fputs("error: --loop takes a whole number from 1 to 1000\n", stderr);
+                return 2;
+            }
+            loop = static_cast<std::uint32_t>(value);
+            has_loop = true;
+            i++;
+            continue;
+        }
         if (arg == "--resolution-scale") {
             char* end = nullptr;
             const long value = i + 1 < argc ? std::strtol(argv[i + 1], &end, 10) : 0;
@@ -379,10 +453,68 @@ int main(int argc, char** argv) {
         if (arg == "--aa-mode") {
             const std::optional<tox2::AaMode> mode = i + 1 < argc ? tox2::parseAaMode(argv[i + 1]) : std::nullopt;
             if (!mode) {
-                std::fputs("error: --aa-mode takes supersample|msaa\n", stderr);
+                std::fputs("error: --aa-mode takes supersample|msaa|dlaa\n", stderr);
                 return 2;
             }
             aa_mode = *mode;
+            i++;
+            continue;
+        }
+        if (arg == "--dlaa-jitter") {
+            const std::string_view value = i + 1 < argc ? std::string_view(argv[i + 1]) : std::string_view();
+            if (value != "on" && value != "off") {
+                std::fputs("error: --dlaa-jitter takes on|off\n", stderr);
+                return 2;
+            }
+            dlaa_debug.jitter = value == "on";
+            has_dlaa_option = true;
+            i++;
+            continue;
+        }
+        if (arg == "--dlaa-jitter-flip") {
+            const std::string_view value = i + 1 < argc ? std::string_view(argv[i + 1]) : std::string_view();
+            if (value != "none" && value != "x" && value != "y" && value != "xy") {
+                std::fputs("error: --dlaa-jitter-flip takes none|x|y|xy\n", stderr);
+                return 2;
+            }
+            dlaa_debug.flip_jitter_x = value == "x" || value == "xy";
+            dlaa_debug.flip_jitter_y = value == "y" || value == "xy";
+            has_dlaa_option = true;
+            i++;
+            continue;
+        }
+        if (arg == "--dlaa-camera") {
+            const std::string_view value = i + 1 < argc ? std::string_view(argv[i + 1]) : std::string_view();
+            if (value != "on" && value != "off" && value != "reset") {
+                std::fputs("error: --dlaa-camera takes on|off|reset\n", stderr);
+                return 2;
+            }
+            dlaa_debug.camera = value == "on"    ? tox2::DlaaCamera::On
+                                : value == "off" ? tox2::DlaaCamera::Off
+                                                 : tox2::DlaaCamera::Reset;
+            has_dlaa_option = true;
+            i++;
+            continue;
+        }
+        if (arg == "--dlaa-clip-flip-y") {
+            const std::string_view value = i + 1 < argc ? std::string_view(argv[i + 1]) : std::string_view();
+            if (value != "on" && value != "off") {
+                std::fputs("error: --dlaa-clip-flip-y takes on|off\n", stderr);
+                return 2;
+            }
+            dlaa_debug.flip_clip_y = value == "on";
+            has_dlaa_option = true;
+            i++;
+            continue;
+        }
+        if (arg == "--dlaa-mv-invalid") {
+            const std::string_view value = i + 1 < argc ? std::string_view(argv[i + 1]) : std::string_view();
+            if (value != "zero" && value != "unset") {
+                std::fputs("error: --dlaa-mv-invalid takes zero|unset\n", stderr);
+                return 2;
+            }
+            dlaa_debug.mvec_invalid_zero = value == "zero";
+            has_dlaa_option = true;
             i++;
             continue;
         }
@@ -415,15 +547,19 @@ int main(int argc, char** argv) {
             target = argv[++i];
             continue;
         }
-        if (arg.starts_with("--") || !capture_path.empty()) {
+        if (arg.starts_with("--")) {
             printUsage();
             return 2;
         }
-        capture_path = std::string(arg);
+        capture_paths.emplace_back(arg);
     }
     const bool has_threshold = !std::isnan(max_diff) || !std::isnan(max_mean) || !std::isnan(max_differing);
-    if (capture_path.empty() || ((has_threshold || has_rect) && compare_path.empty())) {
+    if (capture_paths.empty() || ((has_threshold || has_rect) && compare_path.empty())) {
         printUsage();
+        return 2;
+    }
+    if (has_dlaa_option && aa_mode != tox2::AaMode::Dlaa) {
+        std::fputs("error: the --dlaa-* options need --aa-mode dlaa\n", stderr);
         return 2;
     }
     if (repeat != 0 && (!out_dir.empty() || !compare_path.empty())) {
@@ -431,12 +567,19 @@ int main(int argc, char** argv) {
         std::fputs("error: --repeat cannot be combined with --out or --compare\n", stderr);
         return 2;
     }
+    if (repeat != 0 && (capture_paths.size() > 1 || has_loop)) {
+        std::fputs("error: --repeat takes one capture and cannot be combined with --loop\n", stderr);
+        return 2;
+    }
 
-    tox2::RsxCaptureReader reader;
     std::string error;
-    if (!reader.load(capture_path, error)) {
-        std::fprintf(stderr, "error: %s\n", error.c_str());
-        return 1;
+    std::vector<std::unique_ptr<ReplayFrame>> frames;
+    for (const std::string& path : capture_paths) {
+        frames.push_back(std::make_unique<ReplayFrame>(path));
+        if (!frames.back()->reader.load(path, error)) {
+            std::fprintf(stderr, "error: %s\n", error.c_str());
+            return 1;
+        }
     }
 
     tox2::setRsxUnimplementedProvider(&unimplementedCensus, &tox2::rsxUnimplementedReset);
@@ -445,6 +588,7 @@ int main(int argc, char** argv) {
     if (repeat != 0) {
         tox2::VkContextOptions timed_context_options;
         timed_context_options.validation = validation;
+        timed_context_options.streamline = aa_mode == tox2::AaMode::Dlaa;
         std::unique_ptr<tox2::VkContext> timed_context = tox2::createVkContext(timed_context_options, error);
         if (!timed_context) {
             std::fprintf(stderr, "error: --repeat needs a Vulkan device: %s\n", error.c_str());
@@ -454,36 +598,51 @@ int main(int argc, char** argv) {
         timed_options.shader_cache = shader_cache;
         timed_options.resolution_scale = resolution_scale;
         timed_options.aa_mode = aa_mode;
+        timed_options.dlaa_debug = dlaa_debug;
         TimedResult timed;
-        const std::string capture_name = std::filesystem::path(capture_path).stem().string();
-        const bool ok = runTimedReplay(reader, capture_name, repeat, *timed_context, timed_options, timed);
+        const bool ok = runTimedReplay(frames.front()->reader, frames.front()->name, repeat, *timed_context,
+                                       timed_options, timed);
         // The renderer is gone by now, so errors from its teardown are counted.
-        return printSummary(timed.commands, timed.draws, timed.skipped, resolution_scale, timed.aa_mode, {}, {},
-                            validation, timed_context->validationEnabled(), timed_context->validationErrorCount(),
-                            ok ? 0 : 1);
+        return printSummary(timed.commands, timed.draws, timed.skipped, 1, resolution_scale, aa_mode, timed.aa_mode, {},
+                            timed.dlaa_text, {}, validation, timed_context->validationEnabled(),
+                            timed_context->validationErrorCount(), ok ? 0 : 1);
     }
 
-    tox2::ReplayRsxMemoryView memory;
-    tox2::RsxFrameBuilder builder(memory);
-    tox2::replayCapture(reader, memory, builder);
-    std::vector<tox2::RsxCommand> commands = builder.takeCommands();
-
-    std::size_t draws = 0;
-    for (const tox2::RsxCommand& command : commands) {
-        if (const auto* clear = std::get_if<tox2::RsxClear>(&command)) {
-            if (!quiet) printClear(*clear);
-        } else if (const auto* draw = std::get_if<tox2::RsxDraw>(&command)) {
-            if (!quiet) printDraw(*draw, builder.knownSurfaces());
-            draws++;
-        } else if (!quiet) {
-            const auto& flip = std::get<tox2::RsxFlip>(command);
-            std::printf("flip buffer=%u %ux%u@0x%x\n", flip.buffer, flip.width, flip.height, flip.offset);
+    // The first pass over the list is built and printed before the device is created; later passes are rebuilt
+    // right before they run, as --repeat does.
+    const std::size_t frame_count = frames.size() * loop;
+    std::vector<std::vector<tox2::RsxCommand>> first_pass;
+    std::size_t first_pass_commands = 0, first_pass_draws = 0;
+    for (const std::unique_ptr<ReplayFrame>& frame : frames) {
+        tox2::replayCapture(frame->reader, frame->memory, frame->builder);
+        std::vector<tox2::RsxCommand>& commands = first_pass.emplace_back(frame->builder.takeCommands());
+        for (const tox2::RsxCommand& command : commands) {
+            if (const auto* clear = std::get_if<tox2::RsxClear>(&command)) {
+                if (!quiet) printClear(*clear);
+            } else if (const auto* draw = std::get_if<tox2::RsxDraw>(&command)) {
+                if (!quiet) printDraw(*draw, frame->builder.knownSurfaces());
+                first_pass_draws++;
+            } else if (!quiet) {
+                const auto& flip = std::get<tox2::RsxFlip>(command);
+                std::printf("flip buffer=%u %ux%u@0x%x\n", flip.buffer, flip.width, flip.height, flip.offset);
+            }
+        }
+        first_pass_commands += commands.size();
+        // Frame boundaries are flips: a frame that does not end with one would leak its draws into the next frame.
+        if (frame_count > 1 && (commands.empty() || !std::holds_alternative<tox2::RsxFlip>(commands.back()))) {
+            std::fprintf(stderr,
+                         "error: %s does not end with a flip, so it cannot be replayed as one frame of several\n",
+                         frame->name.c_str());
+            return 2;
         }
     }
+    std::size_t commands_total = first_pass_commands * loop;
+    std::size_t draws = first_pass_draws * loop;
 
     // Without a Vulkan device the replay still prints the command list and counts every draw as skipped.
     tox2::VkContextOptions context_options;
     context_options.validation = validation;
+    context_options.streamline = aa_mode == tox2::AaMode::Dlaa;
     std::unique_ptr<tox2::VkContext> context = tox2::createVkContext(context_options, error);
     if (!context) std::printf("render: unavailable: %s\n", error.c_str());
 
@@ -491,6 +650,7 @@ int main(int argc, char** argv) {
     std::size_t skipped = draws;
     std::string diff_text;
     std::string png_text;
+    std::string dlaa_text;
     std::uint32_t validation_errors = 0;
     bool validation_active = false;
     tox2::AaMode effective_aa_mode = aa_mode;
@@ -499,29 +659,61 @@ int main(int argc, char** argv) {
         render_options.shader_cache = shader_cache;
         render_options.resolution_scale = resolution_scale;
         render_options.aa_mode = aa_mode;
+        render_options.dlaa_debug = dlaa_debug;
         render_options.readback_all = true;  // the replay reads the display after its last flip
         {
             tox2::RsxRenderer renderer(*context, render_options);
             effective_aa_mode = renderer.aaMode();
-            renderer.execute(commands);
-            skipped = renderer.stats().draws_skipped;
 
+            // Every frame but the last is executed here; the last one is read back below with the --compare checks.
+            std::vector<std::string> png_paths;
+            std::size_t executed_commands = 0, executed_draws = 0;
             std::vector<std::uint8_t> bgra;
             std::uint32_t width = 0;
             std::uint32_t height = 0;
+            for (std::uint32_t pass = 0; pass < loop && renderer.valid(); pass++) {
+                for (std::size_t index = 0; index < frames.size() && renderer.valid(); index++) {
+                    ReplayFrame& frame = *frames[index];
+                    std::vector<tox2::RsxCommand> commands;
+                    if (pass == 0) {
+                        commands = std::move(first_pass[index]);
+                    } else {
+                        tox2::replayCapture(frame.reader, frame.memory, frame.builder);
+                        commands = frame.builder.takeCommands();
+                    }
+                    executed_commands += commands.size();
+                    for (const tox2::RsxCommand& command : commands) {
+                        if (std::holds_alternative<tox2::RsxDraw>(command)) executed_draws++;
+                    }
+                    renderer.execute(commands);
+                    frame.builder.recycle(std::move(commands));
+                    const bool last_frame = pass + 1 == loop && index + 1 == frames.size();
+                    if (!last_frame && !out_dir.empty() && renderer.valid()) {
+                        if (!renderer.readDisplay(bgra, width, height)) {
+                            std::fprintf(stderr, "error: no frame to display after %s\n", frame.name.c_str());
+                            exit_code = 1;
+                        } else if (!writeFramePng(tox2::rgbFromBgra(bgra, width, height), frame, out_dir, png_paths,
+                                                  error)) {
+                            std::fprintf(stderr, "error: %s\n", error.c_str());
+                            exit_code = 1;
+                        }
+                    }
+                }
+            }
+            commands_total = executed_commands;
+            draws = executed_draws;
+            skipped = renderer.stats().draws_skipped;
+            dlaa_text = dlaaStatsText(renderer);
+
             if (renderer.valid() && renderer.readDisplay(bgra, width, height)) {
                 const tox2::RgbImage image = tox2::rgbFromBgra(bgra, width, height);
                 if (!out_dir.empty()) {
-                    const std::filesystem::path png_path =
-                            std::filesystem::path(out_dir) /
-                            (std::filesystem::path(capture_path).stem().string() + ".png");
-                    if (tox2::writePngRgb(png_path, image, error)) {
-                        png_text = "png: " + png_path.generic_string();
-                    } else {
+                    if (!writeFramePng(image, *frames.back(), out_dir, png_paths, error)) {
                         std::fprintf(stderr, "error: %s\n", error.c_str());
                         exit_code = 1;
                     }
                 }
+                for (const std::string& text : png_paths) png_text += (png_text.empty() ? "" : "\n") + text;
                 if (!compare_path.empty()) {
                     tox2::RgbImage reference;
                     tox2::ImageDiff diff;
@@ -589,6 +781,6 @@ int main(int argc, char** argv) {
         validation_errors = context->validationErrorCount();
     }
 
-    return printSummary(commands.size(), draws, skipped, resolution_scale, effective_aa_mode, diff_text, png_text,
-                        validation, validation_active, validation_errors, exit_code);
+    return printSummary(commands_total, draws, skipped, frame_count, resolution_scale, aa_mode, effective_aa_mode,
+                        diff_text, dlaa_text, png_text, validation, validation_active, validation_errors, exit_code);
 }

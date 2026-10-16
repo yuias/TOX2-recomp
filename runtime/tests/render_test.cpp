@@ -4,6 +4,7 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -12,6 +13,7 @@
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <random>
@@ -20,6 +22,9 @@
 #include <system_error>
 #include <vector>
 
+#include "core/log.h"
+#include "render/dlaa_math.h"
+#include "render/dlaa_pass.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
 #include "render/image_pool.h"
@@ -478,15 +483,415 @@ void testFrameDump() {
 
 // Needs no Vulkan device.
 void testAaModeNames() {
-    for (const tox2::AaMode mode : {tox2::AaMode::Supersample, tox2::AaMode::Msaa}) {
+    for (const tox2::AaMode mode : {tox2::AaMode::Supersample, tox2::AaMode::Msaa, tox2::AaMode::Dlaa}) {
         const std::optional<tox2::AaMode> parsed = tox2::parseAaMode(tox2::aaModeName(mode));
         CHECK(parsed.has_value() && *parsed == mode);
     }
     CHECK(tox2::aaModeName(tox2::AaMode::Supersample) == "supersample");
     CHECK(tox2::aaModeName(tox2::AaMode::Msaa) == "msaa");
+    CHECK(tox2::aaModeName(tox2::AaMode::Dlaa) == "dlaa");
     CHECK(!tox2::parseAaMode("").has_value());
     CHECK(!tox2::parseAaMode("MSAA2").has_value());
     CHECK(!tox2::parseAaMode("msaa ").has_value());
+    CHECK(!tox2::parseAaMode("DLAA").has_value());
+    CHECK(!tox2::parseAaMode("dlaa ").has_value());
+}
+
+bool nearlyEqual(float a, float b, float tolerance) { return std::abs(a - b) <= tolerance; }
+
+// Needs no Vulkan device.
+void testDlaaJitter() {
+    constexpr float kX[8] = {0.0f, -0.25f, 0.25f, -0.375f, 0.125f, -0.125f, 0.375f, -0.4375f};
+    constexpr float kY[8] = {-1.0f / 6, 1.0f / 6, -7.0f / 18, -1.0f / 18, 5.0f / 18, -5.0f / 18, 1.0f / 18, 7.0f / 18};
+    for (std::uint32_t frame = 0; frame < tox2::kDlaaJitterPhases; ++frame) {
+        const std::array<float, 2> jitter = tox2::dlaaJitterPixels(frame);
+        CHECK(nearlyEqual(jitter[0], kX[frame], 1e-6f));
+        CHECK(nearlyEqual(jitter[1], kY[frame], 1e-6f));
+    }
+    // The sequence repeats, including far past 32 bits.
+    for (const std::uint64_t frame : {std::uint64_t{8}, std::uint64_t{13}, std::uint64_t{1} << 40}) {
+        const std::array<float, 2> wrapped = tox2::dlaaJitterPixels(frame);
+        const std::array<float, 2> base = tox2::dlaaJitterPixels(frame % tox2::kDlaaJitterPhases);
+        CHECK(wrapped[0] == base[0] && wrapped[1] == base[1]);
+    }
+    CHECK(tox2::dlaaJitterPixels(8) == tox2::dlaaJitterPixels(0));
+    // Every offset stays inside the pixel.
+    for (std::uint32_t frame = 0; frame < tox2::kDlaaJitterPhases; ++frame) {
+        const std::array<float, 2> jitter = tox2::dlaaJitterPixels(frame);
+        CHECK(jitter[0] >= -0.5f && jitter[0] < 0.5f && jitter[1] >= -0.5f && jitter[1] < 0.5f);
+    }
+    CHECK(nearlyEqual(tox2::halton(1, 2), 0.5f, 1e-7f));
+    CHECK(nearlyEqual(tox2::halton(3, 2), 0.75f, 1e-7f));
+    CHECK(nearlyEqual(tox2::halton(4, 3), 4.0f / 9, 1e-6f));
+}
+
+// c0..c3 as the 16 vertex-constant words of a draw.
+std::array<std::uint32_t, 16> constantWords(const tox2::Mat4& m) {
+    std::array<std::uint32_t, 16> words{};
+    for (std::size_t i = 0; i < 16; ++i) words[i] = std::bit_cast<std::uint32_t>(m[i]);
+    return words;
+}
+
+// Needs no Vulkan device.
+void testDlaaPerspective() {
+    // A 2D screen-space matrix: x, y scale and offset, no w contribution from x, y or z.
+    const tox2::Mat4 ortho = {2.0f / 1280, 0, 0, 0, 0, -2.0f / 720, 0, 0, 0, 0, 1, 0, -1, 1, 0, 1};
+    const std::array<std::uint32_t, 16> ortho_words = constantWords(ortho);
+    CHECK(!tox2::dlaaPerspective(ortho_words));
+    CHECK(!tox2::dlaaPerspective(constantWords(tox2::mat4Identity())));
+    CHECK(!tox2::dlaaPerspective(std::span<const std::uint32_t>(ortho_words).first(0)));
+
+    // clip.w = z: c2.w = 1.
+    const tox2::Mat4 perspective = {1.2f, 0, 0, 0, 0, 2.1f, 0, 0, 0, 0, 1.01f, 1, 0, 0, -0.1f, 0};
+    const std::array<std::uint32_t, 16> perspective_words = constantWords(perspective);
+    CHECK(tox2::dlaaPerspective(perspective_words));
+    // Any of the three rows that scale an input component into w is enough.
+    for (const std::size_t word : {std::size_t{3}, std::size_t{7}, std::size_t{11}}) {
+        tox2::Mat4 m = ortho;
+        m[word] = 0.5f;
+        CHECK(tox2::dlaaPerspective(constantWords(m)));
+    }
+    // Only c3.w (a constant w) is not a perspective divide.
+    tox2::Mat4 constant_w = ortho;
+    constant_w[15] = 2.0f;
+    CHECK(!tox2::dlaaPerspective(constantWords(constant_w)));
+    // Fewer than 16 words never qualifies, even when the words present would.
+    CHECK(!tox2::dlaaPerspective(std::span<const std::uint32_t>(perspective_words).first(13)));
+}
+
+// Row-vector perspective projection: clip.w = view z.
+tox2::Mat4 perspectiveMatrix(float fx, float fy, float near_plane, float far_plane) {
+    const float a = far_plane / (far_plane - near_plane);
+    const float b = -near_plane * far_plane / (far_plane - near_plane);
+    return {fx, 0, 0, 0, 0, fy, 0, 0, 0, 0, a, 1, 0, 0, b, 0};
+}
+
+tox2::Mat4 translationMatrix(float x, float y, float z) {
+    tox2::Mat4 m = tox2::mat4Identity();
+    m[12] = x;
+    m[13] = y;
+    m[14] = z;
+    return m;
+}
+
+// Needs no Vulkan device.
+void testDlaaMatrices() {
+    std::mt19937 rng(1234);
+    std::uniform_real_distribution<float> dist(-2.0f, 2.0f);
+
+    // p * M is the guest's clip position x*c0 + y*c1 + z*c2 + w*c3.
+    tox2::Mat4 random_matrix{};
+    for (float& value : random_matrix) value = dist(rng);
+    const std::array<float, 4> point = {0.5f, -1.5f, 2.0f, 1.0f};
+    const std::array<float, 4> clip = tox2::mat4Transform(point, random_matrix);
+    for (std::size_t lane = 0; lane < 4; ++lane) {
+        const float expected = point[0] * random_matrix[lane] + point[1] * random_matrix[4 + lane] +
+                               point[2] * random_matrix[8 + lane] + point[3] * random_matrix[12 + lane];
+        CHECK(nearlyEqual(clip[lane], expected, 1e-5f));
+    }
+
+    // mat4Multiply applies the left matrix first.
+    const tox2::Mat4 move = translationMatrix(1.0f, 2.0f, 3.0f);
+    tox2::Mat4 scale = tox2::mat4Identity();
+    scale[0] = 2.0f;
+    const std::array<float, 4> moved_then_scaled = tox2::mat4Transform({1, 1, 1, 1}, tox2::mat4Multiply(move, scale));
+    CHECK(nearlyEqual(moved_then_scaled[0], 4.0f, 1e-6f) && nearlyEqual(moved_then_scaled[1], 3.0f, 1e-6f) &&
+          nearlyEqual(moved_then_scaled[2], 4.0f, 1e-6f));
+
+    // Inverse round trip on well-conditioned random matrices (a dominant diagonal keeps them invertible).
+    for (int trial = 0; trial < 8; ++trial) {
+        tox2::Mat4 m{};
+        for (float& value : m) value = dist(rng);
+        for (std::size_t i = 0; i < 4; ++i) m[i * 5] += 6.0f;
+        tox2::Mat4 inverse{};
+        CHECK(tox2::mat4Inverse(m, inverse));
+        const tox2::Mat4 product = tox2::mat4Multiply(m, inverse);
+        const tox2::Mat4 identity = tox2::mat4Identity();
+        for (std::size_t i = 0; i < 16; ++i) CHECK(nearlyEqual(product[i], identity[i], 1e-5f));
+    }
+    // Singular and non-finite matrices fail and leave the output alone.
+    tox2::Mat4 untouched = tox2::mat4Identity();
+    untouched[5] = 7.0f;
+    tox2::Mat4 out = untouched;
+    tox2::Mat4 singular = tox2::mat4Identity();
+    singular[10] = 0.0f;
+    CHECK(!tox2::mat4Inverse(singular, out) && out == untouched);
+    CHECK(!tox2::mat4Inverse(tox2::Mat4{}, out) && out == untouched);
+    tox2::Mat4 not_finite = tox2::mat4Identity();
+    not_finite[3] = std::numeric_limits<float>::infinity();
+    CHECK(!tox2::mat4Inverse(not_finite, out) && out == untouched);
+
+    // Two cameras differing by a translation: the current clip position carried through clip_to_prev_clip lands
+    // where the previous camera projects the same world point.
+    tox2::DlaaCameraKey current;
+    tox2::DlaaCameraKey previous;
+    const tox2::Mat4 projection = perspectiveMatrix(1.2f, 2.1f, 0.5f, 100.0f);
+    current.mvp = tox2::mat4Multiply(translationMatrix(-0.3f, 0.2f, 1.0f), projection);
+    previous.mvp = tox2::mat4Multiply(translationMatrix(-0.5f, 0.25f, 0.5f), projection);
+    for (tox2::DlaaCameraKey* key : {&current, &previous}) {
+        key->viewport_scale[0] = 640.0f;
+        key->viewport_scale[1] = -360.0f;
+        key->viewport_scale[2] = 0.5f;
+        key->viewport_offset[0] = 640.0f;
+        key->viewport_offset[1] = 360.0f;
+        key->viewport_offset[2] = 0.5f;
+        key->clip_w = 1280.0f;
+        key->clip_h = 720.0f;
+    }
+    // Both the raw MVPs and the clip matrices (viewport mapping included) must satisfy the identity.
+    const std::pair<tox2::Mat4, tox2::Mat4> pairs[] = {{current.mvp, previous.mvp},
+                                                       {tox2::dlaaClipMatrix(current), tox2::dlaaClipMatrix(previous)}};
+    for (const auto& [m_current, m_previous] : pairs) {
+        tox2::Mat4 current_inverse{}, previous_inverse{};
+        CHECK(tox2::mat4Inverse(m_current, current_inverse));
+        CHECK(tox2::mat4Inverse(m_previous, previous_inverse));
+        const tox2::Mat4 clip_to_prev_clip = tox2::mat4Multiply(current_inverse, m_previous);
+        const tox2::Mat4 prev_clip_to_clip = tox2::mat4Multiply(previous_inverse, m_current);
+        for (const std::array<float, 4>& world :
+             {std::array<float, 4>{1.0f, 2.0f, 10.0f, 1.0f}, std::array<float, 4>{-3.0f, 0.5f, 25.0f, 1.0f}}) {
+            const std::array<float, 4> p_current = tox2::mat4Transform(world, m_current);
+            const std::array<float, 4> p_previous = tox2::mat4Transform(world, m_previous);
+            const std::array<float, 4> carried = tox2::mat4Transform(p_current, clip_to_prev_clip);
+            CHECK(p_previous[3] > 0.0f && carried[3] > 0.0f);
+            for (std::size_t lane = 0; lane < 3; ++lane) {
+                CHECK(nearlyEqual(carried[lane] / carried[3], p_previous[lane] / p_previous[3], 1e-4f));
+            }
+            // And back again.
+            const std::array<float, 4> back = tox2::mat4Transform(p_previous, prev_clip_to_clip);
+            for (std::size_t lane = 0; lane < 3; ++lane) {
+                CHECK(nearlyEqual(back[lane] / back[3], p_current[lane] / p_current[3], 1e-4f));
+            }
+        }
+    }
+
+    // dlaaClipMatrix reproduces the vertex epilogue's arithmetic (vp_translator.cpp): viewport transform
+    // normalised to the clip size, then the depth range remap.
+    tox2::DlaaCameraKey key = current;
+    key.viewport_scale[0] = 600.0f;
+    key.viewport_scale[1] = -340.0f;
+    key.viewport_scale[2] = 0.45f;
+    key.viewport_offset[0] = 650.0f;
+    key.viewport_offset[1] = 350.0f;
+    key.viewport_offset[2] = 0.55f;
+    key.clip_min = 0.1f;
+    key.clip_max = 0.9f;
+    const tox2::Mat4 clip_matrix = tox2::dlaaClipMatrix(key);
+    for (const std::array<float, 4>& world :
+         {std::array<float, 4>{0.2f, -0.1f, 4.0f, 1.0f}, std::array<float, 4>{-1.0f, 0.8f, 9.0f, 1.0f},
+          std::array<float, 4>{2.5f, 1.5f, 2.0f, 1.0f}}) {
+        const std::array<float, 4> guest = tox2::mat4Transform(world, key.mvp);
+        const float half_w = 0.5f * key.clip_w;
+        const float half_h = 0.5f * key.clip_h;
+        float x = guest[0] * (key.viewport_scale[0] / half_w) + guest[3] * ((key.viewport_offset[0] - half_w) / half_w);
+        float y = guest[1] * (key.viewport_scale[1] / half_h) + guest[3] * ((key.viewport_offset[1] - half_h) / half_h);
+        float z = guest[2] * key.viewport_scale[2] + guest[3] * key.viewport_offset[2];
+        const float depth_near = std::min(key.clip_min, key.clip_max);
+        const float range = std::max(key.clip_min, key.clip_max) - depth_near;
+        z = ((z - depth_near * guest[3]) / (range * guest[3])) * guest[3];
+        const std::array<float, 4> got = tox2::mat4Transform(world, clip_matrix);
+        CHECK(nearlyEqual(got[0], x, 1e-5f * std::max(1.0f, std::abs(x))));
+        CHECK(nearlyEqual(got[1], y, 1e-5f * std::max(1.0f, std::abs(y))));
+        CHECK(nearlyEqual(got[2], z, 1e-5f * std::max(1.0f, std::abs(z))));
+        CHECK(nearlyEqual(got[3], guest[3], 1e-5f * std::max(1.0f, std::abs(guest[3]))));
+    }
+    // The identity range leaves depth as viewport_scale.z * z + viewport_offset.z * w.
+    key.clip_min = 0.0f;
+    key.clip_max = 1.0f;
+    const std::array<float, 4> world = {0.2f, -0.1f, 4.0f, 1.0f};
+    const std::array<float, 4> guest = tox2::mat4Transform(world, key.mvp);
+    const std::array<float, 4> identity_range = tox2::mat4Transform(world, tox2::dlaaClipMatrix(key));
+    CHECK(nearlyEqual(identity_range[2], guest[2] * key.viewport_scale[2] + guest[3] * key.viewport_offset[2], 1e-5f));
+
+    // F * m * F flips the sign of the y row and column pairs, and is its own inverse.
+    const tox2::Mat4 flipped = tox2::dlaaFlipY(random_matrix);
+    for (std::size_t row = 0; row < 4; ++row) {
+        for (std::size_t col = 0; col < 4; ++col) {
+            const float sign = ((row == 1) != (col == 1)) ? -1.0f : 1.0f;
+            CHECK(flipped[row * 4 + col] == sign * random_matrix[row * 4 + col]);
+        }
+    }
+    CHECK(tox2::dlaaFlipY(flipped) == random_matrix);
+}
+
+// Needs no Vulkan device.
+void testDlaaCameraCut() {
+    CHECK(!tox2::dlaaCameraCut(tox2::mat4Identity()));
+    // The centre moves by 0.6 NDC: a cut. By 0.3: the history is still usable.
+    CHECK(tox2::dlaaCameraCut(translationMatrix(0.6f, 0.0f, 0.0f)));
+    CHECK(tox2::dlaaCameraCut(translationMatrix(0.0f, -0.6f, 0.0f)));
+    CHECK(!tox2::dlaaCameraCut(translationMatrix(0.3f, 0.0f, 0.0f)));
+    CHECK(!tox2::dlaaCameraCut(translationMatrix(0.0f, 0.2f, 0.2f)));
+    // A matrix that sends the test points behind the camera (w <= 0).
+    tox2::Mat4 behind = tox2::mat4Identity();
+    behind[15] = -1.0f;
+    CHECK(tox2::dlaaCameraCut(behind));
+    tox2::Mat4 at_camera = tox2::mat4Identity();
+    at_camera[15] = 0.0f;
+    CHECK(tox2::dlaaCameraCut(at_camera));
+    tox2::Mat4 not_a_number = tox2::mat4Identity();
+    not_a_number[0] = std::numeric_limits<float>::quiet_NaN();
+    CHECK(tox2::dlaaCameraCut(not_a_number));
+}
+
+// A camera that differs from the others by `shift`: a perspective projection behind a translation.
+tox2::DlaaCameraKey trackerKey(float shift) {
+    tox2::DlaaCameraKey key;
+    key.mvp = tox2::mat4Multiply(translationMatrix(shift, 0.2f, 1.0f), perspectiveMatrix(1.2f, 2.1f, 0.5f, 100.0f));
+    key.viewport_scale[0] = 640.0f;
+    key.viewport_scale[1] = -360.0f;
+    key.viewport_scale[2] = 0.5f;
+    key.viewport_offset[0] = 640.0f;
+    key.viewport_offset[1] = 360.0f;
+    key.viewport_offset[2] = 0.5f;
+    key.clip_w = 1280.0f;
+    key.clip_h = 720.0f;
+    return key;
+}
+
+// One frame whose camera is `key`, ended without an evaluation.
+void trackerFrame(tox2::DlaaCameraTracker& tracker, const tox2::DlaaCameraKey& key, int draws = 1) {
+    for (int i = 0; i < draws; ++i) tracker.record(key);
+    tracker.endFrame();
+}
+
+bool isIdentityResult(const tox2::DlaaCameraTracker::Result& result) {
+    const tox2::DlaaMatrices& m = result.matrices;
+    const tox2::Mat4 identity = tox2::mat4Identity();
+    return m.view_to_clip == identity && m.clip_to_view == identity && m.clip_to_prev_clip == identity &&
+           m.prev_clip_to_clip == identity;
+}
+
+// The clip-to-clip transforms the tracker must report for a current and a previous camera.
+void expectTransitions(const tox2::DlaaCameraTracker::Result& result, const tox2::DlaaCameraKey& current,
+                       const tox2::DlaaCameraKey& previous) {
+    const tox2::Mat4 clip_current = tox2::dlaaClipMatrix(current);
+    const tox2::Mat4 clip_previous = tox2::dlaaClipMatrix(previous);
+    tox2::Mat4 inverse_current{}, inverse_previous{};
+    CHECK(tox2::mat4Inverse(clip_current, inverse_current) && tox2::mat4Inverse(clip_previous, inverse_previous));
+    CHECK(result.matrices.view_to_clip == clip_current);
+    CHECK(result.matrices.clip_to_prev_clip == tox2::mat4Multiply(inverse_current, clip_previous));
+    CHECK(result.matrices.prev_clip_to_clip == tox2::mat4Multiply(inverse_previous, clip_current));
+}
+
+// Needs no Vulkan device.
+void testDlaaCameraTracker() {
+    const tox2::DlaaCameraKey a = trackerKey(-0.30f), b = trackerKey(-0.31f), c = trackerKey(-0.32f);
+
+    // No previous camera: identity matrices and a reset, whatever the current frame drew.
+    {
+        tox2::DlaaCameraTracker tracker;
+        tracker.record(a);
+        const tox2::DlaaCameraTracker::Result result = tracker.resolve(false);
+        CHECK(result.reset && isIdentityResult(result));
+    }
+    // A previous camera but none in the current frame: the same.
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        const tox2::DlaaCameraTracker::Result result = tracker.resolve(false);
+        CHECK(result.reset && isIdentityResult(result));
+    }
+    // Two consecutive cameras: the transforms between them, no reset, and the y flip mirrors both.
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        tracker.record(b);
+        const tox2::DlaaCameraTracker::Result result = tracker.resolve(false);
+        CHECK(!result.reset);
+        expectTransitions(result, b, a);
+        const tox2::DlaaCameraTracker::Result flipped = tracker.resolve(true);
+        CHECK(!flipped.reset);
+        CHECK(flipped.matrices.view_to_clip == result.matrices.view_to_clip);
+        CHECK(flipped.matrices.clip_to_prev_clip == tox2::dlaaFlipY(result.matrices.clip_to_prev_clip));
+        CHECK(flipped.matrices.prev_clip_to_clip == tox2::dlaaFlipY(result.matrices.prev_clip_to_clip));
+    }
+
+    // A singular camera, as the current or the previous one, resets with identity matrices.
+    tox2::DlaaCameraKey singular = a;
+    singular.mvp = tox2::Mat4{};
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        tracker.record(singular);
+        const tox2::DlaaCameraTracker::Result result = tracker.resolve(false);
+        CHECK(result.reset && isIdentityResult(result));
+    }
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, singular);
+        tracker.record(a);
+        const tox2::DlaaCameraTracker::Result result = tracker.resolve(false);
+        CHECK(result.reset && isIdentityResult(result));
+    }
+
+    // The most drawn camera wins; on a tie the first one seen does.
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        tracker.record(b);
+        tracker.record(c);
+        tracker.record(c);
+        expectTransitions(tracker.resolve(false), c, a);
+    }
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        tracker.record(b);
+        tracker.record(c);
+        tracker.record(b);
+        tracker.record(c);
+        expectTransitions(tracker.resolve(false), b, a);
+    }
+
+    // Only kMaxKeys distinct cameras are counted: a further one is ignored however often it is drawn, while the
+    // counted ones keep counting.
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        std::vector<tox2::DlaaCameraKey> counted;
+        for (std::size_t i = 0; i < tox2::DlaaCameraTracker::kMaxKeys; ++i) {
+            counted.push_back(trackerKey(-0.5f - 0.01f * static_cast<float>(i)));
+            tracker.record(counted.back());
+        }
+        const tox2::DlaaCameraKey extra = trackerKey(-0.9f);
+        for (int i = 0; i < 5; ++i) tracker.record(extra);
+        expectTransitions(tracker.resolve(false), counted.front(), a);
+        tracker.record(counted.back());
+        expectTransitions(tracker.resolve(false), counted.back(), a);
+    }
+
+    // The camera the evaluation used, not the whole frame's, is the next frame's previous one.
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        tracker.record(b);
+        CHECK(!tracker.resolve(false).reset);           // the evaluation: b is all it has seen
+        for (int i = 0; i < 3; ++i) tracker.record(c);  // drawn after the evaluation, and the more drawn
+        tracker.endFrame();
+        tracker.record(a);
+        const tox2::DlaaCameraTracker::Result result = tracker.resolve(false);
+        CHECK(!result.reset);
+        expectTransitions(result, a, b);
+        tracker.endFrame();
+        // A frame without an evaluation hands on its own dominant camera.
+        tracker.record(b);
+        tracker.record(c);
+        tracker.record(c);
+        tracker.endFrame();
+        tracker.record(a);
+        expectTransitions(tracker.resolve(false), a, c);
+    }
+    // An evaluation that saw no camera leaves none, even if one is drawn later in the frame.
+    {
+        tox2::DlaaCameraTracker tracker;
+        trackerFrame(tracker, a);
+        CHECK(tracker.resolve(false).reset);
+        tracker.record(b);
+        tracker.endFrame();
+        tracker.record(c);
+        const tox2::DlaaCameraTracker::Result result = tracker.resolve(false);
+        CHECK(result.reset && isIdentityResult(result));
+    }
 }
 
 // Needs no Vulkan device.
@@ -693,6 +1098,8 @@ tox2::RenderOptions readbackAllOptions(std::uint32_t resolution_scale = 1, tox2:
     options.readback_all = true;
     options.resolution_scale = resolution_scale;
     options.aa_mode = aa_mode;
+    // The scene-image tests read the layout path; the evaluation has its own test.
+    options.dlaa_evaluate = false;
     return options;
 }
 
@@ -716,6 +1123,25 @@ void testRendererAaMode(tox2::VkContext& ctx) {
             CHECK(renderer.aaMode() == tox2::AaMode::Supersample);
             CHECK(unimplementedCount("state 2-sample multisampling unavailable") == 1);
         }
+    }
+    {
+        tox2::rsxUnimplementedReset();
+        tox2::RsxRenderer renderer(ctx, readbackAllOptions(1, tox2::AaMode::Dlaa));
+        CHECK(renderer.valid());
+        CHECK(renderer.dlaaAvailable() == renderer.dlaaUnavailableReason().empty());
+        if (renderer.dlaaAvailable()) {
+            CHECK(renderer.aaMode() == tox2::AaMode::Dlaa);
+            CHECK(unimplementedCount("state DLAA unavailable") == 0);
+        } else {
+            CHECK(renderer.aaMode() == (renderer.msaaAvailable() ? tox2::AaMode::Msaa : tox2::AaMode::Supersample));
+            CHECK(unimplementedCount("state DLAA unavailable") == 1);
+        }
+        // A switch to Dlaa succeeds exactly when it is available and leaves the mode alone otherwise.
+        const tox2::AaMode before = renderer.aaMode();
+        CHECK(renderer.setAaMode(tox2::AaMode::Dlaa) == renderer.dlaaAvailable());
+        CHECK(renderer.aaMode() == (renderer.dlaaAvailable() ? tox2::AaMode::Dlaa : before));
+        std::printf("render: DLAA %s\n",
+                    renderer.dlaaAvailable() ? "available" : renderer.dlaaUnavailableReason().c_str());
     }
     tox2::rsxUnimplementedReset();
 }
@@ -4897,7 +5323,7 @@ void testRendererAaModeSwitch(tox2::VkContext& ctx) {
 // state on the command buffer, and a new frame, makes the next draw record all of it.
 void testDrawStateShadow(tox2::VkContext& ctx) {
     using namespace tox2::rsx_synthetic;
-    constexpr std::uint64_t kDrawStateCalls = 20;  // pipeline bind and 19 dynamic state commands
+    constexpr std::uint64_t kDrawStateCalls = 21;  // pipeline bind, 19 dynamic state commands, the jitter push
     tox2::rsxUnimplementedReset();
     const std::uint32_t errors_before = ctx.validationErrorCount();
     TextureOptions alias;
@@ -5346,6 +5772,194 @@ void testRendererMsaaInherit(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// ---- The 1-sample scene image of Dlaa mode ----
+
+// Whether pixel (x, y) of the rectangle's surface is red when it is drawn with one sample at the pixel centre at
+// resolution scale `scale`. No rectangle edge passes through a pixel centre at scales 1 and 2.
+bool dlaaPixelCovered(std::uint32_t x, std::uint32_t y, std::uint32_t scale) {
+    const float guest_x = (static_cast<float>(x) + 0.5f) / static_cast<float>(scale);
+    const float guest_y = (static_cast<float>(y) + 0.5f) / static_cast<float>(scale);
+    return guest_x >= kMsRectLeft && guest_x < kMsRectRight && guest_y >= kMsRectTop && guest_y < kMsRectBottom;
+}
+
+// In Dlaa mode a mode-3 surface is drawn one sample per pixel at the clip size and reaches its memory layout by a
+// copy that gives both texels of a pixel the same value; the depth read as A8R8G8B8 does the same, and switching the
+// mode at run time renders each frame like a fresh renderer in that mode.
+void testRendererDlaaSceneImage(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    {
+        tox2::RsxRenderer probe(ctx, readbackAllOptions(1, tox2::AaMode::Dlaa));
+        if (!probe.dlaaAvailable()) {
+            std::printf("DLAA scene image: skipped (%s)\n", probe.dlaaUnavailableReason().c_str());
+            tox2::rsxUnimplementedReset();
+            return;
+        }
+    }
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    constexpr std::uint32_t kRed = 0xFFFF0000, kBlack = 0xFF000000;
+
+    for (const std::uint32_t scale : {1u, 2u}) {
+        // The surface read texel by texel: both texels of a pixel are red iff the pixel centre is in the rectangle.
+        {
+            const ScaledFrame frame =
+                    renderAtScale(ctx, {makeMsaaLayoutCapture(MsaaRead::Texels)}, scale, 1, 0, tox2::AaMode::Dlaa);
+            CHECK(frame.ok && frame.width == 2 * kAaSize * scale && frame.height == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t mismatches = 0, red = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    const std::uint32_t expected = dlaaPixelCovered(x / 2, y, scale) ? kRed : kBlack;
+                    red += expected == kRed;
+                    if (pixelArgb(frame.bgra, frame.width, x, y) != expected) mismatches++;
+                }
+            }
+            if (mismatches != 0)
+                std::fprintf(stderr, "DLAA scene image at scale %u: %u texels differ\n", scale, mismatches);
+            CHECK(mismatches == 0 && red > 0);
+            CHECK(frame.stats.layout_copies >= 1 && frame.stats.draws_skipped == 0);
+            CHECK(frame.notes.empty());
+        }
+
+        // The game's resolve (a LINEAR read of the layout) averages two equal texels: no partial pixels remain.
+        {
+            const ScaledFrame frame =
+                    renderAtScale(ctx, {makeMsaaLayoutCapture(MsaaRead::Linear)}, scale, 1, 0, tox2::AaMode::Dlaa);
+            CHECK(frame.ok && frame.width == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t partial = 0, red = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    const std::uint32_t argb = pixelArgb(frame.bgra, frame.width, x, y);
+                    const std::uint32_t value = (argb >> 16) & 0xFF;
+                    partial += value > 0 && value < 255;
+                    red += argb == kRed;
+                }
+            }
+            CHECK(partial == 0 && red > 0);
+            CHECK(frame.notes.empty());
+        }
+
+        // The depth read as A8R8G8B8 matches a plain surface's words, texel by texel, and so does a pass into the
+        // colour that samples it (the game's edge effect), now that both texels of a pixel are the same sample.
+        const ScaledFrame reference =
+                renderAtScale(ctx, {makeMsaaDepthCapture(MsaaDepthRead::Reference)}, scale, 1, 0, tox2::AaMode::Dlaa);
+        CHECK(reference.ok && reference.width == kAaSize * scale);
+        if (!reference.ok) continue;
+        const std::uint32_t covered_word = pixelArgb(reference.bgra, reference.width, 10 * scale, 8 * scale);
+        const std::uint32_t uncovered_word = pixelArgb(reference.bgra, reference.width, 0, 0);
+        CHECK(covered_word != uncovered_word);
+        for (const MsaaDepthRead read : {MsaaDepthRead::Texels, MsaaDepthRead::EdgeEffect}) {
+            const ScaledFrame frame = renderAtScale(ctx, {makeMsaaDepthCapture(read)}, scale, 1, 0, tox2::AaMode::Dlaa);
+            CHECK(frame.ok && frame.width == 2 * kAaSize * scale && frame.height == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t mismatches = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    const std::uint32_t expected = dlaaPixelCovered(x / 2, y, scale) ? covered_word : uncovered_word;
+                    if (pixelArgb(frame.bgra, frame.width, x, y) != expected) mismatches++;
+                }
+            }
+            if (mismatches != 0)
+                std::fprintf(stderr, "DLAA depth read %d at scale %u: %u texels differ\n", static_cast<int>(read),
+                             scale, mismatches);
+            CHECK(mismatches == 0);
+            CHECK(frame.stats.depth_conversions >= 1 && frame.stats.draws_skipped == 0);
+            CHECK(frame.notes.empty());
+        }
+
+        // Msaa -> Dlaa -> Msaa on one renderer: each frame equals a fresh renderer's in that mode. The full clear at
+        // the start of the scene makes the older representation irrelevant.
+        {
+            const auto fresh = [&](tox2::AaMode mode) {
+                RawDisplay display;
+                const ScaledFrame frame =
+                        renderAtScale(ctx, {makeMsaaLayoutCapture(MsaaRead::Linear)}, scale, 1, 0, mode);
+                CHECK(frame.ok && frame.notes.empty());
+                display.bgra = frame.bgra;
+                display.width = frame.width;
+                display.height = frame.height;
+                return display;
+            };
+            const RawDisplay msaa_reference = fresh(tox2::AaMode::Msaa);
+            const RawDisplay dlaa_reference = fresh(tox2::AaMode::Dlaa);
+            CHECK(!sameDisplay(msaa_reference, dlaa_reference));
+
+            const std::vector<tox2::RsxCommand> drawn = replaySynthetic(makeMsaaLayoutCapture(MsaaRead::Linear));
+            tox2::rsxUnimplementedReset();
+            tox2::RsxRenderer renderer(ctx, readbackAllOptions(scale, tox2::AaMode::Msaa));
+            CHECK(renderer.valid() && renderer.aaMode() == tox2::AaMode::Msaa);
+            CHECK(sameDisplay(runFrame(renderer, drawn), msaa_reference));
+            CHECK(renderer.setAaMode(tox2::AaMode::Dlaa) && renderer.aaMode() == tox2::AaMode::Dlaa);
+            CHECK(sameDisplay(runFrame(renderer, drawn), dlaa_reference));
+            CHECK(renderer.setAaMode(tox2::AaMode::Msaa) && renderer.aaMode() == tox2::AaMode::Msaa);
+            CHECK(sameDisplay(runFrame(renderer, drawn), msaa_reference));
+            CHECK(renderer.stats().layout_copies >= 3 && renderer.stats().draws_skipped == 0);
+            CHECK(tox2::rsxUnimplementedSnapshot().empty());
+        }
+    }
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
+// The game's resolve read of the scene runs DLAA once per scene write: the first evaluation starts a history, the
+// second (the next frame) continues it, nothing fails, and the picture keeps the scene's colours. The history is
+// reset by a frame without an evaluation and by a switch away from Dlaa and back.
+void testRendererDlaaEvaluate(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    {
+        tox2::RsxRenderer probe(ctx, readbackAllOptions(1, tox2::AaMode::Dlaa));
+        if (!probe.dlaaAvailable()) {
+            std::printf("DLAA evaluate: skipped (%s)\n", probe.dlaaUnavailableReason().c_str());
+            tox2::rsxUnimplementedReset();
+            return;
+        }
+    }
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    const std::vector<tox2::RsxCommand> drawn = replaySynthetic(makeMsaaLayoutCapture(MsaaRead::Linear));
+    const std::vector<tox2::RsxCommand> cleared = replaySynthetic(makeClearCapture(0xFF102030));
+    for (const std::uint32_t scale : {1u, 2u}) {
+        tox2::rsxUnimplementedReset();
+        tox2::RenderOptions options = readbackAllOptions(scale, tox2::AaMode::Dlaa);
+        options.dlaa_evaluate = true;
+        // The scene has no perspective draw, so the camera rules would reset every frame; this test is about the
+        // frame-to-frame rules.
+        options.dlaa_debug.camera = tox2::DlaaCamera::Off;
+        tox2::RsxRenderer renderer(ctx, options);
+        CHECK(renderer.valid() && renderer.aaMode() == tox2::AaMode::Dlaa);
+        RawDisplay display = runFrame(renderer, drawn);
+        CHECK(renderer.stats().dlaa_evaluations == 1 && renderer.stats().dlaa_resets == 1);
+        display = runFrame(renderer, drawn);
+        CHECK(renderer.stats().dlaa_evaluations == 2 && renderer.stats().dlaa_resets == 1);
+        CHECK(renderer.stats().dlaa_failures == 0 && renderer.stats().draws_skipped == 0);
+        CHECK(tox2::rsxUnimplementedSnapshot().empty());
+        // The history only continues from the immediately preceding frame: a frame that evaluates nothing (a plain
+        // clear) in between starts a new one ...
+        runFrame(renderer, cleared);
+        runFrame(renderer, drawn);
+        CHECK(renderer.stats().dlaa_evaluations == 3 && renderer.stats().dlaa_resets == 2);
+        runFrame(renderer, drawn);
+        CHECK(renderer.stats().dlaa_evaluations == 4 && renderer.stats().dlaa_resets == 2);
+        // ... and so does a switch away from Dlaa and back, even between consecutive frames.
+        CHECK(renderer.setAaMode(tox2::AaMode::Msaa) && renderer.setAaMode(tox2::AaMode::Dlaa));
+        runFrame(renderer, drawn);
+        CHECK(renderer.stats().dlaa_evaluations == 5 && renderer.stats().dlaa_resets == 3);
+        runFrame(renderer, drawn);
+        CHECK(renderer.stats().dlaa_evaluations == 6 && renderer.stats().dlaa_resets == 3);
+        CHECK(renderer.stats().dlaa_failures == 0 && renderer.stats().draws_skipped == 0);
+        CHECK(display.width == kAaSize * scale && display.height == kAaSize * scale);
+        if (display.width != kAaSize * scale || display.height != kAaSize * scale) continue;
+        // Well inside the red rectangle and well outside it: DLAA may soften edges but not change flat areas much.
+        const std::uint32_t inside = pixelArgb(display.bgra, display.width, 10 * scale, 8 * scale);
+        const std::uint32_t outside = pixelArgb(display.bgra, display.width, scale, scale);
+        CHECK(((inside >> 16) & 0xFF) > 192 && ((inside >> 8) & 0xFF) < 64 && (inside & 0xFF) < 64);
+        CHECK(((outside >> 16) & 0xFF) < 64 && ((outside >> 8) & 0xFF) < 64 && (outside & 0xFF) < 64);
+        CHECK((inside >> 24) == 0xFF && (outside >> 24) == 0xFF);
+    }
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
 // ---- Point size ----
 
 // One red point at the centre of the 64x64 surface (a pixel corner), SET_POINT_SIZE `size`.
@@ -5608,6 +6222,367 @@ void testPresenterTypes() {
     CHECK(target.view != VK_NULL_HANDLE && target.format == VK_FORMAT_B8G8R8A8_UNORM);
 }
 
+// Streamline is optional: the status line says why it is off, and when it is on the hooks must be installed.
+void testStreamlineContext(tox2::VkContext& ctx) {
+    std::printf("streamline: %s\n", ctx.streamlineStatus().c_str());
+#if TOX2_HAS_STREAMLINE
+    if (ctx.streamlineStatus().find("DLSS supported") == std::string::npos) return;
+    CHECK(ctx.streamline() != nullptr);
+    const PFN_vkVoidFunction loader_surface = vkGetInstanceProcAddr(ctx.instance(), "vkCreateWin32SurfaceKHR");
+    const PFN_vkVoidFunction surface = ctx.instanceProc("vkCreateWin32SurfaceKHR");
+    CHECK(surface != nullptr && surface != loader_surface);
+    // Streamline's proxy replaces the volk global; the loader still returns the driver's function.
+    const PFN_vkVoidFunction loader_present = vkGetDeviceProcAddr(ctx.device(), "vkQueuePresentKHR");
+    CHECK(reinterpret_cast<PFN_vkVoidFunction>(vkQueuePresentKHR) != loader_present);
+#endif
+}
+
+struct SlTestImage {
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    VkImageView view = VK_NULL_HANDLE;
+    tox2::SlImage sl;
+};
+
+bool createSlTestImage(tox2::VkContext& ctx, VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspect,
+                       std::uint32_t width, std::uint32_t height, SlTestImage& out) {
+    VkImageCreateInfo image_info{};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = format;
+    image_info.extent = {width, height, 1};
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = usage;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo alloc_info{};
+    alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    // Streamline is told the device memory, so the image owns a whole allocation.
+    alloc_info.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+    VmaAllocationInfo allocated{};
+    if (vmaCreateImage(ctx.allocator(), &image_info, &alloc_info, &out.image, &out.allocation, &allocated) !=
+        VK_SUCCESS) {
+        return false;
+    }
+    VkImageViewCreateInfo view_info{};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = out.image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = format;
+    view_info.subresourceRange = {aspect, 0, 1, 0, 1};
+    if (vkCreateImageView(ctx.device(), &view_info, nullptr, &out.view) != VK_SUCCESS) return false;
+    out.sl.image = out.image;
+    out.sl.memory = allocated.deviceMemory;
+    out.sl.view = out.view;
+    out.sl.width = width;
+    out.sl.height = height;
+    out.sl.format = format;
+    out.sl.usage = usage;
+    return true;
+}
+
+void destroySlTestImage(tox2::VkContext& ctx, SlTestImage& image) {
+    if (image.view != VK_NULL_HANDLE) vkDestroyImageView(ctx.device(), image.view, nullptr);
+    if (image.image != VK_NULL_HANDLE) vmaDestroyImage(ctx.allocator(), image.image, image.allocation);
+    image = {};
+}
+
+// Moves the whole image between layouts with full-pipeline barriers; the test is about Streamline, not barrier cost.
+void slTestBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
+                   VkAccessFlags2 src_access, VkAccessFlags2 dst_access) {
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.srcAccessMask = src_access;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.dstAccessMask = dst_access;
+    barrier.oldLayout = from;
+    barrier.newLayout = to;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange = {aspect, 0, 1, 0, 1};
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.imageMemoryBarrierCount = 1;
+    dependency.pImageMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+}
+
+void slTestMemoryBarrier(VkCommandBuffer cmd) {
+    VkMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+}
+
+// Two DLAA evaluations through the frame API on synthetic images: a hard black/white diagonal edge must come out
+// anti-aliased with the same mean brightness, with no validation error and no Streamline warning.
+void testStreamlineEvaluate(tox2::VkContext& ctx) {
+    tox2::Streamline* streamline = ctx.streamline();
+    if (streamline == nullptr) {
+        std::printf("streamline evaluate: skipped: %s\n", ctx.streamlineStatus().c_str());
+        return;
+    }
+    constexpr std::uint32_t kWidth = 640;
+    constexpr std::uint32_t kHeight = 360;
+    constexpr VkDeviceSize kPixels = static_cast<VkDeviceSize>(kWidth) * kHeight;
+    VkDevice device = ctx.device();
+    const VkFormat depth_format = ctx.depthStencilFormat();
+
+    // The formats and usages a DLAA pass needs; a device without them cannot run DLAA at all.
+    struct FormatNeed {
+        VkFormat format;
+        VkFormatFeatureFlags features;
+    };
+    const FormatNeed needs[] = {
+            {VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT},
+            {depth_format, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT},
+            {VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT},
+            {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                               VK_FORMAT_FEATURE_TRANSFER_SRC_BIT},
+    };
+    for (const FormatNeed& need : needs) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(ctx.physicalDevice(), need.format, &properties);
+        if ((properties.optimalTilingFeatures & need.features) != need.features) {
+            std::printf("streamline evaluate: skipped: format %d lacks features\n", static_cast<int>(need.format));
+            return;
+        }
+    }
+
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    std::vector<std::string> sl_lines;
+    tox2::setLogSink([&sl_lines](std::string_view line) {
+        if (line.find("tox2: streamline:") != std::string_view::npos) sl_lines.emplace_back(line);
+    });
+
+    constexpr VkImageUsageFlags kInputUsage =
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    SlTestImage color, depth, motion, output;
+    bool ok = createSlTestImage(ctx, VK_FORMAT_B8G8R8A8_UNORM, kInputUsage | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                                VK_IMAGE_ASPECT_COLOR_BIT, kWidth, kHeight, color) &&
+              createSlTestImage(ctx, depth_format, kInputUsage | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                VK_IMAGE_ASPECT_DEPTH_BIT, kWidth, kHeight, depth) &&
+              createSlTestImage(ctx, VK_FORMAT_R16G16_SFLOAT, kInputUsage | VK_IMAGE_USAGE_STORAGE_BIT,
+                                VK_IMAGE_ASPECT_COLOR_BIT, kWidth, kHeight, motion) &&
+              createSlTestImage(ctx, VK_FORMAT_R8G8B8A8_UNORM,
+                                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                VK_IMAGE_ASPECT_COLOR_BIT, kWidth, kHeight, output);
+    CHECK(ok);
+
+    // One host-visible buffer holds the input pixels first and the read-back output second.
+    VkBufferCreateInfo buffer_info{};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = kPixels * 4 * 2;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationCreateInfo buffer_alloc_info{};
+    buffer_alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+    buffer_alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation buffer_alloc = nullptr;
+    VmaAllocationInfo mapped{};
+    ok = ok && vmaCreateBuffer(ctx.allocator(), &buffer_info, &buffer_alloc_info, &buffer, &buffer_alloc, &mapped) ==
+                       VK_SUCCESS;
+    CHECK(ok && mapped.pMappedData != nullptr);
+
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    std::uint32_t viewport = 0;
+    bool viewport_made = false;
+    if (ok && mapped.pMappedData != nullptr) {
+        auto* bytes = static_cast<std::uint8_t*>(mapped.pMappedData);
+        // B8G8R8A8: black above the diagonal from the top left to the bottom right, white below it.
+        double input_sum = 0.0;
+        for (std::uint32_t y = 0; y < kHeight; y++) {
+            for (std::uint32_t x = 0; x < kWidth; x++) {
+                const std::uint8_t value =
+                        static_cast<std::uint64_t>(x) * kHeight >= static_cast<std::uint64_t>(y) * kWidth ? 255 : 0;
+                std::uint8_t* pixel = bytes + (static_cast<std::size_t>(y) * kWidth + x) * 4;
+                pixel[0] = pixel[1] = pixel[2] = value;
+                pixel[3] = 255;
+                input_sum += value;
+            }
+        }
+        const double input_mean = input_sum / static_cast<double>(kPixels);
+        vmaFlushAllocation(ctx.allocator(), buffer_alloc, 0, VK_WHOLE_SIZE);
+
+        VkCommandPoolCreateInfo pool_info{};
+        pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        pool_info.queueFamilyIndex = ctx.graphicsQueueFamily();
+        CHECK(vkCreateCommandPool(device, &pool_info, nullptr, &pool) == VK_SUCCESS);
+        VkFenceCreateInfo fence_info{};
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        CHECK(vkCreateFence(device, &fence_info, nullptr, &fence) == VK_SUCCESS);
+
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo cmd_info{};
+        cmd_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cmd_info.commandPool = pool;
+        cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        CHECK(vkAllocateCommandBuffers(device, &cmd_info, &cmd) == VK_SUCCESS);
+
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd, &begin);
+
+        constexpr VkImageAspectFlags kColorAspect = VK_IMAGE_ASPECT_COLOR_BIT;
+        // Colour: upload from the host buffer.
+        slTestBarrier(cmd, color.image, kColorAspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      0, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        VkBufferImageCopy upload{};
+        upload.imageSubresource = {kColorAspect, 0, 0, 1};
+        upload.imageExtent = {kWidth, kHeight, 1};
+        vkCmdCopyBufferToImage(cmd, buffer, color.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &upload);
+        slTestBarrier(cmd, color.image, kColorAspect, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                      VK_ACCESS_2_SHADER_READ_BIT);
+        // Depth: a constant 0.5.
+        const VkImageAspectFlags depth_aspect = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        slTestBarrier(cmd, depth.image, depth_aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      0, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        const VkClearDepthStencilValue depth_clear = {0.5f, 0};
+        const VkImageSubresourceRange depth_range = {depth_aspect, 0, 1, 0, 1};
+        vkCmdClearDepthStencilImage(cmd, depth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &depth_clear, 1,
+                                    &depth_range);
+        slTestBarrier(cmd, depth.image, depth_aspect, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                      VK_ACCESS_2_SHADER_READ_BIT);
+        // Motion vectors: zero.
+        slTestBarrier(cmd, motion.image, kColorAspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      0, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        const VkClearColorValue zero{};
+        const VkImageSubresourceRange color_range = {kColorAspect, 0, 1, 0, 1};
+        vkCmdClearColorImage(cmd, motion.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &color_range);
+        slTestBarrier(cmd, motion.image, kColorAspect, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                      VK_ACCESS_2_SHADER_READ_BIT);
+        // Output: written by Streamline as a storage image.
+        slTestBarrier(cmd, output.image, kColorAspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0,
+                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+        viewport = streamline->newViewport();
+        viewport_made = true;
+        tox2::DlaaFrame frame;
+        frame.viewport = viewport;
+        frame.color_in = color.sl;
+        frame.color_in.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        frame.depth = depth.sl;
+        frame.depth.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        frame.motion = motion.sl;
+        frame.motion.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        frame.color_out = output.sl;
+        frame.color_out.layout = VK_IMAGE_LAYOUT_GENERAL;
+        frame.mvec_scale[0] = 1.0f / kWidth;
+        frame.mvec_scale[1] = 1.0f / kHeight;
+        frame.alpha = true;
+        frame.mvec_invalid_value = 0.0f;
+        bool evaluated = true;
+        for (std::uint64_t i = 0; i < 2; i++) {
+            // The first evaluation starts the history, the second uses it.
+            frame.reset = i == 0;
+            const std::array<float, 2> jitter = tox2::dlaaJitterPixels(i);
+            frame.jitter_px[0] = jitter[0];
+            frame.jitter_px[1] = jitter[1];
+            std::string error;
+            if (!streamline->evaluateDlaa(cmd, frame, error)) {
+                std::printf("streamline evaluate: evaluation %llu failed: %s\n", static_cast<unsigned long long>(i),
+                            error.c_str());
+                evaluated = false;
+                break;
+            }
+            // Streamline leaves no bound state behind that the test relies on; make its writes visible to the
+            // next evaluation and to the read-back.
+            slTestMemoryBarrier(cmd);
+        }
+        CHECK(evaluated);
+
+        slTestBarrier(cmd, output.image, kColorAspect, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        VkBufferImageCopy readback{};
+        readback.bufferOffset = kPixels * 4;
+        readback.imageSubresource = {kColorAspect, 0, 0, 1};
+        readback.imageExtent = {kWidth, kHeight, 1};
+        vkCmdCopyImageToBuffer(cmd, output.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &readback);
+        VkMemoryBarrier2 host_barrier{};
+        host_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        host_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        host_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        host_barrier.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+        host_barrier.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+        VkDependencyInfo dependency{};
+        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.memoryBarrierCount = 1;
+        dependency.pMemoryBarriers = &host_barrier;
+        vkCmdPipelineBarrier2(cmd, &dependency);
+        CHECK(vkEndCommandBuffer(cmd) == VK_SUCCESS);
+
+        VkCommandBufferSubmitInfo cmd_submit{};
+        cmd_submit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        cmd_submit.commandBuffer = cmd;
+        VkSubmitInfo2 submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submit.commandBufferInfoCount = 1;
+        submit.pCommandBufferInfos = &cmd_submit;
+        CHECK(vkQueueSubmit2(ctx.graphicsQueue(), 1, &submit, fence) == VK_SUCCESS);
+        CHECK(vkWaitForFences(device, 1, &fence, VK_TRUE, 30'000'000'000ull) == VK_SUCCESS);
+
+        if (evaluated) {
+            vmaInvalidateAllocation(ctx.allocator(), buffer_alloc, 0, VK_WHOLE_SIZE);
+            const std::uint8_t* out = bytes + kPixels * 4;
+            double sum[3] = {0.0, 0.0, 0.0};
+            std::uint64_t nonzero = 0;
+            std::uint64_t edge_pixels = 0;
+            for (VkDeviceSize i = 0; i < kPixels; i++) {
+                const std::uint8_t* pixel = out + i * 4;
+                for (int c = 0; c < 3; c++) sum[c] += pixel[c];
+                if (pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 || pixel[3] != 0) nonzero++;
+                if (pixel[0] > 0 && pixel[0] < 255) edge_pixels++;
+            }
+            const double mean_r = sum[0] / static_cast<double>(kPixels);
+            const double mean_g = sum[1] / static_cast<double>(kPixels);
+            const double mean_b = sum[2] / static_cast<double>(kPixels);
+            std::printf(
+                    "streamline evaluate: input mean %.2f, output mean %.2f/%.2f/%.2f, %llu non-black, %llu partial\n",
+                    input_mean, mean_r, mean_g, mean_b, static_cast<unsigned long long>(nonzero),
+                    static_cast<unsigned long long>(edge_pixels));
+            CHECK(nonzero > 0);
+            CHECK(std::abs(mean_r - input_mean) <= 8.0);
+            CHECK(std::abs(mean_g - input_mean) <= 8.0);
+            CHECK(std::abs(mean_b - input_mean) <= 8.0);
+            CHECK(edge_pixels >= 16);
+        }
+    }
+
+    if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
+    if (pool != VK_NULL_HANDLE) vkDestroyCommandPool(device, pool, nullptr);
+    if (buffer != VK_NULL_HANDLE) vmaDestroyBuffer(ctx.allocator(), buffer, buffer_alloc);
+    vkDeviceWaitIdle(device);
+    if (viewport_made) streamline->freeViewport(viewport);
+    destroySlTestImage(ctx, output);
+    destroySlTestImage(ctx, motion);
+    destroySlTestImage(ctx, depth);
+    destroySlTestImage(ctx, color);
+
+    tox2::setLogSink({});
+    for (const std::string& line : sl_lines) std::printf("streamline evaluate: log: %s\n", line.c_str());
+    CHECK(sl_lines.empty());
+    CHECK(ctx.validationErrorCount() == errors_before);
+}
+
 }  // namespace
 
 int main() {
@@ -5629,6 +6604,11 @@ int main() {
     testVertexConvertMatchesReference();
     testConvertIndicesChecked();
     testAaModeNames();
+    testDlaaJitter();
+    testDlaaPerspective();
+    testDlaaMatrices();
+    testDlaaCameraCut();
+    testDlaaCameraTracker();
     testWindowSizePresets();
     testPlaceInWorkArea();
     testAnisotropyNames();
@@ -5637,6 +6617,7 @@ int main() {
 
     tox2::VkContextOptions options;
     options.validation = true;
+    options.streamline = true;
     std::string error;
     std::unique_ptr<tox2::VkContext> ctx = tox2::createVkContext(options, error);
     if (!ctx) {
@@ -5653,6 +6634,8 @@ int main() {
                 ctx->hasLargePoints() ? "supported" : "unsupported", ctx->validationEnabled() ? "active" : "inactive");
     CHECK(layer == ctx->validationEnabled());
 
+    testStreamlineContext(*ctx);
+    testStreamlineEvaluate(*ctx);
     testClearAndReadback(*ctx);
     testTwoSampleSupport(*ctx);
     testRendererAaMode(*ctx);
@@ -5689,6 +6672,8 @@ int main() {
     testRendererAaModeSwitch(*ctx);
     testRendererMsaaDepthAsArgb(*ctx);
     testRendererMsaaInherit(*ctx);
+    testRendererDlaaSceneImage(*ctx);
+    testRendererDlaaEvaluate(*ctx);
     testRendererPointSize(*ctx);
     testForcedAnisotropySampler(*ctx);
     testRendererAnisotropy(*ctx);

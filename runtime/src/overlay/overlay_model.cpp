@@ -143,6 +143,12 @@ std::string windowSizePreviewLabel(const WindowStatus& status) {
     return windowSizeItemLabel(status.preset, status.available);
 }
 
+std::vector<AaMode> aaModeChoices(const OverlayState& state) {
+    std::vector<AaMode> choices{AaMode::Supersample, AaMode::Msaa};
+    if (state.dlaa_available) choices.push_back(AaMode::Dlaa);
+    return choices;
+}
+
 PresentOverlayRequests takePresentRequests(OverlayState& state) {
     PresentOverlayRequests requests;
     requests.dump_display = state.dump_requested;

@@ -33,6 +33,69 @@ machine (the in-box `GameInput.dll` or the installed `GameInputRedist.dll`). If 
 implements API version 3 is found, `tox2_game` logs one warning that names `GameInputRedist.msi` and
 the gamepads are disabled; the keyboard keeps working.
 
+## NVIDIA Streamline and DLSS
+
+The optional DLAA anti-aliasing mode (`--aa-mode dlaa`) runs NVIDIA DLSS through the NVIDIA Streamline
+SDK, <https://github.com/NVIDIA-RTX/Streamline>. The SDK is not part of this repository: nothing from
+it is committed. `tools/fetch-streamline.ps1` downloads the pinned release into `externals/Streamline`
+(git-ignored) and verifies its SHA-256 (`-From <zip>` takes a local copy and applies the same check);
+the pin is in `cmake/streamline.cmake`. The build uses the SDK's headers at compile time and, when
+the SDK is present, copies four DLLs and the licence texts next to the executables (`bin/` of the
+build directory, the licences under `bin/licenses/streamline/`). `TOX2_ENABLE_DLSS=OFF` builds
+without any of this.
+
+| | |
+| --- | --- |
+| Version | Streamline 2.14.1 (`streamline-sdk-v2.14.1.zip`, SHA-256 `92c4d954631a1710da86ca3fa8d5034f2b9503838c95fc4ae977ae149319781b`) |
+| Source | <https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.1/streamline-sdk-v2.14.1.zip> |
+| Streamline itself: the headers (build time only) and `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll` | MIT License, Copyright (c) 2023 NVIDIA CORPORATION (the SDK's `license.txt`, copied as `LICENSE.txt`) |
+| Runtime DLLs copied next to the executables | `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll`, `nvngx_dlss.dll` |
+| DLSS runtime and `nvngx_dlss.dll` | NVIDIA RTX SDKs LICENSE (v. March 14, 2024) with the NVIDIA RTX supplement (the SDK's `bin/x64/nvngx_dlss.license.txt`, copied as `nvngx_dlss.license.txt`) |
+| SDK third-party components | `3rd-party-licenses.md` of the SDK (copied unchanged) |
+
+### Licences
+
+The text of each licence ships with the build in `bin/licenses/streamline/` and must accompany any
+redistributed copy of the DLLs. A summary of what the texts say about redistribution follows; the files
+themselves are authoritative:
+
+- `license.txt` is the MIT License, with the condition that the copyright notice and the permission
+  notice are included in all copies or substantial portions of the software. A note in the same file
+  says that two Streamline files, `sl_nvperf.h` and `sl_nvperf.dll`, are covered by the NVIDIA Nsight
+  Perf SDK License instead; this project does not use or copy either of them.
+- `nvngx_dlss.license.txt` grants the right to distribute software and materials within the SDK,
+  other than developer tools, as incorporated in object code format into a software application, subject
+  to its distribution requirements. These include: the application must have material additional
+  functionality beyond the included portions of the SDK; the SDK is to be distributed under terms at
+  least as protective as that licence; and NVIDIA is to be notified in writing of any known or suspected
+  non-compliant distribution or use. The supplement licenses the DLSS SDK for developing applications
+  for use in systems with NVIDIA GPUs, asks for notification to NVIDIA before the commercial release of
+  an application that incorporates it, requires applications that incorporate it to attribute the use of
+  the SDK and include the NVIDIA Marks on splash screens, in the about box (if present) and in the
+  credits of game applications, and states that NVIDIA may make over-the-air updates of the SDK.
+  The licence forbids reverse engineering the SDK and bypassing or circumventing any security or
+  authentication mechanism in it, and forbids using the SDK in a way that would make it subject to an
+  open source software license (one that requires, as a condition of use, modification or distribution, that
+  the SDK be disclosed or distributed in source code form, licensed for making derivative works, or
+  redistributable at no charge).
+- The SDK also ships `NvLowLatencyVk.dll` (NVIDIA Reflex), which `sl.common.dll` tries to load at
+  start-up. It is not copied: its licence, `bin/x64/reflex.license.txt`, lists only "the NVAPIs, .lib
+  and .h files, Linux wrapper, and samples" as distributable, and DLAA does not use Reflex.
+- `3rd-party-licenses.md` lists the third-party software that the SDK includes, with the licence of
+  each.
+
+### Run-time loading
+
+Streamline is not linked into the executables, and no import library of the SDK is used. `tox2_game`,
+`tox2_rsxreplay` and the render tests start without any of the DLLs. When DLAA is requested (and in
+every `tox2_game` run that uses Vulkan, so that the overlay can offer it), the renderer loads
+`sl.interposer.dll` from the directory of the executable with `LoadLibraryExW`, after
+`sl::security::verifyEmbeddedSignature` from the SDK has accepted the file's NVIDIA signature. The DLL
+is only ever loaded from there. Over-the-air updates and downloaded plugins are switched off in the
+Streamline preferences, so only the DLLs next to the executable are used, and Streamline's log output
+goes to the project log. If the DLLs are missing, unsigned, or the GPU or driver cannot run DLSS, DLAA is
+unavailable and the renderer falls back to `msaa` (or `supersample`); see [Rendering](docs/rendering.md#dlaa).
+
 ## RPCS3 key files
 
 `tox2_decrypt` needs the keys that decrypt `EBOOT.BIN` and the firmware's `libsre.prx`. It reads

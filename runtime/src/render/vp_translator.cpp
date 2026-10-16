@@ -611,6 +611,10 @@ std::string Translator::assemble() const {
             "  uint branch_bits;\n"
             "  uint user_clip;\n"
             "} draw;\n"
+            "\n"
+            "layout(push_constant) uniform VpPush {\n"
+            "  vec2 jitter_ndc;  // sub-pixel offset of a DLAA scene pass in clip space, 0 for every other draw\n"
+            "} vp_push;\n"
             "\n";
 
     for (std::uint32_t input = 0; input < 16; input++) {
@@ -717,6 +721,8 @@ std::string Translator::assemble() const {
             "          pos.w * ((draw.viewport_offset.y - half_clip.y) / half_clip.y),\n"
             "      pos.z * draw.viewport_scale.z + pos.w * draw.viewport_offset.z,\n"
             "      pos.w);\n"
+            // Scaled by w so the shift is a constant offset in screen space after the perspective divide.
+            "  pos.xy += vp_push.jitter_ndc * pos.w;\n"
             // The identity range (the common case) keeps z exact instead of going through the grid.
             "  bool identity_depth = draw.clip_params.z == 0.0 && draw.clip_params.w == 1.0;\n"
             "  if (pos.w != 0.0 && !identity_depth) {\n"
