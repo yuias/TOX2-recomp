@@ -1198,12 +1198,12 @@ Run-to-run spread on one machine was a few percent for `buildDraw` and `total` a
 a difference smaller than that is noise; compare interleaved runs of the two binaries.
 
 The CTest entry `rsx_replay` runs `tox2_rsxreplay` on `generated/rsx/captures/title.tox2cap` with
-the options pinned in `cmake/rsx_replay.cmake`. The capture name `title` comes from the earlier game
-and has no meaning for this one. The file is game-derived and git-ignored, so the test is registered
+the options pinned in `cmake/rsx_replay.cmake`. The capture name `title` is only the name the test looks up; it says nothing about the
+scene in the capture. The file is game-derived and git-ignored, so the test is registered
 only when the capture exists; configuration prints the reason otherwise. The pin file also holds the
 slot for the SHA-256 of a reference image (`generated/rsx/reference/title.png`) and the thresholds
 (largest difference 8, at most 0.5 percent of the pixels differing). The SHA-256 is empty, because
-the earlier game's reference image does not apply here, so the test only replays the capture and
+no accepted reference image exists for this game, so the test only replays the capture and
 passes when the summary line is printed and the validation layer reports no error. With a SHA-256
 set, the reference image must exist and match it, and the thresholds apply. To make a capture, run
 `tox2_game` with `--rsx-capture` on the frame you want and copy the file to

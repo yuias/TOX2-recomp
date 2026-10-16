@@ -14,8 +14,8 @@ not been examined.
 
 ## Inherited code that this game does not use
 
-The rest of this page describes the movie code that came with the runtime from an earlier game. That
-game played PAMF movies (MPEG program streams with H.264 video and ATRAC3plus audio) through the
+The rest of this page describes the movie code that came with the runtime from the project it was derived
+from. The game of that project played PAMF movies (MPEG program streams with H.264 video and ATRAC3plus audio) through the
 `cellSail` player library. The code is built and tested on synthetic data, but this game never binds
 its handlers, so it has never run against this game. Removing it is later work: it touches about 20
 files (the handler list in `runtime/src/hle/hle.cpp`, the `census: sail` section, the sail service
@@ -40,7 +40,7 @@ game thread -> cellSail HLE -> MoviePlayer (decode thread) -> PAMF demuxer -> FF
 Only stream URIs of the form `x-cell-fs://...` that name a PAMF file are accepted; the path is
 resolved through the [virtual file system](virtual-file-system.md). The game owns the frame
 buffers: they are allocated through its graphics adapter callbacks, and `GetFrame` copies the due
-frame into one of them as tightly packed ARGB (the earlier game's movies were 1280x720, pitch 5120).
+frame into one of them as tightly packed ARGB (the tests use 1280x720 frames with a pitch of 5120).
 The game then draws that frame through the RSX like any other texture, so the renderer needs
 nothing movie-specific.
 
@@ -62,9 +62,9 @@ stored but not acted on.
   holds up the video.
 - `runtime/src/media/ffmpeg_api.*`, `ffmpeg_codecs.*` (library `tox2_media`): the FFmpeg loader and
   the decoders behind the codec interfaces in `movie_decoder.h`. H.264 is decoded with frame
-  threads and converted with swscale (the earlier game's streams signalled BT.709, limited range).
+  threads and converted with swscale (the matrix, BT.709 or BT.601, comes from the stream's flag, and the source range from the frame).
   ATRAC3plus is decoded to interleaved big-endian float, the format the game asks for. There is no
-  resampling; the earlier game's movies were 48 kHz stereo. The same file also holds the raw-frame
+  resampling (a stream whose rate differs from the requested one logs a warning); the tests use 48 kHz stereo. The same file also holds the raw-frame
   ATRAC3plus decoder behind `atrac_decoder.h`, which is not part of movie playback (see below).
 - `runtime/src/media/at3_file.*` and `atrac_decoder.h` (runtime core): the parser for
   ATRAC3plus RIFF/WAVE files (format, `fact` delay and `smpl` loop, archive scan) and the

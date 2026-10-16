@@ -1,13 +1,15 @@
 # Audio
 
 This page covers the audio code in the runtime: the `cellAudio` and `cellAtrac` HLE, the audio
-engine and the WASAPI output. The code was written for and checked against an earlier game, with
-synthetic data in the tests. In a 120 s headless run of *Tales of Xillia 2* the game calls
+engine and the WASAPI output. The tests use synthetic data. In a 120 s headless run of
+*Tales of Xillia 2* the game calls
 `cellAudioInit`, opens and starts a port and sets the notify queue, and creates two ATRAC decoders
 (both for sounds held in memory); the audio census counts 22,071 blocks, 4,017 of them non-silent,
-and the dump has non-silent audio from about 50 s on (see [Status](status.md)). Where this page describes how "the game" uses the library (thread priorities,
-buffer sizes, sound formats), that is how the earlier game behaved, and it is not verified for this
-one.
+and the dump has non-silent audio from about 50 s on (see [Status](status.md)). Longer windowed runs create dozens of
+decoders for mono and stereo sounds at 48 kHz, held in memory or streamed through a ring of 0x40000 bytes, and they report
+no decoder error. What this page says about how the game uses the library (thread names and priorities, port
+parameters, sound formats, the order of the `cellAtrac` calls) comes from the debug log and census of those runs and from the
+game's code; a statement that has not been checked with this game says so.
 
 ## What this game uses
 
@@ -26,16 +28,16 @@ which holds LPCM 2 ch at 48 kHz only, because the mixer outputs stereo, and one 
 (channel count, coding type and downmixer). In the current headless run the game calls `cellAudioOutGetConfiguration` once and none of the other three.
 
 The game does not import `cellAtracCreateDecoder`, `cellAtracGetRemainFrame` or
-`cellAtracGetSoundInfo`, which the runtime implements. It imports `cellAtracCreateDecoderExt`,
+`cellAtracGetSoundInfo`, which the runtime implements and only the tests call. It imports `cellAtracCreateDecoderExt`,
 which takes a SPURS instance (the argument list is the handle, the work memory, a PPU priority and
 a `CellAtracExtRes` of `{u32 spurs; u8 priority[8]}`). The code that calls it creates a SPURS
 instance with one SPU, named "atrac3plus", for it; the runs create that instance's thread group but
 nothing starts it. On the console the ATRAC3plus decoder runs on that SPU and the firmware decoder
 is not part of this runtime, so `CreateDecoderExt` ignores its last three arguments and attaches a
 host decoder, exactly as `CreateDecoder` does. The stream protocol that `cellAtrac` is implemented
-with here (including `remain`, below) was derived from the earlier game, which used
-`cellAtracCreateDecoder` and `cellAtracGetRemainFrame`; this game also uses `cellAtracGetVacantSize`
-and the starvation code described under `Decode` below.
+with here follows how this game's decode and file-reading threads drive the library: the order of the
+calls, `cellAtracGetVacantSize` for the size of the next read, and the starvation code described under `Decode`
+below.
 
 The game's sound engine core is a raw SPU thread group named "bnusCore" (the SPU image
 `bnusCoreSpu.elf`, embedded in the executable at `0x00f7b080`, 85,008 bytes of text). The code
@@ -81,9 +83,11 @@ The schedule is absolute (`BlockClock`: the next period is due one period after 
 time, not after the previous wake-up), so a late wake-up does not shift later periods.
 
 **No catch-up.** When the thread wakes and several periods are due, it produces one block and
-covers the others with silence (`skipped` in the census). The earlier game's mixer wrote exactly one
-block per notify and needs the guest lock to do it; two periods produced back to back under one
-lock hold would consume a block the mixer never rewrote and lose the next one. A skipped period
+covers the others with silence (`skipped` in the census). A `cellAudio` mixer writes one block per
+notify and needs the guest lock to do it; two periods produced back to back under one
+lock hold would consume a block the mixer never rewrote and lose the next one. This game's mixer
+behaves that way: in the logged windowed runs (5,000 to 79,000 periods each) 0 to 32 periods consumed a block
+that it had not rewritten. A skipped period
 does not call the producer and does not advance the read index, tags or timestamps; its silent
 block still goes to the dump and the output, so the dump stays aligned with wall time and the
 device does not underrun because of it. `kMaxCatchUpBlocks` is 0.
@@ -103,11 +107,11 @@ time and never holds it while sleeping, writing the dump or talking to a device.
 and `cellAtrac` handlers never wait for the engine thread or the device, because the engine may
 itself be waiting for the lock. Device threads never take the lock and never touch guest memory.
 
-After each notify the earlier game's mixer needed 90 to 250 us and several passes through the lock (each hold
-under 0.1 ms) to write its block, and it gets the lock only after the holders ahead of it. A long hold by another thread makes periods run back to back
+After each notify the game's mixer has to write its block under the lock, and it gets the lock only after the
+holders ahead of it. A long hold by another thread makes periods run back to back
 and a block is then consumed before the mixer rewrote it, which plays as silence in the middle of
-the music. The long holder was the RSX thread with the frame builder on (the window, `--render
-vulkan`): it now pumps the command buffer in slices of 128 words and ends a hold once it has lasted
+the music. The RSX thread with the frame builder on (the window, `--render
+vulkan`) is the thread that can hold the lock longest, so it pumps the command buffer in slices of 128 words and ends a hold once it has lasted
 300 us (`kPumpSliceWords`, `kMaxGuestLockHold` in `runtime/src/rsx/rsx_thread.cpp`), then queues
 again behind the other waiters. A pump also stops after each draw end, and the draw's index, vertex
 and texture bytes are copied after the lock is released, so a hold no longer contains a draw's copy.
@@ -120,8 +124,8 @@ section, once per second in the `lock` perf line and as a table in the overlay (
 a 400 s scripted run of this game at resolution scale 1 and 3, the lock was not what made the mixer miss a block:
 the wait of the audio, SPU and high-priority guest threads had a 99th percentile of 0.11 to 0.16 ms and a
 maximum under 2 ms, and looked the same in the seconds with a missed block and in the others; a hand-off took
-under 5 us, and a contended acquisition caused about 0.07 spurious wake-ups. Those figures come from the earlier
-lock, which served every class in arrival order and woke all waiters on each hand-off. They did not point at the
+under 5 us, and a contended acquisition caused about 0.07 spurious wake-ups. Those figures come from the lock as it was
+before guest threads were ordered by priority, which served every class in arrival order and woke all waiters on each hand-off. They did not point at the
 lock, so the lock's order for host-class waiters and their place in the queue were left as they were when guest
 threads started to be ordered by priority.
 
@@ -138,17 +142,20 @@ refused change logs a warning and the thread keeps its priority. With the lock a
 the raise made no measurable difference to the number of unwritten blocks; there were fewer guest-lock waits above
 1 ms with it.
 
-Two more timing facts mattered for its sound:
+Two more timing facts concern the sound threads:
 
-- The earlier game's decode threads polled with 1 ms `sys_timer_usleep` calls. Windows rounds timed waits to
-  its timer tick (15.6 ms), so `tox2_game` requests a 1 ms system timer resolution for the whole run
-  (`runtime/src/core/timer_resolution.*`, `timeBeginPeriod`). Without it that decode loop would
-  poll about six times a second instead of about sixty and could not feed the mixer.
+- Windows rounds timed waits to its timer tick (15.6 ms), so `tox2_game` requests a 1 ms system timer
+  resolution for the whole run (`runtime/src/core/timer_resolution.*`, `timeBeginPeriod`); without it a short
+  `sys_timer_usleep` lasts about 15 ms. This game's ATRAC decode thread waits on a condition variable instead of
+  sleeping; the threads that poll with `sys_timer_usleep` are its main thread and a worker (see
+  [Runtime internals](runtime.md#threads)). Whether the sound of this game depends on the request has not been measured.
 - A guest thread created with a numerically lower priority than its creator runs before the
-  creator continues (see [Runtime internals](runtime.md#threads)). In the earlier game the mixer
-  thread (priority 90) was created by the main thread (1005) and had to store its notify queue key
-  before main registered it with `cellAudioSetNotifyEventQueue`. This game's thread layout is not
-  known yet.
+  creator continues (see [Runtime internals](runtime.md#threads)). In this game the main thread (priority 1001)
+  creates `bnusCoreDecoderServerThread` and `bnusCoreUpdateThread` (priority 0) and `CnuSound2Thread` (499), and
+  each `CnuSound2Thread` creates a `bnusCoreDecoderAT3PThread` (priority 0), so all of them start before their creator
+  continues (the debug lines `tox2: thread: ... starts before creator`). The main thread opens
+  the audio port and registers the notify queue, and the queue key is found at that point. Whether the registration
+  depends on the creation rule has not been checked.
 
 ### Outputs
 
@@ -195,19 +202,20 @@ short is valid up to its last full second. `tox2_audiotool wavstat` reads it.
 
 ## cellAudio
 
-All 11 `cellAudio` functions the earlier game imported and `cellAudioSetPortLevel` are implemented (`runtime/src/hle/cell_audio.cpp` for the handlers,
+Twelve `cellAudio` functions are implemented (`runtime/src/hle/cell_audio.cpp` for the handlers,
 `cell_audio_ports.*` for the state): `cellAudioInit`, `cellAudioQuit`, `cellAudioPortOpen`,
 `cellAudioPortStart`, `cellAudioPortStop`, `cellAudioPortClose`, `cellAudioGetPortConfig`,
 `cellAudioGetPortBlockTag`, `cellAudioGetPortTimestamp`, `cellAudioSetNotifyEventQueue` and
-`cellAudioRemoveNotifyEventQueue`. `cellAudioSetPortLevel(port, level)` sets the level of an open
+`cellAudioRemoveNotifyEventQueue`, and `cellAudioSetPortLevel`. `cellAudioSetPortLevel(port, level)` sets the level of an open
 port (the mixer multiplies the port's samples by it; a negative level or NaN is refused with
 `CELL_AUDIO_ERROR_PARAM`, a closed port is `CELL_AUDIO_ERROR_PORT_NOT_OPEN`), and a reopened port
-starts at 1.0 again. This game does not import `cellAudioGetPortBlockTag` and `cellAudioGetPortTimestamp`. Other
+starts at 1.0 again. This game does not import `cellAudioGetPortBlockTag` and `cellAudioGetPortTimestamp`, so only the tests exercise
+them (see Tags and timestamps below). Other
 functions (for example `cellAudioCreateNotifyEventQueue` and `cellAudioAddData`) are not
 implemented.
 
-- **Ports.** There are 8 ports. The earlier game opened port 0 with 8 channels, 8 blocks, no
-  attributes and level 1.0 (the logged line is below). Channel counts 0 (mono), 2 and 8 and block counts 2, 4, 8,
+- **Ports.** There are 8 ports. This game opens port 0 with 8 channels, 8 blocks, no
+  attributes and level 1.0 (the logged line is below), and no other port. Channel counts 0 (mono), 2 and 8 and block counts 2, 4, 8,
   16 and 32 are accepted. A port's memory is `max(1, channels) * blocks * 256 * 4` bytes (a mono port counts as one channel) of big-endian
   float32, allocated in 64 KiB units in the main region, and `cellAudioGetPortConfig` reports it
   (address at offset `+0x1c`).
@@ -232,7 +240,8 @@ implemented.
   channels at unity gain and drops the other six, which is the "no downmix" mode that
   `cellAudioOutGetState` reports to the game. A mono port is copied to both sides. The census counts
   non-zero samples per input channel, and the first non-zero sample on channel 2 to 7 logs
-  `tox2: audio: input channel N carries signal; the stereo downmix drops it`.
+  `tox2: audio: input channel N carries signal; the stereo downmix drops it`. In this game's censuses channels 2 to 7
+  hold no non-zero sample, so the downmix drops no content.
 - **Tags and timestamps.** The tag of a block is the number of the period that published it, so
   tags are unique and increasing. `cellAudioGetPortTimestamp` returns the time (microseconds, the
   `sys_time_get_system_time` clock) of the period that published the tag; older tags are
@@ -240,8 +249,9 @@ implemented.
   `CELL_AUDIO_ERROR_TAG_NOT_FOUND` (`0x8031070f`).
 - **Notify.** `cellAudioSetNotifyEventQueue(key)` looks the queue up by its IPC key
   (see [lv2 IPC keys](runtime.md#implemented-system-calls)) and registers it; a period then sends
-  one event per registered queue with data words 0. A queue that is full (the earlier game's held two
-  events) or gone only counts as a failed notify and is never an error to the game. A key that
+  one event per registered queue with data words 0. A queue that is full
+  or gone only counts as a failed notify and is never an error to the game; this game's censuses show every notify
+  sent and none failed. A key that
   matches no queue returns `CELL_AUDIO_ERROR_TRANS_EVENT` (`0x80310709`) and logs `not found`.
 - **Errors.** The other error codes follow the library: not initialised (`0x80310703`), already
   initialised (`0x80310701`), bad parameter (`0x80310704`), no free port (`0x80310705`), port
@@ -258,14 +268,17 @@ The runtime implements 18 functions (`runtime/src/hle/cell_atrac.cpp` for the ha
 `GetChannel`, `GetMaxSample` and `GetSoundInfo`. This game imports 15 of them (see above). The
 other `cellAtrac` functions and `cellAtracMulti` are not implemented.
 
-The earlier game's own library never read the `CellAtracHandle` it passed, and its sound manager
-owned both sides of the stream protocol, so the state is kept on the host, keyed by the handle's guest
-address, and nothing is written into the handle. Every value written through an output pointer is a
+The game's decode thread owns both sides of the stream protocol, so the state is kept on the host, keyed by
+the handle's guest address, and nothing is written into the handle. That the game's own code never reads the
+`CellAtracHandle` has not been checked in the code; the sounds of the logged runs decode without error with the handle
+left untouched. Every value written through an output pointer is a
 4-byte big-endian cell. The work memory size reported by `SetDataAndGetMemSize` is `0x1000`; the
 decoder state is on the host.
 
-- **Files.** All the earlier game's sounds were ATRAC3plus in RIFF/WAVE files (`WAVE_FORMAT_EXTENSIBLE`
-  with the ATRAC3plus sub-format GUID, 48 kHz, mono or stereo, 2048 samples per frame). The parser
+- **Files.** Every sound of this game that reached `SetDataAndGetMemSize` in the logged runs was accepted: ATRAC3plus in
+  RIFF/WAVE files (`WAVE_FORMAT_EXTENSIBLE` with the ATRAC3plus sub-format GUID, 48 kHz, 2048 samples per frame),
+  mono (block size `0x158`, held in memory, no loop) or stereo (block size `0x2b0`, with a loop, held in memory or
+  streamed). The parser
   (`media/at3_file.*`) reads `fmt `, `fact`, `smpl` and `data`, skips other chunks, and rejects
   other formats. `fact` holds the sample count and, as its third value, the encoder delay; the valid
   audio is the decoder output from sample `delay` for `count` samples. A loop is the first `smpl`
@@ -276,8 +289,8 @@ decoder state is on the host.
   `AtracFrameDecoder` interface (`media/atrac_decoder.h`), so the runtime core has no FFmpeg types.
 - **Two modes.** The mode follows the data, not the sizes. In memory mode (sound effects) every
   frame is in the first `read_bytes` bytes, so the whole file is in the buffer whatever `buffer_bytes`
-  is. Anything else is streaming mode: the buffer is a ring of `buffer_bytes` (`0x20000` for the earlier
-  game's voice, `0x40000` for this game's background music) that holds file bytes from offset 0 to
+  is. Anything else is streaming mode: the buffer is a ring of `buffer_bytes` (`0x40000` for this game's streamed
+  background music, whose first read is between `0x10000` and `0x40000` bytes) that holds file bytes from offset 0 to
   `read_bytes` at the start, also when `read_bytes == buffer_bytes` (a ring that starts full).
   The ring is a FIFO of stream bytes in the order the game feeds them: stream byte `s` lives at ring
   offset `s % buffer_bytes`, and `buffered_end` is the stream position of the next byte to write.
@@ -295,10 +308,8 @@ decoder state is on the host.
   on that code, publishes a PCM buffer on 0, ends the sound quietly on `0x80610331`
   (`ALLDATA_WAS_DECODED`, never returned here: the end is `finish = 1`), and treats every other code as
   fatal (it calls `GetInternalErrorInfo`, aborts, deletes the decoder and exits the thread). Success
-  with 0 samples and `finish = 0` would make it publish an empty PCM buffer. The earlier game ended a
-  sound for good on any non-zero result and so needed success with 0 samples; that rule was replaced
-  because this game's loop needs the code. In memory mode the whole file is buffered, so
-  starvation does not occur.
+  with 0 samples and `finish = 0` would make it publish an empty PCM buffer, so starvation is the error code. In memory
+  mode the whole file is buffered, so starvation does not occur; in this game's streamed sounds it does.
   Other errors are for a bad handle state only: `Decode` before `CreateDecoder` returns `0x80610321`, a
   handle with no data `0x80610322`, `CreateDecoder` twice `0x80610323`.
 - **`GetVacantSize`** writes the number of ring bytes that `AddStreamData` could still take in
@@ -314,8 +325,8 @@ decoder state is on the host.
 - **`GetInternalErrorInfo`** writes 0 and returns success: the host decoder has no internal error.
 - **`remain`.** `GetRemainFrame` and `Decode` report the number of complete frames buffered ahead of
   the cursor. In memory mode it is -1. In streaming mode it is -2 once the stream limit is buffered
-  (the end of the file, or the end of the last pass to play for a looping file). The earlier game
-  refilled the ring only while `remain` was not negative; this game never reads the value.
+  (the end of the file, or the end of the last pass to play for a looping file). This game never reads the
+  value, so these results have not been checked against it.
 - **Loops.** `SetLoopNum(n)` is the number of passes through the loop region still to play, the
   current one included (-1 forever); 0 and 1 mean no loop-back follows. When decoding reaches the
   loop end and a loop-back follows, the count is decremented, the cursor goes back to the frame
@@ -339,10 +350,10 @@ decoder state is on the host.
   usable, end at the end of the frame that holds the loop end (`(end / 2048 + 1) * 2048` samples)
   instead of the end of the valid audio. A file whose `smpl` loop is not usable (its region holds no
   valid audio) is played once and stops at `E`. `GetLoopInfo` reports status 1 when
-  the file has a usable loop (queried before any decode) and the current count, so the earlier game's "last
-  pass" test (`status == 1 && loops == 1`) works. A loop whose region holds no valid audio is
-  ignored. A sound without loop points that the earlier game repeated was started again by the game itself
-  with `DeleteDecoder` and `SetDataAndGetMemSize` on the same handle, which resets the state.
+  the file has a usable loop (queried before any decode) and the current count. This game imports it, but what it does
+  with the two values has not been checked. A loop whose region holds no valid audio is
+  ignored. `SetDataAndGetMemSize` on a handle that already has state discards that state, whether or not
+  `DeleteDecoder` was called, so a sound can be started again on the same handle.
 - **Other calls.** `IsSecondBufferNeeded` returns 0 in `r3` (the answer is the return value; a
   second buffer is never needed), `GetSecondBufferInfo` and `SetSecondBuffer` accept and write
   zeros. `GetSoundInfo` returns the last sample index (`count - 1`) and the loop points in
@@ -459,7 +470,8 @@ codes), of the event queue IPC keys and the layouts and error codes of `cellAtra
 from a written description of RPCS3's behaviour, produced separately from the implementation. No
 RPCS3 code was copied or read while writing it. The file headers name the RPCS3 source file and
 symbol that each fact comes from. The `cellAtrac` stream protocol is not RPCS3's (its HLE for
-`cellAtrac` only returns constants); it comes from how the earlier game's own code used the library.
+`cellAtrac` only returns constants); it follows how the game's own code feeds and decodes its streams (the loop pass
+order and the read sizes were fitted to this game's reader).
 The WASAPI output follows Microsoft's documentation.
 
 ## Not implemented
@@ -467,7 +479,8 @@ The WASAPI output follows Microsoft's documentation.
 - Output libraries other than WASAPI, exclusive mode, multichannel output (an 8-channel port
   is downmixed to stereo), a volume option and the choice of the output device (the default render
   device is used).
-- ATRAC3 (non-plus) data: the earlier game had none; this game's data has not been checked.
+- ATRAC3 (non-plus) data. No logged run of this game passed such data to `SetDataAndGetMemSize` (no `unusable data`
+  warning), but its sound containers have not been scanned for it.
 - `cellAudio` functions that no examined game imports, `cellAtracMulti`, `cellAudioIn` and microphone
   input.
 - The firmware SPURS-based ATRAC3plus decoder behind `cellAtracCreateDecoderExt`: its SPURS instance

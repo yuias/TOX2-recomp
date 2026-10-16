@@ -253,9 +253,7 @@ before the creator continues. `startGuestThreadFirst` starts the host thread, wa
 queued for the guest lock (at most 5 ms), and yields the lock to it. The new thread then runs until
 it blocks, exits, yields or uses up its preemption budget; the creator's budget is reset afterwards.
 A thread with an equal or higher number, an interrupt thread, and the threads the runtime itself
-creates are started as before. The earlier game depended on this rule: its audio mixer thread was
-created by a main thread of lower precedence and had to store its notify queue key before main
-registered it with `cellAudio`. This game depends on it too: its main thread has priority 1001 and it
+creates are started as before. This game depends on it: its main thread has priority 1001 and it
 creates SPURS with PPU priority 1000, so libsre's helper threads `SpursHdlr1` and `SpursHdlr0` run
 before the main thread continues, and `SpursHdlr0` starts the SPU thread group of the SPURS kernels
 and then waits in `sys_spu_thread_group_join` (see [Status](status.md)). The rule is logged at
@@ -375,8 +373,7 @@ counter's own 8-byte chunk (see [SPU usage](spu.md)).
 `tox2_game` holds a 1 ms system timer resolution for the whole run (`timeBeginPeriod`,
 `runtime/src/core/timer_resolution.*`). Timed waits (`sys_timer_usleep`, lock and queue time-outs)
 are host condition variable waits, and Windows rounds them to its timer tick (15.6 ms by default),
-so a 1 ms guest sleep would take 15 ms. The earlier game's decode loops polled with 1 ms sleeps;
-this game's main thread and a worker poll with `sys_timer_usleep` (about 21,000 calls in a 20 s run). The
+so a 1 ms guest sleep would take 15 ms. This game's main thread and a worker poll with `sys_timer_usleep` (about 21,000 calls in a 20 s run). The
 request ends with the process; a refusal is logged as a warning and the default tick stays. In `1` and `2` a
 `sys_timer_usleep` or `sys_timer_sleep` call is a plain host sleep with the slot released: nothing can wake it early.
 
@@ -390,8 +387,8 @@ host fence; see [SPU usage](spu.md#how-the-runtime-runs-spu-code).
 
 The RSX thread and the audio engine are host threads that take the same guest lock (the kernel lock in `1` and `2`).
 The RSX thread therefore pumps the command buffer in slices of 128 words and leaves the lock once a hold has lasted
-300 us, so that the game's mixer can run between the slices (see [Audio](audio.md#guest-lock); this
-game stops before it starts a mixer, so the figures come from the earlier game). It
+300 us, so that the game's mixer can run between the slices (see [Audio](audio.md#guest-lock) for the lock
+measurements made with this game). It
 also leaves the lock after each draw end and copies the draw's guest bytes without it; the game only
 reuses that memory after a later label, report or flip, which the RSX thread writes after the copy.
 
@@ -668,9 +665,10 @@ the RPCS3 function of the same name (`Emu/Cell/Modules/`); each handler file lis
 its header comment. `cellAudio` and `cellAtrac` were implemented from a written description of
 RPCS3's behaviour, not from its code (see [Audio](audio.md#clean-room)).
 
-The first table lists, for this game's imports, what is bound to a handler and what is not. All
-handlers were written for the earlier game; that they bind here only means that the module and
-FNID match, not that the behaviour suits this game.
+The first table lists, for this game's imports, what is bound to a handler and what is not. The
+handlers came from the project this one was derived from and have been changed since where this game needed it (the
+`cellAtrac` stream rules, for example). That a handler binds means that the module and FNID match; what has been
+checked with this game is on the page of the module (for example [Audio](audio.md) and [Input](input.md)).
 
 | Module | Bound / imported | Handled | Without a handler |
 | --- | --- | --- | --- |

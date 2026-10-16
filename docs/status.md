@@ -155,7 +155,7 @@ depend on scheduling):
 
 ## Components
 
-These exist and are generic. They came from the earlier game; each entry says what has been run with this game:
+These exist and are generic. They came from the project this one was derived from; each entry says what has been run with this game:
 
 - Analysis tools for the PPU executable: ELF summary, SPU probe, disassembler, Ghidra cross-check,
   NID and syscall name tables, function recovery (see [Analysis tools](analysis-tools.md) and

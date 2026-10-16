@@ -9,10 +9,13 @@ organised, how pads are selected, the log lines, the diagnostic option `--pad-pr
 
 *Tales of Xillia 2* imports six `cellPad` functions (`cellPadInit`, `cellPadEnd`,
 `cellPadSetPortSetting`, `cellPadGetData`, `cellPadGetInfo2` and `cellPadSetActDirect`), and the
-runtime has a handler for each. In the headless runs the game called `cellPadInit` but never read
-the pad before the stop (see [Status](status.md)), so no input has reached this game yet. The pad
-code was written for and checked against an earlier game; statements below about what a player or
-a test saw come from that game and from `tox2_padtool`, and have not been repeated with this one.
+runtime has a handler for each. The game calls `cellPadInit` with 7 ports, sets press and sensor mode (setting
+`0x6`) on all seven, and then calls `cellPadGetData`, `cellPadGetInfo2` and `cellPadSetActDirect` about once per
+frame (the three counts are equal in the census; the 30 s headless run in [Status](status.md) has 7,794
+`cellPadGetData` calls). Input from the keyboard and from pad scripts reaches the game, and a pad script has taken it
+through the title screen and its first choices. The gamepad code below does not depend on the game, but no run
+described here had a physical gamepad driving this game: what is said below about pad models, buttons and Steam
+comes from `tox2_padtool`, the tests and runs of other builds, and has not been repeated in this game.
 
 ## Gamepads
 
@@ -23,16 +26,15 @@ pad or on the GameInput runtime.
 
 ### Supported pads
 
-- **Verified:** an Xbox Wireless Controller over Bluetooth LE. GameInput lists it as
+- **Checked with `tox2_padtool`:** an Xbox Wireless Controller over Bluetooth LE. GameInput lists it as
   `gamepad+controller` with rumble, and buttons, d-pad, both sticks, both triggers and vibration were
-  checked with it (with the earlier game and `tox2_padtool`). Other Xbox-family pads should behave the same if GameInput reports them as
+  checked with it; they have not been checked in this game. Other Xbox-family pads should behave the same if GameInput reports them as
   gamepads; they were not tried.
-- **Verified:** a DualShock 4 (second model, `054c:09cc`) over Bluetooth. GameInput lists it as
+- **Checked with `tox2_padtool`:** a DualShock 4 (second model, `054c:09cc`) over Bluetooth. GameInput lists it as
   `gamepad+controller` without rumble and maps it by position: Cross, Circle, Square and Triangle
   read as A, B, X and Y; Share and Options as View and Menu; L1/R1, L2/R2, L3/R3, the d-pad and both
   sticks as on the Xbox pad (full range on every axis). The PS button and the touch pad have no
-  gamepad button and are not read. The runtime selects the pad, and the earlier game's menu worked
-  with it. No vibration: GameInput reports no rumble for it.
+  gamepad button and are not read. The runtime selects the pad; its use in this game's menus has not been checked. No vibration: GameInput reports no rumble for it.
 - **DualShock 4, first model (`054c:05c4`): not supported.** It was seen once over Bluetooth as a
   generic controller without the gamepad kind, so the game logs it as `not a gamepad` and ignores it.
 - While Steam runs with its PlayStation controller support on, Steam takes the DualShock 4 and no
@@ -74,9 +76,8 @@ sensor words of the PS3 pad stay at rest.
 The game's vibration requests (`cellPadSetActDirect`) are forwarded to every used pad that has
 rumble: the large motor sets the low-frequency motor in proportion, and the small motor, which is
 on or off on a PS3 pad, sets the high-frequency motor to full strength. Trigger motors are not used.
-`tox2_padtool rumble` checks a pad's motors without the game. This game imports
-`cellPadSetActDirect`, but it made no call before the stop, so whether and when it asks for
-vibration is not known.
+`tox2_padtool rumble` checks a pad's motors without the game. This game calls `cellPadSetActDirect`
+about once per frame; which motor values it sends, and whether a pad then vibrates in the game, has not been checked.
 
 ### Focus
 
@@ -125,7 +126,8 @@ log shows `tox2: pad: gameinput v3 from gameoverlayrenderer64.dll`. To set it up
 4. Leave "Enable the Steam Overlay while in-game" on.
 5. Under Properties > Controller, the per-game setting turns Steam Input on or off for this game.
 
-What was observed with an Xbox Wireless Controller, running the earlier game's build:
+What was observed with an Xbox Wireless Controller, running a build of the runtime made for a different game
+(not repeated with this game):
 
 - With Steam Input enabled and with it disabled, the process saw the same single physical pad and
   read it directly. No separate virtual pad appeared, and the Steam environment variables were the same in
