@@ -304,6 +304,36 @@ void testPanels() {
         aa_state.aa_mode_request = tox2::AaMode::Dlaa;
         CHECK(drawFrames(aa_state, sources));
     }
+
+    // The Frame generation row: unsupported (not listed), supported but inactive, active and suspended by the overlay,
+    // each with DLAA and without it.
+    const tox2::FrameGenStatus inactive{.game_fps = 60, .inactive_reason = "target is less than twice the game rate"};
+    const tox2::FrameGenStatus active{.active = true,
+                                      .multiplier = 4,
+                                      .game_fps = 30,
+                                      .presented_fps = 119.6f,
+                                      .inactive_reason = {},
+                                      .max_multiplier = 6};
+    const tox2::FrameGenStatus suspended{.inactive_reason = std::string(tox2::kFrameGenOverlayOpenReason),
+                                         .max_multiplier = 6};
+    struct FrameGenCase {
+        bool supported;
+        tox2::FrameGenStatus status;
+    };
+    for (const FrameGenCase& test : {FrameGenCase{false, {}}, FrameGenCase{true, inactive}, FrameGenCase{true, active},
+                                     FrameGenCase{true, suspended}}) {
+        for (const tox2::AaMode mode : {tox2::AaMode::Dlaa, tox2::AaMode::Msaa}) {
+            tox2::OverlayState fg_state;
+            fg_state.refresh(sources, at(1.0));
+            fg_state.aa_mode = mode;
+            fg_state.msaa_available = true;
+            fg_state.dlaa_available = true;
+            fg_state.setFrameGen(test.supported, tox2::FrameGenTarget::Fps120, test.status);
+            CHECK(drawFrames(fg_state, sources));
+            fg_state.frame_gen_request = tox2::FrameGenTarget::Unlimited;
+            CHECK(drawFrames(fg_state, sources));
+        }
+    }
 }
 
 void testUnwrittenRates() {
@@ -626,6 +656,195 @@ void testAaModeChoices() {
     CHECK((tox2::aaModeChoices(state) == std::vector<AaMode>{AaMode::Supersample, AaMode::Msaa}));
 }
 
+void testFrameGenChoices() {
+    using tox2::FrameGenTarget;
+    tox2::OverlayState state;
+    CHECK((tox2::frameGenChoices(state) ==
+           std::vector<FrameGenTarget>{FrameGenTarget::Off, FrameGenTarget::Fps60, FrameGenTarget::Fps90,
+                                       FrameGenTarget::Fps120, FrameGenTarget::Fps180, FrameGenTarget::Unlimited}));
+    // The list is the same whatever the renderer reported.
+    state.setFrameGen(true, FrameGenTarget::Fps60, {});
+    CHECK(tox2::frameGenChoices(state).size() == 6);
+
+    CHECK(tox2::frameGenItemLabel(FrameGenTarget::Off) == "Off");
+    CHECK(tox2::frameGenItemLabel(FrameGenTarget::Fps120) == "120 fps");
+    CHECK(tox2::frameGenItemLabel(FrameGenTarget::Fps180) == "180 fps (unverified)");
+    CHECK(tox2::frameGenItemLabel(FrameGenTarget::Unlimited) == "Unlimited");
+}
+
+void testFrameGenStatusLine() {
+    using tox2::FrameGenTarget;
+    tox2::OverlayState state;
+    state.aa_mode = tox2::AaMode::Dlaa;
+    // Nothing to say while the target is off.
+    state.setFrameGen(true, FrameGenTarget::Off, {});
+    CHECK(tox2::frameGenStatusLine(state).empty());
+
+    const tox2::FrameGenStatus active{.active = true,
+                                      .multiplier = 4,
+                                      .game_fps = 30,
+                                      .presented_fps = 119.6f,
+                                      .inactive_reason = {},
+                                      .max_multiplier = 6};
+    state.setFrameGen(true, FrameGenTarget::Fps120, active);
+    CHECK(tox2::frameGenStatusLine(state) == "4x: 30 -> 120 fps, measured 119.6");
+    // No measurement yet.
+    tox2::FrameGenStatus fresh = active;
+    fresh.presented_fps = 0.0f;
+    state.setFrameGen(true, FrameGenTarget::Fps120, fresh);
+    CHECK(tox2::frameGenStatusLine(state) == "4x: 30 -> 120 fps");
+
+    // The overlay opening suspends generation; the line keeps the last active figures.
+    state.setFrameGen(true, FrameGenTarget::Fps120, active);
+    const tox2::FrameGenStatus suspended{.game_fps = 30,
+                                         .inactive_reason = std::string(tox2::kFrameGenOverlayOpenReason)};
+    state.setFrameGen(true, FrameGenTarget::Fps120, suspended);
+    CHECK(tox2::frameGenStatusLine(state) ==
+          "suspended while this panel is open; last: 4x: 30 -> 120 fps, measured 119.6");
+    // A new target forgets them.
+    state.setFrameGen(true, FrameGenTarget::Fps90, suspended);
+    CHECK(tox2::frameGenStatusLine(state) == "suspended while this panel is open");
+
+    state.setFrameGen(true, FrameGenTarget::Fps120,
+                      {.game_fps = 60, .inactive_reason = "target is less than twice the game rate"});
+    CHECK(tox2::frameGenStatusLine(state) ==
+          "inactive: target is less than twice the game rate (presenting game 60 fps)");
+    state.setFrameGen(true, FrameGenTarget::Fps120, {.inactive_reason = "measuring the game rate"});
+    CHECK(tox2::frameGenStatusLine(state) == "inactive: measuring the game rate");
+    state.setFrameGen(true, FrameGenTarget::Fps120, {});
+    CHECK(tox2::frameGenStatusLine(state) == "inactive");
+
+    // Without DLAA the note says why and the line stays out of its way.
+    state.aa_mode = tox2::AaMode::Msaa;
+    CHECK(tox2::frameGenStatusLine(state).empty());
+    CHECK(tox2::frameGenDisabledNote(state) == "needs DLAA anti-aliasing");
+    state.aa_mode = tox2::AaMode::Dlaa;
+    CHECK(tox2::frameGenDisabledNote(state).empty());
+}
+
+// The combo needs DLAA: a pending anti-aliasing request counts, an unknown mode does not.
+void testFrameGenSelectable() {
+    tox2::OverlayState state;
+    CHECK(!tox2::frameGenSelectable(state));
+    state.aa_mode = tox2::AaMode::Dlaa;
+    CHECK(tox2::frameGenSelectable(state));
+    state.aa_mode_request = tox2::AaMode::Msaa;
+    CHECK(!tox2::frameGenSelectable(state));
+    state.aa_mode = tox2::AaMode::Msaa;
+    state.aa_mode_request = tox2::AaMode::Dlaa;
+    CHECK(tox2::frameGenSelectable(state));
+    state.aa_mode_request.reset();
+    CHECK(!tox2::frameGenSelectable(state));
+    state.aa_mode = tox2::AaMode::Supersample;
+    CHECK(!tox2::frameGenSelectable(state));
+}
+
+void testFrameGenPanel() {
+    using tox2::FrameGenTarget;
+    SettingCalls recorded;
+    tox2::OverlaySources sources = makeFakeSources();
+    recorded.attach(sources);
+    constexpr float kProbeX = 60.0f;
+    constexpr float kWindowBottom = 720.0f;
+
+    {
+        // Unsupported: the row is not drawn, so the panel is shorter than with it. One probe at a time, because each
+        // owns the current ImGui context.
+        float unsupported_height = 0.0f;
+        {
+            tox2::OverlayState unsupported;
+            unsupported.aa_mode = tox2::AaMode::Dlaa;
+            SettingsProbe probe(unsupported, sources);
+            if (probe.window() == nullptr) return;
+            CHECK(!probe.findHovered(probe.window()->GetID("Frame generation"), kProbeX, 10.0f, kWindowBottom));
+            unsupported_height = probe.window()->Size.y;
+            CHECK(!unsupported.frame_gen_request && recorded.calls.empty());
+        }
+        tox2::OverlayState supported;
+        supported.aa_mode = tox2::AaMode::Dlaa;
+        supported.setFrameGen(true, FrameGenTarget::Off, {});
+        SettingsProbe probe(supported, sources);
+        if (probe.window() == nullptr) return;
+        CHECK(probe.window()->Size.y > unsupported_height);
+    }
+
+    // Without DLAA the combo is disabled: no click reaches a request or a saved setting.
+    for (const tox2::AaMode mode : {tox2::AaMode::Msaa, tox2::AaMode::Supersample}) {
+        tox2::OverlayState state;
+        state.aa_mode = mode;
+        state.msaa_available = true;
+        state.dlaa_available = true;
+        state.setFrameGen(true, FrameGenTarget::Fps180, {});
+        SettingsProbe probe(state, sources);
+        if (probe.window() == nullptr) continue;
+        CHECK(!probe.findHovered(probe.window()->GetID("Frame generation"), kProbeX, 10.0f, kWindowBottom));
+        CHECK(!state.frame_gen_request);
+        CHECK(recorded.calls.empty());
+        CHECK(tox2::frameGenDisabledNote(state) == "needs DLAA anti-aliasing");
+        CHECK(state.frame_gen_target == FrameGenTarget::Fps180);
+    }
+
+    {
+        // With DLAA the combo opens and a pick is requested and reported for saving.
+        tox2::OverlayState state;
+        state.aa_mode = tox2::AaMode::Dlaa;
+        state.msaa_available = true;
+        state.dlaa_available = true;
+        state.setFrameGen(true, FrameGenTarget::Off, {});
+        SettingsProbe probe(state, sources);
+        if (probe.window() == nullptr) return;
+        const std::optional<ImVec2> combo =
+                probe.findHovered(probe.window()->GetID("Frame generation"), kProbeX, 10.0f, kWindowBottom);
+        CHECK(combo.has_value());
+        if (!combo) return;
+        CHECK(!state.frame_gen_request && recorded.calls.empty());
+        probe.click(*combo);
+        ImGuiContext& g = *ImGui::GetCurrentContext();
+        CHECK(g.OpenPopupStack.Size == 1);
+        if (g.OpenPopupStack.Size != 1 || g.OpenPopupStack[0].Window == nullptr) return;
+        ImGuiWindow* popup = g.OpenPopupStack[0].Window;
+        CHECK(recorded.calls.empty());  // opening the list changes nothing
+        const std::optional<ImVec2> pick = probe.findHovered(popup->GetID("180 fps (unverified)"), popup->Pos.x + 10.0f,
+                                                             popup->Pos.y, popup->Pos.y + popup->Size.y);
+        CHECK(pick.has_value());
+        if (!pick) return;
+        probe.click(*pick);
+        CHECK(state.frame_gen_request == FrameGenTarget::Fps180);
+        CHECK(recorded.calls.size() == 1);
+        if (recorded.calls.size() == 1) {
+            CHECK(recorded.calls[0].first == tox2::OverlaySetting::FrameGen);
+            CHECK(recorded.calls[0].second == "180");
+        }
+    }
+}
+
+// The saved target is the renderer's, so the AA combo cannot lose it: Dlaa -> Msaa -> Dlaa leaves target, request and
+// saved settings alone, and the combo is usable again at the end.
+void testFrameGenDlaaRoundTrip() {
+    using tox2::FrameGenTarget;
+    SettingCalls recorded;
+    tox2::OverlaySources sources = makeFakeSources();
+    recorded.attach(sources);
+    tox2::OverlayState state;
+    state.msaa_available = true;
+    state.dlaa_available = true;
+    const tox2::FrameGenStatus active{
+            .active = true, .multiplier = 6, .game_fps = 30, .inactive_reason = {}, .max_multiplier = 6};
+    for (const tox2::AaMode mode : {tox2::AaMode::Dlaa, tox2::AaMode::Msaa, tox2::AaMode::Dlaa}) {
+        state.aa_mode = mode;
+        state.setFrameGen(true, FrameGenTarget::Fps180, mode == tox2::AaMode::Dlaa ? active : tox2::FrameGenStatus{});
+        SettingsProbe probe(state, sources);
+        if (probe.window() == nullptr) return;
+        const bool usable =
+                probe.findHovered(probe.window()->GetID("Frame generation"), 60.0f, 10.0f, 720.0f).has_value();
+        CHECK(usable == (mode == tox2::AaMode::Dlaa));
+        CHECK(state.frame_gen_target == FrameGenTarget::Fps180);
+        CHECK(!state.frame_gen_request);
+        CHECK(recorded.calls.empty());
+        CHECK(tox2::frameGenItemLabel(state.frame_gen_target) == "180 fps (unverified)");
+    }
+}
+
 void testAnisotropyPanel() {
     SettingCalls recorded;
     tox2::OverlaySources sources = makeFakeSources();
@@ -827,17 +1046,20 @@ void testPresentRequests() {
     state.aa_mode_request = tox2::AaMode::Supersample;
     state.anisotropy_request = 4;
     state.window_size_request = tox2::WindowSizePreset::Size1440p;
+    state.frame_gen_request = tox2::FrameGenTarget::Fps180;
     tox2::PresentOverlayRequests requests = tox2::takePresentRequests(state);
     CHECK(requests.dump_display);
     CHECK(requests.resolution_scale == 3);
     CHECK(requests.aa_mode == tox2::AaMode::Supersample);
     CHECK(requests.anisotropy == 4);
     CHECK(requests.window_size == tox2::WindowSizePreset::Size1440p);
+    CHECK(requests.frame_gen == tox2::FrameGenTarget::Fps180);
     CHECK(!state.dump_requested);
     CHECK(state.resolution_scale_request == 0);
     CHECK(!state.aa_mode_request);
     CHECK(state.anisotropy_request == 0);
     CHECK(!state.window_size_request);
+    CHECK(!state.frame_gen_request);
 
     requests = tox2::takePresentRequests(state);
     CHECK(!requests.dump_display);
@@ -845,6 +1067,7 @@ void testPresentRequests() {
     CHECK(!requests.aa_mode);
     CHECK(requests.anisotropy == 0);
     CHECK(!requests.window_size);
+    CHECK(!requests.frame_gen);
 
     // A DLAA request is delivered once.
     state.aa_mode_request = tox2::AaMode::Dlaa;
@@ -871,6 +1094,19 @@ void testPresentRequests() {
     requests = tox2::takePresentRequests(state);
     CHECK(!requests.aa_mode);
     CHECK(state.aa_mode == tox2::AaMode::Msaa);
+
+    // The reported target and status are not requests; Off is a request like any other target.
+    state.setFrameGen(
+            true, tox2::FrameGenTarget::Fps120,
+            tox2::FrameGenStatus{.active = true, .multiplier = 2, .inactive_reason = {}, .max_multiplier = 6});
+    requests = tox2::takePresentRequests(state);
+    CHECK(!requests.frame_gen);
+    CHECK(state.frame_gen_target == tox2::FrameGenTarget::Fps120);
+    state.frame_gen_request = tox2::FrameGenTarget::Off;
+    requests = tox2::takePresentRequests(state);
+    CHECK(requests.frame_gen == tox2::FrameGenTarget::Off);
+    requests = tox2::takePresentRequests(state);
+    CHECK(!requests.frame_gen);
 
     // The reported scale is a status, not a request, so taking requests leaves it alone.
     state.resolution_scale = 2;
@@ -1274,6 +1510,11 @@ int main() {
     testFlipLimiterPanel();
     testAaModeChoices();
     testAntiAliasingPanel();
+    testFrameGenChoices();
+    testFrameGenStatusLine();
+    testFrameGenSelectable();
+    testFrameGenPanel();
+    testFrameGenDlaaRoundTrip();
     testAnisotropyPanel();
     testWindowSizeLabels();
     testWindowSizePanel();

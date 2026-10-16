@@ -76,6 +76,15 @@ float FrameStatsHistory::maxFrameTimeMs() const {
     return peak;
 }
 
+void OverlayState::setFrameGen(bool supported, FrameGenTarget target, const FrameGenStatus& status) {
+    // A remembered rate belongs to the target it ran with.
+    if (target != frame_gen_target || target == FrameGenTarget::Off) frame_gen_last_active.reset();
+    frame_gen_supported = supported;
+    frame_gen_target = target;
+    frame_gen = status;
+    if (status.active) frame_gen_last_active = status;
+}
+
 void OverlayState::refresh(const OverlaySources& sources, FrameStatsHistory::Clock::time_point now) {
     if (sources.audio && due(audio_time_, now, kAudioRefreshInterval)) {
         const OverlayAudioStats next = sources.audio();
@@ -149,6 +158,59 @@ std::vector<AaMode> aaModeChoices(const OverlayState& state) {
     return choices;
 }
 
+std::vector<FrameGenTarget> frameGenChoices(const OverlayState&) {
+    return {FrameGenTarget::Off,    FrameGenTarget::Fps60,  FrameGenTarget::Fps90,
+            FrameGenTarget::Fps120, FrameGenTarget::Fps180, FrameGenTarget::Unlimited};
+}
+
+std::string frameGenItemLabel(FrameGenTarget target) {
+    switch (target) {
+        case FrameGenTarget::Off: return "Off";
+        case FrameGenTarget::Fps60: return "60 fps";
+        case FrameGenTarget::Fps90: return "90 fps";
+        case FrameGenTarget::Fps120: return "120 fps";
+        // No 180 Hz display was available to look at the result.
+        case FrameGenTarget::Fps180: return "180 fps (unverified)";
+        case FrameGenTarget::Unlimited: return "Unlimited";
+    }
+    return "?";
+}
+
+bool frameGenSelectable(const OverlayState& state) {
+    const std::optional<AaMode> mode = state.aa_mode_request ? state.aa_mode_request : state.aa_mode;
+    return mode == AaMode::Dlaa;
+}
+
+std::string_view frameGenDisabledNote(const OverlayState& state) {
+    return frameGenSelectable(state) ? std::string_view{} : std::string_view{"needs DLAA anti-aliasing"};
+}
+
+std::string frameGenStatusLine(const OverlayState& state) {
+    if (state.frame_gen_target == FrameGenTarget::Off || !frameGenSelectable(state)) return {};
+
+    const auto rate = [](const FrameGenStatus& status) {
+        std::string text = std::format("{}x", status.multiplier);
+        if (status.game_fps != 0)
+            text += std::format(": {} -> {} fps", status.game_fps, status.game_fps * status.multiplier);
+        if (status.presented_fps > 0.0f)
+            text += std::format(", measured {:.1f}", static_cast<double>(status.presented_fps));
+        return text;
+    };
+
+    const FrameGenStatus& status = state.frame_gen;
+    if (status.active) return rate(status);
+    if (status.inactive_reason == kFrameGenOverlayOpenReason) {
+        std::string text = "suspended while this panel is open";
+        if (state.frame_gen_last_active) text += "; last: " + rate(*state.frame_gen_last_active);
+        return text;
+    }
+    if (status.inactive_reason.empty()) return "inactive";
+    if (status.game_fps != 0) {
+        return std::format("inactive: {} (presenting game {} fps)", status.inactive_reason, status.game_fps);
+    }
+    return "inactive: " + status.inactive_reason;
+}
+
 PresentOverlayRequests takePresentRequests(OverlayState& state) {
     PresentOverlayRequests requests;
     requests.dump_display = state.dump_requested;
@@ -156,11 +218,13 @@ PresentOverlayRequests takePresentRequests(OverlayState& state) {
     requests.aa_mode = state.aa_mode_request;
     requests.anisotropy = state.anisotropy_request;
     requests.window_size = state.window_size_request;
+    requests.frame_gen = state.frame_gen_request;
     state.dump_requested = false;
     state.resolution_scale_request = 0;
     state.aa_mode_request.reset();
     state.anisotropy_request = 0;
     state.window_size_request.reset();
+    state.frame_gen_request.reset();
     return requests;
 }
 

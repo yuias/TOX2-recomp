@@ -263,7 +263,7 @@ FrameGenController::Decision FrameGenController::decide(const FrameGenPresent& f
     }
     if (vblanks > 2) return no("game below 30 fps");
     if (m < 2) return no("target is less than twice the game rate");
-    if (frame.overlay_open) return no("overlay open");
+    if (frame.overlay_open) return no(std::string(kFrameGenOverlayOpenReason));
     if (recreated_ > 0) return no("swapchain recreated");
     if (std::min(frame.swapchain_width, frame.swapchain_height) < min_size_) return no("window too small");
     if (frame.inputs == FrameGenInputs::Failed) return no("inputs not tagged");

@@ -159,6 +159,33 @@ void drawAntiAliasing(OverlayState& state, const OverlaySources& sources) {
     ImGui::EndDisabled();
 }
 
+// Listed only where the device and the presenter can run frame generation. Same pending-request display as the scale
+// combo. Without DLAA it is drawn disabled and the saved target stays as it is, so it applies again when DLAA returns.
+void drawFrameGen(OverlayState& state, const OverlaySources& sources) {
+    if (!state.frame_gen_supported) return;
+    const bool selectable = frameGenSelectable(state);
+    const FrameGenTarget shown = state.frame_gen_request ? *state.frame_gen_request : state.frame_gen_target;
+    ImGui::BeginDisabled(!selectable);
+    if (ImGui::BeginCombo("Frame generation", frameGenItemLabel(shown).c_str())) {
+        for (const FrameGenTarget target : frameGenChoices(state)) {
+            if (ImGui::Selectable(frameGenItemLabel(target).c_str(), target == shown) && target != shown) {
+                state.frame_gen_request = target;
+                if (sources.setting_changed) {
+                    sources.setting_changed(OverlaySetting::FrameGen, frameGenTargetName(target));
+                }
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if (!selectable) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", std::string(frameGenDisabledNote(state)).c_str());
+    }
+    const std::string status = frameGenStatusLine(state);
+    if (!status.empty()) ImGui::TextWrapped("%s", status.c_str());
+}
+
 const char* anisotropyLabel(std::uint32_t level) {
     switch (level) {
         case 1: return "Off";
@@ -255,6 +282,7 @@ void drawSettings(OverlayState& state, const OverlaySources& sources) {
 
     drawResolutionScale(state, sources);
     drawAntiAliasing(state, sources);
+    drawFrameGen(state, sources);
     drawAnisotropy(state, sources);
     drawWindowSize(state, sources);
 

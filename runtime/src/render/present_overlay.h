@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "render/frame_dump.h"
 #include "render/frame_gen.h"
@@ -17,6 +18,10 @@
 namespace tox2 {
 
 struct RendererStats;  // vk_renderer.h
+
+// The inactive reason while the overlay is open: generation is suspended on purpose, not failing. Shared so the
+// controller that sets it and the overlay that words it differently cannot drift apart.
+inline constexpr std::string_view kFrameGenOverlayOpenReason = "overlay open";
 
 // What frame generation does now, for the overlay's status line.
 struct FrameGenStatus {
