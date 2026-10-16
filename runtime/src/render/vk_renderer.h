@@ -58,9 +58,11 @@ struct DlaaDebug {
 // Frame generation diagnostics; the defaults are the measured settings.
 struct FgDebug {
     // The present mode requested while frame generation is loaded. DLSS-G requires vsync off, so FIFO is only a
-    // diagnostic.
+    // diagnostic. MAILBOX measured the same as IMMEDIATE (game fps x m presented exactly, presenter max <= 1.2 ms)
+    // without tearing; DLSS-G still generates with sync interval 0 under it.
     VkPresentModeKHR present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
-    // Reflex low latency markers and sleep while frame generation is loaded.
+    // Reflex low latency markers and sleep while frame generation is loaded. Without them DLSS-G reports Reflex not
+    // detected and stops generating; the sleeper thread's sleeps (about 0.04 ms) are enough for its detection.
     bool reflex_low_latency = true;
     // Present only the generated frames, to see them without the real ones in between.
     bool only_generated = false;

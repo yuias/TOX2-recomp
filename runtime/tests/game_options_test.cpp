@@ -525,7 +525,7 @@ void testOptionTable() {
     CHECK(tox2::gameOptionsUsage().find("[--window-size 720p|1080p|1440p|2160p]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--fullscreen on|off]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--frame-gen off|60|90|120|180|unlimited]") != std::string_view::npos);
-    CHECK(tox2::gameOptionsUsage().find("[--fg-present-mode fifo|mailbox|immediate]") != std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--fg-present-mode mailbox|immediate|fifo]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--fg-reflex on|off] [--fg-only-generated]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--fg-cycle SECONDS]") != std::string_view::npos);
 }

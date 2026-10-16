@@ -86,6 +86,12 @@ void logCallback(sl::LogType type, const char* message) {
     // sl.common tries to load the Reflex DLL at start-up. It is not shipped (its licence does not list it as
     // distributable) and DLAA does not use it, so the failure is expected.
     if (type != sl::LogType::eInfo && text.find("NvLowLatencyVk") != std::string_view::npos) type = sl::LogType::eInfo;
+    // sl.dlss_g reads sync interval 1 from a MAILBOX or FIFO swapchain and warns on every present while generating.
+    // Vulkan has no vsync with frame generation, and its own state line shows SyncInterval=0 while generating in every
+    // present mode (measured), so the warning says nothing about how frames are paced.
+    if (type == sl::LogType::eWarn && text.find("not supported with FG, clamping to 1") != std::string_view::npos) {
+        type = sl::LogType::eInfo;
+    }
     switch (type) {
         case sl::LogType::eInfo: logDebug("tox2: streamline: {}", text); break;
         case sl::LogType::eWarn: logWarn("tox2: streamline: {}", text); break;
