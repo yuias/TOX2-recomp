@@ -10,6 +10,7 @@
 #include "core/host_priority.h"
 #include "core/log.h"
 #include "core/reservation.h"
+#include "core/thread_cpu.h"
 #include "core/threads.h"
 #include "spu/spu_census.h"
 #include "spu/spu_channels.h"
@@ -90,6 +91,7 @@ void SpuThread::requestHalt() {
 }
 
 void SpuThread::threadMain(std::uint32_t entry_ls) {
+    registerHostThreadCpu(std::format("spu.{:08x}", id_));
     // First, so the whole run is raised. Every wait this thread makes blocks (channels, reservation table, guest
     // lock); the reservation stripe lock is a bounded spin that ends in a sleep.
     if (raise_host_priority_) {

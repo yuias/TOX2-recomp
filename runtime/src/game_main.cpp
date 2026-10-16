@@ -37,6 +37,7 @@
 #include "core/param_sfo.h"
 #include "core/perf_log.h"
 #include "core/reservation.h"
+#include "core/thread_cpu.h"
 #include "core/threads.h"
 #include "core/timer_resolution.h"
 #include "tox2/ppu_context.h"
@@ -59,6 +60,7 @@
 #include "overlay/debug_overlay.h"
 #include "overlay/overlay_sources.h"
 #include "render/render_scale.h"
+#include "render/shader_compiler.h"
 #include "render/vk_context.h"
 #include "render/vk_renderer.h"
 #include "render/vk_window.h"
@@ -598,6 +600,19 @@ tox2::PerfSource spuPerfSource() {
     };
 }
 
+// CPU time per registered host thread in the last interval. The process time of the first interval starts when the
+// source is created, so the perf thread's first line does not include start-up.
+tox2::PerfSource cpuPerfSource() {
+    return [prev = tox2::hostThreadCpuSnapshot(), prev_process_us = tox2::processCpuUs()]() mutable -> std::string {
+        std::vector<tox2::HostThreadCpu> now = tox2::hostThreadCpuSnapshot();
+        const std::uint64_t process_us = tox2::processCpuUs();
+        std::string body = tox2::formatHostThreadCpu(prev, now, prev_process_us, process_us);
+        prev = std::move(now);
+        prev_process_us = process_us;
+        return body;
+    };
+}
+
 void configureAudio(const tox2::GameOptions& opt) {
     tox2::AudioEngineConfig config;
     // Only the wasapi choice builds a device output, so a run without it never touches COM.
@@ -635,6 +650,13 @@ void applyBuildDirDefaults(tox2::VfsLayout& layout) {
 
 void flushSettingsStore() {
     if (g_settings_store != nullptr) g_settings_store->flush(std::chrono::milliseconds(250));
+}
+
+// Tells whether a run compiled shaders or found them all in the cache, which decides how far its first seconds can be
+// compared with another run.
+void logShaderCacheStats() {
+    const tox2::ShaderCompilerStats stats = tox2::shaderCompilerStats();
+    tox2::logInfo("tox2: shader cache: {} hits, {} compiles", stats.cache_hits, stats.compiles);
 }
 
 }  // namespace
@@ -693,7 +715,11 @@ int main(int argc, char** argv) {
         }
     }
 
-    tox2::startPerfLog({audioPerfSource(), gamePerfSource(), rsxPerfSource(), lockPerfSource(), spuPerfSource()});
+    tox2::startPerfLog(
+            {audioPerfSource(), gamePerfSource(), rsxPerfSource(), lockPerfSource(), spuPerfSource(), cpuPerfSource()});
+    if (!tox2::addStopHook(&logShaderCacheStats)) {
+        tox2::logWarn("tox2: no free stop hook; the shader cache statistics are not logged");
+    }
 
     // Precedence: command-line options, then config.json, then the --vfs-config file, then the defaults. Keys in
     // config.json act exactly like command-line options, so its game_dir overrides the /dev_bdvd mount of the

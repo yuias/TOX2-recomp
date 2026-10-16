@@ -16,6 +16,7 @@
 #include "core/host_priority.h"
 #include "core/log.h"
 #include "core/sleeper.h"
+#include "core/thread_cpu.h"
 
 namespace tox2 {
 
@@ -203,6 +204,7 @@ private:
     }
 
     void run() {
+        registerHostThreadCpu("audio");
         // Before the device open, so the whole thread is raised; every wait below blocks and none spins.
         applyHostThreadPriority(HostThreadRole::AudioEngine);
         if (!output_) openOutputAndDump();

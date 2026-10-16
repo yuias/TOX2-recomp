@@ -17,6 +17,7 @@
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/sleeper.h"
+#include "core/thread_cpu.h"
 #include "core/threads.h"
 #include "tox2/ppu_context.h"
 #include "rsx/gcm_interrupts.h"
@@ -746,6 +747,7 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
     constexpr auto kPeriod = std::chrono::microseconds(kRsxVBlankPeriodUs);
     constexpr auto kPollInterval = std::chrono::milliseconds(1);
     Sleeper sleeper;
+    registerHostThreadCpu("rsx");
     setGuestLockClass(GuestLockClass::Rsx);
 
     // The device and renderer belong to this thread. They are created before the first command is

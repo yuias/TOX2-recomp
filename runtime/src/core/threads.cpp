@@ -278,6 +278,7 @@ void installThreadHooks() {
 
 unsigned __stdcall guestThreadMain(void* arg) {
     auto* thread = static_cast<GuestThread*>(arg);
+    registerHostThreadCpu(std::format("ppu.{:08x}", thread->id()));
     reserveFaultStack();
     Tox2PpuContext& ctx = thread->context();
     setFatalContext(&ctx);
