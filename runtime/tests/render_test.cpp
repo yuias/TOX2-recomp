@@ -4,6 +4,7 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -25,6 +26,7 @@
 #include "core/log.h"
 #include "render/dlaa_math.h"
 #include "render/dlaa_pass.h"
+#include "render/fg_motion.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
 #include "render/image_pool.h"
@@ -5960,6 +5962,55 @@ void testRendererDlaaEvaluate(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// A frame generation target on a renderer without a presenter is reported unsupported ("no window"), warned about once
+// and changes nothing in the picture; the diagnostics default to the measured settings.
+void testRendererFrameGenOptions(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    const tox2::RenderOptions defaults;
+    CHECK(defaults.frame_gen == tox2::FrameGenTarget::Off);
+    CHECK(defaults.fg_debug.present_mode == VK_PRESENT_MODE_MAILBOX_KHR && defaults.fg_debug.reflex_low_latency);
+    CHECK(!defaults.fg_debug.only_generated && defaults.fg_debug.cycle_seconds == 0);
+
+    const std::vector<tox2::RsxCommand> drawn = replaySynthetic(makeQuadCapture());
+    RawDisplay off_display;
+    {
+        tox2::RsxRenderer off(ctx, readbackAllOptions());
+        CHECK(off.valid() && off.frameGenTarget() == tox2::FrameGenTarget::Off);
+        CHECK(!off.frameGenSupported() && off.frameGenUnsupportedReason() == "no window");
+        off_display = runFrame(off, drawn);
+    }
+
+    std::vector<std::string> warnings;
+    tox2::setLogSink([&warnings](std::string_view line) {
+        if (line.find("frame generation") != std::string_view::npos) warnings.emplace_back(line);
+    });
+    {
+        tox2::RenderOptions options = readbackAllOptions();
+        options.frame_gen = tox2::FrameGenTarget::Fps120;
+        tox2::RsxRenderer renderer(ctx, options);
+        CHECK(renderer.valid());
+        CHECK(!renderer.frameGenSupported() && renderer.frameGenUnsupportedReason() == "no window");
+        CHECK(renderer.frameGenTarget() == tox2::FrameGenTarget::Fps120);
+        const RawDisplay first = runFrame(renderer, drawn);
+        const RawDisplay second = runFrame(renderer, drawn);
+        CHECK(sameDisplay(first, off_display) && sameDisplay(second, off_display));
+        // A target other than off cannot be set without support; off always can.
+        CHECK(!renderer.setFrameGenTarget(tox2::FrameGenTarget::Fps60));
+        CHECK(renderer.frameGenTarget() == tox2::FrameGenTarget::Fps120);
+        CHECK(renderer.setFrameGenTarget(tox2::FrameGenTarget::Off));
+        CHECK(renderer.frameGenTarget() == tox2::FrameGenTarget::Off);
+    }
+    tox2::setLogSink({});
+    for (const std::string& line : warnings) std::printf("frame generation options: log: %s\n", line.c_str());
+    CHECK(warnings.size() == 1);
+    CHECK(!warnings.empty() &&
+          warnings[0].find("frame generation unavailable (no window); presenting without it") != std::string::npos);
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
 // ---- Point size ----
 
 // One red point at the centre of the 64x64 surface (a pixel corner), SET_POINT_SIZE `size`.
@@ -6150,6 +6201,48 @@ void testLetterbox() {
     CHECK(sameRect(tox2::letterboxRect(0xFFFFFFFFu, 0xFFFFFFFFu, 16, 9), 0, 939524096, 0xFFFFFFFFu, 2415919103u));
 }
 
+void testChoosePresentMode() {
+    constexpr VkPresentModeKHR kFifo = VK_PRESENT_MODE_FIFO_KHR;
+    constexpr VkPresentModeKHR kMailbox = VK_PRESENT_MODE_MAILBOX_KHR;
+    constexpr VkPresentModeKHR kImmediate = VK_PRESENT_MODE_IMMEDIATE_KHR;
+    const std::array<VkPresentModeKHR, 3> all = {kFifo, kMailbox, kImmediate};
+    const std::array<VkPresentModeKHR, 2> fifo_mailbox = {kFifo, kMailbox};
+    const std::array<VkPresentModeKHR, 2> fifo_immediate = {kFifo, kImmediate};
+    const std::array<VkPresentModeKHR, 1> fifo_only = {kFifo};
+
+    std::vector<std::string> lines;
+    tox2::setLogSink([&lines](std::string_view line) { lines.emplace_back(line); });
+    const auto choose = [&lines](VkPresentModeKHR requested, std::span<const VkPresentModeKHR> offered) {
+        lines.clear();
+        return tox2::choosePresentMode(requested, offered);
+    };
+    const auto isWarn = [](const std::string& line) { return line.find("warn: ") != std::string::npos; };
+
+    // FIFO is the off path and the diagnostic request: no line, no fallback.
+    CHECK(choose(kFifo, all) == kFifo && lines.empty());
+    CHECK(choose(kFifo, fifo_only) == kFifo && lines.empty());
+    CHECK(choose(kMailbox, all) == kMailbox && lines.empty());
+    CHECK(choose(kImmediate, all) == kImmediate && lines.empty());
+
+    // The chain is requested -> MAILBOX -> IMMEDIATE; the info line names the requested and the chosen mode.
+    CHECK(choose(kImmediate, fifo_mailbox) == kMailbox);
+    CHECK(lines.size() == 1 && !isWarn(lines[0]) && lines[0].find("immediate") != std::string::npos &&
+          lines[0].find("mailbox") != std::string::npos);
+    CHECK(choose(kMailbox, fifo_immediate) == kImmediate);
+    CHECK(lines.size() == 1 && !isWarn(lines[0]) && lines[0].find("mailbox") != std::string::npos &&
+          lines[0].find("immediate") != std::string::npos);
+
+    // Nothing without vsync: FIFO with one warning per call.
+    CHECK(choose(kMailbox, fifo_only) == kFifo);
+    CHECK(lines.size() == 1 && isWarn(lines[0]) &&
+          lines[0].find("no present mode without vsync; using fifo (DLSS-G requires vsync off)") != std::string::npos);
+    CHECK(choose(kImmediate, fifo_only) == kFifo && lines.size() == 1 && isWarn(lines[0]));
+    CHECK(choose(kFifo, fifo_only) == kFifo && lines.empty());
+    tox2::setLogSink({});
+
+    CHECK(tox2::WindowStatus{}.refresh_hz == 0);
+}
+
 // lParam of a key message: repeat count, scan code (bits 16..23), extended (24), previous state (30).
 std::uint64_t keyLparam(std::uint32_t scan, bool extended, bool was_down) {
     return 1u | (static_cast<std::uint64_t>(scan) << 16) | (extended ? 1u << 24 : 0u) | (was_down ? 1u << 30 : 0u);
@@ -6234,6 +6327,63 @@ void testStreamlineContext(tox2::VkContext& ctx) {
     // Streamline's proxy replaces the volk global; the loader still returns the driver's function.
     const PFN_vkVoidFunction loader_present = vkGetDeviceProcAddr(ctx.device(), "vkQueuePresentKHR");
     CHECK(reinterpret_cast<PFN_vkVoidFunction>(vkQueuePresentKHR) != loader_present);
+#endif
+}
+
+// The shared context loads DLSS only, so every frame generation call must fail naming the missing plugins or do
+// nothing, while the frame identity still works. A build without the SDK cannot create a Streamline object at all.
+void testStreamlineFrameGenApi(tox2::VkContext& ctx) {
+#if TOX2_HAS_STREAMLINE
+    tox2::Streamline* streamline = ctx.streamline();
+    if (streamline == nullptr) {
+        std::printf("streamline frame generation api: skipped: %s\n", ctx.streamlineStatus().c_str());
+        return;
+    }
+    const auto notLoaded = [](const std::string& text) { return text.find("not loaded") != std::string::npos; };
+
+    std::string reason;
+    tox2::StreamlineRequirements requirements;
+    CHECK(!streamline->requirements(tox2::StreamlineFeature::FrameGeneration, requirements, reason) &&
+          notLoaded(reason));
+    reason.clear();
+    CHECK(!streamline->featureSupported(tox2::StreamlineFeature::FrameGeneration, ctx.physicalDevice(), reason) &&
+          notLoaded(reason));
+    reason.clear();
+    CHECK(!streamline->setFrameGenerationLoaded(true, reason) && notLoaded(reason));
+    CHECK(!streamline->frameGenerationLoaded());
+
+    streamline->beginFrame(7);
+    CHECK(streamline->frameIndex() == 7);
+    CHECK(streamline->frameHandle() != nullptr);
+
+    // Without the plugins these return without calling into Streamline.
+    for (const tox2::LatencyMarker marker :
+         {tox2::LatencyMarker::SimulationStart, tox2::LatencyMarker::SimulationEnd,
+          tox2::LatencyMarker::RenderSubmitStart, tox2::LatencyMarker::RenderSubmitEnd,
+          tox2::LatencyMarker::PresentStart, tox2::LatencyMarker::PresentEnd}) {
+        streamline->latencyMarker(marker);
+    }
+    streamline->reflexSleep(streamline->frameHandle());
+    streamline->freeFrameGen();
+    CHECK(streamline->frameIndex() == 7);
+
+    std::string error;
+    CHECK(!streamline->setReflex({}, error) && notLoaded(error));
+    error.clear();
+    CHECK(!streamline->setFrameGenOptions({}, error) && notLoaded(error));
+    error.clear();
+    tox2::FrameGenState state;
+    CHECK(!streamline->frameGenState(state, nullptr, error) && notLoaded(error));
+    error.clear();
+    CHECK(!streamline->tagFrameGen(VK_NULL_HANDLE, {}, error) && notLoaded(error));
+    error.clear();
+    CHECK(!streamline->tagBackbufferRect(VK_NULL_HANDLE, 0, 0, 16, 9, error) && notLoaded(error));
+    CHECK(streamline->frameGenApiErrors() == 0);
+#else
+    (void)ctx;
+    std::string reason;
+    CHECK(tox2::Streamline::load({.frame_generation = true}, reason) == nullptr);
+    CHECK(reason == "built without the Streamline SDK");
 #endif
 }
 
@@ -6476,8 +6626,11 @@ void testStreamlineEvaluate(tox2::VkContext& ctx) {
 
         viewport = streamline->newViewport();
         viewport_made = true;
+        // Viewport 0 is reserved for frame generation.
+        CHECK(viewport == 1);
         tox2::DlaaFrame frame;
         frame.viewport = viewport;
+        frame.frame_index = 7;
         frame.color_in = color.sl;
         frame.color_in.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         frame.depth = depth.sl;
@@ -6491,10 +6644,13 @@ void testStreamlineEvaluate(tox2::VkContext& ctx) {
         frame.alpha = true;
         frame.mvec_invalid_value = 0.0f;
         bool evaluated = true;
-        for (std::uint64_t i = 0; i < 2; i++) {
-            // The first evaluation starts the history, the second uses it.
-            frame.reset = i == 0;
-            const std::array<float, 2> jitter = tox2::dlaaJitterPixels(i);
+        const void* first_handle = nullptr;
+        for (std::uint64_t i = 0; i < 3; i++) {
+            // Evaluations 0 and 1 are the same frame (index 7) with identical constants, which Streamline requires
+            // within a frame; evaluation 2 is the next frame and uses the history evaluation 0 started.
+            frame.frame_index = i < 2 ? 7 : 8;
+            frame.reset = i < 2;
+            const std::array<float, 2> jitter = tox2::dlaaJitterPixels(i < 2 ? 0 : 1);
             frame.jitter_px[0] = jitter[0];
             frame.jitter_px[1] = jitter[1];
             std::string error;
@@ -6507,8 +6663,15 @@ void testStreamlineEvaluate(tox2::VkContext& ctx) {
             // Streamline leaves no bound state behind that the test relies on; make its writes visible to the
             // next evaluation and to the read-back.
             slTestMemoryBarrier(cmd);
+            if (i == 0) first_handle = streamline->frameHandle();
+            if (i == 1) {
+                // The frame's second evaluation reuses its token.
+                CHECK(streamline->frameIndex() == 7);
+                CHECK(first_handle != nullptr && streamline->frameHandle() == first_handle);
+            }
         }
         CHECK(evaluated);
+        CHECK(streamline->frameIndex() == 8);
 
         slTestBarrier(cmd, output.image, kColorAspect, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
@@ -6583,12 +6746,376 @@ void testStreamlineEvaluate(tox2::VkContext& ctx) {
     CHECK(ctx.validationErrorCount() == errors_before);
 }
 
+// One-time-submit command buffer on the graphics queue; returns once it has completed.
+template <typename Record>
+bool fgTestSubmit(tox2::VkContext& ctx, Record&& record) {
+    VkDevice device = ctx.device();
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pool_info.queueFamilyIndex = ctx.graphicsQueueFamily();
+    VkFenceCreateInfo fence_info{};
+    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    bool ok = vkCreateCommandPool(device, &pool_info, nullptr, &pool) == VK_SUCCESS &&
+              vkCreateFence(device, &fence_info, nullptr, &fence) == VK_SUCCESS;
+    if (ok) {
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo cmd_info{};
+        cmd_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cmd_info.commandPool = pool;
+        cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        ok = vkAllocateCommandBuffers(device, &cmd_info, &cmd) == VK_SUCCESS &&
+             vkBeginCommandBuffer(cmd, &begin) == VK_SUCCESS;
+        if (ok) {
+            record(cmd);
+            VkCommandBufferSubmitInfo cmd_submit{};
+            cmd_submit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+            cmd_submit.commandBuffer = cmd;
+            VkSubmitInfo2 submit{};
+            submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+            submit.commandBufferInfoCount = 1;
+            submit.pCommandBufferInfos = &cmd_submit;
+            ok = vkEndCommandBuffer(cmd) == VK_SUCCESS &&
+                 vkQueueSubmit2(ctx.graphicsQueue(), 1, &submit, fence) == VK_SUCCESS &&
+                 vkWaitForFences(device, 1, &fence, VK_TRUE, 10'000'000'000ull) == VK_SUCCESS;
+        }
+    }
+    if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
+    if (pool != VK_NULL_HANDLE) vkDestroyCommandPool(device, pool, nullptr);
+    return ok;
+}
+
+struct FgHostBuffer {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    void* mapped = nullptr;
+};
+
+bool createFgHostBuffer(tox2::VkContext& ctx, VkDeviceSize size, FgHostBuffer& out) {
+    VkBufferCreateInfo buffer_info{};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = size;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationCreateInfo alloc_info{};
+    alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+    alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationInfo info{};
+    if (vmaCreateBuffer(ctx.allocator(), &buffer_info, &alloc_info, &out.buffer, &out.allocation, &info) !=
+        VK_SUCCESS) {
+        out.buffer = VK_NULL_HANDLE;
+        return false;
+    }
+    out.mapped = info.pMappedData;
+    return out.mapped != nullptr;
+}
+
+void destroyFgHostBuffer(tox2::VkContext& ctx, FgHostBuffer& buffer) {
+    if (buffer.buffer != VK_NULL_HANDLE) vmaDestroyBuffer(ctx.allocator(), buffer.buffer, buffer.allocation);
+    buffer = {};
+}
+
+// Makes the device's writes to the buffer visible to the host after the submit completed.
+void fgHostBarrier(VkCommandBuffer cmd) {
+    VkMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+}
+
+float halfToFloat(std::uint16_t half) {
+    const float sign = (half >> 15) != 0 ? -1.0f : 1.0f;
+    const int exponent = (half >> 10) & 0x1F;
+    const int mantissa = half & 0x3FF;
+    if (exponent == 0) return sign * std::ldexp(static_cast<float>(mantissa), -24);
+    if (exponent == 31) return sign * std::numeric_limits<float>::infinity();
+    return sign * std::ldexp(static_cast<float>(mantissa | 0x400), exponent - 25);
+}
+
+// Row-vector world-to-clip matrix of a pinhole camera: translate to the eye, yaw about y, then a projection with
+// depth 0..1 and clip w = view depth.
+tox2::Mat4 fgTestWorldToClip(float eye_x, float eye_y, float eye_z, float yaw_degrees) {
+    constexpr float kNear = 1.0f, kFar = 100.0f, kSx = 0.5625f, kSy = 1.0f;
+    const float yaw = yaw_degrees * 3.14159265f / 180.0f;
+    const float c = std::cos(yaw), s = std::sin(yaw);
+    const tox2::Mat4 translate = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -eye_x, -eye_y, -eye_z, 1};
+    const tox2::Mat4 rotate = {c, 0, s, 0, 0, 1, 0, 0, -s, 0, c, 0, 0, 0, 0, 1};
+    const tox2::Mat4 project = {
+            kSx, 0, 0, 0, 0, kSy, 0, 0, 0, 0, kFar / (kFar - kNear), 1, 0, 0, -kNear * kFar / (kFar - kNear), 0};
+    return tox2::mat4Multiply(tox2::mat4Multiply(translate, rotate), project);
+}
+
+// The motion vector pass on a tilted depth plane: the read-back vectors match the formula evaluated on the CPU, the
+// identity matrix gives zeros and a flip sign negates only that component.
+void testFgMotionVectors(tox2::VkContext& ctx) {
+    if (!ctx.hasD24S8()) {
+        std::printf("fg motion vectors: skipped: no D24S8\n");
+        return;
+    }
+    constexpr std::uint32_t kWidth = 64;
+    constexpr std::uint32_t kHeight = 36;
+    constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+
+    // depth = 0.3 + 0.004 x + 0.003 y, as the 24-bit values the image stores.
+    std::vector<std::uint32_t> depth_words(kPixels);
+    std::vector<float> depth_values(kPixels);
+    for (std::uint32_t y = 0; y < kHeight; y++) {
+        for (std::uint32_t x = 0; x < kWidth; x++) {
+            const double depth = 0.3 + 0.004 * x + 0.003 * y;
+            const auto word = static_cast<std::uint32_t>(std::lround(depth * 16777215.0));
+            depth_words[y * kWidth + x] = word;
+            depth_values[y * kWidth + x] = static_cast<float>(word) / 16777215.0f;
+        }
+    }
+
+    SlTestImage depth;
+    FgHostBuffer upload, readback;
+    bool ok = createSlTestImage(ctx, ctx.depthStencilFormat(),
+                                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                VK_IMAGE_ASPECT_DEPTH_BIT, kWidth, kHeight, depth) &&
+              createFgHostBuffer(ctx, kPixels * 4, upload) && createFgHostBuffer(ctx, kPixels * 4, readback);
+    CHECK(ok);
+    auto pass = std::make_unique<tox2::FgMotionPass>(ctx);
+    std::shared_ptr<void> retired;
+    bool recreated = false;
+    std::string error;
+    ok = ok && pass->prepare(kWidth, kHeight, retired, recreated, error);
+    CHECK(ok && recreated && retired == nullptr);
+    if (!ok) {
+        std::printf("fg motion vectors: %s\n", error.c_str());
+    } else {
+        std::memcpy(upload.mapped, depth_words.data(), kPixels * 4);
+        vmaFlushAllocation(ctx.allocator(), upload.allocation, 0, VK_WHOLE_SIZE);
+        // D24_UNORM_S8_UINT buffer texels hold the depth in their low 24 bits.
+        const VkImageAspectFlags both = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            slTestBarrier(cmd, depth.image, both, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                          VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+            copy.imageExtent = {kWidth, kHeight, 1};
+            vkCmdCopyBufferToImage(cmd, upload.buffer, depth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            slTestBarrier(cmd, depth.image, both, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                          VK_ACCESS_2_SHADER_READ_BIT);
+        }));
+
+        // The current camera moved right and up a little and turned 2 degrees; the previous one is at the origin.
+        const tox2::Mat4 current = fgTestWorldToClip(0.4f, 0.15f, 0.0f, 2.0f);
+        const tox2::Mat4 previous = fgTestWorldToClip(0.0f, 0.0f, 0.0f, 0.0f);
+        tox2::Mat4 current_inverse{};
+        CHECK(tox2::mat4Inverse(current, current_inverse));
+        const tox2::Mat4 clip_to_prev_clip = tox2::mat4Multiply(current_inverse, previous);
+
+        // Runs the pass and returns the vectors as floats (x, y per pixel).
+        const auto run = [&](const tox2::Mat4& matrix, float flip_x, float flip_y) {
+            std::vector<float> vectors(kPixels * 2, 1000.0f);
+            tox2::FgMotionInputs inputs;
+            inputs.depth = depth.view;
+            inputs.clip_to_prev_clip = matrix;
+            inputs.flip[0] = flip_x;
+            inputs.flip[1] = flip_y;
+            std::string run_error;
+            const bool done = fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+                CHECK(pass->recordMotion(cmd, inputs, run_error));
+                const tox2::SlImage motion = pass->motionImage();
+                slTestBarrier(cmd, motion.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_NONE, VK_ACCESS_2_TRANSFER_READ_BIT);
+                VkBufferImageCopy copy{};
+                copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                copy.imageExtent = {kWidth, kHeight, 1};
+                vkCmdCopyImageToBuffer(cmd, motion.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1,
+                                       &copy);
+                fgHostBarrier(cmd);
+            });
+            CHECK(done);
+            if (!run_error.empty()) std::printf("fg motion vectors: %s\n", run_error.c_str());
+            if (done) {
+                vmaInvalidateAllocation(ctx.allocator(), readback.allocation, 0, VK_WHOLE_SIZE);
+                const auto* halves = static_cast<const std::uint16_t*>(readback.mapped);
+                for (std::size_t i = 0; i < kPixels * 2; i++) vectors[i] = halfToFloat(halves[i]);
+            }
+            return vectors;
+        };
+
+        // The formula of the pass: previous minus current position in pixels, y down.
+        const auto expected = [&](std::uint32_t x, std::uint32_t y, float& mv_x, float& mv_y) {
+            const float px = static_cast<float>(x) + 0.5f, py = static_cast<float>(y) + 0.5f;
+            const std::array<float, 4> clip = {px / kWidth * 2.0f - 1.0f, py / kHeight * 2.0f - 1.0f,
+                                               depth_values[y * kWidth + x], 1.0f};
+            const std::array<float, 4> q = tox2::mat4Transform(clip, clip_to_prev_clip);
+            CHECK(q[3] > 0.0f);
+            mv_x = (q[0] / q[3] + 1.0f) * 0.5f * kWidth - px;
+            mv_y = (q[1] / q[3] + 1.0f) * 0.5f * kHeight - py;
+        };
+
+        const std::vector<float> moved = run(clip_to_prev_clip, 1.0f, 1.0f);
+        const std::vector<float> flipped = run(clip_to_prev_clip, -1.0f, 1.0f);
+        const std::vector<float> still = run(tox2::mat4Identity(), 1.0f, 1.0f);
+
+        float largest = 0.0f, worst = 0.0f, worst_flip = 0.0f;
+        for (std::uint32_t i = 0; i < 20; i++) {
+            const std::uint32_t x = (i * 7 + 3) % kWidth;
+            const std::uint32_t y = (i * 5 + 2) % kHeight;
+            float mv_x = 0.0f, mv_y = 0.0f;
+            expected(x, y, mv_x, mv_y);
+            const std::size_t at = (static_cast<std::size_t>(y) * kWidth + x) * 2;
+            worst = std::max({worst, std::abs(moved[at] - mv_x), std::abs(moved[at + 1] - mv_y)});
+            worst_flip = std::max(
+                    {worst_flip, std::abs(flipped[at] + moved[at]), std::abs(flipped[at + 1] - moved[at + 1])});
+            largest = std::max({largest, std::abs(mv_x), std::abs(mv_y)});
+        }
+        std::printf("fg motion vectors: largest %.2f px, worst error %.4f px\n", largest, worst);
+        // A transposed matrix or a wrong sign would give other vectors, so the plane must really move.
+        CHECK(largest > 1.0f);
+        CHECK(worst < 0.01f);
+        CHECK(worst_flip < 1e-6f);
+
+        float still_largest = 0.0f;
+        for (const float value : still) still_largest = std::max(still_largest, std::abs(value));
+        CHECK(still_largest < 0.01f);
+    }
+
+    pass.reset();
+    vkDeviceWaitIdle(ctx.device());
+    destroyFgHostBuffer(ctx, readback);
+    destroyFgHostBuffer(ctx, upload);
+    destroySlTestImage(ctx, depth);
+    CHECK(ctx.validationErrorCount() == errors_before);
+}
+
+// The warp check on a gradient shifted by (+3, -2) pixels: motion (-3, +2) compensates it exactly, so only the
+// pixels whose compensated position is inside the image are counted and compare equal.
+void testFgWarpCheck(tox2::VkContext& ctx) {
+    constexpr std::uint32_t kWidth = 64;
+    constexpr std::uint32_t kHeight = 36;
+    constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+
+    // value(x, y) = 3x + y in every colour channel; the current image is the previous one moved right by 3 and up by
+    // 2, and 0 where nothing moved in.
+    const auto gradient = [](std::uint32_t x, std::uint32_t y) { return static_cast<std::uint8_t>(3 * x + y); };
+    std::vector<std::uint8_t> previous_bytes(kPixels * 4), current_bytes(kPixels * 4);
+    for (std::uint32_t y = 0; y < kHeight; y++) {
+        for (std::uint32_t x = 0; x < kWidth; x++) {
+            const bool from_inside = x >= 3 && y + 2 < kHeight;
+            const std::uint8_t previous_value = gradient(x, y);
+            const std::uint8_t current_value = from_inside ? gradient(x - 3, y + 2) : 0;
+            std::uint8_t* previous_pixel = &previous_bytes[(static_cast<std::size_t>(y) * kWidth + x) * 4];
+            std::uint8_t* current_pixel = &current_bytes[(static_cast<std::size_t>(y) * kWidth + x) * 4];
+            previous_pixel[0] = previous_pixel[1] = previous_pixel[2] = previous_value;
+            current_pixel[0] = current_pixel[1] = current_pixel[2] = current_value;
+            previous_pixel[3] = current_pixel[3] = 255;
+        }
+    }
+
+    constexpr VkImageUsageFlags kUsage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    SlTestImage previous, current, motion;
+    FgHostBuffer upload;
+    bool ok = createSlTestImage(ctx, VK_FORMAT_R8G8B8A8_UNORM, kUsage, VK_IMAGE_ASPECT_COLOR_BIT, kWidth, kHeight,
+                                previous) &&
+              createSlTestImage(ctx, VK_FORMAT_R8G8B8A8_UNORM, kUsage, VK_IMAGE_ASPECT_COLOR_BIT, kWidth, kHeight,
+                                current) &&
+              createSlTestImage(ctx, VK_FORMAT_R16G16_SFLOAT, kUsage, VK_IMAGE_ASPECT_COLOR_BIT, kWidth, kHeight,
+                                motion) &&
+              createFgHostBuffer(ctx, kPixels * 4 * 2, upload);
+    CHECK(ok);
+    auto pass = std::make_unique<tox2::FgMotionPass>(ctx);
+    std::shared_ptr<void> retired;
+    bool recreated = false;
+    std::string error;
+    ok = ok && pass->prepare(kWidth, kHeight, retired, recreated, error);
+    CHECK(ok);
+    if (!ok) {
+        std::printf("fg warp check: %s\n", error.c_str());
+    } else {
+        auto* bytes = static_cast<std::uint8_t*>(upload.mapped);
+        std::memcpy(bytes, previous_bytes.data(), kPixels * 4);
+        std::memcpy(bytes + kPixels * 4, current_bytes.data(), kPixels * 4);
+        vmaFlushAllocation(ctx.allocator(), upload.allocation, 0, VK_WHOLE_SIZE);
+
+        constexpr VkImageAspectFlags kColor = VK_IMAGE_ASPECT_COLOR_BIT;
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            const SlTestImage* images[2] = {&previous, &current};
+            for (std::size_t i = 0; i < 2; i++) {
+                slTestBarrier(cmd, images[i]->image, kColor, VK_IMAGE_LAYOUT_UNDEFINED,
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+                VkBufferImageCopy copy{};
+                copy.bufferOffset = i * kPixels * 4;
+                copy.imageSubresource = {kColor, 0, 0, 1};
+                copy.imageExtent = {kWidth, kHeight, 1};
+                vkCmdCopyBufferToImage(cmd, upload.buffer, images[i]->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                                       &copy);
+                slTestBarrier(cmd, images[i]->image, kColor, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                              VK_ACCESS_2_SHADER_READ_BIT);
+            }
+            // Previous minus current position of the moved content: (-3, +2) everywhere.
+            slTestBarrier(cmd, motion.image, kColor, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                          VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            VkClearColorValue vector{};
+            vector.float32[0] = -3.0f;
+            vector.float32[1] = 2.0f;
+            const VkImageSubresourceRange range = {kColor, 0, 1, 0, 1};
+            vkCmdClearColorImage(cmd, motion.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &vector, 1, &range);
+            slTestBarrier(cmd, motion.image, kColor, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                          VK_ACCESS_2_SHADER_READ_BIT);
+        }));
+
+        // The first call only seeds the previous colour; the second compares against it.
+        std::string check_error;
+        tox2::FgWarpStats stats;
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            CHECK(pass->recordWarpCheck(cmd, previous.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, motion.view,
+                                        check_error));
+        }));
+        CHECK(!pass->collectWarpStats(stats));
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            CHECK(pass->recordWarpCheck(cmd, current.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, motion.view,
+                                        check_error));
+        }));
+        if (!check_error.empty()) std::printf("fg warp check: %s\n", check_error.c_str());
+        CHECK(pass->collectWarpStats(stats));
+        std::printf("fg warp check: warp mean %.3f, no-motion mean %.3f, %u pixels\n", stats.warp_mean,
+                    stats.no_motion_mean, stats.pixels);
+        CHECK(stats.pixels == (kWidth - 3) * (kHeight - 2));
+        CHECK(stats.warp_mean < 0.5);
+        CHECK(stats.no_motion_mean > 5.0);
+        CHECK(std::abs(stats.no_motion_mean - 7.0) < 0.05);
+        CHECK(!pass->collectWarpStats(stats));
+    }
+
+    pass.reset();
+    vkDeviceWaitIdle(ctx.device());
+    destroyFgHostBuffer(ctx, upload);
+    destroySlTestImage(ctx, motion);
+    destroySlTestImage(ctx, current);
+    destroySlTestImage(ctx, previous);
+    CHECK(ctx.validationErrorCount() == errors_before);
+}
+
 }  // namespace
 
 int main() {
     const bool layer = tox2::vkValidationLayerAvailable();
     std::printf("validation layer: %s\n", layer ? "installed" : "not installed");
     testLetterbox();
+    testChoosePresentMode();
     testKeyMessages();
     testPresenterTypes();
     testShaderCompiler();
@@ -6636,6 +7163,7 @@ int main() {
 
     testStreamlineContext(*ctx);
     testStreamlineEvaluate(*ctx);
+    testStreamlineFrameGenApi(*ctx);
     testClearAndReadback(*ctx);
     testTwoSampleSupport(*ctx);
     testRendererAaMode(*ctx);
@@ -6674,9 +7202,12 @@ int main() {
     testRendererMsaaInherit(*ctx);
     testRendererDlaaSceneImage(*ctx);
     testRendererDlaaEvaluate(*ctx);
+    testRendererFrameGenOptions(*ctx);
     testRendererPointSize(*ctx);
     testForcedAnisotropySampler(*ctx);
     testRendererAnisotropy(*ctx);
+    testFgMotionVectors(*ctx);
+    testFgWarpCheck(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
     ctx.reset();

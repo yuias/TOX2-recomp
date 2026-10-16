@@ -108,6 +108,7 @@ bool DlaaPass::prepare(std::uint32_t width, std::uint32_t height, std::shared_pt
 bool DlaaPass::evaluate(VkCommandBuffer cmd, const Inputs& inputs, std::string& error) {
     DlaaFrame frame;
     frame.viewport = viewport_;
+    frame.frame_index = inputs.frame_index;
     frame.color_in = inputs.color_in;
     frame.depth = inputs.depth;
     frame.motion = describe(resources_->motion);
@@ -163,6 +164,8 @@ DlaaCameraTracker::Result DlaaCameraTracker::resolve(bool flip_clip_y) {
     matrices.clip_to_prev_clip = mat4Multiply(inverse_current, clip_previous);
     matrices.prev_clip_to_clip = mat4Multiply(inverse_previous, clip_current);
     result.reset = dlaaCameraCut(matrices.clip_to_prev_clip);
+    result.clip = clip_current;
+    result.prev_clip = clip_previous;
     if (flip_clip_y) {
         matrices.clip_to_prev_clip = dlaaFlipY(matrices.clip_to_prev_clip);
         matrices.prev_clip_to_clip = dlaaFlipY(matrices.prev_clip_to_clip);

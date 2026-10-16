@@ -176,7 +176,8 @@ void RsxFrameBuilder::onWrite(const RsxRegisters& regs, std::uint32_t method, st
     }
 }
 
-void RsxFrameBuilder::onFlip(const RsxRegisters&, std::uint32_t buffer, const RsxDisplayBuffer& display) {
+void RsxFrameBuilder::onFlip(const RsxRegisters&, std::uint32_t buffer, const RsxDisplayBuffer& display,
+                             std::uint64_t completed_us) {
     RsxFlip flip;
     flip.buffer = buffer;
     flip.offset = display.offset;
@@ -184,6 +185,7 @@ void RsxFrameBuilder::onFlip(const RsxRegisters&, std::uint32_t buffer, const Rs
     flip.width = display.width;
     flip.height = display.height;
     flip.flip_index = flips_++;
+    flip.completed_us = completed_us;
     commands_.emplace_back(flip);
     textures_.onFlip(flips_);
 }

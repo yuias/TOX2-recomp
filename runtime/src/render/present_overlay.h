@@ -6,8 +6,11 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <string>
+#include <string_view>
 
 #include "render/frame_dump.h"
+#include "render/frame_gen.h"
 #include "render/render_scale.h"
 #include "render/vk_window.h"
 #include "render/window_size.h"
@@ -15,6 +18,20 @@
 namespace tox2 {
 
 struct RendererStats;  // vk_renderer.h
+
+// The inactive reason while the overlay is open: generation is suspended on purpose, not failing. Shared so the
+// controller that sets it and the overlay that words it differently cannot drift apart.
+inline constexpr std::string_view kFrameGenOverlayOpenReason = "overlay open";
+
+// What frame generation does now, for the overlay's status line.
+struct FrameGenStatus {
+    bool active = false;
+    std::uint32_t multiplier = 1;  // presented frames per game frame
+    std::uint32_t game_fps = 0;    // 0 = not known
+    float presented_fps = 0.0f;    // measured; 0 = not known
+    std::string inactive_reason;   // empty while active
+    std::uint32_t max_multiplier = 0;
+};
 
 struct PresentFrameInfo {
     const RendererStats* stats = nullptr;       // stats->flips already counts this flip
@@ -27,6 +44,9 @@ struct PresentFrameInfo {
     std::uint32_t anisotropy = 0;               // the effective forced anisotropy level (1 = off); 0 = unknown
     float max_anisotropy = 0.0f;                // the device maximum; 0 = unsupported or unknown
     std::optional<WindowStatus> window;         // the presenter's window; unset = unknown
+    bool frame_gen_supported = false;           // the device and the presenter can run frame generation
+    FrameGenTarget frame_gen_target = FrameGenTarget::Off;  // the requested target, which may not be active
+    FrameGenStatus frame_gen;
 };
 
 struct PresentOverlayRequests {
@@ -41,6 +61,8 @@ struct PresentOverlayRequests {
     std::uint32_t anisotropy = 0;
     // New window size preset; unset = no change. Forwarded to the presenter at once (it posts to the UI thread).
     std::optional<WindowSizePreset> window_size;
+    // New frame generation target; unset = no change. Applied after the flip is submitted, like the AA mode.
+    std::optional<FrameGenTarget> frame_gen;
 };
 
 // Drawn over the presented swapchain image only. Never called without a presenter, so it cannot reach

@@ -17,11 +17,16 @@
 #include "core/log.h"
 #include "core/threads.h"
 #include "input/pad_script.h"
+#include "render/frame_gen.h"
 #include "render/render_scale.h"
 #include "render/window_size.h"
 #include "rsx/rsx_thread.h"
 
 namespace tox2 {
+
+// The present mode requested while frame generation is loaded. Kept here, apart from VkPresentModeKHR, so that option
+// parsing does not depend on Vulkan; game_main maps it.
+enum class FgPresentMode : std::uint8_t { Fifo, Mailbox, Immediate };
 
 struct GameOptions {
     std::filesystem::path game_dir, elf, libsre, hdd_dir, sdata_cache, vfs_config, png_dump, rsx_census, log_file,
@@ -45,6 +50,13 @@ struct GameOptions {
     std::uint32_t anisotropy = 1;  // 1 = off, else 2, 4, 8, 16
     WindowSizePreset window_size = WindowSizePreset::Size720p;
     bool fullscreen = false;
+    FrameGenTarget frame_gen = FrameGenTarget::Off;
+    // Frame generation diagnostics; each needs frame_gen other than Off. Mailbox is the default because DLSS-G requires
+    // vsync off; Fifo is only a diagnostic.
+    FgPresentMode fg_present_mode = FgPresentMode::Mailbox;
+    bool fg_reflex = true;
+    bool fg_only_generated = false;
+    std::uint32_t fg_cycle_seconds = 0;  // 0 = off, else 1..600
     std::vector<std::uint32_t> rsx_capture_frames;
     std::vector<GuestDumpSpec> dumps;
 

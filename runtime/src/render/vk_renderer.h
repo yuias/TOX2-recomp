@@ -16,8 +16,11 @@
 #include <vector>
 
 #include "render/dlaa_pass.h"
+#include "render/fg_motion.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
+#include "render/frame_gen.h"
+#include "render/frame_gen_runtime.h"
 #include "render/image_pool.h"
 #include "render/present_overlay.h"
 #include "render/render_scale.h"
@@ -52,6 +55,26 @@ struct DlaaDebug {
     bool mvec_invalid_zero = true;
 };
 
+// Frame generation diagnostics; the defaults are the measured settings.
+struct FgDebug {
+    // The present mode requested while frame generation is loaded. DLSS-G requires vsync off, so FIFO is only a
+    // diagnostic. MAILBOX measured the same as IMMEDIATE (game fps x m presented exactly, presenter max <= 1.2 ms)
+    // without tearing; DLSS-G still generates with sync interval 0 under it.
+    VkPresentModeKHR present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
+    // Reflex low latency markers and sleep while frame generation is loaded. Without them DLSS-G reports Reflex not
+    // detected and stops generating; the sleeper thread's sleeps (about 0.04 ms) are enough for its detection.
+    bool reflex_low_latency = true;
+    // Present only the generated frames, to see them without the real ones in between.
+    bool only_generated = false;
+    // 0 = off; else the seconds between switching the target from off to the requested one and back.
+    std::uint32_t cycle_seconds = 0;
+    // At the frame's first DLAA evaluation, draw the camera motion vectors from the depth and compare the DLAA output
+    // with the previous one moved by them; the result goes to RendererStats. The scene pixels are not touched.
+    bool mv_check = false;
+    // Negate the x / y component of the motion vectors, to find their sign convention.
+    bool mv_flip_x = false, mv_flip_y = false;
+};
+
 struct RenderOptions {
     // Every dump_every-th flip (counted from 1) is written to `<dump_dir>/frame_<flip number>.png`. An
     // empty directory disables dumping.
@@ -77,6 +100,10 @@ struct RenderOptions {
     // through the layout copy. For tests of the scene image itself.
     bool dlaa_evaluate = true;
     DlaaDebug dlaa_debug;
+    FgDebug fg_debug;
+    // The presented frame rate to aim for with frame generation. Off, an unsupported device and a missing presenter
+    // all present the game's own frames; frameGenSupported() says which of the last two applies.
+    FrameGenTarget frame_gen = FrameGenTarget::Off;
     // Forced anisotropic filtering level: 1 (off), 2, 4, 8 or 16; anything else makes the renderer invalid. A device
     // without the samplerAnisotropy feature keeps 1; a lower device maximum clamps the level (see anisotropy()).
     std::uint32_t anisotropy = 1;
@@ -105,6 +132,10 @@ struct RendererStats {
     std::uint64_t dlaa_evaluations = 0;   // DLAA evaluations recorded
     std::uint64_t dlaa_resets = 0;        // ... that started a new history
     std::uint64_t dlaa_failures = 0;      // scene reads that fell back to the layout image after a failed evaluation
+    // FgDebug::mv_check results: completed warp checks, and the figures of the latest one.
+    std::uint64_t fg_mv_checks = 0;
+    FgWarpStats fg_mv_last;
+    bool fg_mv_last_reset = false;  // the DLAA evaluation of that frame started a new history
     // GPU images and upload blocks created, by RenderImageKind, with their size in bytes (width x height x samples x
     // texel size). The Texture entries follow the texture cache as of the end of the last execute() or flip.
     std::array<std::uint64_t, kRenderImageKindCount> images_created{};
@@ -163,6 +194,18 @@ public:
     // Why dlaaAvailable() is false: the context's Streamline status or the first missing format feature.
     const std::string& dlaaUnavailableReason() const { return dlaa_gap_; }
 
+    // True when the device was created for frame generation and a presenter is set. The presenter is set after
+    // construction, so this can change once.
+    bool frameGenSupported() const { return context_.frameGenerationSupported() && presenter_ != nullptr; }
+    // Why frameGenSupported() is false; empty when it is true.
+    std::string frameGenUnsupportedReason() const;
+    // The requested frame generation target. The plugins are loaded while it is not off and frameGenSupported();
+    // whether frames are generated depends on the game, see FrameGenController.
+    FrameGenTarget frameGenTarget() const { return frame_gen_target_; }
+    // Changes the requested target; false and no change for a target other than Off while frameGenSupported() is
+    // false. Renderer thread, between commands.
+    bool setFrameGenTarget(FrameGenTarget target);
+
     // Changes the scale of the targets created or bound from now on; false and no change outside
     // 1..kMaxResolutionScale. A target keeps its image until a draw or clear binds it again, then it is replaced by a
     // copy at the new scale (see acquire), so the picture changes at the next flip that draws. Renderer thread.
@@ -202,14 +245,23 @@ public:
     // before the first flip.
     void setPresentOverlay(PresentOverlay* overlay) { overlay_ = overlay; }
 
+    // Logs the frame generation totals of the run, once. The process ends without destructors, so the stop path calls
+    // it. Any thread.
+    void logFrameGenSummary() {
+        if (frame_gen_) frame_gen_->logSummary();
+    }
+
     // Every flip is also blitted to the presenter's next swapchain image (letterboxed 16:9) and presented.
-    // Not owned; null (the default) presents nothing. Call before the first flip.
+    // Not owned; null (the default) presents nothing. Call once, before the first flip. Setting a different presenter
+    // (or null) while a frame generation controller exists destroys the controller first: it holds the old presenter.
     void setPresenter(Presenter* presenter) {
         if (presenter != nullptr && presenter->frameSlots() < kFramesInFlight) {
             fail("the presenter has fewer frame slots than the renderer");
             return;
         }
+        if (presenter != presenter_) frame_gen_.reset();
         presenter_ = presenter;
+        createFrameGen();
     }
 
     // Frames recorded before a slot is reused; a presenter needs one acquire semaphore per slot.
@@ -218,6 +270,7 @@ public:
 private:
     struct RenderTarget;
     struct FrameSlot;
+    struct FgDepthCopy;
     // A region of a slot's upload block, already mapped for writing.
     struct UploadRef {
         VkBuffer buffer = VK_NULL_HANDLE;
@@ -272,6 +325,21 @@ private:
     // widened to the 2W layout columns the game's resolve expects, with the texture remap applied. Null after a counted
     // failure; the caller then reads the layout image instead.
     VkImageView dlaaView(RenderTarget& scene, std::uint32_t remap);
+    // Records the motion vector pass at the DLAA tap, from the depth that went into the evaluation. False with `error`
+    // on failure.
+    bool recordFgMotion(const DlaaPass::Resources& dlaa, const RenderTarget& depth,
+                        const DlaaCameraTracker::Result& camera, std::string& error);
+    // FgDebug::mv_check: records the warp check of the DLAA output against the motion vectors recordFgMotion wrote,
+    // with the DLAA output in GENERAL. False with `error` on failure.
+    bool recordFgMvCheck(const DlaaPass::Resources& dlaa, bool reset, std::string& error);
+    // Copies the depth that went into the DLAA evaluation into the current frame slot's own image, which frame
+    // generation reads. False with `error` on failure.
+    bool copyFgDepth(RenderTarget& depth, SlImage& out, std::string& error);
+    // Constants and tags for the frame generation viewport, after recordFgMotion. False with `error` on failure.
+    bool tagFgInputs(const SlImage& depth, const DlaaPass::Inputs& inputs, const DlaaCameraTracker::Result& camera,
+                     std::uint32_t width, std::uint32_t height, bool reset, VkCommandBuffer cmd, std::string& error);
+    // Reads the pending warp check into stats_ once the frame's commands have finished.
+    void collectFgMvCheck();
     bool beginLayoutPass(RenderTarget& target, bool writes, bool overwrites_all);
     void beginSidecarPass(RenderTarget& target, bool writes, bool overwrites_all);
 
@@ -290,7 +358,13 @@ private:
                                 VkSampleCountFlags sidecar_samples);
     void recordDraw(const RsxDraw& draw);
     void recordFlip(const RsxFlip& flip);
+    // Warns once per change of the requested target when frame generation cannot run; the controller logs the rest.
+    void noteFrameGenTarget();
+    // Creates the controller once the presenter is known and loads the plugins when the target asks for it.
+    void createFrameGen();
     void recordPresentBlit(RenderTarget* source);
+    // After the blit: tells the controller what the frame is, so it can tag the scene rectangle and switch DLSS-G.
+    void recordFrameGenPresent();
     bool ensureReadback(FrameSlot& slot, VkDeviceSize size);
     bool dumpDue() const;
     bool dumpDisplay(const std::filesystem::path& path);
@@ -313,8 +387,26 @@ private:
     std::optional<std::uint64_t> dlaa_jitter_frame_;
     // The perspective scene draws of the frame being recorded, which exist before the first evaluation creates dlaa_.
     DlaaCameraTracker dlaa_camera_;
+    // FgDebug::mv_check state, created by the first check.
+    std::unique_ptr<FgMotionPass> fg_motion_;
+    bool fg_mv_pending_ = false;  // a warp check was recorded and its frame has not been submitted and read yet
+    bool fg_mv_reset_ = false;    // the DLAA evaluation of that frame reset its history
+    // Per frame slot: the depth frame generation reads, which no later pass of the frame may write.
+    std::array<std::shared_ptr<FgDepthCopy>, kFramesInFlight> fg_depth_;
+    // What the DLAA tap handed to frame generation for the frame being recorded.
+    struct FgTapped {
+        std::uint32_t frame = 0;  // frame_index_ of the tap; 0 = none yet
+        FrameGenInputs inputs = FrameGenInputs::Missing;
+        std::uint32_t width = 0, height = 0;
+        VkFormat depth_format = VK_FORMAT_UNDEFINED;
+    } fg_tapped_;
+    std::uint32_t fg_scene_width_ = 0, fg_scene_height_ = 0;  // of the last tagged inputs, for the reset on a change
     std::uint32_t anisotropy_ = 1;
     bool anisotropy_unavailable_logged_ = false;
+    FrameGenTarget frame_gen_target_ = FrameGenTarget::Off;
+    FrameGenTarget frame_gen_noted_ = FrameGenTarget::Off;  // the target noteFrameGenTarget() last logged
+    // Null without frame generation support or a presenter. Destroyed first: its thread calls into Streamline.
+    std::unique_ptr<FrameGenController> frame_gen_;
     // Always created: its worker thread only starts with the first submitted frame.
     std::unique_ptr<FrameDumper> dumper_;
     bool dump_requested_ = false;  // requestDisplayDump() was called and no flip has taken it yet
@@ -348,6 +440,9 @@ private:
     std::array<std::unique_ptr<FrameSlot>, kFramesInFlight> slots_;
     std::size_t current_slot_ = 0;
     bool recording_ = false;
+    // Index of the guest frame being recorded (flips completed + 1), fixed when its recording starts: recordFlip
+    // increments stats_.flips while the same frame's commands are still being recorded.
+    std::uint32_t frame_index_ = 0;
     // The vertex constant upload of the last draw in this frame, for the next draw with the same constants id.
     struct VpConstantUpload {
         std::uint64_t id = 0;

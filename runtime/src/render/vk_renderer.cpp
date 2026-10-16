@@ -327,6 +327,7 @@ RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(c
     }
     resolution_scale_ = options_.resolution_scale;
     aa_mode_ = options_.aa_mode;
+    frame_gen_target_ = options_.frame_gen;
     dlaa_gap_ = dlaaGap(context_);
     if (aa_mode_ == AaMode::Dlaa && !dlaaAvailable()) {
         aa_mode_ = msaaAvailable() ? AaMode::Msaa : AaMode::Supersample;
@@ -382,8 +383,11 @@ RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(c
 }
 
 RsxRenderer::~RsxRenderer() {
+    frame_gen_.reset();  // joins the sleeper thread before anything it uses goes away
     const VkDevice device = context_.device();
     vkDeviceWaitIdle(device);
+    fg_motion_.reset();
+    for (std::shared_ptr<FgDepthCopy>& copy : fg_depth_) copy.reset();
     dlaa_.reset();  // frees the DLSS viewport; the device is idle
     for (std::unique_ptr<FrameSlot>& slot : slots_) {
         if (!slot) continue;
@@ -530,6 +534,8 @@ bool RsxRenderer::beginFrame() {
         return false;
     }
     recording_ = true;
+    frame_index_ = static_cast<std::uint32_t>(stats_.flips) + 1;
+    if (frame_gen_) frame_gen_->beginFrame(frame_index_);
     return true;
 }
 
@@ -584,10 +590,16 @@ bool RsxRenderer::submitFrame() {
     recording_ = false;
     display_slot_ = current_slot_;
     current_slot_ = (current_slot_ + 1) % kFramesInFlight;
+    if (frame_gen_) frame_gen_->submitted();
     if (present_pending_) {
         present_pending_ = false;
+        if (frame_gen_) frame_gen_->presentStarted();
         presenter_->present(present_target_);
+        if (frame_gen_) frame_gen_->presentFinished();
     }
+    // The next frame's token and Reflex sleep, even when nothing was presented: its markers follow at its first
+    // command.
+    if (frame_gen_) frame_gen_->frameDone(static_cast<std::uint32_t>(stats_.flips) + 1);
     return true;
 }
 
@@ -672,6 +684,44 @@ bool RsxRenderer::setAaMode(AaMode mode) {
     if (mode == AaMode::Dlaa && aa_mode_ != AaMode::Dlaa) dlaa_switched_ = true;
     aa_mode_ = mode;
     return true;
+}
+
+std::string RsxRenderer::frameGenUnsupportedReason() const {
+    if (presenter_ == nullptr) return "no window";
+    if (context_.frameGenerationSupported()) return {};
+    return context_.frameGenerationStatus().empty() ? "the Vulkan device was not created for frame generation"
+                                                    : context_.frameGenerationStatus();
+}
+
+bool RsxRenderer::setFrameGenTarget(FrameGenTarget target) {
+    if (target != FrameGenTarget::Off && !frameGenSupported()) return false;
+    frame_gen_target_ = target;
+    if (frame_gen_) frame_gen_->setTarget(target);
+    return true;
+}
+
+// The presenter is set after construction, so the initial load cannot happen in the constructor. No swapchain exists
+// yet, so the first one is already created with the plugins of the requested state.
+void RsxRenderer::createFrameGen() {
+    if (frame_gen_ || !frameGenSupported() || context_.streamline() == nullptr) return;
+    frame_gen_ = std::make_unique<FrameGenController>(
+            context_, *presenter_,
+            FrameGenControllerOptions{.present_mode = options_.fg_debug.present_mode,
+                                      .reflex_low_latency = options_.fg_debug.reflex_low_latency,
+                                      .only_generated = options_.fg_debug.only_generated,
+                                      .cycle_seconds = options_.fg_debug.cycle_seconds});
+    frame_gen_->setTarget(frame_gen_target_);
+}
+
+// The target is read at the first flip, not at construction: the presenter is set in between, and the reason depends
+// on it.
+void RsxRenderer::noteFrameGenTarget() {
+    if (frame_gen_target_ == frame_gen_noted_) return;
+    frame_gen_noted_ = frame_gen_target_;
+    if (frame_gen_target_ == FrameGenTarget::Off) return;
+    if (!frameGenSupported()) {
+        logWarn("tox2: render: frame generation unavailable ({}); presenting without it", frameGenUnsupportedReason());
+    }
 }
 
 bool RsxRenderer::setAnisotropy(std::uint32_t level) {
@@ -1111,6 +1161,7 @@ VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
         inputs.depth = describe(*depth,
                                 depth->msaa->depth_view != VK_NULL_HANDLE ? depth->msaa->depth_view : depth->msaa->view,
                                 depth->msaa->layout);
+        inputs.frame_index = frame_index_;
         const VkCommandBuffer cmd = outsideCmd();
         // The offset the frame's perspective draws were shifted by. A frame without such a draw was not moved, so it
         // reports none. The flips only change what is reported: the geometry always moves toward +x / +y.
@@ -1131,6 +1182,38 @@ VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
         // push descriptors on every draw.
         invalidateDrawState();
         if (!evaluated) return failed(error);
+
+        // Frame generation reads the same depth and a camera motion vector image. The second evaluation of a frame
+        // (the scene written again after the tap) is neither tagged nor checked again.
+        const bool fg_inputs =
+                frame_gen_ && camera.clip && fg_tapped_.frame != frame_index_ && frame_gen_->wantsInputs();
+        const bool mv_check = options_.fg_debug.mv_check && !fg_mv_pending_;
+        if (fg_inputs || mv_check) {
+            // Failures leave the scene read as it is.
+            std::string check_error;
+            bool recorded = recordFgMotion(res, *depth, camera, check_error);
+            if (!recorded) {
+                logOnce(LogLevel::Warn, "render-fg-motion-failed", "tox2: render: motion vectors not recorded ({})",
+                        check_error);
+            }
+            if (fg_inputs) {
+                fg_tapped_ = {frame_index_, FrameGenInputs::Failed, width, height, inputs.depth.format};
+                std::string tag_error;
+                SlImage depth_copy;
+                if (recorded && copyFgDepth(*depth, depth_copy, tag_error) &&
+                    tagFgInputs(depth_copy, inputs, camera, width, height, reset, outsideCmd(), tag_error)) {
+                    fg_tapped_.inputs = FrameGenInputs::Tagged;
+                } else if (recorded) {
+                    logOnce(LogLevel::Warn, "render-fg-tag-failed",
+                            "tox2: render: frame generation inputs not tagged ({})", tag_error);
+                }
+            }
+            if (recorded && mv_check && !recordFgMvCheck(res, reset, check_error)) {
+                logOnce(LogLevel::Warn, "render-fg-mv-failed", "tox2: render: motion vector check failed ({})",
+                        check_error);
+            }
+            invalidateDrawState();
+        }
 
         // Streamline returns the output to the layout it was told.
         transitionImage(res.output.image, VK_IMAGE_ASPECT_COLOR_BIT, res.output.layout,
@@ -1168,6 +1251,197 @@ VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
         }
     }
     return view;
+}
+
+// The depth that went into the DLAA evaluation is still in SHADER_READ_ONLY_OPTIMAL and the DLAA output is in GENERAL,
+// which is where frame generation will read them. The pass only reads those images, so the scene is unchanged.
+bool RsxRenderer::recordFgMotion(const DlaaPass::Resources& dlaa, const RenderTarget& depth,
+                                 const DlaaCameraTracker::Result& camera, std::string& error) {
+    if (!fg_motion_) fg_motion_ = std::make_unique<FgMotionPass>(context_);
+    std::shared_ptr<void> retired;
+    bool recreated = false;
+    if (!fg_motion_->prepare(dlaa.output.width, dlaa.output.height, retired, recreated, error)) return false;
+    // Frames in flight may still read the previous images.
+    if (retired) slots_[current_slot_]->keep_alive.push_back(std::move(retired));
+
+    FgMotionInputs inputs;
+    inputs.depth = depth.msaa->depth_view != VK_NULL_HANDLE ? depth.msaa->depth_view : depth.msaa->view;
+    // The camera pair gives the same clip-to-clip transform as the DLAA matrices, without their y flip.
+    Mat4 inverse{};
+    if (camera.clip && camera.prev_clip && mat4Inverse(*camera.clip, inverse)) {
+        inputs.clip_to_prev_clip = mat4Multiply(inverse, *camera.prev_clip);
+    }
+    inputs.flip[0] = options_.fg_debug.mv_flip_x ? -1.0f : 1.0f;
+    inputs.flip[1] = options_.fg_debug.mv_flip_y ? -1.0f : 1.0f;
+
+    const VkCommandBuffer cmd = outsideCmd();
+    // Streamline's writes to the output are not ordered against fragment reads by anything it records.
+    VkMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+
+    return fg_motion_->recordMotion(cmd, inputs, error);
+}
+
+bool RsxRenderer::recordFgMvCheck(const DlaaPass::Resources& dlaa, bool reset, std::string& error) {
+    if (!fg_motion_->recordWarpCheck(outsideCmd(), dlaa.output.view, VK_IMAGE_LAYOUT_GENERAL, fg_motion_->motionView(),
+                                     error)) {
+        return false;
+    }
+    fg_mv_pending_ = true;
+    fg_mv_reset_ = reset;
+    return true;
+}
+
+// Constants and the depth and motion vectors of the frame, for the frame generation viewport. DLSS-G reads both images
+// when the frame is presented, so they are tagged valid until then: the motion vectors are rewritten only by the next
+// frame, and the depth is a copy of its own. Streamline blocks the presenting queue until DLSS-G has read its inputs,
+// which keeps that frame from starting too early.
+bool RsxRenderer::tagFgInputs(const SlImage& depth, const DlaaPass::Inputs& inputs,
+                              const DlaaCameraTracker::Result& camera, std::uint32_t width, std::uint32_t height,
+                              bool reset, VkCommandBuffer cmd, std::string& error) {
+    FrameGenFrame frame;
+    frame.depth = depth;
+    frame.motion = fg_motion_->motionImage();
+    frame.jitter_px[0] = inputs.jitter_px[0];
+    frame.jitter_px[1] = inputs.jitter_px[1];
+    frame.mvec_scale[0] = 1.0f / static_cast<float>(width);
+    frame.mvec_scale[1] = 1.0f / static_cast<float>(height);
+    frame.view_to_clip = camera.matrices.view_to_clip;
+    frame.clip_to_view = camera.matrices.clip_to_view;
+    frame.clip_to_prev_clip = camera.matrices.clip_to_prev_clip;
+    frame.prev_clip_to_clip = camera.matrices.prev_clip_to_clip;
+    // The fit expects clip y up; the renderer's clip space is y down, which would hand Streamline a mirrored basis.
+    Mat4 world_to_clip_y_up = camera.matrices.view_to_clip;
+    for (std::size_t row = 0; row < 4; ++row) world_to_clip_y_up[row * 4 + 1] = -world_to_clip_y_up[row * 4 + 1];
+    if (const std::optional<FgCamera> fitted = fgCameraFromClip(world_to_clip_y_up)) {
+        frame.camera = *fitted;
+    } else {
+        // An orthonormal basis, so scene change detection finds nothing to complain about.
+        frame.camera.aspect = static_cast<float>(width) / static_cast<float>(height);
+    }
+    const bool size_changed = fg_scene_width_ != width || fg_scene_height_ != height;
+    fg_scene_width_ = width;
+    fg_scene_height_ = height;
+    // takeReset() also consumes the rate event, so it runs for every tagged frame.
+    frame.reset = frame_gen_->takeReset() || reset || size_changed;
+    return context_.streamline()->tagFrameGen(cmd, frame, error);
+}
+
+struct RsxRenderer::FgDepthCopy {
+    VkContext* context = nullptr;
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    VkImageView view = VK_NULL_HANDLE;  // depth aspect only
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    VkImageUsageFlags usage = 0;
+    std::uint32_t width = 0, height = 0;
+
+    FgDepthCopy() = default;
+    FgDepthCopy(const FgDepthCopy&) = delete;
+    FgDepthCopy& operator=(const FgDepthCopy&) = delete;
+    ~FgDepthCopy() {
+        if (context == nullptr) return;
+        if (view != VK_NULL_HANDLE) vkDestroyImageView(context->device(), view, nullptr);
+        if (image != VK_NULL_HANDLE) vmaDestroyImage(context->allocator(), image, allocation);
+    }
+};
+
+// Tagging the depth sidecar itself as valid only now makes Streamline copy it into a clone of its own, and the
+// validation layer reports that clone in the wrong layout at every submit (measured). A tag that is valid until present
+// needs an image no later pass writes, so the depth gets its own, one per frame slot.
+bool RsxRenderer::copyFgDepth(RenderTarget& depth, SlImage& out, std::string& error) {
+    const std::uint32_t width = depth.passWidth(true), height = depth.passHeight(true);
+    std::shared_ptr<FgDepthCopy>& copy = fg_depth_[current_slot_];
+    if (!copy || copy->width != width || copy->height != height || copy->format != depth.format) {
+        // Frames in flight may still read the previous image.
+        if (copy) slots_[current_slot_]->keep_alive.push_back(std::move(copy));
+        auto created = std::make_shared<FgDepthCopy>();
+        created->context = &context_;
+        constexpr VkImageUsageFlags kUsage =
+                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        VkImageCreateInfo image_info{};
+        image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_info.imageType = VK_IMAGE_TYPE_2D;
+        image_info.format = depth.format;
+        image_info.extent = {width, height, 1};
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = 1;
+        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        image_info.usage = kUsage;
+        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VmaAllocationCreateInfo alloc_info{};
+        alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        alloc_info.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+        VmaAllocationInfo allocated{};
+        if (vmaCreateImage(context_.allocator(), &image_info, &alloc_info, &created->image, &created->allocation,
+                           &allocated) != VK_SUCCESS) {
+            created->image = VK_NULL_HANDLE;
+            error = "vmaCreateImage failed for the frame generation depth";
+            return false;
+        }
+        VkImageViewCreateInfo view_info{};
+        view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_info.image = created->image;
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = depth.format;
+        view_info.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+        if (vkCreateImageView(context_.device(), &view_info, nullptr, &created->view) != VK_SUCCESS) {
+            created->view = VK_NULL_HANDLE;
+            error = "vkCreateImageView failed for the frame generation depth";
+            return false;
+        }
+        created->format = depth.format;
+        created->usage = kUsage;
+        created->width = width;
+        created->height = height;
+        copy = std::move(created);
+    }
+
+    transitionSidecar(depth, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    transitionImage(copy->image, depth.aspect, copy->layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageCopy region{};
+    region.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    region.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    region.extent = {width, height, 1};
+    vkCmdCopyImage(outsideCmd(), depth.msaa->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, copy->image,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    transitionImage(copy->image, depth.aspect, copy->layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    transitionSidecar(depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    VmaAllocationInfo allocated{};
+    vmaGetAllocationInfo(context_.allocator(), copy->allocation, &allocated);
+    out.image = copy->image;
+    out.memory = allocated.deviceMemory;
+    out.view = copy->view;
+    out.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    out.width = width;
+    out.height = height;
+    out.format = copy->format;
+    out.usage = copy->usage;
+    return true;
+}
+
+void RsxRenderer::collectFgMvCheck() {
+    if (!fg_mv_pending_) return;
+    fg_mv_pending_ = false;
+    // The flip just submitted the frame that recorded the check.
+    if (!fg_motion_ || !waitSlot(*slots_[display_slot_])) return;
+    FgWarpStats warp;
+    if (!fg_motion_->collectWarpStats(warp)) return;  // the first check only seeds the history
+    stats_.fg_mv_checks++;
+    stats_.fg_mv_last = warp;
+    stats_.fg_mv_last_reset = fg_mv_reset_;
 }
 
 // A single-sample pass is about to use the layout image of `target`: brings it up to date with the sidecar first
@@ -2722,6 +2996,7 @@ bool RsxRenderer::ensureReadback(FrameSlot& slot, VkDeviceSize size) {
 // readback buffer here, inside the frame's command buffer, so readDisplay needs no further GPU work. A
 // buffer that was never a render target reads back as black.
 void RsxRenderer::recordFlip(const RsxFlip& flip) {
+    if (frame_gen_) frame_gen_->flipEntered(flip.completed_us);
     stats_.flips++;
     dlaa_camera_.endFrame();
     textures_->trim();
@@ -2733,9 +3008,11 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     FrameSlot& slot = *slots_[current_slot_];
     dump_this_flip_ = dump_requested_;
     dump_requested_ = false;
+    noteFrameGenTarget();
     // Asked before the readback decision so a request made for this very flip is honoured.
     std::uint32_t requested_scale = 0;
     std::optional<AaMode> requested_aa_mode;
+    std::optional<FrameGenTarget> requested_frame_gen;
     std::uint32_t requested_anisotropy = 0;
     if (presenter_ != nullptr && overlay_ != nullptr) {
         const PresentOverlayRequests requests = overlay_->onFlip(PresentFrameInfo{
@@ -2749,11 +3026,17 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
                 .anisotropy = anisotropy_,
                 .max_anisotropy = maxAnisotropy(),
                 .window = presenter_->windowStatus(),
+                .frame_gen_supported = frameGenSupported(),
+                .frame_gen_target = frame_gen_target_,
+                .frame_gen = frame_gen_ ? frame_gen_->status()
+                                        : FrameGenStatus{.inactive_reason = {},
+                                                         .max_multiplier = context_.frameGenerationMaxMultiplier()},
         });
         if (requests.dump_display) dump_this_flip_ = true;
         requested_scale = requests.resolution_scale;
         requested_aa_mode = requests.aa_mode;
         requested_anisotropy = requests.anisotropy;
+        requested_frame_gen = requests.frame_gen;
         // The window is not part of the frame being recorded, so the request needs no deferral.
         if (requests.window_size) presenter_->requestWindowSize(*requests.window_size);
     }
@@ -2795,14 +3078,41 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
         }
     }
     if (!valid()) return;
-    if (presenter_ != nullptr) recordPresentBlit(display_black_ ? nullptr : it->second.get());
-    if (submitFrame()) has_flip_ = true;
+    if (presenter_ != nullptr) {
+        recordPresentBlit(display_black_ ? nullptr : it->second.get());
+        if (frame_gen_ && present_pending_) recordFrameGenPresent();
+    }
+    if (submitFrame()) {
+        has_flip_ = true;
+        collectFgMvCheck();
+    }
     // Applied only now: this flip, its readback and the present blit were all recorded at the old scale, and
     // targets rescale lazily when the next frame binds them. The mode follows the same rule so a frame is never
     // recorded in both. The anisotropy level follows the same rule; only samplers created afterwards use it.
     if (requested_scale != 0 && valid()) setResolutionScale(requested_scale);
     if (requested_aa_mode && valid()) setAaMode(*requested_aa_mode);
     if (requested_anisotropy != 0 && valid()) setAnisotropy(requested_anisotropy);
+    if (requested_frame_gen && valid()) setFrameGenTarget(*requested_frame_gen);
+    if (frame_gen_ && valid()) frame_gen_->tick();
+}
+
+void RsxRenderer::recordFrameGenPresent() {
+    FrameGenPresent frame;
+    frame.dlaa = aa_mode_ == AaMode::Dlaa;
+    if (fg_tapped_.frame == frame_index_) {
+        frame.inputs = fg_tapped_.inputs;
+        frame.scene_width = fg_tapped_.width;
+        frame.scene_height = fg_tapped_.height;
+        frame.depth_format = fg_tapped_.depth_format;
+    }
+    frame.display_width = display_width_;
+    frame.display_height = display_height_;
+    frame.overlay_open = overlay_ != nullptr && overlay_->wantsDraw();
+    frame.swapchain_width = present_target_.width;
+    frame.swapchain_height = present_target_.height;
+    frame.swapchain_format = present_target_.format;
+    frame.scene_rect = letterboxRect(present_target_.width, present_target_.height, 16, 9);
+    frame_gen_->beforePresent(outsideCmd(), frame);
 }
 
 // Acquires a swapchain image and records the copy of the display buffer into it (a black frame when
@@ -2835,6 +3145,11 @@ void RsxRenderer::recordPresentBlit(RenderTarget* source) {
         vkCmdPipelineBarrier2(cmd, &dependency);
     };
     constexpr VkPipelineStageFlags2 kTransfer = kPresentWriteStages;  // also the acquire semaphore wait in submitFrame
+    // Measured: handed over in PRESENT_SRC_KHR, the images of a swapchain created through sl.dlss_g (its own buffers)
+    // make the validation layer report, at every present, that Streamline's pacer command buffer expects them in
+    // TRANSFER_SRC_OPTIMAL. Left in that layout there are no reports, also while DLSS-G generates frames.
+    const VkImageLayout final_layout =
+            frame_gen_ && frame_gen_->loaded() ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     barrierTo(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, kTransfer, 0, kTransfer,
               VK_ACCESS_2_TRANSFER_WRITE_BIT);
 
@@ -2870,13 +3185,13 @@ void RsxRenderer::recordPresentBlit(RenderTarget* source) {
                   VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
         overlay_->record(cmd, dst);
         invalidateDrawState();  // the overlay binds its own pipeline and sets state on this command buffer
-        barrierTo(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        barrierTo(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, final_layout,
                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                   VK_PIPELINE_STAGE_2_NONE, 0);
         return;
     }
-    barrierTo(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, kTransfer,
-              VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_NONE, 0);
+    barrierTo(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, final_layout, kTransfer, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+              VK_PIPELINE_STAGE_2_NONE, 0);
 }
 
 void RsxRenderer::execute(std::span<RsxCommand> commands) {

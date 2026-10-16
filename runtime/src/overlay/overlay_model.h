@@ -65,7 +65,7 @@ struct OverlayLockRate {
 };
 
 // A Settings choice the user made. The value is the option's command-line form.
-enum class OverlaySetting : std::uint8_t { FrameLimit, ResolutionScale, AaMode, Anisotropy, WindowSize };
+enum class OverlaySetting : std::uint8_t { FrameLimit, ResolutionScale, AaMode, Anisotropy, WindowSize, FrameGen };
 
 // Every member may be empty: the panel then shows "n/a" or disables the control. The providers are
 // called on the renderer's thread and must be safe from any thread.
@@ -150,7 +150,16 @@ struct OverlayState {
     float max_anisotropy = 0.0f;                 // device maximum the renderer reported; 0 = unsupported or unknown
     std::uint32_t anisotropy_request = 0;        // set by the panel, taken by DebugOverlay::onFlip; 0 = none
     std::optional<WindowStatus> window;          // last status the presenter reported; unset = no window
-    std::optional<WindowSizePreset> window_size_request;  // set by the panel, taken by DebugOverlay::onFlip
+    std::optional<WindowSizePreset> window_size_request;    // set by the panel, taken by DebugOverlay::onFlip
+    bool frame_gen_supported = false;                       // last value the renderer reported; the combo is listed
+    FrameGenTarget frame_gen_target = FrameGenTarget::Off;  // last requested target the renderer reported
+    FrameGenStatus frame_gen;                               // last status the renderer reported
+    // The last status that was active, kept for the status line while the overlay itself suspends generation.
+    std::optional<FrameGenStatus> frame_gen_last_active;
+    std::optional<FrameGenTarget> frame_gen_request;  // set by the panel, taken by DebugOverlay::onFlip
+
+    // Stores what the renderer reported for frame generation and keeps frame_gen_last_active.
+    void setFrameGen(bool supported, FrameGenTarget target, const FrameGenStatus& status);
 
     // Calls the providers: audio at most every 250 ms, unimplemented every 500 ms, the rest every call.
     // The audio and unimplemented snapshots take locks or copy maps, which a per-frame call would not need.
@@ -174,6 +183,24 @@ std::string windowSizePreviewLabel(const WindowStatus& status);
 // The anti-aliasing modes the combo lists, in display order. DLAA is left out when the renderer cannot run it, because
 // it depends on the GPU and driver rather than on a device feature a disabled entry could explain.
 std::vector<AaMode> aaModeChoices(const OverlayState& state);
+
+// The frame generation targets the combo lists, in display order: all of them, including the ones not verified on
+// hardware here. The list does not depend on the state; the parameter keeps the shape of aaModeChoices.
+std::vector<FrameGenTarget> frameGenChoices(const OverlayState& state);
+
+// Combo item text for a target: "Off", "60 fps", ..., "180 fps (unverified)", "Unlimited".
+std::string frameGenItemLabel(FrameGenTarget target);
+
+// Frame generation runs only with DLAA, so the combo is usable only while the effective mode (a pending request counts)
+// is DLAA. An unknown mode (no renderer) is not DLAA.
+bool frameGenSelectable(const OverlayState& state);
+
+// Why the combo cannot be changed; empty while it can.
+std::string_view frameGenDisabledNote(const OverlayState& state);
+
+// The status line under the combo, e.g. "4x: 30 -> 120 fps, measured 119.6". Empty while the target is off, and while
+// the combo is not selectable, where frameGenDisabledNote already gives the reason.
+std::string frameGenStatusLine(const OverlayState& state);
 
 // Moves the requests the panels made since the last flip into the reply for the renderer and clears them.
 PresentOverlayRequests takePresentRequests(OverlayState& state);

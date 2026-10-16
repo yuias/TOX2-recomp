@@ -10,7 +10,9 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "render/vk_context.h"
@@ -29,6 +31,13 @@ struct PixelRect {
 // (rounded down, so the margins differ by at most one pixel). Empty when the area or the ratio is empty.
 PixelRect letterboxRect(std::uint32_t area_width, std::uint32_t area_height, std::uint32_t aspect_width,
                         std::uint32_t aspect_height);
+
+// The requested mode if offered, else MAILBOX, else IMMEDIATE, else FIFO. The chain exists because DLSS-G requires
+// vsync off; with frame generation unloaded the request is FIFO, which every surface offers, so the off path never
+// falls back. A request other than FIFO that ends at FIFO logs one warning per call (swapchain creation is rare); a
+// request that ends at another mode than the requested one logs one info line naming both. Requesting FIFO gives FIFO
+// without a line (a diagnostic).
+VkPresentModeKHR choosePresentMode(VkPresentModeKHR requested, std::span<const VkPresentModeKHR> offered);
 
 struct KeyMessage {
     std::uint32_t scan_code = 0;  // PC/AT set 1 make code, 0xE000 | code for extended keys
@@ -103,7 +112,9 @@ public:
     // Acquires the next swapchain image, recreating the swapchain after a resize. False when there is
     // nothing to present to this time (minimised window, no image within the timeout, a failure): the
     // frame is then submitted without a swapchain image. The image is in an undefined layout; the caller
-    // leaves it in VK_IMAGE_LAYOUT_PRESENT_SRC_KHR.
+    // leaves it in VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, or in VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL while the DLSS-G plugin
+    // is loaded (sl.dlss_g's pacer copies from its proxy swapchain images and expects that layout; measured, not
+    // documented).
     bool acquire(std::size_t frame_slot, Target& target);
 
     // Number of frame slots acquire accepts (one acquire semaphore each).
@@ -111,6 +122,19 @@ public:
 
     // Queues the presentation of an image acquired by `acquire` whose submit has been queued.
     void present(const Target& target);
+
+    // Present mode for swapchains created from now on (FIFO until changed, so the off path is exactly today's). The
+    // mode actually used comes from choosePresentMode. The presenter's thread.
+    void setPresentMode(VkPresentModeKHR mode) { requested_present_mode_ = mode; }
+    // Of the current swapchain (the last one created while there is none).
+    VkPresentModeKHR presentMode() const { return present_mode_; }
+    // Of the current swapchain; 0 without one.
+    std::uint32_t imageCount() const { return static_cast<std::uint32_t>(images_.size()); }
+    // vkDeviceWaitIdle and destroys the swapchain now; the next acquire creates a new one. The presenter's thread.
+    void releaseSwapchain();
+    // Called on the presenter's thread just before an existing swapchain is destroyed or recreated, whatever the
+    // reason (resize, out of date, releaseSwapchain); not for the presenter's own destruction.
+    void setBeforeRecreate(std::function<void()> callback) { before_recreate_ = std::move(callback); }
 
     // The window's HWND. Any thread; it is valid for the presenter's lifetime.
     void* nativeWindowHandle() const;
@@ -139,6 +163,7 @@ private:
     bool ensureSwapchain();
     bool createSwapchain(const VkSurfaceCapabilitiesKHR& caps, VkExtent2D extent);
     void destroySwapchainResources();
+    void notifyBeforeRecreate();
     void reportStats();
 
     VkContext& context_;
@@ -148,6 +173,9 @@ private:
     VkFormat format_ = VK_FORMAT_UNDEFINED;
     VkColorSpaceKHR color_space_ = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     VkExtent2D extent_{};
+    VkPresentModeKHR requested_present_mode_ = VK_PRESENT_MODE_FIFO_KHR;
+    VkPresentModeKHR present_mode_ = VK_PRESENT_MODE_FIFO_KHR;
+    std::function<void()> before_recreate_;
     bool needs_recreate_ = false;
     bool acquire_stalled_ = false;  // the last acquire timed out; acquire without waiting until one succeeds
     int swapchain_failures_ = 0;    // consecutive failed swapchain creations

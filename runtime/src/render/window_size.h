@@ -92,6 +92,8 @@ struct WindowStatus {
     ClientSize client;                                     // current client area (0x0 while minimised)
     ClientSize available;  // client pixels the work area allows with the windowed frame at the window's DPI
     bool fullscreen = false;
+    // Refresh rate of the window's monitor in Hz (EnumDisplaySettingsW on the monitor the window is on); 0 = unknown.
+    std::uint32_t refresh_hz = 0;
 };
 
 }  // namespace tox2

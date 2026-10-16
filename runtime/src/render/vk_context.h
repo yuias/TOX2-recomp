@@ -21,6 +21,10 @@ struct VkContextOptions {
     // Load Streamline and create the instance and device with what DLSS asks for. Failing is not an error: the
     // context is created without it and streamlineStatus() says why.
     bool streamline = false;
+    // Also load the frame generation plugins and create the instance and device with what DLSS-G and Reflex ask for.
+    // Needs `streamline` and a window to be useful. Failing is not an error and never turns DLAA off:
+    // frameGenerationStatus() says why.
+    bool frame_generation = false;
 };
 
 // Instance, physical device, logical device whose graphics queue 0 is the renderer's (Streamline may add more),
@@ -76,6 +80,17 @@ public:
     // The instance-level function `name`: Streamline's proxy when it hooks it, else the loader's.
     PFN_vkVoidFunction instanceProc(const char* name) const;
 
+    // True when the device was created with the frame generation requirements and DLSS-G reported generated frames.
+    // The plugins are unloaded again at creation; the renderer loads them when a target is set.
+    bool frameGenerationSupported() const { return frame_generation_supported_; }
+    // "DLSS-G up to 6x, optical flow native|interop", or the reason it is unavailable; empty when not requested.
+    const std::string& frameGenerationStatus() const { return frame_generation_status_; }
+    // 1 + numFramesToGenerateMax; 0 when unsupported or not known yet.
+    std::uint32_t frameGenerationMaxMultiplier() const { return frame_generation_max_multiplier_; }
+    // The queue family of the native optical flow queue; valid when frameGenerationNativeOpticalFlow() is true.
+    std::uint32_t opticalFlowQueueFamily() const { return optical_flow_family_; }
+    bool frameGenerationNativeOpticalFlow() const { return native_optical_flow_; }
+
 private:
     friend std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std::string& error);
     VkContext() = default;
@@ -96,6 +111,11 @@ private:
     std::string two_sample_gap_;
     std::unique_ptr<Streamline> streamline_;
     std::string streamline_status_;
+    bool frame_generation_supported_ = false;
+    bool native_optical_flow_ = false;
+    std::uint32_t frame_generation_max_multiplier_ = 0;
+    std::uint32_t optical_flow_family_ = 0;
+    std::string frame_generation_status_;
     std::atomic<std::uint32_t> validation_errors_{0};
 };
 

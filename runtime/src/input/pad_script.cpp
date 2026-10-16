@@ -1,6 +1,7 @@
 #include "input/pad_script.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <format>
 #include <fstream>
 #include <iterator>
@@ -9,6 +10,7 @@
 #include <utility>
 
 #include "core/log.h"
+#include "input/gamepad_map.h"
 #include "rsx/rsx_thread.h"
 
 namespace tox2 {
@@ -98,6 +100,60 @@ std::expected<PadButtons, std::string> parseButtons(std::string_view text) {
     }
 }
 
+// A stick coordinate in thousandths: an optional '-', digits and an optional fraction; digits beyond
+// the third decimal round half up in magnitude. nullopt: not a number. The result may exceed 1000 in
+// magnitude; the caller checks the range.
+std::optional<int> parseStickMilli(std::string_view text) {
+    const bool negative = text.starts_with('-');
+    if (negative) text.remove_prefix(1);
+    const std::size_t dot = text.find('.');
+    const std::string_view whole = text.substr(0, dot);
+    const std::string_view fraction = dot == std::string_view::npos ? std::string_view{} : text.substr(dot + 1);
+    const auto all_digits = [](std::string_view s) {
+        return std::ranges::all_of(s, [](char c) { return c >= '0' && c <= '9'; });
+    };
+    if (whole.empty() || !all_digits(whole) || !all_digits(fraction)) return std::nullopt;
+    if (dot != std::string_view::npos && fraction.empty()) return std::nullopt;
+
+    // Clamped far outside the range so that a long digit string cannot overflow.
+    constexpr int kTooBig = 1'000'000;
+    int milli = 0;
+    for (const char c : whole) milli = std::min(milli * 10 + (c - '0'), kTooBig);
+    milli = std::min(milli * 1000, kTooBig);
+    constexpr int kPlaces[3] = {100, 10, 1};
+    for (std::size_t i = 0; i < 3 && i < fraction.size(); i++) milli += (fraction[i] - '0') * kPlaces[i];
+    if (fraction.size() > 3 && fraction[3] >= '5') milli++;
+    return negative ? -milli : milli;
+}
+
+// `stick <left|right> <x> <y>`; returns the error text without the line number.
+std::optional<std::string> parseStick(const std::vector<std::string_view>& tokens, std::int64_t at,
+                                      std::vector<PadScriptEvent>& events) {
+    constexpr const char* kUsage = "\"stick\" needs left|right, x and y";
+    if (tokens.size() < 3) return kUsage;
+    PadStick stick;
+    if (tokens[2] == "left") {
+        stick = PadStick::Left;
+    } else if (tokens[2] == "right") {
+        stick = PadStick::Right;
+    } else {
+        return std::format("unknown stick \"{}\"", tokens[2]);
+    }
+    if (tokens.size() < 5) return kUsage;
+    if (tokens.size() > 5) return std::format("unexpected \"{}\"", tokens[5]);
+    int milli[2];
+    for (std::size_t i = 0; i < 2; i++) {
+        const std::string_view text = tokens[3 + i];
+        const std::optional<int> value = parseStickMilli(text);
+        if (!value) return std::format("bad stick value \"{}\"", text);
+        if (*value < -1000 || *value > 1000) return std::format("stick value \"{}\" out of range -1..1", text);
+        milli[i] = *value;
+    }
+    if (events.size() >= kMaxEvents) return std::format("more than {} events", kMaxEvents);
+    events.push_back({at, 0, false, PadScriptEventKind::Stick, stick, milli[0], milli[1]});
+    return std::nullopt;
+}
+
 constexpr const char* kMixedClocksError = "flip times and second times cannot be mixed";
 
 // Parses one non-empty line into events; returns the error text without the line number. The first
@@ -110,9 +166,10 @@ std::optional<std::string> parseLine(const std::vector<std::string_view>& tokens
     if (at->clock != *clock) return kMixedClocksError;
     if (tokens.size() < 2) return "missing command";
     const std::string_view command = tokens[1];
-    if (command != "press" && command != "release" && command != "tap") {
+    if (command != "press" && command != "release" && command != "tap" && command != "stick") {
         return std::format("unknown command \"{}\"", command);
     }
+    if (command == "stick") return parseStick(tokens, at->value, events);
     if (tokens.size() < 3) return std::format("\"{}\" needs buttons", command);
     const std::expected<PadButtons, std::string> buttons = parseButtons(tokens[2]);
     if (!buttons) return buttons.error();
@@ -169,6 +226,30 @@ std::string joinButtonNames(PadButtons buttons) {
     return names;
 }
 
+// "0.500", "-1.000".
+std::string formatStickValue(int milli) {
+    return std::format("{}{}.{:03}", milli < 0 ? "-" : "", std::abs(milli) / 1000, std::abs(milli) % 1000);
+}
+
+// The log text after the time: "press start", "release start" or "stick left 0.000 1.000".
+std::string describeEvent(const PadScriptEvent& event) {
+    if (event.kind == PadScriptEventKind::Stick) {
+        return std::format("stick {} {} {}", event.stick == PadStick::Left ? "left" : "right",
+                           formatStickValue(event.x_milli), formatStickValue(event.y_milli));
+    }
+    return std::format("{} {}", event.down ? "press" : "release", joinButtonNames(event.buttons));
+}
+
+// y is inverted: GameInput +y is up, CellPadData 0 is up. No deadzone: a script gives exact positions.
+void applyEvent(const PadScriptEvent& event, KeyboardPadState& state) {
+    if (event.kind == PadScriptEventKind::Stick) {
+        state.setScriptStick(event.stick, stickByte(static_cast<float>(event.x_milli) / 1000.0f),
+                             stickByte(static_cast<float>(-event.y_milli) / 1000.0f));
+        return;
+    }
+    state.setButtons(InputSource::Script, event.buttons, event.down, KeyboardPadState::Clock::now());
+}
+
 }  // namespace
 
 std::expected<PadScript, std::string> parsePadScript(std::string_view text) {
@@ -190,11 +271,12 @@ std::expected<PadScript, std::string> parsePadScript(std::string_view text) {
         }
     }
     script.clock = clock.value_or(PadScriptClock::Seconds);
-    // Releases first at equal times, so a release and a press of the same button at one instant
-    // read as a re-press rather than a no-op.
-    std::ranges::stable_sort(script.events, [](const PadScriptEvent& a, const PadScriptEvent& b) {
+    // Button releases first at equal times, so a release and a press of the same button at one
+    // instant read as a re-press rather than a no-op. Stick events keep file order with the presses.
+    const auto is_release = [](const PadScriptEvent& e) { return e.kind == PadScriptEventKind::Buttons && !e.down; };
+    std::ranges::stable_sort(script.events, [&](const PadScriptEvent& a, const PadScriptEvent& b) {
         if (a.at != b.at) return a.at < b.at;
-        return !a.down && b.down;
+        return is_release(a) && !is_release(b);
     });
     return script;
 }
@@ -211,14 +293,13 @@ void playPadScript(const PadScript& script, KeyboardPadState& state,
                    const std::function<void(std::int64_t)>& wait_until) {
     for (const PadScriptEvent& event : script.events) {
         wait_until(event.at);
-        state.setButtons(InputSource::Script, event.buttons, event.down, KeyboardPadState::Clock::now());
+        applyEvent(event, state);
         if (script.clock == PadScriptClock::Flips) {
-            logInfo("tox2: pad: script f{}: {} {}", event.at, event.down ? "press" : "release",
-                    joinButtonNames(event.buttons));
+            logInfo("tox2: pad: script f{}: {}", event.at, describeEvent(event));
         } else {
             // The flip count lets a seconds script be rewritten as a flip script from one run's log.
-            logInfo("tox2: pad: script {}.{:03} s: {} {} (flip {})", event.at / 1000, event.at % 1000,
-                    event.down ? "press" : "release", joinButtonNames(event.buttons), rsxFlipCount());
+            logInfo("tox2: pad: script {}.{:03} s: {} (flip {})", event.at / 1000, event.at % 1000,
+                    describeEvent(event), rsxFlipCount());
         }
     }
 }

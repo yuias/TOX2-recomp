@@ -518,13 +518,17 @@ void RsxConsumer::advanceFlipDeadline() {
 
 void RsxConsumer::flip(std::uint32_t buffer) {
     RsxState& state = rsxState();
+    // For frame generation's flip rate tracker only. The guest-visible flip time below is still read after the
+    // builder work, as before, so guest timing does not change.
+    const std::uint64_t completed_us = systemTimeUs();
     // The command waits in flipDue() until the flip limit allows it, and then completes where it executes
     // (RPCS3 `flip_command` -> `request_emu_flip` -> `handle_emu_flip`). In the Vsync limit a flip in the game's
     // VSYNC flip mode waits for a vblank tick (RPCS3's "PS3 Native" frame limit); otherwise only the wall-clock
     // limiter applies.
     if (builder_ != nullptr) {
         static constexpr RsxDisplayBuffer kNoBuffer{};
-        builder_->onFlip(*regs_, buffer, buffer < kRsxDisplayBufferCount ? state.display[buffer] : kNoBuffer);
+        builder_->onFlip(*regs_, buffer, buffer < kRsxDisplayBufferCount ? state.display[buffer] : kNoBuffer,
+                         completed_us);
         if (capture_ != nullptr) finishCapture(buffer);
         flips_reached_++;
         // RPCS3 resets the method registers where the command executes (`flip_command` -> `thread::reset`).

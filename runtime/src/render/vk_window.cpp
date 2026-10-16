@@ -33,7 +33,30 @@ constexpr DWORD kWindowedStyle = WS_OVERLAPPEDWINDOW;
 
 double toMs(std::chrono::nanoseconds duration) { return std::chrono::duration<double, std::milli>(duration).count(); }
 
+std::string presentModeName(VkPresentModeKHR mode) {
+    switch (mode) {
+        case VK_PRESENT_MODE_IMMEDIATE_KHR: return "immediate";
+        case VK_PRESENT_MODE_MAILBOX_KHR: return "mailbox";
+        case VK_PRESENT_MODE_FIFO_KHR: return "fifo";
+        case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "fifo_relaxed";
+        default: return std::format("mode {}", static_cast<int>(mode));
+    }
+}
+
 }  // namespace
+
+VkPresentModeKHR choosePresentMode(VkPresentModeKHR requested, std::span<const VkPresentModeKHR> offered) {
+    const auto has = [&offered](VkPresentModeKHR mode) { return std::ranges::find(offered, mode) != offered.end(); };
+    if (requested == VK_PRESENT_MODE_FIFO_KHR || has(requested)) return requested;
+    for (const VkPresentModeKHR mode : {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR}) {
+        if (!has(mode)) continue;
+        logInfo("tox2: render: window: present mode {} is not offered; using {}", presentModeName(requested),
+                presentModeName(mode));
+        return mode;
+    }
+    logWarn("tox2: render: frame generation: no present mode without vsync; using fifo (DLSS-G requires vsync off)");
+    return VK_PRESENT_MODE_FIFO_KHR;
+}
 
 PixelRect letterboxRect(std::uint32_t area_width, std::uint32_t area_height, std::uint32_t aspect_width,
                         std::uint32_t aspect_height) {
@@ -111,6 +134,7 @@ public:
         status.available = {available_width_.load(std::memory_order_relaxed),
                             available_height_.load(std::memory_order_relaxed)};
         status.fullscreen = fullscreen_.load(std::memory_order_relaxed);
+        status.refresh_hz = refresh_hz_.load(std::memory_order_relaxed);
         return status;
     }
     // Only PostMessageW: window functions belong to the UI thread.
@@ -172,6 +196,7 @@ private:
             windowed_placement_.showCmd = SW_SHOWNORMAL;
         }
         refreshAvailable(hwnd_);
+        refreshRefreshRate(hwnd_, true);
         RECT client{};
         GetClientRect(hwnd_, &client);
         width_.store(static_cast<std::uint32_t>(client.right - client.left));
@@ -222,7 +247,13 @@ private:
             case WM_MOVE:
             case WM_DPICHANGED:
             case WM_DISPLAYCHANGE:
-            case WM_SETTINGCHANGE: self->refreshAvailable(hwnd); break;
+            case WM_SETTINGCHANGE:
+                self->refreshAvailable(hwnd);
+                // A mode change keeps the monitor handle, so only these two messages force the query.
+                if (message != WM_SETTINGCHANGE) {
+                    self->refreshRefreshRate(hwnd, message == WM_DISPLAYCHANGE || message == WM_DPICHANGED);
+                }
+                break;
             case kSetSizeMessage: self->setPreset(wparam); return 0;
             case WM_KEYDOWN:
             case WM_KEYUP:
@@ -334,6 +365,27 @@ private:
         available_height_.store(metrics.available.height);
     }
 
+    // Refresh rate of the monitor the window is on, from the monitor's current display mode (not the GPU's
+    // video-controller properties, which report wrong values on multi-monitor setups). The mode is only queried when
+    // the monitor changed or `force` is set, because WM_MOVE arrives continuously while dragging.
+    void refreshRefreshRate(HWND hwnd, bool force) {
+        if (IsIconic(hwnd)) return;
+        const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if (!force && monitor == refresh_monitor_) return;
+        MONITORINFOEXW info{};
+        info.cbSize = sizeof(info);
+        if (!GetMonitorInfoW(monitor, &info)) return;
+        DEVMODEW mode{};
+        mode.dmSize = sizeof(mode);
+        std::uint32_t hz = 0;
+        // 0 and 1 mean "hardware default" rather than a rate.
+        if (EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1) {
+            hz = mode.dmDisplayFrequency;
+        }
+        refresh_monitor_ = monitor;
+        refresh_hz_.store(hz);
+    }
+
     void setPreset(WPARAM value) {
         if (value >= kWindowSizePresets.size()) return;
         preset_.store(static_cast<std::uint8_t>(value));
@@ -388,7 +440,9 @@ private:
     std::atomic<std::uint32_t> available_width_{0};
     std::atomic<std::uint32_t> available_height_{0};
     std::atomic<bool> fullscreen_{false};
+    std::atomic<std::uint32_t> refresh_hz_{0};
     // UI thread only.
+    HMONITOR refresh_monitor_ = nullptr;
     bool preset_pending_ = false;  // a preset was chosen while fullscreen
     LONG windowed_style_ = 0;
     WINDOWPLACEMENT windowed_placement_{};
@@ -495,6 +549,20 @@ bool Presenter::ensureSwapchain() {
     return createSwapchain(caps, extent);
 }
 
+void Presenter::notifyBeforeRecreate() {
+    if (swapchain_ != VK_NULL_HANDLE && before_recreate_) before_recreate_();
+}
+
+void Presenter::releaseSwapchain() {
+    notifyBeforeRecreate();
+    const VkDevice device = context_.device();
+    if (device != VK_NULL_HANDLE) vkDeviceWaitIdle(device);
+    destroySwapchainResources();
+    // The next ensureSwapchain would otherwise take the old extent for a swapchain that still matches.
+    extent_ = {};
+    acquire_stalled_ = false;
+}
+
 bool Presenter::createSwapchain(const VkSurfaceCapabilitiesKHR& caps, VkExtent2D extent) {
     const VkDevice device = context_.device();
     if ((caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0) {
@@ -535,6 +603,8 @@ bool Presenter::createSwapchain(const VkSurfaceCapabilitiesKHR& caps, VkExtent2D
         color_space_ = chosen.colorSpace;
     }
 
+    // Runs before the wait so that a client can stop work that uses the old swapchain first.
+    notifyBeforeRecreate();
     // Nothing may still use the old images or semaphores.
     vkDeviceWaitIdle(device);
 
@@ -564,7 +634,14 @@ bool Presenter::createSwapchain(const VkSurfaceCapabilitiesKHR& caps, VkExtent2D
     info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.preTransform = caps.currentTransform;
     info.compositeAlpha = alpha;
-    info.presentMode = VK_PRESENT_MODE_FIFO_KHR;  // vsync; always available
+    std::uint32_t mode_count = 0;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(context_.physicalDevice(), surface_, &mode_count, nullptr);
+    std::vector<VkPresentModeKHR> offered(mode_count);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(context_.physicalDevice(), surface_, &mode_count, offered.data());
+    offered.resize(mode_count);
+    // FIFO (vsync) is the default request and is always available, so it never falls back.
+    const VkPresentModeKHR present_mode = choosePresentMode(requested_present_mode_, offered);
+    info.presentMode = present_mode;
     info.clipped = VK_TRUE;
     info.oldSwapchain = swapchain_;
     VkSwapchainKHR created = VK_NULL_HANDLE;
@@ -627,7 +704,10 @@ bool Presenter::createSwapchain(const VkSurfaceCapabilitiesKHR& caps, VkExtent2D
     }
     extent_ = extent;
     needs_recreate_ = false;
+    present_mode_ = present_mode;
     stats_.recreations++;
+    logDebug("tox2: render: window: swapchain {}x{}, {} images, present mode {}, display {} Hz", extent.width,
+             extent.height, images_.size(), presentModeName(present_mode), window_->status().refresh_hz);
     return true;
 }
 

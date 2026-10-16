@@ -13,6 +13,8 @@ tox2_game [--game-dir DIR] [--vfs-config FILE] [--elf PATH] [--libsre PATH] [--h
          [--dump-frames DIR] [--dump-frames-every K]
          [--shader-cache DIR] [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--anisotropic-filter off|2|4|8|16]
          [--vk-validation] [--no-window] [--window-size 720p|1080p|1440p|2160p] [--fullscreen on|off]
+         [--frame-gen off|60|90|120|180|unlimited] [--fg-present-mode mailbox|immediate|fifo] [--fg-reflex on|off]
+         [--fg-only-generated] [--fg-cycle SECONDS]
          [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off] [--ppu-threads legacy|1|2]
          [--lwmutex-fast-path on|off] [--lwmutex-watch]
          [--config FILE | --no-config]
@@ -68,6 +70,11 @@ prefix (the census lines and the register dump of a fatal stop do not).
 | `--shader-cache DIR` | Directory of the SPIR-V cache and the pipeline cache `pipelines.bin` (default `generated/shader_cache`). |
 | `--resolution-scale N` | Render every colour and depth target at `N` times its guest size (`N` is a whole number from 1 to 4; default 1), so the picture is `N` times sharper. The window and the `--dump-frames` PNGs are `N` times the guest frame size (2560x1440 at `N` 2 for a 1280x720 game). A target that would exceed the GPU's image size limit is rendered at a smaller scale and counted as `state surface too large for the resolution scale`. Any other value is a usage error. |
 | `--aa-mode supersample\|msaa\|dlaa` | How surfaces in the game's anti-aliased mode are rendered (default `msaa`). `supersample` draws them into a single-sample image in the memory layout, shaded once per sample; `msaa` is the 2-sample multisampled mode; `dlaa` draws the scene one sample per pixel with a sub-pixel jitter and anti-aliases it with NVIDIA DLSS in DLAA mode, which needs an NVIDIA RTX GPU and the Streamline DLLs (see [DLAA](rendering.md#dlaa) and [NVIDIA Streamline (DLAA)](building.md#nvidia-streamline-dlaa)). `msaa` falls back to `supersample` (one log line and the census kind `state 2-sample multisampling unavailable`) on a device without 2-sample support. `dlaa` falls back to `msaa` (or to `supersample` on a device without 2-sample support) when DLAA is unavailable: the build has no Streamline SDK, the DLLs are missing or not signed by NVIDIA, the GPU is not a DLSS-capable RTX GPU, the driver is too old, or the device lacks an image format the pass needs. That prints one warning, `tox2: render: DLAA unavailable (<reason>); anti-aliased surfaces use <mode>`, and counts the census kind `state DLAA unavailable`; the run goes on. At start-up the log says which case applies, `tox2: render: DLAA available (Streamline <version>)` or `tox2: render: DLAA unavailable: <reason>`. The `aa_mode` key of `config.json` takes the same three names in every build, so a saved `"dlaa"` is never an error. Any other value is a usage error. |
+| `--frame-gen off\|60\|90\|120\|180\|unlimited` | Present `60`, `90`, `120`, `180` frames per second or as many as possible (`unlimited`) by letting NVIDIA DLSS Frame Generation insert frames between the game's flips (default `off`). The multiplier is `floor(target / game fps)`, at most what the GPU supports (6x on an RTX 5070 Ti), and generation is inactive when it is below 2: `120` gives 2x at 60 fps and 4x at 30 fps, `90` gives 3x at 30 fps and nothing at 60 fps. The game's own flip rate, vblank timing and frame limit do not change. It needs the window, `--aa-mode dlaa` (with another mode the target is accepted and generation stays inactive, `needs DLAA anti-aliasing`), an RTX GPU that supports it, hardware-accelerated GPU scheduling and the Streamline frame generation DLLs (see [Frame generation](rendering.md#frame-generation) and [NVIDIA Streamline (DLAA)](building.md#nvidia-streamline-dlaa)). Where it cannot run, one warning, `tox2: render: frame generation unavailable (<reason>); presenting without it`, is logged and the run presents as with `off`. `180` is unverified: no display of the development machine runs at 180 Hz. The `frame_gen` key of `config.json` takes the same six names, and the debug overlay changes it while the game runs (`Frame generation` under Settings). With `--no-window` the option is a usage error and the key is ignored. Any other value is a usage error. |
+| `--fg-present-mode mailbox\|immediate\|fifo` | Diagnostic, needs `--frame-gen` other than `off`: the present mode while frame generation is loaded (default `mailbox`). DLSS-G needs vsync off, so `fifo` is only for comparison; it caps the multiplier at `floor(refresh / game fps)`. A mode the surface does not offer falls back to MAILBOX, IMMEDIATE, then FIFO with a warning. See [Frame generation](rendering.md#frame-generation). |
+| `--fg-reflex on\|off` | Diagnostic, needs `--frame-gen` other than `off`: whether Reflex markers and the Reflex sleep run (default `on`). DLSS-G needs them: with `off` it reports that Reflex was not detected and stops generating. |
+| `--fg-only-generated` | Diagnostic, needs `--frame-gen` other than `off`: present only the generated frames, to look at them without the real frames in between. |
+| `--fg-cycle SECONDS` | Diagnostic, needs `--frame-gen` other than `off`: switch frame generation off and on again every `SECONDS` seconds (1 to 600). Each switch recreates the swapchain, as a window resize does. |
 | `--anisotropic-filter off\|2\|4\|8\|16` | Force anisotropic filtering at the given level on the mipmapped, linearly filtered samplers (default `off`, which leaves every sampler as the game set it). The level is limited to what the device supports, and the option has no effect on a device without anisotropic filtering. The debug overlay can change it while the game runs (`Anisotropic filtering` under Settings). Any other value is a usage error. See [Anisotropic filtering](rendering.md#anisotropic-filtering). |
 | `--vk-validation` | Enable the Khronos validation layer. It comes with the Vulkan SDK; if it is not installed, `tox2_game` logs a warning and goes on without it. |
 | `--rsx-capture N[,M...]` | Record the given frames (1-based flip numbers) as `.tox2cap` files. See [Capture and replay](rendering.md#capture-and-replay). The overlay's `Capture next flip` button records one more frame into the same directory, `generated/rsx/captures`, with or without this option. |
@@ -80,7 +87,9 @@ The renderer options are a usage error (exit code 2) when the renderer is off. T
 conflicts with all of them (`error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale,
 --aa-mode, --anisotropic-filter and --vk-validation need --render vulkan`). `--window-size` and `--fullscreen`
 need the window (`error: --window-size and --fullscreen need the window`).
-`--rsx-capture`, `--rsx-census` and `--frame-limit` do not need the renderer.
+`--rsx-capture`, `--rsx-census` and `--frame-limit` do not need the renderer. `--frame-gen` needs the window
+(`error: --frame-gen needs the window`), and the four `--fg-` options need `--frame-gen` other than `off` (`error:
+--fg-present-mode, --fg-reflex, --fg-only-generated and --fg-cycle need --frame-gen other than off`).
 
 Frame dumps are encoded on a worker thread, so dumping does not slow the game down. When the worker
 falls more than four frames behind, a frame is skipped and counted (`tox2: render: dump skipped
@@ -158,7 +167,7 @@ written the way its kind of option needs it:
 | Kind | Keys | Value in the file |
 | --- | --- | --- |
 | Path | `game_dir`, `vfs_config`, `elf`, `libsre`, `hdd_dir`, `sdata_cache`, `log`, `png_dump`, `pad_script`, `audio_dump`, `rsx_census`, `dump_frames`, `shader_cache` | A non-empty string. A relative path is relative to the directory of the config file, not to the working directory (on the command line it is relative to the working directory). |
-| Text | `log_level`, `dialog_answer`, `pad`, `audio`, `render`, `ppu_threads`, `frame_limit`, `aa_mode`, `anisotropic_filter`, `window_size` | A string with the text the command line takes. A whole number is also accepted and read as its decimal text, so `"frame_limit": 60` and `"ppu_threads": 2` work. |
+| Text | `log_level`, `dialog_answer`, `pad`, `audio`, `render`, `ppu_threads`, `frame_limit`, `aa_mode`, `anisotropic_filter`, `window_size`, `frame_gen` | A string with the text the command line takes. A whole number is also accepted and read as its decimal text, so `"frame_limit": 60` and `"ppu_threads": 2` work. |
 | Number | `seconds`, `dump_frames_every`, `resolution_scale` | A non-negative whole number. |
 | Flag | `strict`, `quiet_hle`, `load_only`, `pad_probe`, `vk_validation`, `no_window`, `lwmutex_watch` | `true` sets the option. `false` is the same as leaving the key out. |
 | On or off | `host_priorities`, `yield_backoff`, `lwmutex_fast_path`, `fullscreen` | `true` or `false`, or the strings `"on"` or `"off"`. |
@@ -214,7 +223,7 @@ no renderer` (or `no window`), and is never an error. So a saved `resolution_sca
 | Needs | Keys |
 | --- | --- |
 | A renderer | `dump_frames`, `dump_frames_every`, `shader_cache`, `vk_validation`, `resolution_scale`, `aa_mode`, `anisotropic_filter` |
-| A window | `pad_probe`, `window_size`, `fullscreen` |
+| A window | `pad_probe`, `window_size`, `fullscreen`, `frame_gen` |
 
 `dump_frames` in the file switches the renderer on by itself, so it is ignored only together with an
 explicit `"render": "none"`. A key outside this table is checked like a command-line option: a hand-written
@@ -231,6 +240,7 @@ values, whether from the command line, the file or the defaults, are never writt
 | `resolution_scale` | `Internal resolution scale` is changed (a number). |
 | `aa_mode` | `Anti-aliasing` is changed (`"supersample"`, `"msaa"` or `"dlaa"`; the overlay lists DLAA only when it is available). |
 | `anisotropic_filter` | `Anisotropic filtering` is changed (`"off"`, `"2"`, `"4"`, `"8"` or `"16"`). |
+| `frame_gen` | `Frame generation` is changed (`"off"`, `"60"`, `"90"`, `"120"`, `"180"` or `"unlimited"`; the overlay lists it only where frame generation is available, and enables it only while the anti-aliasing mode is DLAA). |
 | `window_size` | `Window size` is changed to another preset (`"720p"`, `"1080p"`, `"1440p"` or `"2160p"`). |
 | `fullscreen` | `Alt+Enter` or `F11` switches fullscreen on or off (`true` or `false`). |
 
@@ -244,7 +254,7 @@ placeholder and saves nothing. The rule has these consequences:
   (replacing the file's value) and the run continues with it. The command-line value itself is never
   written.
 - A value that differs from the player's choice is not written: a resolution scale that fell back because
-  the surface was too large, MSAA that fell back to supersampling, DLAA that fell back to MSAA, anisotropy
+  the surface was too large, MSAA that fell back to supersampling, DLAA that fell back to MSAA, a frame generation target that cannot run, anisotropy
   limited by the device, or a window size reduced to fit the screen. The file keeps what the player chose, so a larger monitor or a
   different device gets it at the next start.
 - Dragging or maximising the window, and a fullscreen state given by `--fullscreen`, write nothing.

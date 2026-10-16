@@ -115,8 +115,8 @@ function(tox2_render_add_streamline_runtime)
   set(bin_dir "${CMAKE_BINARY_DIR}/bin")
   set(licence_dir "${bin_dir}/licenses/streamline")
   set(copied "")
-  # NvLowLatencyVk.dll (Reflex) is left out: its licence does not list it as distributable, and DLAA does not need
-  # it. sl.common's error about it is logged at debug level.
+  # NvLowLatencyVk.dll (Reflex) is left out: its licence does not list it as distributable. On Vulkan Streamline
+  # uses VK_NV_low_latency2 instead; sl.common's error about the missing DLL is logged at debug level.
   foreach(name sl.interposer.dll sl.common.dll sl.dlss.dll nvngx_dlss.dll)
     add_custom_command(OUTPUT "${bin_dir}/${name}"
       COMMAND ${CMAKE_COMMAND} -E make_directory "${bin_dir}"
@@ -125,6 +125,24 @@ function(tox2_render_add_streamline_runtime)
       VERBATIM)
     list(APPEND copied "${bin_dir}/${name}")
   endforeach()
+  # Frame generation is optional: a missing DLL only makes it unavailable at run time, DLAA is unaffected.
+  set(missing_frame_gen "")
+  foreach(name sl.dlss_g.dll sl.reflex.dll sl.pcl.dll nvngx_dlssg.dll)
+    if(NOT EXISTS "${sdk}/bin/x64/${name}")
+      list(APPEND missing_frame_gen "${name}")
+      continue()
+    endif()
+    add_custom_command(OUTPUT "${bin_dir}/${name}"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${bin_dir}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${sdk}/bin/x64/${name}" "${bin_dir}/${name}"
+      DEPENDS "${sdk}/bin/x64/${name}"
+      VERBATIM)
+    list(APPEND copied "${bin_dir}/${name}")
+  endforeach()
+  if(missing_frame_gen)
+    list(JOIN missing_frame_gen ", " missing_text)
+    message(STATUS "TOX2: Streamline: frame generation DLLs missing (${missing_text})")
+  endif()
   foreach(pair "license.txt|LICENSE.txt" "bin/x64/nvngx_dlss.license.txt|nvngx_dlss.license.txt"
                "3rd-party-licenses.md|3rd-party-licenses.md")
     string(REPLACE "|" ";" pair "${pair}")
@@ -149,8 +167,10 @@ function(tox2_render_add)
 
   add_library(tox2_render STATIC
     runtime/src/render/dlaa_pass.cpp
+    runtime/src/render/fg_motion.cpp
     runtime/src/render/fp_translator.cpp
     runtime/src/render/frame_dump.cpp
+    runtime/src/render/frame_gen_runtime.cpp
     runtime/src/render/image_pool.cpp
     runtime/src/render/shader_compiler.cpp
     runtime/src/render/vertex_convert.cpp
@@ -212,6 +232,14 @@ function(tox2_render_add)
   add_test(NAME fp_translator COMMAND tox2_fp_translator_tests)
   set_tests_properties(fp_translator PROPERTIES
     PASS_REGULAR_EXPRESSION "fp translator tests: [0-9]+ passed, 0 failed")
+
+  # Header-only maths; needs no GPU.
+  add_executable(tox2_frame_gen_tests runtime/tests/frame_gen_test.cpp)
+  target_compile_options(tox2_frame_gen_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_link_libraries(tox2_frame_gen_tests PRIVATE tox2_render)
+  add_test(NAME frame_gen COMMAND tox2_frame_gen_tests)
+  set_tests_properties(frame_gen PROPERTIES
+    PASS_REGULAR_EXPRESSION "frame gen tests: [0-9]+ passed, 0 failed")
 
   # Replays a capture without the game: prints the command list from the frame builder, renders it
   # headless and writes the displayed frame as a PNG.
