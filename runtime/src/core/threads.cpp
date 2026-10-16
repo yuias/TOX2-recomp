@@ -19,6 +19,7 @@
 #include "core/log.h"
 #include "core/reservation.h"
 #include "core/sleeper.h"
+#include "core/thread_cpu.h"
 #include "tox2/ppu_context.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -84,25 +85,9 @@ std::uint64_t threadCycles() {
     return cycles;
 }
 
-// The unit of QueryThreadCycleTime is not documented as time, so it is calibrated against steady_clock: the thread
-// spins for a millisecond a few times and the highest cycles/ms ratio wins, since a spin the host preempted counts
-// fewer cycles than wall time. Done during static initialisation because a lazy calibration would run inside a hold.
-double calibrateCyclesPerMs() {
-    constexpr int kSpins = 5;
-    constexpr auto kSpinTime = std::chrono::milliseconds(1);
-    double best = 0.0;
-    for (int i = 0; i < kSpins; i++) {
-        const std::uint64_t cycles_start = threadCycles();
-        const auto start = std::chrono::steady_clock::now();
-        auto end = start;
-        while (end - start < kSpinTime) end = std::chrono::steady_clock::now();
-        const std::uint64_t cycles = threadCycles() - cycles_start;
-        const double ms = std::chrono::duration<double, std::milli>(end - start).count();
-        best = std::max(best, static_cast<double>(cycles) / ms);
-    }
-    return best;
-}
-const double g_cycles_per_ms = calibrateCyclesPerMs();
+// Calibrated during static initialisation (the calibration itself is shared, see hostCyclesPerMs) because a lazy
+// calibration would run inside a hold.
+const double g_cycles_per_ms = hostCyclesPerMs();
 
 std::atomic<GuestLockLongHoldObserver> g_long_hold_observer{nullptr};
 

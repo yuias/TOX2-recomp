@@ -41,6 +41,7 @@
 #include "core/param_sfo.h"
 #include "core/perf_log.h"
 #include "core/reservation.h"
+#include "core/thread_cpu.h"
 #include "core/threads.h"
 #include "core/timer_resolution.h"
 #include "tox2/ppu_context.h"
@@ -12518,6 +12519,81 @@ void testRsxBusyFormat() {
     CHECK(tox2::formatRsxBusy({3890, 2090, 790, 4830, 5090}, 0).empty());
 }
 
+void testHostThreadCpu() {
+    using tox2::HostThreadCpu;
+    const std::vector<HostThreadCpu> before = {{"rsx", 0}, {"ppu.01000006", 0}};
+    const std::vector<HostThreadCpu> after = {{"rsx", 262100}, {"ppu.01000006", 150200}, {"spu.06000200", 4000}};
+    CHECK(tox2::formatHostThreadCpu(before, after, 0, 812300) ==
+          "cpu total 812.3 ms: rsx=262.1 ppu.01000006=150.2 other=400.0");
+    CHECK(tox2::formatHostThreadCpu(before, after, 500, 500).empty());
+
+    // A thread missing from `before` counts from 0; the listed entries never push `other` below 0.
+    CHECK(tox2::formatHostThreadCpu({}, after, 1000, 101000) ==
+          "cpu total 100.0 ms: rsx=262.1 ppu.01000006=150.2 other=0.0");
+
+    // 13 threads of 10 ms: ties keep registration order and the line lists 12.
+    std::vector<HostThreadCpu> zero, ten;
+    for (int i = 0; i < 13; i++) {
+        const std::string label = std::format("t{:02}", i);
+        zero.push_back({label, 0});
+        ten.push_back({label, 10000});
+    }
+    const std::string many = tox2::formatHostThreadCpu(zero, ten, 0, 200000);
+    CHECK(many.starts_with("cpu total 200.0 ms: t00=10.0 t01=10.0"));
+    CHECK(many.find(" t11=10.0") != std::string::npos);
+    CHECK(many.find("t12") == std::string::npos);
+    CHECK(many.ends_with(" other=80.0"));
+
+    // A thread that registers itself keeps its CPU time after it exits.
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool spun = false, release = false;
+    std::thread helper([&] {
+        tox2::registerHostThreadCpu("test.cpu.helper");
+        tox2::registerHostThreadCpu("test.cpu.helper.again");
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(100)) {
+        }
+        std::unique_lock lock(mutex);
+        spun = true;
+        cv.notify_all();
+        cv.wait(lock, [&] { return release; });
+    });
+    {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [&] { return spun; });
+    }
+    const auto findHelper = [](const std::vector<HostThreadCpu>& snapshot) {
+        std::size_t count = 0;
+        std::uint64_t cpu_us = 0;
+        for (const HostThreadCpu& entry : snapshot) {
+            if (entry.label.starts_with("test.cpu.helper")) {
+                count++;
+                cpu_us = entry.cpu_us;
+            }
+        }
+        return std::pair{count, cpu_us};
+    };
+    const auto [live_count, live_us] = findHelper(tox2::hostThreadCpuSnapshot());
+    CHECK(live_count == 1);
+    CHECK(live_us >= 80000 && live_us <= 200000);
+    {
+        std::lock_guard lock(mutex);
+        release = true;
+    }
+    cv.notify_all();
+    helper.join();
+    const auto [exited_count, exited_us] = findHelper(tox2::hostThreadCpuSnapshot());
+    const auto [exited_count2, exited_us2] = findHelper(tox2::hostThreadCpuSnapshot());
+    CHECK(exited_count == 1 && exited_count2 == 1);
+    // The thread still runs a little between the first snapshot and its exit.
+    CHECK(exited_us >= live_us && exited_us - live_us < 5000);
+    CHECK(exited_us2 == exited_us);
+
+    CHECK(tox2::hostCyclesPerMs() > 0.0);
+    CHECK(tox2::processCpuUs() > 0);
+}
+
 void testPerfLine() {
     CHECK(tox2::formatPerfLine(212.04, "x") == "tox2: perf: t 212.0 s: x");
 
@@ -16883,6 +16959,7 @@ int main(int argc, char** argv) {
     testPpuYieldStats();
     testPpuYieldSemantics();
     testPerfLine();
+    testHostThreadCpu();
     testRsxBusyFormat();
     testReservationAndDcbz();
     testPpuReservationStats();
