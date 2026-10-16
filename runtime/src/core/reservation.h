@@ -133,9 +133,13 @@ public:
     //
     // Halt: the setter must store the flag atomically (the waiter reads it with an acquire load) and only
     // then call wake(), or the waiter notices it only at its timeout.
+    //
+    // `slept` (may be null) is set to false on entry and to true just before the first sleep. It tells a result of
+    // the checks before sleeping (Halt, or Epoch because any write moved the epoch since `seen`; Timeout for a zero
+    // timeout) from one after sleeping.
     StoreWait waitStoreEpoch(std::uint64_t seen, const std::uint32_t* halt,
                              std::chrono::microseconds timeout = std::chrono::milliseconds(1),
-                             std::uint32_t watch_line = kWatchAnyLine);
+                             std::uint32_t watch_line = kWatchAnyLine, bool* slept = nullptr);
 
     // Bumps the epoch and wakes every waiter without a write, whatever line it watches.
     void wake();

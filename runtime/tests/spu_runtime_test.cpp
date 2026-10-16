@@ -531,6 +531,63 @@ void testWaitForStoreEpoch() {
     CHECK(table.waitStoreEpoch(seen - 1, &halt, milliseconds(3000)) == tox2::StoreWait::Epoch);
 }
 
+void testStoreWaitReportsSleep() {
+    using Clock = std::chrono::steady_clock;
+    using std::chrono::milliseconds;
+    tox2::ReservationTable table;
+    TestMemory mem;
+    std::uint32_t halt = 0;
+    std::uint8_t zeros[16] = {};
+    // Starts true so a missing write of the flag shows up.
+    bool slept = true;
+
+    // The epoch already moved: returns before sleeping.
+    std::uint64_t seen = table.storeEpoch();
+    CHECK(table.waitStoreEpoch(seen - 1, &halt, milliseconds(3000), tox2::kWatchAnyLine, &slept) ==
+          tox2::StoreWait::Epoch);
+    CHECK(!slept);
+
+    // A flag that is already set.
+    slept = true;
+    __atomic_store_n(&halt, 1u, __ATOMIC_RELEASE);
+    CHECK(table.waitStoreEpoch(seen, &halt, milliseconds(3000), tox2::kWatchAnyLine, &slept) == tox2::StoreWait::Halt);
+    CHECK(!slept);
+    __atomic_store_n(&halt, 0u, __ATOMIC_RELEASE);
+
+    // A zero timeout never waits.
+    slept = true;
+    CHECK(table.waitStoreEpoch(seen, &halt, milliseconds(0), tox2::kWatchAnyLine, &slept) == tox2::StoreWait::Timeout);
+    CHECK(!slept);
+
+    // Nothing happens: the wait sleeps until its deadline.
+    slept = false;
+    CHECK(table.waitStoreEpoch(seen, &halt, milliseconds(20), tox2::kWatchAnyLine, &slept) == tox2::StoreWait::Timeout);
+    CHECK(slept);
+
+    // A write to the watched line ends a sleep that started after `seen` was read.
+    seen = table.storeEpoch();
+    std::atomic<bool> started{false};
+    tox2::StoreWait result = tox2::StoreWait::Halt;
+    bool waiter_slept = false;
+    Clock::time_point finished;
+    std::thread waiter([&] {
+        started.store(true);
+        result = table.waitStoreEpoch(seen, &halt, milliseconds(10000), 0, &waiter_slept);
+        finished = Clock::now();
+    });
+    while (!started.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(milliseconds(200));
+    const auto put_time = Clock::now();
+    table.put(mem.base(), 0, zeros, 16);
+    waiter.join();
+    CHECK(result == tox2::StoreWait::Epoch);
+    CHECK(waiter_slept);
+    CHECK(finished - put_time < milliseconds(2000));
+
+    // The slept pointer is optional.
+    CHECK(table.waitStoreEpoch(table.storeEpoch() - 1, &halt, milliseconds(3000)) == tox2::StoreWait::Epoch);
+}
+
 // Ping-pong: each round the writer does exactly one put() once the waiter has read its epoch, so a wakeup
 // lost anywhere between that read and the wait shows up as a Timeout.
 void testWaitersAreNotLost() {
@@ -3687,6 +3744,7 @@ int main(int argc, char** argv) {
     testCompareWindow();
     testUnchangedChunkSurvivesRace();
     testWaitForStoreEpoch();
+    testStoreWaitReportsSleep();
     testWaitersAreNotLost();
     testUnrelatedPutDoesNotNotify();
     testWatchLineWakesOnlyItsWaiter();

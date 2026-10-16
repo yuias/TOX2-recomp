@@ -373,7 +373,8 @@ bool ReservationTable::lost(const std::uint8_t* base, const Reservation& res) co
 }
 
 StoreWait ReservationTable::waitStoreEpoch(std::uint64_t seen, const std::uint32_t* halt,
-                                           std::chrono::microseconds timeout, std::uint32_t watch_line) {
+                                           std::chrono::microseconds timeout, std::uint32_t watch_line, bool* slept) {
+    if (slept) *slept = false;
     // Registered before the word and the epoch are read, see publish().
     const WatchRegistration registration(watch_, wildcard_waiters_, wildcard_wake_, watch_line);
     std::atomic<std::uint32_t>& word = registration.word();
@@ -388,6 +389,7 @@ StoreWait ReservationTable::waitStoreEpoch(std::uint64_t seen, const std::uint32
         // Rounded up: a shorter wait would return early and spin through this loop.
         const auto left_ms = std::chrono::ceil<std::chrono::milliseconds>(left).count();
         const DWORD wait_ms = static_cast<DWORD>(std::min<std::int64_t>(left_ms, INFINITE - 1));
+        if (slept) *slept = true;
         WaitOnAddress(&word, &before, sizeof(before), wait_ms);
         if (word.load(std::memory_order_seq_cst) != before) {
             return haltRequested(halt) ? StoreWait::Halt : StoreWait::Epoch;
