@@ -45,6 +45,7 @@ void printUsage() {
             "                      [--dlaa-jitter on|off] [--dlaa-jitter-flip none|x|y|xy]\n"
             "                      [--dlaa-camera on|off|reset] [--dlaa-clip-flip-y on|off]\n"
             "                      [--dlaa-mv-invalid zero|unset]\n"
+            "                      [--fg-mv-check [--fg-mv-flip none|x|y|xy]]\n"
             "                      [--shader-cache DIR] [--repeat N] [--quiet]\n"
             "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture; several captures are replayed in\n"
             "           order through one renderer, each one a frame that must end with a flip\n"
@@ -72,6 +73,11 @@ void printUsage() {
             "                      clip-to-clip matrices are mirrored in y for Streamline's y-up clip space\n"
             "  --dlaa-mv-invalid V  diagnostic, needs --aa-mode dlaa: motionVectorsInvalidValue 0 (zero, default) or the\n"
             "                      SDK default (unset, which makes Streamline warn once per process)\n"
+            "  --fg-mv-check       diagnostic, needs --aa-mode dlaa: draw the camera motion vectors that frame generation\n"
+            "                      will use and, from the second frame on, print how well they warp the previous DLAA\n"
+            "                      output onto the current one (the displayed frame does not change)\n"
+            "  --fg-mv-flip F      diagnostic, needs --fg-mv-check: negate the motion vectors on the x axis, the y axis or\n"
+            "                      both (none by default)\n"
             "  --no-validation     do not enable the Vulkan validation layer\n"
             "  --shader-cache DIR  directory of the on-disk SPIR-V cache\n"
             "  --repeat N          replay and render the capture N times (N >= 1) with one memory view, builder and\n"
@@ -400,7 +406,9 @@ int main(int argc, char** argv) {
     tox2::AaMode aa_mode = tox2::AaMode::Msaa;
     tox2::DlaaDebug dlaa_debug;
     bool has_dlaa_option = false;  // a --dlaa-* option was given, which needs --aa-mode dlaa
-    std::uint32_t rect[4] = {};    // --compare-rect: x, y, width, height
+    tox2::FgDebug fg_debug;
+    bool has_fg_mv_flip = false;  // --fg-mv-flip was given, which needs --fg-mv-check
+    std::uint32_t rect[4] = {};   // --compare-rect: x, y, width, height
     bool has_rect = false;
     // Thresholds of --compare; a NaN limit is not checked.
     double max_diff = std::nan(""), max_mean = std::nan(""), max_differing = std::nan("");
@@ -518,6 +526,22 @@ int main(int argc, char** argv) {
             i++;
             continue;
         }
+        if (arg == "--fg-mv-check") {
+            fg_debug.mv_check = true;
+            continue;
+        }
+        if (arg == "--fg-mv-flip") {
+            const std::string_view value = i + 1 < argc ? std::string_view(argv[i + 1]) : std::string_view();
+            if (value != "none" && value != "x" && value != "y" && value != "xy") {
+                std::fputs("error: --fg-mv-flip takes none|x|y|xy\n", stderr);
+                return 2;
+            }
+            fg_debug.mv_flip_x = value == "x" || value == "xy";
+            fg_debug.mv_flip_y = value == "y" || value == "xy";
+            has_fg_mv_flip = true;
+            i++;
+            continue;
+        }
         if (arg == "--compare-rect") {
             if (i + 1 >= argc || !parseRect(argv[i + 1], rect)) {
                 std::fputs("error: --compare-rect takes X,Y,W,H, four whole numbers with W and H above 0\n", stderr);
@@ -560,6 +584,18 @@ int main(int argc, char** argv) {
     }
     if (has_dlaa_option && aa_mode != tox2::AaMode::Dlaa) {
         std::fputs("error: the --dlaa-* options need --aa-mode dlaa\n", stderr);
+        return 2;
+    }
+    if (has_fg_mv_flip && !fg_debug.mv_check) {
+        std::fputs("error: --fg-mv-flip needs --fg-mv-check\n", stderr);
+        return 2;
+    }
+    if (fg_debug.mv_check && aa_mode != tox2::AaMode::Dlaa) {
+        std::fputs("error: --fg-mv-check needs --aa-mode dlaa\n", stderr);
+        return 2;
+    }
+    if (repeat != 0 && fg_debug.mv_check) {
+        std::fputs("error: --repeat cannot be combined with --fg-mv-check\n", stderr);
         return 2;
     }
     if (repeat != 0 && (!out_dir.empty() || !compare_path.empty())) {
@@ -660,6 +696,7 @@ int main(int argc, char** argv) {
         render_options.resolution_scale = resolution_scale;
         render_options.aa_mode = aa_mode;
         render_options.dlaa_debug = dlaa_debug;
+        render_options.fg_debug = fg_debug;
         render_options.readback_all = true;  // the replay reads the display after its last flip
         {
             tox2::RsxRenderer renderer(*context, render_options);
@@ -671,6 +708,7 @@ int main(int argc, char** argv) {
             std::vector<std::uint8_t> bgra;
             std::uint32_t width = 0;
             std::uint32_t height = 0;
+            std::uint64_t fg_mv_printed = 0;
             for (std::uint32_t pass = 0; pass < loop && renderer.valid(); pass++) {
                 for (std::size_t index = 0; index < frames.size() && renderer.valid(); index++) {
                     ReplayFrame& frame = *frames[index];
@@ -687,6 +725,14 @@ int main(int argc, char** argv) {
                     }
                     renderer.execute(commands);
                     frame.builder.recycle(std::move(commands));
+                    const tox2::RendererStats& stats = renderer.stats();
+                    if (stats.fg_mv_checks != fg_mv_printed) {
+                        fg_mv_printed = stats.fg_mv_checks;
+                        std::printf("fg mv: frame %zu, warp mean %.3f, no-motion mean %.3f, %u pixels%s\n",
+                                    pass * frames.size() + index + 1, stats.fg_mv_last.warp_mean,
+                                    stats.fg_mv_last.no_motion_mean, stats.fg_mv_last.pixels,
+                                    stats.fg_mv_last_reset ? ", reset" : "");
+                    }
                     const bool last_frame = pass + 1 == loop && index + 1 == frames.size();
                     if (!last_frame && !out_dir.empty() && renderer.valid()) {
                         if (!renderer.readDisplay(bgra, width, height)) {

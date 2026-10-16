@@ -384,6 +384,7 @@ RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(c
 RsxRenderer::~RsxRenderer() {
     const VkDevice device = context_.device();
     vkDeviceWaitIdle(device);
+    fg_motion_.reset();
     dlaa_.reset();  // frees the DLSS viewport; the device is idle
     for (std::unique_ptr<FrameSlot>& slot : slots_) {
         if (!slot) continue;
@@ -1134,6 +1135,17 @@ VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
         invalidateDrawState();
         if (!evaluated) return failed(error);
 
+        // Diagnostic only: a failure is logged and leaves the scene read as it is.
+        // A second evaluation in the same frame (the scene written again after the tap) is not checked.
+        if (options_.fg_debug.mv_check && !fg_mv_pending_) {
+            std::string check_error;
+            if (!recordFgMvCheck(res, *depth, camera, reset, check_error)) {
+                logOnce(LogLevel::Warn, "render-fg-mv-failed", "tox2: render: motion vector check failed ({})",
+                        check_error);
+            }
+            invalidateDrawState();
+        }
+
         // Streamline returns the output to the layout it was told.
         transitionImage(res.output.image, VK_IMAGE_ASPECT_COLOR_BIT, res.output.layout,
                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -1170,6 +1182,62 @@ VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
         }
     }
     return view;
+}
+
+// The depth that went into the DLAA evaluation is still in SHADER_READ_ONLY_OPTIMAL and the DLAA output is in GENERAL,
+// which is where frame generation will read them. Both passes only read those images, so the scene is unchanged.
+bool RsxRenderer::recordFgMvCheck(const DlaaPass::Resources& dlaa, const RenderTarget& depth,
+                                  const DlaaCameraTracker::Result& camera, bool reset, std::string& error) {
+    if (!fg_motion_) fg_motion_ = std::make_unique<FgMotionPass>(context_);
+    std::shared_ptr<void> retired;
+    bool recreated = false;
+    if (!fg_motion_->prepare(dlaa.output.width, dlaa.output.height, retired, recreated, error)) return false;
+    // Frames in flight may still read the previous images.
+    if (retired) slots_[current_slot_]->keep_alive.push_back(std::move(retired));
+
+    FgMotionInputs inputs;
+    inputs.depth = depth.msaa->depth_view != VK_NULL_HANDLE ? depth.msaa->depth_view : depth.msaa->view;
+    // The camera pair gives the same clip-to-clip transform as the DLAA matrices, without their y flip.
+    Mat4 inverse{};
+    if (camera.clip && camera.prev_clip && mat4Inverse(*camera.clip, inverse)) {
+        inputs.clip_to_prev_clip = mat4Multiply(inverse, *camera.prev_clip);
+    }
+    inputs.flip[0] = options_.fg_debug.mv_flip_x ? -1.0f : 1.0f;
+    inputs.flip[1] = options_.fg_debug.mv_flip_y ? -1.0f : 1.0f;
+
+    const VkCommandBuffer cmd = outsideCmd();
+    // Streamline's writes to the output are not ordered against fragment reads by anything it records.
+    VkMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+
+    if (!fg_motion_->recordMotion(cmd, inputs, error) ||
+        !fg_motion_->recordWarpCheck(cmd, dlaa.output.view, VK_IMAGE_LAYOUT_GENERAL, fg_motion_->motionView(), error)) {
+        return false;
+    }
+    fg_mv_pending_ = true;
+    fg_mv_reset_ = reset;
+    return true;
+}
+
+void RsxRenderer::collectFgMvCheck() {
+    if (!fg_mv_pending_) return;
+    fg_mv_pending_ = false;
+    // The flip just submitted the frame that recorded the check.
+    if (!fg_motion_ || !waitSlot(*slots_[display_slot_])) return;
+    FgWarpStats warp;
+    if (!fg_motion_->collectWarpStats(warp)) return;  // the first check only seeds the history
+    stats_.fg_mv_checks++;
+    stats_.fg_mv_last = warp;
+    stats_.fg_mv_last_reset = fg_mv_reset_;
 }
 
 // A single-sample pass is about to use the layout image of `target`: brings it up to date with the sidecar first
@@ -2798,7 +2866,10 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     }
     if (!valid()) return;
     if (presenter_ != nullptr) recordPresentBlit(display_black_ ? nullptr : it->second.get());
-    if (submitFrame()) has_flip_ = true;
+    if (submitFrame()) {
+        has_flip_ = true;
+        collectFgMvCheck();
+    }
     // Applied only now: this flip, its readback and the present blit were all recorded at the old scale, and
     // targets rescale lazily when the next frame binds them. The mode follows the same rule so a frame is never
     // recorded in both. The anisotropy level follows the same rule; only samplers created afterwards use it.

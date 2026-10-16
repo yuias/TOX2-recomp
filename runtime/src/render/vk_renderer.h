@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "render/dlaa_pass.h"
+#include "render/fg_motion.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
 #include "render/image_pool.h"
@@ -52,6 +53,15 @@ struct DlaaDebug {
     bool mvec_invalid_zero = true;
 };
 
+// Frame generation diagnostics (tox2_rsxreplay); the defaults change nothing.
+struct FgDebug {
+    // At the frame's first DLAA evaluation, draw the camera motion vectors from the depth and compare the DLAA output
+    // with the previous one moved by them; the result goes to RendererStats. The scene pixels are not touched.
+    bool mv_check = false;
+    // Negate the x / y component of the motion vectors, to find their sign convention.
+    bool mv_flip_x = false, mv_flip_y = false;
+};
+
 struct RenderOptions {
     // Every dump_every-th flip (counted from 1) is written to `<dump_dir>/frame_<flip number>.png`. An
     // empty directory disables dumping.
@@ -77,6 +87,7 @@ struct RenderOptions {
     // through the layout copy. For tests of the scene image itself.
     bool dlaa_evaluate = true;
     DlaaDebug dlaa_debug;
+    FgDebug fg_debug;
     // Forced anisotropic filtering level: 1 (off), 2, 4, 8 or 16; anything else makes the renderer invalid. A device
     // without the samplerAnisotropy feature keeps 1; a lower device maximum clamps the level (see anisotropy()).
     std::uint32_t anisotropy = 1;
@@ -105,6 +116,10 @@ struct RendererStats {
     std::uint64_t dlaa_evaluations = 0;   // DLAA evaluations recorded
     std::uint64_t dlaa_resets = 0;        // ... that started a new history
     std::uint64_t dlaa_failures = 0;      // scene reads that fell back to the layout image after a failed evaluation
+    // FgDebug::mv_check results: completed warp checks, and the figures of the latest one.
+    std::uint64_t fg_mv_checks = 0;
+    FgWarpStats fg_mv_last;
+    bool fg_mv_last_reset = false;  // the DLAA evaluation of that frame started a new history
     // GPU images and upload blocks created, by RenderImageKind, with their size in bytes (width x height x samples x
     // texel size). The Texture entries follow the texture cache as of the end of the last execute() or flip.
     std::array<std::uint64_t, kRenderImageKindCount> images_created{};
@@ -272,6 +287,12 @@ private:
     // widened to the 2W layout columns the game's resolve expects, with the texture remap applied. Null after a counted
     // failure; the caller then reads the layout image instead.
     VkImageView dlaaView(RenderTarget& scene, std::uint32_t remap);
+    // FgDebug::mv_check: records the motion vector pass and the warp check at the DLAA tap, with the DLAA output in
+    // GENERAL. False with `error` on failure.
+    bool recordFgMvCheck(const DlaaPass::Resources& dlaa, const RenderTarget& depth,
+                         const DlaaCameraTracker::Result& camera, bool reset, std::string& error);
+    // Reads the pending warp check into stats_ once the frame's commands have finished.
+    void collectFgMvCheck();
     bool beginLayoutPass(RenderTarget& target, bool writes, bool overwrites_all);
     void beginSidecarPass(RenderTarget& target, bool writes, bool overwrites_all);
 
@@ -313,6 +334,10 @@ private:
     std::optional<std::uint64_t> dlaa_jitter_frame_;
     // The perspective scene draws of the frame being recorded, which exist before the first evaluation creates dlaa_.
     DlaaCameraTracker dlaa_camera_;
+    // FgDebug::mv_check state, created by the first check.
+    std::unique_ptr<FgMotionPass> fg_motion_;
+    bool fg_mv_pending_ = false;  // a warp check was recorded and its frame has not been submitted and read yet
+    bool fg_mv_reset_ = false;    // the DLAA evaluation of that frame reset its history
     std::uint32_t anisotropy_ = 1;
     bool anisotropy_unavailable_logged_ = false;
     // Always created: its worker thread only starts with the first submitted frame.

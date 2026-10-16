@@ -34,6 +34,10 @@ public:
     struct Result {
         DlaaMatrices matrices;
         bool reset = true;
+        // The unflipped view-to-clip transforms of the two cameras (current and previous frame), set whenever both
+        // frames have an invertible camera. Motion vectors need the unflipped clip-to-clip transform regardless of
+        // the y flip that `matrices` carries for Streamline.
+        std::optional<Mat4> clip, prev_clip;
     };
 
     void record(const DlaaCameraKey& key);
