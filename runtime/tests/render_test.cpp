@@ -6237,6 +6237,63 @@ void testStreamlineContext(tox2::VkContext& ctx) {
 #endif
 }
 
+// The shared context loads DLSS only, so every frame generation call must fail naming the missing plugins or do
+// nothing, while the frame identity still works. A build without the SDK cannot create a Streamline object at all.
+void testStreamlineFrameGenApi(tox2::VkContext& ctx) {
+#if TOX2_HAS_STREAMLINE
+    tox2::Streamline* streamline = ctx.streamline();
+    if (streamline == nullptr) {
+        std::printf("streamline frame generation api: skipped: %s\n", ctx.streamlineStatus().c_str());
+        return;
+    }
+    const auto notLoaded = [](const std::string& text) { return text.find("not loaded") != std::string::npos; };
+
+    std::string reason;
+    tox2::StreamlineRequirements requirements;
+    CHECK(!streamline->requirements(tox2::StreamlineFeature::FrameGeneration, requirements, reason) &&
+          notLoaded(reason));
+    reason.clear();
+    CHECK(!streamline->featureSupported(tox2::StreamlineFeature::FrameGeneration, ctx.physicalDevice(), reason) &&
+          notLoaded(reason));
+    reason.clear();
+    CHECK(!streamline->setFrameGenerationLoaded(true, reason) && notLoaded(reason));
+    CHECK(!streamline->frameGenerationLoaded());
+
+    streamline->beginFrame(7);
+    CHECK(streamline->frameIndex() == 7);
+    CHECK(streamline->frameHandle() != nullptr);
+
+    // Without the plugins these return without calling into Streamline.
+    for (const tox2::LatencyMarker marker :
+         {tox2::LatencyMarker::SimulationStart, tox2::LatencyMarker::SimulationEnd,
+          tox2::LatencyMarker::RenderSubmitStart, tox2::LatencyMarker::RenderSubmitEnd,
+          tox2::LatencyMarker::PresentStart, tox2::LatencyMarker::PresentEnd}) {
+        streamline->latencyMarker(marker);
+    }
+    streamline->reflexSleep(streamline->frameHandle());
+    streamline->freeFrameGen();
+    CHECK(streamline->frameIndex() == 7);
+
+    std::string error;
+    CHECK(!streamline->setReflex({}, error) && notLoaded(error));
+    error.clear();
+    CHECK(!streamline->setFrameGenOptions({}, error) && notLoaded(error));
+    error.clear();
+    tox2::FrameGenState state;
+    CHECK(!streamline->frameGenState(state, nullptr, error) && notLoaded(error));
+    error.clear();
+    CHECK(!streamline->tagFrameGen(VK_NULL_HANDLE, {}, error) && notLoaded(error));
+    error.clear();
+    CHECK(!streamline->tagBackbufferRect(VK_NULL_HANDLE, 0, 0, 16, 9, error) && notLoaded(error));
+    CHECK(streamline->frameGenApiErrors() == 0);
+#else
+    (void)ctx;
+    std::string reason;
+    CHECK(tox2::Streamline::load({.frame_generation = true}, reason) == nullptr);
+    CHECK(reason == "built without the Streamline SDK");
+#endif
+}
+
 struct SlTestImage {
     VkImage image = VK_NULL_HANDLE;
     VmaAllocation allocation = nullptr;
@@ -6636,6 +6693,7 @@ int main() {
 
     testStreamlineContext(*ctx);
     testStreamlineEvaluate(*ctx);
+    testStreamlineFrameGenApi(*ctx);
     testClearAndReadback(*ctx);
     testTwoSampleSupport(*ctx);
     testRendererAaMode(*ctx);

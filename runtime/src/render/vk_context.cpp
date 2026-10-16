@@ -403,10 +403,10 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
     StreamlineRequirements streamline_requirements;
     if (options.streamline) {
         std::string reason;
-        ctx->streamline_ = Streamline::load(reason);
+        ctx->streamline_ = Streamline::load({.frame_generation = false}, reason);
         if (!ctx->streamline_) {
             ctx->streamline_status_ = reason;
-        } else if (!ctx->streamline_->requirements(streamline_requirements, reason)) {
+        } else if (!ctx->streamline_->requirements(StreamlineFeature::Dlss, streamline_requirements, reason)) {
             dropStreamline(reason);
         }
     }
@@ -536,7 +536,7 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
     StreamlineDevicePlan streamline_plan;
     if (ctx->streamline_) {
         std::string reason;
-        if (!ctx->streamline_->dlssSupported(chosen.device, reason)) {
+        if (!ctx->streamline_->featureSupported(StreamlineFeature::Dlss, chosen.device, reason)) {
             dropStreamline(reason);
         } else {
             reason = planStreamlineDevice(chosen.device, chosen.graphics_family, streamline_requirements,
