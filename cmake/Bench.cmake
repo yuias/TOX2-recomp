@@ -1,6 +1,11 @@
 # tox2_bench: fixed-input benchmarks in thread cycles (tools/tox2_bench). Built when the runtime core and the
 # generated SPU tree exist. Call after tox2_runtime_add_core and tox2_spu_add_generated_tree.
 function(tox2_bench_add)
+  # Capture files of generated SPU code spans (written by the game's --spu-capture options) for the spu-replay case.
+  # They hold game data, so the list is set per build directory on the command line and is empty by default.
+  set(TOX2_SPU_REPLAY_CAPTURES "" CACHE STRING
+      "Semicolon-separated .spucap files; each gets a bench_spu_replay_<name> smoke test")
+
   if(NOT TARGET tox2_spu_generated OR NOT TARGET tox2_runtime_core)
     return()
   endif()
@@ -35,4 +40,21 @@ function(tox2_bench_add)
   set_tests_properties(bench_rsv_put PROPERTIES
     PASS_REGULAR_EXPRESSION "bench rsv-put: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
     TIMEOUT 120)
+
+  add_test(NAME bench_spu_replay_synthetic COMMAND tox2_bench spu-replay --synthetic --iterations 2 --warmup 1)
+  set_tests_properties(bench_spu_replay_synthetic PROPERTIES
+    PASS_REGULAR_EXPRESSION "bench spu-replay: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
+    TIMEOUT 120)
+
+  foreach(capture IN LISTS TOX2_SPU_REPLAY_CAPTURES)
+    if(NOT EXISTS "${capture}")
+      continue()
+    endif()
+    get_filename_component(stem "${capture}" NAME_WE)
+    add_test(NAME bench_spu_replay_${stem}
+      COMMAND tox2_bench spu-replay --capture "${capture}" --iterations 2 --warmup 1)
+    set_tests_properties(bench_spu_replay_${stem} PROPERTIES
+      PASS_REGULAR_EXPRESSION "bench spu-replay: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
+      TIMEOUT 120)
+  endforeach()
 endfunction()

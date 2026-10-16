@@ -12,13 +12,18 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
+#include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -26,21 +31,33 @@
 
 #include "core/reservation.h"
 #include "core/thread_cpu.h"
+#include "spu/spu_capture.h"
+#include "spu/spu_channels.h"
+#include "spu/spu_mfc.h"
 #include "spu/spu_thread.h"
 #include "spu_lzma_fixture.h"
 #include "tox2/spu_context.h"
+#include "tox2/spu_lower_stackfree.h"
 
 namespace {
 
 struct Options {
     std::uint32_t iterations = 0;
     std::uint32_t warmup = 0;
-    std::map<std::string, std::string, std::less<>> values;  // case options by name, without the leading dashes
+    // Case options by name, without the leading dashes; every occurrence is kept, in command-line order.
+    std::map<std::string, std::vector<std::string>, std::less<>> values;
+    std::set<std::string, std::less<>> flags;  // case flags that were given
 
+    // The last value of the option, or empty.
     std::string_view value(std::string_view name) const {
         const auto it = values.find(name);
-        return it == values.end() ? std::string_view() : std::string_view(it->second);
+        return it == values.end() ? std::string_view() : std::string_view(it->second.back());
     }
+    std::vector<std::string> all(std::string_view name) const {
+        const auto it = values.find(name);
+        return it == values.end() ? std::vector<std::string>() : it->second;
+    }
+    bool flag(std::string_view name) const { return flags.contains(name); }
 };
 
 bool parseCount(std::string_view option, std::string_view text, std::uint32_t min, std::uint32_t max,
@@ -52,6 +69,7 @@ struct Case {
     std::uint32_t default_iterations;
     std::uint32_t default_warmup;
     std::vector<std::string_view> options;  // case options that take a value, without the leading dashes
+    std::vector<std::string_view> flags;    // case options without a value
     int (*run)(const Case& self, const Options& options);
 };
 
@@ -371,6 +389,299 @@ int runRsvPut(const Case& self, const Options& options) {
     });
 }
 
+// Layout of the synthetic span of spu-replay. Two images: the span's code (a function at kReplayStart that works on
+// the LS and returns by dispatch to the address in r0) and a second image whose code is tagged away from its link
+// address, so the tag rebuild is checked with a non-zero delta and with a name other than the span's image.
+constexpr std::uint32_t kReplayStart = 0x6000;
+constexpr std::uint32_t kReplayEnd = 0x6010;
+constexpr std::uint32_t kReplayCodeEa = 0x00100000;
+constexpr std::uint32_t kReplayCodeSize = 0x100;
+constexpr std::uint32_t kReplayAuxLs = 0x9000;
+constexpr std::uint32_t kReplayAuxEa = 0x00180000;
+constexpr std::uint32_t kReplayAuxSize = 0x80;
+constexpr std::int32_t kReplayAuxDelta = 0x400;
+constexpr std::uint32_t kReplayStartWord = 0xc0de0001;  // the instruction words the dispatcher compares
+constexpr std::uint32_t kReplayEndWord = 0xc0de0002;
+constexpr std::uint32_t kReplayAuxWord = 0xc0de0003;
+constexpr std::uint32_t kReplayIn = 0x10000;
+constexpr std::uint32_t kReplayOut = 0x12000;
+constexpr std::uint32_t kReplayWords = 1024;
+
+std::uint32_t replayLoadBe32(const std::uint8_t* p) {
+    std::uint32_t v;
+    std::memcpy(&v, p, 4);
+    return std::byteswap(v);
+}
+
+void replayStoreBe32(std::uint8_t* p, std::uint32_t value) {
+    value = std::byteswap(value);
+    std::memcpy(p, &value, 4);
+}
+
+// The span: a rotate/xor chain over kReplayWords big-endian words of the LS, written to another LS range, and two
+// register results (a word and a quadword), then the return through r0.
+TOX2_SPU_FUNC(replaySynthStart) {
+    TOX2_SPU_SF_ENTER(kReplayStart);
+    std::uint32_t acc = TOX2_VR_W(ctx->gpr[3], 0);
+    for (std::uint32_t i = 0; i < kReplayWords; i++) {
+        const std::uint32_t w = replayLoadBe32(ls + kReplayIn + 4 * i);
+        acc = std::rotl(acc, 5) ^ w;
+        replayStoreBe32(ls + kReplayOut + 4 * i, acc + w);
+    }
+    TOX2_VR_W(ctx->gpr[4], 0) = acc;
+    ctx->gpr[5] = tox2SpuLoadQ(ls, kReplayOut + 0x40);
+    TOX2_SPU_SF_DISPATCH(kReplayStart + 0xc, TOX2_VR_W(ctx->gpr[0], 0));
+}
+
+// Never run: the replay ends at the dispatch to this address.
+TOX2_SPU_FUNC(replaySynthStub) {
+    (void)ctx;
+    (void)ls;
+}
+
+// The reference model of the span, on plain vectors and without the runtime.
+void replayModel(std::array<Tox2Vr, 128>& gpr, std::vector<std::uint8_t>& ls) {
+    std::uint32_t acc = TOX2_VR_W(gpr[3], 0);
+    for (std::uint32_t i = 0; i < kReplayWords; i++) {
+        const std::uint32_t w = replayLoadBe32(ls.data() + kReplayIn + 4 * i);
+        acc = (acc << 5 | acc >> 27) ^ w;
+        replayStoreBe32(ls.data() + kReplayOut + 4 * i, acc + w);
+    }
+    TOX2_VR_W(gpr[4], 0) = acc;
+    // Quadword load: the 16 LS bytes in reverse order.
+    for (std::uint32_t b = 0; b < 16; b++) gpr[5].u8[b] = ls[kReplayOut + 0x40 + 15 - b];
+}
+
+const Tox2SpuSegment kReplaySegments[] = {{kReplayCodeEa, kReplayStart, kReplayCodeSize, 1}};
+const Tox2SpuEntry kReplayEntries[] = {{kReplayStart, 1, {kReplayStartWord}, replaySynthStart},
+                                       {kReplayEnd, 1, {kReplayEndWord}, replaySynthStub}};
+const Tox2SpuSegment kReplayAuxSegments[] = {{kReplayAuxEa, kReplayAuxLs, kReplayAuxSize, 1}};
+const Tox2SpuEntry kReplayAuxEntries[] = {{kReplayAuxLs, 1, {kReplayAuxWord}, replaySynthStub}};
+const Tox2SpuImageInfo kReplayImages[] = {
+        {"bench_replay", kReplayCodeEa, kReplayCodeSize, kDmaNoHash, kReplayStart, 1, kReplaySegments, 2,
+         kReplayEntries},
+        {"bench_replay_aux", kReplayAuxEa, kReplayAuxSize, kDmaNoHash, kReplayAuxLs, 1, kReplayAuxSegments, 1,
+         kReplayAuxEntries},
+};
+constexpr std::uint32_t kReplayImageCount = 2;
+
+// A capture of the synthetic span whose post state comes from the reference model, not from the runtime.
+tox2::SpuCapture makeSyntheticCapture() {
+    tox2::SpuCapture c;
+    c.image = "bench_replay";
+    c.sha256 = kDmaNoHash;
+    c.start = kReplayStart;
+    c.end = kReplayEnd;
+    c.dispatches = 1;
+    c.pre_ls.resize(kTox2SpuLsSize);
+    fillPattern(c.pre_ls.data(), c.pre_ls.size(), 0x2545f4914f6cdd1dull);
+    replayStoreBe32(c.pre_ls.data() + kReplayStart, kReplayStartWord);
+    replayStoreBe32(c.pre_ls.data() + kReplayEnd, kReplayEndWord);
+    fillPattern(reinterpret_cast<std::uint8_t*>(c.pre_gpr.data()), sizeof(Tox2Vr) * c.pre_gpr.size(),
+                0x9e3779b97f4a7c15ull);
+    TOX2_VR_W(c.pre_gpr[0], 0) = kReplayEnd;
+    fillPattern(reinterpret_cast<std::uint8_t*>(&c.pre_fpscr), sizeof c.pre_fpscr, 0xd1b54a32d192ed03ull);
+    c.pre_srr0 = 0x1234;
+    c.pre_int_enabled = 1;
+
+    c.post_gpr = c.pre_gpr;
+    c.post_fpscr = c.pre_fpscr;
+    c.post_ls = c.pre_ls;
+    replayModel(c.post_gpr, c.post_ls);
+    c.post_jump_target = kReplayEnd;
+
+    c.tag_runs = {{"bench_replay", 0, 0, kReplayStart, kReplayStart + kReplayCodeSize},
+                  {"bench_replay_aux", 0, kReplayAuxDelta, kReplayAuxLs + kReplayAuxDelta,
+                   kReplayAuxLs + kReplayAuxDelta + kReplayAuxSize}};
+    return c;
+}
+
+// One captured span with the thread that replays it. Each file has its own thread so that its image tracking is
+// exactly what its tag runs say.
+struct ReplayFile {
+    std::string name;
+    tox2::SpuCapture capture;
+    tox2::lzma_fixture::Owner owner;
+    std::unique_ptr<tox2::SpuThread> thread;
+};
+
+// Rebuilds the thread's image tracking from the capture's tag runs. The code bytes are in the captured LS, so they go
+// through a scratch image of guest memory (zero-filled, as large as the registered code) and copyToLs, which tags
+// exactly those units with that delta. Fails when the tracking does not come out as the runs say.
+bool tagReplayLs(ReplayFile& f, std::vector<std::uint8_t>& scratch, std::string& error) {
+    tox2::SpuThread& thread = *f.thread;
+    const tox2::SpuCapture& c = f.capture;
+    std::uint32_t expected = 0;
+    for (const tox2::SpuCaptureTagRun& run : c.tag_runs) {
+        const Tox2SpuImageInfo* image = nullptr;
+        for (std::uint32_t i = 0; i < tox2::spuImageCount(); i++) {
+            if (run.image == tox2::spuImage(i).name) image = &tox2::spuImage(i);
+        }
+        if (image == nullptr) {
+            error = "tag run image " + run.image + " is not registered";
+            return false;
+        }
+        const Tox2SpuSegment& seg = image->segments[run.segment];
+        const std::uint32_t size = run.hi - run.lo;
+        const std::int64_t ea = std::int64_t{seg.ea} + run.lo - seg.ls - run.delta;
+        if (ea < seg.ea || ea + size > std::int64_t{seg.ea} + seg.size ||
+            ea + size > static_cast<std::int64_t>(scratch.size())) {
+            error = "a tag run of " + run.image + " lies outside its segment";
+            return false;
+        }
+        std::memcpy(scratch.data() + ea, c.pre_ls.data() + run.lo, size);
+        tox2::copyToLs(thread, scratch.data(), static_cast<std::uint32_t>(ea), run.lo, size);
+        expected += size / tox2::kSpuTagUnit;
+    }
+    std::uint32_t found = 0;
+    for (std::uint32_t unit = 0; unit < tox2::kSpuTagCount; unit++) {
+        if (thread.recordAt(unit * tox2::kSpuTagUnit) != nullptr) found++;
+    }
+    bool same = found == expected;
+    for (const tox2::SpuCaptureTagRun& run : c.tag_runs) {
+        for (std::uint32_t lsa = run.lo; lsa < run.hi && same; lsa += tox2::kSpuTagUnit) {
+            const auto tracked = tox2::trackedImageAt(thread, lsa);
+            same = tracked && run.image == tracked->image->name && run.segment == tracked->segment &&
+                   run.delta == tracked->delta;
+        }
+    }
+    if (!same) error = "the image tracking differs from the tag runs of the capture";
+    return same;
+}
+
+// The state the span starts from; the tags stay as tagReplayLs left them (the tagged bytes are the same).
+void restoreReplayState(ReplayFile& f) {
+    const tox2::SpuCapture& c = f.capture;
+    Tox2SpuContext& ctx = f.thread->context();
+    std::memcpy(f.thread->ls(), c.pre_ls.data(), kTox2SpuLsSize);
+    std::memcpy(ctx.gpr, c.pre_gpr.data(), sizeof ctx.gpr);
+    ctx.fpscr = c.pre_fpscr;
+    ctx.srr0 = c.pre_srr0;
+    ctx.int_enabled = static_cast<std::uint8_t>(c.pre_int_enabled);
+    __atomic_store_n(&ctx.halt, 0u, __ATOMIC_RELEASE);
+    ctx.exit_ls = c.end;
+}
+
+// Everything the span could have taken from outside the LS and the registers: channel reads, MFC commands, stops.
+std::uint64_t replayOutsideInputs(tox2::SpuThread& thread, const tox2::lzma_fixture::Owner& owner) {
+    std::uint64_t n = static_cast<std::uint64_t>(owner.stops.load());
+    for (std::uint32_t ch = 0; ch < tox2::chan::kCount; ch++) n += thread.channels().readCount(ch);
+    const tox2::SpuMfcCounters& m = thread.channels().mfc().counters();
+    for (const std::atomic<std::uint64_t>* field : {&m.get, &m.put, &m.get_list, &m.put_list, &m.getllar, &m.putllc_ok,
+                                                    &m.putllc_failed, &m.putlluc, &m.fences}) {
+        n += field->load(std::memory_order_relaxed);
+    }
+    return n;
+}
+
+// Null when the replay ended as the game span did, else what differs.
+const char* replayMismatch(ReplayFile& f, tox2::SpuLeave how) {
+    const tox2::SpuCapture& c = f.capture;
+    const Tox2SpuContext& ctx = f.thread->context();
+    if (how != tox2::SpuLeave::Exit) return "the run did not end at a dispatch to the end address";
+    if ((ctx.jump_target & (kTox2SpuLsSize - 4u)) != c.end || ctx.jump_target != c.post_jump_target) {
+        return "the jump target at the end differs";
+    }
+    if (replayOutsideInputs(*f.thread, f.owner) != 0) return "the span read a channel, ran an MFC command or stopped";
+    if (std::memcmp(ctx.gpr, c.post_gpr.data(), sizeof ctx.gpr) != 0) return "the registers differ";
+    if (std::memcmp(&ctx.fpscr, &c.post_fpscr, sizeof ctx.fpscr) != 0) return "fpscr differs";
+    if (std::memcmp(f.thread->ls(), c.post_ls.data(), kTox2SpuLsSize) != 0) return "the local store differs";
+    return nullptr;
+}
+
+// Replays captured spans of generated SPU code through the unchanged runtime: the state is restored outside the
+// measured span, then runSpu runs from the start entry to the first dispatch to the end entry, and the result is
+// compared with the state the game had there. The cycles are the sum of the runSpu calls, K per file per iteration.
+// --synthetic replays a span of an image of this file whose post state comes from a reference model instead.
+int runSpuReplay(const Case& self, const Options& options) {
+    const std::vector<std::string> paths = options.all("capture");
+    const bool synthetic = options.flag("synthetic");
+    if (synthetic == !paths.empty()) {
+        std::fputs("error: spu-replay needs either --synthetic or one or more --capture FILE\n", stderr);
+        return 2;
+    }
+    std::uint32_t repeat = 1;
+    if (!options.value("repeat").empty() && !parseCount("--repeat", options.value("repeat"), 1, 1000000, &repeat)) {
+        return 2;
+    }
+
+    const Tox2SpuImageInfo* images = synthetic ? kReplayImages : kTox2SpuImages;
+    const std::uint32_t image_count = synthetic ? kReplayImageCount : kTox2SpuImageCount;
+    tox2::registerSpuImages(images, image_count);
+
+    std::vector<std::unique_ptr<ReplayFile>> files;
+    std::string error;
+    if (synthetic) {
+        // Through the file format and back, so the reader and the validation run on the synthetic span as well.
+        std::vector<std::uint8_t> bytes;
+        std::optional<tox2::SpuCapture> read;
+        if (tox2::serializeSpuCapture(makeSyntheticCapture(), bytes, error)) read = tox2::parseSpuCapture(bytes, error);
+        if (read && !tox2::validateSpuCapture(*read, images, image_count, error)) read.reset();
+        if (!read) {
+            std::fprintf(stderr, "error: synthetic capture: %s\n", error.c_str());
+            return 1;
+        }
+        files.push_back(std::make_unique<ReplayFile>());
+        files.back()->name = "synthetic";
+        files.back()->capture = std::move(*read);
+    } else {
+        for (const std::string& path : paths) {
+            std::optional<tox2::SpuCapture> read = tox2::readSpuCapture(path, images, image_count, error);
+            if (!read) {
+                std::fprintf(stderr, "error: %s\n", error.c_str());
+                return 1;
+            }
+            files.push_back(std::make_unique<ReplayFile>());
+            files.back()->name = std::filesystem::path(path).filename().string();
+            files.back()->capture = std::move(*read);
+        }
+    }
+
+    std::uint64_t scratch_size = 0;
+    for (std::uint32_t i = 0; i < image_count; i++) {
+        for (std::uint32_t j = 0; j < images[i].segment_count; j++) {
+            const Tox2SpuSegment& s = images[i].segments[j];
+            if (s.code != 0) scratch_size = std::max<std::uint64_t>(scratch_size, std::uint64_t{s.ea} + s.size);
+        }
+    }
+    std::vector<std::uint8_t> scratch(scratch_size);
+    for (std::uint32_t i = 0; i < files.size(); i++) {
+        ReplayFile& f = *files[i];
+        const tox2::SpuCapture& c = f.capture;
+        if (c.start % 4 != 0 || c.end % 4 != 0 || c.start >= kTox2SpuLsSize || c.end >= kTox2SpuLsSize) {
+            std::fprintf(stderr, "error: %s: start or end is not a word address in the LS\n", f.name.c_str());
+            return 1;
+        }
+        f.thread = std::make_unique<tox2::SpuThread>(0x01000200 + i, "bench-replay", &f.owner);
+        if (!tagReplayLs(f, scratch, error)) {
+            std::fprintf(stderr, "error: %s: %s\n", f.name.c_str(), error.c_str());
+            return 1;
+        }
+        std::printf("bench %s: %s: image %s start %#07x end %#07x game span cycles %llu dispatches %u\n", self.name,
+                    f.name.c_str(), c.image.c_str(), c.start, c.end, static_cast<unsigned long long>(c.span_cycles),
+                    c.dispatches);
+    }
+
+    return runMeasured(self, options, [&](std::uint64_t* cycles) {
+        std::uint64_t sum = 0;
+        for (const auto& file : files) {
+            ReplayFile& f = *file;
+            for (std::uint32_t k = 0; k < repeat; k++) {
+                restoreReplayState(f);
+                const std::uint64_t start = tox2::currentThreadCycles();
+                const tox2::SpuLeave how = tox2::runSpu(*f.thread, f.capture.start);
+                sum += tox2::currentThreadCycles() - start;
+                if (const char* what = replayMismatch(f, how)) {
+                    std::fprintf(stderr, "bench %s: %s: %s\n", self.name, f.name.c_str(), what);
+                    return false;
+                }
+            }
+        }
+        *cycles = sum;
+        return true;
+    });
+}
+
 const std::vector<Case>& cases() {
     static const std::vector<Case> kCases = {
             {"spu-lzma",
@@ -378,11 +689,13 @@ const std::vector<Case>& cases() {
              50,
              3,
              {"game-dir", "elf"},
+             {},
              runSpuLzma},
             {"spu-dma-ls",
              "DMA into the SPU local store: bulk data, equal code, data over tagged code",
              20,
              2,
+             {},
              {},
              runSpuDmaLs},
             {"rsv-wake",
@@ -390,13 +703,22 @@ const std::vector<Case>& cases() {
              5,
              1,
              {"rounds"},
+             {},
              runRsvWake},
             {"rsv-put",
              "PUT into guest memory: pieces of 16 B to 4 KiB, partly equal to the stored bytes",
              20,
              2,
              {},
+             {},
              runRsvPut},
+            {"spu-replay",
+             "replay of captured spans of generated SPU code (--capture FILE ..., --repeat K) or --synthetic",
+             20,
+             2,
+             {"capture", "repeat"},
+             {"synthetic"},
+             runSpuReplay},
     };
     return kCases;
 }
@@ -453,6 +775,11 @@ int main(int argc, char** argv) {
     options.warmup = selected->default_warmup;
     for (int i = 2; i < argc; i++) {
         const std::string_view arg = argv[i];
+        if (arg.starts_with("--") &&
+            std::find(selected->flags.begin(), selected->flags.end(), arg.substr(2)) != selected->flags.end()) {
+            options.flags.emplace(arg.substr(2));
+            continue;
+        }
         if (!arg.starts_with("--") || i + 1 >= argc) {
             std::fprintf(stderr, "error: option %s is unknown or has no value\n", argv[i]);
             return 2;
@@ -464,7 +791,7 @@ int main(int argc, char** argv) {
         } else if (name == "warmup") {
             if (!parseCount(arg, value, 0, 100000, &options.warmup)) return 2;
         } else if (std::find(selected->options.begin(), selected->options.end(), name) != selected->options.end()) {
-            options.values[std::string(name)] = std::string(value);
+            options.values[std::string(name)].emplace_back(value);
         } else {
             std::fprintf(stderr, "error: case %s has no option %s\n", selected->name, argv[i - 1]);
             return 2;
