@@ -10,6 +10,9 @@
 //        tox2_bench <case> [case options] [--iterations N] [--warmup N]
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -18,8 +21,10 @@
 #include <map>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
+#include "core/reservation.h"
 #include "core/thread_cpu.h"
 #include "spu/spu_thread.h"
 #include "spu_lzma_fixture.h"
@@ -37,6 +42,9 @@ struct Options {
         return it == values.end() ? std::string_view() : std::string_view(it->second);
     }
 };
+
+bool parseCount(std::string_view option, std::string_view text, std::uint32_t min, std::uint32_t max,
+                std::uint32_t* out);
 
 struct Case {
     const char* name;
@@ -192,6 +200,137 @@ int runSpuDmaLs(const Case& self, const Options& options) {
     });
 }
 
+// Layout of the rsv-wake case: waiter i watches the line at i * 128, so the five waiters sit on five different stripes.
+constexpr std::uint32_t kWakeWaiters = 5;
+constexpr std::uint32_t kWakeGuestSize = 64u << 10;
+constexpr std::uint64_t kWakePaceCycles = 15000;  // the writer's pause after each acknowledged round
+constexpr std::uint32_t kWakeFail = 0xFFFFFFFF;   // waiter 0 reports an unexpected line value through the ack word
+
+// What the writer and the waiter threads of one rsv-wake iteration share.
+struct WakeShared {
+    tox2::ReservationTable table;
+    std::uint8_t* base = nullptr;
+    std::uint32_t halt = 0;  // stored atomically, read by waitStoreEpoch()
+    std::atomic<std::uint32_t> ack{0};
+    std::atomic<std::uint32_t> ready{0};
+    std::atomic<std::uint32_t> exited{0};
+    std::atomic<std::uint64_t> other_epoch_returns{0};  // StoreWait::Epoch returns of waiters 1..4
+    std::array<std::uint64_t, kWakeWaiters> waiter_cycles{};
+};
+
+std::uint64_t readBe64(const std::uint8_t* p) {
+    std::uint64_t v = 0;
+    for (int i = 0; i < 8; i++) v = (v << 8) | p[i];
+    return v;
+}
+
+// The waiter protocol of reservation.h: epoch, then lost(), then the wait. Waiter 0 acknowledges each value that the
+// writer puts into its line; the others only count how often a write elsewhere ends their wait.
+void wakeWaiter(WakeShared& s, std::uint32_t index) {
+    const std::uint64_t start = tox2::currentThreadCycles();
+    const std::uint32_t line = index * tox2::kReservationLineSize;
+    tox2::Reservation res;
+    std::uint8_t snapshot[tox2::kReservationLineSize];
+    std::uint32_t acked = 0;
+    s.ready.fetch_add(1);
+    s.ready.notify_all();
+    for (;;) {
+        const std::uint64_t seen = s.table.storeEpoch();
+        if (!res.valid || s.table.lost(s.base, res)) {
+            s.table.getllar(s.base, line, snapshot, res);
+            if (index == 0) {
+                const std::uint64_t value = readBe64(snapshot);
+                if (value != acked) {
+                    if (value != acked + 1) {
+                        s.ack.store(kWakeFail);
+                        s.ack.notify_one();
+                        break;
+                    }
+                    acked = static_cast<std::uint32_t>(value);
+                    s.ack.store(acked);
+                    s.ack.notify_one();
+                }
+            }
+        }
+        if (__atomic_load_n(&s.halt, __ATOMIC_ACQUIRE) != 0) break;
+        const tox2::StoreWait reason = s.table.waitStoreEpoch(seen, &s.halt, std::chrono::milliseconds(1), line);
+        if (reason == tox2::StoreWait::Halt) break;
+        if (reason == tox2::StoreWait::Epoch && index != 0) s.other_epoch_returns.fetch_add(1);
+    }
+    s.waiter_cycles[index] = tox2::currentThreadCycles() - start;
+    s.exited.fetch_add(1);
+}
+
+// Reservation wait and wake: the writer puts an increasing value into line 0 and waits for waiter 0 to see it; the
+// cycles of the writer and all waiters are summed. The diagnostic line counts how often a put ends the wait of the
+// four waiters that watch other lines (about 4 per round when every put wakes every waiter).
+int runRsvWake(const Case& self, const Options& options) {
+    std::uint32_t rounds = 20000;
+    if (!options.value("rounds").empty() && !parseCount("--rounds", options.value("rounds"), 1, 10000000, &rounds)) {
+        return 2;
+    }
+    // The table takes 128-byte lines; the vector is over-allocated to align the guest base.
+    std::vector<std::uint8_t> guest(kWakeGuestSize + tox2::kReservationLineSize);
+    std::uint8_t* const base = reinterpret_cast<std::uint8_t*>(
+            (reinterpret_cast<std::uintptr_t>(guest.data()) + tox2::kReservationLineSize - 1) &
+            ~static_cast<std::uintptr_t>(tox2::kReservationLineSize - 1));
+
+    const std::uint32_t total_iterations = options.warmup + options.iterations;
+    std::uint32_t iteration_index = 0;
+    std::uint64_t epoch_returns = 0;
+    std::uint64_t rounds_run = 0;
+    return runMeasured(self, options, [&](std::uint64_t* cycles) {
+        std::memset(base, 0, kWakeGuestSize);
+        WakeShared shared;
+        shared.base = base;
+        std::vector<std::thread> waiters;
+        for (std::uint32_t i = 0; i < kWakeWaiters; i++) waiters.emplace_back(wakeWaiter, std::ref(shared), i);
+        for (std::uint32_t seen = shared.ready.load(); seen != kWakeWaiters; seen = shared.ready.load()) {
+            shared.ready.wait(seen);
+        }
+
+        bool ok = true;
+        const std::uint64_t start = tox2::currentThreadCycles();
+        for (std::uint32_t r = 1; r <= rounds; r++) {
+            std::uint8_t value[8];
+            for (int b = 0; b < 8; b++)
+                value[b] = static_cast<std::uint8_t>(static_cast<std::uint64_t>(r) >> (56 - 8 * b));
+            shared.table.put(base, 0, value, 8);
+            for (std::uint32_t cur = shared.ack.load(); cur != r; cur = shared.ack.load()) {
+                if (cur == kWakeFail) {
+                    ok = false;
+                    break;
+                }
+                shared.ack.wait(cur);
+            }
+            if (!ok) break;
+            // Without a pause the next put often lands before the other waiters, woken by the previous one, have read
+            // the epoch again, and they sleep through it (about 2.4 returns per round instead of 4). The pause adds the
+            // same cycles to every table implementation.
+            for (const std::uint64_t until = tox2::currentThreadCycles() + kWakePaceCycles;
+                 tox2::currentThreadCycles() < until;) {
+            }
+        }
+        const std::uint64_t writer_cycles = tox2::currentThreadCycles() - start;
+
+        __atomic_store_n(&shared.halt, 1u, __ATOMIC_RELEASE);
+        shared.table.wake();
+        for (std::thread& t : waiters) t.join();
+
+        std::uint64_t sum = writer_cycles;
+        for (const std::uint64_t c : shared.waiter_cycles) sum += c;
+        *cycles = sum;
+        epoch_returns += shared.other_epoch_returns.load();
+        rounds_run += rounds;
+        // The diagnostic goes out before the summary line, so it is printed once, with the last iteration.
+        if (++iteration_index == total_iterations) {
+            std::printf("bench %s: other waiters returned Epoch per round %.2f\n", self.name,
+                        static_cast<double>(epoch_returns) / static_cast<double>(rounds_run));
+        }
+        return ok && shared.exited.load() == kWakeWaiters && readBe64(base) == rounds && shared.ack.load() == rounds;
+    });
+}
+
 const std::vector<Case>& cases() {
     static const std::vector<Case> kCases = {
             {"spu-lzma",
@@ -206,6 +345,12 @@ const std::vector<Case>& cases() {
              2,
              {},
              runSpuDmaLs},
+            {"rsv-wake",
+             "reservation wait and wake: one writer, five line-watching waiters (--rounds N)",
+             5,
+             1,
+             {"rounds"},
+             runRsvWake},
     };
     return kCases;
 }
