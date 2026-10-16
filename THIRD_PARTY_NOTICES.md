@@ -36,20 +36,22 @@ the gamepads are disabled; the keyboard keeps working.
 ## NVIDIA Streamline and DLSS
 
 The optional DLAA anti-aliasing mode (`--aa-mode dlaa`) runs NVIDIA DLSS through the NVIDIA Streamline
-SDK, <https://github.com/NVIDIA-RTX/Streamline>. The SDK is not part of this repository: nothing from
+SDK, <https://github.com/NVIDIA-RTX/Streamline>, and the optional frame generation (`--frame-gen`) runs NVIDIA DLSS
+Frame Generation and NVIDIA Reflex through the same SDK. The SDK is not part of this repository: nothing from
 it is committed. `tools/fetch-streamline.ps1` downloads the pinned release into `externals/Streamline`
 (git-ignored) and verifies its SHA-256 (`-From <zip>` takes a local copy and applies the same check);
 the pin is in `cmake/streamline.cmake`. The build uses the SDK's headers at compile time and, when
-the SDK is present, copies four DLLs and the licence texts next to the executables (`bin/` of the
-build directory, the licences under `bin/licenses/streamline/`). `TOX2_ENABLE_DLSS=OFF` builds
-without any of this.
+the SDK is present, copies four DLLs (eight with frame generation) and the licence texts next to the
+executables (`bin/` of the build directory, the licences under `bin/licenses/streamline/`).
+`TOX2_ENABLE_DLSS=OFF` builds without any of this.
 
 | | |
 | --- | --- |
 | Version | Streamline 2.14.1 (`streamline-sdk-v2.14.1.zip`, SHA-256 `92c4d954631a1710da86ca3fa8d5034f2b9503838c95fc4ae977ae149319781b`) |
 | Source | <https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.1/streamline-sdk-v2.14.1.zip> |
-| Streamline itself: the headers (build time only) and `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll` | MIT License, Copyright (c) 2023 NVIDIA CORPORATION (the SDK's `license.txt`, copied as `LICENSE.txt`) |
-| Runtime DLLs copied next to the executables | `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll`, `nvngx_dlss.dll` |
+| Streamline itself: the headers (build time only) and `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll`, `sl.reflex.dll`, `sl.pcl.dll` | MIT License, Copyright (c) 2023 NVIDIA CORPORATION (the SDK's `license.txt`, copied as `LICENSE.txt`) |
+| Runtime DLLs copied next to the executables | `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll`, `nvngx_dlss.dll`; for frame generation `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`, `nvngx_dlssg.dll` |
+| DLSS Frame Generation: `sl.dlss_g.dll` (a prebuilt plugin; its source is not in the SDK) and `nvngx_dlssg.dll` | No licence text of their own ships with them in the SDK. They are treated as covered by the NVIDIA RTX SDKs LICENSE below, the licence of the SDK's other NVIDIA runtime files |
 | DLSS runtime and `nvngx_dlss.dll` | NVIDIA RTX SDKs LICENSE (v. March 14, 2024) with the NVIDIA RTX supplement (the SDK's `bin/x64/nvngx_dlss.license.txt`, copied as `nvngx_dlss.license.txt`) |
 | SDK third-party components | `3rd-party-licenses.md` of the SDK (copied unchanged) |
 
@@ -80,7 +82,13 @@ themselves are authoritative:
   redistributable at no charge).
 - The SDK also ships `NvLowLatencyVk.dll` (NVIDIA Reflex), which `sl.common.dll` tries to load at
   start-up. It is not copied: its licence, `bin/x64/reflex.license.txt`, lists only "the NVAPIs, .lib
-  and .h files, Linux wrapper, and samples" as distributable, and DLAA does not use Reflex.
+  and .h files, Linux wrapper, and samples" as distributable. On Vulkan, Streamline uses the driver's
+  `VK_NV_low_latency2` extension for Reflex, so frame generation does not need the file.
+  The Reflex SDK supplement in that file (v. December 9, 2020) also asks that a product attribute the use of the SDK with an
+  NVIDIA Reflex reference for the features developed with it. Frame generation needs Reflex, and this project
+  therefore names "NVIDIA Reflex" and "NVIDIA DLSS Frame Generation" in this file and in
+  [Frame generation](docs/rendering.md#frame-generation). The same attribution requirements as for DLSS, in
+  `nvngx_dlss.license.txt` above, apply to DLSS Frame Generation; the project has no splash screen or about box.
 - `3rd-party-licenses.md` lists the third-party software that the SDK includes, with the licence of
   each.
 
@@ -95,6 +103,8 @@ is only ever loaded from there. Over-the-air updates and downloaded plugins are 
 Streamline preferences, so only the DLLs next to the executable are used, and Streamline's log output
 goes to the project log. If the DLLs are missing, unsigned, or the GPU or driver cannot run DLSS, DLAA is
 unavailable and the renderer falls back to `msaa` (or `supersample`); see [Rendering](docs/rendering.md#dlaa).
+Streamline loads the four frame generation DLLs from the same directory. If one is missing, frame generation is
+unavailable and DLAA is not affected.
 
 ## RPCS3 key files
 

@@ -193,13 +193,16 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
 - **Flips and vsync.** A flip is done when the command executes, once the flip limit allows it: with the default
   `--frame-limit vsync` a flip in the game's VSYNC flip mode waits for the next vblank, otherwise the limit is
   60 flips per second (see [Fake RSX](#fake-rsx)); `--frame-limit off` removes the limit. With the window the displayed buffer is
-  also blitted, letterboxed to 16:9, to a swapchain with the FIFO present mode, once per completed flip;
+  also blitted, letterboxed to 16:9, to a swapchain with the FIFO present mode, once per completed flip (MAILBOX
+  while [frame generation](#frame-generation) is loaded, which then presents more frames than the game flips);
   presenting runs outside the guest lock. The window's client area is a size preset in physical pixels
   (`--window-size`, 720p by default; see [Window](runtime.md#window)); the swapchain follows it through
   `WM_SIZE`, and the blit scales the frame to it, so a frame of `N` times 1280x720 maps one to one onto
   the preset of the same size (`--resolution-scale 2` and 1440p, 3 and 2160p). The limit paces the flips before they reach the swapchain, so a
   display that refreshes faster than 60 Hz does not speed the game up; with `--frame-limit off` the display's
-  refresh paces the RSX thread instead. Without a window nothing waits for a vertical blank in the renderer.
+  refresh paces the RSX thread instead. Frame generation changes none of this: the flips, the vblank timer and the
+  flip limit stay as the game and `--frame-limit` set them, and only the number of frames the window shows grows.
+  Without a window nothing waits for a vertical blank in the renderer.
   The [debug overlay](runtime.md#debug-overlay) is drawn on the swapchain image after that blit, in a
   separate pass before the image is presented. It is not drawn into the render target, so it never
   appears in `--dump-frames` files, requested PNG dumps, the display readback or captures, and it only
@@ -716,6 +719,133 @@ times `--resolution-scale`. DLSS is reached through the NVIDIA Streamline SDK; b
   skinned meshes, scrolling textures) would remove the ghosting named under the known limits, and are future work.
   DLSS upscaling, a render scale per phase and HDR colour are not used.
 
+#### Frame generation
+
+With a window and `--aa-mode dlaa`, `--frame-gen off|60|90|120|180|unlimited` (or the overlay's `Frame generation`
+combo) lets NVIDIA DLSS Frame Generation (DLSS-G, multi frame generation, through Streamline 2.14.1) insert generated
+frames between the game's flips, so that the window shows `game rate x multiplier` frames per second. It changes
+presentation only. The guest's simulation, its flip rate, the vblank timer and `--frame-limit` are as they were: a
+260 s dungeon run counted 9232 flips and 15449 vblanks with generation off and 9228 and 15452 with target
+`120` (generating at 2x and 4x), and no vblank was coalesced. Building with the SDK and the DLLs it needs are
+described in [NVIDIA Streamline (DLAA)](building.md#nvidia-streamline-dlaa).
+
+- **Availability.** Everything DLAA needs, and in addition: `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll` and
+  `nvngx_dlssg.dll` next to the executable, a GPU and driver for which DLSS-G reports itself supported (RTX 40 or 50
+  series), Windows hardware-accelerated GPU scheduling, a device with `VK_NV_low_latency2`, and a window. The Vulkan
+  device is created with the extensions, features and queues the three plugins ask for, including a queue family for
+  native optical flow when the device has one. Where any of this is missing, frame generation is unavailable for one
+  reason, and the run presents as it did before: no generation, the FIFO swapchain, no Reflex markers. The start-up
+  log says which case applies, `tox2: render: frame generation available (DLSS-G up to 6x, optical flow native)` or
+  `tox2: render: frame generation unavailable: <reason>` (`no window` for `--no-window`); a requested target that
+  cannot run logs one warning, `tox2: render: frame generation unavailable (<reason>); presenting without it`.
+  `tox2_rsxreplay` and the tests never use it. The overlay lists the combo only where it is available. In a windowed
+  run the plugins are loaded at start-up so that the overlay can turn generation on later, and they are unloaded
+  before the swapchain is created while the target is `off`. Switching between `off` and a target therefore
+  recreates the swapchain, like a window resize: the RSX thread stalls once.
+- **Only with DLAA.** The inputs below exist only in the `dlaa` scene pass. With another anti-aliasing mode, a
+  target is accepted and generation stays inactive (`needs DLAA anti-aliasing`, one info line); the overlay draws the
+  combo disabled with that note and keeps the saved target, which applies again when DLAA is selected.
+- **Targets.** The multiplier is `floor(target / game fps)`, at most the maximum DLSS-G reports (5 generated frames,
+  so 6x, on the measured RTX 5070 Ti), and generation is inactive when it is below 2. `unlimited` uses the maximum.
+  The ratio is never rounded up and the game is never slowed down to make it whole: the target is an upper bound.
+
+  | target | game 30 fps | game 60 fps |
+  | --- | --- | --- |
+  | `off` | none (30) | none (60) |
+  | `60` | 2x (60) | none (60) |
+  | `90` | 3x (90) | none (60): `target is less than twice the game rate` |
+  | `120` | 4x (120) | 2x (120) |
+  | `180` (unverified) | 6x (180) | 3x (180) |
+  | `unlimited` | 6x (180) | 6x (360) |
+
+  Measured with a 144 Hz display: target `120` gave 2x at 60 fps and 4x at 30 fps and presented 120.0 fps; `90` gave
+  3x at 30 fps (90.0 fps) and nothing at 60 fps; `unlimited` gave 6x, 360.0 and 180.0 fps. `180` could not be
+  checked: no display of the development machine runs at 180 Hz (the frames handed to the swapchain were counted, not
+  seen).
+- **Game rate.** The rate comes from the flip completion times the RSX thread records. An interval counts as a whole
+  number of vblanks when it is within 4 ms of one, and a class (1 vblank is 60 fps, 2 vblanks is 30 fps) is adopted
+  after 6 consecutive intervals of it. Only 60 and 30 fps generate. A game below 30 fps, or one with irregular
+  intervals (for example `--frame-limit off`), is presented as it is. An interval over 100 ms (a load) drops the
+  history. The title and menus run at 60 fps and the dungeon at 30 fps, so the multiplier changes when the game does.
+- **Inputs.** DLSS-G is given, for every guest frame, the depth and motion vectors of the DLAA frame and the camera.
+  The depth is the DLAA depth sidecar, copied once per frame slot. The motion vectors are camera motion only: a
+  fragment pass computes, for every pixel, where its depth projects in the previous frame from the
+  clip-to-previous-clip matrix of the DLAA camera (the unmirrored one), as an R16G16 image of the scene size. Both
+  are valid until the present; the vector image is shared by all frames, which is safe because Streamline's default
+  blocks the presenting queue until DLSS-G has read it. The black bars of the letterbox are described as a
+  sub-rectangle of the backbuffer, so only the picture is interpolated. The history is reset on the first generated
+  frame after a frame without generation, when the camera appears, disappears or cuts, and when the game rate class
+  or the scene size changes. The convention was measured headless with `tox2_rsxreplay --fg-mv-check`, which warps the
+  previous DLAA output with the vectors and compares it with the current one (mean absolute difference over RGB, 0 to
+  255): the vectors cut the difference by 66 % on the cutscene pair 8700 to 8701 and by 87 to 88 % on four dungeon pairs
+  (walking forward, and turning the camera), where the warp scored 1.6 to 2.7 against 12.5 to 20.6 without motion; of the four
+  sign combinations, the unflipped one was lowest on every motion pair.
+- **Limits of the inputs.** Moving objects, characters, particles and screen-space effects have no vectors of their own
+  (DLSS-G's optical flow is all that covers them). No HUD-less colour and no UI colour or alpha is tagged: the game
+  draws its HUD and text into the same buffer as the scene, so during camera motion they take the scene's motion and
+  can ghost or warp. The debug overlay would be interpolated the same way, so generation is suspended while it is open
+  (`overlay open`) and resumes when it is closed. Whether the generated frames look right was not judged by these
+  measurements. `--fg-only-generated` presents only the generated frames, to look at them without the real ones.
+- **Reflex.** DLSS-G needs Reflex: with it off, DLSS-G reports `Reflex not detected` at the first activation and
+  stops, and the controller keeps generation off until the target changes (one warning names the status bits). The
+  renderer therefore sends Reflex markers for every guest frame (simulation start and end, render submit, present)
+  with the DLAA frame index, which is the flip number, and a sleeper thread calls the Reflex sleep once per frame.
+  Nothing waits for that thread: a sleep in front of the simulation would change the guest's timing, and the RSX
+  thread also delivers the vblank ticks, so it must never sleep. The sleeps take about 0.04 ms on average (0.78 ms at
+  most, none dropped), and the thread is stopped before every plugin load or unload and before the swapchain is
+  released. Reflex runs in low-latency mode without a frame limit; `--fg-reflex off` is a diagnostic that shows the
+  failure above. `NvLowLatencyVk.dll` is not shipped (see [Third-party notices](../THIRD_PARTY_NOTICES.md)); Streamline
+  uses `VK_NV_low_latency2` instead, and its message about the missing DLL is logged at debug level.
+- **Present mode.** DLSS-G requires vsync off, and Streamline documents that Vulkan has no vsync with frame
+  generation. While the plugins are loaded the swapchain is therefore MAILBOX, else IMMEDIATE, else FIFO with one
+  warning (`tox2: render: frame generation: no present mode without vsync; using fifo (DLSS-G requires vsync off)`);
+  with generation off it is FIFO as before. All three modes were measured for 260 s with targets `120` and
+  `unlimited`. MAILBOX and IMMEDIATE present exactly game fps times the multiplier (120.0, and 360.0 or 180.0), with
+  a presenter wait of at most 1.13 ms under MAILBOX and 3.25 ms under IMMEDIATE (outside the first activation). FIFO
+  cannot show more frames than the refresh, so the multiplier is capped at `floor(refresh / game fps)`: with
+  `unlimited` on a 144 Hz display it gave 2x at 60 fps and 4x at 30 fps, 120.0 fps, with the presenter waiting at
+  most 1.31 ms. MAILBOX is the default because it measured like IMMEDIATE and does not tear; frames above the refresh
+  rate are replaced in the mailbox and never shown, so `unlimited` at 60 fps on a 144 Hz display presents 360 fps and
+  shows at most 144. `--fg-present-mode fifo|mailbox|immediate` selects the mode; FIFO is a diagnostic. Under MAILBOX
+  DLSS-G logs `VSync interval 1 not supported with FG, clamping to 1` at every present, although its own state line
+  shows sync interval 0 while it generates in every mode, so that line is logged at debug level.
+- **Log.** On every change of the active state, the multiplier, the game rate class or the target, held for 1 s so
+  that a short alternation is not logged, one info line states the expected rate:
+  `tox2: render: frame generation active: <m>x (game <g> fps, expected <g*m> fps, display <r> Hz, target <t>)`, or
+  `tox2: render: frame generation inactive: <reason> (presenting game <g> fps)`. The expected rate is the game rate
+  times the multiplier, not a measurement; under MAILBOX it can exceed the display refresh. The reasons are
+  `needs DLAA anti-aliasing`, `measuring the game rate`, `game rate irregular`, `game below 30 fps`, `target is less
+  than twice the game rate`, `overlay open`, `swapchain recreated` (the two frames after any swapchain recreation),
+  `window too small` (below DLSS-G's minimum size), `no 3D camera` (a dialog or menu frame), `inputs not tagged`,
+  `scene size differs from the display` and `status <bits>` (DLSS-G reported a failure; it stays off until the target
+  changes). At debug level every 10 s while active: `tox2: render: frame generation: <m>x, game <g> fps, presented <p>
+  fps, sleep avg <a> max <b> ms`, where `<p>` is the number of frames DLSS-G reports presented per second. Once, at
+  the first activation, `tox2: render: frame generation needs about <n> MB of video memory`. At stop, at info level,
+  `tox2: render: frame generation summary: <n> frames presented, <k> of <N> game frames with generation (average
+  <x>x), suspended frames: <reason n, ...>`. The overlay's status line shows the same figures, for example
+  `4x: 30 -> 120 fps, measured 119.6` (see [Debug overlay](runtime.md#debug-overlay)).
+- **Known limits.** The first activation stalls one present for about 40 ms (DLSS-G allocates its resources inside the
+  present); an activation that follows a plugin reload (a switch from `off` to a target, as `--fg-cycle` does) took
+  about 160 ms. DLSS-G
+  disables itself while the window is not focused (it logs `DLSS-G disabled: window not focused`) and reports a status
+  of ok, so the controller still logs `active` while the presented rate equals the game rate. At some scene changes,
+  such as the load of a save that takes the game from 60 to 30 fps, DLSS-G was off for about 2 s. With
+  `--vk-validation` the layer reports 8 or 9 errors per activation, all on Streamline's own objects
+  (`nv.sl.dlss_g.*`: the layout of its output images on first use, its present semaphore and, once, a thread-safety
+  report on a latency marker between two of its threads), none on the renderer's. While the plugins are loaded the
+  backbuffer is left in `TRANSFER_SRC_OPTIMAL` instead of `PRESENT_SRC_KHR`, because DLSS-G expects that layout.
+  Streamline's warning `slDLSSGGetState must be synchronized with the present thread` is logged once per process. The
+  generated frames add about one game frame of latency by their nature; it was not measured. Display behaviour
+  (variable refresh rate, the NVIDIA indicator text, the look of the generated frames) was not checked.
+- **Not done.** Per-object motion vectors, HUD-less colour and UI colour or alpha tags (which would remove the HUD
+  ghosting), tagging the overlay as UI so that it need not suspend generation, a frame rate readout in the window
+  title, dynamic multi frame generation (D3D12 only) and frame generation in the `msaa` and `supersample` modes
+  (which have no depth image of the scene and no camera tracker).
+- **Diagnostics.** `--fg-present-mode`, `--fg-reflex off`, `--fg-only-generated` and `--fg-cycle SECONDS` (alternates
+  between `off` and the target every `SECONDS` seconds, recreating the swapchain each time) need `--frame-gen` other
+  than `off`; see [`tox2_game` options](runtime-options.md#rendering). `tox2_rsxreplay --fg-mv-check [--fg-mv-flip
+  none|x|y|xy]` checks the motion vectors without a window (see [Capture and replay](#capture-and-replay)).
+
 #### Stencil
 
 The stencil state is decoded from the registers SET_STENCIL_TEST_ENABLE, SET_STENCIL_MASK, SET_STENCIL_FUNC,
@@ -976,6 +1106,7 @@ tox2_rsxreplay CAPTURE [CAPTURE...] [--loop N] [--out DIR]
                       [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--no-validation] [--shader-cache DIR]
                       [--dlaa-jitter on|off] [--dlaa-jitter-flip none|x|y|xy] [--dlaa-camera on|off|reset]
                       [--dlaa-clip-flip-y on|off] [--dlaa-mv-invalid zero|unset]
+                      [--fg-mv-check [--fg-mv-flip none|x|y|xy]]
                       [--repeat N] [--quiet]
 ```
 
@@ -996,6 +1127,8 @@ tox2_rsxreplay CAPTURE [CAPTURE...] [--loop N] [--out DIR]
 | `--dlaa-camera on\|off\|reset` | `on` (default) describes the camera motion between frames from the scene draws' projections. `off` passes identity matrices. `reset` passes identity matrices and drops the history at every frame. |
 | `--dlaa-clip-flip-y on\|off` | Whether the camera's clip-to-clip matrices are mirrored in y for Streamline's y-up clip space. Default `on`. |
 | `--dlaa-mv-invalid zero\|unset` | Set `motionVectorsInvalidValue` to 0 (`zero`, default) or leave the SDK default (`unset`, which makes Streamline warn once per process). It does not change the picture. |
+| `--fg-mv-check` | Diagnostic for [frame generation](#frame-generation), needs `--aa-mode dlaa` (a usage error otherwise, and together with `--repeat`). Draws the camera motion vectors that frame generation would use and, from the second frame on, prints `fg mv: frame <i>, warp mean <w>, no-motion mean <z>, <n> pixels` (`, reset` when the history was dropped for that frame): the mean absolute difference (RGB, 0 to 255) between the current DLAA output and the previous one warped with the vectors, and between the two unwarped. A lower `warp mean` than `no-motion mean` means the vectors follow the camera. The displayed frame does not change. |
+| `--fg-mv-flip none\|x\|y\|xy` | Diagnostic, needs `--fg-mv-check`: negate the vectors on the given axes. Default `none`, the measured winner. |
 | `--no-validation` | Do not enable the Vulkan validation layer, which is on by default. |
 | `--shader-cache DIR` | SPIR-V cache directory. Without it nothing is cached. |
 | `--repeat N` | Replay and render the capture `N` times (1 to 100000) and print the median time of each phase (see below). A usage error together with `--out`, `--compare`, more than one capture or `--loop`; exit code 1 without a Vulkan device. |

@@ -45,7 +45,7 @@ These can also be passed to `cmake` directly (`cmake --preset release -D<name>=<
 | `TOX2_RPCS3_CRYPTO_DIR` | empty | Set by `-Rpcs3CryptoDir`. |
 | `TOX2_FFMPEG_DIR` | empty | An extracted FFmpeg build to use instead of `generated/deps/ffmpeg/<pinned build>` (see [Movies](movies.md); FFmpeg is used for ATRAC3plus decoding and by the inherited movie code). |
 | `TOX2_GAMEINPUT_DIR` | empty | An extracted `Microsoft.GameInput` package to use instead of `generated/deps/gameinput/<pinned version>` (see [Input](input.md#the-gameinput-package)). Configure needs the package from `tools/fetch-gameinput.ps1`. |
-| `TOX2_ENABLE_DLSS` | `AUTO` | `AUTO`, `ON` or `OFF`: whether to build the DLAA anti-aliasing mode on NVIDIA Streamline (see [NVIDIA Streamline (DLAA)](#nvidia-streamline-dlaa)). |
+| `TOX2_ENABLE_DLSS` | `AUTO` | `AUTO`, `ON` or `OFF`: whether to build the DLAA anti-aliasing mode and frame generation on NVIDIA Streamline (see [NVIDIA Streamline (DLAA)](#nvidia-streamline-dlaa)). |
 | `TOX2_STREAMLINE_DIR` | `externals/Streamline` | The unpacked Streamline SDK to build against. |
 | `TOX2_PPU_WERROR` | `ON` | Add `-Werror` for generated code and the code that mirrors it (header check, semantics harness, link test). Every such target is compiled with `-O1 -march=x86-64-v3 -ffp-contract=off -fpatchable-function-entry=8 -Wall -Wextra`, whatever the preset's optimization level; the generated SPU tree and the SPU tests that run generated code (`spu_semantics`, `spu_programs`) use `-O3` instead of `-O1` (`TOX2_SPU_CODEGEN_OPT_LEVEL` in `cmake/SpuCodegen.cmake`), because the game's SPU decode loops run several times faster at that level. |
 
@@ -191,7 +191,10 @@ supply the hooks for the link checks and the header and semantics tests; `tox2_g
 
 The `dlaa` anti-aliasing mode (`--aa-mode dlaa`, see [DLAA](rendering.md#dlaa)) runs NVIDIA
 DLSS in its DLAA mode through the NVIDIA Streamline SDK. The SDK is optional and is not part of the
-repository. Without it the build succeeds, DLAA is compiled out and a requested `dlaa` falls back to `msaa`.
+repository. Without it the build succeeds, DLAA is compiled out and a requested `dlaa` falls back to `msaa`. The same SDK
+provides DLSS Frame Generation and NVIDIA Reflex, which `--frame-gen` uses (see
+[Frame generation](rendering.md#frame-generation)); it has no build option of its own. In a build without the SDK the option is still accepted, and frame generation is
+unavailable (one warning when a target is requested).
 
 ```powershell
 pwsh -NoProfile -File tools/fetch-streamline.ps1 [-From <zip>] [-Force]
@@ -224,17 +227,26 @@ loader already defines. `sl.interposer.dll` is loaded at run time instead (see
 | File | Source in the SDK |
 | --- | --- |
 | `sl.interposer.dll`, `sl.common.dll`, `sl.dlss.dll`, `nvngx_dlss.dll` | `bin/x64/` (the production DLLs, not `bin/x64/development`) |
+| `sl.dlss_g.dll` (DLSS Frame Generation), `nvngx_dlssg.dll` (its NGX runtime), `sl.reflex.dll` (NVIDIA Reflex) and `sl.pcl.dll` (PC latency markers) | `bin/x64/`, for frame generation |
 | `licenses/streamline/LICENSE.txt` | `license.txt` |
 | `licenses/streamline/nvngx_dlss.license.txt` | `bin/x64/` |
 | `licenses/streamline/3rd-party-licenses.md` | `3rd-party-licenses.md` |
 
+The four frame generation DLLs are copied only if they exist in the SDK; a missing one prints
+`TOX2: Streamline: frame generation DLLs missing (<names>)` at configuration, and frame generation is then unavailable
+at run time while DLAA is not affected. Streamline loads `sl.pcl.dll` whenever it is next to the executable, also in
+runs without a window and in the tests. `-DTOX2_ENABLE_DLSS=OFF` builds without any of these DLLs.
+
 `NvLowLatencyVk.dll` (Reflex), which `sl.common.dll` tries to load at start-up, is not copied: its licence
-does not list it as distributable and DLAA does not use it; the load failure is logged at debug level.
+does not list it as distributable. Streamline uses `VK_NV_low_latency2` for Reflex on Vulkan instead, so frame
+generation works without it; the load failure is logged at debug level.
 Streamline's own signature check still prints `File '...NvLowLatencyVk.dll' is NOT correctly signed` to
 standard output, which only means the file is absent. The licences of these files, which must accompany
 a redistributed copy, are listed in [Third-party notices](../THIRD_PARTY_NOTICES.md). At run time DLAA is
 off, with one log line that gives the reason, when the DLLs are missing or not signed by NVIDIA, or the GPU
-is not an RTX GPU that supports DLSS, or the driver is too old.
+is not an RTX GPU that supports DLSS, or the driver is too old. Frame generation is off, with the reason in the
+start-up log, when its DLLs are missing, the GPU is not an RTX 40 or 50 series GPU, the driver or Windows is too old,
+hardware-accelerated GPU scheduling is off, the device has no `VK_NV_low_latency2`, or there is no window.
 
 The DLAA tests print a skip line instead of failing when DLAA is unavailable. To check the build without the
 SDK, configure a second build directory with `-DTOX2_ENABLE_DLSS=OFF`.
