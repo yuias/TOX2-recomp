@@ -4,6 +4,7 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -25,6 +26,7 @@
 #include "core/log.h"
 #include "render/dlaa_math.h"
 #include "render/dlaa_pass.h"
+#include "render/fg_motion.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
 #include "render/image_pool.h"
@@ -6653,6 +6655,369 @@ void testStreamlineEvaluate(tox2::VkContext& ctx) {
     CHECK(ctx.validationErrorCount() == errors_before);
 }
 
+// One-time-submit command buffer on the graphics queue; returns once it has completed.
+template <typename Record>
+bool fgTestSubmit(tox2::VkContext& ctx, Record&& record) {
+    VkDevice device = ctx.device();
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pool_info.queueFamilyIndex = ctx.graphicsQueueFamily();
+    VkFenceCreateInfo fence_info{};
+    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    bool ok = vkCreateCommandPool(device, &pool_info, nullptr, &pool) == VK_SUCCESS &&
+              vkCreateFence(device, &fence_info, nullptr, &fence) == VK_SUCCESS;
+    if (ok) {
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo cmd_info{};
+        cmd_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cmd_info.commandPool = pool;
+        cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        ok = vkAllocateCommandBuffers(device, &cmd_info, &cmd) == VK_SUCCESS &&
+             vkBeginCommandBuffer(cmd, &begin) == VK_SUCCESS;
+        if (ok) {
+            record(cmd);
+            VkCommandBufferSubmitInfo cmd_submit{};
+            cmd_submit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+            cmd_submit.commandBuffer = cmd;
+            VkSubmitInfo2 submit{};
+            submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+            submit.commandBufferInfoCount = 1;
+            submit.pCommandBufferInfos = &cmd_submit;
+            ok = vkEndCommandBuffer(cmd) == VK_SUCCESS &&
+                 vkQueueSubmit2(ctx.graphicsQueue(), 1, &submit, fence) == VK_SUCCESS &&
+                 vkWaitForFences(device, 1, &fence, VK_TRUE, 10'000'000'000ull) == VK_SUCCESS;
+        }
+    }
+    if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
+    if (pool != VK_NULL_HANDLE) vkDestroyCommandPool(device, pool, nullptr);
+    return ok;
+}
+
+struct FgHostBuffer {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    void* mapped = nullptr;
+};
+
+bool createFgHostBuffer(tox2::VkContext& ctx, VkDeviceSize size, FgHostBuffer& out) {
+    VkBufferCreateInfo buffer_info{};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = size;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationCreateInfo alloc_info{};
+    alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+    alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationInfo info{};
+    if (vmaCreateBuffer(ctx.allocator(), &buffer_info, &alloc_info, &out.buffer, &out.allocation, &info) !=
+        VK_SUCCESS) {
+        out.buffer = VK_NULL_HANDLE;
+        return false;
+    }
+    out.mapped = info.pMappedData;
+    return out.mapped != nullptr;
+}
+
+void destroyFgHostBuffer(tox2::VkContext& ctx, FgHostBuffer& buffer) {
+    if (buffer.buffer != VK_NULL_HANDLE) vmaDestroyBuffer(ctx.allocator(), buffer.buffer, buffer.allocation);
+    buffer = {};
+}
+
+// Makes the device's writes to the buffer visible to the host after the submit completed.
+void fgHostBarrier(VkCommandBuffer cmd) {
+    VkMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+}
+
+float halfToFloat(std::uint16_t half) {
+    const float sign = (half >> 15) != 0 ? -1.0f : 1.0f;
+    const int exponent = (half >> 10) & 0x1F;
+    const int mantissa = half & 0x3FF;
+    if (exponent == 0) return sign * std::ldexp(static_cast<float>(mantissa), -24);
+    if (exponent == 31) return sign * std::numeric_limits<float>::infinity();
+    return sign * std::ldexp(static_cast<float>(mantissa | 0x400), exponent - 25);
+}
+
+// Row-vector world-to-clip matrix of a pinhole camera: translate to the eye, yaw about y, then a projection with
+// depth 0..1 and clip w = view depth.
+tox2::Mat4 fgTestWorldToClip(float eye_x, float eye_y, float eye_z, float yaw_degrees) {
+    constexpr float kNear = 1.0f, kFar = 100.0f, kSx = 0.5625f, kSy = 1.0f;
+    const float yaw = yaw_degrees * 3.14159265f / 180.0f;
+    const float c = std::cos(yaw), s = std::sin(yaw);
+    const tox2::Mat4 translate = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -eye_x, -eye_y, -eye_z, 1};
+    const tox2::Mat4 rotate = {c, 0, s, 0, 0, 1, 0, 0, -s, 0, c, 0, 0, 0, 0, 1};
+    const tox2::Mat4 project = {
+            kSx, 0, 0, 0, 0, kSy, 0, 0, 0, 0, kFar / (kFar - kNear), 1, 0, 0, -kNear * kFar / (kFar - kNear), 0};
+    return tox2::mat4Multiply(tox2::mat4Multiply(translate, rotate), project);
+}
+
+// The motion vector pass on a tilted depth plane: the read-back vectors match the formula evaluated on the CPU, the
+// identity matrix gives zeros and a flip sign negates only that component.
+void testFgMotionVectors(tox2::VkContext& ctx) {
+    if (!ctx.hasD24S8()) {
+        std::printf("fg motion vectors: skipped: no D24S8\n");
+        return;
+    }
+    constexpr std::uint32_t kWidth = 64;
+    constexpr std::uint32_t kHeight = 36;
+    constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+
+    // depth = 0.3 + 0.004 x + 0.003 y, as the 24-bit values the image stores.
+    std::vector<std::uint32_t> depth_words(kPixels);
+    std::vector<float> depth_values(kPixels);
+    for (std::uint32_t y = 0; y < kHeight; y++) {
+        for (std::uint32_t x = 0; x < kWidth; x++) {
+            const double depth = 0.3 + 0.004 * x + 0.003 * y;
+            const auto word = static_cast<std::uint32_t>(std::lround(depth * 16777215.0));
+            depth_words[y * kWidth + x] = word;
+            depth_values[y * kWidth + x] = static_cast<float>(word) / 16777215.0f;
+        }
+    }
+
+    SlTestImage depth;
+    FgHostBuffer upload, readback;
+    bool ok = createSlTestImage(ctx, ctx.depthStencilFormat(),
+                                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                VK_IMAGE_ASPECT_DEPTH_BIT, kWidth, kHeight, depth) &&
+              createFgHostBuffer(ctx, kPixels * 4, upload) && createFgHostBuffer(ctx, kPixels * 4, readback);
+    CHECK(ok);
+    auto pass = std::make_unique<tox2::FgMotionPass>(ctx);
+    std::shared_ptr<void> retired;
+    bool recreated = false;
+    std::string error;
+    ok = ok && pass->prepare(kWidth, kHeight, retired, recreated, error);
+    CHECK(ok && recreated && retired == nullptr);
+    if (!ok) {
+        std::printf("fg motion vectors: %s\n", error.c_str());
+    } else {
+        std::memcpy(upload.mapped, depth_words.data(), kPixels * 4);
+        vmaFlushAllocation(ctx.allocator(), upload.allocation, 0, VK_WHOLE_SIZE);
+        // D24_UNORM_S8_UINT buffer texels hold the depth in their low 24 bits.
+        const VkImageAspectFlags both = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            slTestBarrier(cmd, depth.image, both, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                          VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+            copy.imageExtent = {kWidth, kHeight, 1};
+            vkCmdCopyBufferToImage(cmd, upload.buffer, depth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            slTestBarrier(cmd, depth.image, both, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                          VK_ACCESS_2_SHADER_READ_BIT);
+        }));
+
+        // The current camera moved right and up a little and turned 2 degrees; the previous one is at the origin.
+        const tox2::Mat4 current = fgTestWorldToClip(0.4f, 0.15f, 0.0f, 2.0f);
+        const tox2::Mat4 previous = fgTestWorldToClip(0.0f, 0.0f, 0.0f, 0.0f);
+        tox2::Mat4 current_inverse{};
+        CHECK(tox2::mat4Inverse(current, current_inverse));
+        const tox2::Mat4 clip_to_prev_clip = tox2::mat4Multiply(current_inverse, previous);
+
+        // Runs the pass and returns the vectors as floats (x, y per pixel).
+        const auto run = [&](const tox2::Mat4& matrix, float flip_x, float flip_y) {
+            std::vector<float> vectors(kPixels * 2, 1000.0f);
+            tox2::FgMotionInputs inputs;
+            inputs.depth = depth.view;
+            inputs.clip_to_prev_clip = matrix;
+            inputs.flip[0] = flip_x;
+            inputs.flip[1] = flip_y;
+            std::string run_error;
+            const bool done = fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+                CHECK(pass->recordMotion(cmd, inputs, run_error));
+                const tox2::SlImage motion = pass->motionImage();
+                slTestBarrier(cmd, motion.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_NONE, VK_ACCESS_2_TRANSFER_READ_BIT);
+                VkBufferImageCopy copy{};
+                copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                copy.imageExtent = {kWidth, kHeight, 1};
+                vkCmdCopyImageToBuffer(cmd, motion.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1,
+                                       &copy);
+                fgHostBarrier(cmd);
+            });
+            CHECK(done);
+            if (!run_error.empty()) std::printf("fg motion vectors: %s\n", run_error.c_str());
+            if (done) {
+                vmaInvalidateAllocation(ctx.allocator(), readback.allocation, 0, VK_WHOLE_SIZE);
+                const auto* halves = static_cast<const std::uint16_t*>(readback.mapped);
+                for (std::size_t i = 0; i < kPixels * 2; i++) vectors[i] = halfToFloat(halves[i]);
+            }
+            return vectors;
+        };
+
+        // The formula of the pass: previous minus current position in pixels, y down.
+        const auto expected = [&](std::uint32_t x, std::uint32_t y, float& mv_x, float& mv_y) {
+            const float px = static_cast<float>(x) + 0.5f, py = static_cast<float>(y) + 0.5f;
+            const std::array<float, 4> clip = {px / kWidth * 2.0f - 1.0f, py / kHeight * 2.0f - 1.0f,
+                                               depth_values[y * kWidth + x], 1.0f};
+            const std::array<float, 4> q = tox2::mat4Transform(clip, clip_to_prev_clip);
+            CHECK(q[3] > 0.0f);
+            mv_x = (q[0] / q[3] + 1.0f) * 0.5f * kWidth - px;
+            mv_y = (q[1] / q[3] + 1.0f) * 0.5f * kHeight - py;
+        };
+
+        const std::vector<float> moved = run(clip_to_prev_clip, 1.0f, 1.0f);
+        const std::vector<float> flipped = run(clip_to_prev_clip, -1.0f, 1.0f);
+        const std::vector<float> still = run(tox2::mat4Identity(), 1.0f, 1.0f);
+
+        float largest = 0.0f, worst = 0.0f, worst_flip = 0.0f;
+        for (std::uint32_t i = 0; i < 20; i++) {
+            const std::uint32_t x = (i * 7 + 3) % kWidth;
+            const std::uint32_t y = (i * 5 + 2) % kHeight;
+            float mv_x = 0.0f, mv_y = 0.0f;
+            expected(x, y, mv_x, mv_y);
+            const std::size_t at = (static_cast<std::size_t>(y) * kWidth + x) * 2;
+            worst = std::max({worst, std::abs(moved[at] - mv_x), std::abs(moved[at + 1] - mv_y)});
+            worst_flip = std::max(
+                    {worst_flip, std::abs(flipped[at] + moved[at]), std::abs(flipped[at + 1] - moved[at + 1])});
+            largest = std::max({largest, std::abs(mv_x), std::abs(mv_y)});
+        }
+        std::printf("fg motion vectors: largest %.2f px, worst error %.4f px\n", largest, worst);
+        // A transposed matrix or a wrong sign would give other vectors, so the plane must really move.
+        CHECK(largest > 1.0f);
+        CHECK(worst < 0.01f);
+        CHECK(worst_flip < 1e-6f);
+
+        float still_largest = 0.0f;
+        for (const float value : still) still_largest = std::max(still_largest, std::abs(value));
+        CHECK(still_largest < 0.01f);
+    }
+
+    pass.reset();
+    vkDeviceWaitIdle(ctx.device());
+    destroyFgHostBuffer(ctx, readback);
+    destroyFgHostBuffer(ctx, upload);
+    destroySlTestImage(ctx, depth);
+    CHECK(ctx.validationErrorCount() == errors_before);
+}
+
+// The warp check on a gradient shifted by (+3, -2) pixels: motion (-3, +2) compensates it exactly, so only the
+// pixels whose compensated position is inside the image are counted and compare equal.
+void testFgWarpCheck(tox2::VkContext& ctx) {
+    constexpr std::uint32_t kWidth = 64;
+    constexpr std::uint32_t kHeight = 36;
+    constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+
+    // value(x, y) = 3x + y in every colour channel; the current image is the previous one moved right by 3 and up by
+    // 2, and 0 where nothing moved in.
+    const auto gradient = [](std::uint32_t x, std::uint32_t y) { return static_cast<std::uint8_t>(3 * x + y); };
+    std::vector<std::uint8_t> previous_bytes(kPixels * 4), current_bytes(kPixels * 4);
+    for (std::uint32_t y = 0; y < kHeight; y++) {
+        for (std::uint32_t x = 0; x < kWidth; x++) {
+            const bool from_inside = x >= 3 && y + 2 < kHeight;
+            const std::uint8_t previous_value = gradient(x, y);
+            const std::uint8_t current_value = from_inside ? gradient(x - 3, y + 2) : 0;
+            std::uint8_t* previous_pixel = &previous_bytes[(static_cast<std::size_t>(y) * kWidth + x) * 4];
+            std::uint8_t* current_pixel = &current_bytes[(static_cast<std::size_t>(y) * kWidth + x) * 4];
+            previous_pixel[0] = previous_pixel[1] = previous_pixel[2] = previous_value;
+            current_pixel[0] = current_pixel[1] = current_pixel[2] = current_value;
+            previous_pixel[3] = current_pixel[3] = 255;
+        }
+    }
+
+    constexpr VkImageUsageFlags kUsage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    SlTestImage previous, current, motion;
+    FgHostBuffer upload;
+    bool ok = createSlTestImage(ctx, VK_FORMAT_R8G8B8A8_UNORM, kUsage, VK_IMAGE_ASPECT_COLOR_BIT, kWidth, kHeight,
+                                previous) &&
+              createSlTestImage(ctx, VK_FORMAT_R8G8B8A8_UNORM, kUsage, VK_IMAGE_ASPECT_COLOR_BIT, kWidth, kHeight,
+                                current) &&
+              createSlTestImage(ctx, VK_FORMAT_R16G16_SFLOAT, kUsage, VK_IMAGE_ASPECT_COLOR_BIT, kWidth, kHeight,
+                                motion) &&
+              createFgHostBuffer(ctx, kPixels * 4 * 2, upload);
+    CHECK(ok);
+    auto pass = std::make_unique<tox2::FgMotionPass>(ctx);
+    std::shared_ptr<void> retired;
+    bool recreated = false;
+    std::string error;
+    ok = ok && pass->prepare(kWidth, kHeight, retired, recreated, error);
+    CHECK(ok);
+    if (!ok) {
+        std::printf("fg warp check: %s\n", error.c_str());
+    } else {
+        auto* bytes = static_cast<std::uint8_t*>(upload.mapped);
+        std::memcpy(bytes, previous_bytes.data(), kPixels * 4);
+        std::memcpy(bytes + kPixels * 4, current_bytes.data(), kPixels * 4);
+        vmaFlushAllocation(ctx.allocator(), upload.allocation, 0, VK_WHOLE_SIZE);
+
+        constexpr VkImageAspectFlags kColor = VK_IMAGE_ASPECT_COLOR_BIT;
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            const SlTestImage* images[2] = {&previous, &current};
+            for (std::size_t i = 0; i < 2; i++) {
+                slTestBarrier(cmd, images[i]->image, kColor, VK_IMAGE_LAYOUT_UNDEFINED,
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+                VkBufferImageCopy copy{};
+                copy.bufferOffset = i * kPixels * 4;
+                copy.imageSubresource = {kColor, 0, 0, 1};
+                copy.imageExtent = {kWidth, kHeight, 1};
+                vkCmdCopyBufferToImage(cmd, upload.buffer, images[i]->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                                       &copy);
+                slTestBarrier(cmd, images[i]->image, kColor, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                              VK_ACCESS_2_SHADER_READ_BIT);
+            }
+            // Previous minus current position of the moved content: (-3, +2) everywhere.
+            slTestBarrier(cmd, motion.image, kColor, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                          VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            VkClearColorValue vector{};
+            vector.float32[0] = -3.0f;
+            vector.float32[1] = 2.0f;
+            const VkImageSubresourceRange range = {kColor, 0, 1, 0, 1};
+            vkCmdClearColorImage(cmd, motion.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &vector, 1, &range);
+            slTestBarrier(cmd, motion.image, kColor, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                          VK_ACCESS_2_SHADER_READ_BIT);
+        }));
+
+        // The first call only seeds the previous colour; the second compares against it.
+        std::string check_error;
+        tox2::FgWarpStats stats;
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            CHECK(pass->recordWarpCheck(cmd, previous.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, motion.view,
+                                        check_error));
+        }));
+        CHECK(!pass->collectWarpStats(stats));
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            CHECK(pass->recordWarpCheck(cmd, current.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, motion.view,
+                                        check_error));
+        }));
+        if (!check_error.empty()) std::printf("fg warp check: %s\n", check_error.c_str());
+        CHECK(pass->collectWarpStats(stats));
+        std::printf("fg warp check: warp mean %.3f, no-motion mean %.3f, %u pixels\n", stats.warp_mean,
+                    stats.no_motion_mean, stats.pixels);
+        CHECK(stats.pixels == (kWidth - 3) * (kHeight - 2));
+        CHECK(stats.warp_mean < 0.5);
+        CHECK(stats.no_motion_mean > 5.0);
+        CHECK(std::abs(stats.no_motion_mean - 7.0) < 0.05);
+        CHECK(!pass->collectWarpStats(stats));
+    }
+
+    pass.reset();
+    vkDeviceWaitIdle(ctx.device());
+    destroyFgHostBuffer(ctx, upload);
+    destroySlTestImage(ctx, motion);
+    destroySlTestImage(ctx, current);
+    destroySlTestImage(ctx, previous);
+    CHECK(ctx.validationErrorCount() == errors_before);
+}
+
 }  // namespace
 
 int main() {
@@ -6748,6 +7113,8 @@ int main() {
     testRendererPointSize(*ctx);
     testForcedAnisotropySampler(*ctx);
     testRendererAnisotropy(*ctx);
+    testFgMotionVectors(*ctx);
+    testFgWarpCheck(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
     ctx.reset();

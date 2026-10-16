@@ -167,6 +167,7 @@ function(tox2_render_add)
 
   add_library(tox2_render STATIC
     runtime/src/render/dlaa_pass.cpp
+    runtime/src/render/fg_motion.cpp
     runtime/src/render/fp_translator.cpp
     runtime/src/render/frame_dump.cpp
     runtime/src/render/image_pool.cpp
