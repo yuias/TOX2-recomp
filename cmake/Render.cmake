@@ -213,6 +213,14 @@ function(tox2_render_add)
   set_tests_properties(fp_translator PROPERTIES
     PASS_REGULAR_EXPRESSION "fp translator tests: [0-9]+ passed, 0 failed")
 
+  # Header-only maths; needs no GPU.
+  add_executable(tox2_frame_gen_tests runtime/tests/frame_gen_test.cpp)
+  target_compile_options(tox2_frame_gen_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_link_libraries(tox2_frame_gen_tests PRIVATE tox2_render)
+  add_test(NAME frame_gen COMMAND tox2_frame_gen_tests)
+  set_tests_properties(frame_gen PROPERTIES
+    PASS_REGULAR_EXPRESSION "frame gen tests: [0-9]+ passed, 0 failed")
+
   # Replays a capture without the game: prints the command list from the frame builder, renders it
   # headless and writes the displayed frame as a PNG.
   add_executable(tox2_rsxreplay tools/tox2_rsxreplay/main.cpp)
