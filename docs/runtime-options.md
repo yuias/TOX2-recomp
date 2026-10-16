@@ -9,6 +9,8 @@ tox2_game [--game-dir DIR] [--vfs-config FILE] [--elf PATH] [--libsre PATH] [--h
          [--pad none|neutral|keyboard|gamepad|keyboard+gamepad] [--pad-script FILE] [--pad-probe]
          [--audio none|wasapi] [--audio-dump FILE]
          [--load-only] [--png-dump DIR] [--dump-guest ADDR:SIZE:FILE]...
+         [--spu-capture IMAGE:S[+S...]:E[:dispatches=N]]... [--spu-capture-dir DIR]
+         [--spu-capture-after SECONDS] [--spu-capture-count N] [--spu-capture-every K]
          [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]
          [--dump-frames DIR] [--dump-frames-every K]
          [--shader-cache DIR] [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--anisotropic-filter off|2|4|8|16]
@@ -115,6 +117,11 @@ the window cannot be created, the RSX thread logs the reason and the game goes o
 | `--load-only` | Load and verify the executable and libsre, print the load summary and exit with 0 without running any guest code. |
 | `--png-dump DIR` | Write every image `cellPngDec` decodes to `DIR/png_<n>.png` (8-bit RGBA, at most 64), to check what the guest was given. `DIR` is created. |
 | `--dump-guest ADDR:SIZE:FILE` | Write `SIZE` bytes of guest memory from `ADDR` to `FILE` when the run stops, and log their SHA-256. Repeatable. `ADDR` and `SIZE` are decimal or `0x` hex; `SIZE` is at least 1 and `ADDR + SIZE` must stay within 4 GiB, and `FILE` is the rest of the argument after the second colon. The dump runs on every stop path (exit code, watchdog, stall, fatal stop), in the order given and before the census, so it shows the memory as the run left it while other threads may still run. `FILE` is truncated. |
+| `--spu-capture IMAGE:S[+S...]:E[:dispatches=N]` | Capture spans of generated SPU code for benchmarks. A span runs from the dispatch to an entry `S` of the SPU image `IMAGE` to the next dispatch to its entry `E` on the same SPU thread, so a call is captured from the dispatch before the call site to the return. `S` and `E` are hex local-store addresses (optional `0x`) of entries of the image; several starts can be joined with `+`. `dispatches=N` (decimal) rejects spans with more than `N` dispatches, the one to `E` included. A span is written only if it read no channel, ran no MFC command and counted no `stop` between `S` and `E`. Each accepted span becomes one file `<IMAGE>_<S>_<E>_<n>.spucap` in `--spu-capture-dir` that holds the registers and local store at both ends and the code segments the local store holds; every written file is logged as `tox2: spu capture: wrote ...`. Repeatable, one selector per occurrence. An unknown image, an `S` or `E` that is not an entry, an `E` that is also a start, or more than 16 distinct entries is a start-up error. Needs `--spu-capture-dir`. The patched entries run a small trampoline first; without this option the generated tables are used unchanged. |
+| `--spu-capture-dir DIR` | Directory of the `.spucap` files, created when missing. Required with `--spu-capture`. |
+| `--spu-capture-after SECONDS` | Capture only spans that start at least `SECONDS` seconds after the SPU tables were installed at boot, so loading and warm-up are skipped (whole seconds, default 0). |
+| `--spu-capture-count N` | Write at most `N` files per `--spu-capture` selector (default 4; at least 1). A write that fails does not count. |
+| `--spu-capture-every K` | Write every `K`-th accepted span of a selector instead of every one (default 1; at least 1). |
 | `--host-priorities on\|off` | Raise the host priority of the threads that feed the audio output (default `on`): the audio engine thread to `THREAD_PRIORITY_TIME_CRITICAL`, and the host threads of an SPU thread group that has a scheduler context and an lv2 priority of 31 or less (the game's sound-processing group) to `THREAD_PRIORITY_HIGHEST`. All of them sleep or block while they wait. The RSX thread and the PPU threads stay at normal priority. `off` leaves every thread at normal priority. Any other value is a usage error. |
 | `--yield-backoff on\|off` | Let a guest thread that spins on `sys_ppu_thread_yield` sleep without the guest lock, or in `--ppu-threads 1\|2` without its PPU slot (default `on`): a thread whose yields follow each other within 50 us sleeps 100 us on every 64th one, and the sleeps are counted in the census and the perf line (`yield calls ... backoff`). During a sleep any waiter may run, including a lower-priority PPU thread. `off` never sleeps, so a spinning thread keeps a core busy and the RSX thread waits longer for the lock; in a 140 s run of this game that used about 1.8 times the process CPU time in `legacy` and 1.7 times in `2`. The result of the call follows lv2's rule either way: `CELL_OK` only when a PPU thread of equal or higher priority was queued and ran, else `CELL_CANCEL` (see [Threads](runtime.md#threads)). Any other value is a usage error. |
 | `--ppu-threads legacy\|1\|2` | How guest PPU threads share the CPU (default `2`). `legacy` runs one guest thread at a time, holding the guest lock for the whole time it runs guest code, so the RSX thread and the audio engine exclude PPU guest code. `1` and `2` run guest code under a PPU slot instead, with 1 or 2 slots, and take the guest lock (now the kernel lock) only inside lv2 and HLE calls, so with `2` two guest PPU threads can run at once, like the two hardware threads of the PS3, and the host threads run beside guest code. `1` is a diagnostic step between the two: no parallel PPU threads, but the host threads already run beside guest code. Compared with `legacy` in 140 s and 420 s runs of this game, `2` cut the RSX thread's lock wait from 2.0 to 0.3 ms per flip at the same flip rate and used 1.06 to 1.09 times the process CPU time (see [Threads](runtime.md#threads)). The mode is logged as `tox2: ppu threads: <mode>`. In `1` and `2` the census has a `census: ppu slots` line (slot hold time, time with both slots held, time with every slot held and a thread waiting, and the slot wait latencies), the census header and the perf `lock` line omit `ppu overlap`, and the perf `lock` line ends with `slots par X ms full Y ms` per second. Any other value is a usage error. |
@@ -166,13 +173,13 @@ written the way its kind of option needs it:
 
 | Kind | Keys | Value in the file |
 | --- | --- | --- |
-| Path | `game_dir`, `vfs_config`, `elf`, `libsre`, `hdd_dir`, `sdata_cache`, `log`, `png_dump`, `pad_script`, `audio_dump`, `rsx_census`, `dump_frames`, `shader_cache` | A non-empty string. A relative path is relative to the directory of the config file, not to the working directory (on the command line it is relative to the working directory). |
+| Path | `game_dir`, `vfs_config`, `elf`, `libsre`, `hdd_dir`, `sdata_cache`, `log`, `png_dump`, `pad_script`, `audio_dump`, `rsx_census`, `dump_frames`, `shader_cache`, `spu_capture_dir` | A non-empty string. A relative path is relative to the directory of the config file, not to the working directory (on the command line it is relative to the working directory). |
 | Text | `log_level`, `dialog_answer`, `pad`, `audio`, `render`, `ppu_threads`, `frame_limit`, `aa_mode`, `anisotropic_filter`, `window_size`, `frame_gen` | A string with the text the command line takes. A whole number is also accepted and read as its decimal text, so `"frame_limit": 60` and `"ppu_threads": 2` work. |
-| Number | `seconds`, `dump_frames_every`, `resolution_scale` | A non-negative whole number. |
+| Number | `seconds`, `dump_frames_every`, `resolution_scale`, `spu_capture_after`, `spu_capture_count`, `spu_capture_every` | A non-negative whole number. |
 | Flag | `strict`, `quiet_hle`, `load_only`, `pad_probe`, `vk_validation`, `no_window`, `lwmutex_watch` | `true` sets the option. `false` is the same as leaving the key out. |
 | On or off | `host_priorities`, `yield_backoff`, `lwmutex_fast_path`, `fullscreen` | `true` or `false`, or the strings `"on"` or `"off"`. |
 | Frame list | `rsx_capture` | A string such as `"300,600"`, or a non-empty array of positive whole numbers. |
-| Strings | `dump_guest` | An array of strings, each one an `ADDR:SIZE:FILE` argument. |
+| Strings | `dump_guest`, `spu_capture` | An array of strings, each one an `ADDR:SIZE:FILE` argument (`dump_guest`) or an `IMAGE:S[+S...]:E[:dispatches=N]` argument (`spu_capture`). |
 
 ```json
 {
@@ -194,7 +201,7 @@ and is kept when the file is rewritten. The key of an option that no longer exis
 The order is: command line, then `config.json`, then the `--vfs-config` file, then the defaults. A key
 acts exactly like the option, so `game_dir` in `config.json` overrides the `/dev_bdvd` mount of a VFS
 file. When an option is on the command line, the file's value for it is not used and not checked; for the
-repeatable `rsx_capture` and `dump_guest`, a command-line occurrence replaces the file's whole list.
+repeatable `rsx_capture`, `dump_guest` and `spu_capture`, a command-line occurrence replaces the file's whole list.
 
 A file that is not valid JSON, has a value of the wrong type or has a value that fails the option's check
 stops the start with exit code 2. The message names the file (`<file>` is its absolute path) and the usage
