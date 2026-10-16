@@ -243,6 +243,9 @@ struct Streamline::Impl {
         bool alpha = false;
     };
     std::unordered_map<std::uint32_t, ViewportOptions> viewport_options;
+    // The frame index whose constants a DLSS viewport already holds. sl.common refuses different constants for
+    // the same frame and viewport, so a second evaluation in one frame keeps the first one's.
+    std::unordered_map<std::uint32_t, std::uint32_t> constants_frame;
     std::uint32_t next_viewport = 1;  // 0 is kFrameGenViewport
     PFun_slDLSSSetOptions* dlss_set_options = nullptr;
 
@@ -699,35 +702,41 @@ bool Streamline::evaluateDlaa(VkCommandBuffer cmd, const DlaaFrame& frame, std::
         impl.frame_index = frame.frame_index;
     }
 
-    sl::Constants constants;
-    constants.cameraViewToClip = toFloat4x4(frame.view_to_clip);
-    constants.clipToCameraView = toFloat4x4(frame.clip_to_view);
-    constants.clipToPrevClip = toFloat4x4(frame.clip_to_prev_clip);
-    constants.prevClipToClip = toFloat4x4(frame.prev_clip_to_clip);
-    constants.jitterOffset = sl::float2(frame.jitter_px[0], frame.jitter_px[1]);
-    constants.mvecScale = sl::float2(frame.mvec_scale[0], frame.mvec_scale[1]);
-    constants.cameraPinholeOffset = sl::float2(0.0f, 0.0f);
-    // DLAA reads none of the camera description, but the struct asks for all of it.
-    constants.cameraPos = sl::float3(0.0f, 0.0f, 0.0f);
-    constants.cameraUp = sl::float3(0.0f, 1.0f, 0.0f);
-    constants.cameraRight = sl::float3(1.0f, 0.0f, 0.0f);
-    constants.cameraFwd = sl::float3(0.0f, 0.0f, 1.0f);
-    constants.cameraNear = 1.0f;
-    constants.cameraFar = 1000.0f;
-    constants.cameraFOV = 1.0f;
-    constants.cameraAspectRatio = static_cast<float>(width) / static_cast<float>(height);
-    if (frame.mvec_invalid_value) constants.motionVectorsInvalidValue = *frame.mvec_invalid_value;
-    constants.depthInverted = sl::Boolean::eFalse;
-    constants.cameraMotionIncluded = sl::Boolean::eFalse;
-    constants.motionVectors3D = sl::Boolean::eFalse;
-    constants.reset = frame.reset ? sl::Boolean::eTrue : sl::Boolean::eFalse;
-    constants.orthographicProjection = sl::Boolean::eFalse;
-    constants.motionVectorsDilated = sl::Boolean::eFalse;
-    constants.motionVectorsJittered = sl::Boolean::eFalse;
-    result = impl.api.set_constants(constants, *token, viewport);
-    if (result != sl::Result::eOk) {
-        error = "slSetConstants failed: " + resultName(result);
-        return false;
+    // The scene written again after the first evaluation is evaluated again in the same frame. Its reset flag and
+    // camera may differ from the first evaluation's, but the frame keeps the constants it was given first.
+    const auto set_for = impl.constants_frame.find(frame.viewport);
+    if (set_for == impl.constants_frame.end() || set_for->second != frame.frame_index) {
+        sl::Constants constants;
+        constants.cameraViewToClip = toFloat4x4(frame.view_to_clip);
+        constants.clipToCameraView = toFloat4x4(frame.clip_to_view);
+        constants.clipToPrevClip = toFloat4x4(frame.clip_to_prev_clip);
+        constants.prevClipToClip = toFloat4x4(frame.prev_clip_to_clip);
+        constants.jitterOffset = sl::float2(frame.jitter_px[0], frame.jitter_px[1]);
+        constants.mvecScale = sl::float2(frame.mvec_scale[0], frame.mvec_scale[1]);
+        constants.cameraPinholeOffset = sl::float2(0.0f, 0.0f);
+        // DLAA reads none of the camera description, but the struct asks for all of it.
+        constants.cameraPos = sl::float3(0.0f, 0.0f, 0.0f);
+        constants.cameraUp = sl::float3(0.0f, 1.0f, 0.0f);
+        constants.cameraRight = sl::float3(1.0f, 0.0f, 0.0f);
+        constants.cameraFwd = sl::float3(0.0f, 0.0f, 1.0f);
+        constants.cameraNear = 1.0f;
+        constants.cameraFar = 1000.0f;
+        constants.cameraFOV = 1.0f;
+        constants.cameraAspectRatio = static_cast<float>(width) / static_cast<float>(height);
+        if (frame.mvec_invalid_value) constants.motionVectorsInvalidValue = *frame.mvec_invalid_value;
+        constants.depthInverted = sl::Boolean::eFalse;
+        constants.cameraMotionIncluded = sl::Boolean::eFalse;
+        constants.motionVectors3D = sl::Boolean::eFalse;
+        constants.reset = frame.reset ? sl::Boolean::eTrue : sl::Boolean::eFalse;
+        constants.orthographicProjection = sl::Boolean::eFalse;
+        constants.motionVectorsDilated = sl::Boolean::eFalse;
+        constants.motionVectorsJittered = sl::Boolean::eFalse;
+        result = impl.api.set_constants(constants, *token, viewport);
+        if (result != sl::Result::eOk) {
+            error = "slSetConstants failed: " + resultName(result);
+            return false;
+        }
+        impl.constants_frame[frame.viewport] = frame.frame_index;
     }
 
     sl::Resource color_in = toResource(frame.color_in);
@@ -760,6 +769,7 @@ void Streamline::freeViewport(std::uint32_t viewport) {
     Impl& impl = *impl_;
     if (!impl.device_set) return;
     impl.viewport_options.erase(viewport);
+    impl.constants_frame.erase(viewport);
     const sl::Result result = impl.api.free_resources(sl::kFeatureDLSS, sl::ViewportHandle(viewport));
     if (result != sl::Result::eOk) logWarn("tox2: streamline: slFreeResources failed: {}", resultName(result));
 }
