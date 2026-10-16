@@ -28,11 +28,14 @@ std::optional<PadButton> padButtonForScanCode(std::uint32_t scan_code);
 
 enum class InputSource : std::uint8_t { Keyboard, Script, Gamepad, Count };
 
+enum class PadStick : std::uint8_t { Left, Right };
+
 // Pad state held by host input. Written by the window thread (Keyboard), the script thread (Script)
 // and the gamepad thread (Gamepad), read by poll on guest threads under the kernel lock, so
 // everything is a relaxed atomic: each mask bit, press time and snapshot is independent, and a
 // stale read delays a change by one poll (the button mask and the analog snapshot are not updated
-// together, so a poll between the two stores sees one stale part).
+// together, so a poll between the two stores sees one stale part). The sticks have two sources, the
+// gamepad (with the triggers) and the script; analog() merges them per axis.
 class KeyboardPadState {
 public:
     using Clock = std::chrono::steady_clock;
@@ -57,6 +60,10 @@ public:
 
     // Sticks and trigger pressure of the gamepad source; the default PadAnalog when no gamepad is in use.
     void setAnalog(const PadAnalog& analog);
+    // Position of one stick of the Script source (CellPadData bytes, centre 0x80); it stays until set again.
+    void setScriptStick(PadStick stick, std::uint8_t x, std::uint8_t y);
+    // The gamepad's analog values with the script sticks merged in: per stick axis the value farthest
+    // from 0x80 (a tie keeps the gamepad's, as in mergeMappedPads). Triggers come from the gamepad only.
     PadAnalog analog() const;
 
     // True while at least one gamepad is in use; only a provider made with always_connected = false
@@ -83,12 +90,14 @@ private:
             pressed_at_ns_;
     // PadAnalog packed one byte per field (see the .cpp), so a poll never sees a half-written stick.
     std::atomic<std::uint64_t> analog_;
+    // The Script source's sticks, one byte per axis (left_x, left_y, right_x, right_y from the low byte).
+    std::atomic<std::uint32_t> script_sticks_;
     std::atomic<bool> gamepad_connected_{false};
     std::atomic<std::uint16_t> vibration_{0};  // small motor in the low byte, large in the high byte
     // poll() runs under the kernel lock and must never block.
     static_assert(std::atomic<std::int64_t>::is_always_lock_free && std::atomic<PadButtons>::is_always_lock_free &&
-                  std::atomic<std::uint64_t>::is_always_lock_free && std::atomic<std::uint16_t>::is_always_lock_free &&
-                  std::atomic<bool>::is_always_lock_free);
+                  std::atomic<std::uint64_t>::is_always_lock_free && std::atomic<std::uint32_t>::is_always_lock_free &&
+                  std::atomic<std::uint16_t>::is_always_lock_free && std::atomic<bool>::is_always_lock_free);
 };
 
 struct PadProviderOptions {

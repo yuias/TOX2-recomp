@@ -877,6 +877,7 @@ are parsed. `#` starts a comment, blank lines are ignored, tokens are separated 
 <time> press   <buttons>
 <time> release <buttons>
 <time> tap     <buttons> [every <interval> until <time>]
+<time> stick   left|right <x> <y>
 ```
 
 - `<time>` and `<interval>` are either decimal seconds from the start of the script, with
@@ -890,7 +891,18 @@ are parsed. `#` starts a comment, blank lines are ignored, tokens are separated 
   150 ms at 60 flips/s). `every <interval> until <time>` repeats it at `<time> + k * <interval>`
   while that is not after the `until` time; `<interval>` must be longer than the hold. A script has
   at most 100000 events, times of at most 1000000 s and flip times of at most 100000000.
-- The events are sorted by time (stable); at the same time, releases come before presses.
+- `stick` puts one analog stick at (`<x>`, `<y>`): decimal numbers from -1 to 1 in GameInput's
+  convention, +x right and +y up (digits beyond the third decimal are rounded). A value outside the
+  range or a missing, extra or non-numeric token is an error (`line 5: stick value "1.5" out of range
+  -1..1`, `line 5: unknown stick "middle"`). The values become CellPadData bytes with `stickByte`
+  (`runtime/src/input/gamepad_map.h`) and no deadzone: x as is, y inverted because CellPadData 0 is
+  up. The stick stays at that position until the next `stick` command for the same stick, and
+  `stick left 0 0` centres it; there is no `every`/`until` form. The script sticks are merged with a
+  connected gamepad's per axis: the value farther from centre wins, a tie goes to the gamepad.
+  Without `stick` commands the script leaves the sticks alone. This is how an unattended run walks
+  the character (left stick) and turns the camera (right stick) in the field.
+- The events are sorted by time (stable); at the same time, button releases come before everything
+  else (presses and stick moves keep their file order).
 - An error names the line (`line 7: unknown button "crosss"`), is printed to stderr and ends the
   start-up with exit code 2.
 - A seconds script starts its clock right before the main guest thread is booted, so it matches

@@ -4,6 +4,8 @@
 #include <limits>
 #include <utility>
 
+#include "input/gamepad_map.h"
+
 namespace tox2 {
 namespace {
 
@@ -21,6 +23,8 @@ constexpr Axis kAxes[] = {{PadButton::Up, PadButton::Down}, {PadButton::Left, Pa
 std::int64_t toNanoseconds(KeyboardPadState::Clock::time_point t) {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count();
 }
+
+constexpr std::uint32_t kCentredSticks = 0x80808080;
 
 constexpr PadButtons kTriggers = padButtonBit(PadButton::L2) | padButtonBit(PadButton::R2);
 
@@ -97,7 +101,7 @@ std::optional<PadButton> padButtonForScanCode(std::uint32_t scan_code) {
     }
 }
 
-KeyboardPadState::KeyboardPadState() : analog_(packAnalog(PadAnalog{})) {
+KeyboardPadState::KeyboardPadState() : analog_(packAnalog(PadAnalog{})), script_sticks_(kCentredSticks) {
     for (auto& times : pressed_at_ns_) {
         for (auto& time : times) time.store(kNoPress, std::memory_order_relaxed);
     }
@@ -166,7 +170,27 @@ void KeyboardPadState::setAnalog(const PadAnalog& analog) {
     analog_.store(packAnalog(analog), std::memory_order_relaxed);
 }
 
-PadAnalog KeyboardPadState::analog() const { return unpackAnalog(analog_.load(std::memory_order_relaxed)); }
+void KeyboardPadState::setScriptStick(PadStick stick, std::uint8_t x, std::uint8_t y) {
+    const unsigned shift = stick == PadStick::Left ? 0 : 16;
+    const std::uint32_t mask = 0xFFFFu << shift;
+    const std::uint32_t bits = (static_cast<std::uint32_t>(x) | static_cast<std::uint32_t>(y) << 8) << shift;
+    // One compare-exchange: a poll must not see the other stick's axes, or this one's, half written.
+    std::uint32_t old = script_sticks_.load(std::memory_order_relaxed);
+    while (!script_sticks_.compare_exchange_weak(old, (old & ~mask) | bits, std::memory_order_relaxed)) {
+    }
+}
+
+PadAnalog KeyboardPadState::analog() const {
+    const std::uint32_t sticks = script_sticks_.load(std::memory_order_relaxed);
+    MappedPad pads[2];
+    pads[0].analog = unpackAnalog(analog_.load(std::memory_order_relaxed));
+    pads[1].analog.left_x = static_cast<std::uint8_t>(sticks);
+    pads[1].analog.left_y = static_cast<std::uint8_t>(sticks >> 8);
+    pads[1].analog.right_x = static_cast<std::uint8_t>(sticks >> 16);
+    pads[1].analog.right_y = static_cast<std::uint8_t>(sticks >> 24);
+    // The script has no triggers (0), so the gamepad's survive the merge's maximum.
+    return mergeMappedPads(pads).analog;
+}
 
 void KeyboardPadState::setGamepadConnected(bool connected) {
     gamepad_connected_.store(connected, std::memory_order_relaxed);

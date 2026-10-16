@@ -5216,6 +5216,31 @@ void testGamepadSourceState() {
     const std::pair<std::uint8_t, std::uint8_t> motors{7, 200};
     values.setVibration(7, 200);
     CHECK(values.vibration() == motors);
+
+    // Script sticks merge with the gamepad's per axis, the value farther from 0x80 winning (a tie
+    // keeps the gamepad's); centred, they leave the gamepad snapshot untouched.
+    State merged;
+    tox2::PadAnalog pad;
+    pad.left_x = 0xC0;
+    pad.left_y = 0x70;
+    pad.right_x = 0x40;
+    pad.l2 = 0x55;
+    merged.setAnalog(pad);
+    CHECK(merged.analog() == pad);
+    merged.setScriptStick(tox2::PadStick::Left, 0x10, 0x80);
+    CHECK(merged.analog().left_x == 0x10 && merged.analog().left_y == 0x70);
+    merged.setScriptStick(tox2::PadStick::Left, 0x80, 0x00);
+    CHECK(merged.analog().left_x == 0xC0 && merged.analog().left_y == 0x00);
+    merged.setScriptStick(tox2::PadStick::Right, 0xC0, 0x80);  // tie with the gamepad's 0x40 distance
+    CHECK(merged.analog().right_x == 0x40 && merged.analog().right_y == 0x80);
+    CHECK(merged.analog().l2 == 0x55 && merged.analog().r2 == 0);
+    merged.setScriptStick(tox2::PadStick::Left, 0x80, 0x80);
+    merged.setScriptStick(tox2::PadStick::Right, 0x80, 0x80);
+    CHECK(merged.analog() == pad);
+    State script_only;
+    script_only.setScriptStick(tox2::PadStick::Right, 0xFF, 0x00);
+    CHECK(script_only.analog().right_x == 0xFF && script_only.analog().right_y == 0x00);
+    CHECK(script_only.analog().left_x == 0x80 && script_only.analog().left_y == 0x80);
 }
 
 void testGamepadPadProvider() {
@@ -5495,6 +5520,43 @@ void testPadScriptParse() {
     // Comments and blank lines do not decide the clock; the first timed line does.
     CHECK(scriptEventsAre("# f1 is not a time here\n\nf7 press start", {{7, kStart, true}}, PadScriptClock::Flips));
     CHECK(scriptEventsAre("7 press start # f8", {{7000, kStart, true}}));
+
+    // Stick events: both clocks, rounding, a sign, and the sort rule (only button releases move ahead).
+    const auto left_up = tox2::parsePadScript("75 stick left 0 1");
+    CHECK(left_up && left_up->clock == PadScriptClock::Seconds && left_up->events.size() == 1);
+    if (left_up && left_up->events.size() == 1) {
+        const tox2::PadScriptEvent& e = left_up->events[0];
+        CHECK(e.at == 75000 && e.kind == tox2::PadScriptEventKind::Stick && e.stick == tox2::PadStick::Left);
+        CHECK(e.x_milli == 0 && e.y_milli == 1000);
+    }
+    const auto right_flip = tox2::parsePadScript("f100 stick right -1 0.5");
+    CHECK(right_flip && right_flip->clock == PadScriptClock::Flips && right_flip->events.size() == 1);
+    if (right_flip && right_flip->events.size() == 1) {
+        const tox2::PadScriptEvent& e = right_flip->events[0];
+        CHECK(e.at == 100 && e.kind == tox2::PadScriptEventKind::Stick && e.stick == tox2::PadStick::Right);
+        CHECK(e.x_milli == -1000 && e.y_milli == 500);
+    }
+    const auto rounded = tox2::parsePadScript("1 stick left 0.12345 -0.9995\n2 stick right -0.0004 1.0004\n");
+    CHECK(rounded && rounded->events.size() == 2);
+    if (rounded && rounded->events.size() == 2) {
+        CHECK(rounded->events[0].x_milli == 123 && rounded->events[0].y_milli == -1000);
+        CHECK(rounded->events[1].x_milli == 0 && rounded->events[1].y_milli == 1000);
+    }
+    // At one time: the release first, then the press and the stick in file order.
+    const auto mixed_order =
+            tox2::parsePadScript("2 stick left 1 0\n2 press start\n2 release cross\n2 stick right 0 1\n");
+    CHECK(mixed_order && mixed_order->events.size() == 4);
+    if (mixed_order && mixed_order->events.size() == 4) {
+        const auto& ev = mixed_order->events;
+        CHECK(ev[0].kind == tox2::PadScriptEventKind::Buttons && !ev[0].down && ev[0].buttons == kCross);
+        CHECK(ev[1].kind == tox2::PadScriptEventKind::Stick && ev[1].stick == tox2::PadStick::Left);
+        CHECK(ev[2].kind == tox2::PadScriptEventKind::Buttons && ev[2].down && ev[2].buttons == kStart);
+        CHECK(ev[3].kind == tox2::PadScriptEventKind::Stick && ev[3].stick == tox2::PadStick::Right);
+    }
+    // A stick event does not count as a release against an earlier time either.
+    const auto timed_order = tox2::parsePadScript("3 stick left 0 0\n1 stick left 0 1\n2 release cross\n");
+    CHECK(timed_order && timed_order->events.size() == 3 && timed_order->events[0].at == 1000 &&
+          timed_order->events[1].at == 2000 && timed_order->events[2].at == 3000);
 }
 
 void testPadScriptErrors() {
@@ -5525,6 +5587,25 @@ void testPadScriptErrors() {
     CHECK(scriptError("1 tap start often").starts_with("line 1: unexpected \"often\""));
     CHECK(scriptError("1 tap start every 2 until 5 extra").starts_with("line 1: unexpected \"extra\""));
     CHECK(scriptError("1 tap start every 0.2 until 999999").starts_with("line 1: more than"));
+
+    // Stick commands: unknown stick, missing or extra tokens, non-numbers and out-of-range values.
+    CHECK(scriptError("1 press start\n\n5 stick left 1.5 0") == "line 3: stick value \"1.5\" out of range -1..1");
+    CHECK(scriptError("5 stick left 0 -1.001") == "line 1: stick value \"-1.001\" out of range -1..1");
+    CHECK(scriptError("5 stick left 0 1.0005") == "line 1: stick value \"1.0005\" out of range -1..1");
+    CHECK(scriptError("5 stick left 99999999999999999999 0").starts_with("line 1: stick value"));
+    CHECK(scriptError("5 stick middle 0 0") == "line 1: unknown stick \"middle\"");
+    CHECK(scriptError("5 stick left 0").starts_with("line 1: \"stick\" needs"));
+    CHECK(scriptError("5 stick left").starts_with("line 1: \"stick\" needs"));
+    CHECK(scriptError("5 stick").starts_with("line 1: \"stick\" needs"));
+    CHECK(scriptError("5 stick left 0 0 0") == "line 1: unexpected \"0\"");
+    CHECK(scriptError("5 stick left x 0") == "line 1: bad stick value \"x\"");
+    CHECK(scriptError("5 stick left 0 1e0") == "line 1: bad stick value \"1e0\"");
+    CHECK(scriptError("5 stick left 0 --1") == "line 1: bad stick value \"--1\"");
+    CHECK(scriptError("5 stick left 0 .5") == "line 1: bad stick value \".5\"");
+    CHECK(scriptError("5 stick left 1. 0") == "line 1: bad stick value \"1.\"");
+    CHECK(scriptError("5 stick left 0 -").starts_with("line 1: bad stick value"));
+    CHECK(scriptError("f5 stick left 0 0\n6 stick left 0 0") == "line 2: flip times and second times cannot be mixed");
+    CHECK(scriptError("5 stick left 0 0 # comment\n6 stick right 1 -1\n").empty());
 
     // Flip times: malformed tokens, bounds, and no mixing with seconds.
     CHECK(scriptError("f press start") == "line 1: bad time \"f\"");
@@ -5634,6 +5715,54 @@ void testPadScriptPlay() {
             CHECK(lines[1] == "[host] tox2: pad: script f1009: release start");
             CHECK(lines[2] == "[host] tox2: pad: script f1200: press r1+cross");
             CHECK(lines[3] == "[host] tox2: pad: script f1300: release r1+cross");
+        }
+    }
+
+    // Stick events move the script sticks and log like button events; the stick stays until moved again.
+    const auto stick_script = tox2::parsePadScript("1 stick left 0 1\n2.5 stick right -0.25 0\n3 stick left 0 0\n");
+    CHECK(stick_script && stick_script->events.size() == 3);
+    if (stick_script && stick_script->events.size() == 3) {
+        lines.clear();
+        tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+        tox2::KeyboardPadState stick_state;
+        std::vector<tox2::PadAnalog> analog_before_wait;
+        tox2::playPadScript(*stick_script, stick_state,
+                            [&](std::int64_t) { analog_before_wait.push_back(stick_state.analog()); });
+        tox2::setLogSink({});
+        CHECK(analog_before_wait.size() == 3);
+        if (analog_before_wait.size() == 3) {
+            CHECK(analog_before_wait[0] == tox2::PadAnalog{});
+            // After the first event: up is CellPadData 0, x stays centred.
+            CHECK(analog_before_wait[1].left_x == 0x80 && analog_before_wait[1].left_y == 0x00);
+            CHECK(analog_before_wait[1].right_x == 0x80 && analog_before_wait[1].right_y == 0x80);
+            CHECK(analog_before_wait[2].left_y == 0x00 && analog_before_wait[2].right_x == 0x60 &&
+                  analog_before_wait[2].right_y == 0x80);
+        }
+        // The left stick is centred again; the right one stays where the script left it.
+        CHECK(stick_state.analog().left_x == 0x80 && stick_state.analog().left_y == 0x80);
+        CHECK(stick_state.analog().right_x == 0x60 && stick_state.analog().right_y == 0x80);
+        CHECK(stick_state.held() == 0);
+        CHECK(lines.size() == 3);
+        if (lines.size() == 3) {
+            CHECK(lines[0] ==
+                  "[host] tox2: pad: script 1.000 s: stick left 0.000 1.000 (flip " + std::to_string(flip_count) + ")");
+            CHECK(lines[1] == "[host] tox2: pad: script 2.500 s: stick right -0.250 0.000 (flip " +
+                                      std::to_string(flip_count) + ")");
+            CHECK(lines[2] ==
+                  "[host] tox2: pad: script 3.000 s: stick left 0.000 0.000 (flip " + std::to_string(flip_count) + ")");
+        }
+
+        // Full deflection and the flip clock's log format.
+        const auto corner = tox2::parsePadScript("f7 stick right 1 -1\n");
+        CHECK(corner && corner->events.size() == 1);
+        if (corner && corner->events.size() == 1) {
+            lines.clear();
+            tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+            tox2::KeyboardPadState corner_state;
+            tox2::playPadScript(*corner, corner_state, [](std::int64_t) {});
+            tox2::setLogSink({});
+            CHECK(corner_state.analog().right_x == 0xFF && corner_state.analog().right_y == 0xFF);
+            CHECK(lines.size() == 1 && lines[0] == "[host] tox2: pad: script f7: stick right 1.000 -1.000");
         }
     }
 
