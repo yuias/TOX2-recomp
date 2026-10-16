@@ -66,7 +66,8 @@ public:
 
     // Called after RsxRegisters::apply for every completed write.
     void onWrite(const RsxRegisters& regs, std::uint32_t method, std::uint32_t value);
-    void onFlip(const RsxRegisters& regs, std::uint32_t buffer, const RsxDisplayBuffer& display);
+    void onFlip(const RsxRegisters& regs, std::uint32_t buffer, const RsxDisplayBuffer& display,
+                std::uint64_t completed_us = 0);
 
     // Moves out what was built since the last call.
     std::vector<RsxCommand> takeCommands();

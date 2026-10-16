@@ -162,6 +162,9 @@ struct RsxDraw {
 struct RsxFlip {
     std::uint32_t buffer = 0, offset = 0, pitch = 0, width = 0, height = 0;
     std::uint64_t flip_index = 0;
+    // When the RSX thread completed the flip: steady clock microseconds since an arbitrary epoch. 0 for callers that
+    // pass nothing (replays), which the frame generation flip rate tracker ignores.
+    std::uint64_t completed_us = 0;
 };
 
 using RsxCommand = std::variant<RsxClear, RsxDraw, RsxFlip>;

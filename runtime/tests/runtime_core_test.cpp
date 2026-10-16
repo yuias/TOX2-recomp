@@ -8676,6 +8676,14 @@ void testRsxFrameBuilder() {
     CHECK(std::get<tox2::RsxFlip>(commands[1]).offset == 0x400000 &&
           std::get<tox2::RsxFlip>(commands[1]).height == 720);
     CHECK(unimplementedCount("method NV4097_INLINE_ARRAY") == 1);
+    CHECK(std::get<tox2::RsxFlip>(commands[0]).completed_us == 0);  // no time passed: replays leave 0
+
+    // The completion time given by the RSX thread rides on the flip command.
+    builder.onFlip(*regs, 1, display, 1000);
+    builder.onFlip(*regs, 2, display, 17667);
+    commands = builder.takeCommands();
+    CHECK(commands.size() == 2 && std::get<tox2::RsxFlip>(commands[0]).completed_us == 1000 &&
+          std::get<tox2::RsxFlip>(commands[1]).completed_us == 17667);
 
     // Unreadable vertex memory drops the draw and counts it.
     write(0x1680, 0x80000000 | 0x20000);
