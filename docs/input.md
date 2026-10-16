@@ -13,9 +13,10 @@ runtime has a handler for each. The game calls `cellPadInit` with 7 ports, sets 
 `0x6`) on all seven, and then calls `cellPadGetData`, `cellPadGetInfo2` and `cellPadSetActDirect` about once per
 frame (the three counts are equal in the census; the 30 s headless run in [Status](status.md) has 7,794
 `cellPadGetData` calls). Input from the keyboard and from pad scripts reaches the game, and a pad script has taken it
-through the title screen and its first choices. The gamepad code below does not depend on the game, but no run
-described here had a physical gamepad driving this game: what is said below about pad models, buttons and Steam
-comes from `tox2_padtool`, the tests and runs of other builds, and has not been repeated in this game.
+through the title screen and its first choices. The game has been played with a gamepad. A pad connected
+after the start is not picked up by the game; while Steam runs, Steam handles the pad and
+reconnection. The finer statements below about pad models, buttons and Steam come from `tox2_padtool`, the tests
+and runs of other builds, and have not been repeated one by one in this game.
 
 ## Gamepads
 
@@ -250,7 +251,8 @@ All gamepad lines start with `tox2: pad:`. The start line of the pad itself is
 | `tox2: pad: probe ...` | info | only with `--pad-probe` (below) |
 
 `cellPad` itself logs `tox2: pad: port 0 connected` and `disconnected`. With `--pad gamepad` they
-follow the pad being plugged in and out; otherwise port 0 is always connected, because the keyboard is
+follow the pad being plugged in and out as the device list reports it, but in the game a pad connected after the start
+has not worked; otherwise port 0 is always connected, because the keyboard is
 part of the pad.
 
 ## `--pad-probe`
