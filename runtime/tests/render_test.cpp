@@ -5962,6 +5962,55 @@ void testRendererDlaaEvaluate(tox2::VkContext& ctx) {
     tox2::rsxUnimplementedReset();
 }
 
+// A frame generation target on a renderer without a presenter is reported unsupported ("no window"), warned about once
+// and changes nothing in the picture; the diagnostics default to the measured settings.
+void testRendererFrameGenOptions(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    const tox2::RenderOptions defaults;
+    CHECK(defaults.frame_gen == tox2::FrameGenTarget::Off);
+    CHECK(defaults.fg_debug.present_mode == VK_PRESENT_MODE_MAILBOX_KHR && defaults.fg_debug.reflex_low_latency);
+    CHECK(!defaults.fg_debug.only_generated && defaults.fg_debug.cycle_seconds == 0);
+
+    const std::vector<tox2::RsxCommand> drawn = replaySynthetic(makeQuadCapture());
+    RawDisplay off_display;
+    {
+        tox2::RsxRenderer off(ctx, readbackAllOptions());
+        CHECK(off.valid() && off.frameGenTarget() == tox2::FrameGenTarget::Off);
+        CHECK(!off.frameGenSupported() && off.frameGenUnsupportedReason() == "no window");
+        off_display = runFrame(off, drawn);
+    }
+
+    std::vector<std::string> warnings;
+    tox2::setLogSink([&warnings](std::string_view line) {
+        if (line.find("frame generation") != std::string_view::npos) warnings.emplace_back(line);
+    });
+    {
+        tox2::RenderOptions options = readbackAllOptions();
+        options.frame_gen = tox2::FrameGenTarget::Fps120;
+        tox2::RsxRenderer renderer(ctx, options);
+        CHECK(renderer.valid());
+        CHECK(!renderer.frameGenSupported() && renderer.frameGenUnsupportedReason() == "no window");
+        CHECK(renderer.frameGenTarget() == tox2::FrameGenTarget::Fps120);
+        const RawDisplay first = runFrame(renderer, drawn);
+        const RawDisplay second = runFrame(renderer, drawn);
+        CHECK(sameDisplay(first, off_display) && sameDisplay(second, off_display));
+        // A target other than off cannot be set without support; off always can.
+        CHECK(!renderer.setFrameGenTarget(tox2::FrameGenTarget::Fps60));
+        CHECK(renderer.frameGenTarget() == tox2::FrameGenTarget::Fps120);
+        CHECK(renderer.setFrameGenTarget(tox2::FrameGenTarget::Off));
+        CHECK(renderer.frameGenTarget() == tox2::FrameGenTarget::Off);
+    }
+    tox2::setLogSink({});
+    for (const std::string& line : warnings) std::printf("frame generation options: log: %s\n", line.c_str());
+    CHECK(warnings.size() == 1);
+    CHECK(!warnings.empty() &&
+          warnings[0].find("frame generation unavailable (no window); presenting without it") != std::string::npos);
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
 // ---- Point size ----
 
 // One red point at the centre of the 64x64 surface (a pixel corner), SET_POINT_SIZE `size`.
@@ -7110,6 +7159,7 @@ int main() {
     testRendererMsaaInherit(*ctx);
     testRendererDlaaSceneImage(*ctx);
     testRendererDlaaEvaluate(*ctx);
+    testRendererFrameGenOptions(*ctx);
     testRendererPointSize(*ctx);
     testForcedAnisotropySampler(*ctx);
     testRendererAnisotropy(*ctx);

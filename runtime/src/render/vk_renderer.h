@@ -19,6 +19,7 @@
 #include "render/fg_motion.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
+#include "render/frame_gen.h"
 #include "render/image_pool.h"
 #include "render/present_overlay.h"
 #include "render/render_scale.h"
@@ -53,8 +54,17 @@ struct DlaaDebug {
     bool mvec_invalid_zero = true;
 };
 
-// Frame generation diagnostics (tox2_rsxreplay); the defaults change nothing.
+// Frame generation diagnostics; the defaults are the measured settings.
 struct FgDebug {
+    // The present mode requested while frame generation is loaded. DLSS-G requires vsync off, so FIFO is only a
+    // diagnostic.
+    VkPresentModeKHR present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
+    // Reflex low latency markers and sleep while frame generation is loaded.
+    bool reflex_low_latency = true;
+    // Present only the generated frames, to see them without the real ones in between.
+    bool only_generated = false;
+    // 0 = off; else the seconds between switching the target from off to the requested one and back.
+    std::uint32_t cycle_seconds = 0;
     // At the frame's first DLAA evaluation, draw the camera motion vectors from the depth and compare the DLAA output
     // with the previous one moved by them; the result goes to RendererStats. The scene pixels are not touched.
     bool mv_check = false;
@@ -88,6 +98,9 @@ struct RenderOptions {
     bool dlaa_evaluate = true;
     DlaaDebug dlaa_debug;
     FgDebug fg_debug;
+    // The presented frame rate to aim for with frame generation. Off, an unsupported device and a missing presenter
+    // all present the game's own frames; frameGenSupported() says which of the last two applies.
+    FrameGenTarget frame_gen = FrameGenTarget::Off;
     // Forced anisotropic filtering level: 1 (off), 2, 4, 8 or 16; anything else makes the renderer invalid. A device
     // without the samplerAnisotropy feature keeps 1; a lower device maximum clamps the level (see anisotropy()).
     std::uint32_t anisotropy = 1;
@@ -177,6 +190,17 @@ public:
     bool dlaaAvailable() const { return dlaa_gap_.empty(); }
     // Why dlaaAvailable() is false: the context's Streamline status or the first missing format feature.
     const std::string& dlaaUnavailableReason() const { return dlaa_gap_; }
+
+    // True when the device was created for frame generation and a presenter is set. The presenter is set after
+    // construction, so this can change once.
+    bool frameGenSupported() const { return context_.frameGenerationSupported() && presenter_ != nullptr; }
+    // Why frameGenSupported() is false; empty when it is true.
+    std::string frameGenUnsupportedReason() const;
+    // The requested frame generation target, active or not. No controller exists yet, so nothing is ever active.
+    FrameGenTarget frameGenTarget() const { return frame_gen_target_; }
+    // Changes the requested target; false and no change for a target other than Off while frameGenSupported() is
+    // false. Renderer thread, between commands.
+    bool setFrameGenTarget(FrameGenTarget target);
 
     // Changes the scale of the targets created or bound from now on; false and no change outside
     // 1..kMaxResolutionScale. A target keeps its image until a draw or clear binds it again, then it is replaced by a
@@ -311,6 +335,8 @@ private:
                                 VkSampleCountFlags sidecar_samples);
     void recordDraw(const RsxDraw& draw);
     void recordFlip(const RsxFlip& flip);
+    // Logs a change of the requested target: the unavailable warning when it cannot run, else that it is not active.
+    void noteFrameGenTarget();
     void recordPresentBlit(RenderTarget* source);
     bool ensureReadback(FrameSlot& slot, VkDeviceSize size);
     bool dumpDue() const;
@@ -340,6 +366,8 @@ private:
     bool fg_mv_reset_ = false;    // the DLAA evaluation of that frame reset its history
     std::uint32_t anisotropy_ = 1;
     bool anisotropy_unavailable_logged_ = false;
+    FrameGenTarget frame_gen_target_ = FrameGenTarget::Off;
+    FrameGenTarget frame_gen_noted_ = FrameGenTarget::Off;  // the target noteFrameGenTarget() last logged
     // Always created: its worker thread only starts with the first submitted frame.
     std::unique_ptr<FrameDumper> dumper_;
     bool dump_requested_ = false;  // requestDisplayDump() was called and no flip has taken it yet

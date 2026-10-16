@@ -327,6 +327,7 @@ RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(c
     }
     resolution_scale_ = options_.resolution_scale;
     aa_mode_ = options_.aa_mode;
+    frame_gen_target_ = options_.frame_gen;
     dlaa_gap_ = dlaaGap(context_);
     if (aa_mode_ == AaMode::Dlaa && !dlaaAvailable()) {
         aa_mode_ = msaaAvailable() ? AaMode::Msaa : AaMode::Supersample;
@@ -674,6 +675,33 @@ bool RsxRenderer::setAaMode(AaMode mode) {
     if (mode == AaMode::Dlaa && aa_mode_ != AaMode::Dlaa) dlaa_switched_ = true;
     aa_mode_ = mode;
     return true;
+}
+
+std::string RsxRenderer::frameGenUnsupportedReason() const {
+    if (presenter_ == nullptr) return "no window";
+    if (context_.frameGenerationSupported()) return {};
+    return context_.frameGenerationStatus().empty() ? "the Vulkan device was not created for frame generation"
+                                                    : context_.frameGenerationStatus();
+}
+
+bool RsxRenderer::setFrameGenTarget(FrameGenTarget target) {
+    if (target != FrameGenTarget::Off && !frameGenSupported()) return false;
+    frame_gen_target_ = target;
+    return true;
+}
+
+// The target is read at the first flip, not at construction: the presenter is set in between, and the reason depends
+// on it.
+void RsxRenderer::noteFrameGenTarget() {
+    if (frame_gen_target_ == frame_gen_noted_) return;
+    frame_gen_noted_ = frame_gen_target_;
+    if (frame_gen_target_ == FrameGenTarget::Off) return;
+    if (!frameGenSupported()) {
+        logWarn("tox2: render: frame generation unavailable ({}); presenting without it", frameGenUnsupportedReason());
+    } else {
+        logInfo("tox2: render: frame generation inactive: not implemented (target {})",
+                frameGenTargetName(frame_gen_target_));
+    }
 }
 
 bool RsxRenderer::setAnisotropy(std::uint32_t level) {
@@ -2803,9 +2831,11 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     FrameSlot& slot = *slots_[current_slot_];
     dump_this_flip_ = dump_requested_;
     dump_requested_ = false;
+    noteFrameGenTarget();
     // Asked before the readback decision so a request made for this very flip is honoured.
     std::uint32_t requested_scale = 0;
     std::optional<AaMode> requested_aa_mode;
+    std::optional<FrameGenTarget> requested_frame_gen;
     std::uint32_t requested_anisotropy = 0;
     if (presenter_ != nullptr && overlay_ != nullptr) {
         const PresentOverlayRequests requests = overlay_->onFlip(PresentFrameInfo{
@@ -2819,11 +2849,16 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
                 .anisotropy = anisotropy_,
                 .max_anisotropy = maxAnisotropy(),
                 .window = presenter_->windowStatus(),
+                .frame_gen_supported = frameGenSupported(),
+                .frame_gen_target = frame_gen_target_,
+                .frame_gen = FrameGenStatus{.inactive_reason = "not implemented",
+                                            .max_multiplier = context_.frameGenerationMaxMultiplier()},
         });
         if (requests.dump_display) dump_this_flip_ = true;
         requested_scale = requests.resolution_scale;
         requested_aa_mode = requests.aa_mode;
         requested_anisotropy = requests.anisotropy;
+        requested_frame_gen = requests.frame_gen;
         // The window is not part of the frame being recorded, so the request needs no deferral.
         if (requests.window_size) presenter_->requestWindowSize(*requests.window_size);
     }
@@ -2876,6 +2911,7 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     if (requested_scale != 0 && valid()) setResolutionScale(requested_scale);
     if (requested_aa_mode && valid()) setAaMode(*requested_aa_mode);
     if (requested_anisotropy != 0 && valid()) setAnisotropy(requested_anisotropy);
+    if (requested_frame_gen && valid()) setFrameGenTarget(*requested_frame_gen);
 }
 
 // Acquires a swapchain image and records the copy of the display buffer into it (a black frame when
