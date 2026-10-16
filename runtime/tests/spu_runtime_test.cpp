@@ -911,6 +911,7 @@ std::uintptr_t g_sp_first;
 std::uintptr_t g_sp_last;
 std::atomic<int> g_image_b_runs{0};
 std::atomic<bool> g_spinning{false};
+std::atomic<std::uint32_t> g_spin_laps{0};
 
 TOX2_SPU_FUNC(synthChainA) {
     TOX2_SPU_SF_ENTER(kLsChainA);
@@ -942,6 +943,11 @@ TOX2_SPU_FUNC(synthSpin) {
     TOX2_SPU_SF_ENTER(kLsSpin);
     g_spinning = true;
     for (;;) {
+        // Registers the halt check must not leave stale in ctx: the compiler may keep them in host registers
+        // across the back edge, so the taken path has to store them.
+        TOX2_VR_W(ctx->gpr[5], 0) += 1;
+        TOX2_VR_W(ctx->gpr[6], 0) = ~TOX2_VR_W(ctx->gpr[5], 0);
+        g_spin_laps.fetch_add(1, std::memory_order_relaxed);
         TOX2_SPU_SF_LOOP(kLsSpin + 4);
     }
 }
@@ -2042,15 +2048,27 @@ void testHostThread() {
         tox2::SpuThread thread(0x01000105, "spin", &owner);
         loadSynthImages(thread, guest);
         g_spinning = false;
+        g_spin_laps = 0;
         CHECK(thread.start(kLsSpin));
         const auto deadline = Clock::now() + milliseconds(5000);
         while (!g_spinning && Clock::now() < deadline) std::this_thread::yield();
         CHECK(g_spinning);
         CHECK(thread.state() == tox2::SpuState::Running);
+        // Let the loop run long enough to be in its steady state before the request.
+        while (g_spin_laps.load(std::memory_order_relaxed) < 10000 && Clock::now() < deadline)
+            std::this_thread::yield();
         thread.requestHalt();
         thread.join();
         CHECK(owner.finished == 2 && owner.how == tox2::SpuLeave::Halt);
         CHECK(thread.state() == tox2::SpuState::Finished);
+        // The thread left at the back edge: its site is recorded, and the registers hold the last completed
+        // lap (no lap is lost or half stored).
+        const auto& ctx = thread.context();
+        const std::uint32_t laps = g_spin_laps.load();
+        CHECK(laps >= 10000);
+        CHECK(ctx.jump_site == kLsSpin + 4);
+        CHECK(TOX2_VR_W(ctx.gpr[5], 0) == laps);
+        CHECK(TOX2_VR_W(ctx.gpr[6], 0) == ~laps);
     }
 
     // A halt that is already pending stops the thread before it runs anything.
