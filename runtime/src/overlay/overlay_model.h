@@ -65,7 +65,7 @@ struct OverlayLockRate {
 };
 
 // A Settings choice the user made. The value is the option's command-line form.
-enum class OverlaySetting : std::uint8_t { FrameLimit, ResolutionScale, AaMode, Anisotropy, WindowSize };
+enum class OverlaySetting : std::uint8_t { FrameLimit, ResolutionScale, AaMode, Anisotropy, WindowSize, FrameGen };
 
 // Every member may be empty: the panel then shows "n/a" or disables the control. The providers are
 // called on the renderer's thread and must be safe from any thread.

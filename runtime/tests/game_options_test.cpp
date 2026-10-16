@@ -486,7 +486,7 @@ void testOptionTable() {
         if (spec.persisted) persisted.push_back(spec.name);
     }
     CHECK((persisted == std::vector<std::string_view>{"frame-limit", "resolution-scale", "aa-mode",
-                                                      "anisotropic-filter", "window-size", "fullscreen"}));
+                                                      "anisotropic-filter", "window-size", "fullscreen", "frame-gen"}));
     for (const OptionSpec& spec : specs) {
         if (spec.name == "frame-limit") CHECK(spec.kind == OptionKind::String && spec.needs == OptionNeeds::Nothing);
         if (spec.name == "resolution-scale") {
@@ -498,6 +498,11 @@ void testOptionTable() {
         }
         if (spec.name == "window-size") CHECK(spec.kind == OptionKind::String && spec.needs == OptionNeeds::Window);
         if (spec.name == "fullscreen") CHECK(spec.kind == OptionKind::Switch && spec.needs == OptionNeeds::Window);
+        if (spec.name == "frame-gen") CHECK(spec.kind == OptionKind::String && spec.needs == OptionNeeds::Window);
+        if (spec.name == "fg-present-mode") CHECK(spec.kind == OptionKind::String && !spec.persisted);
+        if (spec.name == "fg-reflex") CHECK(spec.kind == OptionKind::Switch && !spec.persisted);
+        if (spec.name == "fg-only-generated") CHECK(spec.kind == OptionKind::Flag && !spec.persisted);
+        if (spec.name == "fg-cycle") CHECK(spec.kind == OptionKind::Unsigned && !spec.persisted);
         if (spec.name == "rsx-capture") CHECK(spec.kind == OptionKind::FrameList);
         if (spec.name == "dump-guest") CHECK(spec.kind == OptionKind::StringList);
     }
@@ -507,7 +512,8 @@ void testOptionTable() {
                               spec.name == "shader-cache" || spec.name == "vk-validation" ||
                               spec.name == "resolution-scale" || spec.name == "aa-mode" ||
                               spec.name == "anisotropic-filter";
-        const bool window = spec.name == "pad-probe" || spec.name == "window-size" || spec.name == "fullscreen";
+        const bool window = spec.name == "pad-probe" || spec.name == "window-size" || spec.name == "fullscreen" ||
+                            spec.name == "frame-gen" || spec.name.starts_with("fg-");
         const OptionNeeds expected = renderer ? OptionNeeds::Renderer
                                      : window ? OptionNeeds::Window
                                               : OptionNeeds::Nothing;
@@ -518,6 +524,10 @@ void testOptionTable() {
     CHECK(tox2::gameOptionsUsage().find("[--anisotropic-filter off|2|4|8|16]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--window-size 720p|1080p|1440p|2160p]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--fullscreen on|off]") != std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--frame-gen off|60|90|120|180|unlimited]") != std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--fg-present-mode fifo|mailbox|immediate]") != std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--fg-reflex on|off] [--fg-only-generated]") != std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--fg-cycle SECONDS]") != std::string_view::npos);
 }
 
 void testDefaultLines() {
@@ -534,6 +544,9 @@ void testDefaultLines() {
         CHECK(windowed->dialog_answer.empty() && windowed->rsx_capture_frames.empty() && windowed->dumps.empty());
         CHECK(windowed->anisotropy == 1 && windowed->window_size == tox2::WindowSizePreset::Size720p &&
               !windowed->fullscreen);
+        CHECK(windowed->frame_gen == tox2::FrameGenTarget::Off &&
+              windowed->fg_present_mode == tox2::FgPresentMode::Mailbox && windowed->fg_reflex &&
+              !windowed->fg_only_generated && windowed->fg_cycle_seconds == 0);
     }
 
     const auto headless = parseLine(std::vector<std::string>{"--vfs-config", "v.json", "--no-window"});
@@ -1068,6 +1081,111 @@ void testWindowAndFilterOptions() {
     CHECK(over && over->window_size == tox2::WindowSizePreset::Size1080p && !over->fullscreen);
 }
 
+void testFrameGenOptions() {
+    using tox2::FrameGenTarget;
+    const std::vector<std::pair<const char*, FrameGenTarget>> targets = {
+            {"off", FrameGenTarget::Off},    {"60", FrameGenTarget::Fps60},   {"90", FrameGenTarget::Fps90},
+            {"120", FrameGenTarget::Fps120}, {"180", FrameGenTarget::Fps180}, {"unlimited", FrameGenTarget::Unlimited}};
+    ConfigDirs dirs("tox2_game_options_cfg_frame_gen_");
+    const stdfs::path file = dirs.work / "config.json";
+    for (const auto& [text, target] : targets) {
+        const auto cli = parseLine({"--game-dir", "g", "--frame-gen", text});
+        CHECK(cli && cli->frame_gen == target);
+        writeFile(file, std::string(R"({"game_dir": "g", "frame_gen": ")") + text + "\"}");
+        const auto saved = dirs.parse({});
+        CHECK(saved && saved->frame_gen == target && saved->config_ignored.empty());
+    }
+    // A number in the file reads like the string, and the command line replaces the file's value.
+    writeFile(file, R"({"game_dir": "g", "frame_gen": 90})");
+    const auto numeric = dirs.parse({});
+    CHECK(numeric && numeric->frame_gen == FrameGenTarget::Fps90);
+    const auto over = dirs.parse({"--frame-gen", "unlimited"});
+    CHECK(over && over->frame_gen == FrameGenTarget::Unlimited);
+    const auto last = parseLine({"--game-dir", "g", "--frame-gen", "60", "--frame-gen", "180"});
+    CHECK(last && last->frame_gen == FrameGenTarget::Fps180);
+
+    // Not a target: the message names the values, on the command line and in the file.
+    const std::string names = "off|60|90|120|180|unlimited\n";
+    for (const char* bad : {"75", "", "Unlimited", " 60", "0", "on"}) {
+        CHECK(rejectedLine({"--game-dir", "g", "--frame-gen", bad}, "error: --frame-gen needs " + names));
+    }
+    writeFile(file, R"({"game_dir": "g", "frame_gen": 75})");
+    const tox2::OptionsError bad_saved = dirs.error({});
+    CHECK(bad_saved.message == "error: " + file.string() + ": frame_gen needs " + names && !bad_saved.print_usage);
+    CHECK(rejectedLine({"--game-dir", "g", "--frame-gen"}, "error: --frame-gen needs a value\n"));
+
+    // The target needs the window, as the window size does; a saved one is left out of a run without it.
+    const char* const need_window = "error: --frame-gen needs the window\n";
+    CHECK(rejectedLine({"--game-dir", "g", "--frame-gen", "120", "--no-window"}, need_window));
+    CHECK(rejectedLine({"--game-dir", "g", "--frame-gen", "off", "--no-window"}, need_window));
+    CHECK(rejectedLine({"--game-dir", "g", "--frame-gen", "120", "--render", "none"}, need_window));
+    writeFile(file, R"({"game_dir": "g", "frame_gen": "120"})");
+    const auto headless = dirs.parse({"--no-window"});
+    CHECK(headless && headless->frame_gen == FrameGenTarget::Off);
+    if (headless) {
+        CHECK(headless->config_ignored == std::vector<std::string>{"frame_gen ignored: the run has no window"});
+    }
+    CHECK(dirs.error({"--no-window", "--frame-gen", "120"}).print_usage);
+    // A bad saved value that is left out is not reported.
+    writeFile(file, R"({"game_dir": "g", "frame_gen": 75})");
+    CHECK(dirs.parse({"--no-window"}).has_value());
+
+    // The diagnostics.
+    const auto diag = parseLine({"--game-dir", "g", "--frame-gen", "120", "--fg-present-mode", "immediate",
+                                 "--fg-reflex", "off", "--fg-only-generated", "--fg-cycle", "10"});
+    CHECK(diag && diag->frame_gen == FrameGenTarget::Fps120 &&
+          diag->fg_present_mode == tox2::FgPresentMode::Immediate && !diag->fg_reflex && diag->fg_only_generated &&
+          diag->fg_cycle_seconds == 10);
+    for (const auto& [text, mode] : {std::pair<const char*, tox2::FgPresentMode>{"fifo", tox2::FgPresentMode::Fifo},
+                                     {"mailbox", tox2::FgPresentMode::Mailbox},
+                                     {"immediate", tox2::FgPresentMode::Immediate}}) {
+        const auto parsed = parseLine({"--game-dir", "g", "--frame-gen", "60", "--fg-present-mode", text});
+        CHECK(parsed && parsed->fg_present_mode == mode);
+    }
+    for (const auto& [text, seconds] : {std::pair<const char*, std::uint32_t>{"1", 1}, {"600", 600}}) {
+        const auto parsed = parseLine({"--game-dir", "g", "--frame-gen", "unlimited", "--fg-cycle", text});
+        CHECK(parsed && parsed->fg_cycle_seconds == seconds);
+    }
+    const auto reflex_on = parseLine({"--game-dir", "g", "--frame-gen", "60", "--fg-reflex", "on"});
+    CHECK(reflex_on && reflex_on->fg_reflex);
+
+    CHECK(rejectedLine({"--game-dir", "g", "--frame-gen", "120", "--fg-present-mode", "vsync"},
+                       "error: --fg-present-mode needs fifo|mailbox|immediate\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--frame-gen", "120", "--fg-reflex", "1"},
+                       "error: --fg-reflex needs on or off\n"));
+    for (const char* cycle : {"0", "601", "x", "-1", ""}) {
+        CHECK(rejectedLine({"--game-dir", "g", "--frame-gen", "120", "--fg-cycle", cycle},
+                           "error: --fg-cycle needs a whole number from 1 to 600\n"));
+    }
+
+    // Each diagnostic needs a target other than off, given or absent.
+    const std::string needs_target =
+            "error: --fg-present-mode, --fg-reflex, --fg-only-generated and --fg-cycle need --frame-gen other than "
+            "off\n";
+    const std::vector<std::vector<std::string>> diagnostics = {
+            {"--fg-present-mode", "mailbox"}, {"--fg-reflex", "on"}, {"--fg-only-generated"}, {"--fg-cycle", "5"}};
+    for (const std::vector<std::string>& diagnostic : diagnostics) {
+        std::vector<std::string> line = {"--game-dir", "g"};
+        line.insert(line.end(), diagnostic.begin(), diagnostic.end());
+        CHECK(rejectedLine(line, needs_target));
+        line.insert(line.end(), {"--frame-gen", "off"});
+        CHECK(rejectedLine(line, needs_target));
+    }
+    // A saved target satisfies a diagnostic, and the command line's off does not.
+    writeFile(file, R"({"game_dir": "g", "frame_gen": "90"})");
+    const auto saved_target = dirs.parse({"--fg-cycle", "5"});
+    CHECK(saved_target && saved_target->frame_gen == FrameGenTarget::Fps90 && saved_target->fg_cycle_seconds == 5);
+    CHECK(dirs.error({"--frame-gen", "off", "--fg-cycle", "5"}).message ==
+          needs_target + "note: settings were also read from " + file.string() + "\n");
+    // An unattended run leaves the file's diagnostics out; on the command line one is still the mistake.
+    writeFile(file, R"({"game_dir": "g", "fg_cycle": 5, "fg_only_generated": true})");
+    const auto unattended = dirs.parse({"--no-window"});
+    CHECK(unattended && unattended->fg_cycle_seconds == 0 && !unattended->fg_only_generated &&
+          unattended->config_ignored.size() == 2);
+    CHECK(dirs.error({"--no-window", "--fg-cycle", "5"}).message.starts_with(needs_target));
+    CHECK(rejectedLine({"--game-dir", "g", "--frame-gen", "120", "--fg-cycle", "5", "--no-window"}, need_window));
+}
+
 void testConfigApply() {
     // Only the process state changes here; the lines themselves go to the log.
     ConfigDirs dirs("tox2_game_options_cfg_apply_");
@@ -1331,6 +1449,7 @@ int main() {
     testConfigFileErrors();
     testConfigFileDroppedKeys();
     testWindowAndFilterOptions();
+    testFrameGenOptions();
     testConfigApply();
     testSettingsStore();
     std::printf("game options tests: %d passed, %d failed\n", g_passed, g_failed);

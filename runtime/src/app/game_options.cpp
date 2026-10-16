@@ -29,7 +29,9 @@ constexpr std::string_view kUsage =
         "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
         "                [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--vk-validation] [--no-window]\n"
         "                [--anisotropic-filter off|2|4|8|16] [--window-size 720p|1080p|1440p|2160p]\n"
-        "                [--fullscreen on|off]\n"
+        "                [--fullscreen on|off] [--frame-gen off|60|90|120|180|unlimited]\n"
+        "                [--fg-present-mode fifo|mailbox|immediate] [--fg-reflex on|off] [--fg-only-generated]\n"
+        "                [--fg-cycle SECONDS]\n"
         "                [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off]\n"
         "                [--ppu-threads legacy|1|2] [--lwmutex-fast-path on|off] [--lwmutex-watch]\n"
         "                [--dump-guest ADDR:SIZE:FILE]...\n"
@@ -60,6 +62,8 @@ struct ParseState {
     bool aa_mode_given = false;
     bool anisotropy_given = false;
     bool window_option_given = false;  // --window-size or --fullscreen
+    bool frame_gen_given = false;
+    bool fg_option_given = false;  // any of the --fg-* diagnostics
     bool pad_given = false;
     bool audio_given = false;
     std::string pad_script_text;
@@ -300,6 +304,50 @@ bool setFullscreen(ParseState& state, std::string_view label, const RawItem& ite
     return true;
 }
 
+bool setFrameGen(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    const std::optional<FrameGenTarget> target = parseFrameGenTarget(item.text);
+    if (!target) return fail(error, std::format("error: {} needs off|60|90|120|180|unlimited\n", label));
+    state.options.frame_gen = *target;
+    state.frame_gen_given = true;
+    return true;
+}
+
+bool setFgPresentMode(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    if (item.text == "fifo") {
+        state.options.fg_present_mode = FgPresentMode::Fifo;
+    } else if (item.text == "mailbox") {
+        state.options.fg_present_mode = FgPresentMode::Mailbox;
+    } else if (item.text == "immediate") {
+        state.options.fg_present_mode = FgPresentMode::Immediate;
+    } else {
+        return fail(error, std::format("error: {} needs fifo|mailbox|immediate\n", label));
+    }
+    state.fg_option_given = true;
+    return true;
+}
+
+bool setFgReflex(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    if (!setSwitch<&GameOptions::fg_reflex>(state, label, item, error)) return false;
+    state.fg_option_given = true;
+    return true;
+}
+
+bool setFgOnlyGenerated(ParseState& state, std::string_view, const RawItem&, std::string&) {
+    state.options.fg_only_generated = true;
+    state.fg_option_given = true;
+    return true;
+}
+
+bool setFgCycle(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    constexpr std::uint32_t kMaxCycleSeconds = 600;
+    if (!parseUnsigned(item.text, state.options.fg_cycle_seconds) || state.options.fg_cycle_seconds < 1 ||
+        state.options.fg_cycle_seconds > kMaxCycleSeconds) {
+        return fail(error, std::format("error: {} needs a whole number from 1 to {}\n", label, kMaxCycleSeconds));
+    }
+    state.fg_option_given = true;
+    return true;
+}
+
 // Value errors are reported in this order. An option that takes a value is any kind but Flag. `needs` is also
 // set on options that are not persisted: a key of the config file that the run cannot use is left out.
 constexpr auto kEntries = std::to_array<OptionEntry>({
@@ -342,6 +390,11 @@ constexpr auto kEntries = std::to_array<OptionEntry>({
         {{"anisotropic-filter", OptionKind::String, true, OptionNeeds::Renderer}, setAnisotropicFilter},
         {{"window-size", OptionKind::String, true, OptionNeeds::Window}, setWindowSize},
         {{"fullscreen", OptionKind::Switch, true, OptionNeeds::Window}, setFullscreen},
+        {{"frame-gen", OptionKind::String, true, OptionNeeds::Window}, setFrameGen},
+        {{"fg-present-mode", OptionKind::String, false, OptionNeeds::Window}, setFgPresentMode},
+        {{"fg-reflex", OptionKind::Switch, false, OptionNeeds::Window}, setFgReflex},
+        {{"fg-only-generated", OptionKind::Flag, false, OptionNeeds::Window}, setFgOnlyGenerated},
+        {{"fg-cycle", OptionKind::Unsigned, false, OptionNeeds::Window}, setFgCycle},
 });
 
 constexpr auto kSpecs = [] {
@@ -564,6 +617,12 @@ std::optional<OptionsError> settle(ParseState& state, const std::string& file_no
     if (opt.pad_probe && !opt.window) return combined("error: --pad-probe needs the window\n");
     if (state.window_option_given && !opt.window) {
         return combined("error: --window-size and --fullscreen need the window\n");
+    }
+    if (state.frame_gen_given && !opt.window) return combined("error: --frame-gen needs the window\n");
+    if (state.fg_option_given && opt.frame_gen == FrameGenTarget::Off) {
+        return combined(
+                "error: --fg-present-mode, --fg-reflex, --fg-only-generated and --fg-cycle need --frame-gen other "
+                "than off\n");
     }
     // A window or a script is what makes a keyboard pad useful, so either one selects it by default.
     const bool pad_input = opt.window || !opt.pad_script.empty();

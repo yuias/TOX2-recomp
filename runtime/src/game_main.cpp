@@ -212,7 +212,17 @@ void saveOverlaySetting(tox2::OverlaySetting setting, std::string_view value) {
         case tox2::OverlaySetting::AaMode: g_settings_store->set("aa_mode", value); break;
         case tox2::OverlaySetting::Anisotropy: g_settings_store->set("anisotropic_filter", value); break;
         case tox2::OverlaySetting::WindowSize: g_settings_store->set("window_size", value); break;
+        case tox2::OverlaySetting::FrameGen: g_settings_store->set("frame_gen", value); break;
     }
+}
+
+VkPresentModeKHR presentModeFor(tox2::FgPresentMode mode) {
+    switch (mode) {
+        case tox2::FgPresentMode::Fifo: return VK_PRESENT_MODE_FIFO_KHR;
+        case tox2::FgPresentMode::Mailbox: return VK_PRESENT_MODE_MAILBOX_KHR;
+        case tox2::FgPresentMode::Immediate: return VK_PRESENT_MODE_IMMEDIATE_KHR;
+    }
+    return VK_PRESENT_MODE_MAILBOX_KHR;
 }
 
 // Runs on the RSX thread; a null result makes the consumer continue without rendering.
@@ -255,6 +265,11 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions&
     render_options.resolution_scale = opt.resolution_scale;
     render_options.aa_mode = opt.aa_mode;
     render_options.anisotropy = opt.anisotropy;
+    render_options.frame_gen = opt.frame_gen;
+    render_options.fg_debug.present_mode = presentModeFor(opt.fg_present_mode);
+    render_options.fg_debug.reflex_low_latency = opt.fg_reflex;
+    render_options.fg_debug.only_generated = opt.fg_only_generated;
+    render_options.fg_debug.cycle_seconds = opt.fg_cycle_seconds;
     render_options.shader_cache =
             opt.shader_cache.empty() ? std::filesystem::path("generated") / "shader_cache" : opt.shader_cache;
     // Requested PNG dumps follow --dump-frames so they land next to the periodic ones.
