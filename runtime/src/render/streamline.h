@@ -126,7 +126,7 @@ struct FrameGenState {
 
 // Inputs and constants of one frame for frame generation, recorded at the DLAA tap.
 struct FrameGenFrame {
-    SlImage depth, motion;               // SHADER_READ_ONLY_OPTIMAL; tagged eOnlyValidNow (copied by Streamline)
+    SlImage depth, motion;               // SHADER_READ_ONLY_OPTIMAL; valid until present, so unchanged until then
     float jitter_px[2] = {0.0f, 0.0f};   // as reported to DLAA for this frame
     float mvec_scale[2] = {1.0f, 1.0f};  // 1 / input size: pixel-space vectors
     Mat4 view_to_clip = mat4Identity(), clip_to_view = mat4Identity();

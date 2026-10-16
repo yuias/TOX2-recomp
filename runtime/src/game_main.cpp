@@ -184,6 +184,7 @@ public:
 
     std::uint64_t flushOutput(std::chrono::milliseconds timeout) override {
         if (!renderer_->savePipelineCache()) tox2::logWarn("tox2: render: pipeline cache not saved");
+        renderer_->logFrameGenSummary();
         return renderer_->flushDumps(timeout);
     }
 

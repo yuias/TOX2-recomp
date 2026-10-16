@@ -948,13 +948,22 @@ bool Streamline::tagFrameGen(VkCommandBuffer cmd, const FrameGenFrame& frame, st
         return false;
     }
 
-    // eOnlyValidNow: Streamline copies the images while recording into `cmd`, so later passes cannot change what
-    // DLSS-G reads at present time.
+    // Valid until present, not only now: with eOnlyValidNow sl.common copies each image into a clone that the
+    // validation layer reports in the wrong layout at every submit (measured). The caller keeps both images unchanged
+    // until the frame is presented.
     sl::Resource depth = toResource(frame.depth);
     sl::Resource motion = toResource(frame.motion);
+    // The whole image, stated: without an extent sl.dlss_g warns that a zero extent was reset to the full size.
+    sl::Extent depth_extent;
+    depth_extent.width = frame.depth.width;
+    depth_extent.height = frame.depth.height;
+    sl::Extent motion_extent;
+    motion_extent.width = frame.motion.width;
+    motion_extent.height = frame.motion.height;
     const sl::ResourceTag tags[] = {
-            sl::ResourceTag(&depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow),
-            sl::ResourceTag(&motion, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow),
+            sl::ResourceTag(&depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent, &depth_extent),
+            sl::ResourceTag(&motion, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent,
+                            &motion_extent),
     };
     result = impl.api.set_tag_for_frame(*impl.frame_token, viewport, tags, static_cast<std::uint32_t>(std::size(tags)),
                                         cmd);

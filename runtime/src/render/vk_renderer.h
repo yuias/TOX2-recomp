@@ -197,8 +197,8 @@ public:
     bool frameGenSupported() const { return context_.frameGenerationSupported() && presenter_ != nullptr; }
     // Why frameGenSupported() is false; empty when it is true.
     std::string frameGenUnsupportedReason() const;
-    // The requested frame generation target. The plugins are loaded while it is not off and frameGenSupported(); no
-    // frame is generated yet, so nothing is active.
+    // The requested frame generation target. The plugins are loaded while it is not off and frameGenSupported();
+    // whether frames are generated depends on the game, see FrameGenController.
     FrameGenTarget frameGenTarget() const { return frame_gen_target_; }
     // Changes the requested target; false and no change for a target other than Off while frameGenSupported() is
     // false. Renderer thread, between commands.
@@ -243,6 +243,12 @@ public:
     // before the first flip.
     void setPresentOverlay(PresentOverlay* overlay) { overlay_ = overlay; }
 
+    // Logs the frame generation totals of the run, once. The process ends without destructors, so the stop path calls
+    // it. Any thread.
+    void logFrameGenSummary() {
+        if (frame_gen_) frame_gen_->logSummary();
+    }
+
     // Every flip is also blitted to the presenter's next swapchain image (letterboxed 16:9) and presented.
     // Not owned; null (the default) presents nothing. Call once, before the first flip. Setting a different presenter
     // (or null) while a frame generation controller exists destroys the controller first: it holds the old presenter.
@@ -262,6 +268,7 @@ public:
 private:
     struct RenderTarget;
     struct FrameSlot;
+    struct FgDepthCopy;
     // A region of a slot's upload block, already mapped for writing.
     struct UploadRef {
         VkBuffer buffer = VK_NULL_HANDLE;
@@ -316,10 +323,19 @@ private:
     // widened to the 2W layout columns the game's resolve expects, with the texture remap applied. Null after a counted
     // failure; the caller then reads the layout image instead.
     VkImageView dlaaView(RenderTarget& scene, std::uint32_t remap);
-    // FgDebug::mv_check: records the motion vector pass and the warp check at the DLAA tap, with the DLAA output in
-    // GENERAL. False with `error` on failure.
-    bool recordFgMvCheck(const DlaaPass::Resources& dlaa, const RenderTarget& depth,
-                         const DlaaCameraTracker::Result& camera, bool reset, std::string& error);
+    // Records the motion vector pass at the DLAA tap, from the depth that went into the evaluation. False with `error`
+    // on failure.
+    bool recordFgMotion(const DlaaPass::Resources& dlaa, const RenderTarget& depth,
+                        const DlaaCameraTracker::Result& camera, std::string& error);
+    // FgDebug::mv_check: records the warp check of the DLAA output against the motion vectors recordFgMotion wrote,
+    // with the DLAA output in GENERAL. False with `error` on failure.
+    bool recordFgMvCheck(const DlaaPass::Resources& dlaa, bool reset, std::string& error);
+    // Copies the depth that went into the DLAA evaluation into the current frame slot's own image, which frame
+    // generation reads. False with `error` on failure.
+    bool copyFgDepth(RenderTarget& depth, SlImage& out, std::string& error);
+    // Constants and tags for the frame generation viewport, after recordFgMotion. False with `error` on failure.
+    bool tagFgInputs(const SlImage& depth, const DlaaPass::Inputs& inputs, const DlaaCameraTracker::Result& camera,
+                     std::uint32_t width, std::uint32_t height, bool reset, VkCommandBuffer cmd, std::string& error);
     // Reads the pending warp check into stats_ once the frame's commands have finished.
     void collectFgMvCheck();
     bool beginLayoutPass(RenderTarget& target, bool writes, bool overwrites_all);
@@ -340,11 +356,13 @@ private:
                                 VkSampleCountFlags sidecar_samples);
     void recordDraw(const RsxDraw& draw);
     void recordFlip(const RsxFlip& flip);
-    // Logs a change of the requested target: the unavailable warning when it cannot run, else that it is not active.
+    // Warns once per change of the requested target when frame generation cannot run; the controller logs the rest.
     void noteFrameGenTarget();
     // Creates the controller once the presenter is known and loads the plugins when the target asks for it.
     void createFrameGen();
     void recordPresentBlit(RenderTarget* source);
+    // After the blit: tells the controller what the frame is, so it can tag the scene rectangle and switch DLSS-G.
+    void recordFrameGenPresent();
     bool ensureReadback(FrameSlot& slot, VkDeviceSize size);
     bool dumpDue() const;
     bool dumpDisplay(const std::filesystem::path& path);
@@ -371,6 +389,16 @@ private:
     std::unique_ptr<FgMotionPass> fg_motion_;
     bool fg_mv_pending_ = false;  // a warp check was recorded and its frame has not been submitted and read yet
     bool fg_mv_reset_ = false;    // the DLAA evaluation of that frame reset its history
+    // Per frame slot: the depth frame generation reads, which no later pass of the frame may write.
+    std::array<std::shared_ptr<FgDepthCopy>, kFramesInFlight> fg_depth_;
+    // What the DLAA tap handed to frame generation for the frame being recorded.
+    struct FgTapped {
+        std::uint32_t frame = 0;  // frame_index_ of the tap; 0 = none yet
+        FrameGenInputs inputs = FrameGenInputs::Missing;
+        std::uint32_t width = 0, height = 0;
+        VkFormat depth_format = VK_FORMAT_UNDEFINED;
+    } fg_tapped_;
+    std::uint32_t fg_scene_width_ = 0, fg_scene_height_ = 0;  // of the last tagged inputs, for the reset on a change
     std::uint32_t anisotropy_ = 1;
     bool anisotropy_unavailable_logged_ = false;
     FrameGenTarget frame_gen_target_ = FrameGenTarget::Off;
