@@ -31,6 +31,7 @@
 #include "core/census.h"
 #include "core/dispatch.h"
 #include "core/elf_loader.h"
+#include "core/event_history.h"
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/host_functions.h"
@@ -118,6 +119,79 @@ void testLogLevelsAndPrefix() {
         CHECK(lines[1] == "[t 01000000] warn: w 0xff");
         CHECK(lines[2] == "[t 01000000] error: e");
     }
+}
+
+void testEventHistoryRing() {
+    using tox2::HistoryKind;
+    tox2::setGuestThreadIdProvider(&fakeThreadId);
+    g_thread_id = 0x0100000bu;
+    tox2::resetHistory();
+
+    CHECK(tox2::historyLines(std::nullopt).empty());
+    {
+        const auto lines = tox2::historyLines(0x1000);
+        CHECK(lines.size() == 1 && lines[0] == "history: no recorded free covers 0x1000");
+    }
+
+    // 700 entries overflow the 512-entry ring. The free of 0x40000 is the first entry, so it is evicted; the
+    // first free of 0x30000 is still in the ring but older than the second one.
+    tox2::recordHistory(HistoryKind::MemoryFree, 0x40000, 0x100, 0x444, 1, 2);
+    for (std::uint32_t i = 0; i < 696; i++) {
+        if (i == 300) tox2::recordHistory(HistoryKind::MemoryFree, 0x30000, 0x100, 0x111, 1, 2);
+        switch (i % 5) {
+            case 0: tox2::recordHistory(HistoryKind::SpuSend, 0x77, i, 0x55); break;
+            case 1: tox2::recordHistory(HistoryKind::EventReceive, 0x77, i, 0x55); break;
+            case 2: tox2::recordHistory(HistoryKind::JoinEnter, i, 0, 0); break;
+            case 3: tox2::recordHistory(HistoryKind::JoinReturn, i, 0, 0); break;
+            default: tox2::recordHistory(HistoryKind::MutexDestroy, i, 0, 0); break;
+        }
+    }
+    tox2::recordHistory(HistoryKind::MemoryFree, 0x30000, 0x100, 0x222, 0x3333, 0x4444);
+    tox2::recordHistory(HistoryKind::MemoryFree, 0x50000, 0x100, 0x333);
+
+    const auto plain = tox2::historyLines(std::nullopt);
+    CHECK(plain.size() == 512);
+    // The last two are the newest frees; the evicted first free must not be listed.
+    CHECK(plain.size() == 512 && plain[0].contains("t 0100000b "));
+    bool evicted = true;
+    for (const std::string& line : plain) evicted = evicted && !line.contains("addr 0x40000");
+    CHECK(evicted);
+    CHECK(plain.size() == 512 && plain[510].contains("mem-free addr 0x30000 size 0x100 lr 0x222"));
+    CHECK(plain.size() == 512 && plain[510].contains("caller lrs 0x3333 0x4444"));
+    CHECK(plain.size() == 512 && plain[511].contains("mem-free addr 0x50000"));
+
+    // Timestamps never decrease: "+<ms>.<us>" is the second token.
+    bool ordered = true;
+    double previous = 0;
+    for (const std::string& line : plain) {
+        const double ms = std::stod(line.substr(line.find('+') + 1));
+        ordered = ordered && ms >= previous;
+        previous = ms;
+    }
+    CHECK(ordered);
+
+    // The sequence of "spu-send" codes is increasing, so the ring was read oldest to newest.
+    std::uint64_t last_code = 0;
+    bool increasing = true;
+    for (const std::string& line : plain) {
+        if (!line.contains("spu-send")) continue;
+        const std::size_t at = line.find("code 0x");
+        const std::uint64_t code = std::stoull(line.substr(at + 7), nullptr, 16);
+        increasing = increasing && code >= last_code;
+        last_code = code;
+    }
+    CHECK(increasing && last_code != 0);
+
+    const auto covered = tox2::historyLines(0x30080);
+    CHECK(covered.size() == 513);
+    CHECK(covered.size() == 513 && covered.back().contains("lr 0x222") && !covered.back().contains("lr 0x111"));
+    const auto uncovered = tox2::historyLines(0x40000);
+    CHECK(uncovered.size() == 513 && uncovered.back() == "history: no recorded free covers 0x40000");
+
+    tox2::resetHistory();
+    CHECK(tox2::historyLines(std::nullopt).empty());
+    tox2::setGuestThreadIdProvider(nullptr);
+    g_thread_id = std::nullopt;
 }
 
 void testLogVisibleLevel() {
@@ -16666,6 +16740,7 @@ int main(int argc, char** argv) {
 
     tox2::installProcessSettings();
     testLogLevelsAndPrefix();
+    testEventHistoryRing();
     testLogVisibleLevel();
     testLogOnce();
     testGuestMemoryRoundTrip();

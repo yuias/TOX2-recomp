@@ -14,6 +14,7 @@
 #include <memory>
 #include <vector>
 
+#include "core/event_history.h"
 #include "core/guest_memory.h"
 #include "core/threads.h"
 #include "spu/spu_channels.h"
@@ -452,7 +453,8 @@ void sysEventQueueDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
 // r4..r7 (source, data1..3); the pointer argument is never written.
 void sysEventQueueReceive(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
-    const auto queue = g_queues.find(arg32(ctx, 3));
+    const std::uint32_t queue_id = arg32(ctx, 3);
+    const auto queue = g_queues.find(queue_id);
     if (queue == nullptr) {
         setResultCode(ctx, kCellEsrch);
         return;
@@ -461,11 +463,12 @@ void sysEventQueueReceive(Tox2PpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, kCellEinval);
         return;
     }
-    const auto deliver = [ctx](const Event& event) {
+    const auto deliver = [ctx, queue_id](const Event& event) {
         ctx->gpr[4] = event.source;
         ctx->gpr[5] = event.data1;
         ctx->gpr[6] = event.data2;
         ctx->gpr[7] = event.data3;
+        recordHistory(HistoryKind::EventReceive, queue_id, event.data2 & 0xFFFFFF, event.data3);
     };
     if (!queue->events.empty()) {
         deliver(queue->events.front());

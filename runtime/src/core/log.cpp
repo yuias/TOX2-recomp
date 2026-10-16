@@ -7,6 +7,7 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_sinks.h>
 
+#include <atomic>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -79,7 +80,8 @@ struct LogState {
     }
 
     std::mutex mutex;
-    GuestThreadIdFn thread_id_fn = nullptr;
+    // Atomic so currentGuestThreadId() can read it without the log mutex.
+    std::atomic<GuestThreadIdFn> thread_id_fn{nullptr};
     std::shared_ptr<spdlog::sinks::stderr_sink_mt> stderr_sink;
     std::shared_ptr<spdlog::sinks::sink> file_sink;
     std::shared_ptr<spdlog::sinks::sink> sink;
@@ -119,9 +121,7 @@ spdlog::level::level_enum toSpdlogLevel(LogLevel level) {
 }
 
 void LinePrefixFormatter::format(const spdlog::details::log_msg& msg, const std::tm&, spdlog::memory_buf_t& dest) {
-    // Runs inside logWrite(), which holds LogState::mutex.
-    LogState& s = state();
-    const std::optional<std::uint32_t> tid = s.thread_id_fn ? s.thread_id_fn() : std::nullopt;
+    const std::optional<std::uint32_t> tid = currentGuestThreadId();
     if (t_spu_thread_id) {
         dest.append(std::format("[spu {:08x}] ", *t_spu_thread_id));
     } else if (tid) {
@@ -137,7 +137,12 @@ void LinePrefixFormatter::format(const spdlog::details::log_msg& msg, const std:
 void setGuestThreadIdProvider(GuestThreadIdFn fn) {
     LogState& s = state();
     std::lock_guard lock(s.mutex);
-    s.thread_id_fn = fn;
+    s.thread_id_fn.store(fn);
+}
+
+std::optional<std::uint32_t> currentGuestThreadId() {
+    const GuestThreadIdFn fn = state().thread_id_fn.load();
+    return fn ? fn() : std::nullopt;
 }
 
 void setLogSpuThread(std::optional<std::uint32_t> id) { t_spu_thread_id = id; }

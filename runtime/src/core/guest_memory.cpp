@@ -42,7 +42,8 @@ LONG CALLBACK faultHandler(EXCEPTION_POINTERS* info) {
     const ULONG_PTR access = rec.ExceptionInformation[0];
     const char* what = access == 1 ? "write to" : access == 8 ? "execute at" : "read from";
     fatal(FatalKind::GuestFault,
-          std::format("{} guest address {:#010x}", what, static_cast<std::uint64_t>(address - begin)));
+          std::format("{} guest address {:#010x}", what, static_cast<std::uint64_t>(address - begin)),
+          static_cast<std::uint32_t>(address - begin));
 }
 
 }  // namespace

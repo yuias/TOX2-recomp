@@ -10,6 +10,7 @@
 #include <string>
 
 #include "core/boot.h"
+#include "core/event_history.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/threads.h"
@@ -127,8 +128,9 @@ void sysPpuThreadYield(Tox2PpuContext* ctx, std::uint8_t* base) {
     ctx->gpr[3] = yieldPpuThread() ? kCellOk : kCellCancel;
 }
 
-// 44 sys_ppu_thread_join(u32 thread_id, u64* vptr)
-void sysPpuThreadJoin(Tox2PpuContext* ctx, std::uint8_t* base) {
+namespace {
+
+void joinThread(Tox2PpuContext* ctx, std::uint8_t* base) {
     const auto id = static_cast<std::uint32_t>(ctx->gpr[3]);
     const auto vptr = static_cast<std::uint32_t>(ctx->gpr[4]);
 
@@ -160,6 +162,16 @@ void sysPpuThreadJoin(Tox2PpuContext* ctx, std::uint8_t* base) {
     }
     tox2Write64(base, vptr, thread->exitValue());
     setResultCode(ctx, kCellOk);
+}
+
+}  // namespace
+
+// 44 sys_ppu_thread_join(u32 thread_id, u64* vptr)
+void sysPpuThreadJoin(Tox2PpuContext* ctx, std::uint8_t* base) {
+    const auto id = static_cast<std::uint32_t>(ctx->gpr[3]);
+    recordHistory(HistoryKind::JoinEnter, id, 0, 0);
+    joinThread(ctx, base);
+    recordHistory(HistoryKind::JoinReturn, id, static_cast<std::uint32_t>(ctx->gpr[3]), 0);
 }
 
 // 45 sys_ppu_thread_detach(u32 thread_id): a thread that exited without being joined is dropped, as

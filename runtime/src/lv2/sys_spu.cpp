@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "core/event_history.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/threads.h"
@@ -288,6 +289,9 @@ void GroupOwner::onInterruptMailbox(SpuThread& cpu, std::uint32_t value) {
                     const std::uint32_t sent =
                             sendEventToQueue(bound->second, kSpuThreadEventUserKey, cpu.id(), data2, d1);
                     queue_full = sent == kCellEbusy;
+                    if (sent == kCellOk) {
+                        recordHistory(HistoryKind::SpuSend, bound->second, value & 0xFFFFFF, d1);
+                    }
                     result = sent == kCellEsrch ? kCellEnotconn : sent;
                 }
             } else {

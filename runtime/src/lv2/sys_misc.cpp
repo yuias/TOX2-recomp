@@ -18,6 +18,7 @@
 #include <string_view>
 
 #include "core/census.h"
+#include "core/event_history.h"
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
@@ -203,7 +204,6 @@ void sysMemoryAllocate(Tox2PpuContext* ctx, std::uint8_t* base) {
 
 // 349 sys_memory_free(u32 addr)
 void sysMemoryFree(Tox2PpuContext* ctx, std::uint8_t* base) {
-    (void)base;
     const auto addr = static_cast<std::uint32_t>(ctx->gpr[3]);
     Process& p = process();
 
@@ -229,6 +229,10 @@ void sysMemoryFree(Tox2PpuContext* ctx, std::uint8_t* base) {
     } else {
         p.user_memory_used -= std::min(freed, p.user_memory_used);
     }
+    // The caller's own return address is ctx->lr; the walk gives the callers above it.
+    GuestFrame frames[2] = {};
+    walkGuestStack(*ctx, base, frames, 2);
+    recordHistory(HistoryKind::MemoryFree, addr, freed, ctx->lr, frames[0].lr, frames[1].lr);
     setResult(ctx, kCellOk);
 }
 

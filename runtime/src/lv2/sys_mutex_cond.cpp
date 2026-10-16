@@ -25,6 +25,7 @@
 #include <memory>
 #include <optional>
 
+#include "core/event_history.h"
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
@@ -538,7 +539,10 @@ void sysMutexCreate(Tox2PpuContext* ctx, std::uint8_t* base) {
 // 101 sys_mutex_destroy(u32 mutex_id)
 void sysMutexDestroy(Tox2PpuContext* ctx, std::uint8_t* base) {
     (void)base;
-    setResultCode(ctx, mutexDestroy(static_cast<std::uint32_t>(ctx->gpr[3])));
+    const auto id = static_cast<std::uint32_t>(ctx->gpr[3]);
+    const std::uint32_t result = mutexDestroy(id);
+    recordHistory(HistoryKind::MutexDestroy, id, result, 0);
+    setResultCode(ctx, result);
 }
 
 // 102 sys_mutex_lock(u32 mutex_id, u64 timeout)

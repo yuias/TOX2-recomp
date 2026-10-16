@@ -8,6 +8,7 @@
 #include <format>
 #include <string>
 
+#include "core/event_history.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
 
@@ -160,7 +161,7 @@ void setFatalDump(FatalDumpFn fn, const void* subject) {
     t_fatal_subject = subject;
 }
 
-void fatal(FatalKind kind, std::string_view message) {
+void fatal(FatalKind kind, std::string_view message, std::optional<std::uint32_t> fault_addr) {
     enterStop();
     logInfo("tox2: stop: fatal {}: {}", fatalKindName(kind), message);
     if (t_fatal_dump != nullptr) {
@@ -170,6 +171,12 @@ void fatal(FatalKind kind, std::string_view message) {
         logInfo("{}", text);
     } else if (t_fatal_context != nullptr) {
         dumpContext(*t_fatal_context);
+    }
+    if (kind == FatalKind::GuestFault) {
+        logInfo("event history (oldest -> newest):");
+        for (const std::string& line : historyLines(fault_addr)) {
+            logInfo("{}", line);
+        }
     }
     finishStop(ExitCode::Fatal);
 }

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -81,7 +82,9 @@ void setFatalDump(FatalDumpFn fn, const void* subject);
 
 // Logs the stop line, the registers and trace ring of the current guest thread (or its setFatalDump dump) and
 // the census, then ends the process with ExitCode::Fatal. Only the first caller proceeds; others block forever.
-[[noreturn]] void fatal(FatalKind kind, std::string_view message);
+// A GuestFault also logs the event history; `fault_addr` (guest address) lets it name the free that covers it.
+[[noreturn]] void fatal(FatalKind kind, std::string_view message,
+                        std::optional<std::uint32_t> fault_addr = std::nullopt);
 
 // Like fatal() without the register dump. `line` is the complete stop line, e.g.
 // "tox2: stop: watchdog 20 s".

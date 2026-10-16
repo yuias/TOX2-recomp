@@ -89,6 +89,7 @@ function(tox2_runtime_add_core)
     runtime/src/core/cpu_hooks.cpp
     runtime/src/core/dispatch.cpp
     runtime/src/core/elf_loader.cpp
+    runtime/src/core/event_history.cpp
     runtime/src/core/fatal.cpp
     runtime/src/core/guest_dump.cpp
     runtime/src/core/guest_memory.cpp

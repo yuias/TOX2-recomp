@@ -18,6 +18,9 @@ using GuestThreadIdFn = std::optional<std::uint32_t> (*)();
 
 void setGuestThreadIdProvider(GuestThreadIdFn fn);
 
+// The registered provider's answer for the calling thread; nullopt without a provider. Takes no lock.
+std::optional<std::uint32_t> currentGuestThreadId();
+
 // Marks the calling host thread as the host thread of the lv2 SPU thread `id`: its lines start with
 // "[spu XXXXXXXX] " instead of "[host] " or "[t XXXXXXXX] ". nullopt clears the mark. Set once where the
 // host thread starts, not per log call.
