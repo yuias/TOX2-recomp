@@ -12,6 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(cmake/CompilerChecks.cmake)
 include(cmake/PpuCodegen.cmake)
 include(cmake/SpuCodegen.cmake)
+include(cmake/Bench.cmake)
 include(cmake/Runtime.cmake)
 include(cmake/Render.cmake)
 include(cmake/Overlay.cmake)
@@ -85,6 +86,7 @@ tox2_ppu_add_semantics_harness()
 tox2_spu_add_semantics_harness()
 tox2_spu_add_programs()
 tox2_spu_add_lzma_inflate_test()
+tox2_bench_add()
 
 add_test(NAME tools_unittest
   COMMAND ${Python3_EXECUTABLE} -B -m unittest discover -s tools/tests -t tools
