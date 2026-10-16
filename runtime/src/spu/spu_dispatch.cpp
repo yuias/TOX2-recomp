@@ -40,6 +40,10 @@ std::array<std::unique_ptr<ImageTable>, kMaxSpuImages> g_tables;
 std::array<std::atomic<bool>, kMaxSpuImages> g_seen;
 // One bit per entry of each image, set by the first dispatch to it from any thread (census).
 std::array<std::unique_ptr<std::atomic<std::uint64_t>[]>, kMaxSpuImages> g_entry_seen;
+// Guest span [g_code_lo, g_code_hi) from the lowest code segment start to the highest code segment end of all images;
+// empty (lo > hi) without code segments. Same publication rule as g_images.
+std::uint64_t g_code_lo = UINT64_MAX;
+std::uint64_t g_code_hi = 0;
 
 [[noreturn]] void badTable(const Tox2SpuImageInfo& image, std::string_view why) {
     stopProcess(ExitCode::LoadError, std::format("tox2: spu: image {}: {}", image.name, why));
@@ -100,6 +104,8 @@ void registerSpuImages(const Tox2SpuImageInfo* images, std::uint32_t count) {
     }
     g_images = nullptr;
     g_image_count = 0;
+    g_code_lo = UINT64_MAX;
+    g_code_hi = 0;
     for (std::uint32_t i = 0; i < kMaxSpuImages; i++) {
         g_tables[i].reset();
         g_seen[i].store(false);
@@ -123,6 +129,12 @@ void registerSpuImages(const Tox2SpuImageInfo* images, std::uint32_t count) {
             }
             table->entry_of[entry.ls / 4] = static_cast<std::uint16_t>(e);
         }
+        for (std::uint32_t j = 0; j < image.segment_count; j++) {
+            const Tox2SpuSegment& s = image.segments[j];
+            if (s.code == 0) continue;
+            g_code_lo = std::min<std::uint64_t>(g_code_lo, s.ea);
+            g_code_hi = std::max<std::uint64_t>(g_code_hi, std::uint64_t{s.ea} + s.size);
+        }
         g_tables[i] = std::move(table);
         // Value-initialised: all bits clear.
         g_entry_seen[i] = std::make_unique<std::atomic<std::uint64_t>[]>((image.entry_count + 63) / 64);
@@ -132,6 +144,10 @@ void registerSpuImages(const Tox2SpuImageInfo* images, std::uint32_t count) {
 }
 
 std::uint32_t spuImageCount() { return g_image_count; }
+
+bool spuCodeRangeOverlaps(std::uint32_t ea, std::uint32_t size) {
+    return ea < g_code_hi && std::uint64_t{ea} + size > g_code_lo;
+}
 
 const Tox2SpuImageInfo& spuImage(std::uint32_t index) { return g_images[index]; }
 

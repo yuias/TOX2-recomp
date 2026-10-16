@@ -1000,6 +1000,302 @@ void testCopyWrapsAtLsEnd() {
     CHECK(std::memcmp(thread.ls(), guest.data() + 0x9020, 0x20) == 0);
 }
 
+// Image setup of the tag summary tests: image 0 has a 13 KiB code segment and a 2 KiB data segment behind it, image 1
+// one 6 KiB code segment. Copy sources outside every code segment: a mirror of the image bytes at kTagMirrorEa and
+// unrelated bytes at kTagDataEa.
+constexpr std::uint32_t kTagGuestSize = 0x40000;
+constexpr std::uint32_t kTagImage0Ea = 0x10000;
+constexpr std::uint32_t kTagImage0Ls = 0x4000;
+constexpr std::uint32_t kTagImage0Code = 0x3400;
+constexpr std::uint32_t kTagImage0Size = 0x3c00;
+constexpr std::uint32_t kTagImage1Ea = 0x14000;
+constexpr std::uint32_t kTagImage1Ls = 0x9000;
+constexpr std::uint32_t kTagImage1Size = 0x1800;
+constexpr std::uint32_t kTagMirrorEa = 0x20000;
+constexpr std::uint32_t kTagDataEa = 0x30000;
+constexpr std::uint32_t kTagDataSize = 0x8000;
+
+const Tox2SpuSegment kTagSegments0[] = {
+        {kTagImage0Ea, kTagImage0Ls, kTagImage0Code, 1},
+        {kTagImage0Ea + kTagImage0Code, kTagImage0Ls + kTagImage0Code, kTagImage0Size - kTagImage0Code, 0}};
+const Tox2SpuSegment kTagSegments1[] = {{kTagImage1Ea, kTagImage1Ls, kTagImage1Size, 1}};
+const Tox2SpuImageInfo kTagImages[] = {
+        {"tag0", kTagImage0Ea, kTagImage0Size, kNoHash, kTagImage0Ls, 2, kTagSegments0, 0, nullptr},
+        {"tag1", kTagImage1Ea, kTagImage1Size, kNoHash, kTagImage1Ls, 1, kTagSegments1, 0, nullptr},
+};
+
+// Deterministic bytes (xorshift64), so a run can be repeated.
+struct TagRandom {
+    std::uint64_t x;
+    std::uint32_t next() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        return static_cast<std::uint32_t>(x >> 32);
+    }
+    std::uint32_t below(std::uint32_t n) { return next() % n; }
+};
+
+std::vector<std::uint8_t> makeTagGuest() {
+    std::vector<std::uint8_t> guest(kTagGuestSize);
+    TagRandom rng{0x9e3779b97f4a7c15ull};
+    for (std::uint32_t i = kTagImage0Ea; i < kTagImage1Ea + kTagImage1Size; i++) {
+        guest[i] = static_cast<std::uint8_t>(rng.next());
+    }
+    std::memcpy(guest.data() + kTagMirrorEa, guest.data() + kTagImage0Ea, 0x6000);
+    for (std::uint32_t i = 0; i < kTagDataSize; i++) guest[kTagDataEa + i] = static_cast<std::uint8_t>(rng.next());
+    return guest;
+}
+
+// Summary bits of blocks [first, last), as the word array holds them.
+std::array<std::uint64_t, tox2::kSpuTagBlockWords> blockBits(std::uint32_t first, std::uint32_t last) {
+    std::array<std::uint64_t, tox2::kSpuTagBlockWords> words{};
+    for (std::uint32_t b = first; b < last; b++) words[b / 64] |= std::uint64_t{1} << (b % 64);
+    return words;
+}
+
+// No tagged unit sits in a block whose summary bit is clear.
+bool summaryCoversTags(const tox2::SpuThread& thread) {
+    for (std::uint32_t unit = 0; unit < tox2::kSpuTagCount; unit++) {
+        if (untracked(thread, unit * tox2::kSpuTagUnit)) continue;
+        if (!thread.blockMayBeTagged(unit / tox2::kSpuTagBlockUnits)) return false;
+    }
+    return true;
+}
+
+void testTaggedBlockSummary() {
+    tox2::registerSpuImages(kTagImages, 2);
+    const auto guest = makeTagGuest();
+    constexpr std::uint32_t kBlock = tox2::kSpuTagBlock;
+    constexpr std::uint32_t kFirstCodeBlock = kTagImage0Ls / kBlock;
+    constexpr std::uint32_t kCodeBlocks = kTagImage0Code / kBlock;
+
+    {
+        tox2::SpuThread thread(20, "summary", nullptr);
+        CHECK(thread.taggedBlocks() == blockBits(0, 0));
+
+        // The bits of exactly the blocks that hold code.
+        tox2::copyToLs(thread, guest.data(), kTagImage0Ea, kTagImage0Ls, kTagImage0Size);
+        CHECK(thread.taggedBlocks() == blockBits(kFirstCodeBlock, kFirstCodeBlock + kCodeBlocks));
+        CHECK(summaryCoversTags(thread));
+
+        // Other bytes over the whole of one tagged block untag it and clear its bit; the neighbours stay.
+        tox2::copyToLs(thread, guest.data(), kTagDataEa, kTagImage0Ls + kBlock, kBlock);
+        auto expected = blockBits(kFirstCodeBlock, kFirstCodeBlock + kCodeBlocks);
+        expected[(kFirstCodeBlock + 1) / 64] &= ~(std::uint64_t{1} << ((kFirstCodeBlock + 1) % 64));
+        CHECK(thread.taggedBlocks() == expected);
+        CHECK(untracked(thread, kTagImage0Ls + kBlock) && untracked(thread, kTagImage0Ls + 2 * kBlock - 16));
+        CHECK(trackedAs(thread, kTagImage0Ls, "tag0") && trackedAs(thread, kTagImage0Ls + 2 * kBlock, "tag0"));
+
+        // The same bytes from outside an image keep tags and bits.
+        tox2::copyToLs(thread, guest.data(), kTagMirrorEa + 2 * kBlock, kTagImage0Ls + 2 * kBlock, 3 * kBlock);
+        CHECK(thread.taggedBlocks() == expected);
+        CHECK(trackedAs(thread, kTagImage0Ls + 2 * kBlock, "tag0") &&
+              trackedAs(thread, kTagImage0Ls + 5 * kBlock - 16, "tag0"));
+
+        // A copy that covers part of a block untags only the units whose bytes differ and keeps the bit.
+        tox2::copyToLs(thread, guest.data(), kTagDataEa, kTagImage0Ls + 6 * kBlock + 0x40, 0x40);
+        CHECK(untracked(thread, kTagImage0Ls + 6 * kBlock + 0x40) &&
+              trackedAs(thread, kTagImage0Ls + 6 * kBlock, "tag0"));
+        CHECK(thread.taggedBlocks() == expected);
+        CHECK(summaryCoversTags(thread));
+
+        // The whole LS untagged: no bit is left.
+        tox2::untagLs(thread, 0, kTox2SpuLsSize);
+        CHECK(thread.taggedBlocks() == blockBits(0, 0));
+        CHECK(untracked(thread, kTagImage0Ls));
+    }
+
+    {
+        // A bit that is set while its block holds no tag (a partial untag leaves it) is cleared by the next copy that
+        // covers the whole block.
+        tox2::SpuThread thread(21, "stale", nullptr);
+        tox2::copyToLs(thread, guest.data(), kTagImage0Ea, kTagImage0Ls, kTagImage0Size);
+        const std::uint32_t block_ls = kTagImage0Ls + 3 * kBlock;
+        tox2::untagLs(thread, block_ls, kBlock - 16);
+        CHECK(trackedAs(thread, block_ls + kBlock - 16, "tag0"));
+        tox2::untagLs(thread, block_ls + kBlock - 16, 16);
+        CHECK(untracked(thread, block_ls + kBlock - 16));
+        CHECK(((thread.taggedBlocks()[(block_ls / kBlock) / 64] >> ((block_ls / kBlock) % 64)) & 1u) != 0);
+        tox2::copyToLs(thread, guest.data(), kTagMirrorEa + 3 * kBlock, block_ls, kBlock);
+        CHECK(((thread.taggedBlocks()[(block_ls / kBlock) / 64] >> ((block_ls / kBlock) % 64)) & 1u) == 0);
+        CHECK(summaryCoversTags(thread));
+    }
+
+    {
+        // A load at a delta that is not a multiple of the block size: the edge blocks get a bit as soon as one unit
+        // of them is tagged.
+        tox2::SpuThread thread(22, "shifted", nullptr);
+        tox2::copyToLs(thread, guest.data(), kTagImage1Ea, kTagImage1Ls + 0x3f0, 0x20);
+        CHECK(thread.taggedBlocks() == blockBits((kTagImage1Ls + 0x3f0) / kBlock, (kTagImage1Ls + 0x3f0) / kBlock + 2));
+    }
+
+    // The code span: [0x10000, 0x15800) is the union of the code segments; the data segment of image 0 lies inside it.
+    CHECK(tox2::spuCodeRangeOverlaps(kTagImage0Ea, 1));
+    CHECK(tox2::spuCodeRangeOverlaps(kTagImage0Ea - 16, 17));
+    CHECK(!tox2::spuCodeRangeOverlaps(kTagImage0Ea - 16, 16));
+    CHECK(tox2::spuCodeRangeOverlaps(kTagImage1Ea + kTagImage1Size - 1, 16));
+    CHECK(!tox2::spuCodeRangeOverlaps(kTagImage1Ea + kTagImage1Size, 16));
+    CHECK(!tox2::spuCodeRangeOverlaps(kTagDataEa, kTagDataSize));
+    registerSynthImages();
+    CHECK(tox2::spuCodeRangeOverlaps(kEaA, 1) && !tox2::spuCodeRangeOverlaps(0, 0x100));
+}
+
+// The per-unit rule that copyToLs follows, written out without the summary: a tagged unit loses its tag when the bytes
+// the copy writes into it differ from what it holds; then the units wholly inside a code segment's intersection with
+// the copy are tagged for that segment.
+class TagReference {
+public:
+    struct Tag {
+        bool tagged = false;
+        std::uint32_t image = 0, segment = 0;
+        std::int32_t delta = 0;
+    };
+
+    TagReference() : ls_(kTox2SpuLsSize, 0), tags_(tox2::kSpuTagCount) {}
+
+    void copy(const std::uint8_t* base, std::uint32_t ea, std::uint32_t lsa, std::uint32_t size) {
+        std::uint32_t pos = lsa & (kTox2SpuLsSize - 1u);
+        while (size > 0) {
+            const std::uint32_t n = std::min<std::uint32_t>(size, kTox2SpuLsSize - pos);
+            piece(base, ea, pos, n);
+            ea += n;
+            size -= n;
+            pos = 0;
+        }
+    }
+
+    void untag(std::uint32_t lsa, std::uint32_t size) {
+        std::uint64_t pos = lsa & (kTox2SpuLsSize - 1u);
+        std::uint64_t left = size;
+        while (left > 0) {
+            const std::uint64_t n = std::min<std::uint64_t>(left, kTox2SpuLsSize - pos);
+            for (std::uint64_t u = pos / 16; u < (pos + n + 15) / 16; u++) tags_[u].tagged = false;
+            left -= n;
+            pos = 0;
+        }
+    }
+
+    const std::vector<std::uint8_t>& ls() const { return ls_; }
+    const Tag& tag(std::uint32_t unit) const { return tags_[unit]; }
+
+private:
+    void piece(const std::uint8_t* base, std::uint32_t ea, std::uint32_t lsa, std::uint32_t size) {
+        const std::uint32_t end = lsa + size;
+        for (std::uint32_t u = lsa / 16; u < (end + 15) / 16; u++) {
+            if (!tags_[u].tagged) continue;
+            const std::uint32_t lo = std::max(lsa, u * 16);
+            const std::uint32_t hi = std::min(end, (u + 1) * 16);
+            if (std::memcmp(ls_.data() + lo, base + ea + (lo - lsa), hi - lo) != 0) tags_[u].tagged = false;
+        }
+        std::memcpy(ls_.data() + lsa, base + ea, size);
+        const std::uint64_t ea_end = std::uint64_t{ea} + size;
+        for (std::uint32_t i = 0; i < 2; i++) {
+            for (std::uint32_t j = 0; j < kTagImages[i].segment_count; j++) {
+                const Tox2SpuSegment& s = kTagImages[i].segments[j];
+                if (s.code == 0) continue;
+                const std::uint64_t a = std::max<std::uint64_t>(ea, s.ea);
+                const std::uint64_t b = std::min<std::uint64_t>(ea_end, std::uint64_t{s.ea} + s.size);
+                if (a >= b) continue;
+                const std::uint32_t lo = static_cast<std::uint32_t>((lsa + (a - ea) + 15) & ~15ull);
+                const std::uint32_t hi = static_cast<std::uint32_t>((lsa + (b - ea)) & ~15ull);
+                if (lo >= hi) continue;
+                const auto delta = static_cast<std::int32_t>(std::int64_t{lsa} - (std::int64_t{ea} - s.ea) - s.ls);
+                for (std::uint32_t u = lo / 16; u < hi / 16; u++) tags_[u] = Tag{true, i, j, delta};
+            }
+        }
+    }
+
+    std::vector<std::uint8_t> ls_;
+    std::vector<Tag> tags_;
+};
+
+bool sameAsReference(const tox2::SpuThread& thread, const TagReference& ref) {
+    if (std::memcmp(thread.ls(), ref.ls().data(), kTox2SpuLsSize) != 0) return false;
+    for (std::uint32_t unit = 0; unit < tox2::kSpuTagCount; unit++) {
+        const auto tracked = tox2::trackedImageAt(thread, unit * tox2::kSpuTagUnit);
+        const TagReference::Tag& want = ref.tag(unit);
+        if (tracked.has_value() != want.tagged) return false;
+        if (tracked &&
+            (tracked->image_index != want.image || tracked->segment != want.segment || tracked->delta != want.delta)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Random copies and untags against the reference above. Image bytes land at the link address and at a few fixed
+// offsets from it (so the distinct load records stay few), mirror bytes with some flipped bytes make equal and
+// different runs inside tagged code, and unrelated bytes over any LS range make the usual untags.
+void testCopyToLsMatchesReference() {
+    tox2::registerSpuImages(kTagImages, 2);
+    auto guest = makeTagGuest();
+    tox2::SpuThread thread(23, "reference", nullptr);
+    TagReference ref;
+    TagRandom rng{0x2545f4914f6cdd1dull};
+    constexpr std::int32_t kDeltas[] = {0, 0, 0, 8, 16, -16, 0x400};
+    int mismatches = 0;
+    int summary_failures = 0;
+
+    for (int op = 0; op < 2000; op++) {
+        const std::uint32_t kind = rng.below(10);
+        std::uint32_t ea = 0, lsa = 0, size = 0;
+        if (kind < 3) {
+            // Image bytes, whole or in pieces.
+            const bool second = rng.below(4) == 0;
+            const std::uint32_t image_ea = second ? kTagImage1Ea : kTagImage0Ea;
+            const std::uint32_t image_ls = second ? kTagImage1Ls : kTagImage0Ls;
+            const std::uint32_t image_size = second ? kTagImage1Size : kTagImage0Size;
+            const std::uint32_t off = rng.below(3) == 0 ? 0 : rng.below(image_size);
+            size = rng.below(3) == 0 ? image_size - off : 1 + rng.below(std::min(image_size - off, 0x1800u));
+            ea = image_ea + off;
+            lsa = static_cast<std::uint32_t>(std::int64_t{image_ls} + kDeltas[rng.below(7)] + off);
+        } else if (kind < 6) {
+            // Mirror bytes onto the code area.
+            ea = kTagMirrorEa + rng.below(0x5000);
+            lsa = kTagImage0Ls + (ea - kTagMirrorEa) + (rng.below(3) == 0 ? rng.below(64) : 0);
+            size = 1 + rng.below(0x1800);
+        } else if (kind < 8) {
+            // Unrelated bytes anywhere, now and then across the end of the LS.
+            ea = kTagDataEa + rng.below(kTagDataSize - 0x1800);
+            lsa = rng.below(8) == 0 ? kTox2SpuLsSize - rng.below(0x200) : rng.below(0x12000);
+            size = 1 + rng.below(rng.below(2) == 0 ? 0x40 : 0x1800);
+        } else if (kind == 8) {
+            const std::uint32_t at = kTagImage0Ls + rng.below(0x5000);
+            const std::uint32_t n = rng.below(3) == 0 ? rng.below(0x1000) : rng.below(0x60);
+            tox2::untagLs(thread, at, n);
+            ref.untag(at, n);
+            if (!sameAsReference(thread, ref)) mismatches++;
+            if (!summaryCoversTags(thread)) summary_failures++;
+            continue;
+        } else {
+            // Flip or restore a mirror byte, so mirror copies are equal or different from the LS in new places.
+            const std::uint32_t at = rng.below(0x5000);
+            if (rng.below(2) == 0) {
+                guest[kTagMirrorEa + at] ^= 0x5a;
+            } else {
+                guest[kTagMirrorEa + at] = guest[kTagImage0Ea + at];
+            }
+            continue;
+        }
+        tox2::copyToLs(thread, guest.data(), ea, lsa, size);
+        ref.copy(guest.data(), ea, lsa, size);
+        if (!sameAsReference(thread, ref)) {
+            mismatches++;
+            std::fprintf(stderr, "reference mismatch after op %d (kind %u): ea %#x ls %#x size %#x\n", op, kind, ea,
+                         lsa, size);
+        }
+        if (!summaryCoversTags(thread)) summary_failures++;
+    }
+    CHECK(mismatches == 0);
+    CHECK(summary_failures == 0);
+    // The run did tag and untag, not only one of them.
+    int tagged = 0;
+    for (std::uint32_t unit = 0; unit < tox2::kSpuTagCount; unit++) tagged += ref.tag(unit).tagged ? 1 : 0;
+    std::printf("reference run: %d of %u units tagged at the end\n", tagged, tox2::kSpuTagCount);
+    registerSynthImages();
+}
+
 void testFirstImageLog() {
     registerSynthImages();
     const auto guest = makeGuest();
@@ -3320,6 +3616,8 @@ int main(int argc, char** argv) {
     testDispatchAcrossImages();
     testTrackingIntersection();
     testTrackingIdenticalWrite();
+    testTaggedBlockSummary();
+    testCopyToLsMatchesReference();
     testCopyWrapsAtLsEnd();
     testFirstImageLog();
     testCheckImages();

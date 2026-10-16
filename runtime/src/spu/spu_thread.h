@@ -57,6 +57,11 @@ enum class SpuState { Created, Running, Blocked, Finished };
 inline constexpr std::uint32_t kSpuTagUnit = 16;
 inline constexpr std::uint32_t kSpuTagCount = kTox2SpuLsSize / kSpuTagUnit;
 inline constexpr std::uint32_t kSpuMaxLoadRecords = 255;
+// The summary of the tag map: one bit per kSpuTagBlock bytes of LS (see SpuThread::taggedBlocks).
+inline constexpr std::uint32_t kSpuTagBlock = 1024;
+inline constexpr std::uint32_t kSpuTagBlockUnits = kSpuTagBlock / kSpuTagUnit;
+inline constexpr std::uint32_t kSpuTagBlockCount = kTox2SpuLsSize / kSpuTagBlock;
+inline constexpr std::uint32_t kSpuTagBlockWords = kSpuTagBlockCount / 64;
 inline constexpr std::uint32_t kMaxSpuImages = 64;
 
 // "Image `image` (an index into the registered images) occupies this LS range through its code
@@ -174,8 +179,19 @@ public:
     // Tracking internals for copyToLs and untagLs; other code goes through those two.
     // The tag (record index + 1) for this triple; adds the record when it is new.
     std::uint16_t recordTag(std::uint32_t image, std::uint32_t segment, std::int32_t delta);
-    // Tag units [first_unit, last_unit) with `tag` (0 untags).
+    // Tag units [first_unit, last_unit) with `tag` (0 untags). Keeps the block summary up to date.
     void setTags(std::uint32_t first_unit, std::uint32_t last_unit, std::uint16_t tag);
+    // False when no unit of LS block `block` (kSpuTagBlock bytes) is tagged, so a walk over it can be skipped.
+    bool blockMayBeTagged(std::uint32_t block) const {
+        const std::uint64_t word = tagged_blocks_[block / 64].load(std::memory_order_acquire);
+        return ((word >> (block % 64)) & 1u) != 0;
+    }
+    // Clears the summary bit of `block`; the caller has seen every unit of the block untagged.
+    void clearBlockMayBeTagged(std::uint32_t block) {
+        tagged_blocks_[block / 64].fetch_and(~(std::uint64_t{1} << (block % 64)), std::memory_order_release);
+    }
+    // The summary words, bit b of word b / 64 for block b (test accessor).
+    std::array<std::uint64_t, kSpuTagBlockWords> taggedBlocks() const;
 
 private:
     struct LsDeleter {
@@ -194,6 +210,13 @@ private:
     // Tags may be changed by another thread (write_ls from the PPU) while this one dispatches. Records are
     // only ever appended, so a tag that is visible always names a complete record.
     std::array<std::atomic<std::uint16_t>, kSpuTagCount> tags_{};
+    // Bit b of word b / 64 is set when a unit of LS block b may be tagged. It is set before the tags are stored and
+    // cleared only when every unit of the block is known to be 0, so a set bit with no tagged unit costs a walk and
+    // never a wrong answer. Non-zero tags come from this thread's own DMA and from image loads while the thread does
+    // not run; other threads only untag (write_ls, at most 8 bytes), so they never cover a whole block and never
+    // clear a bit, and an untag racing with a walk can only leave a bit set. A whole-block untag from another thread
+    // racing with this thread's tagging could leave a tag with its bit clear.
+    std::array<std::atomic<std::uint64_t>, kSpuTagBlockWords> tagged_blocks_{};
     std::array<SpuLoadRecord, kSpuMaxLoadRecords> records_{};
     std::uint32_t record_count_ = 0;  // guarded by record_mutex_
     std::mutex record_mutex_;
@@ -261,6 +284,9 @@ std::string describeSpuThread(const SpuThread& thread);
 // ExitCode::LoadError.
 void registerSpuImages(const Tox2SpuImageInfo* images, std::uint32_t count);
 std::uint32_t spuImageCount();
+// True when guest bytes [ea, ea + size) intersect the span from the lowest code segment start to the highest code
+// segment end of the registered images. False means a copy from there tags nothing.
+bool spuCodeRangeOverlaps(std::uint32_t ea, std::uint32_t size);
 const Tox2SpuImageInfo& spuImage(std::uint32_t index);
 // The dispatchable entry of image `index` at `ls`, or null.
 const Tox2SpuEntry* spuFindEntry(std::uint32_t index, std::uint32_t ls);

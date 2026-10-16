@@ -139,10 +139,47 @@ std::uint16_t SpuThread::recordTag(std::uint32_t image, std::uint32_t segment, s
     return static_cast<std::uint16_t>(++record_count_);
 }
 
+namespace {
+
+// Calls apply(word, mask) for the summary bits of blocks [first_block, last_block).
+template <typename Apply>
+void forBlockMasks(std::uint32_t first_block, std::uint32_t last_block, Apply apply) {
+    for (std::uint32_t b = first_block; b < last_block;) {
+        const std::uint32_t word = b / 64;
+        const std::uint32_t end = std::min(last_block, (word + 1) * 64);
+        const std::uint32_t count = end - b;
+        const std::uint64_t mask = (count == 64 ? ~std::uint64_t{0} : (std::uint64_t{1} << count) - 1) << (b % 64);
+        apply(word, mask);
+        b = end;
+    }
+}
+
+}  // namespace
+
 void SpuThread::setTags(std::uint32_t first_unit, std::uint32_t last_unit, std::uint16_t tag) {
+    if (first_unit >= last_unit) return;
+    if (tag != 0) {
+        // The bits go first: a reader that sees a tag must also see its block marked.
+        forBlockMasks(first_unit / kSpuTagBlockUnits, (last_unit - 1) / kSpuTagBlockUnits + 1,
+                      [&](std::uint32_t word, std::uint64_t mask) {
+                          tagged_blocks_[word].fetch_or(mask, std::memory_order_release);
+                      });
+    } else {
+        // A block that is only partly covered may still hold tagged units outside the range.
+        forBlockMasks((first_unit + kSpuTagBlockUnits - 1) / kSpuTagBlockUnits, last_unit / kSpuTagBlockUnits,
+                      [&](std::uint32_t word, std::uint64_t mask) {
+                          tagged_blocks_[word].fetch_and(~mask, std::memory_order_release);
+                      });
+    }
     for (std::uint32_t u = first_unit; u < last_unit; u++) {
         tags_[u].store(tag, std::memory_order_release);
     }
+}
+
+std::array<std::uint64_t, kSpuTagBlockWords> SpuThread::taggedBlocks() const {
+    std::array<std::uint64_t, kSpuTagBlockWords> out{};
+    for (std::uint32_t i = 0; i < kSpuTagBlockWords; i++) out[i] = tagged_blocks_[i].load(std::memory_order_acquire);
+    return out;
 }
 
 SpuThread* currentSpuThread() { return t_current; }
@@ -182,13 +219,49 @@ namespace {
 // "these LS bytes are image X at its link address", so overwriting a unit with the bytes it already holds
 // keeps that true (the SPURS policy module restores a task's LS pattern from a save area this way). Edge
 // units are partial: only the bytes the copy writes into them are compared.
+//
+// Most copies land in blocks without code, which the summary skips without reading a tag. In the other blocks a run
+// of tagged units is compared with one memcmp, and only a run that differs is compared unit by unit.
 void untagChangedUnits(SpuThread& thread, const std::uint8_t* src, std::uint32_t lsa, std::uint32_t size) {
     const std::uint32_t end = lsa + size;
-    for (std::uint32_t u = lsa / kSpuTagUnit; u < roundUp(end) / kSpuTagUnit; u++) {
-        if (thread.recordAt(u * kSpuTagUnit) == nullptr) continue;
-        const std::uint32_t lo = std::max(lsa, u * kSpuTagUnit);
-        const std::uint32_t hi = std::min(end, (u + 1) * kSpuTagUnit);
-        if (std::memcmp(thread.ls() + lo, src + (lo - lsa), hi - lo) != 0) thread.setTags(u, u + 1, 0);
+    const std::uint32_t first_unit = lsa / kSpuTagUnit;
+    const std::uint32_t last_unit = roundUp(end) / kSpuTagUnit;
+    const auto tagged = [&](std::uint32_t unit) { return thread.recordAt(unit * kSpuTagUnit) != nullptr; };
+    // Same bytes in LS and in the copy for the part of units [from, to) that the copy writes.
+    const auto same = [&](std::uint32_t from, std::uint32_t to) {
+        const std::uint32_t lo = std::max(lsa, from * kSpuTagUnit);
+        const std::uint32_t hi = std::min(end, to * kSpuTagUnit);
+        return std::memcmp(thread.ls() + lo, src + (lo - lsa), hi - lo) == 0;
+    };
+    for (std::uint32_t block = first_unit / kSpuTagBlockUnits; block * kSpuTagBlockUnits < last_unit; block++) {
+        if (!thread.blockMayBeTagged(block)) continue;
+        const std::uint32_t block_first = block * kSpuTagBlockUnits;
+        const std::uint32_t from = std::max(first_unit, block_first);
+        const std::uint32_t to = std::min(last_unit, block_first + kSpuTagBlockUnits);
+        bool remaining = false;  // a unit of the block that stays tagged
+        for (std::uint32_t u = from; u < to;) {
+            if (!tagged(u)) {
+                u++;
+                continue;
+            }
+            std::uint32_t run_end = u + 1;
+            while (run_end < to && tagged(run_end)) run_end++;
+            if (same(u, run_end)) {
+                remaining = true;
+            } else {
+                for (std::uint32_t v = u; v < run_end; v++) {
+                    if (same(v, v + 1)) {
+                        remaining = true;
+                    } else {
+                        thread.setTags(v, v + 1, 0);
+                    }
+                }
+            }
+            u = run_end;
+        }
+        if (!remaining && from == block_first && to == block_first + kSpuTagBlockUnits) {
+            thread.clearBlockMayBeTagged(block);
+        }
     }
 }
 
@@ -196,6 +269,9 @@ void untagChangedUnits(SpuThread& thread, const std::uint8_t* src, std::uint32_t
 void copyPiece(SpuThread& thread, const std::uint8_t* base, std::uint32_t ea, std::uint32_t lsa, std::uint32_t size) {
     untagChangedUnits(thread, base + ea, lsa, size);
     std::memcpy(thread.ls() + lsa, base + ea, size);
+
+    // Copies from outside every code segment (most data DMA) tag nothing.
+    if (!spuCodeRangeOverlaps(ea, size)) return;
 
     const std::uint64_t ea_end = std::uint64_t{ea} + size;
     const std::uint32_t count = spuImageCount();
