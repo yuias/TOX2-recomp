@@ -1162,13 +1162,14 @@ are warm, as they are in the game's steady state. An iteration replays the captu
 the commands, executes them one command at a time and gives them back to the builder (`recycle`). The first
 iteration creates the pipelines and uploads the textures, so it is left out when `N` is 2 or more. Turn the
 validation layer off with `--no-validation` when timing, because it costs CPU for every Vulkan call. The per-command
-lines are not printed; the summary line, the `rsx unimplemented` section and the validation line follow the three
+lines are not printed; the summary line, the `rsx unimplemented` section and the validation line follow the four
 lines below and describe the last iteration. A later iteration draws over the targets of the one before, so the image
-is not the capture's frame, which is why `--out` and `--compare` are refused. Three lines are printed, here with
+is not the capture's frame, which is why `--out` and `--compare` are refused. Four lines are printed, here with
 illustrative figures:
 
 ```
 timing: frame_9400_room, 30 iterations (first excluded), median ms per iteration: build 6.10 (buildDraw 4.83), recordDraw 5.33, recordClear 0.10, submit 0.41, gpu wait 0.02, total 11.94
+cycles: frame_9400_room, 30 iterations (first excluded), median thread cycles per iteration: build 21334455, record 18273645, total 40112233
 builder: per iteration 627 draws, fp cache 620 hits 7 misses, vp cache 600 hits 27 misses, vertex bytes 1234567 copied (union 1234567)
 render: per iteration 115 barriers (3 skipped), 31 rendering instances, 552 state calls (11988 skipped), 12 vp constant uploads reused; upload memory 0x7 device-local host-visible host-coherent
 ```
@@ -1187,6 +1188,14 @@ The `timing` line gives the median over the counted iterations of the time each 
   out of the three phases above.
 - `total`: `build`, `recordDraw`, `recordClear` and `submit` added up (`gpu wait` is not in it).
 
+The `cycles` line gives the median over the same iterations of the cycles the replaying thread ran
+(`QueryThreadCycleTime`, which counts at the time-stamp counter rate), in three columns: `build` is `replayCapture`
+plus `takeCommands`, `record` is the whole loop that executes the commands (the three recording phases and the
+`gpu wait` above), and `total` is the iteration from before `replayCapture` to after `recycle`. Time the thread is
+not scheduled does not count, so other load on the machine moves these figures far less than the `timing` line, and
+they are the figures to compare two builds by. Each column is a median of its own, so `build` plus `record` need not
+equal `total` exactly.
+
 The `builder` line gives, per iteration, the draws, the hits and misses of the fragment and vertex program caches
 and the vertex bytes copied. The union figure is the size of the union of the attribute ranges per location, counted
 separately from the merge; it equals the bytes copied unless the merge is wrong. The `render` line gives the
@@ -1196,6 +1205,10 @@ that uploads go to (`device-local`, `host-visible`, `host-coherent`, `host-cache
 memory is write-combined, where reads are slow and single-byte stores are slower than whole-element stores.
 Run-to-run spread on one machine was a few percent for `buildDraw` and `total` and up to 7 % for `recordDraw`, so
 a difference smaller than that is noise; compare interleaved runs of the two binaries.
+
+The CTest entry `rsx_replay_repeat` runs `tox2_rsxreplay generated/rsx/captures/frame_9400_room.tox2cap --repeat 3
+--quiet --no-validation` (the capture is named in `cmake/rsx_replay.cmake`) and passes when the `cycles` line is
+printed. It is registered only when the capture exists.
 
 The CTest entry `rsx_replay` runs `tox2_rsxreplay` on `generated/rsx/captures/title.tox2cap` with
 the options pinned in `cmake/rsx_replay.cmake`. The capture name `title` is only the name the test looks up; it says nothing about the

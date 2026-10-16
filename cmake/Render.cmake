@@ -304,4 +304,19 @@ function(tox2_render_add)
     message(STATUS "TOX2: rsx_replay test not registered "
       "(generated/rsx/captures/${TOX2_RSX_REPLAY_CAPTURE}.tox2cap not found)")
   endif()
+
+  # Smoke test of the --repeat measurement the fixed-input comparisons use.
+  set(replay_repeat_capture
+    "${CMAKE_SOURCE_DIR}/generated/rsx/captures/${TOX2_RSX_REPLAY_REPEAT_CAPTURE}.tox2cap")
+  if(EXISTS "${replay_repeat_capture}")
+    add_test(NAME rsx_replay_repeat
+      COMMAND tox2_rsxreplay "${replay_repeat_capture}" --repeat 3 --quiet --no-validation)
+    set_tests_properties(rsx_replay_repeat PROPERTIES
+      PASS_REGULAR_EXPRESSION
+      "cycles: ${TOX2_RSX_REPLAY_REPEAT_CAPTURE}, 3 iterations \\(first excluded\\), median thread cycles per iteration: build [0-9]+, record [0-9]+, total [0-9]+"
+      FAIL_REGULAR_EXPRESSION "error: ")
+  else()
+    message(STATUS "TOX2: rsx_replay_repeat test not registered "
+      "(generated/rsx/captures/${TOX2_RSX_REPLAY_REPEAT_CAPTURE}.tox2cap not found)")
+  endif()
 endfunction()

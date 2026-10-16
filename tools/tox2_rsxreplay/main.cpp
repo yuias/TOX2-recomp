@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "core/census.h"
+#include "core/thread_cpu.h"
 #include "render/frame_dump.h"
 #include "render/render_scale.h"
 #include "render/vk_context.h"
@@ -206,6 +207,8 @@ struct IterationSample {
     std::uint64_t bytes_copied = 0, bytes_union = 0;
     std::uint64_t barriers = 0, barriers_skipped = 0, instances = 0, state_calls = 0, state_skipped = 0;
     std::uint64_t uploads_reused = 0;
+    // Thread cycles of the replay thread: build, the whole execute loop, and the iteration.
+    std::uint64_t build_cycles = 0, record_cycles = 0, total_cycles = 0;
 };
 
 std::uint64_t median(const std::vector<IterationSample>& samples, std::uint64_t IterationSample::* field) {
@@ -214,6 +217,13 @@ std::uint64_t median(const std::vector<IterationSample>& samples, std::uint64_t 
     for (const IterationSample& sample : samples) values.push_back(sample.*field);
     std::sort(values.begin(), values.end());
     return values[values.size() / 2];
+}
+
+std::uint64_t medianCycles(const std::vector<IterationSample>& samples, std::uint64_t IterationSample::* field) {
+    std::vector<std::uint64_t> values;
+    values.reserve(samples.size());
+    for (const IterationSample& sample : samples) values.push_back(sample.*field);
+    return tox2::summarizeCycles(values).median;
 }
 
 double toMs(std::uint64_t ns) { return static_cast<double>(ns) / 1e6; }
@@ -262,10 +272,13 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
         const tox2::RsxBuilderStats builder_before = builder.stats();
         IterationSample sample;
 
+        const std::uint64_t cycles_begin = tox2::currentThreadCycles();
         Clock::time_point begin = Clock::now();
         tox2::replayCapture(reader, memory, builder);
         std::vector<tox2::RsxCommand> commands = builder.takeCommands();
         sample.build_ns = nanosSince(begin);
+        const std::uint64_t cycles_built = tox2::currentThreadCycles();
+        sample.build_cycles = cycles_built - cycles_begin;
         const tox2::RsxBuilderStats& builder_after = builder.stats();
         sample.build_draw_ns = builder_after.build_draw_ns - builder_before.build_draw_ns;
         sample.fp_hits = builder_after.fp_cache_hits - builder_before.fp_cache_hits;
@@ -290,6 +303,7 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
             phase += elapsed - wait;
             if (is_draw) sample.draws++;
         }
+        sample.record_cycles = tox2::currentThreadCycles() - cycles_built;
         if (!renderer.valid()) {
             std::fprintf(stderr, "error: %s\n", renderer.error().c_str());
             return false;
@@ -306,6 +320,7 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
         result.draws = sample.draws;
         result.skipped = renderer_after.draws_skipped - renderer_before.draws_skipped;
         builder.recycle(std::move(commands));
+        sample.total_cycles = tox2::currentThreadCycles() - cycles_begin;
         // The first iteration creates pipelines and uploads textures.
         if (iteration > 0 || repeat == 1) samples.push_back(sample);
     }
@@ -320,6 +335,13 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
             capture_name.c_str(), repeat, repeat == 1 ? "" : "s", repeat == 1 ? "none excluded" : "first excluded",
             build, toMs(median(samples, &IterationSample::build_draw_ns)), record_draw, record_clear, submit,
             toMs(median(samples, &IterationSample::gpu_wait_ns)), build + record_draw + record_clear + submit);
+    // Thread cycles do not count time the thread is not scheduled, so this is the line to compare builds by.
+    std::printf(
+            "cycles: %s, %u iteration%s (%s), median thread cycles per iteration: build %llu, record %llu, total %llu\n",
+            capture_name.c_str(), repeat, repeat == 1 ? "" : "s", repeat == 1 ? "none excluded" : "first excluded",
+            toUll(medianCycles(samples, &IterationSample::build_cycles)),
+            toUll(medianCycles(samples, &IterationSample::record_cycles)),
+            toUll(medianCycles(samples, &IterationSample::total_cycles)));
     std::printf(
             "builder: per iteration %llu draws, fp cache %llu hits %llu misses, vp cache %llu hits %llu misses, "
             "vertex bytes %llu copied (union %llu)\n",

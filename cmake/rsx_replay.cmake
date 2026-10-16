@@ -10,3 +10,7 @@ set(TOX2_RSX_REPLAY_REFERENCE_SHA256 "")
 set(TOX2_RSX_REPLAY_MAX_DIFF "8")
 set(TOX2_RSX_REPLAY_MEAN_DIFF "")
 set(TOX2_RSX_REPLAY_DIFFERING_PERCENT "0.5")
+
+# The capture the rsx_replay_repeat test replays with --repeat. It only has to replay cleanly: the test checks the
+# cycles line, not the image.
+set(TOX2_RSX_REPLAY_REPEAT_CAPTURE frame_9400_room)
