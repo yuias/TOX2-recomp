@@ -132,6 +132,101 @@ static int checkFloat(void) {
     return g_bad == 0;
 }
 
+// Operands that send a lane through the exact path: overflow of the products and sums, and exponent-255
+// operands, with both signs, next to values that stay on the fast path.
+static const uint32_t kForcing[] = {0x7f7fffffu, 0xff7fffffu, 0x7f000000u, 0x40800000u, 0xc0800000u, 0x7f800000u,
+                                    0xff800000u, 0x7fffffffu, 0xffffffffu, 0x3f800000u, 0x00000000u, 0x80000000u};
+static const int kForcingCount = (int)(sizeof kForcing / sizeof kForcing[0]);
+
+// True when the fast path of operation `op` rejects the vector, so the exact path produces the merged result.
+static int needsExact(int op, Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+    Tox2Vr r;
+    switch (op) {
+        case 0: r.f32 = a.f32 + b.f32; break;
+        case 1: r.f32 = a.f32 - b.f32; break;
+        case 2: r.f32 = a.f32 * b.f32; break;
+        case 3: r.f32 = __builtin_elementwise_fma(a.f32, b.f32, c.f32); break;
+        case 4: r.f32 = __builtin_elementwise_fma(a.f32, b.f32, -c.f32); break;
+        default: r.f32 = __builtin_elementwise_fma(-a.f32, b.f32, c.f32); break;
+    }
+    return tox2SpuSf4NeedsExact(r.u32);
+}
+
+// The wrappers on vectors where one lane takes the exact path and the other three stay on the fast
+// path, and the exact-path functions themselves on the same vectors. Checks the merge of the two results
+// per lane, and that the forcing inputs do reach the exact path of every operation.
+static int checkExactPaths(void) {
+    long bad = 0;
+    long forced[6] = {0, 0, 0, 0, 0, 0};
+    const uint32_t saved = tox2SpuMxcsrGet();
+    for (int x = 0; x < kForcingCount; x++) {
+        for (int y = 0; y < kForcingCount; y++) {
+            for (int z = 0; z < kForcingCount; z++) {
+                for (int lane = 0; lane < 4; lane++) {
+                    Tox2Vr a;
+                    Tox2Vr b;
+                    Tox2Vr c;
+                    for (int i = 0; i < 4; i++) {
+                        a.u32[i] = 0x3f800000u + (uint32_t)(i + 1) * 0x100000u;
+                        b.u32[i] = 0x40000000u + (uint32_t)i * 0x80000u;
+                        c.u32[i] = 0x3f000000u + (uint32_t)i * 0x10000u;
+                    }
+                    a.u32[lane] = kForcing[x];
+                    b.u32[lane] = kForcing[y];
+                    c.u32[lane] = kForcing[z];
+
+                    Tox2Vr got[6];
+                    Tox2U32x4 exact[6];
+                    int hit[6];
+                    tox2SpuMxcsrSet(kTox2SpuMxcsrSpu);
+                    for (int op = 0; op < 6; op++) hit[op] = needsExact(op, a, b, c);
+                    got[0] = tox2SpuFa(a, b);
+                    got[1] = tox2SpuFs(a, b);
+                    got[2] = tox2SpuFm(a, b);
+                    got[3] = tox2SpuFma(a, b, c);
+                    got[4] = tox2SpuFms(a, b, c);
+                    got[5] = tox2SpuFnms(a, b, c);
+                    exact[0] = tox2SpuFaExact(a, b);
+                    exact[1] = tox2SpuFsExact(a, b);
+                    exact[2] = tox2SpuFmExact(a, b);
+                    exact[3] = tox2SpuFmaExact(a, b, c);
+                    exact[4] = tox2SpuFmsExact(a, b, c);
+                    exact[5] = tox2SpuFnmsExact(a, b, c);
+                    if ((tox2SpuMxcsrGet() & kControlBits) != kTox2SpuMxcsrSpu && bad++ < 10) {
+                        printf("an exact-path function changed the MXCSR to %08x\n", (unsigned)tox2SpuMxcsrGet());
+                    }
+                    tox2SpuMxcsrSet(kTox2SpuMxcsrHost);
+                    for (int i = 0; i < 4; i++) {
+                        const uint32_t p = a.u32[i];
+                        const uint32_t q = b.u32[i];
+                        const uint32_t r = c.u32[i];
+                        const uint32_t want[6] = {tox2SpuSfAdd(p, q),       tox2SpuSfSub(p, q),
+                                                  tox2SpuSfMul(p, q),       tox2SpuSfMulAdd(p, q, r),
+                                                  tox2SpuSfMulSub(p, q, r), tox2SpuSfNegMulSub(p, q, r)};
+                        for (int op = 0; op < 6; op++) {
+                            if ((got[op].u32[i] != want[op] || exact[op][i] != want[op]) && bad++ < 10) {
+                                printf("exact path op %d lane %d (%08x, %08x, %08x): %08x and %08x, expected %08x\n",
+                                       op, i, p, q, r, got[op].u32[i], exact[op][i], want[op]);
+                            }
+                        }
+                    }
+                    for (int op = 0; op < 6; op++) forced[op] += hit[op];
+                }
+            }
+        }
+    }
+    tox2SpuMxcsrSet(saved);
+    for (int op = 0; op < 6; op++) {
+        if (forced[op] == 0) {
+            printf("no input reached the exact path of op %d\n", op);
+            bad++;
+        }
+    }
+    printf("exact paths: %ld/%ld/%ld/%ld/%ld/%ld vectors forced, %ld mismatches\n", forced[0], forced[1], forced[2],
+           forced[3], forced[4], forced[5], bad);
+    return bad == 0;
+}
+
 // Every combination of the edge words, twice: spread over the four lanes of the vectors, and with the
 // same combination in all lanes, so that the fast path sees an edge without any other lane to hide it.
 static int checkEdges(void) {
@@ -309,7 +404,8 @@ static int checkGenControl(void) {
 }
 
 int main(void) {
-    const int ok = checkFloat() & checkEdges() & checkRoundedHelpers() & checkShufb() & checkGenControl();
+    const int ok =
+            checkFloat() & checkEdges() & checkExactPaths() & checkRoundedHelpers() & checkShufb() & checkGenControl();
     if (ok) printf("spu vector helpers ok\n");
     return ok ? 0 : 1;
 }

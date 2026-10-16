@@ -193,10 +193,11 @@ TOX2_FORCEINLINE Tox2U32x4 tox2SpuSf4FromExact(Tox2SpuF64x4 hi, Tox2SpuF64x4 lo)
 }
 
 // The exact path of each operation. Only the vectors that the fast path rejects reach these, so they
-// stay out of line and keep the call sites small.
+// stay out of line and keep the call sites small. They return the plain vector type: the MS x64 ABI
+// returns the union Tox2Vr through a hidden pointer, which forced every fast/slow merge through a stack slot.
 #define TOX2_SPU_SLOW static inline __attribute__((noinline, cold))
 
-TOX2_SPU_SLOW Tox2Vr tox2SpuFaExact(Tox2Vr a, Tox2Vr b) {
+TOX2_SPU_SLOW Tox2U32x4 tox2SpuFaExact(Tox2Vr a, Tox2Vr b) {
 #pragma STDC FENV_ACCESS ON
     const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
@@ -204,10 +205,10 @@ TOX2_SPU_SLOW Tox2Vr tox2SpuFaExact(Tox2Vr a, Tox2Vr b) {
     tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32), tox2SpuSf4ToDouble(b.u32), &hi, &lo);
     a.u32 = tox2SpuSf4FromExact(hi, lo);
     tox2SpuMxcsrSet(saved);
-    return a;
+    return a.u32;
 }
 
-TOX2_SPU_SLOW Tox2Vr tox2SpuFsExact(Tox2Vr a, Tox2Vr b) {
+TOX2_SPU_SLOW Tox2U32x4 tox2SpuFsExact(Tox2Vr a, Tox2Vr b) {
 #pragma STDC FENV_ACCESS ON
     const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
@@ -215,19 +216,19 @@ TOX2_SPU_SLOW Tox2Vr tox2SpuFsExact(Tox2Vr a, Tox2Vr b) {
     tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32), -tox2SpuSf4ToDouble(b.u32), &hi, &lo);
     a.u32 = tox2SpuSf4FromExact(hi, lo);
     tox2SpuMxcsrSet(saved);
-    return a;
+    return a.u32;
 }
 
-TOX2_SPU_SLOW Tox2Vr tox2SpuFmExact(Tox2Vr a, Tox2Vr b) {
+TOX2_SPU_SLOW Tox2U32x4 tox2SpuFmExact(Tox2Vr a, Tox2Vr b) {
 #pragma STDC FENV_ACCESS ON
     const uint32_t saved = tox2SpuMxcsrEnterHost();
     const Tox2SpuF64x4 no_error = {0.0, 0.0, 0.0, 0.0};
     a.u32 = tox2SpuSf4FromExact(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32), no_error);
     tox2SpuMxcsrSet(saved);
-    return a;
+    return a.u32;
 }
 
-TOX2_SPU_SLOW Tox2Vr tox2SpuFmaExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+TOX2_SPU_SLOW Tox2U32x4 tox2SpuFmaExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
 #pragma STDC FENV_ACCESS ON
     const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
@@ -235,10 +236,10 @@ TOX2_SPU_SLOW Tox2Vr tox2SpuFmaExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
     tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32), tox2SpuSf4ToDouble(c.u32), &hi, &lo);
     a.u32 = tox2SpuSf4FromExact(hi, lo);
     tox2SpuMxcsrSet(saved);
-    return a;
+    return a.u32;
 }
 
-TOX2_SPU_SLOW Tox2Vr tox2SpuFmsExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+TOX2_SPU_SLOW Tox2U32x4 tox2SpuFmsExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
 #pragma STDC FENV_ACCESS ON
     const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
@@ -246,10 +247,10 @@ TOX2_SPU_SLOW Tox2Vr tox2SpuFmsExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
     tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32), -tox2SpuSf4ToDouble(c.u32), &hi, &lo);
     a.u32 = tox2SpuSf4FromExact(hi, lo);
     tox2SpuMxcsrSet(saved);
-    return a;
+    return a.u32;
 }
 
-TOX2_SPU_SLOW Tox2Vr tox2SpuFnmsExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+TOX2_SPU_SLOW Tox2U32x4 tox2SpuFnmsExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
 #pragma STDC FENV_ACCESS ON
     const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
@@ -257,7 +258,7 @@ TOX2_SPU_SLOW Tox2Vr tox2SpuFnmsExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
     tox2SpuTwoSum4(-(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32)), tox2SpuSf4ToDouble(c.u32), &hi, &lo);
     a.u32 = tox2SpuSf4FromExact(hi, lo);
     tox2SpuMxcsrSet(saved);
-    return a;
+    return a.u32;
 }
 
 // True when a lane of the native result may differ from the SPU's: an overflow (0x7f7fffff when
@@ -283,7 +284,10 @@ TOX2_FORCEINLINE Tox2U32x4 tox2SpuSf4ZeroSign(Tox2U32x4 r) {
 TOX2_FORCEINLINE Tox2Vr tox2SpuFa(Tox2Vr a, Tox2Vr b) {
     Tox2Vr r;
     r.f32 = a.f32 + b.f32;
-    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) return tox2SpuFaExact(a, b);
+    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) {
+        r.u32 = tox2SpuFaExact(a, b);
+        return r;
+    }
     r.u32 = tox2SpuSf4ZeroSign(r.u32);
     return r;
 }
@@ -291,7 +295,10 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuFa(Tox2Vr a, Tox2Vr b) {
 TOX2_FORCEINLINE Tox2Vr tox2SpuFs(Tox2Vr a, Tox2Vr b) {
     Tox2Vr r;
     r.f32 = a.f32 - b.f32;
-    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) return tox2SpuFsExact(a, b);
+    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) {
+        r.u32 = tox2SpuFsExact(a, b);
+        return r;
+    }
     r.u32 = tox2SpuSf4ZeroSign(r.u32);
     return r;
 }
@@ -299,7 +306,10 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuFs(Tox2Vr a, Tox2Vr b) {
 TOX2_FORCEINLINE Tox2Vr tox2SpuFm(Tox2Vr a, Tox2Vr b) {
     Tox2Vr r;
     r.f32 = a.f32 * b.f32;
-    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) return tox2SpuFmExact(a, b);
+    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) {
+        r.u32 = tox2SpuFmExact(a, b);
+        return r;
+    }
     r.u32 = tox2SpuSf4ZeroSign(r.u32);
     return r;
 }
@@ -308,7 +318,10 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuFm(Tox2Vr a, Tox2Vr b) {
 TOX2_FORCEINLINE Tox2Vr tox2SpuFma(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
     Tox2Vr r;
     r.f32 = __builtin_elementwise_fma(a.f32, b.f32, c.f32);
-    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) return tox2SpuFmaExact(a, b, c);
+    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) {
+        r.u32 = tox2SpuFmaExact(a, b, c);
+        return r;
+    }
     r.u32 = tox2SpuSf4ZeroSign(r.u32);
     return r;
 }
@@ -317,7 +330,10 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuFma(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
 TOX2_FORCEINLINE Tox2Vr tox2SpuFms(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
     Tox2Vr r;
     r.f32 = __builtin_elementwise_fma(a.f32, b.f32, -c.f32);
-    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) return tox2SpuFmsExact(a, b, c);
+    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) {
+        r.u32 = tox2SpuFmsExact(a, b, c);
+        return r;
+    }
     r.u32 = tox2SpuSf4ZeroSign(r.u32);
     return r;
 }
@@ -326,7 +342,10 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuFms(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
 TOX2_FORCEINLINE Tox2Vr tox2SpuFnms(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
     Tox2Vr r;
     r.f32 = __builtin_elementwise_fma(-a.f32, b.f32, c.f32);
-    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) return tox2SpuFnmsExact(a, b, c);
+    if (__builtin_expect(tox2SpuSf4NeedsExact(r.u32), 0)) {
+        r.u32 = tox2SpuFnmsExact(a, b, c);
+        return r;
+    }
     r.u32 = tox2SpuSf4ZeroSign(r.u32);
     return r;
 }
