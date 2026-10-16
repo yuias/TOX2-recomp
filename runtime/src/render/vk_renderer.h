@@ -20,6 +20,7 @@
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
 #include "render/frame_gen.h"
+#include "render/frame_gen_runtime.h"
 #include "render/image_pool.h"
 #include "render/present_overlay.h"
 #include "render/render_scale.h"
@@ -196,7 +197,8 @@ public:
     bool frameGenSupported() const { return context_.frameGenerationSupported() && presenter_ != nullptr; }
     // Why frameGenSupported() is false; empty when it is true.
     std::string frameGenUnsupportedReason() const;
-    // The requested frame generation target, active or not. No controller exists yet, so nothing is ever active.
+    // The requested frame generation target. The plugins are loaded while it is not off and frameGenSupported(); no
+    // frame is generated yet, so nothing is active.
     FrameGenTarget frameGenTarget() const { return frame_gen_target_; }
     // Changes the requested target; false and no change for a target other than Off while frameGenSupported() is
     // false. Renderer thread, between commands.
@@ -242,13 +244,16 @@ public:
     void setPresentOverlay(PresentOverlay* overlay) { overlay_ = overlay; }
 
     // Every flip is also blitted to the presenter's next swapchain image (letterboxed 16:9) and presented.
-    // Not owned; null (the default) presents nothing. Call before the first flip.
+    // Not owned; null (the default) presents nothing. Call once, before the first flip. Setting a different presenter
+    // (or null) while a frame generation controller exists destroys the controller first: it holds the old presenter.
     void setPresenter(Presenter* presenter) {
         if (presenter != nullptr && presenter->frameSlots() < kFramesInFlight) {
             fail("the presenter has fewer frame slots than the renderer");
             return;
         }
+        if (presenter != presenter_) frame_gen_.reset();
         presenter_ = presenter;
+        createFrameGen();
     }
 
     // Frames recorded before a slot is reused; a presenter needs one acquire semaphore per slot.
@@ -337,6 +342,8 @@ private:
     void recordFlip(const RsxFlip& flip);
     // Logs a change of the requested target: the unavailable warning when it cannot run, else that it is not active.
     void noteFrameGenTarget();
+    // Creates the controller once the presenter is known and loads the plugins when the target asks for it.
+    void createFrameGen();
     void recordPresentBlit(RenderTarget* source);
     bool ensureReadback(FrameSlot& slot, VkDeviceSize size);
     bool dumpDue() const;
@@ -368,6 +375,8 @@ private:
     bool anisotropy_unavailable_logged_ = false;
     FrameGenTarget frame_gen_target_ = FrameGenTarget::Off;
     FrameGenTarget frame_gen_noted_ = FrameGenTarget::Off;  // the target noteFrameGenTarget() last logged
+    // Null without frame generation support or a presenter. Destroyed first: its thread calls into Streamline.
+    std::unique_ptr<FrameGenController> frame_gen_;
     // Always created: its worker thread only starts with the first submitted frame.
     std::unique_ptr<FrameDumper> dumper_;
     bool dump_requested_ = false;  // requestDisplayDump() was called and no flip has taken it yet

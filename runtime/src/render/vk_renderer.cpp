@@ -383,6 +383,7 @@ RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(c
 }
 
 RsxRenderer::~RsxRenderer() {
+    frame_gen_.reset();  // joins the sleeper thread before anything it uses goes away
     const VkDevice device = context_.device();
     vkDeviceWaitIdle(device);
     fg_motion_.reset();
@@ -533,6 +534,7 @@ bool RsxRenderer::beginFrame() {
     }
     recording_ = true;
     frame_index_ = static_cast<std::uint32_t>(stats_.flips) + 1;
+    if (frame_gen_) frame_gen_->beginFrame(frame_index_);
     return true;
 }
 
@@ -587,10 +589,16 @@ bool RsxRenderer::submitFrame() {
     recording_ = false;
     display_slot_ = current_slot_;
     current_slot_ = (current_slot_ + 1) % kFramesInFlight;
+    if (frame_gen_) frame_gen_->submitted();
     if (present_pending_) {
         present_pending_ = false;
+        if (frame_gen_) frame_gen_->presentStarted();
         presenter_->present(present_target_);
+        if (frame_gen_) frame_gen_->presentFinished();
     }
+    // The next frame's token and Reflex sleep, even when nothing was presented: its markers follow at its first
+    // command.
+    if (frame_gen_) frame_gen_->frameDone(static_cast<std::uint32_t>(stats_.flips) + 1);
     return true;
 }
 
@@ -687,7 +695,20 @@ std::string RsxRenderer::frameGenUnsupportedReason() const {
 bool RsxRenderer::setFrameGenTarget(FrameGenTarget target) {
     if (target != FrameGenTarget::Off && !frameGenSupported()) return false;
     frame_gen_target_ = target;
+    if (frame_gen_) frame_gen_->setTarget(target);
     return true;
+}
+
+// The presenter is set after construction, so the initial load cannot happen in the constructor. No swapchain exists
+// yet, so the first one is already created with the plugins of the requested state.
+void RsxRenderer::createFrameGen() {
+    if (frame_gen_ || !frameGenSupported() || context_.streamline() == nullptr) return;
+    frame_gen_ = std::make_unique<FrameGenController>(
+            context_, *presenter_,
+            FrameGenControllerOptions{.present_mode = options_.fg_debug.present_mode,
+                                      .reflex_low_latency = options_.fg_debug.reflex_low_latency,
+                                      .cycle_seconds = options_.fg_debug.cycle_seconds});
+    frame_gen_->setTarget(frame_gen_target_);
 }
 
 // The target is read at the first flip, not at construction: the presenter is set in between, and the reason depends
@@ -699,7 +720,7 @@ void RsxRenderer::noteFrameGenTarget() {
     if (!frameGenSupported()) {
         logWarn("tox2: render: frame generation unavailable ({}); presenting without it", frameGenUnsupportedReason());
     } else {
-        logInfo("tox2: render: frame generation inactive: not implemented (target {})",
+        logInfo("tox2: render: frame generation inactive: inputs not tagged (target {})",
                 frameGenTargetName(frame_gen_target_));
     }
 }
@@ -2820,6 +2841,7 @@ bool RsxRenderer::ensureReadback(FrameSlot& slot, VkDeviceSize size) {
 // readback buffer here, inside the frame's command buffer, so readDisplay needs no further GPU work. A
 // buffer that was never a render target reads back as black.
 void RsxRenderer::recordFlip(const RsxFlip& flip) {
+    if (frame_gen_) frame_gen_->flipEntered();
     stats_.flips++;
     dlaa_camera_.endFrame();
     textures_->trim();
@@ -2851,7 +2873,7 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
                 .window = presenter_->windowStatus(),
                 .frame_gen_supported = frameGenSupported(),
                 .frame_gen_target = frame_gen_target_,
-                .frame_gen = FrameGenStatus{.inactive_reason = "not implemented",
+                .frame_gen = FrameGenStatus{.inactive_reason = "inputs not tagged",
                                             .max_multiplier = context_.frameGenerationMaxMultiplier()},
         });
         if (requests.dump_display) dump_this_flip_ = true;
@@ -2912,6 +2934,7 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     if (requested_aa_mode && valid()) setAaMode(*requested_aa_mode);
     if (requested_anisotropy != 0 && valid()) setAnisotropy(requested_anisotropy);
     if (requested_frame_gen && valid()) setFrameGenTarget(*requested_frame_gen);
+    if (frame_gen_ && valid()) frame_gen_->tick();
 }
 
 // Acquires a swapchain image and records the copy of the display buffer into it (a black frame when
@@ -2944,6 +2967,11 @@ void RsxRenderer::recordPresentBlit(RenderTarget* source) {
         vkCmdPipelineBarrier2(cmd, &dependency);
     };
     constexpr VkPipelineStageFlags2 kTransfer = kPresentWriteStages;  // also the acquire semaphore wait in submitFrame
+    // Measured: handed over in PRESENT_SRC_KHR, the images of a swapchain created through sl.dlss_g (its own buffers)
+    // make the validation layer report, at every present, that Streamline's pacer command buffer expects them in
+    // TRANSFER_SRC_OPTIMAL. Left in that layout there are no reports.
+    const VkImageLayout final_layout =
+            frame_gen_ && frame_gen_->loaded() ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     barrierTo(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, kTransfer, 0, kTransfer,
               VK_ACCESS_2_TRANSFER_WRITE_BIT);
 
@@ -2979,13 +3007,13 @@ void RsxRenderer::recordPresentBlit(RenderTarget* source) {
                   VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
         overlay_->record(cmd, dst);
         invalidateDrawState();  // the overlay binds its own pipeline and sets state on this command buffer
-        barrierTo(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        barrierTo(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, final_layout,
                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                   VK_PIPELINE_STAGE_2_NONE, 0);
         return;
     }
-    barrierTo(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, kTransfer,
-              VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_NONE, 0);
+    barrierTo(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, final_layout, kTransfer, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+              VK_PIPELINE_STAGE_2_NONE, 0);
 }
 
 void RsxRenderer::execute(std::span<RsxCommand> commands) {

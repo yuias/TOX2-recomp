@@ -112,7 +112,9 @@ public:
     // Acquires the next swapchain image, recreating the swapchain after a resize. False when there is
     // nothing to present to this time (minimised window, no image within the timeout, a failure): the
     // frame is then submitted without a swapchain image. The image is in an undefined layout; the caller
-    // leaves it in VK_IMAGE_LAYOUT_PRESENT_SRC_KHR.
+    // leaves it in VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, or in VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL while the DLSS-G plugin
+    // is loaded (sl.dlss_g's pacer copies from its proxy swapchain images and expects that layout; measured, not
+    // documented).
     bool acquire(std::size_t frame_slot, Target& target);
 
     // Number of frame slots acquire accepts (one acquire semaphore each).
