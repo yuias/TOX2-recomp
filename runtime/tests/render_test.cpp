@@ -6201,6 +6201,48 @@ void testLetterbox() {
     CHECK(sameRect(tox2::letterboxRect(0xFFFFFFFFu, 0xFFFFFFFFu, 16, 9), 0, 939524096, 0xFFFFFFFFu, 2415919103u));
 }
 
+void testChoosePresentMode() {
+    constexpr VkPresentModeKHR kFifo = VK_PRESENT_MODE_FIFO_KHR;
+    constexpr VkPresentModeKHR kMailbox = VK_PRESENT_MODE_MAILBOX_KHR;
+    constexpr VkPresentModeKHR kImmediate = VK_PRESENT_MODE_IMMEDIATE_KHR;
+    const std::array<VkPresentModeKHR, 3> all = {kFifo, kMailbox, kImmediate};
+    const std::array<VkPresentModeKHR, 2> fifo_mailbox = {kFifo, kMailbox};
+    const std::array<VkPresentModeKHR, 2> fifo_immediate = {kFifo, kImmediate};
+    const std::array<VkPresentModeKHR, 1> fifo_only = {kFifo};
+
+    std::vector<std::string> lines;
+    tox2::setLogSink([&lines](std::string_view line) { lines.emplace_back(line); });
+    const auto choose = [&lines](VkPresentModeKHR requested, std::span<const VkPresentModeKHR> offered) {
+        lines.clear();
+        return tox2::choosePresentMode(requested, offered);
+    };
+    const auto isWarn = [](const std::string& line) { return line.find("warn: ") != std::string::npos; };
+
+    // FIFO is the off path and the diagnostic request: no line, no fallback.
+    CHECK(choose(kFifo, all) == kFifo && lines.empty());
+    CHECK(choose(kFifo, fifo_only) == kFifo && lines.empty());
+    CHECK(choose(kMailbox, all) == kMailbox && lines.empty());
+    CHECK(choose(kImmediate, all) == kImmediate && lines.empty());
+
+    // The chain is requested -> MAILBOX -> IMMEDIATE; the info line names the requested and the chosen mode.
+    CHECK(choose(kImmediate, fifo_mailbox) == kMailbox);
+    CHECK(lines.size() == 1 && !isWarn(lines[0]) && lines[0].find("immediate") != std::string::npos &&
+          lines[0].find("mailbox") != std::string::npos);
+    CHECK(choose(kMailbox, fifo_immediate) == kImmediate);
+    CHECK(lines.size() == 1 && !isWarn(lines[0]) && lines[0].find("mailbox") != std::string::npos &&
+          lines[0].find("immediate") != std::string::npos);
+
+    // Nothing without vsync: FIFO with one warning per call.
+    CHECK(choose(kMailbox, fifo_only) == kFifo);
+    CHECK(lines.size() == 1 && isWarn(lines[0]) &&
+          lines[0].find("no present mode without vsync; using fifo (DLSS-G requires vsync off)") != std::string::npos);
+    CHECK(choose(kImmediate, fifo_only) == kFifo && lines.size() == 1 && isWarn(lines[0]));
+    CHECK(choose(kFifo, fifo_only) == kFifo && lines.empty());
+    tox2::setLogSink({});
+
+    CHECK(tox2::WindowStatus{}.refresh_hz == 0);
+}
+
 // lParam of a key message: repeat count, scan code (bits 16..23), extended (24), previous state (30).
 std::uint64_t keyLparam(std::uint32_t scan, bool extended, bool was_down) {
     return 1u | (static_cast<std::uint64_t>(scan) << 16) | (extended ? 1u << 24 : 0u) | (was_down ? 1u << 30 : 0u);
@@ -7073,6 +7115,7 @@ int main() {
     const bool layer = tox2::vkValidationLayerAvailable();
     std::printf("validation layer: %s\n", layer ? "installed" : "not installed");
     testLetterbox();
+    testChoosePresentMode();
     testKeyMessages();
     testPresenterTypes();
     testShaderCompiler();
