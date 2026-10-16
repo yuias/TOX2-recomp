@@ -56,11 +56,6 @@ double calibrateCyclesPerMs() {
     return best;
 }
 
-std::uint64_t filetimeUs(const FILETIME& ft) {
-    const std::uint64_t ticks = (static_cast<std::uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
-    return ticks / 10;  // 100 ns units
-}
-
 }  // namespace
 
 double hostCyclesPerMs() {
@@ -98,9 +93,12 @@ std::vector<HostThreadCpu> hostThreadCpuSnapshot() {
 }
 
 std::uint64_t processCpuUs() {
-    FILETIME creation, exit_time, kernel, user;
-    if (!GetProcessTimes(GetCurrentProcess(), &creation, &exit_time, &kernel, &user)) return 0;
-    return filetimeUs(kernel) + filetimeUs(user);
+    // Cycle counts, like the per-thread figures, so the two are comparable within one second. GetProcessTimes only
+    // advances in scheduler ticks (about 15.6 ms), which makes a one-second delta too coarse and too low.
+    const double cycles_per_ms = hostCyclesPerMs();
+    ULONG64 cycles = 0;
+    if (cycles_per_ms <= 0.0 || !QueryProcessCycleTime(GetCurrentProcess(), &cycles)) return 0;
+    return static_cast<std::uint64_t>(static_cast<double>(cycles) / cycles_per_ms * 1000.0);
 }
 
 std::string formatHostThreadCpu(std::span<const HostThreadCpu> before, std::span<const HostThreadCpu> after,

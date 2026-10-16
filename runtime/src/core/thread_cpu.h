@@ -24,7 +24,8 @@ struct HostThreadCpu {
 };
 // Every registered thread, in registration order (append-only, so an earlier snapshot is a prefix by index).
 std::vector<HostThreadCpu> hostThreadCpuSnapshot();
-// User + kernel time of the whole process (GetProcessTimes), in microseconds.
+// User + kernel time of the whole process in microseconds, from cycle counts (QueryProcessCycleTime) so that it has the
+// resolution of the per-thread figures.
 std::uint64_t processCpuUs();
 
 inline constexpr std::uint64_t kCpuLineMinUs = 5000;  // threads below 5 ms in the interval are folded into `other`
