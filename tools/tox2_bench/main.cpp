@@ -218,6 +218,12 @@ struct WakeShared {
     std::array<std::uint64_t, kWakeWaiters> waiter_cycles{};
 };
 
+// The table takes 128-byte lines, so a guest buffer allocated with kReservationLineSize spare bytes is aligned up.
+std::uint8_t* alignToReservationLine(std::uint8_t* p) {
+    return reinterpret_cast<std::uint8_t*>((reinterpret_cast<std::uintptr_t>(p) + tox2::kReservationLineSize - 1) &
+                                           ~static_cast<std::uintptr_t>(tox2::kReservationLineSize - 1));
+}
+
 std::uint64_t readBe64(const std::uint8_t* p) {
     std::uint64_t v = 0;
     for (int i = 0; i < 8; i++) v = (v << 8) | p[i];
@@ -269,11 +275,8 @@ int runRsvWake(const Case& self, const Options& options) {
     if (!options.value("rounds").empty() && !parseCount("--rounds", options.value("rounds"), 1, 10000000, &rounds)) {
         return 2;
     }
-    // The table takes 128-byte lines; the vector is over-allocated to align the guest base.
     std::vector<std::uint8_t> guest(kWakeGuestSize + tox2::kReservationLineSize);
-    std::uint8_t* const base = reinterpret_cast<std::uint8_t*>(
-            (reinterpret_cast<std::uintptr_t>(guest.data()) + tox2::kReservationLineSize - 1) &
-            ~static_cast<std::uintptr_t>(tox2::kReservationLineSize - 1));
+    std::uint8_t* const base = alignToReservationLine(guest.data());
 
     const std::uint32_t total_iterations = options.warmup + options.iterations;
     std::uint32_t iteration_index = 0;
@@ -331,6 +334,43 @@ int runRsvWake(const Case& self, const Options& options) {
     });
 }
 
+// Layout of the rsv-put case. Sizes cycle through a small store, one line, and multi-line pieces; the EAs are
+// multiples of 4 KiB, so every size is naturally aligned and no piece leaves the buffer.
+constexpr std::uint32_t kPutGuestSize = 1u << 20;
+constexpr std::uint32_t kPutPatternSize = 4096;
+constexpr std::uint32_t kPutCount = 8192;
+constexpr std::uint32_t kPutSizes[] = {16, 128, 1024, 4096};
+
+// The cycles of the put calls of a fixed workload. The EAs repeat every 255 calls and the pattern depends on the call
+// number modulo 3, so later calls often store bytes that are already there (the skip-equal path) and others change
+// them. The guest buffer starts zeroed in every iteration.
+int runRsvPut(const Case& self, const Options& options) {
+    std::vector<std::uint8_t> guest(kPutGuestSize + tox2::kReservationLineSize);
+    std::uint8_t* const base = alignToReservationLine(guest.data());
+    std::vector<std::uint8_t> expected(kPutGuestSize);
+    std::array<std::array<std::uint8_t, kPutPatternSize>, 2> patterns;
+    fillPattern(patterns[0].data(), kPutPatternSize, 0x2545f4914f6cdd1dull);
+    fillPattern(patterns[1].data(), kPutPatternSize, 0x9e3779b97f4a7c15ull);
+
+    tox2::ReservationTable table;
+    return runMeasured(self, options, [&](std::uint64_t* cycles) {
+        std::memset(base, 0, kPutGuestSize);
+        const std::uint64_t start = tox2::currentThreadCycles();
+        for (std::uint32_t k = 0; k < kPutCount; k++) {
+            const std::uint32_t ea = ((k * 4096u) % (kPutGuestSize - 4096u)) & ~15u;
+            table.put(base, ea, patterns[k % 3 == 2 ? 1 : 0].data(), kPutSizes[k % 4]);
+        }
+        *cycles = tox2::currentThreadCycles() - start;
+
+        std::memset(expected.data(), 0, kPutGuestSize);
+        for (std::uint32_t k = 0; k < kPutCount; k++) {
+            const std::uint32_t ea = ((k * 4096u) % (kPutGuestSize - 4096u)) & ~15u;
+            std::memcpy(expected.data() + ea, patterns[k % 3 == 2 ? 1 : 0].data(), kPutSizes[k % 4]);
+        }
+        return std::memcmp(base, expected.data(), kPutGuestSize) == 0;
+    });
+}
+
 const std::vector<Case>& cases() {
     static const std::vector<Case> kCases = {
             {"spu-lzma",
@@ -351,6 +391,12 @@ const std::vector<Case>& cases() {
              1,
              {"rounds"},
              runRsvWake},
+            {"rsv-put",
+             "PUT into guest memory: pieces of 16 B to 4 KiB, partly equal to the stored bytes",
+             20,
+             2,
+             {},
+             runRsvPut},
     };
     return kCases;
 }

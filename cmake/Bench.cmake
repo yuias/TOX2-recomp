@@ -30,4 +30,9 @@ function(tox2_bench_add)
   set_tests_properties(bench_rsv_wake PROPERTIES
     PASS_REGULAR_EXPRESSION "bench rsv-wake: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
     TIMEOUT 120)
+
+  add_test(NAME bench_rsv_put COMMAND tox2_bench rsv-put --iterations 2 --warmup 1)
+  set_tests_properties(bench_rsv_put PROPERTIES
+    PASS_REGULAR_EXPRESSION "bench rsv-put: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
+    TIMEOUT 120)
 endfunction()
