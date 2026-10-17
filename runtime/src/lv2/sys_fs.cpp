@@ -1,8 +1,8 @@
 // lv2 file system syscalls over the host file system (see lv2/vfs.h for the path mapping).
-// Behaviour and error codes follow RPCS3 `Emu/Cell/lv2/sys_fs.cpp` / `sys_fs.h`. Host I/O runs
-// while the calling guest thread holds the kernel lock, so a long read blocks every other kernel section (other guest
-// threads' syscalls, RSX and audio callbacks) for its duration, and in legacy mode all guest code; that is accepted for
-// boot.
+// Behaviour and error codes follow RPCS3 `Emu/Cell/lv2/sys_fs.cpp` / `sys_fs.h`. In split PPU modes the host calls of
+// read, write and lseek run without the kernel lock and the PPU slot of the calling guest thread (see HostIoRegion), so
+// a slow read does not stall other kernel sections (other guest threads' syscalls, RSX and audio callbacks). In legacy
+// mode the one guest lock stays held, which blocks all guest code for the duration of the call.
 
 #include "lv2/sys_fs.h"
 
@@ -21,6 +21,7 @@
 
 #include "core/guest_memory.h"
 #include "core/log.h"
+#include "core/threads.h"
 #include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
@@ -83,6 +84,9 @@ struct FsObject {
     std::int32_t flags = 0;
     std::vector<DirEntry> entries;
     std::size_t pos = 0;
+    // Serializes every use of the host file position (sequential transfers, the save/seek/restore of positional ones,
+    // append seeks, lseek), which other threads can reach at once now that the kernel lock is dropped around host I/O.
+    std::mutex io_mutex;
 };
 
 std::mutex g_table_mutex;
@@ -387,9 +391,41 @@ struct TransferCounters {
 };
 TransferCounters g_read_counters, g_write_counters;
 
+// Scope for the host calls of one fs operation. In split PPU modes it gives up the kernel lock and the PPU slot, so a
+// slow host call blocks neither other kernel sections nor a PPU slot, then takes the file's io_mutex. The slot and the
+// kernel lock come back in the order used elsewhere (slot first, kernel lock last), after io_mutex is released:
+// waiting for io_mutex while holding either could deadlock with the thread that owns it. In legacy mode the guest lock
+// stays held (KernelExit does nothing) and the mutex is only contended by host threads.
+class HostIoRegion {
+public:
+    explicit HostIoRegion(FsObject& file)
+        : holds_slot_(splitPpuMode() && ppuSlots().heldByCurrentThread()), io_lock_(file.io_mutex, std::defer_lock) {
+        if (holds_slot_) {
+            // A release point like a yield: a creator waiting in startGuestThreadFirst may go on.
+            if (GuestThread* thread = currentThread()) thread->markFirstRelease();
+            ppuSlots().release();
+        }
+        io_lock_.lock();
+    }
+    ~HostIoRegion() {
+        io_lock_.unlock();
+        if (holds_slot_) {
+            ppuSlots().acquire();
+        }
+        // leave_kernel_ is destroyed after this body, so the kernel lock is taken last.
+    }
+    HostIoRegion(const HostIoRegion&) = delete;
+    HostIoRegion& operator=(const HostIoRegion&) = delete;
+
+private:
+    KernelExit leave_kernel_;
+    const bool holds_slot_;
+    std::unique_lock<std::mutex> io_lock_;
+};
+
 // Reads or writes `size` bytes at the current position; returns the byte count and sets `code` on
-// a host error. Timed as a whole, because the host call runs under the kernel lock.
-std::uint64_t transfer(HANDLE file, bool write, std::uint8_t* data, std::uint64_t size, std::uint32_t& code) {
+// a host error. The caller holds the file's io_mutex. Timed over the host calls only.
+std::uint64_t transferLocked(HANDLE file, bool write, std::uint8_t* data, std::uint64_t size, std::uint32_t& code) {
     const auto start = std::chrono::steady_clock::now();
     std::uint64_t total = 0;
     while (total < size) {
@@ -411,12 +447,25 @@ std::uint64_t transfer(HANDLE file, bool write, std::uint8_t* data, std::uint64_
     return total;
 }
 
+// Transfer at the current position; an append-mode write goes to the end of the file.
+std::uint64_t transfer(FsObject& file, bool write, std::uint8_t* data, std::uint64_t size, std::uint32_t& code) {
+    if (size == 0) return 0;
+    const HostIoRegion region(file);
+    if (write && (file.flags & kOAppend) != 0) {
+        setPos(file.file, 0, FILE_END, nullptr);
+    }
+    return transferLocked(file.file, write, data, size, code);
+}
+
 // Like transfer() at an absolute offset, leaving the file position where it was (the console's
 // cellFsReadWithOffset/cellFsWriteWithOffset do not move it either).
-std::uint64_t transferAt(HANDLE file, bool write, std::uint64_t offset, std::uint8_t* data, std::uint64_t size,
+std::uint64_t transferAt(FsObject& file, bool write, std::uint64_t offset, std::uint8_t* data, std::uint64_t size,
                          std::uint32_t& code) {
+    // An empty read moves nothing; an empty write still reports an offset it cannot place.
+    if (size == 0 && !write) return 0;
+    const HostIoRegion region(file);
     std::uint64_t saved = 0;
-    if (!setPos(file, 0, FILE_CURRENT, &saved)) {
+    if (!setPos(file.file, 0, FILE_CURRENT, &saved)) {
         code = mapWinError(GetLastError(), {});
         return 0;
     }
@@ -424,12 +473,12 @@ std::uint64_t transferAt(HANDLE file, bool write, std::uint64_t offset, std::uin
     if (offset > static_cast<std::uint64_t>(INT64_MAX)) {
         // Beyond any file: a read hits the end, a write cannot be placed.
         code = write ? kCellEinval : kCellOk;
-    } else if (!setPos(file, static_cast<std::int64_t>(offset), FILE_BEGIN, nullptr)) {
+    } else if (!setPos(file.file, static_cast<std::int64_t>(offset), FILE_BEGIN, nullptr)) {
         code = mapWinError(GetLastError(), {});
     } else {
-        total = transfer(file, write, data, size, code);
+        total = transferLocked(file.file, write, data, size, code);
     }
-    setPos(file, static_cast<std::int64_t>(saved), FILE_BEGIN, nullptr);
+    setPos(file.file, static_cast<std::int64_t>(saved), FILE_BEGIN, nullptr);
     return total;
 }
 
@@ -503,6 +552,13 @@ std::uint32_t openGuest(std::uint8_t* base, std::uint32_t path_addr, std::int32_
 }
 
 }  // namespace
+
+std::uint32_t fsAdoptHostHandleForTesting(void* handle, std::int32_t flags) {
+    auto object = std::make_shared<FsObject>();
+    object->file = static_cast<HANDLE>(handle);
+    object->flags = flags;
+    return addObject(std::move(object));
+}
 
 FsTransferStats takeFsTransferStats() {
     FsTransferStats out;
@@ -694,7 +750,7 @@ std::uint32_t fsReadWithOffset(std::uint8_t* base, std::uint32_t fd, std::uint64
         return finish(kCellEfault, 0);
     }
     std::uint32_t code = kCellOk;
-    const std::uint64_t done = transferAt(file->file, false, offset, base + buf, size, code);
+    const std::uint64_t done = transferAt(*file, false, offset, base + buf, size, code);
     return finish(code, done);
 }
 
@@ -725,7 +781,7 @@ std::uint32_t fsWriteWithOffset(std::uint8_t* base, std::uint32_t fd, std::uint6
         return finish(kCellEfault, 0);
     }
     std::uint32_t code = kCellOk;
-    const std::uint64_t done = transferAt(file->file, true, offset, base + buf, size, code);
+    const std::uint64_t done = transferAt(*file, true, offset, base + buf, size, code);
     return finish(code, done);
 }
 
@@ -765,7 +821,7 @@ void sysFsRead(Tox2PpuContext* ctx, std::uint8_t* base) {
     }
 
     std::uint32_t code = kCellOk;
-    const std::uint64_t total = transfer(file->file, false, base + buf, nbytes, code);
+    const std::uint64_t total = transfer(*file, false, base + buf, nbytes, code);
     tox2Write64(base, nread, total);
     setResultCode(ctx, code);
 }
@@ -808,11 +864,8 @@ void sysFsWrite(Tox2PpuContext* ctx, std::uint8_t* base) {
         return;
     }
 
-    if ((file->flags & kOAppend) != 0) {
-        setPos(file->file, 0, FILE_END, nullptr);
-    }
     std::uint32_t code = kCellOk;
-    const std::uint64_t total = transfer(file->file, true, base + buf, nbytes, code);
+    const std::uint64_t total = transfer(*file, true, base + buf, nbytes, code);
     tox2Write64(base, nwrite, total);
     setResultCode(ctx, code);
 }
@@ -932,8 +985,22 @@ void sysFsLseek(Tox2PpuContext* ctx, std::uint8_t* base) {
     }
     // FILE_BEGIN, FILE_CURRENT and FILE_END have the same values as SEEK_SET, SEEK_CUR and SEEK_END.
     std::uint64_t result = 0;
-    if (!setPos(file->file, offset, whence, &result)) {
-        setResultCode(ctx, mapWinError(GetLastError(), {}));
+    bool moved = false;
+    DWORD error = 0;
+    const auto seek = [&] {
+        moved = setPos(file->file, offset, whence, &result);
+        error = moved ? 0 : GetLastError();
+    };
+    // A seek never waits on the disk, so the mutex is taken in place when no transfer holds it. Otherwise wait for it
+    // outside the kernel lock and the slot, as a transfer does.
+    if (std::unique_lock io(file->io_mutex, std::try_to_lock); io.owns_lock()) {
+        seek();
+    } else {
+        const HostIoRegion region(*file);
+        seek();
+    }
+    if (!moved) {
+        setResultCode(ctx, mapWinError(error, {}));
         return;
     }
     tox2Write64(base, pos, result);

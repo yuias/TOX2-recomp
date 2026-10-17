@@ -14,4 +14,8 @@ struct FsTransferStats {
 // Returns the counters and resets them. For the one periodic reporter; any thread may record concurrently.
 FsTransferStats takeFsTransferStats();
 
+// For tests: registers an open host HANDLE (for example the read end of a pipe) as a file with the given open flags and
+// returns its fd, or 0 when the table is full. The handle is closed with the fd.
+std::uint32_t fsAdoptHostHandleForTesting(void* handle, std::int32_t flags);
+
 }  // namespace tox2

@@ -57,6 +57,7 @@
 #include "lv2/lwmutex_word.h"
 #include "lv2/sys_memory.h"
 #include "lv2/sys_ppu_thread.h"
+#include "lv2/sys_fs.h"
 #include "lv2/sys_spu.h"
 #include "lv2/syscalls.h"
 #include "lv2/vfs.h"
@@ -13777,6 +13778,231 @@ void testKernelWaitByCall() {
     }
 }
 
+// A guest read waiting on the host gives up the kernel lock and its slot, and has both again when the call returns. The
+// pipe makes the host read block until the test writes, so the order is fixed without any timing: the second thread can
+// only get the lock (and, with one slot, the slot) while the first one is inside ReadFile, and the read cannot return
+// before the second thread has written.
+void testFsReadReleasesKernelLock() {
+    HangGuard guard("testFsReadReleasesKernelLock");
+    tox2::setLogSink([](std::string_view) {});
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t buf = scratch, nread = scratch + 0x100;
+
+    HANDLE read_end = nullptr, write_end = nullptr;
+    CHECK(CreatePipe(&read_end, &write_end, nullptr, 0));
+    const std::uint32_t fd = tox2::fsAdoptHostHandleForTesting(read_end, 0);
+    CHECK(fd != 0);
+    const char payload[] = "pipe!";
+    const auto writePayload = [&] {
+        DWORD written = 0;
+        CHECK(WriteFile(write_end, payload, 5, &written, nullptr) && written == 5);
+    };
+
+    for (const tox2::PpuThreadsMode split : {tox2::PpuThreadsMode::Split1, tox2::PpuThreadsMode::Split2}) {
+        SplitModeScope mode(split);
+        tox2::PpuSlots& slots = tox2::ppuSlots();
+        tox2::GuestLock& kernel = tox2::guestLock();
+        std::memset(base + buf, 0, 8);
+        tox2Write64(base, nread, 0);
+        std::atomic<bool> reader_holds{false}, other_got_lock{false}, holds_after{false};
+        std::atomic<std::uint64_t> result{~0ull};
+        std::thread reader = slotThread(1001, [&] {
+            slots.acquire();
+            kernel.lock();
+            reader_holds = true;
+            auto ctx = std::make_unique<Tox2PpuContext>();
+            ctx->gpr[3] = fd;
+            ctx->gpr[4] = buf;
+            ctx->gpr[5] = 5;
+            ctx->gpr[6] = nread;
+            tox2::sysFsRead(ctx.get(), base);
+            result = ctx->gpr[3];
+            holds_after = kernel.heldByCurrentThread() && slots.heldByCurrentThread();
+            kernel.unlock();
+            slots.release();
+        });
+        CHECK(pollUntil([&] { return reader_holds.load(); }));
+        std::thread other = slotThread(1001, [&] {
+            slots.acquire();  // with one slot this needs the reader's slot, which it gave up for the host read
+            kernel.lock();
+            other_got_lock = true;
+            kernel.unlock();
+            writePayload();
+            slots.release();
+        });
+        if (!pollUntil([&] { return other_got_lock.load(); })) {
+            writePayload();  // the check below fails; this only lets the threads end
+        }
+        reader.join();
+        other.join();
+        CHECK(other_got_lock);
+        CHECK(holds_after);
+        CHECK(result == 0 && tox2Read64(base, nread) == 5 && std::memcmp(base + buf, payload, 5) == 0);
+        CHECK(slots.waiterCount() == 0 && !kernel.hasWaiters() && !kernel.heldByCurrentThread());
+    }
+
+    CHECK(tox2::fsCloseFd(fd) == 0);
+    CloseHandle(write_end);
+    p.main.free(scratch);
+    tox2::setLogSink({});
+}
+
+// Threads using one fd at the same time: sequential reads, positional reads, lseek queries and append writes keep the
+// file position semantics of a single caller.
+void testFsConcurrentFdUse() {
+    namespace stdfs = std::filesystem;
+    HangGuard guard("testFsConcurrentFdUse");
+    tox2::setLogSink([](std::string_view) {});
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t path_addr = scratch, fd_addr = scratch + 0x200;
+    const auto threadBuf = [&](std::uint32_t index) { return scratch + 0x1000 * (index + 1); };
+
+    const stdfs::path root =
+            stdfs::temp_directory_path() / ("tox2_fs_io_test_" + std::to_string(GetCurrentProcessId()));
+    std::error_code ec;
+    stdfs::remove_all(root, ec);
+    stdfs::create_directories(root / "game");
+    stdfs::create_directories(root / "hdd" / "dev_hdd0" / "tmp" / "d");
+    constexpr std::uint32_t kRecords = 2048;
+    const auto record = [](std::uint32_t i) {
+        return std::array<std::uint8_t, 4>{static_cast<std::uint8_t>(i >> 8), static_cast<std::uint8_t>(i), 0xA5, 0x5A};
+    };
+    {
+        std::ofstream out(root / "game" / "rec.bin", std::ios::binary);
+        for (std::uint32_t i = 0; i < kRecords; i++) {
+            const auto r = record(i);
+            out.write(reinterpret_cast<const char*>(r.data()), r.size());
+        }
+    }
+    tox2::configureVfs(root / "game", root / "hdd");
+
+    const auto putPath = [&](std::string_view text) {
+        std::memcpy(base + path_addr, text.data(), text.size());
+        base[path_addr + text.size()] = 0;
+    };
+    putPath("/dev_bdvd/rec.bin");
+    CHECK(tox2::fsOpenGuest(base, path_addr, 0, fd_addr, 0, 0) == 0);
+    const std::uint32_t fd = tox2Read32(base, fd_addr);
+    putPath("/dev_hdd0/tmp/d/app.bin");
+    CHECK(tox2::fsOpenGuest(base, path_addr, 02101, fd_addr, 0, 0) == 0);  // WRONLY | CREAT | APPEND
+    const std::uint32_t append_fd = tox2Read32(base, fd_addr);
+
+    constexpr int kAppendsPerThread = 300;
+    constexpr std::size_t kAppendSize = 8;
+    for (const bool split : {false, true}) {
+        std::optional<SplitModeScope> mode;
+        if (split) mode.emplace(tox2::PpuThreadsMode::Split2);
+        // Each thread acts as a guest thread would: slot and kernel lock held around the call.
+        const auto asGuest = [&](auto&& call) {
+            if (split) {
+                tox2::ppuSlots().acquire();
+                tox2::guestLock().lock();
+            }
+            call();
+            if (split) {
+                tox2::guestLock().unlock();
+                tox2::ppuSlots().release();
+            }
+        };
+        const auto lseek = [&](std::uint32_t buf, std::uint64_t offset, std::uint32_t whence) {
+            auto ctx = std::make_unique<Tox2PpuContext>();
+            ctx->gpr[3] = fd;
+            ctx->gpr[4] = offset;
+            ctx->gpr[5] = whence;
+            ctx->gpr[6] = buf;
+            asGuest([&] { tox2::sysFsLseek(ctx.get(), base); });
+            return ctx->gpr[3] == 0 ? tox2Read64(base, buf) : ~0ull;
+        };
+        CHECK(lseek(threadBuf(0), 0, 0) == 0);
+
+        std::vector<std::vector<std::uint32_t>> seen(2);
+        std::vector<std::thread> threads;
+        for (std::uint32_t t = 0; t < 2; t++) {
+            threads.push_back(slotThread(1001, [&, t] {
+                const std::uint32_t buf = threadBuf(t), nread = buf + 0x800;
+                auto ctx = std::make_unique<Tox2PpuContext>();
+                for (std::uint32_t n = 0; n < kRecords + 8; n++) {
+                    ctx->gpr[3] = fd;
+                    ctx->gpr[4] = buf;
+                    ctx->gpr[5] = 4;
+                    ctx->gpr[6] = nread;
+                    asGuest([&] { tox2::sysFsRead(ctx.get(), base); });
+                    if (ctx->gpr[3] != 0 || tox2Read64(base, nread) == 0) break;
+                    const std::uint32_t index = (static_cast<std::uint32_t>(base[buf]) << 8) | base[buf + 1];
+                    CHECK(tox2Read64(base, nread) == 4 && index < kRecords);
+                    CHECK(std::memcmp(base + buf, record(index).data(), 4) == 0);
+                    seen[t].push_back(index);
+                }
+            }));
+        }
+        threads.push_back(slotThread(1001, [&] {  // positional reads that must not move the position
+            const std::uint32_t buf = threadBuf(2), nread = buf + 0x800;
+            for (std::uint32_t n = 0; n < 2 * kRecords; n++) {
+                const std::uint32_t index = (n * 37) % kRecords;
+                std::uint32_t code = ~0u;
+                asGuest([&] { code = tox2::fsReadWithOffset(base, fd, index * 4ull, buf, 4, nread); });
+                CHECK(code == 0 && tox2Read64(base, nread) == 4);
+                CHECK(std::memcmp(base + buf, record(index).data(), 4) == 0);
+            }
+        }));
+        threads.push_back(slotThread(1001, [&] {  // position queries
+            for (std::uint32_t n = 0; n < kRecords; n++) {
+                const std::uint64_t pos = lseek(threadBuf(3), 0, 1);
+                CHECK(pos % 4 == 0 && pos <= 4ull * kRecords);
+            }
+        }));
+        for (std::uint32_t t = 0; t < 2; t++) {
+            threads.push_back(slotThread(1001, [&, t] {  // appends of whole records
+                const std::uint32_t buf = threadBuf(4 + t), nwrite = buf + 0x800;
+                std::memset(base + buf, t == 0 ? 'A' : 'B', kAppendSize - 1);
+                base[buf + kAppendSize - 1] = '\n';
+                auto ctx = std::make_unique<Tox2PpuContext>();
+                for (int n = 0; n < kAppendsPerThread; n++) {
+                    ctx->gpr[3] = append_fd;
+                    ctx->gpr[4] = buf;
+                    ctx->gpr[5] = kAppendSize;
+                    ctx->gpr[6] = nwrite;
+                    asGuest([&] { tox2::sysFsWrite(ctx.get(), base); });
+                    CHECK(ctx->gpr[3] == 0 && tox2Read64(base, nwrite) == kAppendSize);
+                }
+            }));
+        }
+        joinAll(threads);
+
+        std::vector<std::uint32_t> all = seen[0];
+        all.insert(all.end(), seen[1].begin(), seen[1].end());
+        std::ranges::sort(all);
+        bool exact = all.size() == kRecords;
+        for (std::uint32_t i = 0; exact && i < kRecords; i++) exact = all[i] == i;
+        CHECK(exact);  // every record read once: no repeat, no skip
+        CHECK(lseek(threadBuf(0), 0, 1) == 4ull * kRecords);
+    }
+
+    std::ifstream in(root / "hdd" / "dev_hdd0" / "tmp" / "d" / "app.bin", std::ios::binary);
+    const std::string appended(std::istreambuf_iterator<char>(in), {});
+    CHECK(appended.size() == 2 * 2 * kAppendsPerThread * kAppendSize);
+    bool whole = appended.size() % kAppendSize == 0;
+    for (std::size_t off = 0; whole && off < appended.size(); off += kAppendSize) {
+        const std::string_view line(appended.data() + off, kAppendSize);
+        whole = (line == "AAAAAAA\n" || line == "BBBBBBB\n");
+    }
+    CHECK(whole);  // no append overwrote another
+
+    CHECK(tox2::fsCloseFd(fd) == 0);
+    CHECK(tox2::fsCloseFd(append_fd) == 0);
+    p.main.free(scratch);
+    tox2::setLogSink({});
+    stdfs::remove_all(root, ec);
+}
+
 constexpr int kStepBudget = kTox2PreemptBudget;
 std::atomic<int> g_step_count{0};
 
@@ -16963,6 +17189,8 @@ int main(int argc, char** argv) {
     testSplitYield();
     testSplitKernelHelpers();
     testKernelWaitByCall();
+    testFsReadReleasesKernelLock();
+    testFsConcurrentFdUse();
     testSplitCreatePriority();
     testSplitExitInKernelSection();
     testSplitReturnPathTls();
