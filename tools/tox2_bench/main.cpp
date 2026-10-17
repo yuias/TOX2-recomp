@@ -163,18 +163,8 @@ void fillPattern(std::uint8_t* out, std::size_t size, std::uint64_t seed) {
     }
 }
 
-// The LS holds the image bytes and the last bulk data, and exactly the code units are tagged, all at their link
-// address.
-bool checkDmaLs(const tox2::SpuThread& thread, const std::vector<std::uint8_t>& guest) {
-    if (std::memcmp(thread.ls() + kDmaCodeLs, guest.data() + kDmaCodeEa, kDmaCodeSize) != 0) return false;
-    // Each bulk slot was written last by one of the final kDmaBulkSlots copies of the bulk loop.
-    for (std::uint32_t slot = 0; slot < kDmaBulkSlots; slot++) {
-        const std::uint32_t copy = kDmaBulkCopies - kDmaBulkSlots + slot;
-        const std::uint32_t ea = kDmaSourceEa + kDmaBulkSize * (copy % (kDmaSourceSize / kDmaBulkSize));
-        if (std::memcmp(thread.ls() + kDmaBulkLs + kDmaBulkSize * slot, guest.data() + ea, kDmaBulkSize) != 0) {
-            return false;
-        }
-    }
+// Exactly the code units are tagged, all at their link address.
+bool checkDmaCodeTags(const tox2::SpuThread& thread) {
     std::uint32_t tagged = 0;
     for (std::uint32_t unit = 0; unit < tox2::kSpuTagCount; unit++) {
         const std::uint32_t lsa = unit * tox2::kSpuTagUnit;
@@ -186,6 +176,20 @@ bool checkDmaLs(const tox2::SpuThread& thread, const std::vector<std::uint8_t>& 
         tagged++;
     }
     return tagged == kDmaCodeUnits;
+}
+
+// The LS holds the image bytes and the last bulk data, and the code units are tagged.
+bool checkDmaLs(const tox2::SpuThread& thread, const std::vector<std::uint8_t>& guest) {
+    if (std::memcmp(thread.ls() + kDmaCodeLs, guest.data() + kDmaCodeEa, kDmaCodeSize) != 0) return false;
+    // Each bulk slot was written last by one of the final kDmaBulkSlots copies of the bulk loop.
+    for (std::uint32_t slot = 0; slot < kDmaBulkSlots; slot++) {
+        const std::uint32_t copy = kDmaBulkCopies - kDmaBulkSlots + slot;
+        const std::uint32_t ea = kDmaSourceEa + kDmaBulkSize * (copy % (kDmaSourceSize / kDmaBulkSize));
+        if (std::memcmp(thread.ls() + kDmaBulkLs + kDmaBulkSize * slot, guest.data() + ea, kDmaBulkSize) != 0) {
+            return false;
+        }
+    }
+    return checkDmaCodeTags(thread);
 }
 
 // The cycles of the copyToLs calls that the MFC GET makes: bulk data into untagged LS, the code segment onto itself
@@ -215,6 +219,53 @@ int runSpuDmaLs(const Case& self, const Options& options) {
         }
         *cycles = tox2::currentThreadCycles() - start;
         return checkDmaLs(thread, guest);
+    });
+}
+
+// Layout of the spu-dma-restore case: the save area holds the code bytes with one unit changed in each block. It lies
+// outside every code range, so a GET from it untags the units it changes and tags nothing.
+constexpr std::uint32_t kRestoreSaveEa = 0x00300000;
+constexpr std::uint32_t kRestoreBlockSize = 0x400;
+constexpr std::uint32_t kRestoreBlockUnits = kRestoreBlockSize / tox2::kSpuTagUnit;
+constexpr std::uint32_t kRestoreBlocks = kDmaCodeSize / kRestoreBlockSize;
+constexpr std::uint32_t kRestoreRounds = 16;
+
+// The restore pattern of the SPURS policy module and SPU stores into tagged code. A GET of the save area changes one
+// unit per block; the GET of the code after it finds long runs of tagged units that are equal, and (b) finds runs
+// that differ in a few units, which are compared one by one.
+//
+// One round: (a) save area, then code; (b) 32 units written straight into the LS, then code.
+int runSpuDmaRestore(const Case& self, const Options& options) {
+    std::vector<std::uint8_t> guest(kDmaGuestSize);
+    fillPattern(guest.data() + kDmaCodeEa, kDmaCodeSize + kDmaDataSegmentSize, 0x9e3779b97f4a7c15ull);
+    std::uint8_t* const save = guest.data() + kRestoreSaveEa;
+    std::memcpy(save, guest.data() + kDmaCodeEa, kDmaCodeSize);
+    for (std::uint32_t block = 0; block < kRestoreBlocks; block++) {
+        std::uint8_t* const unit =
+                save + block * kRestoreBlockSize + ((block * 5 + 3) % kRestoreBlockUnits) * tox2::kSpuTagUnit;
+        for (std::uint32_t i = 0; i < tox2::kSpuTagUnit; i++) unit[i] ^= 0xa5;
+    }
+    tox2::registerSpuImages(kDmaImages, 1);
+    tox2::SpuThread thread(0, "bench-dma", nullptr);
+    const std::uint8_t* base = guest.data();
+    tox2::copyToLs(thread, base, kDmaCodeEa, kDmaCodeLs, kDmaCodeSize);
+
+    return runMeasured(self, options, [&](std::uint64_t* cycles) {
+        const std::uint64_t start = tox2::currentThreadCycles();
+        for (std::uint32_t round = 0; round < kRestoreRounds; round++) {
+            tox2::copyToLs(thread, base, kRestoreSaveEa, kDmaCodeLs, kDmaCodeSize);
+            tox2::copyToLs(thread, base, kDmaCodeEa, kDmaCodeLs, kDmaCodeSize);
+            // SPU stores change the bytes but not the tags. The positions move from round to round.
+            for (std::uint32_t k = 0; k < kRestoreBlocks; k++) {
+                std::uint8_t* const unit = thread.ls() + kDmaCodeLs + k * kRestoreBlockSize +
+                                           ((k * 11 + round * 3 + 7) % kRestoreBlockUnits) * tox2::kSpuTagUnit;
+                for (std::uint32_t i = 0; i < tox2::kSpuTagUnit; i++) unit[i] ^= 0x5a;
+            }
+            tox2::copyToLs(thread, base, kDmaCodeEa, kDmaCodeLs, kDmaCodeSize);
+        }
+        *cycles = tox2::currentThreadCycles() - start;
+        return std::memcmp(thread.ls() + kDmaCodeLs, guest.data() + kDmaCodeEa, kDmaCodeSize) == 0 &&
+               checkDmaCodeTags(thread);
     });
 }
 
@@ -698,6 +749,13 @@ const std::vector<Case>& cases() {
              {},
              {},
              runSpuDmaLs},
+            {"spu-dma-restore",
+             "DMA into tagged SPU code from a save area and from the code that differ in few units",
+             20,
+             2,
+             {},
+             {},
+             runSpuDmaRestore},
             {"rsv-wake",
              "reservation wait and wake: one writer, five line-watching waiters (--rounds N)",
              5,

@@ -31,6 +31,11 @@ function(tox2_bench_add)
     PASS_REGULAR_EXPRESSION "bench spu-dma-ls: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
     TIMEOUT 120)
 
+  add_test(NAME bench_spu_dma_restore COMMAND tox2_bench spu-dma-restore --iterations 2 --warmup 1)
+  set_tests_properties(bench_spu_dma_restore PROPERTIES
+    PASS_REGULAR_EXPRESSION "bench spu-dma-restore: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
+    TIMEOUT 120)
+
   add_test(NAME bench_rsv_wake COMMAND tox2_bench rsv-wake --rounds 200 --iterations 2 --warmup 1)
   set_tests_properties(bench_rsv_wake PROPERTIES
     PASS_REGULAR_EXPRESSION "bench rsv-wake: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
