@@ -93,8 +93,9 @@ Registry& registry() {
     return *r;
 }
 
-// A wait that ends by timeout normally lasts the 1 ms poll; twice that flags a delayed wake-up.
-constexpr std::uint64_t kReservationWaitOverUs = 2000;
+// A wait that ends by timeout normally lasts one poll; twice that flags a delayed wake-up.
+constexpr std::uint64_t kReservationWaitOverUs =
+        2 * std::chrono::duration_cast<std::chrono::microseconds>(kPlainStorePoll).count();
 
 struct ReservationWaitCounters {
     std::atomic<std::uint64_t> epoch_before_sleep{0}, epoch_woken{0}, timeout{0}, halt{0};

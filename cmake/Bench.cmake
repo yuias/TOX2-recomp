@@ -51,6 +51,11 @@ function(tox2_bench_add)
     PASS_REGULAR_EXPRESSION "bench rsv-put: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
     TIMEOUT 120)
 
+  add_test(NAME bench_rsv_idle COMMAND tox2_bench rsv-idle --span-ms 50 --iterations 2 --warmup 1)
+  set_tests_properties(bench_rsv_idle PROPERTIES
+    PASS_REGULAR_EXPRESSION "bench rsv-idle: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
+    TIMEOUT 120)
+
   add_test(NAME bench_rsx_hash COMMAND tox2_bench rsx-hash --kb 64 --reps 16 --iterations 2 --warmup 1)
   set_tests_properties(bench_rsx_hash PROPERTIES
     PASS_REGULAR_EXPRESSION "bench rsx-hash: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"

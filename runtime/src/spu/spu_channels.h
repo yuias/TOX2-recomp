@@ -70,6 +70,10 @@ inline constexpr std::uint32_t kImplemented =
 
 inline constexpr std::uint32_t kInMboxDepth = 4;
 
+// How long a wait on the reservation table goes without looking again. Plain PPU stores do not move the
+// store epoch, so this bounds how late they are noticed.
+inline constexpr std::chrono::milliseconds kPlainStorePoll{1};
+
 // "SPU_RdInMbox" and so on; "?" for a number without a name.
 const char* spuChannelName(std::uint32_t ch);
 

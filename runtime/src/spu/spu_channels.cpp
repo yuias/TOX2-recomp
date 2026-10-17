@@ -12,11 +12,6 @@ namespace tox2 {
 namespace {
 
 using std::chrono::microseconds;
-using std::chrono::milliseconds;
-
-// How long a wait on the reservation table goes without looking again. Plain PPU stores do not move the
-// store epoch, so this bounds how late they are noticed.
-constexpr milliseconds kPlainStorePoll{1};
 
 const char* channelName(std::uint32_t ch) {
     switch (ch) {
@@ -159,7 +154,7 @@ bool SpuChannels::readEventStat(std::uint32_t site, std::uint32_t* value) {
     microseconds timeout_waited{0};
     for (;;) {
         // A mailbox push that lands while this thread waits on the table must wake it. The flag goes up
-        // before anything is sampled; the fences pair with the pusher's (a missed wake costs 1 ms).
+        // before anything is sampled; the fences pair with the pusher's (a missed wake costs one poll).
         const bool on_table = wants_reservation && mfc_.hasReservation();
         table_wait_.store(on_table, std::memory_order_seq_cst);
         std::atomic_thread_fence(std::memory_order_seq_cst);

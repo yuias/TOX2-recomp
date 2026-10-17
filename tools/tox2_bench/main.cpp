@@ -35,6 +35,7 @@
 #include "core/guest_memory.h"
 #include "core/reservation.h"
 #include "core/thread_cpu.h"
+#include "core/timer_resolution.h"
 #include "render/vertex_convert.h"
 #include "rsx/fifo_parser.h"
 #include "rsx/rsx_capture.h"
@@ -44,6 +45,7 @@
 #include "rsx/rsx_thread.h"
 #include "rsx_synthetic.h"
 #include "spu/spu_capture.h"
+#include "spu/spu_census.h"
 #include "spu/spu_channels.h"
 #include "spu/spu_mfc.h"
 #include "spu/spu_thread.h"
@@ -1437,6 +1439,98 @@ int runRsxFifo(const Case& self, const Options& options) {
     });
 }
 
+// Layout of the rsv-idle case: waiter i holds a reservation on its own line, so the five waiters sit on five stripes.
+constexpr std::uint32_t kIdleWaiters = 5;
+constexpr std::uint32_t kIdleGuestSize = 64u << 10;
+constexpr std::uint32_t kIdleFirstLine = 0x1000;
+constexpr std::uint32_t kIdleSite = 0x3000;
+
+// GETLLAR of `line` through the MFC channels, then the event mask and acknowledgement that make the SPU wait for the
+// lock-line-lost event. The thread has no owner and is never started; the reads below run on host threads.
+bool idleArm(tox2::SpuThread& thread, std::uint32_t line) {
+    const auto write = [&](std::uint32_t channel, std::uint32_t value) {
+        return tox2SpuWriteChannel(&thread.context(), thread.ls(), kIdleSite, channel, value);
+    };
+    bool ok = write(tox2::chan::kMfcLsa, 0x1000) && write(tox2::chan::kMfcEah, 0) && write(tox2::chan::kMfcEal, line) &&
+              write(tox2::chan::kMfcSize, tox2::kReservationLineSize) && write(tox2::chan::kMfcTagId, 0) &&
+              write(tox2::chan::kMfcCmd, tox2::mfc::kGetLLAR);
+    std::uint32_t status = 0;
+    ok = ok && tox2SpuReadChannel(&thread.context(), thread.ls(), kIdleSite, tox2::chan::kRdAtomicStat, &status);
+    return ok && write(tox2::chan::kWrEventMask, tox2::spu_event::kLockLineLost) &&
+           write(tox2::chan::kWrEventAck, tox2::spu_event::kLockLineLost) && thread.channels().mfc().hasReservation();
+}
+
+// The production idle loop of an SPU thread that waits for a lost reservation while nothing is written: five threads
+// in readEventStat on their own lines for --span-ms, then a halt. The cycles of the five waiters are summed, so the
+// case shows what the poll costs the host, not how fast a wake is. The diagnostic line gives the poll rate; a
+// 1 ms poll at 1 ms timer resolution is 1000 timeouts per waiter per second at most.
+int runRsvIdle(const Case& self, const Options& options) {
+    std::uint32_t span_ms = 1000;
+    if (!options.value("span-ms").empty() && !parseCount("--span-ms", options.value("span-ms"), 1, 600000, &span_ms)) {
+        return 2;
+    }
+    // Without the finer timer a 1 ms wait lasts about 15.6 ms and the case would not show the game's cost.
+    const tox2::TimerResolution timer_resolution;
+    std::vector<std::uint8_t> guest(kIdleGuestSize + tox2::kReservationLineSize);
+    std::uint8_t* const base = alignToReservationLine(guest.data());
+
+    const std::uint32_t total_iterations = options.warmup + options.iterations;
+    std::uint32_t iteration_index = 0;
+    return runMeasured(self, options, [&](std::uint64_t* cycles) {
+        std::memset(base, 0, kIdleGuestSize);
+        std::vector<std::unique_ptr<tox2::SpuThread>> threads;
+        bool ok = true;
+        for (std::uint32_t i = 0; i < kIdleWaiters; i++) {
+            threads.push_back(std::make_unique<tox2::SpuThread>(0x01000300 + i, "bench-idle", nullptr));
+            threads.back()->channels().mfc().setGuestBase(base);
+            ok = idleArm(*threads.back(), kIdleFirstLine + i * tox2::kReservationLineSize) && ok;
+        }
+        if (!ok) return false;
+
+        std::array<std::uint64_t, kIdleWaiters> waiter_cycles{};
+        std::array<bool, kIdleWaiters> returned_event{};
+        std::atomic<std::uint32_t> ready{0};
+        const std::uint64_t timeouts_before = tox2::spuReservationWaitSnapshot().timeout;
+        std::vector<std::thread> waiters;
+        for (std::uint32_t i = 0; i < kIdleWaiters; i++) {
+            waiters.emplace_back([&, i] {
+                tox2::SpuThread& thread = *threads[i];
+                std::uint32_t value = 0;
+                ready.fetch_add(1);
+                ready.notify_all();
+                const std::uint64_t start = tox2::currentThreadCycles();
+                const bool event =
+                        tox2SpuReadChannel(&thread.context(), thread.ls(), kIdleSite, tox2::chan::kRdEventStat, &value);
+                waiter_cycles[i] = tox2::currentThreadCycles() - start;
+                returned_event[i] = event;
+            });
+        }
+        for (std::uint32_t seen = ready.load(); seen != kIdleWaiters; seen = ready.load()) ready.wait(seen);
+
+        const auto span_start = std::chrono::steady_clock::now();
+        std::this_thread::sleep_for(std::chrono::milliseconds(span_ms));
+        const double span_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - span_start).count();
+        for (const auto& thread : threads) thread->requestHalt();
+        for (std::thread& t : waiters) t.join();
+        const std::uint64_t timeouts = tox2::spuReservationWaitSnapshot().timeout - timeouts_before;
+
+        std::uint64_t sum = 0;
+        for (const std::uint64_t c : waiter_cycles) sum += c;
+        *cycles = sum;
+        for (std::uint32_t i = 0; i < kIdleWaiters; i++) {
+            // A halt ends the read with false; nothing was written, so no event and no lost line either.
+            ok = ok && !returned_event[i] && threads[i]->channels().mfc().hasReservation() &&
+                 !threads[i]->channels().mfc().reservationLost();
+        }
+        // The diagnostic goes out before the summary line, so it is printed once, with the last iteration.
+        if (++iteration_index == total_iterations) {
+            std::printf("bench %s: timeouts per waiter per second %.0f\n", self.name,
+                        static_cast<double>(timeouts) / kIdleWaiters / span_s);
+        }
+        return ok;
+    });
+}
+
 const std::vector<Case>& cases() {
     static const std::vector<Case> kCases = {
             {"spu-lzma",
@@ -1474,6 +1568,13 @@ const std::vector<Case>& cases() {
              {},
              {},
              runRsvPut},
+            {"rsv-idle",
+             "five SPU threads idle in the lost-reservation wait with no writes, summed waiter cycles (--span-ms MS)",
+             5,
+             1,
+             {"span-ms"},
+             {},
+             runRsvIdle},
             {"spu-replay",
              "replay of captured spans of generated SPU code (--capture FILE ..., --repeat K) or --synthetic",
              20,
