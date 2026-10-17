@@ -4,8 +4,9 @@
 
 Log lines go to stderr, and to `--log FILE` when given, one line each. The logger is a thin layer
 over spdlog (the `externals/spdlog` submodule, built as a static library with `std::format`
-instead of the bundled fmt); spdlog types do not appear in the runtime's own headers. A line is
-prefixed with `[host]`, with `[t XXXXXXXX]`, the id of the guest thread that wrote it, or with
+instead of the bundled fmt); spdlog types do not appear in the runtime's own headers. On stderr and in the
+log file a line starts with the local time (`[13:05:42.317] `); lines handed to a log sink in tests do not. The
+prefix that follows is `[host]`, `[t XXXXXXXX]`, the id of the guest thread that wrote it, or
 `[spu XXXXXXXX]`, the id of the SPU thread, followed by `warn: ` or `error: ` for those levels. The runtime's own messages then start with `tox2: ` and a
 topic (`tox2: fs: ...`, `tox2: game: ...`, `tox2: pad: ...`); the census lines and the register dump
 of a fatal stop have no such prefix. Output from the guest itself (`sys_tty_write`) goes to stdout,

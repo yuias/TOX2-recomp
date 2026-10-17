@@ -48,16 +48,18 @@ private:
     std::function<void(std::string_view)> fn_;
 };
 
-std::unique_ptr<spdlog::formatter> makeFormatter(const char* eol) {
+// Console and file lines start with the local wall-clock time; lines handed to a log sink do not, so their text
+// stays the same from run to run.
+std::unique_ptr<spdlog::formatter> makeFormatter(const char* eol, bool timestamp) {
     auto formatter = std::make_unique<spdlog::pattern_formatter>(spdlog::pattern_time_type::local, std::string(eol));
-    formatter->add_flag<LinePrefixFormatter>('*').set_pattern("%*%v");
+    formatter->add_flag<LinePrefixFormatter>('*').set_pattern(timestamp ? "[%T.%e] %*%v" : "%*%v");
     return formatter;
 }
 
 struct LogState {
     LogState() {
         stderr_sink = std::make_shared<spdlog::sinks::stderr_sink_mt>();
-        stderr_sink->set_formatter(makeFormatter("\n"));
+        stderr_sink->set_formatter(makeFormatter("\n", true));
         logger = std::make_shared<spdlog::logger>("tox2", stderr_sink);
         logger->set_level(spdlog::level::info);
         // Each emitted line must reach the stream before a fatal path ends the process. This is
@@ -155,7 +157,7 @@ bool setLogFile(const std::string& path) {
     if (!path.empty()) {
         try {
             s.file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path, /*truncate=*/true);
-            s.file_sink->set_formatter(makeFormatter("\n"));
+            s.file_sink->set_formatter(makeFormatter("\n", true));
         } catch (const std::exception&) {
             ok = false;
         }
@@ -169,7 +171,7 @@ void setLogSink(std::function<void(std::string_view)> sink) {
     std::lock_guard lock(s.mutex);
     if (sink) {
         s.sink = std::make_shared<FunctionSink>(std::move(sink));
-        s.sink->set_formatter(makeFormatter(""));
+        s.sink->set_formatter(makeFormatter("", false));
     } else {
         s.sink.reset();
     }
