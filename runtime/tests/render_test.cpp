@@ -1716,10 +1716,13 @@ void testVertexConvertMatchesReference() {
     odd.host_size = 16;
     formats.push_back(odd);
 
-    const std::uint32_t counts[] = {0, 1, 2, 7, 100};
+    // Counts around the vector paths' read-ahead and unroll boundaries; strides tight, padded, and wider than a
+    // 16 byte read.
+    const std::uint32_t counts[] = {0, 1, 2, 3, 5, 7, 16, 17, 33, 100};
     std::size_t cases = 0;
     for (const tox2::VertexAttribFormat& format : formats) {
-        const std::uint32_t strides[] = {0, format.guest_size, format.guest_size + 1, format.guest_size + 3, 64};
+        const std::uint32_t strides[] = {0, format.guest_size, format.guest_size + 1, format.guest_size + 3, 16, 20,
+                                         64};
         for (const std::uint32_t stride : strides) {
             for (const std::uint32_t count : counts) {
                 const std::uint32_t elements = stride == 0 ? std::min<std::uint32_t>(count, 1) : count;
@@ -1731,14 +1734,22 @@ void testVertexConvertMatchesReference() {
                     std::vector<std::uint8_t> backing(src_size + 1);
                     for (std::uint8_t& b : backing) b = nextByte();
                     const std::span<const std::uint8_t> src(backing.data() + 1, src_size);
-                    const std::size_t dst_size = static_cast<std::size_t>(count) * std::max(format.host_size, 16u) + 16;
-                    std::vector<std::uint8_t> expected(dst_size, 0xCD);
-                    std::vector<std::uint8_t> actual(dst_size, 0xCD);
-                    const std::uint32_t expected_n = referenceConvert(format, src, stride, count, expected);
-                    const std::uint32_t actual_n = tox2::convertVertexElements(format, src, stride, count, actual);
-                    CHECK(actual_n == expected_n);
-                    CHECK(actual == expected);
-                    cases++;
+                    // The destination starts at an offset that is not a multiple of 16, with and without slack
+                    // after the converted elements; the bytes around the elements must stay untouched.
+                    for (const std::size_t dst_offset : {std::size_t{0}, std::size_t{1}, std::size_t{3}}) {
+                        for (const std::size_t slack : {std::size_t{0}, std::size_t{16}}) {
+                            const std::size_t dst_size = static_cast<std::size_t>(count) * format.host_size + slack;
+                            std::vector<std::uint8_t> expected(dst_size + dst_offset, 0xCD);
+                            std::vector<std::uint8_t> actual(dst_size + dst_offset, 0xCD);
+                            const std::uint32_t expected_n = referenceConvert(
+                                    format, src, stride, count, std::span<std::uint8_t>(expected).subspan(dst_offset));
+                            const std::uint32_t actual_n = tox2::convertVertexElements(
+                                    format, src, stride, count, std::span<std::uint8_t>(actual).subspan(dst_offset));
+                            CHECK(actual_n == expected_n);
+                            CHECK(actual == expected);
+                            cases++;
+                        }
+                    }
                 }
             }
         }

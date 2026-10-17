@@ -2,8 +2,13 @@
 
 #include <algorithm>
 #include <bit>
+#include <array>
 #include <cstring>
 #include <type_traits>
+
+#if defined(__SSE4_1__)
+#include <immintrin.h>
+#endif
 
 namespace tox2 {
 namespace {
@@ -180,6 +185,85 @@ void storeComponent(std::uint8_t* p, T value) {
     std::memcpy(p, &value, sizeof(T));
 }
 
+#if defined(__SSE4_1__)
+// Whole-element form of convertPacked for the host sizes one or two stores cover. An element is loaded with a single
+// 4, 8 or 16 byte read, byte-swapped and padded in a register, and stored without a round trip through a local array,
+// whose narrow stores followed by wider reloads stall store forwarding. Reads past the guest element are allowed only
+// while they stay inside the source, so the elements nearest the end are left to the scalar loop.
+template <std::uint32_t Component, std::uint32_t Guest, std::uint32_t Host, std::uint32_t Pad>
+struct PackedSimd {
+    static constexpr std::uint32_t kGuestBytes = Component * Guest;
+    static constexpr std::uint32_t kHostBytes = Component * Host;
+    static constexpr std::uint32_t kLoadBytes = kGuestBytes <= 4 ? 4 : (kGuestBytes <= 8 ? 8 : 16);
+    static constexpr bool kEnabled =
+            kHostBytes == 4 || kHostBytes == 6 || kHostBytes == 8 || kHostBytes == 12 || kHostBytes == 16;
+
+    // Source byte for each output byte; 0x80 zeroes it.
+    static constexpr std::array<std::uint8_t, 16> shuffleMask() {
+        std::array<std::uint8_t, 16> mask{};
+        for (std::uint32_t i = 0; i < 16; i++) {
+            const std::uint32_t component = i / Component, byte = i % Component;
+            mask[i] = i >= kHostBytes || component >= Guest
+                              ? 0x80
+                              : static_cast<std::uint8_t>(component * Component + (Component - 1 - byte));
+        }
+        return mask;
+    }
+
+    // The padding components' bytes in little-endian order, zero elsewhere.
+    static constexpr std::array<std::uint8_t, 16> padBytes() {
+        std::array<std::uint8_t, 16> bytes{};
+        for (std::uint32_t c = Guest; c < Host; c++) {
+            for (std::uint32_t b = 0; b < Component; b++)
+                bytes[c * Component + b] = static_cast<std::uint8_t>(Pad >> (8 * b));
+        }
+        return bytes;
+    }
+
+    static __m128i load(const std::uint8_t* p) {
+        if constexpr (kLoadBytes == 16) {
+            return _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+        } else if constexpr (kLoadBytes == 8) {
+            return _mm_loadl_epi64(reinterpret_cast<const __m128i*>(p));
+        } else {
+            return _mm_cvtsi32_si128(loadComponent<int>(p));
+        }
+    }
+
+    static void store(std::uint8_t* p, __m128i v) {
+        if constexpr (kHostBytes == 16) {
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(p), v);
+        } else if constexpr (kHostBytes == 12) {
+            _mm_storel_epi64(reinterpret_cast<__m128i*>(p), v);
+            storeComponent<int>(p + 8, _mm_extract_epi32(v, 2));
+        } else if constexpr (kHostBytes == 8) {
+            _mm_storel_epi64(reinterpret_cast<__m128i*>(p), v);
+        } else if constexpr (kHostBytes == 6) {
+            storeComponent<int>(p, _mm_cvtsi128_si32(v));
+            storeComponent<std::uint16_t>(p + 4, static_cast<std::uint16_t>(_mm_extract_epi16(v, 2)));
+        } else {
+            storeComponent<int>(p, _mm_cvtsi128_si32(v));
+        }
+    }
+
+    // Converts the leading elements whose load fits in src; returns how many (at most m).
+    static std::uint32_t run(const std::uint8_t* in, std::size_t src_size, std::uint32_t stride, std::uint32_t m,
+                             std::uint8_t* out) {
+        alignas(16) static constexpr std::array<std::uint8_t, 16> kMask = shuffleMask();
+        alignas(16) static constexpr std::array<std::uint8_t, 16> kPad = padBytes();
+        const std::uint32_t count = std::min(m, fittingElements(src_size, kLoadBytes, stride, m));
+        const __m128i mask = _mm_load_si128(reinterpret_cast<const __m128i*>(kMask.data()));
+        const __m128i pad = _mm_load_si128(reinterpret_cast<const __m128i*>(kPad.data()));
+        for (std::uint32_t k = 0; k < count; k++) {
+            const __m128i v =
+                    _mm_or_si128(_mm_shuffle_epi8(load(in + static_cast<std::size_t>(k) * stride), mask), pad);
+            store(out + static_cast<std::size_t>(k) * kHostBytes, v);
+        }
+        return count;
+    }
+};
+#endif
+
 // Components of Component bytes: Guest of them in the guest element, Host in the converted one (Guest or, for a
 // three-component 8-bit or 16-bit type, 4 with Pad as the last). Components wider than a byte are byte-swapped.
 // The converted element is built in a local buffer and stored whole: the upload memory is write-combined and
@@ -210,7 +294,13 @@ std::uint32_t convertPacked(std::span<const std::uint8_t> src, std::uint32_t str
         }
     }
 
-    for (std::uint32_t k = 0; k < m; k++) {
+    std::uint32_t first = 0;
+#if defined(__SSE4_1__)
+    if constexpr (PackedSimd<Component, Guest, Host, Pad>::kEnabled) {
+        first = PackedSimd<Component, Guest, Host, Pad>::run(in, src.size(), stride, m, out);
+    }
+#endif
+    for (std::uint32_t k = first; k < m; k++) {
         const std::uint8_t* element = in + static_cast<std::size_t>(k) * stride;
         T values[Host];
         for (std::uint32_t c = 0; c < Guest; c++) {
