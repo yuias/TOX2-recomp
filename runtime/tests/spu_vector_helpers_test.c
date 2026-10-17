@@ -133,6 +133,92 @@ static int checkFloat(void) {
     return g_bad == 0;
 }
 
+// A word with exponent field 0 and a random sign and fraction.
+static uint32_t zeroExponentWord(void) { return next() & 0x807fffffu; }
+
+// Operands whose results have exponent field 0: sums of denormals, x + -x and zero operands (-0 on x86
+// when rounding toward zero), and products or fused sums below Smin (flushed; a negative one is -0 on
+// x86). The sign of each lane is random, and the fractions are nonzero, so ZeroSign has to clear the
+// whole word and not just the exponent.
+static int checkZeroResults(void) {
+    g_bad = 0;
+    int n = 0;
+    for (long it = 0; it < 400000; it++) {
+        Tox2Vr a;
+        Tox2Vr b;
+        Tox2Vr c;
+        for (int i = 0; i < 4; i++) {
+            a.u32[i] = pickWord();
+            b.u32[i] = pickWord();
+            c.u32[i] = pickWord();
+            switch (next() % 6u) {
+                case 0:  // denormals, both signs
+                    a.u32[i] = zeroExponentWord();
+                    b.u32[i] = zeroExponentWord();
+                    c.u32[i] = zeroExponentWord();
+                    break;
+                case 1:  // x + -x
+                    a.u32[i] = withExponent((int)(next() % 254u) + 1);
+                    b.u32[i] = a.u32[i] ^ 0x80000000u;
+                    c.u32[i] = tox2SpuSfMul(a.u32[i], b.u32[i]) ^ 0x80000000u;  // cancels the product of a and b
+                    break;
+                case 2: {  // product below Smin, in both signs
+                    const int ea = (int)(next() % 126u) + 1;
+                    a.u32[i] = withExponent(ea);
+                    b.u32[i] = withExponent(127 - ea - (int)(next() % 3u));
+                    c.u32[i] = next() & 1u ? 0x80000000u : 0u;
+                    break;
+                }
+                case 3:  // zeros of both signs against anything
+                    a.u32[i] = next() & 1u ? 0x80000000u : 0u;
+                    c.u32[i] = next() & 1u ? 0x80000000u : 0u;
+                    break;
+                case 4:  // a sum of two normals that falls below Smin
+                    a.u32[i] = withExponent(1 + (int)(next() % 2u));
+                    b.u32[i] = a.u32[i] ^ 0x80000000u ^ (next() % 64u);
+                    break;
+                default: break;
+            }
+        }
+        g_a[n] = a;
+        g_b[n] = b;
+        g_c[n] = c;
+        if (++n == kBatch) {
+            checkBatch(n);
+            n = 0;
+        }
+    }
+    if (n > 0) checkBatch(n);
+    return g_bad == 0;
+}
+
+// ZeroSign on every exponent, both signs and several fractions: the words with exponent field 0 become +0
+// and the others are unchanged. It needs the SPU environment (DAZ), as the helpers that call it do.
+static int checkZeroSign(void) {
+    long bad = 0;
+    const uint32_t saved = tox2SpuMxcsrGet();
+    tox2SpuMxcsrSet(kTox2SpuMxcsrSpu);
+    for (uint32_t sign = 0; sign < 2; sign++) {
+        for (uint32_t e = 0; e < 256; e++) {
+            const uint32_t fractions[8] = {0u,        1u,        0x7fffffu,          0x400000u,
+                                           0x200000u, 0x000100u, next() & 0x7fffffu, next() & 0x7fffffu};
+            for (int k = 0; k < 8; k += 4) {
+                Tox2Vr v;
+                for (int i = 0; i < 4; i++) v.u32[i] = (sign << 31) | (e << 23) | fractions[k + i];
+                const Tox2U32x4 got = tox2SpuSf4ZeroSign(v.u32);
+                for (int i = 0; i < 4; i++) {
+                    const uint32_t want = e == 0u ? 0u : v.u32[i];
+                    if (got[i] != want && bad++ < 10) {
+                        printf("ZeroSign %08x: %08x, expected %08x\n", v.u32[i], got[i], want);
+                    }
+                }
+            }
+        }
+    }
+    tox2SpuMxcsrSet(saved);
+    return bad == 0;
+}
+
 // Operands that send a lane through the exact path: overflow of the products and sums, and exponent-255
 // operands, with both signs, next to values that stay on the fast path.
 static const uint32_t kForcing[] = {0x7f7fffffu, 0xff7fffffu, 0x7f000000u, 0x40800000u, 0xc0800000u, 0x7f800000u,
@@ -544,8 +630,8 @@ static int checkQuadwords(void) {
 }
 
 int main(void) {
-    const int ok = checkFloat() & checkEdges() & checkExactPaths() & checkRoundedHelpers() & checkShufb() &
-                   checkGenControl() & checkQuadwords();
+    const int ok = checkFloat() & checkEdges() & checkZeroResults() & checkZeroSign() & checkExactPaths() &
+                   checkRoundedHelpers() & checkShufb() & checkGenControl() & checkQuadwords();
     if (ok) printf("spu vector helpers ok\n");
     return ok ? 0 : 1;
 }

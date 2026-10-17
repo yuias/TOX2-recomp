@@ -269,12 +269,14 @@ TOX2_FORCEINLINE bool tox2SpuSf4NeedsExact(Tox2U32x4 r) {
     return __builtin_ia32_movmskps((Tox2F32x4)(magnitude > 0x7f7ffffe)) != 0;
 }
 
-// A zero result is +0: clears the whole word of the lanes with exponent field 0, so the rule does not
-// depend on FTZ leaving no fraction.
-TOX2_FORCEINLINE Tox2U32x4 tox2SpuSf4ZeroSign(Tox2U32x4 r) {
-    const Tox2U32x4 zero = (Tox2U32x4)((r & 0x7f800000u) == 0u);
-    return r & ~zero;
-}
+// A zero result is +0: clears the whole word of the lanes with exponent field 0. Written as a float
+// compare against zero, which needs DAZ: with it a word with exponent field 0 (a zero or a denormal, of
+// either sign) compares equal to zero whatever its fraction, so exactly those lanes are cleared, as an
+// exponent mask would. This is the same environment the fast path already depends on; it is set by runSpu
+// for every thread that runs generated code, and by the test harnesses that call the helpers directly.
+// An Inf or NaN lane never gets here (tox2SpuSf4NeedsExact sends it to the exact path), and a NaN would
+// compare unequal and be kept anyway.
+TOX2_FORCEINLINE Tox2U32x4 tox2SpuSf4ZeroSign(Tox2U32x4 r) { return r & (Tox2U32x4)((Tox2F32x4)r != 0.0f); }
 
 // --- Single precision: register helpers (RT = f(RA, RB[, RC])) --------------------------------------
 //
