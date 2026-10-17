@@ -70,6 +70,9 @@ struct RsxBuilderStats {
     // (RsxMemoryView::hashRange) and the bytes copied into the scratch buffer (a changed or new texture).
     std::uint64_t texture_validations = 0;
     std::uint64_t texture_bytes_hashed = 0, texture_bytes_read = 0;
+    // Enabled texture units fillTextures handled: reused from the unit's previous descriptor (hit) or decoded and
+    // looked up in full (miss). hits + misses = enabled units seen.
+    std::uint64_t texture_unit_hits = 0, texture_unit_misses = 0;
 };
 
 class RsxFrameBuilder {

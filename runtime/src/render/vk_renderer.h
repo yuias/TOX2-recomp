@@ -154,6 +154,8 @@ struct RendererStats {
     std::uint64_t state_calls = 0;                  // vkCmdSet*/BindPipeline/PushConstants calls from recordDraw
     std::uint64_t state_calls_skipped = 0;          // ... that were not recorded because the value was already set
     std::uint64_t vp_constant_uploads_reused = 0;   // vertex constant uploads shared by draws with equal constants
+    std::uint64_t texture_bind_hits = 0;            // blob binds that reused the unit's previous bind in this frame
+    std::uint64_t texture_bind_misses = 0;          // blob binds that ran the full acquire/view/sampler path
     VkMemoryPropertyFlags upload_memory_flags = 0;  // of the first upload block (vmaGetAllocationMemoryProperties)
 };
 

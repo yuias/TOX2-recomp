@@ -315,6 +315,20 @@ function(tox2_render_add)
       PASS_REGULAR_EXPRESSION
       "cycles: ${TOX2_RSX_REPLAY_REPEAT_CAPTURE}, 3 iterations \\(first excluded\\), median thread cycles per iteration: build [0-9]+, record [0-9]+, total [0-9]+"
       FAIL_REGULAR_EXPRESSION "error: ")
+
+    # The builder and render lines carry the texture unit cache and texture bind counters.
+    add_test(NAME rsx_replay_builder_counters
+      COMMAND tox2_rsxreplay "${replay_repeat_capture}" --repeat 3 --quiet --no-validation)
+    set_tests_properties(rsx_replay_builder_counters PROPERTIES
+      PASS_REGULAR_EXPRESSION
+      "builder: per iteration .*, texture unit cache [0-9]+ hits [0-9]+ misses"
+      FAIL_REGULAR_EXPRESSION "error: ")
+    add_test(NAME rsx_replay_render_counters
+      COMMAND tox2_rsxreplay "${replay_repeat_capture}" --repeat 3 --quiet --no-validation)
+    set_tests_properties(rsx_replay_render_counters PROPERTIES
+      PASS_REGULAR_EXPRESSION
+      "render: per iteration .*, texture binds [0-9]+ cached [0-9]+ full;"
+      FAIL_REGULAR_EXPRESSION "error: ")
   else()
     message(STATUS "TOX2: rsx_replay_repeat test not registered "
       "(generated/rsx/captures/${TOX2_RSX_REPLAY_REPEAT_CAPTURE}.tox2cap not found)")

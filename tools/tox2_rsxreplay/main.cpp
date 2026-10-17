@@ -208,6 +208,7 @@ struct IterationSample {
     std::uint64_t tex_validations = 0, tex_hashed = 0, tex_read = 0;
     std::uint64_t barriers = 0, barriers_skipped = 0, instances = 0, state_calls = 0, state_skipped = 0;
     std::uint64_t uploads_reused = 0;
+    std::uint64_t tex_unit_hits = 0, tex_unit_misses = 0, tex_bind_hits = 0, tex_bind_misses = 0;
     // Thread cycles of the replay thread: build, the whole execute loop, and the iteration.
     std::uint64_t build_cycles = 0, record_cycles = 0, total_cycles = 0;
 };
@@ -291,6 +292,8 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
         sample.tex_validations = builder_after.texture_validations - builder_before.texture_validations;
         sample.tex_hashed = builder_after.texture_bytes_hashed - builder_before.texture_bytes_hashed;
         sample.tex_read = builder_after.texture_bytes_read - builder_before.texture_bytes_read;
+        sample.tex_unit_hits = builder_after.texture_unit_hits - builder_before.texture_unit_hits;
+        sample.tex_unit_misses = builder_after.texture_unit_misses - builder_before.texture_unit_misses;
 
         const tox2::RendererStats renderer_before = renderer.stats();
         for (tox2::RsxCommand& command : commands) {
@@ -319,6 +322,8 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
         sample.state_calls = renderer_after.state_calls - renderer_before.state_calls;
         sample.state_skipped = renderer_after.state_calls_skipped - renderer_before.state_calls_skipped;
         sample.uploads_reused = renderer_after.vp_constant_uploads_reused - renderer_before.vp_constant_uploads_reused;
+        sample.tex_bind_hits = renderer_after.texture_bind_hits - renderer_before.texture_bind_hits;
+        sample.tex_bind_misses = renderer_after.texture_bind_misses - renderer_before.texture_bind_misses;
 
         result.commands = commands.size();
         result.draws = sample.draws;
@@ -349,21 +354,25 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
     std::printf(
             "builder: per iteration %llu draws, fp cache %llu hits %llu misses, vp cache %llu hits %llu misses, "
             "vertex bytes %llu copied (union %llu), texture validations %llu (%llu bytes hashed in place, %llu bytes "
-            "read)\n",
+            "read), texture unit cache %llu hits %llu misses\n",
             toUll(median(samples, &IterationSample::draws)), toUll(median(samples, &IterationSample::fp_hits)),
             toUll(median(samples, &IterationSample::fp_misses)), toUll(median(samples, &IterationSample::vp_hits)),
             toUll(median(samples, &IterationSample::vp_misses)), toUll(median(samples, &IterationSample::bytes_copied)),
             toUll(median(samples, &IterationSample::bytes_union)),
             toUll(median(samples, &IterationSample::tex_validations)),
-            toUll(median(samples, &IterationSample::tex_hashed)), toUll(median(samples, &IterationSample::tex_read)));
+            toUll(median(samples, &IterationSample::tex_hashed)), toUll(median(samples, &IterationSample::tex_read)),
+            toUll(median(samples, &IterationSample::tex_unit_hits)),
+            toUll(median(samples, &IterationSample::tex_unit_misses)));
     std::printf(
             "render: per iteration %llu barriers (%llu skipped), %llu rendering instances, %llu state calls (%llu "
-            "skipped), %llu vp constant uploads reused; upload memory %s\n",
+            "skipped), %llu vp constant uploads reused, texture binds %llu cached %llu full; upload memory %s\n",
             toUll(median(samples, &IterationSample::barriers)),
             toUll(median(samples, &IterationSample::barriers_skipped)),
             toUll(median(samples, &IterationSample::instances)), toUll(median(samples, &IterationSample::state_calls)),
             toUll(median(samples, &IterationSample::state_skipped)),
             toUll(median(samples, &IterationSample::uploads_reused)),
+            toUll(median(samples, &IterationSample::tex_bind_hits)),
+            toUll(median(samples, &IterationSample::tex_bind_misses)),
             memoryFlagNames(renderer.stats().upload_memory_flags).c_str());
     result.dlaa_text = dlaaStatsText(renderer);
     return true;
