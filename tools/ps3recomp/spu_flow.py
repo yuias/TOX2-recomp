@@ -232,44 +232,45 @@ def eval_const(code: SpuCode, addr: int, reg: int, *, labels: frozenset[int] | N
                      depth, zero_regs)
 
 
-def _eval_def(code: SpuCode, d: SpuInsn, labels: frozenset[int], memory: bool, limit: int,
-              depth: int, zero_regs: frozenset[int]) -> int | None:
-    def src(r: int) -> int | None:
-        return eval_const(code, d.addr, r, labels=labels, memory=memory, limit=limit, depth=depth - 1,
-                          zero_regs=zero_regs)
+# Mnemonics whose result is a function of the same 32-bit slot of their source registers, so one
+# rule serves the preferred slot of the backward walk and all four slots of the forward pass.
+WORD_OPS = frozenset({"il", "ila", "ilh", "ilhu", "iohl", "ai", "ori", "andi", "shli", "a", "sf", "and", "or"})
 
-    name = d.spec.mnemonic
+
+def word_result(insn: SpuInsn, word_of: Callable[[int], int | None]) -> int | None:
+    """The value one word slot of RT receives from a WORD_OPS instruction, given the same slot of its source
+    registers (`word_of(reg)`, None when unknown); None for any other mnemonic or an unknown source. Every
+    operation in WORD_OPS works on each 32-bit word separately, so one rule gives the preferred slot and the
+    other three."""
+    name = insn.spec.mnemonic
     if name == "il":
-        return d.field("I16") & _MASK32
+        return insn.field("I16") & _MASK32
     if name == "ila":
-        return d.field("I18")
+        return insn.field("I18")
     if name == "ilhu":
-        return d.field("U16") << 16
+        return insn.field("U16") << 16
     if name == "ilh":
-        return d.field("U16") * 0x10001
-    if name in ("brsl", "brasl"):
-        # Only the `$+4` PC read reaches here; real calls are walk barriers.
-        return (d.addr + 4) & _MASK32
+        return insn.field("U16") * 0x10001
     if name == "iohl":
-        base = src(d.field("RT"))
-        return None if base is None else base | d.field("U16")
+        base = word_of(insn.field("RT"))
+        return None if base is None else base | insn.field("U16")
     if name in ("ai", "ori", "andi", "shli"):
-        a = src(d.field("RA"))
+        a = word_of(insn.field("RA"))
         if a is None:
             return None
         if name == "ai":
-            return (a + d.field("I10")) & _MASK32
+            return (a + insn.field("I10")) & _MASK32
         if name == "ori":
-            return a | (d.field("I10") & _MASK32)
+            return a | (insn.field("I10") & _MASK32)
         if name == "andi":
-            return a & d.field("I10") & _MASK32
-        count = d.field("I7") & 0x3F
+            return a & insn.field("I10") & _MASK32
+        count = insn.field("I7") & 0x3F
         return (a << count) & _MASK32 if count < 32 else 0
     if name in ("a", "sf", "and", "or"):
-        a = src(d.field("RA"))
+        a = word_of(insn.field("RA"))
         if a is None:
             return None
-        b = a if name == "or" and d.field("RA") == d.field("RB") else src(d.field("RB"))
+        b = a if name == "or" and insn.field("RA") == insn.field("RB") else word_of(insn.field("RB"))
         if b is None:
             return None
         if name == "a":
@@ -277,6 +278,21 @@ def _eval_def(code: SpuCode, d: SpuInsn, labels: frozenset[int], memory: bool, l
         if name == "sf":
             return (b - a) & _MASK32
         return a & b if name == "and" else a | b
+    return None
+
+
+def _eval_def(code: SpuCode, d: SpuInsn, labels: frozenset[int], memory: bool, limit: int,
+              depth: int, zero_regs: frozenset[int]) -> int | None:
+    def src(r: int) -> int | None:
+        return eval_const(code, d.addr, r, labels=labels, memory=memory, limit=limit, depth=depth - 1,
+                          zero_regs=zero_regs)
+
+    name = d.spec.mnemonic
+    if name in ("brsl", "brasl"):
+        # Only the `$+4` PC read reaches here; real calls are walk barriers.
+        return (d.addr + 4) & _MASK32
+    if name in WORD_OPS:
+        return word_result(d, src)
     if memory and name in ("lqr", "lqa", "lqd"):
         if name == "lqr":
             ea = (d.addr + d.field("REL16")) & _QUAD_MASK

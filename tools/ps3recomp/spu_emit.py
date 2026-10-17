@@ -286,6 +286,7 @@ def image_report(result: ImageResult, file_bytes: Mapping[str, int]) -> dict:
         "unlisted_targets": [[_hexs(site), _hexs(target)] for site, target in stats.unlisted_targets],
         "labels": stats.labels,
         "loop_hooks": stats.loop_hooks,
+        "folded_shufb": stats.folded_shufb,
     }
 
 

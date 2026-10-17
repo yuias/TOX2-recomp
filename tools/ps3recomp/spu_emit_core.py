@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 from . import spu
 from .spu import LS_TARGET_MASK, SpuInsn
+from .spu_consts import FunctionConstants, Words, function_constants
 from .spu_flow import STOP_TERMINATE_CODES, SpuCode, flow_of
 from .spu_format import format_insn
 
@@ -62,6 +63,8 @@ class EmitStats:
     mnemonics: Counter = field(default_factory=Counter)
     labels: int = 0
     loop_hooks: int = 0
+    # Shuffles whose control was written as a literal (set by the handler through `SpuOp.folded_control`).
+    folded_shufb: int = 0
     functions: int = 0
     instructions: int = 0
 
@@ -128,13 +131,20 @@ class FunctionView:
 class SpuOp:
     """What a handler sees: the decoded instruction plus C-expression helpers."""
 
-    def __init__(self, insn: SpuInsn, lowering: "Lowering") -> None:
+    def __init__(self, insn: SpuInsn, lowering: "Lowering", known: Mapping[int, Words] | None = None) -> None:
         self.insn = insn
         self.addr = insn.addr
         self.word = insn.word
         self.name = insn.spec.mnemonic
         self.lowering = lowering
         self.unhandled_key: str | None = None
+        self.folded_control = False
+        self._known = {} if known is None else known
+
+    def known(self, reg: int) -> Words | None:
+        """Full value of `reg` before this instruction when it is the same emit-time constant on every path
+        that reaches it (spu_consts); None otherwise."""
+        return self._known.get(reg)
 
     def f(self, field_name: str) -> int:
         return self.insn.field(field_name)
@@ -267,11 +277,12 @@ def _guarded(cond: str | None, lines: list[str]) -> list[str]:
 
 class _FunctionEmitter:
     def __init__(self, model: ImageModel, view: FunctionView, lowering: Lowering,
-                 handlers: Mapping[str, Handler]) -> None:
+                 handlers: Mapping[str, Handler], consts: FunctionConstants) -> None:
         self.model = model
         self.view = view
         self.lowering = lowering
         self.handlers = handlers
+        self.consts = consts
         self.stats = view.stats
 
     def unhandled_stmt(self, key: str, site: int, word: int) -> list[str]:
@@ -363,7 +374,7 @@ class _FunctionEmitter:
         if not code.valid(addr):
             return self.unhandled_stmt("invalid", addr, code.word(addr) if code.contains(addr) else 0)
         insn = code.insn(addr)
-        op = SpuOp(insn, self.lowering)
+        op = SpuOp(insn, self.lowering, self.consts.at(addr))
         self.stats.mnemonics[op.name] += 1
         if op.name in CORE_MNEMONICS:
             lines = self.control(op)
@@ -375,6 +386,8 @@ class _FunctionEmitter:
                 lines = _braced(lines)
         if lines is None:
             return self.unhandled_stmt(op.unhandled_key or op.name, addr, op.word)
+        if op.folded_control:
+            self.stats.folded_shufb += 1
         return lines
 
     def fall_through(self, addr: int) -> list[str]:
@@ -403,7 +416,10 @@ def emit_function(model: ImageModel, entry: int, stats: EmitStats,
     lowering = model.lowering_of(entry)
     addrs = model.functions[entry]
     view = FunctionView(model, entry, frozenset(addrs), stats)
-    em = _FunctionEmitter(model, view, lowering, _default_handlers() if handlers is None else handlers)
+    resolved = _default_handlers() if handlers is None else handlers
+    consts = function_constants(model.code, view.owned, model.entry_cases(entry),
+                                lambda name: is_handled(name, resolved))
+    em = _FunctionEmitter(model, view, lowering, resolved, consts)
     blocks: list[tuple[int, str | None, list[str]]] = []
     for addr in addrs:
         lines = em.instruction(addr) + em.fall_through(addr)
