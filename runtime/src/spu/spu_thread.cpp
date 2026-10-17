@@ -221,17 +221,28 @@ namespace {
 // units are partial: only the bytes the copy writes into them are compared.
 //
 // Most copies land in blocks without code, which the summary skips without reading a tag. In the other blocks a run
-// of tagged units is compared with one memcmp, and only a run that differs is compared unit by unit.
+// of tagged units is compared with one memcmp, and only a run that differs is compared unit by unit: a unit the
+// copy covers wholly with a fixed 16-byte compare, the at most two edge units with a bounded one. Consecutive
+// differing units are untagged with one setTags call.
 void untagChangedUnits(SpuThread& thread, const std::uint8_t* src, std::uint32_t lsa, std::uint32_t size) {
     const std::uint32_t end = lsa + size;
     const std::uint32_t first_unit = lsa / kSpuTagUnit;
     const std::uint32_t last_unit = roundUp(end) / kSpuTagUnit;
-    const auto tagged = [&](std::uint32_t unit) { return thread.recordAt(unit * kSpuTagUnit) != nullptr; };
+    const auto tagged = [&](std::uint32_t unit) { return thread.unitTagged(unit); };
     // Same bytes in LS and in the copy for the part of units [from, to) that the copy writes.
     const auto same = [&](std::uint32_t from, std::uint32_t to) {
         const std::uint32_t lo = std::max(lsa, from * kSpuTagUnit);
         const std::uint32_t hi = std::min(end, to * kSpuTagUnit);
         return std::memcmp(thread.ls() + lo, src + (lo - lsa), hi - lo) == 0;
+    };
+    // `same` for one unit. A fixed size lets the compiler inline the compare as two 8-byte loads.
+    const auto sameUnit = [&](std::uint32_t unit) {
+        const std::uint32_t lo = unit * kSpuTagUnit;
+        if (lo < lsa || lo + kSpuTagUnit > end) return same(unit, unit + 1);
+        std::uint64_t a[2], b[2];
+        std::memcpy(a, thread.ls() + lo, kSpuTagUnit);
+        std::memcpy(b, src + (lo - lsa), kSpuTagUnit);
+        return ((a[0] ^ b[0]) | (a[1] ^ b[1])) == 0;
     };
     for (std::uint32_t block = first_unit / kSpuTagBlockUnits; block * kSpuTagBlockUnits < last_unit; block++) {
         if (!thread.blockMayBeTagged(block)) continue;
@@ -249,13 +260,17 @@ void untagChangedUnits(SpuThread& thread, const std::uint8_t* src, std::uint32_t
             if (same(u, run_end)) {
                 remaining = true;
             } else {
+                std::uint32_t diff_begin = run_end;  // start of the current run of differing units, if any
                 for (std::uint32_t v = u; v < run_end; v++) {
-                    if (same(v, v + 1)) {
+                    if (sameUnit(v)) {
                         remaining = true;
-                    } else {
-                        thread.setTags(v, v + 1, 0);
+                        if (diff_begin != run_end) thread.setTags(diff_begin, v, 0);
+                        diff_begin = run_end;
+                    } else if (diff_begin == run_end) {
+                        diff_begin = v;
                     }
                 }
+                if (diff_begin != run_end) thread.setTags(diff_begin, run_end, 0);
             }
             u = run_end;
         }

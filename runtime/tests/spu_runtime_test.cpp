@@ -1210,6 +1210,49 @@ bool summaryCoversTags(const tox2::SpuThread& thread) {
     return true;
 }
 
+// A copy over a tagged run untags exactly the units whose written bytes differ. The copy is not 16-aligned at either
+// end, so the first and last unit are partial and only the bytes the copy writes count; units in the middle are
+// compared whole, and neighbouring differing units are untagged together.
+void testUntagChangedUnitsRuns() {
+    tox2::registerSpuImages(kTagImages, 2);
+    constexpr std::uint32_t kOffset = 0x240;  // into the code segment, a multiple of 16
+    constexpr std::uint32_t kBase = kTagImage0Ls + kOffset;
+    constexpr std::uint32_t kStart = 0x13;   // first copied byte, relative to kBase
+    constexpr std::uint32_t kLength = 0x95;  // the copy ends at 0xa8
+    constexpr std::uint32_t kUnits = 14;     // units 0 and 11..13 lie outside the copy
+    struct Case {
+        const char* name;
+        std::vector<std::uint32_t> flipped;   // source bytes that differ from LS, relative to kBase
+        std::vector<std::uint32_t> untagged;  // expected untagged units, relative to kBase / 16
+    };
+    const Case cases[] = {
+            {"one interior unit and both edge units", {0x14, 0x55, 0xa7}, {1, 5, 10}},
+            {"bytes next to the copy, interior runs", {0x12, 0x30, 0x4f, 0x5f, 0x70, 0xa8}, {3, 4, 5, 7}},
+            {"edges inside runs", {0x1f, 0x20, 0x3a, 0x6b, 0x90, 0xa0}, {1, 2, 3, 6, 9, 10}},
+            {"nothing differs", {0x12, 0xa8, 0xb0}, {}},
+            {"every unit",
+             {0x13, 0x28, 0x38, 0x49, 0x5a, 0x6b, 0x7c, 0x8d, 0x9e, 0xa7},
+             {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}},
+    };
+    for (const Case& c : cases) {
+        auto guest = makeTagGuest();
+        tox2::SpuThread thread(23, "untag-runs", nullptr);
+        tox2::copyToLs(thread, guest.data(), kTagImage0Ea, kTagImage0Ls, kTagImage0Size);
+        for (std::uint32_t x : c.flipped) guest[kTagMirrorEa + kOffset + x] ^= 0x01;
+        tox2::copyToLs(thread, guest.data(), kTagMirrorEa + kOffset + kStart, kBase + kStart, kLength);
+        CHECK(std::memcmp(thread.ls() + kBase + kStart, guest.data() + kTagMirrorEa + kOffset + kStart, kLength) == 0);
+        for (std::uint32_t unit = 0; unit < kUnits; unit++) {
+            const bool expect_untagged = std::find(c.untagged.begin(), c.untagged.end(), unit) != c.untagged.end();
+            const bool is_untagged = untracked(thread, kBase + unit * 16);
+            if (is_untagged != expect_untagged) std::fprintf(stderr, "case '%s': unit %u\n", c.name, unit);
+            CHECK(is_untagged == expect_untagged);
+            if (!is_untagged) CHECK(trackedAs(thread, kBase + unit * 16, "tag0"));
+        }
+        CHECK(trackedAs(thread, kBase - 16, "tag0") && trackedAs(thread, kBase + kUnits * 16, "tag0"));
+        CHECK(summaryCoversTags(thread));
+    }
+}
+
 void testTaggedBlockSummary() {
     tox2::registerSpuImages(kTagImages, 2);
     const auto guest = makeTagGuest();
@@ -4332,6 +4375,7 @@ int main(int argc, char** argv) {
     testTrackingIntersection();
     testTrackingIdenticalWrite();
     testTaggedBlockSummary();
+    testUntagChangedUnitsRuns();
     testCopyToLsMatchesReference();
     testCopyWrapsAtLsEnd();
     testFirstImageLog();

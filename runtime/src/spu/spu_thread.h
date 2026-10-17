@@ -176,6 +176,9 @@ public:
         return tag == 0 ? nullptr : &records_[tag - 1u];
     }
 
+    // Whether tag unit `unit` (LS offset / kSpuTagUnit, below kSpuTagCount) is tagged; no record lookup.
+    bool unitTagged(std::uint32_t unit) const { return tags_[unit].load(std::memory_order_relaxed) != 0; }
+
     // Tracking internals for copyToLs and untagLs; other code goes through those two.
     // The tag (record index + 1) for this triple; adds the record when it is new.
     std::uint16_t recordTag(std::uint32_t image, std::uint32_t segment, std::int32_t delta);
