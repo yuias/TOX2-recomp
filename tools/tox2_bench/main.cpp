@@ -35,6 +35,7 @@
 #include "core/guest_memory.h"
 #include "core/reservation.h"
 #include "core/thread_cpu.h"
+#include "render/vertex_convert.h"
 #include "rsx/fifo_parser.h"
 #include "rsx/rsx_capture.h"
 #include "rsx/rsx_frame.h"
@@ -478,6 +479,82 @@ int runRsxHash(const Case& self, const Options& options) {
                         static_cast<double>(*cycles) / (static_cast<double>(size) * reps));
         }
         return sum == expected * reps;
+    });
+}
+
+// The cycles of convertVertexElements over interleaved big-endian vertices, one attribute per format of the common
+// layouts, as the renderer converts them for a draw. The output is checked against a byte-wise conversion outside the
+// measured span.
+int runVertexConvert(const Case& self, const Options& options) {
+    std::uint32_t vertices = 16384, reps = 64;
+    if (!options.value("vertices").empty() &&
+        !parseCount("--vertices", options.value("vertices"), 1, 1u << 22, &vertices)) {
+        return 2;
+    }
+    if (!options.value("reps").empty() && !parseCount("--reps", options.value("reps"), 1, 1u << 20, &reps)) return 2;
+
+    struct Attribute {
+        std::uint8_t type, size;
+        std::uint32_t stride, offset;
+    };
+    const Attribute attributes[] = {
+            {tox2::kVertexTypeFloat, 3, 32, 0},   {tox2::kVertexTypeFloat, 3, 12, 0},
+            {tox2::kVertexTypeFloat, 2, 32, 12},  {tox2::kVertexTypeFloat, 4, 32, 16},
+            {tox2::kVertexTypeHalf, 3, 24, 0},    {tox2::kVertexTypeSnorm16, 3, 24, 8},
+            {tox2::kVertexTypeUnorm8, 4, 32, 20}, {tox2::kVertexTypeUnorm8, 3, 24, 16},
+    };
+    constexpr std::uint32_t kMaxStride = 32;
+    std::vector<std::uint8_t> source(static_cast<std::size_t>(vertices) * kMaxStride + 64);
+    fillPattern(source.data(), source.size(), 0x9e3779b97f4a7c15ull);
+
+    struct Prepared {
+        tox2::VertexAttribFormat format;
+        std::span<const std::uint8_t> src;
+        std::uint32_t stride;
+        std::vector<std::uint8_t> out, expected;
+    };
+    std::vector<Prepared> prepared;
+    for (const Attribute& a : attributes) {
+        const auto format = tox2::vertexAttribFormat(a.type, a.size);
+        if (!format) return 2;
+        Prepared p{*format, std::span<const std::uint8_t>(source).subspan(a.offset), a.stride, {}, {}};
+        p.out.resize(static_cast<std::size_t>(vertices) * format->host_size);
+        p.expected.assign(p.out.size(), 0);
+        // Components wider than a byte are swapped; a padded fourth component is the format's 1.0.
+        const std::uint32_t component =
+                format->type == tox2::kVertexTypeFloat                                              ? 4
+                : format->type == tox2::kVertexTypeHalf || format->type == tox2::kVertexTypeSnorm16 ? 2
+                                                                                                    : 1;
+        const std::uint32_t pad = format->type == tox2::kVertexTypeHalf      ? 0x3C00
+                                  : format->type == tox2::kVertexTypeSnorm16 ? 0x7FFF
+                                                                             : 0xFF;
+        for (std::uint32_t v = 0; v < vertices; v++) {
+            std::uint8_t* out = p.expected.data() + static_cast<std::size_t>(v) * format->host_size;
+            const std::uint8_t* in = p.src.data() + static_cast<std::size_t>(v) * p.stride;
+            for (std::uint32_t c = 0; c < format->host_size / component; c++) {
+                for (std::uint32_t b = 0; b < component; b++) {
+                    out[c * component + b] = c < format->size ? in[c * component + (component - 1 - b)]
+                                                              : static_cast<std::uint8_t>(pad >> (8 * b));
+                }
+            }
+        }
+        prepared.push_back(std::move(p));
+    }
+
+    return runMeasured(self, options, [&](std::uint64_t* cycles) {
+        std::uint32_t converted = 0;
+        const std::uint64_t start = tox2::currentThreadCycles();
+        for (std::uint32_t r = 0; r < reps; r++) {
+            for (Prepared& p : prepared) {
+                converted += tox2::convertVertexElements(p.format, p.src, p.stride, vertices, p.out);
+            }
+        }
+        *cycles = tox2::currentThreadCycles() - start;
+        if (converted != vertices * reps * std::size(attributes)) return false;
+        for (const Prepared& p : prepared) {
+            if (p.out != p.expected) return false;
+        }
+        return true;
     });
 }
 
@@ -1419,6 +1496,14 @@ const std::vector<Case>& cases() {
              {"kb", "reps"},
              {},
              runRsxHash},
+            {"vertex-convert",
+             "convertVertexElements over interleaved big-endian vertices of the common attribute formats "
+             "(--vertices N, --reps N)",
+             30,
+             3,
+             {"vertices", "reps"},
+             {},
+             runVertexConvert},
             {"rsx-fifo",
              "the RSX consumer pumping the FIFO words of a captured frame with the frame builder on and no renderer "
              "(--capture FILE) or --synthetic",
