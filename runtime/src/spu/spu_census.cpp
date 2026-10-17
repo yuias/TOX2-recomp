@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <format>
 #include <map>
 #include <mutex>
@@ -98,8 +99,10 @@ constexpr std::uint64_t kReservationWaitOverUs = 2000;
 struct ReservationWaitCounters {
     std::atomic<std::uint64_t> epoch_before_sleep{0}, epoch_woken{0}, timeout{0}, halt{0};
     LatencyStats lost_wait{kReservationWaitOverUs};
+    std::atomic<std::uint64_t> lost_table{0}, lost_plain{0};
     std::array<std::atomic<std::uint64_t>, kWokenBuckets> woken_us{};
-    std::atomic<std::uint32_t> lost_logged{0};
+    // Each kind has its own budget, so a flood of one kind cannot hide the other.
+    std::atomic<std::uint32_t> lost_table_logged{0}, lost_plain_logged{0};
 };
 
 constexpr std::uint32_t kLostLogLimit = 16;
@@ -189,15 +192,46 @@ void spuCountReservationWait(StoreWait reason, bool slept) {
     }
 }
 
+namespace {
+
+// Appends the 8 bytes of a chunk in memory order, whatever the host byte order.
+void appendChunkHex(std::string& out, const void* chunk) {
+    std::uint8_t bytes[8];
+    std::memcpy(bytes, chunk, sizeof(bytes));
+    for (const std::uint8_t b : bytes) out += std::format("{:02x}", b);
+}
+
+// "none" or "+0xOO OLD->NEW" per changed chunk, OO the byte offset in the line.
+std::string describeChangedChunks(const Reservation& res, const ReservationLoss& loss) {
+    std::string out;
+    for (std::size_t i = 0; i < loss.now.size(); i++) {
+        if ((loss.changed_chunks & (1u << i)) == 0) continue;
+        if (!out.empty()) out += ' ';
+        out += std::format("+{:#04x} ", i * 8);
+        appendChunkHex(out, res.snapshot + i * 8);
+        out += "->";
+        appendChunkHex(out, &loss.now[i]);
+    }
+    return out.empty() ? "none" : out;
+}
+
+}  // namespace
+
 void spuCountLostAfterTimeout(std::chrono::microseconds waited, std::uint32_t line, std::uint32_t thread_id,
-                              std::uint32_t site) {
+                              std::uint32_t site, const Reservation& res, const ReservationLoss& loss) {
     ReservationWaitCounters& c = reservationWaits();
     const auto waited_us = static_cast<std::uint64_t>(std::max<std::int64_t>(waited.count(), 0));
     c.lost_wait.record(waited_us);
-    // Bounded: the first events show which lines and code lose reservations to plain stores.
-    if (c.lost_logged.fetch_add(1, std::memory_order_relaxed) < kLostLogLimit) {
-        logInfo("tox2: spu: reservation lost after timeout: line {:#010x} thread {:#010x} at ls {:#07x}, waited {} us",
-                line, thread_id, site, waited_us);
+    // A version move is a write through the table that landed after the timeout; without one, only a store that
+    // bypasses the table can have changed the line.
+    const bool table = loss.version_moved;
+    (table ? c.lost_table : c.lost_plain).fetch_add(1, std::memory_order_relaxed);
+    // Bounded: the first events show which lines and code lose reservations, and to what.
+    auto& logged = table ? c.lost_table_logged : c.lost_plain_logged;
+    if (logged.fetch_add(1, std::memory_order_relaxed) < kLostLogLimit) {
+        logInfo("tox2: spu: reservation lost after timeout ({}): line {:#010x} thread {:#010x} at ls {:#07x}, waited "
+                "{} us; changed {}",
+                table ? "table" : "plain", line, thread_id, site, waited_us, describeChangedChunks(res, loss));
     }
 }
 
@@ -217,6 +251,8 @@ SpuReservationWaits spuReservationWaitSnapshot() {
     out.timeout = c.timeout.load(std::memory_order_relaxed);
     out.halt = c.halt.load(std::memory_order_relaxed);
     out.lost_wait = c.lost_wait.snapshot();
+    out.lost_table = c.lost_table.load(std::memory_order_relaxed);
+    out.lost_plain = c.lost_plain.load(std::memory_order_relaxed);
     for (std::size_t i = 0; i < kWokenBuckets; i++) out.woken_us[i] = c.woken_us[i].load(std::memory_order_relaxed);
     out.notifies = reservations().stats().notifies_by_kind;
     return out;
@@ -230,16 +266,17 @@ std::string spuReservationWaitSegment(const SpuReservationWaits& now, const SpuR
         const auto i = static_cast<std::size_t>(kind);
         return now.notifies[i] - before.notifies[i];
     };
-    // The histogram and the notify counts come last: scripts parse the fields before them.
+    // The histogram, the notify counts and the table/plain split come last: scripts parse the fields before them.
     return std::format(
             "rsv-wait epoch {} timeout {} lost-after-timeout {} pre-sleep {} woken {} "
             "woken-us <2 {} 2-5 {} 5-10 {} 10-20 {} 20-50 {} 50-100 {} 100-500 {} 500-1000 {} >1000 {} "
-            "notify putllc {} put {} putlluc {} ppu {} wake {}",
+            "notify putllc {} put {} putlluc {} ppu {} wake {} lost-after-timeout table {} plain {}",
             now.epoch - before.epoch, now.timeout - before.timeout, lost,
             now.epoch_before_sleep - before.epoch_before_sleep, now.epoch_woken - before.epoch_woken, woken(0),
             woken(1), woken(2), woken(3), woken(4), woken(5), woken(6), woken(7), woken(8),
             notified(WriterKind::Putllc), notified(WriterKind::Put), notified(WriterKind::Putlluc),
-            notified(WriterKind::PpuStoreConditional), notified(WriterKind::Wake));
+            notified(WriterKind::PpuStoreConditional), notified(WriterKind::Wake), now.lost_table - before.lost_table,
+            now.lost_plain - before.lost_plain);
 }
 
 SpuPutllcFails spuPutllcFailSnapshot() { return reservations().stats().putllc_fails; }
@@ -328,9 +365,10 @@ std::vector<std::string> spuCensusLines() {
     out.push_back(
             std::format("  reservation table: {} publishes, {} notifies", reservation.publishes, reservation.notifies));
     const SpuReservationWaits waits = spuReservationWaitSnapshot();
-    out.push_back(std::format("  reservation waits: epoch {}, timeout {} (lost after timeout {}, wait {}), halt {}",
-                              waits.epoch, waits.timeout, waits.lost_wait.count,
-                              formatLatency(waits.lost_wait, kReservationWaitOverUs), waits.halt));
+    out.push_back(std::format(
+            "  reservation waits: epoch {}, timeout {} (lost after timeout {}: table {}, plain {}, wait {}), halt {}",
+            waits.epoch, waits.timeout, waits.lost_wait.count, waits.lost_table, waits.lost_plain,
+            formatLatency(waits.lost_wait, kReservationWaitOverUs), waits.halt));
     const double seconds = std::max(static_cast<double>(systemTimeUs()) / 1e6, 1e-3);
     for (const SpuReceiveRow& row : spuReceiveSnapshot()) {
         out.push_back(std::format("  thread {:#010x} {} receive {:.1f}/s: busy {}; wait {}", row.id, row.name,

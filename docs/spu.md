@@ -352,10 +352,14 @@ The SPU's own floating-point rules are emitted as written (the full list of devi
   any); the number of reads of each channel; and the `stop` codes that were seen. The counters add up over
   all SPU threads of the run, also those of an earlier start of a group.
 - Further census lines of that section: `reservation table: N publishes, M notifies` (epoch moves, and the
-  ones that woke a sleeper), `reservation waits: epoch E, timeout T (lost after timeout L, wait <stats>), halt H`
-  (how the `RdEventStat` waits on the table ended; `L` counts timeouts after which the reservation was found
-  lost, which is the signature of a plain PPU store, and its wait statistics start at the beginning of the
-  waiting that timed out), and, per thread that blocked in `stop 0x110`, `thread <id> <name> receive <n>/s:
+  ones that woke a sleeper), `reservation waits: epoch E, timeout T (lost after timeout L: table X, plain Y, wait
+  <stats>), halt H` (how the `RdEventStat` waits on the table ended; `L` counts timeouts after which the
+  reservation was found lost, and its wait statistics start at the beginning of the waiting that timed out. `X`
+  counts the losses where a write through the reservation table (a PUT, a PUTLLC or a PUTLLUC, also to another line
+  of the same stripe) had moved the stripe version by the time of the check, and `Y` the rest: the line's
+  content changed without a version move, which a plain PPU store or a host write does. `X + Y = L`. A plain store
+  that is followed within the poll by a table write on the same stripe wakes the wait and is counted as neither),
+  and, per thread that blocked in `stop 0x110`, `thread <id> <name> receive <n>/s:
   busy <stats>; wait <stats>`. `busy` is the time from the reply of one receive to the arrival of the next, which
   for the sound engine thread `bnusCoreMain` is its processing time per event and is compared with the
   5.33 ms audio period; `wait` is the time from the arrival to the reply, the idle time plus the wait for the
@@ -376,10 +380,13 @@ The SPU's own floating-point rules are emitted as written (the full list of devi
   store-conditional, explicit wake such as a mailbox push or a halt). A separate segment `putllc-fail lost <n>
   locked <n> moved <n> data <n>` counts the failed PUTLLCs of the period by the check that rejected them: no
   usable reservation (none, or on another line), the stripe held by another writer, the stripe version changed
-  since GETLLAR, or the line differs from the snapshot.
-- The first 16 reservations found lost right after a timed-out wait (a plain store broke them) are logged at info
-  level as `tox2: spu: reservation lost after timeout: line 0x<line> thread 0x<id> at ls 0x<site>, waited <n> us`,
-  where `site` is the LS address of the waiting `rdch`.
+  since GETLLAR, or the line differs from the snapshot. The perf line ends with ` lost-after-timeout table <n>
+  plain <n>`, the split of its `lost-after-timeout` count described above.
+- The first 16 reservations of each kind found lost right after a timed-out wait are logged at info level as
+  `tox2: spu: reservation lost after timeout (<table|plain>): line 0x<line> thread 0x<id> at ls 0x<site>, waited <n>
+  us; changed <list>`, where `site` is the LS address of the waiting `rdch` and `<list>` is `none` or, for each
+  8-byte chunk of the line that differs from the GETLLAR snapshot, `+0x<offset> <old>-><new>` with both values as 16
+  hex digits in memory byte order.
 
 ## What the current run reaches
 

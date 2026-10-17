@@ -3168,6 +3168,23 @@ void testChanReservationWaitCounts() {
         CHECK(after.lost_wait.sum_us > before.lost_wait.sum_us);
         CHECK(after.timeout - before.timeout >= 1);
         CHECK(after.epoch == before.epoch);
+        // Nothing moved the stripe version: counted as plain.
+        CHECK(after.lost_plain - before.lost_plain == 1);
+        CHECK(after.lost_table - before.lost_table == 0);
+    }
+    // A put that lands after the timeout moves the version. Timing cannot place it there deterministically, so the
+    // classification is driven directly.
+    {
+        const tox2::SpuReservationWaits before = tox2::spuReservationWaitSnapshot();
+        tox2::Reservation res;
+        tox2::ReservationLoss loss;
+        loss.version_moved = true;
+        tox2::spuCountLostAfterTimeout(std::chrono::microseconds(1100), 0x1000, 0x01000300, 0x00cf4, res, loss);
+        const tox2::SpuReservationWaits after = tox2::spuReservationWaitSnapshot();
+        CHECK(after.lost_table - before.lost_table == 1);
+        CHECK(after.lost_plain - before.lost_plain == 0);
+        CHECK(after.lost_wait.count - before.lost_wait.count == 1);
+        CHECK(after.lost_table + after.lost_plain == after.lost_wait.count);
     }
     // Table put: the wait ends with an epoch change. A poll timeout can expire between the version bump and the
     // notify, which shows as a lost-after-timeout instead, so a few tries.
@@ -3214,12 +3231,13 @@ void testReservationWaitSplit() {
     some.epoch_woken = 2;
     some.timeout = 3;
     some.lost_wait.count = 1;
+    some.lost_table = 1;
     some.woken_us = {1, 2, 3, 4, 5, 6, 7, 8, 9};
     some.notifies = {10, 20, 30, 40, 50};
     CHECK(tox2::spuReservationWaitSegment(some, {}) ==
           "rsv-wait epoch 7 timeout 3 lost-after-timeout 1 pre-sleep 5 woken 2 "
           "woken-us <2 1 2-5 2 5-10 3 10-20 4 20-50 5 50-100 6 100-500 7 500-1000 8 >1000 9 "
-          "notify putllc 10 put 20 putlluc 30 ppu 40 wake 50");
+          "notify putllc 10 put 20 putlluc 30 ppu 40 wake 50 lost-after-timeout table 1 plain 0");
     tox2::SpuReservationWaits later = some;
     later.epoch += 1;
     later.woken_us[8] += 2;
@@ -3227,7 +3245,7 @@ void testReservationWaitSplit() {
     CHECK(tox2::spuReservationWaitSegment(later, some) ==
           "rsv-wait epoch 1 timeout 0 lost-after-timeout 0 pre-sleep 0 woken 0 "
           "woken-us <2 0 2-5 0 5-10 0 10-20 0 20-50 0 50-100 0 100-500 0 500-1000 0 >1000 2 "
-          "notify putllc 0 put 0 putlluc 0 ppu 0 wake 3");
+          "notify putllc 0 put 0 putlluc 0 ppu 0 wake 3 lost-after-timeout table 0 plain 0");
     CHECK(tox2::spuReservationWaitSegment(some, some).empty());
     CHECK(tox2::spuReservationWaitSegment({}, {}).empty());
 
@@ -4503,7 +4521,10 @@ void testSpuCensus() {
         CHECK(waits_at == table_end);
         const std::size_t waits_end = waits_at == std::string::npos ? waits_at : text.find('\n', waits_at + 1);
         if (waits_at != std::string::npos) {
-            CHECK(text.substr(waits_at, waits_end - waits_at).contains(" (lost after timeout "));
+            const std::string waits_line = text.substr(waits_at, waits_end - waits_at);
+            CHECK(waits_line.contains(" (lost after timeout "));
+            CHECK(waits_line.contains("table "));
+            CHECK(waits_line.contains("plain "));
         }
         text.erase(table_at, waits_end == std::string::npos ? std::string::npos : waits_end - table_at);
     }

@@ -153,7 +153,8 @@ bool SpuChannels::readEventStat(std::uint32_t site, std::uint32_t* value) {
     const bool wants_reservation = (mask & spu_event::kLockLineLost) != 0;
     std::optional<BlockedScope> blocked;
     // Set after a wait that ended by timeout. A reservation found lost right after such a wait was not announced by
-    // the table, which means a plain store broke it.
+    // the table before the timeout: either a plain store broke it, or a table write landed after the timeout (the
+    // census tells the two apart).
     bool after_timeout = false;
     microseconds timeout_waited{0};
     for (;;) {
@@ -167,7 +168,8 @@ bool SpuChannels::readEventStat(std::uint32_t site, std::uint32_t* value) {
         const std::uint32_t status = eventStatus() & mask;
         // The previous pass saw no lost-line event, so the bit is new.
         if (after_timeout && (status & spu_event::kLockLineLost) != 0) {
-            spuCountLostAfterTimeout(timeout_waited, mfc_.reservationLine(), thread_.id(), site);
+            spuCountLostAfterTimeout(timeout_waited, mfc_.reservationLine(), thread_.id(), site, mfc_.reservation(),
+                                     mfc_.reservationLoss());
         }
         after_timeout = false;
         if (status != 0) {
