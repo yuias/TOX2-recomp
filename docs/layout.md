@@ -8,6 +8,7 @@
 | `runtime/` | Runtime executable stub (`tox2_runtime`), stub runtimes for generated code (`tox2_ppu_stub`, `tox2_spu_stub`), the runtime core and `tox2_game` (`runtime/src/core`, `lv2`, `hle`, `input`, `rsx`, `media`, `audio`, `spu`, `game_main.cpp`; see [Runtime internals](runtime.md) and [`tox2_game` options](runtime-options.md)) and runtime-side tests |
 | `externals/spdlog` | spdlog submodule used by the runtime logger |
 | `externals/libpng`, `externals/zlib` | libpng (v1.6.59) and zlib (v1.3.2) submodules, the PNG codec behind `cellPngDec` |
+| `externals/xxHash` | xxHash submodule (v0.8.4, header-only), the XXH3 hash behind the RSX texture validation |
 | `externals/yyjson` | yyjson submodule (0.13.0, built as a static library), used only to parse the VFS configuration |
 | `externals/Vulkan-Headers`, `externals/volk`, `externals/VulkanMemoryAllocator` | Vulkan headers, the run-time loader and the memory allocator of the renderer |
 | `externals/imgui` | Dear ImGui submodule (v1.91.9b, built as a static library from the core files and the Win32 and Vulkan backends, no demo window), used only by the debug overlay |

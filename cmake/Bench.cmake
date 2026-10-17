@@ -46,6 +46,11 @@ function(tox2_bench_add)
     PASS_REGULAR_EXPRESSION "bench rsv-put: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
     TIMEOUT 120)
 
+  add_test(NAME bench_rsx_hash COMMAND tox2_bench rsx-hash --kb 64 --reps 16 --iterations 2 --warmup 1)
+  set_tests_properties(bench_rsx_hash PROPERTIES
+    PASS_REGULAR_EXPRESSION "bench rsx-hash: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
+    TIMEOUT 120)
+
   add_test(NAME bench_spu_replay_synthetic COMMAND tox2_bench spu-replay --synthetic --iterations 2 --warmup 1)
   set_tests_properties(bench_spu_replay_synthetic PROPERTIES
     PASS_REGULAR_EXPRESSION "bench spu-replay: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"

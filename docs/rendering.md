@@ -1005,7 +1005,7 @@ handful of textures, some of them several megabytes), so the builder keeps the c
   these points (this title does two acquires per flip); a guest write inside an epoch, with none of them
   in between, is not seen until the epoch ends. Inside an epoch an entry is used without reading guest
   memory. On the first use in a later epoch the guest range is read into a scratch buffer and hashed
-  (`rsxHashBytes`, four multiply-fold lanes over 64 bytes per step); an unchanged hash keeps the blob and
+  (`rsxHashBytes`, XXH3-64); an unchanged hash keeps the blob and
   its id, a changed one converts a new blob under a new id. The reads go through the memory view, so a
   capture records them where the replay builder, which starts with an empty cache, makes the same reads.
 - *Writes by the RSX.* A color or depth surface that a clear or a draw writes ends the trust in every entry

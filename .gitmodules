@@ -22,3 +22,6 @@
 [submodule "externals/imgui"]
 	path = externals/imgui
 	url = https://github.com/ocornut/imgui
+[submodule "externals/xxHash"]
+	path = externals/xxHash
+	url = https://github.com/Cyan4973/xxHash

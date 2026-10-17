@@ -24,6 +24,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -32,6 +33,7 @@
 
 #include "core/reservation.h"
 #include "core/thread_cpu.h"
+#include "rsx/rsx_texture_cache.h"
 #include "spu/spu_capture.h"
 #include "spu/spu_channels.h"
 #include "spu/spu_mfc.h"
@@ -438,6 +440,36 @@ int runRsvPut(const Case& self, const Options& options) {
             std::memcpy(expected.data() + ea, patterns[k % 3 == 2 ? 1 : 0].data(), kPutSizes[k % 4]);
         }
         return std::memcmp(base, expected.data(), kPutGuestSize) == 0;
+    });
+}
+
+// The cycles of rsxHashBytes over one pseudo-random buffer, as the texture validation hashes it. Each iteration hashes
+// the buffer `reps` times (about 64 MiB of input by default) so the span is long enough to measure for small buffers.
+int runRsxHash(const Case& self, const Options& options) {
+    std::uint32_t kb = 4096;
+    if (!options.value("kb").empty() && !parseCount("--kb", options.value("kb"), 1, 1u << 20, &kb)) return 2;
+    const std::size_t size = static_cast<std::size_t>(kb) * 1024;
+    std::uint32_t reps = static_cast<std::uint32_t>(std::max<std::size_t>(1, (64u << 20) / size));
+    if (!options.value("reps").empty() && !parseCount("--reps", options.value("reps"), 1, 1u << 20, &reps)) return 2;
+
+    std::vector<std::uint8_t> buffer(size);
+    fillPattern(buffer.data(), size, 0x2545f4914f6cdd1dull);
+    const std::span<const std::uint8_t> bytes(buffer);
+    const std::uint64_t expected = tox2::rsxHashBytes(bytes);
+
+    std::uint32_t iteration_index = 0;
+    const std::uint32_t total_iterations = options.warmup + options.iterations;
+    return runMeasured(self, options, [&](std::uint64_t* cycles) {
+        std::uint64_t sum = 0;
+        const std::uint64_t start = tox2::currentThreadCycles();
+        for (std::uint32_t r = 0; r < reps; r++) sum += tox2::rsxHashBytes(bytes);
+        *cycles = tox2::currentThreadCycles() - start;
+        // The diagnostic goes out before the summary line, so it is printed once, with the last iteration.
+        if (++iteration_index == total_iterations) {
+            std::printf("bench %s: %u KiB x %u hashes per iteration, %.3f cycles per byte\n", self.name, kb, reps,
+                        static_cast<double>(*cycles) / (static_cast<double>(size) * reps));
+        }
+        return sum == expected * reps;
     });
 }
 
@@ -1002,6 +1034,13 @@ const std::vector<Case>& cases() {
              {"images", "entries", "pollute-kb", "slice", "dispatches"},
              {},
              runSpuDispatch},
+            {"rsx-hash",
+             "rsxHashBytes over a pseudo-random buffer, the hash of the texture validation (--kb KB, --reps N)",
+             20,
+             2,
+             {"kb", "reps"},
+             {},
+             runRsxHash},
     };
     return kCases;
 }

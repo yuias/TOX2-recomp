@@ -22,8 +22,8 @@
 
 namespace tox2 {
 
-// 64-bit hash of a byte range, 64 bytes per step with four independent multiply-fold lanes. Not a
-// cryptographic hash: it only has to tell a changed texture from an unchanged one.
+// 64-bit hash of a byte range (XXH3-64, AVX2 path). Not a cryptographic hash: it only has to tell a changed
+// texture from an unchanged one.
 std::uint64_t rsxHashBytes(std::span<const std::uint8_t> bytes);
 
 class RsxTextureCache {

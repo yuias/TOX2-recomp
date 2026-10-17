@@ -70,12 +70,26 @@ function(tox2_runtime_add_yyjson)
   set_target_properties(yyjson PROPERTIES SYSTEM ON)
 endfunction()
 
+# xxHash is used header-only: XXH_INLINE_ALL compiles its functions into each translation unit that includes
+# xxhash.h, with the unit's own flags, so XXH3 picks the AVX2 code path from -march=x86-64-v3. Nothing is built
+# or installed from the submodule; SYSTEM keeps its header out of our warnings.
+function(tox2_runtime_add_xxhash)
+  if(NOT EXISTS ${CMAKE_SOURCE_DIR}/externals/xxHash/xxhash.h)
+    message(FATAL_ERROR
+      "TOX2: externals/xxHash is missing or empty. Run: git submodule update --init")
+  endif()
+  add_library(xxhash INTERFACE)
+  target_include_directories(xxhash SYSTEM INTERFACE ${CMAKE_SOURCE_DIR}/externals/xxHash)
+  target_compile_definitions(xxhash INTERFACE XXH_INLINE_ALL)
+endfunction()
+
 # Runtime core: everything that does not reference generated symbols, so it builds and its tests
 # run without a generated tree. Call after enable_testing().
 function(tox2_runtime_add_core)
   tox2_runtime_add_spdlog()
   tox2_runtime_add_libpng()
   tox2_runtime_add_yyjson()
+  tox2_runtime_add_xxhash()
 
   add_library(tox2_runtime_core STATIC
     runtime/src/app/config_file.cpp
@@ -180,6 +194,8 @@ function(tox2_runtime_add_core)
   target_link_libraries(tox2_runtime_core PRIVATE png_static)
   # PRIVATE as well: JSON types stay inside config_file.cpp, vfs_config.cpp and rsx_census.cpp.
   target_link_libraries(tox2_runtime_core PRIVATE yyjson)
+  # PRIVATE as well: xxhash.h stays out of the runtime headers.
+  target_link_libraries(tox2_runtime_core PRIVATE xxhash)
 
   add_executable(tox2_runtime_tests runtime/tests/runtime_core_test.cpp)
   target_compile_options(tox2_runtime_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
