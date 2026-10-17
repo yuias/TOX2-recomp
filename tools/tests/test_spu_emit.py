@@ -259,6 +259,62 @@ class HandlerTest(unittest.TestCase):
             spu_emit_core.get_lowering("hostcall")
 
 
+class ShufbControlTest(unittest.TestCase):
+    """`shufb` takes its control as a literal when the constant pass knows RC on every path."""
+
+    SPLAT_LINE = "ctx->gpr[6] = tox2SpuShufb(ctx->gpr[3], ctx->gpr[3], tox2SpuSplatW(0x00010203u));"
+    REG_LINE = "ctx->gpr[6] = tox2SpuShufb(ctx->gpr[3], ctx->gpr[3], ctx->gpr[5]);"
+
+    @staticmethod
+    def set_rc() -> list[int]:
+        return [enc("ilhu", RT=5, U16=0x0001), enc("iohl", RT=5, U16=0x0203)]
+
+    @staticmethod
+    def shufb() -> int:
+        return enc("shufb", RT4=6, RA=3, RB=3, RC=5)
+
+    def assert_folded(self, words, folded, **kwargs):
+        result, text = emit(words, **kwargs)
+        lines = lines_of(text)
+        self.assertEqual(self.SPLAT_LINE in lines, folded, text)
+        self.assertEqual(self.REG_LINE in lines, not folded, text)
+        self.assertEqual(result.stats.folded_shufb, 1 if folded else 0)
+
+    def test_control_set_before_a_loop_label_is_a_literal(self):
+        words = [*self.set_rc(), self.shufb(), enc("ai", RT=3, RA=3, I10=-1),
+                 enc("brnz", RT=3, addr=at(4), target=at(2)), stop(0x102)]
+        self.assert_folded(words, True)
+
+    def test_control_redefined_on_one_path_stays_a_register(self):
+        words = [*self.set_rc(), enc("brnz", RT=3, addr=at(2), target=at(4)), enc("il", RT=5, I16=0x77),
+                 self.shufb(), stop(0x102)]
+        self.assert_folded(words, False)
+
+    def test_control_defined_before_a_return_site_stays_a_register(self):
+        # The word after the call is entered through the entry switch, so nothing is known there.
+        self.assert_folded([*self.set_rc(), brsl(2, 5), self.shufb(), stop(0x102), ret()], False)
+
+    def test_control_overwritten_by_an_rt4_instruction_or_a_link_stays_a_register(self):
+        selb = enc("selb", RT4=5, RA=3, RB=4, RC=7)
+        pc_read = enc("brsl", RT=5, addr=at(2), target=at(3))
+        self.assert_folded([*self.set_rc(), selb, self.shufb(), stop(0x102)], False)
+        self.assert_folded([*self.set_rc(), pc_read, self.shufb(), stop(0x102)], False)
+
+    def test_fsmbi_control_is_a_per_word_literal(self):
+        words = [enc("fsmbi", RT=5, U16=0x8001), enc("shufb", RT4=6, RA=3, RB=4, RC=5), stop(0x102)]
+        result, text = emit(words)
+        self.assertIn("ctx->gpr[6] = tox2SpuShufb(ctx->gpr[3], ctx->gpr[4], tox2VrFromBeWords(0xff000000u, "
+                      "0x00000000u, 0x00000000u, 0x000000ffu));", lines_of(text))
+        self.assertEqual(result.stats.folded_shufb, 1)
+
+    def test_folded_count_equals_the_number_of_literals(self):
+        words = [*self.set_rc(), self.shufb(), self.shufb(), enc("selb", RT4=5, RA=3, RB=4, RC=7), self.shufb(),
+                 stop(0x102)]
+        result, text = emit(words)
+        self.assertEqual(text.count("tox2SpuSplatW(0x00010203u)"), 2)
+        self.assertEqual(result.stats.folded_shufb, 2)
+
+
 class ModelTest(unittest.TestCase):
     def test_overlapping_functions_are_rejected(self):
         code = synthetic_recovery([nop(), stop(0x102)]).code

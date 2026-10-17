@@ -275,6 +275,15 @@ and writes no files.
   resolutions in the database only supply entries and jump tables. A branch target is masked with
   `0x3fffc`, the E and D bits of an indirect branch set or clear `int_enabled` before the transfer, and
   `bisled` is taken when `tox2SpuChannelCount` of channel 0 is non-zero.
+- A `shufb` takes its control as a literal when the control register holds the same emit-time constant on every
+  path that reaches it: `tox2SpuSplatW(w)` for four equal words, else `tox2VrFromBeWords(w0, w1, w2, w3)`. The
+  compiler then folds the shuffle, special control bytes included, and no longer reloads the register from the
+  context inside loops. `spu_consts` finds the constants with a forward pass per function, seeded empty at every
+  entry case (the function entry and its return sites); the successors are the ones the lowering emits.
+  Constants come from `il`, `ila`, `ilh`, `ilhu`, `iohl`, `ai`, `ori`, `andi`, `a`, `sf`, `and`, `or`, `shli`
+  and `fsmbi`. Any other write to the register, a link write, a load, a channel, `stop`, SPR or FPSCR hook,
+  `bisled` or a mnemonic without a handler drops it. Local-store loads are never folded, because the local
+  store can change at run time.
 - The op groups follow the decoder's groups, one module `tools/ps3recomp/spu_emit_ops_<group>.py` each:
   `int` (arithmetic, logic, compare, select, multiply, byte, shift and rotate, and the conditional halts),
   `perm` (shuffle, quadword shifts and rotates, generate controls, select masks, gathers), `mem` (quadword
@@ -285,10 +294,10 @@ and writes no files.
 - The report is JSON. Per image it has `functions`, `instructions`, `dispatchable`, `chunks` (file, functions,
   instructions, bytes), `unhandled` (total, per mnemonic, per group, with example addresses), `edges`
   (`gotos`, `jumps`, `dispatch_direct`, `dispatch_indirect`, `fallthrough_jumps`, `fallthrough_dispatch`,
-  `returns`, `stops`, `leaves`, `invalid_flow`), `invalid_flow`, `unlisted_targets`, `labels` and `loop_hooks`;
-  at the top it has `gate_unhandled` and `ungated_unhandled`. Stdout has three lines per image in `--census`
-  mode (counts, the commonest mnemonics, the unhandled ones) and one line per image otherwise, then
-  `gate unhandled: N`.
+  `returns`, `stops`, `leaves`, `invalid_flow`), `invalid_flow`, `unlisted_targets`, `labels`, `loop_hooks` and
+  `folded_shufb` (shuffles emitted with a literal control); at the top it has `gate_unhandled` and
+  `ungated_unhandled`. Stdout has three lines per image in `--census` mode (counts, the commonest mnemonics,
+  the unhandled ones) and one line per image otherwise, then `gate unhandled: N`.
 - `--max-unhandled N` makes `spu-emit` exit with 9 if the gate images together have more than `N` unhandled
   words. Every emitted image is a gate image (a registry `gate` is true for each image with an LS base, which
   is every image today), so no `ungated unhandled: <image> <n>` line appears. The gate is checked after the files are written.

@@ -179,6 +179,37 @@ CASES += [
       {6: (0x0F0E0D0C, 0x0B0A0908, 0x07060504, 0x03020100)}),
 ]
 
+
+def _at(index: int) -> int:
+    return CODE_BASE + 4 * index
+
+
+# Controls the emitter can see as constants are written as literals; these cases pin that the literal is used
+# only where the register holds that value on every path. Loops run twice: $7 counts down from 2 in its
+# preferred word.
+_SPLAT_CONTROL = [enc("ilhu", RT=5, U16=0x0001), enc("iohl", RT=5, U16=0x0203)]  # every word 00 01 02 03
+_LOOP_TAIL = [enc("ai", RT=7, RA=7, I10=-1)]
+
+CASES += [
+    # Pass 1 selects bytes 0..3 of SA = 00112233 in every word; `ai` makes SA 00112234 for pass 2, which is
+    # the value left in $6. The control is constant across the backward branch.
+    t("shufb_constant_control_across_backward_branch", INT_REF + ": shufb",
+      [*_SPLAT_CONTROL, enc("shufb", RT4=6, RA=3, RB=3, RC=5), enc("ai", RT=3, RA=3, I10=1), *_LOOP_TAIL,
+       enc("brnz", RT=7, addr=_at(5), target=_at(2))],
+      {3: SA, 7: (2, *JUNK), 6: OLD_RT}, {6: (0x00112234,) * 4}),
+    # `ai` adds 0x10 to every control word, so pass 2 reads 00 01 02 13: bytes 0..2 of SA and byte 3 of SB
+    # (0x13 selects byte 19 of RA || RB). A fold of the value before the loop would leave 00112233.
+    t("shufb_control_changes_in_loop", INT_REF + ": shufb",
+      [*_SPLAT_CONTROL, enc("shufb", RT4=6, RA=3, RB=4, RC=5), enc("ai", RT=5, RA=5, I10=0x10), *_LOOP_TAIL,
+       enc("brnz", RT=7, addr=_at(5), target=_at(2))],
+      {3: SA, 4: SB, 7: (2, *JUNK), 6: OLD_RT}, {6: (0x001122F3,) * 4}),
+    # fsmbi 0x8001 makes bytes 0 and 15 0xff and all others 0x00. 0xff gives 0x80; 0x00 selects byte 0 of
+    # RA, which is 0xf0 in QC (a zero special would give 0x00 there).
+    t("shufb_fsmbi_control", INT_REF + ": shufb",
+      [enc("fsmbi", RT=5, U16=0x8001), enc("shufb", RT4=6, RA=3, RB=4, RC=5)],
+      {3: QC, 4: QB, 6: OLD_RT}, {6: (0x80F0F0F0, 0xF0F0F0F0, 0xF0F0F0F0, 0xF0F0F080)}),
+]
+
 # --- Generate controls ----------------------------------------------------------------------------
 
 CASES += [

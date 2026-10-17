@@ -89,5 +89,15 @@ def emit_fsmbi(op: SpuOp) -> list[str]:
 
 @handler("shufb")
 def emit_shufb(op: SpuOp) -> list[str]:
-    return _set(op, "tox2SpuShufb(%s, %s, %s)" % (op.gpr(op.f("RA")), op.gpr(op.f("RB")), op.gpr(op.f("RC"))),
-                "RT4")
+    rc = op.f("RC")
+    words = op.known(rc)
+    if words is None:
+        control = op.gpr(rc)
+    else:
+        # A literal lets the compiler fold the special-byte handling and drop the reload of RC from the context.
+        op.folded_control = True
+        if words[0] == words[1] == words[2] == words[3]:
+            control = "tox2SpuSplatW(%s)" % u32(words[0])
+        else:
+            control = "tox2VrFromBeWords(%s)" % ", ".join(u32(w) for w in words)
+    return _set(op, "tox2SpuShufb(%s, %s, %s)" % (op.gpr(op.f("RA")), op.gpr(op.f("RB")), control), "RT4")
