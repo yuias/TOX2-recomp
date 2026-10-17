@@ -9877,6 +9877,149 @@ void testRsxTextureCache() {
     CHECK(builder.stats().texture_bytes_read == reads_before);
 }
 
+// The calling thread's note count moves by one per note, ignores other threads and survives a census reset.
+void testRsxUnimplementedThreadNotes() {
+    const std::uint64_t start = tox2::rsxUnimplementedThreadNotes();
+    tox2::rsxNoteUnimplemented("state", "thread notes a");
+    CHECK(tox2::rsxUnimplementedThreadNotes() == start + 1);
+    tox2::rsxNoteUnimplemented("state", "thread notes a");  // a repeated kind counts too
+    tox2::rsxNoteUnimplemented("state", "thread notes b");
+    CHECK(tox2::rsxUnimplementedThreadNotes() == start + 3);
+
+    std::uint64_t other_notes = 0;
+    std::thread other([&] {
+        for (int i = 0; i < 5; i++) tox2::rsxNoteUnimplemented("state", "thread notes other");
+        other_notes = tox2::rsxUnimplementedThreadNotes();
+    });
+    other.join();
+    CHECK(other_notes == 5);
+    CHECK(tox2::rsxUnimplementedThreadNotes() == start + 3);
+
+    tox2::rsxUnimplementedReset();
+    CHECK(tox2::rsxUnimplementedThreadNotes() == start + 3);
+}
+
+// The validity interface the builder uses to decide that a descriptor it took earlier is still current: epoch,
+// write serial, overlapping writes since a serial, and the entry-set generation.
+void testRsxTextureCacheValidity() {
+    tox2::RsxTextureLayout layout;
+    layout.guest_bytes = 100;
+    layout.levels.resize(1);
+    const auto blob = [] { return std::make_shared<const std::vector<std::uint8_t>>(100); };
+    const auto key = [](std::uint32_t offset) {
+        tox2::RsxTextureCache::Key k;
+        k.offset = offset;
+        return k;
+    };
+
+    // Epoch and write serial.
+    {
+        tox2::RsxTextureCache cache;
+        const std::uint64_t epoch = cache.epoch();
+        cache.beginEpoch();
+        CHECK(cache.epoch() == epoch + 1);
+        cache.onFlip(1);
+        CHECK(cache.epoch() == epoch + 2);
+
+        const std::uint64_t serial = cache.writeSerial();
+        cache.noteWrite(0, 100, 200);
+        CHECK(cache.writeSerial() == serial + 1);
+        cache.noteWrite(0, 100, 200);  // the same range again still moves the serial
+        CHECK(cache.writeSerial() == serial + 2);
+        cache.noteWrite(0, 300, 300);  // an empty range is no write
+        cache.noteWrite(0, 400, 300);
+        CHECK(cache.writeSerial() == serial + 2);
+        cache.noteWrite(1, 0, 10);
+        CHECK(cache.writeSerial() == serial + 3);
+    }
+
+    // writtenSince.
+    {
+        tox2::RsxTextureCache cache;
+        cache.noteWrite(0, 100, 200);
+        const std::uint64_t first = cache.writeSerial();
+        CHECK(!cache.writtenSince(0, 100, 200, first));  // a write at the serial is not after it
+        CHECK(cache.writtenSince(0, 100, 200, first - 1));
+        CHECK(cache.writtenSince(0, 0, 101, first - 1));  // partial overlaps count
+        CHECK(cache.writtenSince(0, 199, 500, first - 1));
+        CHECK(!cache.writtenSince(0, 0, 100, first - 1));  // ranges that only touch do not overlap
+        CHECK(!cache.writtenSince(0, 200, 300, first - 1));
+        CHECK(!cache.writtenSince(1, 100, 200, first - 1));  // another location
+        cache.noteWrite(0, 150, 160);
+        CHECK(cache.writtenSince(0, 100, 200, first));
+        CHECK(!cache.writtenSince(0, 100, 150, first));
+        CHECK(!cache.writtenSince(0, 100, 200, cache.writeSerial()));
+        cache.beginEpoch();
+        CHECK(!cache.writtenSince(0, 100, 200, 0));
+    }
+
+    // fresh() agrees with the pieces it is made of.
+    {
+        tox2::RsxTextureCache cache;
+        const tox2::RsxTextureCache::Entry& entry = cache.store(key(100), layout, 1, blob());
+        CHECK(cache.fresh(entry));
+        cache.noteWrite(0, 0, 100);
+        CHECK(cache.fresh(entry));
+        cache.noteWrite(0, 150, 160);
+        CHECK(!cache.fresh(entry));
+        cache.beginEpoch();
+        CHECK(!cache.fresh(entry));
+    }
+
+    // generation: created, replaced or dropped entries move it; lookups, freshness and writes do not.
+    {
+        tox2::RsxTextureCache cache(250);
+        std::uint64_t generation = cache.generation();
+        cache.store(key(0), layout, 1, blob());
+        CHECK(cache.generation() > generation);
+        generation = cache.generation();
+        cache.store(key(0), layout, 2, blob());  // replaced in place
+        CHECK(cache.generation() > generation);
+        generation = cache.generation();
+
+        tox2::RsxTextureCache::Entry* found = cache.find(key(0));
+        CHECK(found != nullptr);
+        cache.markFresh(*found);
+        cache.noteWrite(0, 0, 10);
+        cache.beginEpoch();
+        CHECK(cache.find(key(500)) == nullptr);  // a missing key
+        CHECK(cache.generation() == generation);
+
+        cache.erase(key(500));  // nothing to erase
+        CHECK(cache.generation() == generation);
+        cache.erase(key(0));
+        CHECK(cache.generation() > generation);
+        CHECK(cache.entryCount() == 0);
+
+        // A store that goes over the budget drops the least recently used entry.
+        cache.store(key(0), layout, 1, blob());
+        cache.store(key(100), layout, 2, blob());
+        generation = cache.generation();
+        cache.store(key(200), layout, 3, blob());
+        CHECK(cache.entryCount() == 2 && cache.generation() > generation);
+        generation = cache.generation();
+
+        // A flip that is no sweep leaves the entries alone; the idle sweep drops both.
+        cache.onFlip(1);
+        CHECK(cache.entryCount() == 2 && cache.generation() == generation);
+        cache.onFlip((tox2::RsxTextureCache::kIdleFlips / 32 + 2) * 32);
+        CHECK(cache.entryCount() == 0 && cache.generation() > generation);
+    }
+
+    // A sweep flip that only trims moves the generation. The store keeps the entry it just made even over the
+    // budget, so the next sweep is the one that drops it.
+    {
+        tox2::RsxTextureCache cache(50);
+        cache.store(key(0), layout, 1, blob());
+        CHECK(cache.entryCount() == 1);
+        const std::uint64_t generation = cache.generation();
+        cache.onFlip(1);
+        CHECK(cache.entryCount() == 1 && cache.generation() == generation);
+        cache.onFlip(32);
+        CHECK(cache.entryCount() == 0 && cache.generation() > generation);
+    }
+}
+
 // rsxHashBytes without a copy: the streaming hash and the memory views' hashRange give the hash of the
 // concatenated bytes however the range is split into chunks or pages.
 void testRsxHashRange() {
@@ -17525,6 +17668,8 @@ int main(int argc, char** argv) {
     testSharedVertexRanges();
     testRecycledDrawBuffers();
     testRsxTextureCache();
+    testRsxTextureCacheValidity();
+    testRsxUnimplementedThreadNotes();
     testRsxHashRange();
     testRsxFloatAndDepthSurfaces();
     testRsxCapture();

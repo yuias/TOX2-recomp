@@ -21,6 +21,11 @@ void rsxNoteUnimplemented(std::string_view category, std::string_view key);
 std::vector<std::pair<std::string, std::uint64_t>> rsxUnimplementedSnapshot();
 std::uint64_t rsxUnimplementedDropped();
 
+// Number of rsxNoteUnimplemented calls made so far by the calling thread (dropped kinds included). A caller
+// compares two readings to learn whether its own work made a note; other threads do not move it. Not reset by
+// rsxUnimplementedReset().
+std::uint64_t rsxUnimplementedThreadNotes();
+
 // Forgets all counts. Intended for tests.
 void rsxUnimplementedReset();
 

@@ -61,6 +61,8 @@ public:
     Entry* find(const Key& key);
     // Whether the entry may be used without reading guest memory.
     bool fresh(const Entry& entry) const;
+    // Whether a write recorded in this epoch after write serial `serial` overlaps [begin, end) of `location`.
+    bool writtenSince(std::uint32_t location, std::uint64_t begin, std::uint64_t end, std::uint64_t serial) const;
     // The entry has just been checked against the guest bytes: trust it until the epoch ends or a write hits it.
     void markFresh(Entry& entry);
     // Stores new content for `key` (creating the entry), names it with a new content id and marks it fresh.
@@ -76,6 +78,12 @@ public:
     // A flip ended: drops entries unused for kIdleFlips flips and entries beyond the byte budget (least
     // recently used first).
     void onFlip(std::uint64_t flip_index);
+
+    std::uint64_t epoch() const { return epoch_; }
+    std::uint64_t writeSerial() const { return serial_; }
+    // Moves whenever an entry is created, replaced or dropped (store, erase, trimBytes, the idle drop in onFlip).
+    // While it is unchanged, a descriptor taken from an entry is still what find() would return for that key.
+    std::uint64_t generation() const { return generation_; }
 
     std::size_t entryCount() const { return entries_.size(); }
     std::uint64_t byteCount() const { return bytes_; }
@@ -96,14 +104,15 @@ private:
     // epoch is cheaper than the scan.
     static constexpr std::size_t kMaxWriteRanges = 64;
 
-    // Drops least recently used entries other than `keep` until the blobs fit the budget.
-    void trimBytes(const Entry* keep);
+    // Drops least recently used entries other than `keep` until the blobs fit the budget. Returns whether it
+    // dropped any; the caller moves generation_.
+    bool trimBytes(const Entry* keep);
     static std::uint64_t entryBytes(const Entry& entry) { return entry.data ? entry.data->size() : 0; }
 
     std::unordered_map<Key, Entry, KeyHash> entries_;
     std::uint64_t budget_bytes_;
     std::uint64_t bytes_ = 0;
-    std::uint64_t epoch_ = 1, serial_ = 0, use_tick_ = 0, flip_ = 0;
+    std::uint64_t epoch_ = 1, serial_ = 0, use_tick_ = 0, flip_ = 0, generation_ = 1;
     std::vector<WriteRange> writes_;
 };
 

@@ -53,14 +53,17 @@ RsxTextureCache::Entry* RsxTextureCache::find(const Key& key) {
 }
 
 bool RsxTextureCache::fresh(const Entry& entry) const {
-    if (entry.epoch != epoch_) return false;
+    return entry.epoch == epoch_ && !writtenSince(entry.location, entry.begin, entry.end, entry.serial);
+}
+
+bool RsxTextureCache::writtenSince(std::uint32_t location, std::uint64_t begin, std::uint64_t end,
+                                   std::uint64_t serial) const {
     for (const WriteRange& write : writes_) {
-        if (write.serial > entry.serial && write.location == entry.location && write.begin < entry.end &&
-            entry.begin < write.end) {
-            return false;
+        if (write.serial > serial && write.location == location && write.begin < end && begin < write.end) {
+            return true;
         }
     }
-    return true;
+    return false;
 }
 
 void RsxTextureCache::markFresh(Entry& entry) {
@@ -70,6 +73,7 @@ void RsxTextureCache::markFresh(Entry& entry) {
 
 RsxTextureCache::Entry& RsxTextureCache::store(const Key& key, const RsxTextureLayout& layout, std::uint64_t hash,
                                                std::shared_ptr<const std::vector<std::uint8_t>> data) {
+    generation_++;
     Entry& entry = entries_[key];
     bytes_ -= entryBytes(entry);
     entry.data = std::move(data);
@@ -95,6 +99,7 @@ void RsxTextureCache::erase(const Key& key) {
     if (it == entries_.end()) return;
     bytes_ -= entryBytes(it->second);
     entries_.erase(it);
+    generation_++;
 }
 
 void RsxTextureCache::beginEpoch() {
@@ -123,18 +128,22 @@ void RsxTextureCache::onFlip(std::uint64_t flip_index) {
     beginEpoch();
     // A scan of every entry is cheap next to a frame, but not worth doing for every one.
     if ((flip_index & 31) != 0) return;
+    bool dropped = false;
     for (auto it = entries_.begin(); it != entries_.end();) {
         if (flip_ - it->second.last_flip > kIdleFlips) {
             bytes_ -= entryBytes(it->second);
             it = entries_.erase(it);
+            dropped = true;
         } else {
             ++it;
         }
     }
-    trimBytes(nullptr);
+    if (trimBytes(nullptr)) dropped = true;
+    if (dropped) generation_++;
 }
 
-void RsxTextureCache::trimBytes(const Entry* keep) {
+bool RsxTextureCache::trimBytes(const Entry* keep) {
+    bool dropped = false;
     while (bytes_ > budget_bytes_) {
         auto oldest = entries_.end();
         for (auto it = entries_.begin(); it != entries_.end(); ++it) {
@@ -144,7 +153,9 @@ void RsxTextureCache::trimBytes(const Entry* keep) {
         if (oldest == entries_.end()) break;
         bytes_ -= entryBytes(oldest->second);
         entries_.erase(oldest);
+        dropped = true;
     }
+    return dropped;
 }
 
 }  // namespace tox2

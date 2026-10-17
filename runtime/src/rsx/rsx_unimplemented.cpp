@@ -23,9 +23,13 @@ UnimplementedState& state() {
     return *s;
 }
 
+// Per thread so that a note made by another thread cannot move a caller's reading; no atomic operation needed.
+thread_local std::uint64_t t_thread_notes = 0;
+
 }  // namespace
 
 void rsxNoteUnimplemented(std::string_view category, std::string_view key) {
+    t_thread_notes++;
     std::string name;
     name.reserve(category.size() + 1 + key.size());
     name.append(category).push_back(' ');
@@ -61,6 +65,8 @@ std::uint64_t rsxUnimplementedDropped() {
     std::lock_guard lock(s.mutex);
     return s.dropped;
 }
+
+std::uint64_t rsxUnimplementedThreadNotes() { return t_thread_notes; }
 
 void rsxUnimplementedReset() {
     UnimplementedState& s = state();
