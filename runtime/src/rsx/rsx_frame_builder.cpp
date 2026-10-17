@@ -340,7 +340,7 @@ void RsxFrameBuilder::clear(const RsxRegisters& regs, std::uint32_t mask) {
 bool RsxFrameBuilder::fillVertices(const RsxRegisters& regs, RsxDraw& draw, std::uint32_t vertex_base,
                                    std::uint32_t vertex_count) {
     const std::uint32_t base_offset = regs.reg(kMethodNv4097SetVertexDataBaseOffset);
-    draw.attribs = decodeVertexAttribs(regs);
+    decodeVertexAttribs(regs, draw.attribs);
 
     // Pass 1 finds every attribute's range. The first attribute that fails a check ends the plan; pass 2 still reads
     // the ones before it, so an unreadable earlier attribute is the note that wins, as when each attribute was sized

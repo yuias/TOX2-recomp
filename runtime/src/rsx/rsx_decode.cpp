@@ -434,8 +434,8 @@ bool rsxZetaWriteEnabled(const RsxRasterState& raster, RsxDepthFormat depth_form
 // RPCS3 `rsx_decode.h` vertex_array_helper (type bits 0-2, size 4-7, stride 8-15, frequency 16-31) and
 // vertex_array_offset_helper; the location is bit 31 of the offset word
 // (`draw_command_processor::analyse_inputs_interleaved`, `Core/RSXDrawCommands.cpp`).
-std::vector<RsxVertexAttrib> decodeVertexAttribs(const RsxRegisters& regs) {
-    std::vector<RsxVertexAttrib> out;
+void decodeVertexAttribs(const RsxRegisters& regs, std::vector<RsxVertexAttrib>& out) {
+    out.clear();
     for (std::uint32_t slot = 0; slot < kRsxVertexSlotCount; slot++) {
         const std::uint32_t format = regs.reg(kMethodNv4097SetVertexDataArrayFormat + slot * 4);
         const std::uint32_t size = (format >> 4) & 0xF;
@@ -455,7 +455,6 @@ std::vector<RsxVertexAttrib> decodeVertexAttribs(const RsxRegisters& regs) {
         if ((format >> 16) != 0) noteState("vertex frequency");
         out.push_back(attrib);
     }
-    return out;
 }
 
 // RPCS3 `NV47/HW/nv4097.h` set_vertex_data_impl: the 4F method puts word i of attribute n in

@@ -7844,7 +7844,8 @@ void testRsxDecode() {
     regs->apply(0x1680 + 2 * 4, 0x8000100C);
     regs->apply(0x1680 + 3 * 4, 0x80001018);
     regs->apply(0x1680 + 8 * 4, 0x8000101C);
-    const std::vector<tox2::RsxVertexAttrib> attribs = tox2::decodeVertexAttribs(*regs);
+    std::vector<tox2::RsxVertexAttrib> attribs;
+    tox2::decodeVertexAttribs(*regs, attribs);
     CHECK(attribs.size() == 4);
     if (attribs.size() == 4) {
         const std::uint8_t slots[] = {0, 2, 3, 8}, types[] = {2, 2, 4, 2}, sizes[] = {3, 3, 4, 2};
@@ -7857,7 +7858,8 @@ void testRsxDecode() {
     }
     CHECK(tox2::rsxUnimplementedSnapshot().empty());
     regs->apply(0x1740 + 5 * 4, 6u | (1u << 4));  // CMP32
-    CHECK(tox2::decodeVertexAttribs(*regs).size() == 5 && unimplementedCount("vertex type cmp") == 1);
+    tox2::decodeVertexAttribs(*regs, attribs);    // also checks that the vector is replaced, not appended to
+    CHECK(attribs.size() == 5 && unimplementedCount("vertex type cmp") == 1);
     regs->apply(0x1740 + 5 * 4, 2);
 
     // Default attributes: slot 2 of SET_VERTEX_DATA4F_M.

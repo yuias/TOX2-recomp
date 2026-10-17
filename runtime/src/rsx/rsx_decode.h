@@ -118,8 +118,9 @@ bool rsxStencilOpWrites(std::uint32_t op_word);
 // is 0 or the front ops are all KEEP. The compare function is not consulted.
 bool rsxZetaWriteEnabled(const RsxRasterState& raster, RsxDepthFormat depth_format);
 
-// One entry per slot whose array is enabled (size != 0); data_offset stays 0 for the builder to fill.
-std::vector<RsxVertexAttrib> decodeVertexAttribs(const RsxRegisters& regs);
+// Replaces `out` with one entry per slot whose array is enabled (size != 0); data_offset stays 0 for the builder to
+// fill. Filled in place so a recycled vector keeps its capacity.
+void decodeVertexAttribs(const RsxRegisters& regs, std::vector<RsxVertexAttrib>& out);
 
 // Four floats per slot from SET_VERTEX_DATA4F_M. The register file cannot tell "written with zeros"
 // from "never written": an unbound, never-written slot is the renderer's call.

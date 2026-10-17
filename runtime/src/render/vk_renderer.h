@@ -423,6 +423,8 @@ private:
 
     std::unique_ptr<DrawPipelines> pipelines_;
     std::unique_ptr<TextureCache> textures_;
+    // Reused by prepareTextures so laying out a texture per draw does not allocate once the level storage has grown.
+    RsxTextureLayout texture_layout_;
     std::map<VkFormat, bool> vertex_format_support_;
     std::map<VkFormat, bool> blend_support_;
 

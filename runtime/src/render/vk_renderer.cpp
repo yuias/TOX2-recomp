@@ -2120,7 +2120,7 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
             // The blob holds every level in tightly packed rows (see RsxTextureDesc::data), which is the
             // layout of a linear texture without padding.
             const std::vector<std::uint8_t>& blob = *texture->data;
-            RsxTextureLayout layout;
+            RsxTextureLayout& layout = texture_layout_;
             if (!rsxTextureLayout(texture->format, true, texture->width, texture->height, texture->mips, 0,
                                   kind == RsxTextureKind::Cube ? 6 : 1, layout,
                                   kind == RsxTextureKind::Tex3D ? texture->depth : 1) ||

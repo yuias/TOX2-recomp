@@ -85,7 +85,12 @@ bool rsxTextureLayout(std::uint32_t format, bool linear, std::uint32_t width, st
     const std::uint64_t padded_pitch = linear ? (pitch == 0 ? first_row : pitch) : 0;
     if (linear && padded_pitch < first_row) return false;
 
-    RsxTextureLayout layout;
+    // Every check above has passed, so `out` can be rebuilt in place. Its level storage is reused, which keeps a
+    // caller that lays out a texture per draw from allocating.
+    RsxTextureLayout& layout = out;
+    layout.guest_bytes = 0;
+    layout.packed_bytes = 0;
+    layout.levels.clear();
     layout.mip_count = rsxTextureMipCount(format, width, height, mips);
     layout.layer_count = layers;
     layout.block_bytes = block_bytes;
@@ -119,7 +124,6 @@ bool rsxTextureLayout(std::uint32_t format, bool linear, std::uint32_t width, st
         }
         if (!linear) guest = (guest + kLayerAlignment - 1) & ~(kLayerAlignment - 1);
     }
-    out = std::move(layout);
     return true;
 }
 
