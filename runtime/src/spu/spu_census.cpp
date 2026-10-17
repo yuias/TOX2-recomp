@@ -12,6 +12,7 @@
 #include <string_view>
 
 #include "core/census.h"
+#include "core/log.h"
 #include "core/reservation.h"
 #include "core/threads.h"
 #include "spu/spu_channels.h"
@@ -97,7 +98,11 @@ constexpr std::uint64_t kReservationWaitOverUs = 2000;
 struct ReservationWaitCounters {
     std::atomic<std::uint64_t> epoch_before_sleep{0}, epoch_woken{0}, timeout{0}, halt{0};
     LatencyStats lost_wait{kReservationWaitOverUs};
+    std::array<std::atomic<std::uint64_t>, kWokenBuckets> woken_us{};
+    std::atomic<std::uint32_t> lost_logged{0};
 };
+
+constexpr std::uint32_t kLostLogLimit = 16;
 
 // Leaked like the registry: SPU threads may still wait while the process shuts down.
 ReservationWaitCounters& reservationWaits() {
@@ -184,8 +189,23 @@ void spuCountReservationWait(StoreWait reason, bool slept) {
     }
 }
 
-void spuCountLostAfterTimeout(std::chrono::microseconds waited) {
-    reservationWaits().lost_wait.record(static_cast<std::uint64_t>(std::max<std::int64_t>(waited.count(), 0)));
+void spuCountLostAfterTimeout(std::chrono::microseconds waited, std::uint32_t line, std::uint32_t thread_id,
+                              std::uint32_t site) {
+    ReservationWaitCounters& c = reservationWaits();
+    const auto waited_us = static_cast<std::uint64_t>(std::max<std::int64_t>(waited.count(), 0));
+    c.lost_wait.record(waited_us);
+    // Bounded: the first events show which lines and code lose reservations to plain stores.
+    if (c.lost_logged.fetch_add(1, std::memory_order_relaxed) < kLostLogLimit) {
+        logInfo("tox2: spu: reservation lost after timeout: line {:#010x} thread {:#010x} at ls {:#07x}, waited {} us",
+                line, thread_id, site, waited_us);
+    }
+}
+
+void spuCountWokenSleep(std::chrono::microseconds slept) {
+    const auto us = static_cast<std::uint64_t>(std::max<std::int64_t>(slept.count(), 0));
+    std::size_t bucket = 0;
+    while (bucket < kWokenBucketBoundsUs.size() && us >= kWokenBucketBoundsUs[bucket]) bucket++;
+    reservationWaits().woken_us[bucket].fetch_add(1, std::memory_order_relaxed);
 }
 
 SpuReservationWaits spuReservationWaitSnapshot() {
@@ -197,15 +217,41 @@ SpuReservationWaits spuReservationWaitSnapshot() {
     out.timeout = c.timeout.load(std::memory_order_relaxed);
     out.halt = c.halt.load(std::memory_order_relaxed);
     out.lost_wait = c.lost_wait.snapshot();
+    for (std::size_t i = 0; i < kWokenBuckets; i++) out.woken_us[i] = c.woken_us[i].load(std::memory_order_relaxed);
+    out.notifies = reservations().stats().notifies_by_kind;
     return out;
 }
 
 std::string spuReservationWaitSegment(const SpuReservationWaits& now, const SpuReservationWaits& before) {
     const std::uint64_t lost = now.lost_wait.count - before.lost_wait.count;
     if (now.epoch == before.epoch && now.timeout == before.timeout && lost == 0) return {};
-    return std::format("rsv-wait epoch {} timeout {} lost-after-timeout {} pre-sleep {} woken {}",
-                       now.epoch - before.epoch, now.timeout - before.timeout, lost,
-                       now.epoch_before_sleep - before.epoch_before_sleep, now.epoch_woken - before.epoch_woken);
+    const auto woken = [&](std::size_t i) { return now.woken_us[i] - before.woken_us[i]; };
+    const auto notified = [&](WriterKind kind) {
+        const auto i = static_cast<std::size_t>(kind);
+        return now.notifies[i] - before.notifies[i];
+    };
+    // The histogram and the notify counts come last: scripts parse the fields before them.
+    return std::format(
+            "rsv-wait epoch {} timeout {} lost-after-timeout {} pre-sleep {} woken {} "
+            "woken-us <2 {} 2-5 {} 5-10 {} 10-20 {} 20-50 {} 50-100 {} 100-500 {} 500-1000 {} >1000 {} "
+            "notify putllc {} put {} putlluc {} ppu {} wake {}",
+            now.epoch - before.epoch, now.timeout - before.timeout, lost,
+            now.epoch_before_sleep - before.epoch_before_sleep, now.epoch_woken - before.epoch_woken, woken(0),
+            woken(1), woken(2), woken(3), woken(4), woken(5), woken(6), woken(7), woken(8),
+            notified(WriterKind::Putllc), notified(WriterKind::Put), notified(WriterKind::Putlluc),
+            notified(WriterKind::PpuStoreConditional), notified(WriterKind::Wake));
+}
+
+SpuPutllcFails spuPutllcFailSnapshot() { return reservations().stats().putllc_fails; }
+
+std::string spuPutllcFailSegment(const SpuPutllcFails& now, const SpuPutllcFails& before) {
+    if (now == before) return {};
+    const auto delta = [&](PutllcFail why) {
+        const auto i = static_cast<std::size_t>(why);
+        return now[i] - before[i];
+    };
+    return std::format("putllc-fail lost {} locked {} moved {} data {}", delta(PutllcFail::Lost),
+                       delta(PutllcFail::Locked), delta(PutllcFail::Moved), delta(PutllcFail::Data));
 }
 
 std::vector<SpuReceiveRow> spuReceiveSnapshot() {

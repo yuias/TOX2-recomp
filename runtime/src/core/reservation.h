@@ -48,10 +48,25 @@ struct alignas(64) WatchSlot {
 static_assert(sizeof(std::atomic<std::uint32_t>) == 4 && std::atomic<std::uint32_t>::is_always_lock_free,
               "the wake words are waited on by address");
 
-// Cost counters: epoch bumps, and the bumps that found a waiter and notified.
+// What bumped the epoch; notifies are counted per kind.
+enum class WriterKind : std::uint8_t { Putllc, Put, Putlluc, PpuStoreConditional, Wake };
+inline constexpr std::size_t kWriterKindCount = 5;
+
+// Why a PUTLLC failed, by the first check that rejected it.
+enum class PutllcFail : std::uint8_t {
+    Lost,    // no valid reservation, or one on another line
+    Locked,  // the stripe was held by another writer
+    Moved,   // the stripe version changed since GETLLAR
+    Data     // the line differs from the snapshot
+};
+inline constexpr std::size_t kPutllcFailCount = 4;
+
+// Cost counters: epoch bumps, and the bumps that found a waiter and notified (`notifies` is the sum of the kinds).
 struct ReservationStats {
     std::uint64_t publishes = 0;
     std::uint64_t notifies = 0;
+    std::array<std::uint64_t, kWriterKindCount> notifies_by_kind{};
+    std::array<std::uint64_t, kPutllcFailCount> putllc_fails{};
 };
 
 class ReservationTable {
@@ -163,11 +178,14 @@ private:
     std::uint64_t lock(std::atomic<std::uint64_t>& s);
     // Version bump only; the caller publishes once its writes are all done.
     void unlockVersion(std::atomic<std::uint64_t>& s);
-    void unlockWithWrite(std::atomic<std::uint64_t>& s, std::uint32_t line);
+    void unlockWithWrite(std::atomic<std::uint64_t>& s, std::uint32_t line, WriterKind kind);
     void unlockClean(std::atomic<std::uint64_t>& s);
     // Bumps the epoch and wakes the waiters that watch a stripe of the inclusive line range (the versions are
     // already updated, see waitStoreEpoch()).
-    void publish(std::uint32_t first_line, std::uint32_t last_line);
+    void publish(std::uint32_t first_line, std::uint32_t last_line, WriterKind kind);
+    void countPutllcFail(PutllcFail why) {
+        diag_.putllc_fails[static_cast<std::size_t>(why)].fetch_add(1, std::memory_order_relaxed);
+    }
 
     std::unique_ptr<std::atomic<std::uint64_t>[]> stripes_;  // bit 0 lock, bits 1..63 version
     std::atomic<std::uint64_t> epoch_{0};
@@ -176,7 +194,11 @@ private:
     // Bumped by every publish while a wildcard waits, and by wake(); the wildcards sleep on it.
     std::atomic<std::uint32_t> wildcard_wake_{0};
     std::atomic<std::uint64_t> publishes_{0};
-    std::atomic<std::uint64_t> notifies_{0};
+    // Own cache lines: the failure counters are bumped from several SPU threads and must not slow the epoch.
+    struct alignas(64) Diagnostics {
+        std::array<std::atomic<std::uint64_t>, kWriterKindCount> notifies{};
+        std::array<std::atomic<std::uint64_t>, kPutllcFailCount> putllc_fails{};
+    } diag_;
     void (*compare_hook_)(void*) = nullptr;
     void* compare_hook_arg_ = nullptr;
 };

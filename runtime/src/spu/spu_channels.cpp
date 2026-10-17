@@ -166,7 +166,9 @@ bool SpuChannels::readEventStat(std::uint32_t site, std::uint32_t* value) {
         const std::uint64_t seen = reservations().storeEpoch();
         const std::uint32_t status = eventStatus() & mask;
         // The previous pass saw no lost-line event, so the bit is new.
-        if (after_timeout && (status & spu_event::kLockLineLost) != 0) spuCountLostAfterTimeout(timeout_waited);
+        if (after_timeout && (status & spu_event::kLockLineLost) != 0) {
+            spuCountLostAfterTimeout(timeout_waited, mfc_.reservationLine(), thread_.id(), site);
+        }
         after_timeout = false;
         if (status != 0) {
             table_wait_.store(false, std::memory_order_relaxed);
@@ -201,6 +203,9 @@ bool SpuChannels::readEventStat(std::uint32_t site, std::uint32_t* value) {
             if (reason == StoreWait::Timeout) {
                 after_timeout = true;
                 timeout_waited = std::chrono::duration_cast<microseconds>(Clock::now() - wait_start);
+            } else if (reason == StoreWait::Epoch && slept) {
+                // Only a wait that slept pays the extra clock read.
+                spuCountWokenSleep(std::chrono::duration_cast<microseconds>(Clock::now() - wait_start));
             }
             continue;
         }

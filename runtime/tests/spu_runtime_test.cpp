@@ -847,6 +847,89 @@ void testFailedWritersDoNotLoseReservation() {
     }
 }
 
+// Failed PUTLLCs are counted by the check that rejected them. The table is local, so the counts are exact. A stripe
+// held by another writer (Locked) has no deterministic setup.
+void testPutllcFailReasons() {
+    tox2::ReservationTable table;
+    TestMemory mem;
+    tox2::Reservation res;
+    std::uint8_t ls[128];
+    std::uint8_t zeros[128] = {};
+    using tox2::PutllcFail;
+    const auto fails = [&](PutllcFail why) { return table.stats().putllc_fails[static_cast<std::size_t>(why)]; };
+
+    CHECK(!table.putllc(mem.base(), 0, ls, res));  // no reservation
+    CHECK(fails(PutllcFail::Lost) == 1);
+    table.getllar(mem.base(), 0, ls, res);
+    CHECK(!table.putllc(mem.base(), 128, ls, res));  // another line
+    CHECK(fails(PutllcFail::Lost) == 2);
+
+    table.getllar(mem.base(), 0, ls, res);
+    table.put(mem.base(), 0x40, zeros, 16);  // same bytes, the version moves
+    CHECK(!table.putllc(mem.base(), 0, ls, res));
+    CHECK(fails(PutllcFail::Moved) == 1);
+
+    table.getllar(mem.base(), 0, ls, res);
+    plainStore8(mem.bytes + 0x72, 0xff);  // no version change
+    CHECK(!table.putllc(mem.base(), 0, ls, res));
+    CHECK(fails(PutllcFail::Data) == 1);
+
+    table.getllar(mem.base(), 0, ls, res);
+    CHECK(table.putllc(mem.base(), 0, ls, res));
+    const tox2::ReservationStats stats = table.stats();
+    CHECK(stats.putllc_fails[static_cast<std::size_t>(PutllcFail::Lost)] == 2);
+    CHECK(stats.putllc_fails[static_cast<std::size_t>(PutllcFail::Locked)] == 0);
+    CHECK(stats.putllc_fails[static_cast<std::size_t>(PutllcFail::Moved)] == 1);
+    CHECK(stats.putllc_fails[static_cast<std::size_t>(PutllcFail::Data)] == 1);
+}
+
+// A notify is counted under the kind of the writer whose epoch bump found a waiter; wake() always notifies.
+void testNotifyByWriterKind() {
+    tox2::ReservationTable table;
+    TestMemory mem;
+    std::atomic<bool> stop{false};
+    std::thread waiter([&] {
+        while (!stop.load()) table.waitStoreEpoch(table.storeEpoch(), nullptr, milliseconds(20));
+    });
+    const auto notified = [&](tox2::WriterKind kind) {
+        return table.stats().notifies_by_kind[static_cast<std::size_t>(kind)];
+    };
+    // Repeats the write until the waiter is registered and sees it, which takes a few tries at most.
+    const auto until_notified = [&](tox2::WriterKind kind, auto&& write) {
+        const auto deadline = Clock::now() + milliseconds(3000);
+        while (notified(kind) == 0 && Clock::now() < deadline) {
+            write();
+            std::this_thread::sleep_for(milliseconds(1));
+        }
+        return notified(kind) != 0;
+    };
+    std::uint8_t ls[128] = {};
+    std::uint8_t zeros[16] = {};
+    tox2::Reservation res;
+    CHECK(until_notified(tox2::WriterKind::Put, [&] { table.put(mem.base(), 0, zeros, 16); }));
+    CHECK(until_notified(tox2::WriterKind::Putlluc, [&] { table.putlluc(mem.base(), 0, ls); }));
+    CHECK(until_notified(tox2::WriterKind::Putllc, [&] {
+        table.getllar(mem.base(), 0, ls, res);
+        ls[0] ^= 1;
+        table.putllc(mem.base(), 0, ls, res);
+    }));
+    CHECK(until_notified(tox2::WriterKind::PpuStoreConditional, [&] {
+        std::uint64_t value = 0, version = 0;
+        table.loadReserved(mem.base(), 0, 4, value, version);
+        table.storeConditional(mem.base(), 0, 4, value, version, value + 1);
+    }));
+    CHECK(notified(tox2::WriterKind::Wake) == 0);
+    table.wake();
+    CHECK(notified(tox2::WriterKind::Wake) == 1);
+    stop = true;
+    table.wake();
+    waiter.join();
+    const tox2::ReservationStats stats = table.stats();
+    std::uint64_t sum = 0;
+    for (const std::uint64_t n : stats.notifies_by_kind) sum += n;
+    CHECK(stats.notifies == sum);
+}
+
 // GETLLAR must never return a line that is half one PUTLLUC and half another.
 void testGetllarIsNotTorn() {
     tox2::ReservationTable table;
@@ -3060,10 +3143,37 @@ void testReservationWaitSplit() {
     some.epoch_woken = 2;
     some.timeout = 3;
     some.lost_wait.count = 1;
+    some.woken_us = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+    some.notifies = {10, 20, 30, 40, 50};
     CHECK(tox2::spuReservationWaitSegment(some, {}) ==
-          "rsv-wait epoch 7 timeout 3 lost-after-timeout 1 pre-sleep 5 woken 2");
+          "rsv-wait epoch 7 timeout 3 lost-after-timeout 1 pre-sleep 5 woken 2 "
+          "woken-us <2 1 2-5 2 5-10 3 10-20 4 20-50 5 50-100 6 100-500 7 500-1000 8 >1000 9 "
+          "notify putllc 10 put 20 putlluc 30 ppu 40 wake 50");
+    tox2::SpuReservationWaits later = some;
+    later.epoch += 1;
+    later.woken_us[8] += 2;
+    later.notifies[4] += 3;
+    CHECK(tox2::spuReservationWaitSegment(later, some) ==
+          "rsv-wait epoch 1 timeout 0 lost-after-timeout 0 pre-sleep 0 woken 0 "
+          "woken-us <2 0 2-5 0 5-10 0 10-20 0 20-50 0 50-100 0 100-500 0 500-1000 0 >1000 2 "
+          "notify putllc 0 put 0 putlluc 0 ppu 0 wake 3");
     CHECK(tox2::spuReservationWaitSegment(some, some).empty());
     CHECK(tox2::spuReservationWaitSegment({}, {}).empty());
+
+    // Slept times land in the bucket whose upper bound they are below; the bounds themselves go up a bucket.
+    const tox2::SpuReservationWaits hist_before = tox2::spuReservationWaitSnapshot();
+    for (const std::int64_t us : {0, 1, 2, 4, 5, 19, 20, 99, 100, 499, 999, 1000, 5000}) {
+        tox2::spuCountWokenSleep(std::chrono::microseconds(us));
+    }
+    const tox2::SpuReservationWaits hist_after = tox2::spuReservationWaitSnapshot();
+    const std::array<std::uint64_t, tox2::kWokenBuckets> expected_buckets = {2, 2, 1, 1, 1, 1, 2, 1, 2};
+    for (std::size_t i = 0; i < tox2::kWokenBuckets; i++) {
+        CHECK(hist_after.woken_us[i] - hist_before.woken_us[i] == expected_buckets[i]);
+    }
+
+    const tox2::SpuPutllcFails none{};
+    CHECK(tox2::spuPutllcFailSegment(none, none).empty());
+    CHECK(tox2::spuPutllcFailSegment({4, 3, 2, 1}, {1, 1, 1, 1}) == "putllc-fail lost 3 locked 2 moved 1 data 0");
 }
 
 // The inbound mailbox can be replaced by one value, whatever it holds.
@@ -4368,6 +4478,8 @@ int main(int argc, char** argv) {
     testUnrelatedPutDoesNotNotify();
     testWatchLineWakesOnlyItsWaiter();
     testFailedWritersDoNotLoseReservation();
+    testPutllcFailReasons();
+    testNotifyByWriterKind();
     testGetllarIsNotTorn();
     testSharedTable();
     testDispatchChain();

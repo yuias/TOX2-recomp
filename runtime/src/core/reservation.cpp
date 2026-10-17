@@ -159,11 +159,11 @@ std::uint64_t ReservationTable::lock(std::atomic<std::uint64_t>& s) {
 
 void ReservationTable::unlockVersion(std::atomic<std::uint64_t>& s) { s.fetch_add(1, std::memory_order_seq_cst); }
 
-void ReservationTable::unlockWithWrite(std::atomic<std::uint64_t>& s, std::uint32_t line) {
+void ReservationTable::unlockWithWrite(std::atomic<std::uint64_t>& s, std::uint32_t line, WriterKind kind) {
     unlockVersion(s);
     // The version moves before the epoch, so a waiter that read the old epoch and then found the
     // reservation intact is still woken by this bump.
-    publish(line, line);
+    publish(line, line, kind);
 }
 
 void ReservationTable::unlockClean(std::atomic<std::uint64_t>& s) { s.fetch_sub(1, std::memory_order_release); }
@@ -176,7 +176,7 @@ void ReservationTable::unlockClean(std::atomic<std::uint64_t>& s) { s.fetch_sub(
 // finds the word changed or is woken by the writer's wake. A slot reused between the writer's read and its bump gets
 // a spurious Epoch, which costs nothing. The waiter watches the stripe of its line, and every written line's version
 // moved before this call, so whatever makes lost() true reaches the waiter through a stripe it watches.
-void ReservationTable::publish(std::uint32_t first_line, std::uint32_t last_line) {
+void ReservationTable::publish(std::uint32_t first_line, std::uint32_t last_line, WriterKind kind) {
     publishes_.fetch_add(1, std::memory_order_relaxed);
     epoch_.fetch_add(1, std::memory_order_seq_cst);
     bool woke = false;
@@ -196,7 +196,7 @@ void ReservationTable::publish(std::uint32_t first_line, std::uint32_t last_line
             woke = true;
         }
     }
-    if (woke) notifies_.fetch_add(1, std::memory_order_relaxed);
+    if (woke) diag_.notifies[static_cast<std::size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
 }
 
 void ReservationTable::wake() {
@@ -205,7 +205,7 @@ void ReservationTable::wake() {
     // Every word moves, occupied or not: a slot that is claimed after this bump finds the epoch moved.
     bumpAndWake(wildcard_wake_);
     for (WatchSlot& slot : watch_) bumpAndWake(slot.wake);
-    notifies_.fetch_add(1, std::memory_order_relaxed);
+    diag_.notifies[static_cast<std::size_t>(WriterKind::Wake)].fetch_add(1, std::memory_order_relaxed);
 }
 
 void ReservationTable::getllar(const std::uint8_t* base, std::uint32_t ea, std::uint8_t* dst, Reservation& res) {
@@ -240,12 +240,17 @@ bool ReservationTable::putllc(std::uint8_t* base, std::uint32_t ea, const std::u
     const std::uint32_t line = ea & ~(kReservationLineSize - 1);
     const bool usable = res.valid && res.line == line;
     res.valid = false;
-    if (!usable) return false;
+    if (!usable) {
+        countPutllcFail(PutllcFail::Lost);
+        return false;
+    }
 
     // No spinning: a locked or moved stripe means another writer got there first.
     std::atomic<std::uint64_t>& s = stripe(line);
     std::uint64_t expected = res.version;
     if (!s.compare_exchange_strong(expected, expected + 1, std::memory_order_acquire, std::memory_order_relaxed)) {
+        // `expected` now holds the stripe value: an odd one is a writer inside its critical section.
+        countPutllcFail((expected & 1) != 0 ? PutllcFail::Locked : PutllcFail::Moved);
         return false;
     }
 
@@ -253,6 +258,7 @@ bool ReservationTable::putllc(std::uint8_t* base, std::uint32_t ea, const std::u
     for (std::uint32_t i = 0; i < kChunkCount; i++) {
         if (loadChunk(host + 8 * i) != readBuffer(res.snapshot + 8 * i)) {
             unlockClean(s);
+            countPutllcFail(PutllcFail::Data);
             return false;
         }
     }
@@ -266,7 +272,7 @@ bool ReservationTable::putllc(std::uint8_t* base, std::uint32_t ea, const std::u
         if (!watch_hit) watch_hit = lwmutexWatchCheck(LwmutexWatchKind::SpuPutllc, line + 8 * i, 8, 0);
         storeChunk(host + 8 * i, value);
     }
-    unlockWithWrite(s, line);
+    unlockWithWrite(s, line, WriterKind::Putllc);
     return true;
 }
 
@@ -276,7 +282,7 @@ void ReservationTable::putlluc(std::uint8_t* base, std::uint32_t ea, const std::
     std::atomic<std::uint64_t>& s = stripe(line);
     lock(s);
     storeBytes(base + line, src, kReservationLineSize);
-    unlockWithWrite(s, line);
+    unlockWithWrite(s, line, WriterKind::Putlluc);
 }
 
 void ReservationTable::put(std::uint8_t* base, std::uint32_t ea, const std::uint8_t* src, std::uint32_t size) {
@@ -299,7 +305,7 @@ void ReservationTable::put(std::uint8_t* base, std::uint32_t ea, const std::uint
         size -= piece;
     }
     // Every line's version has moved by now, so this one epoch bump still follows each of them.
-    publish(first_line, last_line);
+    publish(first_line, last_line, WriterKind::Put);
 }
 
 void ReservationTable::loadReserved(const std::uint8_t* base, std::uint32_t ea, std::uint32_t size,
@@ -352,7 +358,7 @@ bool ReservationTable::storeConditional(std::uint8_t* base, std::uint32_t ea, st
         }
     }
     if (ok) {
-        unlockWithWrite(s, ea & ~(kReservationLineSize - 1));
+        unlockWithWrite(s, ea & ~(kReservationLineSize - 1), WriterKind::PpuStoreConditional);
     } else {
         unlockClean(s);
     }
@@ -399,7 +405,16 @@ StoreWait ReservationTable::waitStoreEpoch(std::uint64_t seen, const std::uint32
 }
 
 ReservationStats ReservationTable::stats() const {
-    return {publishes_.load(std::memory_order_relaxed), notifies_.load(std::memory_order_relaxed)};
+    ReservationStats out;
+    out.publishes = publishes_.load(std::memory_order_relaxed);
+    for (std::size_t i = 0; i < kWriterKindCount; i++) {
+        out.notifies_by_kind[i] = diag_.notifies[i].load(std::memory_order_relaxed);
+        out.notifies += out.notifies_by_kind[i];
+    }
+    for (std::size_t i = 0; i < kPutllcFailCount; i++) {
+        out.putllc_fails[i] = diag_.putllc_fails[i].load(std::memory_order_relaxed);
+    }
+    return out;
 }
 
 ReservationTable& reservations() {

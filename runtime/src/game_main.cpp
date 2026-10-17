@@ -575,8 +575,8 @@ tox2::PerfSource lockPerfSource() {
 }
 
 tox2::PerfSource spuPerfSource() {
-    return [prev = std::map<std::uint32_t, tox2::SpuReceiveRow>{},
-            prev_waits = tox2::SpuReservationWaits{}]() mutable -> std::string {
+    return [prev = std::map<std::uint32_t, tox2::SpuReceiveRow>{}, prev_waits = tox2::SpuReservationWaits{},
+            prev_fails = tox2::SpuPutllcFails{}]() mutable -> std::string {
         std::string body;
         for (const tox2::SpuReceiveRow& row : tox2::spuReceiveSnapshot()) {
             const tox2::SpuReceiveRow& before = prev[row.id];
@@ -594,6 +594,10 @@ tox2::PerfSource spuPerfSource() {
         const std::string segment = tox2::spuReservationWaitSegment(waits, prev_waits);
         if (!segment.empty()) body += std::format("{}{}", body.empty() ? "" : " | ", segment);
         prev_waits = waits;
+        const tox2::SpuPutllcFails fails = tox2::spuPutllcFailSnapshot();
+        const std::string fail_segment = tox2::spuPutllcFailSegment(fails, prev_fails);
+        if (!fail_segment.empty()) body += std::format("{}{}", body.empty() ? "" : " | ", fail_segment);
+        prev_fails = fails;
         return body;
     };
 }

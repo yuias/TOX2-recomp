@@ -4,6 +4,7 @@
 // is constructed and hands its counters over when it is destroyed, so the totals survive the fresh objects
 // that lv2 builds at every group start.
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -27,6 +28,10 @@ void spuCensusStarted();
 // The lines of the "census: spu" section; empty when no SPU thread started since the last reset.
 std::vector<std::string> spuCensusLines();
 
+// Upper bounds in microseconds of the buckets of SpuReservationWaits::woken_us; the last bucket is everything above.
+inline constexpr std::array<std::uint64_t, 8> kWokenBucketBoundsUs = {2, 5, 10, 20, 50, 100, 500, 1000};
+inline constexpr std::size_t kWokenBuckets = kWokenBucketBoundsUs.size() + 1;
+
 // How the SPU waits on the reservation table in SpuChannels::readEventStat ended, process-wide. A reservation lost
 // through a plain PPU store does not move the store epoch, so it shows up as a Timeout that is followed by a lost
 // reservation: that is what `lost_wait` counts (and times, from the start of the wait that timed out). Monotonic;
@@ -37,14 +42,29 @@ struct SpuReservationWaits {
     std::uint64_t epoch_woken = 0;         // Epoch after sleeping: the waiter's wake word changed
     std::uint64_t timeout = 0, halt = 0;
     LatencySnapshot lost_wait;  // count = Timeout returns after which the reservation was found lost
+    // Time from the start of the wait to the return, for the Epoch returns after a sleep (epoch_woken).
+    std::array<std::uint64_t, kWokenBuckets> woken_us{};
+    // Table notifies by writer kind (index = WriterKind), taken from the reservation table.
+    std::array<std::uint64_t, kWriterKindCount> notifies{};
 };
 // `slept` is what waitStoreEpoch() reported; it only splits the Epoch returns.
 void spuCountReservationWait(StoreWait reason, bool slept);
-void spuCountLostAfterTimeout(std::chrono::microseconds waited);
+// Also logs the first 16 events (line address, thread id and the LS address of the waiting rdch).
+void spuCountLostAfterTimeout(std::chrono::microseconds waited, std::uint32_t line, std::uint32_t thread_id,
+                              std::uint32_t site);
+// `slept` is how long an Epoch-after-sleep wait took.
+void spuCountWokenSleep(std::chrono::microseconds slept);
 SpuReservationWaits spuReservationWaitSnapshot();
 // The perf-line segment for the waits between two snapshots; empty when epoch, timeout and lost_wait.count are all
 // unchanged.
+// It ends with the woken-us histogram and the notify counts.
 std::string spuReservationWaitSegment(const SpuReservationWaits& now, const SpuReservationWaits& before);
+
+// Failed PUTLLCs by reason, process-wide and monotonic (from the reservation table).
+using SpuPutllcFails = std::array<std::uint64_t, kPutllcFailCount>;
+SpuPutllcFails spuPutllcFailSnapshot();
+// "putllc-fail lost x locked y moved z data w" for the failures between two snapshots; empty when there are none.
+std::string spuPutllcFailSegment(const SpuPutllcFails& now, const SpuPutllcFails& before);
 
 // The blocking-receive timing of one thread (see SpuThread::receiveBusy), summed over its runs.
 struct SpuReceiveRow {

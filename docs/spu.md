@@ -369,7 +369,17 @@ The SPU's own floating-point rules are emitted as written (the full list of devi
 - With `--log-level debug` the same receive statistics, and `rsv-wait epoch <n> timeout <n> lost-after-timeout
   <n> pre-sleep <n> woken <n>`, are logged every second as `tox2: perf:` lines (see [Audio](audio.md#log-lines)). `epoch`
   is the sum of `pre-sleep` (the wait returned without sleeping because the store epoch had already moved) and
-  `woken` (a write to a watched line or a wake ended the sleep).
+  `woken` (a write to a watched line or a wake ended the sleep). The line continues with `woken-us <2 <n> 2-5 <n>
+  5-10 <n> 10-20 <n> 20-50 <n> 50-100 <n> 100-500 <n> 500-1000 <n> >1000 <n>`, a histogram in microseconds of
+  how long the `woken` waits took from the start of the wait to the return, and `notify putllc <n> put <n> putlluc
+  <n> ppu <n> wake <n>`, the epoch bumps that found a waiter and woke it, by writer (PUTLLC, PUT, PUTLLUC, PPU
+  store-conditional, explicit wake such as a mailbox push or a halt). A separate segment `putllc-fail lost <n>
+  locked <n> moved <n> data <n>` counts the failed PUTLLCs of the period by the check that rejected them: no
+  usable reservation (none, or on another line), the stripe held by another writer, the stripe version changed
+  since GETLLAR, or the line differs from the snapshot.
+- The first 16 reservations found lost right after a timed-out wait (a plain store broke them) are logged at info
+  level as `tox2: spu: reservation lost after timeout: line 0x<line> thread 0x<id> at ls 0x<site>, waited <n> us`,
+  where `site` is the LS address of the waiting `rdch`.
 
 ## What the current run reaches
 
