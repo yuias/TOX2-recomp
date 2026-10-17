@@ -51,6 +51,13 @@ function(tox2_bench_add)
     PASS_REGULAR_EXPRESSION "bench spu-replay: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
     TIMEOUT 120)
 
+  add_test(NAME bench_spu_dispatch
+    COMMAND tox2_bench spu-dispatch --images 4 --entries 16 --dispatches 2000 --pollute-kb 32
+            --iterations 2 --warmup 1)
+  set_tests_properties(bench_spu_dispatch PROPERTIES
+    PASS_REGULAR_EXPRESSION "bench spu-dispatch: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
+    TIMEOUT 120)
+
   foreach(capture IN LISTS TOX2_SPU_REPLAY_CAPTURES)
     if(NOT EXISTS "${capture}")
       continue()

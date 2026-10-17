@@ -27,6 +27,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "core/reservation.h"
@@ -733,6 +734,222 @@ int runSpuReplay(const Case& self, const Options& options) {
     });
 }
 
+// Layout of the spu-dispatch case. SPURS keeps the kernel, the policy modules and the tasks of a workload resident in
+// the LS at the same time, and every one of them is a registered image with its own entry_of table. The case does the
+// same: every image has a window of its own in one SpuThread's LS, loaded once by copyToLs before the measured span, so
+// the span holds dispatches and nothing else. (Time-sharing one window by DMA between phases would put the cost of the
+// DMA, or untimed phases, into a case that measures the dispatcher, and one image would own an address at a time.)
+// Entries sit kDispatchStride bytes apart: that is one 64-byte cache line apart in entry_of (2 bytes per word), so no
+// two entries of an image share a table line, and the tags (1 per 16 bytes) and the entry records spread as well.
+constexpr std::uint32_t kDispatchCodeLs = 0x04000;  // first window
+constexpr std::uint32_t kDispatchCodeEnd = 0x3f000;
+constexpr std::uint32_t kDispatchExitLs = kDispatchCodeEnd;  // outside every window
+constexpr std::uint32_t kDispatchStride = 128;
+constexpr std::uint32_t kDispatchCodeEa = 0x00100000;
+constexpr std::uint32_t kDispatchMaxEntries = (kDispatchCodeEnd - kDispatchCodeLs) / kDispatchStride;
+constexpr std::uint32_t kDispatchCheckBase = 0xd15a0000;  // the instruction word of entry g is this + g
+constexpr std::uint32_t kPolluteLine = 64;
+
+// Everything the host functions and the control loop share. One chain runs at a time on one thread.
+struct DispatchBench {
+    std::vector<std::uint8_t> pollute;
+    std::uint32_t pollute_lines = 0;
+    std::uint32_t slice_lines = 0;
+    std::uint32_t slice_pos = 0;           // first line of the next slice
+    std::vector<std::uint32_t> seq_entry;  // the chain as entry numbers (image * entries + entry)
+    std::vector<std::uint32_t> seq_ls;     // the same as LS addresses
+    std::uint32_t pos = 0;                 // host functions that have run in this chain
+    std::vector<std::uint64_t> hits;       // per entry: runs of its host function
+    std::uint32_t sink = 0;
+};
+DispatchBench g_dispatch;
+
+// A different slice of the buffer on every call, like task code that works on data the dispatcher's tables then have to
+// compete with for cache lines. Read-modify-write, because the LS the tasks work on is written as well.
+TOX2_NOINLINE void walkPollution(DispatchBench& b) {
+    if (b.pollute_lines == 0) return;
+    std::uint8_t* const p = b.pollute.data();
+    std::uint32_t line = b.slice_pos;
+    for (std::uint32_t i = 0; i < b.slice_lines; i++) {
+        p[std::size_t{line} * kPolluteLine] += 1;
+        if (++line == b.pollute_lines) line = 0;
+    }
+    b.slice_pos = line;
+}
+
+// The host function of entry N: count the run, do the work between two dispatches, then dispatch to the next entry of
+// the chain (to exit_ls after the last). One function per entry so that the indirect call goes to as many targets as in
+// the game.
+template <std::uint32_t N>
+TOX2_SPU_FUNC(dispatchHost) {
+    DispatchBench& b = g_dispatch;
+    TOX2_SPU_SF_ENTER(ctx->jump_target);
+    b.hits[N]++;
+    walkPollution(b);
+    const std::uint32_t next = ++b.pos;
+    TOX2_SPU_SF_DISPATCH(ctx->jump_target, next < b.seq_ls.size() ? b.seq_ls[next] : ctx->exit_ls);
+}
+
+template <std::uint32_t... I>
+constexpr std::array<Tox2SpuFunc*, sizeof...(I)> makeDispatchHosts(std::integer_sequence<std::uint32_t, I...>) {
+    return {&dispatchHost<I>...};
+}
+constexpr std::array<Tox2SpuFunc*, kDispatchMaxEntries> kDispatchHosts =
+        makeDispatchHosts(std::make_integer_sequence<std::uint32_t, kDispatchMaxEntries>());
+
+// The chain without the dispatcher: the same pollution walk and the same counters, no dispatch and no indirect call.
+TOX2_NOINLINE void runDispatchControl(DispatchBench& b) {
+    std::uint32_t acc = 0;
+    for (std::size_t j = 0; j < b.seq_entry.size(); j++) {
+        b.hits[b.seq_entry[j]]++;
+        walkPollution(b);
+        b.pos++;
+        acc += b.seq_ls[j];
+    }
+    b.sink += acc;
+}
+
+// A chain of `count` entries from a fixed seed. The next entry is always in another image (when there is more than
+// one), so consecutive dispatches use different tables.
+void makeDispatchChain(std::uint64_t seed, std::uint32_t images, std::uint32_t entries, std::uint32_t count,
+                       DispatchBench& b) {
+    std::uint64_t x = seed;
+    const auto draw = [&x]() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        return static_cast<std::uint32_t>(x >> 32);
+    };
+    b.seq_entry.resize(count);
+    b.seq_ls.resize(count);
+    std::uint32_t image = draw() % images;
+    for (std::uint32_t j = 0; j < count; j++) {
+        if (j > 0 && images > 1) image = (image + 1 + draw() % (images - 1)) % images;
+        const std::uint32_t entry = draw() % entries;
+        b.seq_entry[j] = image * entries + entry;
+        b.seq_ls[j] = kDispatchCodeLs + (image * entries + entry) * kDispatchStride;
+    }
+}
+
+// Parses the case option `name` into `out` (unchanged when the option is absent); false after an error message.
+bool caseCount(const Options& options, std::string_view name, std::uint32_t min, std::uint32_t max,
+               std::uint32_t* out) {
+    if (options.value(name).empty()) return true;
+    return parseCount(std::string("--").append(name), options.value(name), min, max, out);
+}
+
+// The cycles of tox2SpuDispatch under the game's conditions: many images, so many 128 KiB entry_of tables, and task
+// code between dispatches that evicts the lines of the tables, the entry records and the tags. One chain of
+// --dispatches dispatches through pseudo-random entries of --images images (--entries each) is one iteration; every
+// host function walks a slice of a --pollute-kb buffer (--slice lines per call) before it dispatches to the next entry.
+// The diagnostic line gives the cycles of the same walk without the dispatches, so that the difference is the cost of
+// the dispatch (and of the host function call it ends in) on top of the work between dispatches.
+int runSpuDispatch(const Case& self, const Options& options) {
+    std::uint32_t images = 16, entries = 64, pollute_kb = 256, slice = 32, dispatches = 20000;
+    if (!caseCount(options, "images", 1, tox2::kMaxSpuImages, &images) ||
+        !caseCount(options, "entries", 1, 1024, &entries) || !caseCount(options, "pollute-kb", 0, 65536, &pollute_kb) ||
+        !caseCount(options, "slice", 1, 65536, &slice) || !caseCount(options, "dispatches", 1, 10000000, &dispatches)) {
+        return 2;
+    }
+    if (images * entries > kDispatchMaxEntries) {
+        std::fprintf(stderr, "error: --images times --entries is at most %u (one %u-byte stride in the LS each)\n",
+                     kDispatchMaxEntries, kDispatchStride);
+        return 2;
+    }
+
+    // Guest bytes of the images: zero except the instruction word that the dispatcher compares at each entry.
+    const std::uint32_t window = entries * kDispatchStride;
+    std::vector<std::uint8_t> guest(std::size_t{kDispatchCodeEa} + std::size_t{images} * window);
+    std::vector<std::string> names(images);
+    std::vector<Tox2SpuSegment> segments(images);
+    std::vector<Tox2SpuEntry> entry_tables(std::size_t{images} * entries);
+    for (std::uint32_t i = 0; i < images; i++) {
+        names[i] = "bench_dispatch_" + std::to_string(i);
+        segments[i] = {kDispatchCodeEa + i * window, kDispatchCodeLs + i * window, window, 1};
+        for (std::uint32_t e = 0; e < entries; e++) {
+            const std::uint32_t g = i * entries + e;
+            const std::uint32_t ls = kDispatchCodeLs + g * kDispatchStride;
+            entry_tables[g] = {ls, 1, {kDispatchCheckBase + g}, kDispatchHosts[g]};
+            replayStoreBe32(guest.data() + kDispatchCodeEa + g * kDispatchStride, kDispatchCheckBase + g);
+        }
+    }
+    std::vector<Tox2SpuImageInfo> image_infos(images);
+    for (std::uint32_t i = 0; i < images; i++) {
+        image_infos[i] = {names[i].c_str(), segments[i].ea, window,
+                          kDmaNoHash,       segments[i].ls, 1,
+                          &segments[i],     entries,        &entry_tables[std::size_t{i} * entries]};
+    }
+    // The registry keeps pointers into the vectors above; they live until this function returns and the process then
+    // ends.
+    tox2::registerSpuImages(image_infos.data(), images);
+    tox2::SpuThread thread(0, "bench-dispatch", nullptr);
+    for (std::uint32_t i = 0; i < images; i++) {
+        tox2::copyToLs(thread, guest.data(), segments[i].ea, segments[i].ls, window);
+    }
+    thread.context().exit_ls = kDispatchExitLs;
+
+    DispatchBench& b = g_dispatch;
+    b.pollute_lines = pollute_kb * 1024 / kPolluteLine;
+    b.pollute.assign(std::size_t{b.pollute_lines} * kPolluteLine, 0);
+    b.slice_lines = std::min(slice, std::max(b.pollute_lines, 1u));
+    b.hits.assign(std::size_t{images} * entries, 0);
+    std::printf("bench %s: %u images x %u entries, %u dispatches per chain, pollution %u KiB, %u lines per call\n",
+                self.name, images, entries, dispatches, pollute_kb, b.slice_lines);
+
+    std::vector<std::uint64_t> expected(b.hits.size());
+    std::vector<std::uint64_t> chain_samples, control_samples;
+    std::uint32_t iteration_index = 0;
+    const std::uint32_t total_iterations = options.warmup + options.iterations;
+    return runMeasured(self, options, [&](std::uint64_t* cycles) {
+        // A new chain from a fixed seed in every iteration: one chain repeated would let the indirect branch predictor
+        // learn its sequence of targets, which the game's many different sequences do not allow.
+        makeDispatchChain(0x9e3779b97f4a7c15ull + std::uint64_t{iteration_index} * 0xd1b54a32d192ed03ull, images,
+                          entries, dispatches, b);
+        std::fill(expected.begin(), expected.end(), 0);
+        for (const std::uint32_t g : b.seq_entry) expected[g]++;
+
+        const auto restart = [&] {
+            std::fill(b.hits.begin(), b.hits.end(), 0);
+            b.pos = 0;
+            b.slice_pos = 0;
+        };
+        restart();
+        std::uint64_t start = tox2::currentThreadCycles();
+        runDispatchControl(b);
+        const std::uint64_t control_cycles = tox2::currentThreadCycles() - start;
+        const bool control_ok = b.pos == dispatches && b.hits == expected;
+
+        restart();
+        const std::uint64_t dispatched_before = thread.dispatchCount();
+        start = tox2::currentThreadCycles();
+        const tox2::SpuLeave how = tox2::runSpu(thread, b.seq_ls[0]);
+        *cycles = tox2::currentThreadCycles() - start;
+        const bool chain_ok = how == tox2::SpuLeave::Exit && b.pos == dispatches && b.hits == expected &&
+                              thread.dispatchCount() - dispatched_before == dispatches &&
+                              thread.lastDispatchTarget() == b.seq_ls[dispatches - 1] &&
+                              (thread.context().jump_target & (kTox2SpuLsSize - 4u)) == kDispatchExitLs;
+
+        if (iteration_index++ >= options.warmup) {
+            chain_samples.push_back(*cycles);
+            control_samples.push_back(control_cycles);
+        }
+        // The diagnostic goes out before the summary line, so it is printed once, with the last iteration.
+        if (iteration_index == total_iterations) {
+            const tox2::CycleStats chain = tox2::summarizeCycles(chain_samples);
+            const tox2::CycleStats control = tox2::summarizeCycles(control_samples);
+            std::printf(
+                    "bench %s: control (pollution walk and counters, no dispatch) typical %llu cycles per chain "
+                    "(min %llu, max %llu); chain typical %llu; chain minus control %.1f cycles per dispatch\n",
+                    self.name, static_cast<unsigned long long>(control.median),
+                    static_cast<unsigned long long>(control.min), static_cast<unsigned long long>(control.max),
+                    static_cast<unsigned long long>(chain.median),
+                    (static_cast<double>(chain.median) - static_cast<double>(control.median)) /
+                            static_cast<double>(dispatches));
+        }
+        return control_ok && chain_ok;
+    });
+}
+
 const std::vector<Case>& cases() {
     static const std::vector<Case> kCases = {
             {"spu-lzma",
@@ -777,6 +994,14 @@ const std::vector<Case>& cases() {
              {"capture", "repeat"},
              {"synthetic"},
              runSpuReplay},
+            {"spu-dispatch",
+             "tox2SpuDispatch over many images with cache-evicting work between dispatches (--images K, --entries E, "
+             "--pollute-kb KB, --slice LINES, --dispatches N)",
+             40,
+             2,
+             {"images", "entries", "pollute-kb", "slice", "dispatches"},
+             {},
+             runSpuDispatch},
     };
     return kCases;
 }
