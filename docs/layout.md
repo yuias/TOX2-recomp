@@ -49,6 +49,7 @@
 | `runtime/src/core/elf_loader.*`, `dispatch.*` | The executable and PRX loaders, and the dispatch tables with one span per loaded image |
 | `runtime/src/spu/` | The SPU runtime in the runtime core: SPU threads and the dispatcher, the MFC, channels and mailboxes, and the SPU census; see [SPU usage](spu.md) |
 | `config/ppu_overrides.json` | The guest functions that hand-written C replaces, each with the SHA-256 of the generated code it was derived from; see [Overrides](emitter.md#overrides) |
+| `config/ppu_notify_stores.json` | The guest stores that `emit` routes through the reservation table (`tox2NotifyWriteN`), keyed by image and function, each with a reason; see [Notifying stores](emitter.md#notifying-stores) |
 | `runtime/src/ppu_overrides/` | The C sources of those replacements (`tox2_ppu_overrides`, an object library linked into `tox2_game` and the `ppu_link` test), tested by `ppu_overrides`; see [Overrides in use](emitter.md#overrides-in-use) |
 | `docs/` | Development documentation |
 | `LICENSE`, `THIRD_PARTY_NOTICES.md` | Licence of this project (0BSD) and notices of third-party components (FFmpeg, GameInput, the RPCS3 key files, Dear ImGui) |

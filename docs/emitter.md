@@ -53,6 +53,7 @@ parentheses when there are any:
 | `edges` | Calls, tail calls, switches, syscalls and traps by kind, for example `calls_direct` and `calls_indirect` |
 | `dynamic_targets` | Transfers whose constant target is not a recovered function or stub, with site and target |
 | `overrides` | The functions replaced by hand-written code, with entry and reason; see [Overrides](#overrides) |
+| `notify_stores` | The stores routed through the reservation table, with image, function, store addresses and reason; see [Notifying stores](#notifying-stores) |
 | `labels`, `loop_hooks`, `elapsed_s` | Emitted labels, loop hooks, run time |
 
 `--census` only counts the owned instructions by mnemonic and exits, without writing C.
@@ -171,6 +172,57 @@ it can be diffed against `fn_<address>_generated`. Mutex means the stream mutex 
 
 The first SetData runs under the mutex. It parses the header and makes no lv2 call and no guest call,
 so the added wait is bounded; if SetData ever waited, the loader would wait as long.
+
+## Notifying stores
+
+A plain guest store (`tox2WriteN`) writes guest memory and nothing else. It does not touch the reservation
+table, so an SPU that sleeps until its reservation on that cache line is lost does not see the store; it
+notices the change only at its next poll (see [Reservations and memory ordering](spu.md#reservations-and-memory-ordering)).
+The few stores that an SPU waits on can be routed through the table: `tox2NotifyWriteN` takes the same
+arguments as `tox2WriteN`, bumps the stripe version of the line and wakes the waiters on it, like an SPU PUT.
+The notify file names these stores, and `emit` writes `tox2NotifyWriteN` for them and `tox2WriteN` for every
+other store, so the generated diff is exactly the listed lines.
+
+```json
+{
+  "notify_stores": [
+    {
+      "image": "libsre",
+      "function": "0x011d97e4",
+      "stores": ["0x011d9b3c"],
+      "reason": "why an SPU waits on this store"
+    }
+  ]
+}
+```
+
+`emit --notify-stores PATH` reads the file. The default is `config/ppu_notify_stores.json`; a missing default
+file means no notifying stores, and without them the output is byte-identical to what it would be without this
+feature. A missing file named with `--notify-stores` is an I/O error (exit 1). The option is allowed with and
+without `--symbol-prefix`.
+
+- `image` is the `--symbol-prefix` value, or `main` for the unprefixed executable. Entries of other images are
+  checked for their shape and otherwise ignored, so one file serves both emit runs. `function` is the entry of
+  a function of the database, `stores` a non-empty list of instruction addresses, `reason` a non-empty string.
+  The four keys are required and no other key is allowed.
+- Every store address must belong to the listed function and decode to `stb`, `sth`, `stw` or `std` (with their
+  `u`, `x` and `ux` forms) or to `sthbrx`, `stwbrx` or `stdbrx`. Other stores (`stmw`, floating-point, vector and
+  string stores) have no notifying form and are refused. A function or an address listed twice is refused.
+- A listed address that was not emitted as a store is an error (a stale list: the ELF, the database or the
+  emitter changed). A malformed file or a bad entry fails with exit 3 before emission; the stale-list check
+  runs after emission and also exits 3.
+- A store whose address is not naturally aligned is split into byte stores by the runtime, so any address is
+  correct; the sites in use are aligned.
+
+The report has one entry per function, and the summary prints `notify stores: <stores> in <functions> functions`
+before the `overrides` line.
+
+### Notifying stores in use
+
+`config/ppu_notify_stores.json` lists 21 stores in 14 libsre functions. They write the first cache line of the
+`CellSpurs` object (the system service's workload bytes and the `+0x72` flag that wakes the idle system service)
+from the init, finalize, priority, add-workload and shutdown-workload paths. None runs per frame. The stores
+of the taskset and job-chain initialisers write other objects and stay plain.
 
 ## SPU images
 

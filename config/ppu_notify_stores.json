@@ -1,0 +1,88 @@
+{
+  "notify_stores": [
+    {
+      "image": "libsre",
+      "function": "0x011d75dc",
+      "stores": ["0x011d7a20", "0x011d800c", "0x011d8028", "0x011d802c"],
+      "reason": "cellSpursInitialize* body: writes CellSpurs +0x76, +0x70 (8 bytes), +0x6c (4 bytes) and +0x77 in line 0"
+    },
+    {
+      "image": "libsre",
+      "function": "0x011d8660",
+      "stores": ["0x011d87cc"],
+      "reason": "cellSpursFinalize: sets the CellSpurs +0x72 byte that the idle system service reads"
+    },
+    {
+      "image": "libsre",
+      "function": "0x011d8cb8",
+      "stores": ["0x011d8e1c"],
+      "reason": "cellSpursSetPriorities: sets the CellSpurs +0x72 byte that the idle system service reads"
+    },
+    {
+      "image": "libsre",
+      "function": "0x011d8e84",
+      "stores": ["0x011d8f80"],
+      "reason": "cellSpursSetPriority: sets a bit of the CellSpurs +0x72 byte that the idle system service reads"
+    },
+    {
+      "image": "libsre",
+      "function": "0x011d97e4",
+      "stores": ["0x011d9b3c", "0x011d9b5c", "0x011d9b70", "0x011d9e70", "0x011d9f04"],
+      "reason": "cellSpursAddWorkload body: per-workload bytes at CellSpurs +0x00+wid, +0x10+wid, +0x40+wid, +0x10+(wid-16) and the +0x72 byte that wakes the idle system service"
+    },
+    {
+      "image": "libsre",
+      "function": "0x011da158",
+      "stores": ["0x011da2fc"],
+      "reason": "cellSpursShutdownWorkload: sets the CellSpurs +0x72 byte that the idle system service reads"
+    },
+    {
+      "image": "libsre",
+      "function": "0x011dac24",
+      "stores": ["0x011dad00"],
+      "reason": "cellSpursReadyCountStore: writes the ready-count byte at CellSpurs +wid in line 0"
+    },
+    {
+      "image": "libsre",
+      "function": "0x011dae80",
+      "stores": ["0x011daf24"],
+      "reason": "cellSpursRequestIdleSpu: writes the byte at CellSpurs +0x10+wid in line 0"
+    },
+    {
+      "image": "libsre",
+      "function": "0x011dcbf4",
+      "stores": ["0x011dcca0"],
+      "reason": "cellSpursTrace* helper: sets the CellSpurs +0x72 byte that the idle system service reads"
+    },
+    {
+      "image": "libsre",
+      "function": "0x011dccd8",
+      "stores": ["0x011dcd3c"],
+      "reason": "cellSpursTraceFinalize: writes the CellSpurs +0x75 trace-control byte in line 0"
+    },
+    {
+      "image": "libsre",
+      "function": "0x011dcd54",
+      "stores": ["0x011dcdc0"],
+      "reason": "cellSpursTraceStop body: writes the CellSpurs +0x75 trace-control byte in line 0"
+    },
+    {
+      "image": "libsre",
+      "function": "0x011dce18",
+      "stores": ["0x011dce84"],
+      "reason": "cellSpursTraceStart body: writes the CellSpurs +0x75 trace-control byte in line 0"
+    },
+    {
+      "image": "libsre",
+      "function": "0x011dcedc",
+      "stores": ["0x011dd034"],
+      "reason": "cellSpursTraceInitialize body: writes the CellSpurs +0x75 trace-control byte in line 0"
+    },
+    {
+      "image": "libsre",
+      "function": "0x011dd1ec",
+      "stores": ["0x011dd2a8"],
+      "reason": "user-trace callback (registered with cellUserTraceRegister): sets the CellSpurs +0x72 byte that the idle system service reads"
+    }
+  ]
+}

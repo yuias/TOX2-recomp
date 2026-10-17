@@ -287,6 +287,10 @@ class PrxEmitTest(TempDirTestCase):
         self.out = self.tmp / "out"
         self.report = self.tmp / "report.json"
         self.census = self.tmp / "census.json"
+        # The committed default file names libsre functions that this fixture does not have.
+        patcher = mock.patch.object(emit, "DEFAULT_NOTIFY_STORES", self.tmp / "no_notify_stores.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def set_input(self, data):
         self.elf_path = self.tmp / "prx.elf"
