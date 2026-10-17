@@ -205,6 +205,7 @@ struct IterationSample {
                   gpu_wait_ns = 0;
     std::uint64_t draws = 0, fp_hits = 0, fp_misses = 0, vp_hits = 0, vp_misses = 0;
     std::uint64_t bytes_copied = 0, bytes_union = 0;
+    std::uint64_t tex_validations = 0, tex_hashed = 0, tex_read = 0;
     std::uint64_t barriers = 0, barriers_skipped = 0, instances = 0, state_calls = 0, state_skipped = 0;
     std::uint64_t uploads_reused = 0;
     // Thread cycles of the replay thread: build, the whole execute loop, and the iteration.
@@ -287,6 +288,9 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
         sample.vp_misses = builder_after.vp_cache_misses - builder_before.vp_cache_misses;
         sample.bytes_copied = builder_after.vertex_bytes_copied - builder_before.vertex_bytes_copied;
         sample.bytes_union = builder_after.vertex_bytes_union - builder_before.vertex_bytes_union;
+        sample.tex_validations = builder_after.texture_validations - builder_before.texture_validations;
+        sample.tex_hashed = builder_after.texture_bytes_hashed - builder_before.texture_bytes_hashed;
+        sample.tex_read = builder_after.texture_bytes_read - builder_before.texture_bytes_read;
 
         const tox2::RendererStats renderer_before = renderer.stats();
         for (tox2::RsxCommand& command : commands) {
@@ -344,11 +348,14 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
             toUll(medianCycles(samples, &IterationSample::total_cycles)));
     std::printf(
             "builder: per iteration %llu draws, fp cache %llu hits %llu misses, vp cache %llu hits %llu misses, "
-            "vertex bytes %llu copied (union %llu)\n",
+            "vertex bytes %llu copied (union %llu), texture validations %llu (%llu bytes hashed in place, %llu bytes "
+            "read)\n",
             toUll(median(samples, &IterationSample::draws)), toUll(median(samples, &IterationSample::fp_hits)),
             toUll(median(samples, &IterationSample::fp_misses)), toUll(median(samples, &IterationSample::vp_hits)),
             toUll(median(samples, &IterationSample::vp_misses)), toUll(median(samples, &IterationSample::bytes_copied)),
-            toUll(median(samples, &IterationSample::bytes_union)));
+            toUll(median(samples, &IterationSample::bytes_union)),
+            toUll(median(samples, &IterationSample::tex_validations)),
+            toUll(median(samples, &IterationSample::tex_hashed)), toUll(median(samples, &IterationSample::tex_read)));
     std::printf(
             "render: per iteration %llu barriers (%llu skipped), %llu rendering instances, %llu state calls (%llu "
             "skipped), %llu vp constant uploads reused; upload memory %s\n",

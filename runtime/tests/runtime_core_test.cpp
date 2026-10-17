@@ -70,6 +70,7 @@
 #include "rsx/rsx_decode.h"
 #include "rsx/rsx_frame.h"
 #include "rsx/rsx_frame_builder.h"
+#include "rsx/rsx_hash_stream.h"
 #include "rsx/rsx_registers.h"
 #include "rsx/rsx_state.h"
 #include "rsx/rsx_texture_layout.h"
@@ -8067,6 +8068,14 @@ public:
         std::memcpy(out.data(), bytes.data() + offset, out.size());
         return true;
     }
+    // Hashes in place like a view over plain memory; counted apart from the copies in `reads`.
+    bool hashRange(std::uint32_t location, std::uint32_t offset, std::size_t size, std::uint64_t& out) override {
+        hashes[{location, offset}]++;
+        const std::vector<std::uint8_t>& bytes = location == 0 ? local : main;
+        if (offset > bytes.size() || size > bytes.size() - offset) return false;
+        out = tox2::rsxHashBytes(std::span<const std::uint8_t>(bytes).subspan(offset, size));
+        return true;
+    }
     void putWord(std::uint32_t location, std::uint32_t offset, std::uint32_t word) {
         std::vector<std::uint8_t>& bytes = location == 0 ? local : main;
         for (int i = 0; i < 4; i++) bytes[offset + i] = static_cast<std::uint8_t>(word >> (24 - 8 * i));
@@ -8077,7 +8086,12 @@ public:
         return it == reads.end() ? 0 : it->second;
     }
     std::vector<std::uint8_t> local, main;
-    std::map<std::pair<std::uint32_t, std::uint32_t>, int> reads;
+    // Hashes in place that started at (location, offset).
+    int hashesAt(std::uint32_t location, std::uint32_t offset) const {
+        const auto it = hashes.find({location, offset});
+        return it == hashes.end() ? 0 : it->second;
+    }
+    std::map<std::pair<std::uint32_t, std::uint32_t>, int> reads, hashes;
 };
 
 // Guest layout of mip chains and de-swizzling, checked against the rules of RPCS3's `TextureUtils.cpp`.
@@ -9559,7 +9573,7 @@ void testRsxTextureCache() {
     setTexture(0, kTex, 0xA5, 1, 4, 4, 16);
 
     // Draws in one epoch share the blob and read guest memory once; a guest write nobody announced is not
-    // seen yet.
+    // seen yet. A new texture is copied without a hash pass first.
     const tox2::RsxDraw first = draw();
     CHECK(first.textures.size() == 1 && first.textures[0].data != nullptr && first.textures[0].content_id != 0);
     CHECK(texSize(first.textures[0]) == 64 && texByte(first.textures[0], 0) == 1);
@@ -9567,23 +9581,27 @@ void testRsxTextureCache() {
     const tox2::RsxDraw second = draw();
     CHECK(second.textures[0].data == first.textures[0].data &&
           second.textures[0].content_id == first.textures[0].content_id);
-    CHECK(memory.readsAt(0, kTex) == 1);
+    CHECK(memory.readsAt(0, kTex) == 1 && memory.hashesAt(0, kTex) == 0);
 
-    // A flip ends the epoch: the changed bytes get a new blob and id, and the earlier draws keep theirs.
+    // A flip ends the epoch: the changed bytes are hashed in place, then copied for a new blob and id, and the
+    // earlier draws keep theirs.
     flip();
     setTexture(0, kTex, 0xA5, 1, 4, 4, 16);
     const tox2::RsxDraw third = draw();
-    CHECK(memory.readsAt(0, kTex) == 2);
+    CHECK(memory.readsAt(0, kTex) == 2 && memory.hashesAt(0, kTex) == 1);
     CHECK(third.textures[0].content_id != first.textures[0].content_id &&
           third.textures[0].data != first.textures[0].data);
     CHECK(texByte(third.textures[0], 0) == 100 && texByte(first.textures[0], 0) == 1);
 
-    // After a flip with the bytes unchanged the guest memory is read and compared, and the blob and id stay.
+    // After a flip with the bytes unchanged the guest memory is hashed in place and not copied, and the blob and id
+    // stay.
     flip();
     setTexture(0, kTex, 0xA5, 1, 4, 4, 16);
     const tox2::RsxDraw fourth = draw();
     const tox2::RsxDraw fifth = draw();
-    CHECK(memory.readsAt(0, kTex) == 3);
+    CHECK(memory.readsAt(0, kTex) == 2 && memory.hashesAt(0, kTex) == 2);
+    CHECK(builder.stats().texture_validations == 2 && builder.stats().texture_bytes_hashed == 128 &&
+          builder.stats().texture_bytes_read == 128);
     CHECK(fourth.textures[0].content_id == third.textures[0].content_id &&
           fourth.textures[0].data == third.textures[0].data);
     CHECK(fifth.textures[0].data == third.textures[0].data);
@@ -9594,11 +9612,13 @@ void testRsxTextureCache() {
     fill(kTex, 64, 7);
     write(tox2::kMethodNv406eSemaphoreAcquire, 0);
     const tox2::RsxDraw after_acquire = draw();
-    CHECK(memory.readsAt(0, kTex) == 4 && after_acquire.textures[0].content_id != third.textures[0].content_id);
+    CHECK(memory.readsAt(0, kTex) == 3 && memory.hashesAt(0, kTex) == 3 &&
+          after_acquire.textures[0].content_id != third.textures[0].content_id);
     fill(kTex, 64, 9);
     write(tox2::kMethodNv406eSemaphoreRelease, 1);
     const tox2::RsxDraw after_release = draw();
-    CHECK(memory.readsAt(0, kTex) == 5 && after_release.textures[0].content_id != after_acquire.textures[0].content_id);
+    CHECK(memory.readsAt(0, kTex) == 4 && memory.hashesAt(0, kTex) == 4 &&
+          after_release.textures[0].content_id != after_acquire.textures[0].content_id);
 
     // A target the RSX draws or clears over the texture's range ends the trust at once, inside the epoch; a
     // target elsewhere does not.
@@ -9608,16 +9628,19 @@ void testRsxTextureCache() {
     write(0x1D94, 0xF3);  // clears the surface at 0x100000
     CHECK(builder.takeCommands().size() == 1);
     const tox2::RsxDraw elsewhere = draw();
-    CHECK(memory.readsAt(0, kTex) == 5 && elsewhere.textures[0].content_id == after_release.textures[0].content_id);
+    CHECK(memory.readsAt(0, kTex) == 4 && memory.hashesAt(0, kTex) == 4 &&
+          elsewhere.textures[0].content_id == after_release.textures[0].content_id);
     setSurface(kTex - 0x40, 64, 4);  // covers [kTex - 0x40, kTex + 0xC0)
     write(0x1D94, 0xF3);
     CHECK(builder.takeCommands().size() == 1);
     const tox2::RsxDraw overlapped = draw();
-    CHECK(memory.readsAt(0, kTex) == 6 && overlapped.textures[0].content_id != after_release.textures[0].content_id);
+    CHECK(memory.readsAt(0, kTex) == 5 && memory.hashesAt(0, kTex) == 5 &&
+          overlapped.textures[0].content_id != after_release.textures[0].content_id);
     CHECK(overlapped.textures[0].rt_alias == -1 && texByte(overlapped.textures[0], 0) == 11);
     CHECK(overlapped.surfaces.color.offset == kTex - 0x40);
     const tox2::RsxDraw again = draw();  // the draw above wrote the target again, so the texture is read again
-    CHECK(memory.readsAt(0, kTex) == 7 && again.textures[0].content_id == overlapped.textures[0].content_id);
+    CHECK(memory.readsAt(0, kTex) == 5 && memory.hashesAt(0, kTex) == 6 &&
+          again.textures[0].content_id == overlapped.textures[0].content_id);
 
     // A texture at the address of a known render target is an alias and carries no bytes, cached blob or not.
     setSurface(kTex, 64, 4);
@@ -9657,6 +9680,171 @@ void testRsxTextureCache() {
     const tox2::RsxDraw unreadable = draw();
     CHECK(texSize(unreadable.textures.back()) == 0 && unimplementedCount("state unreadable texture memory") == 1);
     CHECK(builder.textureCache().entryCount() == entries_before + 5);
+
+    // A cached texture whose memory is no longer readable is counted and dropped, and nothing is copied for it.
+    const std::uint64_t reads_before = builder.stats().texture_bytes_read;
+    flip();
+    setSurface(0x100000, 64, 4);
+    write(0x1A0C + 6 * 0x20, 0);
+    setTexture(0, kTex + 0x100, 0xA5, 1, 4, 4, 16);
+    memory.local.resize(kTex + 0x100 + 32);
+    const tox2::RsxDraw gone = draw();
+    CHECK(texSize(gone.textures[0]) == 0 && unimplementedCount("state unreadable texture memory") == 2);
+    CHECK(builder.textureCache().entryCount() == entries_before + 4);
+    CHECK(builder.stats().texture_bytes_read == reads_before);
+}
+
+// rsxHashBytes without a copy: the streaming hash and the memory views' hashRange give the hash of the
+// concatenated bytes however the range is split into chunks or pages.
+void testRsxHashRange() {
+    std::vector<std::uint8_t> bytes(0x6000);
+    std::uint32_t x = 12345;
+    for (std::uint8_t& b : bytes) {
+        x = x * 1664525u + 1013904223u;
+        b = static_cast<std::uint8_t>(x >> 24);
+    }
+    const auto hashOf = [&](std::size_t begin, std::size_t size) {
+        return tox2::rsxHashBytes(std::span<const std::uint8_t>(bytes).subspan(begin, size));
+    };
+
+    // The stream is invariant under the split points, including empty pieces and pieces of one byte.
+    {
+        bool same = true;
+        for (std::size_t length : {0, 1, 63, 64, 65, 240, 241, 256, 257, 1000, 4096, 5000}) {
+            for (std::size_t first : {0, 1, 17, 64, 255, 256, 257, 3000}) {
+                const std::size_t cut = std::min(first, length);
+                tox2::RsxHashStream stream;
+                stream.update(std::span<const std::uint8_t>(bytes).first(cut));
+                stream.update({});
+                stream.update(std::span<const std::uint8_t>(bytes).subspan(cut, length - cut));
+                same = same && stream.digest() == hashOf(0, length);
+            }
+        }
+        tox2::RsxHashStream bytewise;
+        for (std::size_t i = 0; i < 700; i++) bytewise.update(std::span<const std::uint8_t>(bytes).subspan(i, 1));
+        CHECK(same && bytewise.digest() == hashOf(0, 700));
+        const tox2::RsxHashStream empty;
+        CHECK(empty.digest() == tox2::rsxHashBytes({}));
+    }
+
+    // The replay view walks 4 KiB pages: a range over four pages with partial ends, and the failures.
+    {
+        tox2::rsxUnimplementedReset();
+        tox2::ReplayRsxMemoryView view;
+        view.add(0, 0x2F00, std::span<const std::uint8_t>(bytes).subspan(0, 0x3200));
+        std::uint64_t hash = 0;
+        CHECK(view.hashRange(0, 0x2F10, 0x3000, hash) && hash == hashOf(0x10, 0x3000));
+        CHECK(view.hashRange(0, 0x3000, 0x1000, hash) && hash == hashOf(0x100, 0x1000));  // one whole page
+        CHECK(view.hashRange(0, 0x2F00, 0x3200, hash) && hash == hashOf(0, 0x3200));
+        std::vector<std::uint8_t> copy(0x3000);
+        CHECK(view.read(0, 0x2F10, copy) && tox2::rsxHashBytes(copy) == hashOf(0x10, 0x3000));
+        CHECK(view.hashRange(0, 0x9000, 0, hash) && hash == tox2::rsxHashBytes({}));
+        CHECK(unimplementedCount("capture missing range") == 0);
+        // Past the recorded end (inside a page that is only partly recorded), in an unrecorded page, in the other
+        // location and beyond the 32-bit space: each fails and is counted once, like read().
+        CHECK(!view.hashRange(0, 0x2F10, 0x3200, hash) && unimplementedCount("capture missing range") == 1);
+        CHECK(!view.hashRange(0, 0x1000, 16, hash) && unimplementedCount("capture missing range") == 2);
+        CHECK(!view.hashRange(1, 0x3000, 16, hash) && unimplementedCount("capture missing range") == 3);
+        CHECK(!view.hashRange(0, 0xFFFFFFF0u, 0x20, hash) && unimplementedCount("capture missing range") == 4);
+        tox2::rsxUnimplementedReset();
+    }
+
+    // A view that only implements read() gets the copying default.
+    {
+        class PlainMemory final : public tox2::RsxMemoryView {
+        public:
+            explicit PlainMemory(const std::vector<std::uint8_t>& data) : data_(data) {}
+            bool read(std::uint32_t, std::uint32_t offset, std::span<std::uint8_t> out) override {
+                if (offset > data_.size() || out.size() > data_.size() - offset) return false;
+                std::memcpy(out.data(), data_.data() + offset, out.size());
+                return true;
+            }
+
+        private:
+            const std::vector<std::uint8_t>& data_;
+        };
+        PlainMemory plain(bytes);
+        std::uint64_t hash = 0;
+        CHECK(plain.hashRange(0, 0x123, 0x2000, hash) && hash == hashOf(0x123, 0x2000));
+        CHECK(!plain.hashRange(0, 0x5F00, 0x200, hash));
+    }
+
+    // The recording view hashes in place while no capture is active; with a writer it must see the bytes, so the
+    // writer receives them.
+    {
+        FakeRsxMemory memory;
+        std::copy(bytes.begin(), bytes.begin() + 0x1000, memory.local.begin() + 0x100);
+        tox2::RsxRecordingMemoryView recording(memory);
+        std::uint64_t hash = 0;
+        CHECK(recording.hashRange(0, 0x100, 0x1000, hash) && hash == hashOf(0, 0x1000));
+        CHECK(memory.hashesAt(0, 0x100) == 1 && memory.readsAt(0, 0x100) == 0);
+
+        auto regs = std::make_unique<tox2::RsxRegisters>();
+        regs->reset();
+        tox2::RsxCaptureWriter writer(1, *regs, {});
+        recording.setWriter(&writer);
+        hash = 0;
+        CHECK(recording.hashRange(0, 0x100, 0x1000, hash) && hash == hashOf(0, 0x1000));
+        CHECK(memory.hashesAt(0, 0x100) == 1 && memory.readsAt(0, 0x100) == 1 && writer.rangeCount() == 1);
+        CHECK(!recording.hashRange(0, 0xFFF0, 0x40, hash) && writer.rangeCount() == 1);
+    }
+
+    // The live view: local memory is one span; IO memory is made of 1 MiB pages that need not be contiguous in
+    // guest memory, and a hash that crosses them equals the hash of what read() copies.
+    {
+        tox2::resetRsxState();
+        tox2::Process& process = tox2::process();
+        CHECK(process.memory.reserve());
+        std::uint8_t* base = process.memory.base();
+        constexpr std::uint32_t kPage = 0x100000;
+        constexpr std::uint32_t kEaA = 0x30000000, kEaB = 0x30500000, kEaC = 0x30200000;
+        constexpr std::uint32_t kLocal = tox2::kRsxLocalBase;
+        CHECK(process.memory.commit(kEaA, kPage) && process.memory.commit(kEaB, kPage) &&
+              process.memory.commit(kEaC, kPage) && process.memory.commit(kLocal + 0x1000, 0x3000));
+        // IO pages 0, 1, 2 map to three scattered pages; the fourth is not mapped.
+        CHECK(tox2::rsxMapEaIo(kEaA, 0, kPage) == 0 && tox2::rsxMapEaIo(kEaB, kPage, kPage) == 0 &&
+              tox2::rsxMapEaIo(kEaC, 2 * kPage, kPage) == 0);
+        std::vector<std::uint8_t> pattern(3 * kPage);
+        for (std::size_t i = 0; i < pattern.size(); i++) pattern[i] = static_cast<std::uint8_t>((i * 31) ^ (i >> 12));
+        std::memcpy(base + kEaA, pattern.data(), kPage);
+        std::memcpy(base + kEaB, pattern.data() + kPage, kPage);
+        std::memcpy(base + kEaC, pattern.data() + 2 * kPage, kPage);
+        for (std::uint32_t i = 0; i < 0x3000; i++) base[kLocal + 0x1000 + i] = static_cast<std::uint8_t>(i * 13 + 5);
+
+        tox2::GuestRsxMemoryView view(base);
+        std::uint64_t hash = 0;
+        std::vector<std::uint8_t> copy;
+        for (const auto& [offset, size] : {std::pair<std::uint32_t, std::size_t>{0, 100},
+                                           {kPage - 50, 100},
+                                           {kPage - 1, 2},
+                                           {123, 3 * kPage - 123},
+                                           {kPage, kPage},
+                                           {kPage + 7, 2 * kPage - 7}}) {
+            copy.assign(size, 0);
+            CHECK(view.read(1, offset, copy) && view.hashRange(1, offset, size, hash) &&
+                  hash == tox2::rsxHashBytes(copy));
+        }
+        CHECK(view.hashRange(1, 5, 0, hash) && hash == tox2::rsxHashBytes({}));
+        // Past the mapped pages, and over an io page that is not mapped.
+        CHECK(!view.hashRange(1, 3 * kPage - 10, 20, hash) && !view.hashRange(1, 4 * kPage, 16, hash));
+        CHECK(!view.hashRange(1, 0xFFFFFFF0u, 0x20, hash));
+
+        copy.assign(0x3000, 0);
+        CHECK(view.read(0, 0x1000, copy) && view.hashRange(0, 0x1000, 0x3000, hash) &&
+              hash == tox2::rsxHashBytes(copy));
+        CHECK(view.hashRange(0, 0x1800, 0x100, hash) &&
+              hash == tox2::rsxHashBytes(std::span<const std::uint8_t>(copy).subspan(0x800, 0x100)));
+        // Not committed, and beyond the end of local memory.
+        CHECK(!view.hashRange(0, 0x800, 0x1000, hash) && !view.hashRange(0, 0x3800, 0x1000, hash));
+        CHECK(!view.hashRange(0, tox2::kRsxLocalSize - 8, 16, hash) &&
+              !view.hashRange(0, tox2::kRsxLocalSize, 1, hash));
+
+        tox2::resetRsxState();
+        process.memory.decommit(kEaA, kPage);
+        process.memory.decommit(kEaB, kPage);
+        process.memory.decommit(kEaC, kPage);
+        process.memory.decommit(kLocal + 0x1000, 0x3000);
+    }
 }
 
 void testRsxFloatAndDepthSurfaces() {
@@ -17153,6 +17341,7 @@ int main(int argc, char** argv) {
     testSharedVertexRanges();
     testRecycledDrawBuffers();
     testRsxTextureCache();
+    testRsxHashRange();
     testRsxFloatAndDepthSurfaces();
     testRsxCapture();
     testRsxSyntheticCaptures();

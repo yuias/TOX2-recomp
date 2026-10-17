@@ -15,6 +15,7 @@
 #include "rsx/fifo_parser.h"
 #include "rsx/rsx_census.h"
 #include "rsx/rsx_decode.h"
+#include "rsx/rsx_hash_stream.h"
 #include "rsx/rsx_texture_layout.h"
 #include "rsx/rsx_unimplemented.h"
 
@@ -118,6 +119,13 @@ void clipAxis(std::uint32_t parent, std::uint32_t& pos, std::uint32_t& length) {
 
 }  // namespace
 
+bool RsxMemoryView::hashRange(std::uint32_t location, std::uint32_t offset, std::size_t size, std::uint64_t& out) {
+    hash_scratch_.resize(size);
+    if (!read(location, offset, hash_scratch_)) return false;
+    out = rsxHashBytes(hash_scratch_);
+    return true;
+}
+
 bool GuestRsxMemoryView::read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) {
     if (out.empty()) return true;
     const GuestMemory& memory = process().memory;
@@ -140,6 +148,37 @@ bool GuestRsxMemoryView::read(std::uint32_t location, std::uint32_t offset, std:
         std::memcpy(out.data() + done, base_ + ea, chunk);
         done += chunk;
     }
+    return true;
+}
+
+// The same bounds and commit checks as read(), with the bytes hashed where they lie. The local range is one span;
+// the IO map is hashed page by page through a streaming state, so no scratch copy is made either way.
+bool GuestRsxMemoryView::hashRange(std::uint32_t location, std::uint32_t offset, std::size_t size, std::uint64_t& out) {
+    const GuestMemory& memory = process().memory;
+    if (size == 0) {
+        out = rsxHashBytes({});
+        return true;
+    }
+    if (location == 0) {
+        if (offset >= kRsxLocalSize || size > kRsxLocalSize - offset) return false;
+        const std::uint32_t ea = kRsxLocalBase + offset;
+        if (!memory.isCommitted(ea, static_cast<std::uint32_t>(size))) return false;
+        out = rsxHashBytes(std::span<const std::uint8_t>(base_ + ea, size));
+        return true;
+    }
+    RsxHashStream stream;
+    std::size_t done = 0;
+    while (done < size) {
+        const std::uint64_t io = static_cast<std::uint64_t>(offset) + done;
+        if (io > 0xFFFFFFFFull) return false;
+        const std::uint32_t chunk = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(size - done, kIoPageSize - (static_cast<std::uint32_t>(io) & kIoPageMask)));
+        std::uint32_t ea = 0;
+        if (!rsxIoToEa(static_cast<std::uint32_t>(io), ea) || !memory.isCommitted(ea, chunk)) return false;
+        stream.update(std::span<const std::uint8_t>(base_ + ea, chunk));
+        done += chunk;
+    }
+    out = stream.digest();
     return true;
 }
 
@@ -546,15 +585,34 @@ void RsxFrameBuilder::copyTexture(RsxTextureDesc& t) {
     }
     const RsxTextureLayout& layout = entry != nullptr ? entry->layout : fresh_layout;
 
-    // First use in this epoch, or after a render target write over the range: the guest bytes are read and
-    // compared with the ones the blob was made from. The scratch buffer is reused, so a texture that did not
-    // change costs one read and one hash.
+    // First use in this epoch, or after a render target write over the range. A cached texture is first hashed where
+    // it lies; only a changed or new one is copied into the scratch buffer (reused) to be converted. The copy is
+    // hashed again because the guest may have written between the two passes, and the blob and its hash must come
+    // from the same bytes.
+    if (entry != nullptr) {
+        stats_.texture_validations++;
+        std::uint64_t in_place_hash = 0;
+        if (!memory_.hashRange(t.location, t.offset, layout.guest_bytes, in_place_hash)) {
+            textures_.erase(key);
+            noteState("unreadable texture memory");
+            return;
+        }
+        stats_.texture_bytes_hashed += layout.guest_bytes;
+        if (in_place_hash == entry->hash) {
+            textures_.markFresh(*entry);
+            t.pitch = entry->pitch;
+            t.data = entry->data;
+            t.content_id = entry->content_id;
+            return;
+        }
+    }
     texture_scratch_.resize(layout.guest_bytes);
     if (!memory_.read(t.location, t.offset, texture_scratch_)) {
         textures_.erase(key);
         noteState("unreadable texture memory");
         return;
     }
+    stats_.texture_bytes_read += layout.guest_bytes;
     const std::uint64_t hash = rsxHashBytes(texture_scratch_);
     if (entry != nullptr && entry->hash == hash) {
         textures_.markFresh(*entry);

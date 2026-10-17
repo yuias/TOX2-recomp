@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "rsx/fifo_parser.h"
+#include "rsx/rsx_hash_stream.h"
 #include "rsx/rsx_unimplemented.h"
 
 namespace tox2 {
@@ -169,6 +170,12 @@ bool RsxRecordingMemoryView::tryRead(std::uint32_t location, std::uint32_t offse
     if (!inner_.tryRead(location, offset, out)) return false;
     if (writer_ != nullptr) writer_->onMemory(location, offset, out);
     return true;
+}
+
+bool RsxRecordingMemoryView::hashRange(std::uint32_t location, std::uint32_t offset, std::size_t size,
+                                       std::uint64_t& out) {
+    if (writer_ == nullptr) return inner_.hashRange(location, offset, size, out);
+    return RsxMemoryView::hashRange(location, offset, size, out);
 }
 
 bool RsxCaptureReader::parse(std::vector<std::uint8_t> bytes, std::string& error) {
@@ -399,25 +406,35 @@ void ReplayRsxMemoryView::add(std::uint32_t location, std::uint32_t offset, std:
     }
 }
 
-bool ReplayRsxMemoryView::lookup(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) const {
-    if (out.empty()) return true;
-    if (location > 1 || static_cast<std::uint64_t>(offset) + out.size() > 0x100000000ull) return false;
+template <class Visit>
+bool ReplayRsxMemoryView::forEachSpan(std::uint32_t location, std::uint32_t offset, std::size_t size,
+                                      Visit&& visit) const {
+    if (size == 0) return true;
+    if (location > 1 || static_cast<std::uint64_t>(offset) + size > 0x100000000ull) return false;
     const auto& pages = pages_[location];
     std::uint64_t pos = offset;
     std::size_t done = 0;
-    while (done < out.size()) {
+    while (done < size) {
         const std::uint32_t index = static_cast<std::uint32_t>(pos / kPageSize);
         const std::uint32_t in_page = static_cast<std::uint32_t>(pos % kPageSize);
-        const std::size_t chunk = std::min<std::size_t>(out.size() - done, kPageSize - in_page);
+        const std::size_t chunk = std::min<std::size_t>(size - done, kPageSize - in_page);
         const auto it = pages.find(index);
         if (it == pages.end()) return false;
         const Page& page = *it->second;
         if (page.valid_count != kPageSize && !page.covers(in_page, static_cast<std::uint32_t>(chunk))) return false;
-        std::memcpy(out.data() + done, page.data.data() + in_page, chunk);
+        visit(std::span<const std::uint8_t>(page.data.data() + in_page, chunk));
         done += chunk;
         pos += chunk;
     }
     return true;
+}
+
+bool ReplayRsxMemoryView::lookup(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) const {
+    std::size_t done = 0;
+    return forEachSpan(location, offset, out.size(), [&](std::span<const std::uint8_t> bytes) {
+        std::memcpy(out.data() + done, bytes.data(), bytes.size());
+        done += bytes.size();
+    });
 }
 
 bool ReplayRsxMemoryView::read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) {
@@ -428,6 +445,17 @@ bool ReplayRsxMemoryView::read(std::uint32_t location, std::uint32_t offset, std
 
 bool ReplayRsxMemoryView::tryRead(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) {
     return lookup(location, offset, out);
+}
+
+bool ReplayRsxMemoryView::hashRange(std::uint32_t location, std::uint32_t offset, std::size_t size,
+                                    std::uint64_t& out) {
+    RsxHashStream stream;
+    if (!forEachSpan(location, offset, size, [&](std::span<const std::uint8_t> bytes) { stream.update(bytes); })) {
+        rsxNoteUnimplemented("capture", "missing range");
+        return false;
+    }
+    out = stream.digest();
+    return true;
 }
 
 void replayCapture(const RsxCaptureReader& reader, ReplayRsxMemoryView& memory, RsxFrameBuilder& builder) {

@@ -31,6 +31,13 @@ public:
     virtual bool tryRead(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) {
         return read(location, offset, out);
     }
+    // rsxHashBytes of the `size` bytes at the address, without copying them out; false when any part of the range is
+    // not readable (the failure read() would report). The default reads into a scratch buffer, which is what a view
+    // that has to see every byte it hands out (the capture recorder) needs; views over plain memory override it.
+    virtual bool hashRange(std::uint32_t location, std::uint32_t offset, std::size_t size, std::uint64_t& out);
+
+private:
+    std::vector<std::uint8_t> hash_scratch_;
 };
 
 // Live view over guest memory. The RSX thread reads through it without the kernel lock: like the
@@ -39,6 +46,7 @@ class GuestRsxMemoryView final : public RsxMemoryView {
 public:
     explicit GuestRsxMemoryView(const std::uint8_t* base) : base_(base) {}
     bool read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override;
+    bool hashRange(std::uint32_t location, std::uint32_t offset, std::size_t size, std::uint64_t& out) override;
 
 private:
     const std::uint8_t* base_;
@@ -58,6 +66,10 @@ struct RsxBuilderStats {
     std::uint64_t vp_cache_hits = 0, vp_cache_misses = 0;
     std::uint64_t vertex_bytes_copied = 0;  // guest vertex bytes fillVertices copied
     std::uint64_t vertex_bytes_union = 0;   // bytes of the union of those ranges per location
+    // Texture validation: checks of a cached texture against guest memory, the bytes hashed in place for them
+    // (RsxMemoryView::hashRange) and the bytes copied into the scratch buffer (a changed or new texture).
+    std::uint64_t texture_validations = 0;
+    std::uint64_t texture_bytes_hashed = 0, texture_bytes_read = 0;
 };
 
 class RsxFrameBuilder {

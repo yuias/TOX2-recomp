@@ -167,6 +167,7 @@ function(tox2_runtime_add_core)
     runtime/src/rsx/rsx_census.cpp
     runtime/src/rsx/rsx_decode.cpp
     runtime/src/rsx/rsx_frame_builder.cpp
+    runtime/src/rsx/rsx_hash_stream.cpp
     runtime/src/rsx/rsx_registers.cpp
     runtime/src/rsx/rsx_state.cpp
     runtime/src/rsx/rsx_texture_cache.cpp

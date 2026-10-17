@@ -77,6 +77,9 @@ public:
     void setWriter(RsxCaptureWriter* writer) { writer_ = writer; }
     bool read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override;
     bool tryRead(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override;
+    // Hashes in place through the inner view when no capture is active; with a writer the bytes must be read so that
+    // they are recorded.
+    bool hashRange(std::uint32_t location, std::uint32_t offset, std::size_t size, std::uint64_t& out) override;
 
 private:
     RsxMemoryView& inner_;
@@ -128,9 +131,14 @@ public:
     void add(std::uint32_t location, std::uint32_t offset, std::span<const std::uint8_t> bytes);
     bool read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override;
     bool tryRead(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override;
+    bool hashRange(std::uint32_t location, std::uint32_t offset, std::size_t size, std::uint64_t& out) override;
 
 private:
     bool lookup(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) const;
+    // Calls visit(span) for the recorded bytes of the range in address order; false when any part is not recorded
+    // (a span already visited stays visited).
+    template <class Visit>
+    bool forEachSpan(std::uint32_t location, std::uint32_t offset, std::size_t size, Visit&& visit) const;
     static constexpr std::uint32_t kPageSize = 4096;
     struct Page {
         std::array<std::uint8_t, kPageSize> data{};

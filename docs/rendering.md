@@ -1004,10 +1004,12 @@ handful of textures, some of them several megabytes), so the builder keeps the c
   texture memory the RSX may still read, so a change it makes behind the RSX's back shows up at the next of
   these points (this title does two acquires per flip); a guest write inside an epoch, with none of them
   in between, is not seen until the epoch ends. Inside an epoch an entry is used without reading guest
-  memory. On the first use in a later epoch the guest range is read into a scratch buffer and hashed
-  (`rsxHashBytes`, XXH3-64); an unchanged hash keeps the blob and
-  its id, a changed one converts a new blob under a new id. The reads go through the memory view, so a
-  capture records them where the replay builder, which starts with an empty cache, makes the same reads.
+  memory. On the first use in a later epoch the guest range is hashed where it lies (`RsxMemoryView::hashRange`,
+  XXH3-64 as in `rsxHashBytes`, streamed over the pieces of the range); an unchanged hash keeps the blob and
+  its id without a copy. A changed hash reads the range into a scratch buffer, hashes that copy and converts a
+  new blob under a new id. A capture records the bytes of the reads, so while one is active the recording view
+  reads the range instead of hashing it in place, and the replay builder, which starts with an empty cache,
+  makes the same reads. `tox2_rsxreplay --repeat` shows the counts on its `builder:` line.
 - *Writes by the RSX.* A color or depth surface that a clear or a draw writes ends the trust in every entry
   whose range overlaps it, at once and without a new epoch; such an entry is read and hashed again at its
   next use. (The renderer keeps surface contents on the GPU, so the guest bytes are normally unchanged and
@@ -1170,7 +1172,7 @@ illustrative figures:
 ```
 timing: frame_9400_room, 30 iterations (first excluded), median ms per iteration: build 6.10 (buildDraw 4.83), recordDraw 5.33, recordClear 0.10, submit 0.41, gpu wait 0.02, total 11.94
 cycles: frame_9400_room, 30 iterations (first excluded), median thread cycles per iteration: build 21334455, record 18273645, total 40112233
-builder: per iteration 627 draws, fp cache 620 hits 7 misses, vp cache 600 hits 27 misses, vertex bytes 1234567 copied (union 1234567)
+builder: per iteration 627 draws, fp cache 620 hits 7 misses, vp cache 600 hits 27 misses, vertex bytes 1234567 copied (union 1234567), texture validations 40 (3456789 bytes hashed in place, 0 bytes read)
 render: per iteration 115 barriers (3 skipped), 31 rendering instances, 552 state calls (11988 skipped), 12 vp constant uploads reused; upload memory 0x7 device-local host-visible host-coherent
 ```
 
