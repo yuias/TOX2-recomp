@@ -195,70 +195,76 @@ TOX2_FORCEINLINE Tox2U32x4 tox2SpuSf4FromExact(Tox2SpuF64x4 hi, Tox2SpuF64x4 lo)
 // The exact path of each operation. Only the vectors that the fast path rejects reach these, so they
 // stay out of line and keep the call sites small. They return the plain vector type: the MS x64 ABI
 // returns the union Tox2Vr through a hidden pointer, which forced every fast/slow merge through a stack slot.
-#define TOX2_SPU_SLOW static inline __attribute__((noinline, cold))
+//
+// `pure` lets the caller keep the context's values in registers across the call. It holds because the result
+// depends only on the arguments and the functions write only their locals (the parameters are const: the MS x64
+// ABI passes them through a pointer to the caller's copy). The one side effect, the MXCSR, is invisible to the
+// caller: each function sets the default environment itself, so the result does not depend on the caller's
+// MXCSR, and restores the caller's whole value, sticky exception flags included, on its only return path.
+#define TOX2_SPU_SLOW static inline __attribute__((noinline, cold, pure))
 
-TOX2_SPU_SLOW Tox2U32x4 tox2SpuFaExact(Tox2Vr a, Tox2Vr b) {
+TOX2_SPU_SLOW Tox2U32x4 tox2SpuFaExact(const Tox2Vr a, const Tox2Vr b) {
 #pragma STDC FENV_ACCESS ON
     const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
     Tox2SpuF64x4 lo;
     tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32), tox2SpuSf4ToDouble(b.u32), &hi, &lo);
-    a.u32 = tox2SpuSf4FromExact(hi, lo);
+    const Tox2U32x4 r = tox2SpuSf4FromExact(hi, lo);
     tox2SpuMxcsrSet(saved);
-    return a.u32;
+    return r;
 }
 
-TOX2_SPU_SLOW Tox2U32x4 tox2SpuFsExact(Tox2Vr a, Tox2Vr b) {
+TOX2_SPU_SLOW Tox2U32x4 tox2SpuFsExact(const Tox2Vr a, const Tox2Vr b) {
 #pragma STDC FENV_ACCESS ON
     const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
     Tox2SpuF64x4 lo;
     tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32), -tox2SpuSf4ToDouble(b.u32), &hi, &lo);
-    a.u32 = tox2SpuSf4FromExact(hi, lo);
+    const Tox2U32x4 r = tox2SpuSf4FromExact(hi, lo);
     tox2SpuMxcsrSet(saved);
-    return a.u32;
+    return r;
 }
 
-TOX2_SPU_SLOW Tox2U32x4 tox2SpuFmExact(Tox2Vr a, Tox2Vr b) {
+TOX2_SPU_SLOW Tox2U32x4 tox2SpuFmExact(const Tox2Vr a, const Tox2Vr b) {
 #pragma STDC FENV_ACCESS ON
     const uint32_t saved = tox2SpuMxcsrEnterHost();
     const Tox2SpuF64x4 no_error = {0.0, 0.0, 0.0, 0.0};
-    a.u32 = tox2SpuSf4FromExact(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32), no_error);
+    const Tox2U32x4 r = tox2SpuSf4FromExact(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32), no_error);
     tox2SpuMxcsrSet(saved);
-    return a.u32;
+    return r;
 }
 
-TOX2_SPU_SLOW Tox2U32x4 tox2SpuFmaExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+TOX2_SPU_SLOW Tox2U32x4 tox2SpuFmaExact(const Tox2Vr a, const Tox2Vr b, const Tox2Vr c) {
 #pragma STDC FENV_ACCESS ON
     const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
     Tox2SpuF64x4 lo;
     tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32), tox2SpuSf4ToDouble(c.u32), &hi, &lo);
-    a.u32 = tox2SpuSf4FromExact(hi, lo);
+    const Tox2U32x4 r = tox2SpuSf4FromExact(hi, lo);
     tox2SpuMxcsrSet(saved);
-    return a.u32;
+    return r;
 }
 
-TOX2_SPU_SLOW Tox2U32x4 tox2SpuFmsExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+TOX2_SPU_SLOW Tox2U32x4 tox2SpuFmsExact(const Tox2Vr a, const Tox2Vr b, const Tox2Vr c) {
 #pragma STDC FENV_ACCESS ON
     const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
     Tox2SpuF64x4 lo;
     tox2SpuTwoSum4(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32), -tox2SpuSf4ToDouble(c.u32), &hi, &lo);
-    a.u32 = tox2SpuSf4FromExact(hi, lo);
+    const Tox2U32x4 r = tox2SpuSf4FromExact(hi, lo);
     tox2SpuMxcsrSet(saved);
-    return a.u32;
+    return r;
 }
 
-TOX2_SPU_SLOW Tox2U32x4 tox2SpuFnmsExact(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
+TOX2_SPU_SLOW Tox2U32x4 tox2SpuFnmsExact(const Tox2Vr a, const Tox2Vr b, const Tox2Vr c) {
 #pragma STDC FENV_ACCESS ON
     const uint32_t saved = tox2SpuMxcsrEnterHost();
     Tox2SpuF64x4 hi;
     Tox2SpuF64x4 lo;
     tox2SpuTwoSum4(-(tox2SpuSf4ToDouble(a.u32) * tox2SpuSf4ToDouble(b.u32)), tox2SpuSf4ToDouble(c.u32), &hi, &lo);
-    a.u32 = tox2SpuSf4FromExact(hi, lo);
+    const Tox2U32x4 r = tox2SpuSf4FromExact(hi, lo);
     tox2SpuMxcsrSet(saved);
-    return a.u32;
+    return r;
 }
 
 // True when a lane of the native result may differ from the SPU's: an overflow (0x7f7fffff when

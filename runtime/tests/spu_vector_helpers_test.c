@@ -314,6 +314,76 @@ static int checkExactPaths(void) {
     return bad == 0;
 }
 
+// The exact-path functions are declared pure, which is only right while their results do not depend on the
+// caller's MXCSR and they restore it. Back-to-back calls on changing operands run in the SPU environment, the
+// references in the default one, and the MXCSR is checked after each step.
+static int checkExactPathLoop(void) {
+    enum { kSteps = 4 };
+    long bad = 0;
+    long forced = 0;
+    const uint32_t saved = tox2SpuMxcsrGet();
+    Tox2Vr a;
+    Tox2Vr b;
+    Tox2Vr c;
+    for (int i = 0; i < 4; i++) a.u32[i] = b.u32[i] = c.u32[i] = 0x3f800000u;
+    for (long it = 0; it < 20000; it++) {
+        Tox2Vr in[kSteps][3];
+        Tox2Vr got[kSteps][6];
+        Tox2U32x4 exact[kSteps][6];
+        tox2SpuMxcsrSet(kTox2SpuMxcsrSpu);
+        for (int step = 0; step < kSteps; step++) {
+            for (int i = 0; i < 4; i++) {
+                a.u32[i] = next() & 1u ? kForcing[next() % (uint32_t)kForcingCount] : pickWord();
+                b.u32[i] = next() & 1u ? kForcing[next() % (uint32_t)kForcingCount] : pickWord();
+                c.u32[i] = next() & 1u ? kForcing[next() % (uint32_t)kForcingCount] : pickWord();
+            }
+            in[step][0] = a;
+            in[step][1] = b;
+            in[step][2] = c;
+            got[step][0] = tox2SpuFa(a, b);
+            got[step][1] = tox2SpuFs(a, b);
+            got[step][2] = tox2SpuFm(a, b);
+            got[step][3] = tox2SpuFma(a, b, c);
+            got[step][4] = tox2SpuFms(a, b, c);
+            got[step][5] = tox2SpuFnms(a, b, c);
+            exact[step][0] = tox2SpuFaExact(a, b);
+            exact[step][1] = tox2SpuFsExact(a, b);
+            exact[step][2] = tox2SpuFmExact(a, b);
+            exact[step][3] = tox2SpuFmaExact(a, b, c);
+            exact[step][4] = tox2SpuFmsExact(a, b, c);
+            exact[step][5] = tox2SpuFnmsExact(a, b, c);
+            for (int op = 0; op < 6; op++) forced += needsExact(op, a, b, c);
+        }
+        if ((tox2SpuMxcsrGet() & kControlBits) != kTox2SpuMxcsrSpu && bad++ < 10) {
+            printf("an exact-path function changed the MXCSR to %08x\n", (unsigned)tox2SpuMxcsrGet());
+        }
+        tox2SpuMxcsrSet(kTox2SpuMxcsrHost);
+        for (int step = 0; step < kSteps; step++) {
+            for (int i = 0; i < 4; i++) {
+                const uint32_t p = in[step][0].u32[i];
+                const uint32_t q = in[step][1].u32[i];
+                const uint32_t r = in[step][2].u32[i];
+                const uint32_t want[6] = {tox2SpuSfAdd(p, q),       tox2SpuSfSub(p, q),
+                                          tox2SpuSfMul(p, q),       tox2SpuSfMulAdd(p, q, r),
+                                          tox2SpuSfMulSub(p, q, r), tox2SpuSfNegMulSub(p, q, r)};
+                for (int op = 0; op < 6; op++) {
+                    if ((got[step][op].u32[i] != want[op] || exact[step][op][i] != want[op]) && bad++ < 10) {
+                        printf("exact path loop op %d step %d lane %d (%08x, %08x, %08x): %08x and %08x, expected %08x\n",
+                               op, step, i, p, q, r, got[step][op].u32[i], exact[step][op][i], want[op]);
+                    }
+                }
+            }
+        }
+    }
+    tox2SpuMxcsrSet(saved);
+    if (forced == 0) {
+        printf("no input reached the exact path in the loop\n");
+        bad++;
+    }
+    printf("exact path loop: %ld vectors forced, %ld mismatches\n", forced, bad);
+    return bad == 0;
+}
+
 // Every combination of the edge words, twice: spread over the four lanes of the vectors, and with the
 // same combination in all lanes, so that the fast path sees an edge without any other lane to hide it.
 static int checkEdges(void) {
@@ -631,7 +701,7 @@ static int checkQuadwords(void) {
 
 int main(void) {
     const int ok = checkFloat() & checkEdges() & checkZeroResults() & checkZeroSign() & checkExactPaths() &
-                   checkRoundedHelpers() & checkShufb() & checkGenControl() & checkQuadwords();
+                   checkExactPathLoop() & checkRoundedHelpers() & checkShufb() & checkGenControl() & checkQuadwords();
     if (ok) printf("spu vector helpers ok\n");
     return ok ? 0 : 1;
 }
