@@ -195,12 +195,15 @@ shares a stripe with another one causes at worst a spurious PUTLLC or store-cond
   its reservation, then sleeps until the epoch differs, so a write that lands in between is not missed.
 - A thread waiting in `RdEventStat` for the reservation-lost event (`0x400`) names the line of its reservation
   and sleeps until a write to a line of the same stripe (the granularity at which a reservation is lost)
-  changes the epoch, a mailbox push or a halt wakes it, or 1 ms passes; then it compares the line with the
+  changes the epoch, a mailbox push or a halt wakes it, or 16 ms pass; then it compares the line with the
   snapshot. Writes to other lines move the epoch but do not wake it, which matters because idle SPURS kernels
   wait this way while reservation-aware writes happen over 100,000 times per second in a busy stretch. Sixteen line-watching
   waiters are tracked; further ones wait as wildcards that every epoch change wakes. A plain PPU store does not
-  move the epoch, so it is seen at the 1 ms poll, within about 1 ms; the census counts these waits
-  (`reservation waits` below).
+  move the epoch, so it is seen at the 16 ms poll, within about 16 ms; the census counts these waits
+  (`reservation waits` below). The poll can be that long because the only `rdch 0` waiter enables just the
+  lock-line-lost event and the libsre stores to the CellSpurs line, the ones an idle kernel waits for, are
+  emitted as notifying stores that move the epoch (see `docs/emitter.md`); an idle waiter times out about 60
+  times per second instead of about 550.
 - **Known race window.** PPU plain stores (and host plain writes) are not instrumented. A plain store to
   an 8-byte chunk that a PUTLLC changes, landing after that PUTLLC's snapshot compare and before its chunk
   store (well under a microsecond), is overwritten without the PUTLLC failing. Plain stores before the
@@ -364,7 +367,8 @@ The SPU's own floating-point rules are emitted as written (the full list of devi
   for the sound engine thread `bnusCoreMain` is its processing time per event and is compared with the
   5.33 ms audio period; `wait` is the time from the arrival to the reply, the idle time plus the wait for the
   guest lock. A statistics group reads `n <count> avg <x> p99 <x> max <x> ms >5.33ms <count>`: milliseconds, then the
-  number of values above the threshold of that statistic (5.33 ms for these, 2 ms for the reservation waits).
+  number of values above the threshold of that statistic (5.33 ms for these, 32 ms for the reservation waits: twice
+  the poll).
   In a 400 s scripted run at resolution scale 1 the busy time of `bnusCoreMain` was 0.80 ms on average with a
   99th percentile of 3.07 ms and a maximum of 4.38 ms, against 1.22 ms, 5.12 ms and 6.57 ms (33 intervals over
   5.33 ms) before the reservation changes; every interval over 5.33 ms before them fell in a second with a

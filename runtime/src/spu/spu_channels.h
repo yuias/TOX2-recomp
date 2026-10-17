@@ -71,8 +71,11 @@ inline constexpr std::uint32_t kImplemented =
 inline constexpr std::uint32_t kInMboxDepth = 4;
 
 // How long a wait on the reservation table goes without looking again. Plain PPU stores do not move the
-// store epoch, so this bounds how late they are noticed.
-inline constexpr std::chrono::milliseconds kPlainStorePoll{1};
+// store epoch, so this bounds how late a store that bypasses the table is noticed. The value is safe because
+// the only rdch 0 waiter enables just the lock-line-lost event, a mailbox push and a halt wake the table, and
+// the libsre stores to the CellSpurs line go through the notifying store helpers; a short poll would only cost
+// CPU on idle SPURS kernels (about 550 wakeups per second per waiter at 1 ms).
+inline constexpr std::chrono::milliseconds kPlainStorePoll{16};
 
 // "SPU_RdInMbox" and so on; "?" for a number without a name.
 const char* spuChannelName(std::uint32_t ch);

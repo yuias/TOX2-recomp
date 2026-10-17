@@ -3201,9 +3201,10 @@ void testChanLockLineLost() {
     CHECK(f.putllc() == 0);
     CHECK(f.count(tox2::chan::kRdEventStat) == 0);
 
-    // A plain write is noticed within 5 ms (best of a few tries: the wait polls every millisecond).
+    // A plain write is noticed one poll later (best of a few tries: the wait only polls for it).
+    const double plain_bound_ms = std::chrono::duration<double, std::milli>(tox2::kPlainStorePoll).count() + 5.0;
     double best = 1e9;
-    for (int attempt = 0; attempt < 8 && best >= 5.0; attempt++) {
+    for (int attempt = 0; attempt < 8 && best >= plain_bound_ms; attempt++) {
         CHECK(f.getllar() == 4);
         f.wr(tox2::chan::kWrEventAck, 0x400);
         AsyncRead reader(f, tox2::chan::kRdEventStat);
@@ -3215,7 +3216,7 @@ void testChanLockLineLost() {
         CHECK(reader.ok && reader.value == 0x400);
         best = std::min(best, reader.latencyMsSince(t0));
     }
-    CHECK(best < 5.0);
+    CHECK(best < plain_bound_ms);
     f.wr(tox2::chan::kWrEventAck, 0x400);
 
     // A mixed mask is also woken by a mailbox push.
@@ -3241,6 +3242,30 @@ void testChanLockLineLost() {
         CHECK(waitUntil([&] { return reader.done.load(); }));
         CHECK(!reader.ok);
     }
+}
+
+// An idle wait for the lost-line event polls rarely: the game's SPURS kernels sit in it for the whole run. At a 1 ms
+// poll the 300 ms below gives 150-300 timeouts.
+void testChanIdlePollRate() {
+    const tox2::TimerResolution timer_resolution;
+    CHECK(tox2::kPlainStorePoll >= milliseconds(10));
+    CHECK(tox2::kPlainStorePoll <= milliseconds(100));
+
+    ChanFixture f;
+    CHECK(f.getllar() == 4);
+    CHECK(f.wr(tox2::chan::kWrEventMask, tox2::spu_event::kLockLineLost));
+    CHECK(f.wr(tox2::chan::kWrEventAck, tox2::spu_event::kLockLineLost));
+    const tox2::SpuReservationWaits before = tox2::spuReservationWaitSnapshot();
+    {
+        AsyncRead reader(f, tox2::chan::kRdEventStat);
+        CHECK(waitUntil([&] { return f.blockedIn("RdEventStat"); }));
+        std::this_thread::sleep_for(milliseconds(300));
+        f.thread.requestHalt();
+        CHECK(waitUntil([&] { return reader.done.load(); }));
+        CHECK(!reader.ok);
+    }
+    const tox2::SpuReservationWaits after = tox2::spuReservationWaitSnapshot();
+    CHECK(after.timeout - before.timeout <= 40);
 }
 
 // A reservation broken by a plain store is noticed only when the wait times out; one broken through the table ends the
@@ -4705,6 +4730,7 @@ int main(int argc, char** argv) {
     testChanDecrementer();
     testChanLevelEvents();
     testChanLockLineLost();
+    testChanIdlePollRate();
     testChanReservationWaitCounts();
     testReservationWaitSplit();
     testChanReplaceInMbox();
