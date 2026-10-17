@@ -6,6 +6,11 @@ function(tox2_bench_add)
   set(TOX2_SPU_REPLAY_CAPTURES "" CACHE STRING
       "Semicolon-separated .spucap files; each gets a bench_spu_replay_<name> smoke test")
 
+  # RSX captures (written by --rsx-capture) for the rsx-fifo case. They hold game data too, so the list is empty by
+  # default; the synthetic frame always gets a smoke test.
+  set(TOX2_RSX_FIFO_CAPTURES "" CACHE STRING
+      "Semicolon-separated .tox2cap files; each gets a bench_rsx_fifo_<name> smoke test")
+
   if(NOT TARGET tox2_spu_generated OR NOT TARGET tox2_runtime_core)
     return()
   endif()
@@ -50,6 +55,22 @@ function(tox2_bench_add)
   set_tests_properties(bench_rsx_hash PROPERTIES
     PASS_REGULAR_EXPRESSION "bench rsx-hash: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
     TIMEOUT 120)
+
+  add_test(NAME bench_rsx_fifo_synthetic COMMAND tox2_bench rsx-fifo --synthetic --iterations 2 --warmup 1)
+  set_tests_properties(bench_rsx_fifo_synthetic PROPERTIES
+    PASS_REGULAR_EXPRESSION "bench rsx-fifo: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
+    TIMEOUT 120)
+
+  foreach(capture IN LISTS TOX2_RSX_FIFO_CAPTURES)
+    if(NOT EXISTS "${capture}")
+      continue()
+    endif()
+    get_filename_component(stem "${capture}" NAME_WE)
+    add_test(NAME bench_rsx_fifo_${stem} COMMAND tox2_bench rsx-fifo --capture "${capture}" --iterations 2 --warmup 1)
+    set_tests_properties(bench_rsx_fifo_${stem} PROPERTIES
+      PASS_REGULAR_EXPRESSION "bench rsx-fifo: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
+      TIMEOUT 120)
+  endforeach()
 
   add_test(NAME bench_spu_replay_synthetic COMMAND tox2_bench spu-replay --synthetic --iterations 2 --warmup 1)
   set_tests_properties(bench_spu_replay_synthetic PROPERTIES

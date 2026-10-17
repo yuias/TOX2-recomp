@@ -29,11 +29,19 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
+#include "core/guest_memory.h"
 #include "core/reservation.h"
 #include "core/thread_cpu.h"
+#include "rsx/fifo_parser.h"
+#include "rsx/rsx_capture.h"
+#include "rsx/rsx_frame.h"
+#include "rsx/rsx_state.h"
 #include "rsx/rsx_texture_cache.h"
+#include "rsx/rsx_thread.h"
+#include "rsx_synthetic.h"
 #include "spu/spu_capture.h"
 #include "spu/spu_channels.h"
 #include "spu/spu_mfc.h"
@@ -982,6 +990,376 @@ int runSpuDispatch(const Case& self, const Options& options) {
     });
 }
 
+// Layout of the rsx-fifo case. IO page p (1 MiB) of the RSX IO space maps the guest page at kFifoEaBase + p MiB, so the
+// 256 MiB IO space fills the user1m region and an IO offset is its guest address minus kFifoEaBase.
+constexpr std::uint32_t kFifoEaBase = 0x20000000;
+constexpr std::uint32_t kFifoPageSize = 0x100000;
+constexpr std::uint32_t kFifoPageCount = tox2::kRsxIoSpaceSize / kFifoPageSize;
+constexpr std::uint32_t kFifoMaxCount = 2047;  // the count of a method header is 11 bits wide
+// The size of the pump slice of the RSX thread (kPumpSliceWords in rsx_thread.cpp).
+constexpr std::uint32_t kFifoSliceWords = 128;
+// Context DMA objects and areas of the semaphore methods (private to rsx_thread.cpp).
+constexpr std::uint32_t kFifoDmaSemaphoreRw = 0x66606660, kFifoDmaSemaphoreR = 0x66616661;
+constexpr std::uint32_t kFifoDmaDeviceRw = 0x56616660, kFifoDmaDeviceR = 0x56616661;
+constexpr std::uint32_t kFifoDmaReportLocal = 0x66626660, kFifoDmaReportMain = 0xBAD68000;
+constexpr std::uint32_t kFifoSemaphoreAreaSize = 0x1000, kFifoDeviceAreaSize = 0x100000;
+constexpr std::uint32_t kFifoReportAreaSize = 2048 * 16;
+constexpr std::uint32_t kFifoDeviceReadyOffset = 0x30;
+
+// A capture re-encoded as FIFO words.
+struct FifoFrame {
+    std::vector<std::uint32_t> words;  // host order; stored big-endian
+    std::uint64_t writes = 0, headers = 0;
+    std::uint64_t repeated_methods = 0;  // writes to the method of the write before them (not packed into a header)
+    // (guest address, value) of the labels the frame's semaphore acquires wait for.
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> labels;
+};
+
+void storeBe32(std::uint8_t* base, std::uint32_t ea, std::uint32_t value) {
+    const std::uint32_t be = std::byteswap(value);
+    std::memcpy(base + ea, &be, 4);
+}
+
+// Effective address of `offset` in the context DMA `dma` for a semaphore access, the way RsxConsumer::resolve gives it
+// (the main-memory report window is rejected before this is asked).
+std::optional<std::uint32_t> fifoResolve(std::uint32_t offset, std::uint32_t dma) {
+    switch (dma) {
+        case kFifoDmaSemaphoreRw:
+        case kFifoDmaSemaphoreR:
+            if (offset >= kFifoSemaphoreAreaSize || 4 > kFifoSemaphoreAreaSize - offset) return std::nullopt;
+            return tox2::kRsxLabelAddr + offset;
+        case kFifoDmaDeviceRw:
+        case kFifoDmaDeviceR:
+            if (offset >= kFifoDeviceAreaSize || 4 > kFifoDeviceAreaSize - offset) return std::nullopt;
+            return tox2::kRsxDeviceAddr + offset;
+        case kFifoDmaReportLocal:
+            if (offset >= kFifoReportAreaSize || 4 > kFifoReportAreaSize - offset) return std::nullopt;
+            return tox2::kRsxLabelAddr + tox2::kRsxReportsReportOffset + offset;
+        default: return std::nullopt;
+    }
+}
+
+// Encodes the writes of the capture, and the flip that ends it, as one increment-method header per run of consecutive
+// increasing methods (at most kFifoMaxCount of them) and a single-write header for every other write. The recorded
+// semaphore acquires are satisfied by pre-writing the label value they wait for before each pass instead of dropping
+// them: the consumer then still runs its acquire path and the frame builder still sees the epoch boundary. That holds
+// only while no release of the frame rewrites such a label before its acquire, which is checked here.
+bool encodeFifoFrame(const tox2::RsxCaptureReader& reader, FifoFrame* frame, std::string* error) {
+    struct Write {
+        std::uint32_t method, value;
+    };
+    std::vector<Write> writes;
+    for (const tox2::RsxCaptureReader::Event& event : reader.events()) {
+        if (event.kind == tox2::RsxCaptureReader::EventKind::Write) {
+            writes.push_back({event.a, event.b});
+        } else if (event.kind == tox2::RsxCaptureReader::EventKind::Flip) {
+            // The flip command is not a recorded write: the consumer ends the capture when it executes it.
+            writes.push_back({tox2::kMethodGcmFlipCommand, event.a});
+        }
+    }
+    for (const Write& write : writes) {
+        if ((write.method & ~0xFFFCu) != 0) {
+            *error = "a recorded method is not a 16-bit register offset";
+            return false;
+        }
+    }
+
+    // The latches of the semaphore methods, as RsxConsumer starts and as a flip leaves them. The offset of NV406E is
+    // not reset by a flip, so an acquire before the frame's first offset write would depend on the previous frame.
+    std::uint32_t dma_406e = kFifoDmaSemaphoreR, dma_4097 = kFifoDmaSemaphoreRw;
+    std::uint32_t offset_406e = 0, offset_4097 = 0;
+    bool offset_406e_set = false;
+    std::map<std::uint32_t, std::uint32_t> released;  // guest address -> value of the last release of the frame
+    for (const Write& write : writes) {
+        switch (write.method) {
+            case tox2::kMethodNv406eSetContextDmaSemaphore: dma_406e = write.value; break;
+            case tox2::kMethodNv406eSemaphoreOffset:
+                offset_406e = write.value;
+                offset_406e_set = true;
+                break;
+            case tox2::kMethodNv406eSemaphoreAcquire: {
+                if (dma_406e == kFifoDmaReportMain) {
+                    *error = "an acquire waits on the main-memory report window";
+                    return false;
+                }
+                const std::optional<std::uint32_t> ea = fifoResolve(offset_406e, dma_406e);
+                if (!ea) break;  // the consumer ignores an acquire it cannot address
+                if (!offset_406e_set) {
+                    *error = "an acquire comes before any semaphore offset write";
+                    return false;
+                }
+                const auto it = released.find(*ea);
+                if (it != released.end() && it->second != write.value) {
+                    *error = "a release rewrites the label of a later acquire";
+                    return false;
+                }
+                frame->labels.emplace_back(*ea, write.value);
+                break;
+            }
+            case tox2::kMethodNv406eSemaphoreRelease: {
+                const std::optional<std::uint32_t> ea = fifoResolve(offset_406e, dma_406e);
+                if (offset_406e % 4 != 0 || !ea || (*ea >> 28) != (tox2::kRsxLabelAddr >> 28)) break;
+                std::uint32_t value = write.value;
+                if (*ea == tox2::kRsxDeviceAddr + kFifoDeviceReadyOffset && value == 0) value = 1;
+                released[*ea] = value;
+                break;
+            }
+            case tox2::kMethodNv4097SetContextDmaSemaphore: dma_4097 = write.value; break;
+            case tox2::kMethodNv4097SetSemaphoreOffset: offset_4097 = write.value; break;
+            case tox2::kMethodNv4097BackEndWriteSemaphoreRelease:
+            case tox2::kMethodNv4097TextureReadSemaphoreRelease: {
+                const std::optional<std::uint32_t> ea = fifoResolve(offset_4097, dma_4097);
+                if (offset_4097 % 16 != 0 || !ea || (*ea >> 28) != (tox2::kRsxLabelAddr >> 28)) break;
+                std::uint32_t value = write.value;
+                if (write.method == tox2::kMethodNv4097BackEndWriteSemaphoreRelease) {
+                    value = (value & 0xFF00FF00) | ((value & 0xFF) << 16) | ((value >> 16) & 0xFF);
+                }
+                released[*ea] = value;
+                break;
+            }
+            case tox2::kMethodGcmFlipCommand:
+                // The flip clears the label it uses, which each pass restores by pre-writing the acquired labels.
+                dma_406e = kFifoDmaSemaphoreR;
+                dma_4097 = kFifoDmaSemaphoreRw;
+                break;
+            default: break;
+        }
+    }
+
+    for (std::size_t first = 0; first < writes.size();) {
+        std::size_t end = first + 1;
+        while (end < writes.size() && end - first < kFifoMaxCount && writes[end].method == writes[end - 1].method + 4) {
+            end++;
+        }
+        frame->words.push_back(writes[first].method | (static_cast<std::uint32_t>(end - first) << 18));
+        for (std::size_t i = first; i < end; i++) frame->words.push_back(writes[i].value);
+        frame->headers++;
+        first = end;
+    }
+    frame->writes = writes.size();
+    for (std::size_t i = 1; i < writes.size(); i++) frame->repeated_methods += writes[i].method == writes[i - 1].method;
+    return true;
+}
+
+// Commits and maps the guest memory the capture read and stores its bytes (later records replace earlier ones, like
+// the live memory they were read from). `page_used` tells which IO pages hold capture bytes.
+bool placeFifoMemory(const tox2::RsxCaptureReader& reader, std::uint8_t* base, std::vector<bool>* page_used,
+                     std::string* error) {
+    tox2::GuestMemory& memory = tox2::process().memory;
+    for (const tox2::RsxCaptureReader::Event& event : reader.events()) {
+        if (event.kind != tox2::RsxCaptureReader::EventKind::Memory || event.size == 0) continue;
+        const std::uint64_t end = static_cast<std::uint64_t>(event.b) + event.size;
+        if (event.a == 0) {
+            if (end > tox2::kRsxLocalSize || !memory.commit(tox2::kRsxLocalBase + event.b, event.size)) {
+                *error = "a local memory record does not fit";
+                return false;
+            }
+            continue;
+        }
+        if (end > tox2::kRsxIoSpaceSize) {
+            *error = "an IO record leaves the IO space";
+            return false;
+        }
+        for (std::uint32_t page = event.b / kFifoPageSize; page <= (end - 1) / kFifoPageSize; page++) {
+            if ((*page_used)[page]) continue;
+            (*page_used)[page] = true;
+            const std::uint32_t ea = kFifoEaBase + page * kFifoPageSize;
+            if (!memory.commit(ea, kFifoPageSize) || tox2::rsxMapEaIo(ea, page * kFifoPageSize, kFifoPageSize) != 0) {
+                *error = "cannot map an IO page";
+                return false;
+            }
+        }
+    }
+    for (const tox2::RsxCaptureReader::Event& event : reader.events()) {
+        if (event.kind != tox2::RsxCaptureReader::EventKind::Memory || event.size == 0) continue;
+        const std::uint32_t ea = event.a == 0 ? tox2::kRsxLocalBase + event.b : kFifoEaBase + event.b;
+        std::memcpy(base + ea, reader.memoryBytes(event).data(), event.size);
+    }
+    return true;
+}
+
+// Cycles of the RSX consumer side of one frame: the real RsxConsumer pumps the FIFO words of a capture, with the frame
+// builder on and no renderer (the draws are built, counted and recycled, as the consumer loop does without a sink).
+// The consumer, its builder caches and the guest memory are reused by every pass, so a pass is a steady-state frame.
+// The pass runs on one thread and without the kernel lock and the clock reads of the consumer loop.
+int runRsxFifo(const Case& self, const Options& options) {
+    const std::string path(options.value("capture"));
+    if (options.flag("synthetic") == !path.empty()) {
+        std::fputs("error: rsx-fifo needs either --synthetic or --capture FILE\n", stderr);
+        return 2;
+    }
+    tox2::RsxCaptureReader reader;
+    std::string error;
+    const std::string name = path.empty() ? "synthetic" : std::filesystem::path(path).stem().string();
+    if (path.empty()) {
+        if (!reader.parse(tox2::rsx_synthetic::makeTexturedQuadCapture(), error)) {
+            std::fprintf(stderr, "error: synthetic capture: %s\n", error.c_str());
+            return 1;
+        }
+    } else if (!reader.load(path, error)) {
+        std::fprintf(stderr, "error: %s: %s\n", path.c_str(), error.c_str());
+        return 1;
+    }
+
+    // What the frame builder produces from the capture on its own is what the consumer has to reproduce.
+    std::uint64_t expected_draws = 0, expected_clears = 0;
+    {
+        tox2::ReplayRsxMemoryView memory;
+        tox2::RsxFrameBuilder builder(memory);
+        tox2::replayCapture(reader, memory, builder);
+        for (const tox2::RsxCommand& command : builder.takeCommands()) {
+            expected_draws += std::holds_alternative<tox2::RsxDraw>(command);
+            expected_clears += std::holds_alternative<tox2::RsxClear>(command);
+        }
+    }
+
+    FifoFrame frame;
+    if (!encodeFifoFrame(reader, &frame, &error)) {
+        std::fprintf(stderr, "error: %s: %s\n", name.c_str(), error.c_str());
+        return 1;
+    }
+
+    tox2::clearRsxState();
+    tox2::GuestMemory& memory = tox2::process().memory;
+    if (!memory.reserve() || !memory.commit(tox2::kRsxDeviceAddr, tox2::kRsxContextCommitSize)) {
+        std::fputs("error: cannot reserve the guest address space\n", stderr);
+        return 1;
+    }
+    std::uint8_t* const base = memory.base();
+    std::vector<bool> page_used(kFifoPageCount, false);
+    if (!placeFifoMemory(reader, base, &page_used, &error)) {
+        std::fprintf(stderr, "error: %s: %s\n", name.c_str(), error.c_str());
+        return 1;
+    }
+
+    // The command buffer takes the first free run of IO pages. After the frame comes a jump back to its start: a pass
+    // stops with `get` at the jump, and a pump to the start consumes the jump to rewind without a word of the frame.
+    const std::uint32_t buffer_bytes = static_cast<std::uint32_t>(frame.words.size() + 1) * 4;
+    const std::uint32_t buffer_pages = (buffer_bytes + kFifoPageSize - 1) / kFifoPageSize;
+    std::uint32_t start_page = 0;
+    for (std::uint32_t run = 0, page = 0; page < kFifoPageCount && run < buffer_pages; page++) {
+        run = page_used[page] ? 0 : run + 1;
+        start_page = page + 1 - run;
+    }
+    if (start_page + buffer_pages > kFifoPageCount || buffer_pages == 0) {
+        std::fputs("error: no free IO pages for the command buffer\n", stderr);
+        return 1;
+    }
+    for (std::uint32_t page = start_page; page < start_page + buffer_pages; page++) {
+        if (page_used[page]) {
+            std::fputs("error: no free IO pages for the command buffer\n", stderr);
+            return 1;
+        }
+    }
+    const std::uint32_t ea = kFifoEaBase + start_page * kFifoPageSize;
+    if (!memory.commit(ea, buffer_pages * kFifoPageSize) ||
+        tox2::rsxMapEaIo(ea, start_page * kFifoPageSize, buffer_pages * kFifoPageSize) != 0) {
+        std::fputs("error: cannot map the command buffer\n", stderr);
+        return 1;
+    }
+    const std::uint32_t buffer_start = start_page * kFifoPageSize;
+    const std::uint32_t buffer_end = buffer_start + static_cast<std::uint32_t>(frame.words.size()) * 4;
+    for (std::size_t i = 0; i < frame.words.size(); i++) {
+        storeBe32(base, ea + static_cast<std::uint32_t>(i) * 4, frame.words[i]);
+    }
+    storeBe32(base, kFifoEaBase + buffer_end, tox2::kFifoOldJump | buffer_start);
+
+    tox2::RsxState& state = tox2::rsxState();
+    state.display = reader.display();
+    state.display_count = reader.displayCount();
+
+    tox2::RsxConsumer consumer(base);
+    consumer.enableFrameBuilder();
+    storeBe32(base, tox2::kRsxControlAddr + 4, buffer_start);  // get; the consumer reads it once, at the first pump
+
+    struct Pass {
+        tox2::FifoStatus status = tox2::FifoStatus::Idle;
+        std::uint64_t pumps = 0, draw_stops = 0;
+    };
+    // The consumer loop's slice loop: pump until a draw end, a flip or the end of the words, then build the draw.
+    const auto drainTo = [&](std::uint32_t put) {
+        storeBe32(base, tox2::kRsxControlAddr, put);
+        Pass pass;
+        for (;;) {
+            do {
+                pass.status = consumer.pump(kFifoSliceWords);
+                pass.pumps++;
+            } while (pass.status == tox2::FifoStatus::Budget && !consumer.stopAfterWrite());
+            pass.draw_stops += pass.status == tox2::FifoStatus::Budget;
+            std::vector<tox2::RsxCommand> commands = consumer.takeCommands();
+            consumer.countCommands(commands);
+            consumer.recycleCommands(std::move(commands));
+            if (pass.status != tox2::FifoStatus::Budget) return pass;
+        }
+    };
+    const auto prepare = [&] {
+        for (const auto& [label_ea, value] : frame.labels) storeBe32(base, label_ea, value);
+    };
+    const auto rewind = [&] {
+        const Pass pass = drainTo(buffer_start);
+        return pass.status == tox2::FifoStatus::Idle && consumer.parserGet() == buffer_start;
+    };
+    const auto methodWrites = [&] {
+        std::uint64_t sum = 0;
+        for (const tox2::RsxMethodCount& method : consumer.census().methods) sum += method.count;
+        return sum;
+    };
+
+    // One pass the measurement does not count: the consumer's registers start from their defaults, not from the
+    // capture's, and the builder's caches fill.
+    prepare();
+    const tox2::RsxConsumer::CommandCounts seed_before = consumer.commandCounts();
+    const Pass seed = drainTo(buffer_end);
+    const tox2::RsxConsumer::CommandCounts seed_after = consumer.commandCounts();
+    if (seed.status != tox2::FifoStatus::Idle || !rewind()) {
+        std::fprintf(stderr, "error: %s: the first pass did not reach the end of the words (status %d)\n", name.c_str(),
+                     static_cast<int>(seed.status));
+        return 1;
+    }
+
+    std::uint32_t iteration_index = 0;
+    const std::uint32_t total_iterations = options.warmup + options.iterations;
+    return runMeasured(self, options, [&](std::uint64_t* cycles) {
+        prepare();
+        const std::uint64_t headers_before = consumer.census().headers;
+        const std::uint64_t writes_before = methodWrites();
+        const tox2::RsxConsumer::CommandCounts before = consumer.commandCounts();
+
+        const std::uint64_t start = tox2::currentThreadCycles();
+        const Pass pass = drainTo(buffer_end);
+        *cycles = tox2::currentThreadCycles() - start;
+
+        const tox2::RsxConsumer::CommandCounts after = consumer.commandCounts();
+        const std::uint64_t draws = after.draws - before.draws;
+        const bool words_ok = pass.status == tox2::FifoStatus::Idle && !consumer.faulted() &&
+                              consumer.parserGet() == buffer_end &&
+                              consumer.census().headers - headers_before == frame.headers &&
+                              methodWrites() - writes_before == frame.writes;
+        const bool builder_ok = draws == expected_draws && after.clears - before.clears == expected_clears &&
+                                after.flips - before.flips == 1 && pass.draw_stops >= draws;
+        if (++iteration_index == total_iterations) {
+            // The diagnostic goes out before the summary line, so it is printed once, with the last iteration.
+            std::printf(
+                    "bench %s: %s: %llu method writes in %llu headers (%llu words, %llu writes repeat the method of "
+                    "the one before), %zu semaphore acquires, %u pump calls, %llu draw stops, %llu draws, %llu "
+                    "clears\n",
+                    self.name, name.c_str(), static_cast<unsigned long long>(frame.writes),
+                    static_cast<unsigned long long>(frame.headers), static_cast<unsigned long long>(frame.words.size()),
+                    static_cast<unsigned long long>(frame.repeated_methods), frame.labels.size(),
+                    static_cast<unsigned>(pass.pumps), static_cast<unsigned long long>(pass.draw_stops),
+                    static_cast<unsigned long long>(draws),
+                    static_cast<unsigned long long>(after.clears - before.clears));
+            std::printf(
+                    "bench %s: first pass (registers from the defaults) built %llu draws, expected %llu; %.1f "
+                    "cycles per method write\n",
+                    self.name, static_cast<unsigned long long>(seed_after.draws - seed_before.draws),
+                    static_cast<unsigned long long>(expected_draws),
+                    static_cast<double>(*cycles) / static_cast<double>(frame.writes));
+        }
+        return words_ok && builder_ok && rewind();
+    });
+}
+
 const std::vector<Case>& cases() {
     static const std::vector<Case> kCases = {
             {"spu-lzma",
@@ -1041,6 +1419,14 @@ const std::vector<Case>& cases() {
              {"kb", "reps"},
              {},
              runRsxHash},
+            {"rsx-fifo",
+             "the RSX consumer pumping the FIFO words of a captured frame with the frame builder on and no renderer "
+             "(--capture FILE) or --synthetic",
+             20,
+             2,
+             {"capture"},
+             {"synthetic"},
+             runRsxFifo},
     };
     return kCases;
 }
