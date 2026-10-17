@@ -733,11 +733,21 @@ void RsxFrameBuilder::fillVertexProgram(const RsxRegisters& regs, RsxDraw& draw)
     draw.vp_output_mask = regs.reg(kMethodNv4097SetVertexAttribOutputMask);
     draw.vp_branch_bits = regs.reg(kMethodNv4097SetTransformBranchBits);
     // Draws between two constant writes share one snapshot. A snapshot no draw holds any more is rewritten in place
-    // instead of allocating a new 7.5 KB vector.
+    // instead of allocating a new 7.5 KB vector, and when it holds the contents the registers' dirty range is relative
+    // to, only that range is copied.
     const std::uint64_t constants_generation = regs.vpConstantsGeneration();
     if (!constants_snapshot_ || constants_generation_ != constants_generation) {
         if (constants_snapshot_ && constants_snapshot_.use_count() == 1) {
-            constants_snapshot_->assign(regs.vp_constants.begin(), regs.vp_constants.end());
+            std::vector<std::uint32_t>& snapshot = *constants_snapshot_;
+            const std::size_t begin = regs.vp_constants_dirty_begin;
+            const std::size_t end = std::min<std::size_t>(regs.vp_constants_dirty_end, regs.vp_constants.size());
+            if (regs.vp_constants_base != 0 && regs.vp_constants_base == constants_generation_ &&
+                snapshot.size() == regs.vp_constants.size() && begin <= end) {
+                std::memcpy(snapshot.data() + begin, regs.vp_constants.data() + begin,
+                            (end - begin) * sizeof(std::uint32_t));
+            } else {
+                snapshot.assign(regs.vp_constants.begin(), regs.vp_constants.end());
+            }
         } else {
             constants_snapshot_ =
                     std::make_shared<std::vector<std::uint32_t>>(regs.vp_constants.begin(), regs.vp_constants.end());

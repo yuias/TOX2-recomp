@@ -1,5 +1,6 @@
 #include "rsx/rsx_registers.h"
 
+#include <algorithm>
 #include <atomic>
 
 #include "rsx/fifo_parser.h"
@@ -394,6 +395,7 @@ std::uint64_t RsxRegisters::vpConstantsGeneration() const {
 void RsxRegisters::markVpStoresChanged() {
     vp_ucode_generation = 0;
     vp_constants_generation = 0;
+    vp_constants_base = 0;
 }
 
 void RsxRegisters::reset() {
@@ -479,6 +481,15 @@ void RsxRegisters::apply(std::uint32_t method, std::uint32_t value) {
         const std::uint64_t slot = (static_cast<std::uint64_t>(constant_load) + index / 4) * 4 + index % 4;
         if (slot < vp_constants.size()) {
             vp_constants[slot] = value;
+            const auto word = static_cast<std::uint32_t>(slot);
+            if (vp_constants_generation != 0) {
+                vp_constants_base = vp_constants_generation;
+                vp_constants_dirty_begin = word;
+                vp_constants_dirty_end = word + 1;
+            } else if (vp_constants_base != 0) {
+                vp_constants_dirty_begin = std::min(vp_constants_dirty_begin, word);
+                vp_constants_dirty_end = std::max(vp_constants_dirty_end, word + 1);
+            }
             vp_constants_generation = 0;
         }
     }

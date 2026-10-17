@@ -49,6 +49,13 @@ struct RsxRegisters {
     std::uint64_t vpConstantsGeneration() const;
     void markVpStoresChanged();
     mutable std::uint64_t vp_ucode_generation = 0, vp_constants_generation = 0;
+
+    // Lets a consumer holding a copy of vp_constants refresh only what changed: while vp_constants_base is non-zero,
+    // vp_constants differs from the contents that carried that name only within words
+    // [vp_constants_dirty_begin, vp_constants_dirty_end). apply() moves the base to the current name when it changes a
+    // named store; markVpStoresChanged() and reset() clear it, so a consumer then copies everything.
+    std::uint64_t vp_constants_base = 0;
+    std::uint32_t vp_constants_dirty_begin = 0, vp_constants_dirty_end = 0;
 };
 
 }  // namespace tox2

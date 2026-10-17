@@ -9190,6 +9190,87 @@ void testSharedVertexConstants() {
     tox2::rsxUnimplementedReset();
 }
 
+// The snapshot a draw carries always equals the register store, whatever mix of constant writes, draws that still hold
+// their snapshot (a new vector) or released it (rewritten in place, only the changed words), direct stores and resets
+// came before it.
+void testVertexConstantSnapshotMatchesRegisters() {
+    tox2::rsxUnimplementedReset();
+    FakeRsxMemory memory;
+    memory.putWord(0, 0x2000, 0x00010000);
+    FragmentRig rig(memory);
+    const auto configure = [&] {
+        rig.write(0x0200, 1280u << 16);
+        rig.write(0x0204, 720u << 16);
+        rig.write(0x0208, 8u | (2u << 5) | (1u << 8));
+        rig.write(0x020C, 0x1400);
+        rig.write(0x0210, 0x100000);
+        rig.write(0x0214, 0x900000);
+        rig.write(0x022C, 0x1400);
+        rig.write(0x0220, 1);
+        rig.write(0x08C0, 1280u << 16);
+        rig.write(0x08C4, 720u << 16);
+        rig.write(0x1740, 2u | (3u << 4) | (12u << 8));
+        rig.write(0x1680, 0x80001000);
+    };
+    std::uint32_t state = 0x9E3779B9u;  // xorshift32, fixed seed
+    const auto next = [&state]() {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        return state;
+    };
+    const auto matches = [&](const tox2::RsxDraw& draw) {
+        return draw.vp_constants && draw.vp_constants->size() == rig.regs->vp_constants.size() &&
+               std::equal(draw.vp_constants->begin(), draw.vp_constants->end(), rig.regs->vp_constants.begin());
+    };
+    const auto writeConstants = [&](std::uint32_t load, std::uint32_t first, std::uint32_t count) {
+        rig.write(tox2::kMethodNv4097SetTransformConstantLoad, load);
+        for (std::uint32_t i = 0; i < count; i++) {
+            rig.write(tox2::kMethodNv4097SetTransformConstant + (first + i) * 4, next());
+        }
+    };
+
+    // Writes before the first draw, spread over the store and past its end.
+    writeConstants(0, 0, 1);
+    writeConstants(tox2::kRsxVpConstantCount - 2, 0, 12);
+    writeConstants(100, 3, 5);
+    CHECK(matches(rig.draw(0x2000)));
+
+    struct Held {
+        tox2::RsxDraw draw;
+        std::vector<std::uint32_t> expected;
+    };
+    std::vector<Held> held;
+    const auto releaseHeld = [&] {
+        for (const Held& entry : held) CHECK(*entry.draw.vp_constants == entry.expected);
+        held.clear();
+    };
+    for (std::uint32_t step = 0; step < 400; step++) {
+        const std::uint32_t action = next() % 16;
+        if (action < 9) {
+            writeConstants(next() % (tox2::kRsxVpConstantCount + 3), next() % 24, 1 + next() % 8);
+        } else if (action < 13) {
+            tox2::RsxDraw draw = rig.draw(0x2000);
+            CHECK(matches(draw));
+            // The next change must not touch a snapshot a draw still holds.
+            if (next() % 3 == 0)
+                held.push_back({std::move(draw), {rig.regs->vp_constants.begin(), rig.regs->vp_constants.end()}});
+        } else if (action == 13) {
+            // A direct store followed by markVpStoresChanged, as the capture loader does.
+            for (std::uint32_t& word : rig.regs->vp_constants) word = next();
+            rig.regs->markVpStoresChanged();
+        } else if (action == 14) {
+            rig.regs->reset();
+            configure();
+            writeConstants(next() % tox2::kRsxVpConstantCount, 0, 4);
+        } else {
+            releaseHeld();
+        }
+    }
+    releaseHeld();
+    tox2::rsxUnimplementedReset();
+}
+
 // fillVertices sizes the vertex vector once: slot placement, the bytes copied, the notes for each failure order and
 // the copied and union byte counters.
 void testFillVerticesOnePass() {
@@ -17439,6 +17520,7 @@ int main(int argc, char** argv) {
     testFragmentProgramCache();
     testVertexProgramCache();
     testSharedVertexConstants();
+    testVertexConstantSnapshotMatchesRegisters();
     testFillVerticesOnePass();
     testSharedVertexRanges();
     testRecycledDrawBuffers();
