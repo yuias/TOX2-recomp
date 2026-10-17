@@ -528,6 +528,48 @@ static int checkShufb(void) {
     return bad == 0;
 }
 
+static long compareShufb(Tox2Vr a, Tox2Vr b, Tox2Vr c, const char* what) {
+    const Tox2Vr got = tox2SpuShufb(a, b, c);
+    const Tox2Vr want = shufbReference(a, b, c);
+    long bad = 0;
+    for (int i = 0; i < 16; i++) {
+        if (got.u8[i] != want.u8[i]) {
+            if (bad++ < 3)
+                printf("shufb %s lane %d control %02x: %02x, expected %02x\n", what, i, c.u8[i], got.u8[i], want.u8[i]);
+        }
+    }
+    return bad;
+}
+
+static Tox2Vr randomVector(void) {
+    Tox2Vr v;
+    for (int i = 0; i < 16; i++) v.u8[i] = (uint8_t)next();
+    return v;
+}
+
+// Controls that come from tox2SpuGenControl (the form generated code feeds to shufb, which the compiler can
+// simplify) and the same register on both inputs.
+static int checkShufbForms(void) {
+    long bad = 0;
+    for (uint32_t size = 1; size <= 8; size <<= 1) {
+        for (uint32_t k = 0; k < 64; k++) {
+            const uint32_t addr = k < 32 ? k : 0xffffffe0u + (k - 32);
+            const Tox2Vr c = tox2SpuGenControl(addr, size);
+            for (int rep = 0; rep < 4; rep++) bad += compareShufb(randomVector(), randomVector(), c, "gencontrol");
+        }
+    }
+    for (long it = 0; it < 100000; it++) {
+        const Tox2Vr a = randomVector();
+        Tox2Vr c = randomVector();
+        if (it < 256) {
+            for (int i = 0; i < 16; i++) c.u8[i] = (uint8_t)(it + i);
+        }
+        bad += compareShufb(a, a, c, "a == b");
+    }
+    printf("shufb forms: control from genControl, a == b, %ld mismatches\n", bad);
+    return bad == 0;
+}
+
 // The previous definition of the insertion mask: a byte store at a variable index per element byte.
 static Tox2Vr genControlReference(uint32_t addr, uint32_t size) {
     uint32_t t = addr & (16u - size);
@@ -701,7 +743,8 @@ static int checkQuadwords(void) {
 
 int main(void) {
     const int ok = checkFloat() & checkEdges() & checkZeroResults() & checkZeroSign() & checkExactPaths() &
-                   checkExactPathLoop() & checkRoundedHelpers() & checkShufb() & checkGenControl() & checkQuadwords();
+                   checkExactPathLoop() & checkRoundedHelpers() & checkShufb() & checkShufbForms() & checkGenControl() &
+                   checkQuadwords();
     if (ok) printf("spu vector helpers ok\n");
     return ok ? 0 : 1;
 }

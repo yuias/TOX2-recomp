@@ -534,22 +534,24 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuRotqmbybi(Tox2Vr a, uint32_t count) { return tox2
 // bytes are read lane by lane because RC and RT share the same lane order.
 TOX2_FORCEINLINE Tox2Vr tox2SpuShufb(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
 #if defined(__SSSE3__)
-    // Architected byte k of a register is host lane 15 - k, so (~sel) & 15 is the lane that pshufb
-    // picks from RA and from RB; bit 4 of the control chooses between them.
+    // pshufb uses only bits 0-3 of a control byte (bits 4-6 are ignored) and gives 0 when bit 7 is set. Architected
+    // byte k is host lane 15 - k, so sel ^ 0x0f is the lane index reversed with bit 7 kept: every special control
+    // (1xxxxxxx) gives 0 from both pshufbs, which already is the 10xxxxxx result. Bit 4 picks RB.
     typedef char Tox2SpuC8x16 __attribute__((vector_size(16)));
     const Tox2U8x16 sel = c.u8;
-    const Tox2U8x16 lane = ~sel & (uint8_t)0x0f;
+    const Tox2U8x16 lane = sel ^ (uint8_t)0x0f;
     const Tox2U8x16 from_a = (Tox2U8x16)__builtin_ia32_pshufb128((Tox2SpuC8x16)a.u8, (Tox2SpuC8x16)lane);
     const Tox2U8x16 from_b = (Tox2U8x16)__builtin_ia32_pshufb128((Tox2SpuC8x16)b.u8, (Tox2SpuC8x16)lane);
     const Tox2U8x16 use_b = (Tox2U8x16)((sel & (uint8_t)0x10) != (uint8_t)0);
-    Tox2U8x16 v = (from_a & ~use_b) | (from_b & use_b);
-    // The special controls: 10xxxxxx gives 0x00, 110xxxxx gives 0xff and 111xxxxx gives 0x80.
-    const Tox2U8x16 zero = (Tox2U8x16)((sel & (uint8_t)0xc0) == (uint8_t)0x80);
-    const Tox2U8x16 ones = (Tox2U8x16)((sel & (uint8_t)0xe0) == (uint8_t)0xc0);
-    const Tox2U8x16 sign = (Tox2U8x16)((sel & (uint8_t)0xe0) == (uint8_t)0xe0);
-    v = (v & ~(zero | sign)) | ones | (sign & (uint8_t)0x80);
+    const Tox2U8x16 v = (from_a & ~use_b) | (from_b & use_b);
+    // 110xxxxx gives 0xff and 111xxxxx gives 0x80. Compares rather than a table, so the compiler drops them when
+    // it knows the control has no special byte (a generate-controls result).
+    const Tox2U8x16 high = sel & (uint8_t)0xe0;
+    const Tox2U8x16 ones = (Tox2U8x16)(high == (uint8_t)0xc0);
+    const Tox2U8x16 sign = (Tox2U8x16)(high == (uint8_t)0xe0);
+    const Tox2U8x16 special = ones | (sign & (uint8_t)0x80);
     Tox2Vr r;
-    r.u8 = v;
+    r.u8 = v | special;
     return r;
 #else
     uint8_t concat[32];
