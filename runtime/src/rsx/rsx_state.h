@@ -127,6 +127,9 @@ std::condition_variable_any& rsxGetAdvanced();
 // IO offset -> effective address; false when the IO page is unmapped.
 bool rsxIoToEa(std::uint32_t io, std::uint32_t& ea);
 
+// rsxIoToEa that also gives the bytes from `io` to the end of its mapping page; they are contiguous in guest memory.
+bool rsxIoToEaSpan(std::uint32_t io, std::uint32_t& ea, std::uint32_t& bytes);
+
 // cellGcmAddressToOffset: local memory first, then the IO mapping; false when neither applies.
 bool rsxEaToOffset(std::uint32_t ea, std::uint32_t& offset);
 

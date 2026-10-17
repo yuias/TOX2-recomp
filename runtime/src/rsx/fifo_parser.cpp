@@ -1,5 +1,7 @@
 #include "rsx/fifo_parser.h"
 
+#include <bit>
+#include <cstring>
 #include <format>
 #include <utility>
 
@@ -17,19 +19,38 @@ FifoStatus FifoParser::run(std::uint32_t& get, std::uint32_t put, std::uint32_t 
     if (faulted_) return FifoStatus::Fault;
     put &= ~3u;
     std::uint32_t words = 0;
+    // Words come from the sink's span while it covers `get`, so the common case costs no virtual call per word. A
+    // sink without spans is asked once per run.
+    const std::uint8_t* span = nullptr;
+    std::uint32_t span_io = 0, span_bytes = 0;
+    bool use_spans = true;
 
     for (;;) {
         if (pending_) {
             if (!sink.write(pending_method_, pending_value_)) return FifoStatus::Waiting;
             pending_ = false;
-            if (sink.stopAfterWrite()) return FifoStatus::Budget;
+            if (sink.stopRequested()) return FifoStatus::Budget;
         }
         if (get == put) return FifoStatus::Idle;
         if (words >= max_words) return FifoStatus::Budget;
         if ((get & 3) != 0) return fail(std::format("unaligned get 0x{:x}", get));
 
         std::uint32_t word = 0;
-        if (!sink.readIo(get, word)) return fail(std::format("unmapped IO offset 0x{:x}", get));
+        // `get` is word aligned and span_bytes a multiple of 4, so a hit leaves a whole word.
+        if (get - span_io >= span_bytes && use_spans) {
+            std::uint32_t bytes = 0;
+            span = sink.ioSpan(get, bytes);
+            span_io = get;
+            span_bytes = span != nullptr ? bytes & ~3u : 0;
+            if (span_bytes == 0) use_spans = false;
+        }
+        if (get - span_io < span_bytes) {
+            std::uint32_t raw;
+            std::memcpy(&raw, span + (get - span_io), sizeof raw);
+            word = std::byteswap(raw);
+        } else if (!sink.readIo(get, word)) {
+            return fail(std::format("unmapped IO offset 0x{:x}", get));
+        }
         ++words;
 
         if (remaining_ != 0) {

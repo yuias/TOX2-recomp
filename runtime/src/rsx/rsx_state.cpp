@@ -77,6 +77,12 @@ bool rsxIoToEa(std::uint32_t io, std::uint32_t& ea) {
     return true;
 }
 
+bool rsxIoToEaSpan(std::uint32_t io, std::uint32_t& ea, std::uint32_t& bytes) {
+    if (!rsxIoToEa(io, ea)) return false;
+    bytes = (kPageMask + 1) - (io & kPageMask);
+    return true;
+}
+
 bool rsxEaToOffset(std::uint32_t ea, std::uint32_t& offset) {
     // cellGcmAddressToOffset calls this without the kernel lock.
     if (const std::uint32_t local = ea - kRsxLocalBase; local < rsxLocalSize()) {

@@ -173,9 +173,25 @@ public:
     // acquire not satisfied, flip waiting for VBlank): the parser keeps the write and retries it on
     // the next run.
     virtual bool write(std::uint32_t method, std::uint32_t value) = 0;
-    // Asked after each completed write; true ends the run right there with Budget, before any further
-    // word is read, so the sink can do work outside the run that needs the state of exactly that write.
-    virtual bool stopAfterWrite() { return false; }
+    // Optional bulk read: the big-endian bytes at an IO offset up to the end of the contiguous mapping
+    // (`bytes`, at least one word when the pointer is not null). The parser reads each word from the span
+    // only when it parses it, as readIo would. nullptr when the page is unmapped or the sink has no spans;
+    // the parser then falls back to readIo. The pointer stays in use until the next ioSpan call or the end of
+    // run(), across write() calls, so write() must not change the IO mapping.
+    virtual const std::uint8_t* ioSpan(std::uint32_t io, std::uint32_t& bytes) {
+        (void)io;
+        (void)bytes;
+        return nullptr;
+    }
+
+    // Read by the parser after each completed write; true ends the run right there with Budget, before any
+    // further word is read, so the sink can do work outside the run that needs the state of exactly that
+    // write. A plain flag instead of a virtual query: it is asked once per register write.
+    bool stopRequested() const { return stop_after_write_; }
+
+protected:
+    // Set by write() on every call that returns true.
+    bool stop_after_write_ = false;
 };
 
 enum class FifoStatus {

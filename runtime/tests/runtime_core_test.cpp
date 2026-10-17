@@ -3242,6 +3242,7 @@ void testSpuAndSysmodule() {
 class FakeSink : public tox2::RsxSink {
 public:
     bool readIo(std::uint32_t io, std::uint32_t& word) override {
+        read_io_calls++;
         const auto it = words.find(io);
         if (it == words.end()) return false;
         word = it->second;
@@ -3254,9 +3255,25 @@ public:
             return false;
         }
         writes.emplace_back(method, value);
+        stop_after_write_ = writes.back() == stop_on;
         return true;
     }
-    bool stopAfterWrite() override { return !writes.empty() && writes.back() == stop_on; }
+    const std::uint8_t* ioSpan(std::uint32_t io, std::uint32_t& bytes) override {
+        if (!use_spans) return nullptr;
+        const auto it = words.find(io);
+        if (it == words.end()) return nullptr;
+        // Contiguous words from `io`, each as big-endian bytes in a buffer rebuilt per call.
+        span_buffer.clear();
+        std::uint32_t at = io;
+        for (auto word = it; word != words.end() && word->first == at && span_buffer.size() < span_limit * 4;
+             ++word, at += 4) {
+            for (int shift = 24; shift >= 0; shift -= 8) {
+                span_buffer.push_back(static_cast<std::uint8_t>(word->second >> shift));
+            }
+        }
+        bytes = static_cast<std::uint32_t>(span_buffer.size());
+        return span_buffer.data();
+    }
     void put(std::uint32_t at, std::initializer_list<std::uint32_t> list) {
         for (const std::uint32_t word : list) {
             words[at] = word;
@@ -3269,6 +3286,10 @@ public:
     int refuse = 0;  // the next writes return false
     int attempts = 0;
     std::pair<std::uint32_t, std::uint32_t> stop_on{0xFFFFFFFF, 0};  // the run stops after this write
+    bool use_spans = false;                                          // offer ioSpan() instead of readIo() only
+    int read_io_calls = 0;                                           // readIo() calls, to show the span path ran
+    std::size_t span_limit = 1000;                                   // words per span, to cross span ends
+    std::vector<std::uint8_t> span_buffer;
 };
 
 using Writes = std::vector<std::pair<std::uint32_t, std::uint32_t>>;
@@ -7452,6 +7473,51 @@ void testFifoParser() {
         CHECK(parser.run(get, 0x4008, 100, sink) == FifoStatus::Idle && get == 0x4008);
         CHECK((sink.writes == Writes{{0x1800, 5}, {0x1800, 6}}));
     }
+
+    // Reading through spans gives the same writes, get, status and fault as word reads, also when spans end
+    // mid-command, when jumps and calls leave the span, and with budget and stop points inside it.
+    for (const std::size_t span_limit : {std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{1000}}) {
+        const auto fill = [](FakeSink& sink) {
+            sink.put(kBase,
+                     {0x1d6c | (5u << 18), 1, 2, 3, 4, 5, 0x1800 | (1u << 18), 6, 0x3000u | 2, 0x20000000u | 0x2000});
+            sink.put(0x2000, {0x40000000u | 0x1808 | (3u << 18), 7, 0, 9, 0x1800 | (1u << 18), 8});
+            sink.put(0x3000, {0x1800 | (2u << 18), 10, 11, 0x00020000});
+        };
+        for (const std::uint32_t budget : {2u, 3u, 7u, 100u}) {
+            FakeSink words_sink, span_sink;
+            fill(words_sink);
+            fill(span_sink);
+            span_sink.use_spans = true;
+            span_sink.span_limit = span_limit;
+            words_sink.stop_on = span_sink.stop_on = {0x1808, 0};
+            FifoParser words_parser, span_parser;
+            std::uint32_t words_get = kBase, span_get = kBase;
+            for (int run = 0; run < 40; run++) {
+                const FifoStatus a = words_parser.run(words_get, 0x2018, budget, words_sink);
+                const FifoStatus b = span_parser.run(span_get, 0x2018, budget, span_sink);
+                CHECK(a == b && words_get == span_get);
+                CHECK(words_parser.commandGet(words_get) == span_parser.commandGet(span_get));
+                if (a == FifoStatus::Idle || a == FifoStatus::Fault) break;
+            }
+            CHECK(words_sink.writes == span_sink.writes && !span_sink.writes.empty());
+            CHECK(words_get == span_get && words_parser.headersParsed() == span_parser.headersParsed());
+            CHECK(span_sink.read_io_calls == 0 && words_sink.read_io_calls > 0);
+        }
+    }
+
+    // An unmapped word is a fault with spans too, and a span that stops before the unmapped word is not trusted
+    // beyond its end.
+    {
+        FakeSink sink;
+        sink.use_spans = true;
+        FifoParser parser;
+        sink.put(kBase, {0x1800 | (3u << 18), 1, 2});  // the third argument is unmapped
+        std::uint32_t get = kBase;
+        CHECK(parser.run(get, kBase + 20, 100, sink) == FifoStatus::Fault && get == kBase + 12);
+        CHECK((sink.writes == Writes{{0x1800, 1}, {0x1804, 2}}));
+        CHECK(parser.lastFault().find("unmapped") != std::string_view::npos);
+        CHECK(sink.read_io_calls == 1);  // only the unmapped word falls back to readIo
+    }
 }
 
 std::vector<std::pair<tox2::RsxInterrupt, std::uint32_t>> g_interrupts;
@@ -8024,6 +8090,42 @@ void testRsxDecode() {
     CHECK(tox2::rsxIgnoredMethodName(0x1500) == nullptr);  // the float forms are decoded into the defaults
     CHECK(tox2::rsxIgnoredMethodName(0x1C00) == nullptr && tox2::rsxIgnoredMethodName(0x1814) == nullptr);
     CHECK(tox2::rsxIgnoredMethodName(0x1818) != nullptr && tox2::rsxIgnoredMethodName(0xC40C) != nullptr);
+
+    // The lookup is a bitmap built from the ranges; it must agree with the plain range scan for every offset,
+    // unaligned ones and the whole 16-bit method space and beyond included.
+    {
+        struct Range {
+            std::uint32_t first, count;
+            const char* name;
+        };
+        const Range ranges[] = {
+                {tox2::kMethodNv4097SetVertexDataScaled4sM, 32, "NV4097_SET_VERTEX_DATA_SCALED4S_M"},
+                {tox2::kMethodNv4097ArrayElement16, 1, "NV4097_ARRAY_ELEMENT16"},
+                {tox2::kMethodNv4097ArrayElement32, 1, "NV4097_ARRAY_ELEMENT32"},
+                {tox2::kMethodNv4097InlineArray, 1, "NV4097_INLINE_ARRAY"},
+                {tox2::kMethodNv4097SetVertexData2sM, 16, "NV4097_SET_VERTEX_DATA2S_M"},
+                {tox2::kMethodNv4097SetVertexData4ubM, 16, "NV4097_SET_VERTEX_DATA4UB_M"},
+                {tox2::kMethodNv4097SetVertexData4sM, 32, "NV4097_SET_VERTEX_DATA4S_M"},
+                {tox2::kMethodNv0039BufferNotify, 1, "NV0039_BUFFER_NOTIFY"},
+                {tox2::kMethodNv3089ImageIn, 1, "NV3089_IMAGE_IN"},
+        };
+        std::size_t ignored = 0;
+        for (std::uint32_t method = 0; method < 0x20000; method++) {
+            const char* expected = nullptr;
+            for (const Range& range : ranges) {
+                if (method >= range.first && method < range.first + range.count * 4) {
+                    expected = range.name;
+                    break;
+                }
+            }
+            const char* actual = tox2::rsxIgnoredMethodName(method);
+            CHECK((actual == nullptr) == (expected == nullptr));
+            if (actual != nullptr && expected != nullptr) CHECK(std::string_view(actual) == expected);
+            ignored += actual != nullptr;
+        }
+        CHECK(ignored == (32 + 1 + 1 + 1 + 16 + 16 + 32 + 1 + 1) * 4);
+        CHECK(tox2::rsxIgnoredMethodName(0xFFFFFFFC) == nullptr);
+    }
 
     // The census prints the section once something was noted, most frequent first.
     tox2::rsxUnimplementedReset();

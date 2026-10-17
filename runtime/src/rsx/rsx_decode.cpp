@@ -1,7 +1,9 @@
 #include "rsx/rsx_decode.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
+#include <cstdint>
 #include <format>
 #include <iterator>
 #include <string>
@@ -117,6 +119,20 @@ constexpr MethodRange kIgnoredMethods[] = {
         {kMethodNv0039BufferNotify, 1, "NV0039_BUFFER_NOTIFY"},
         {kMethodNv3089ImageIn, 1, "NV3089_IMAGE_IN"},
 };
+
+// One bit per register (method >> 2) of the 16-bit method space, set where a range of kIgnoredMethods covers it, so
+// the per-write check is a bit test and the range scan runs only for ignored methods.
+constexpr std::size_t kIgnoredBitmapWords = 0x4000 / 64;
+constexpr std::array<std::uint64_t, kIgnoredBitmapWords> kIgnoredBitmap = [] {
+    std::array<std::uint64_t, kIgnoredBitmapWords> bits{};
+    for (const MethodRange& range : kIgnoredMethods) {
+        for (std::uint32_t i = 0; i < range.count; i++) {
+            const std::uint32_t reg = (range.first >> 2) + i;
+            bits[reg / 64] |= std::uint64_t{1} << (reg % 64);
+        }
+    }
+    return bits;
+}();
 
 }  // namespace
 
@@ -573,6 +589,9 @@ RsxClear decodeClear(const RsxRegisters& regs, std::uint32_t mask) {
 }
 
 const char* rsxIgnoredMethodName(std::uint32_t method) {
+    // The ranges start and end on register boundaries, so an unaligned offset is covered with its register.
+    const std::uint32_t reg = method >> 2;
+    if (reg >= kIgnoredBitmapWords * 64 || (kIgnoredBitmap[reg / 64] >> (reg % 64) & 1) == 0) return nullptr;
     for (const MethodRange& range : kIgnoredMethods) {
         if (method >= range.first && method < range.first + range.count * 4) return range.name;
     }

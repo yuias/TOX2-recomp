@@ -101,10 +101,12 @@ public:
     explicit RsxConsumer(std::uint8_t* base);
 
     bool readIo(std::uint32_t io, std::uint32_t& word) override;
+    const std::uint8_t* ioSpan(std::uint32_t io, std::uint32_t& bytes) override;
     bool write(std::uint32_t method, std::uint32_t value) override;
     // True after the write that ends a draw clause: the run stops there so that takeCommands() can copy
-    // the draw's guest bytes outside the kernel lock with the registers that draw used.
-    bool stopAfterWrite() override;
+    // the draw's guest bytes outside the kernel lock with the registers that draw used. write() sets the sink's
+    // stop flag from the same condition for the parser.
+    bool stopAfterWrite() const;
 
     // Parses what the guest has put since the last call (at most `max_words` words), then publishes
     // `get` to the control register. After Fault nothing is consumed any more. A draw still pending from

@@ -155,10 +155,19 @@ bool RsxConsumer::readIo(std::uint32_t io, std::uint32_t& word) {
     return true;
 }
 
+const std::uint8_t* RsxConsumer::ioSpan(std::uint32_t io, std::uint32_t& bytes) {
+    std::uint32_t ea = 0;
+    if (!rsxIoToEaSpan(io, ea, bytes)) return nullptr;
+    return base_ + ea;
+}
+
 bool RsxConsumer::write(std::uint32_t method, std::uint32_t value) {
     if (!execute(method, value)) return false;
     // Counted on completion, so a write retried while waiting is counted once.
-    method_counts_[(method >> 2) & (kMethodCount - 1)].fetch_add(1, std::memory_order_relaxed);
+    // Only the thread that pumps writes a counter (under the kernel lock); census() just loads, so a plain
+    // load and store avoids the locked read-modify-write.
+    std::atomic<std::uint64_t>& count = method_counts_[(method >> 2) & (kMethodCount - 1)];
+    count.store(count.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
     if (arg_census_ != nullptr) arg_census_->onWrite(method, value);
     if (builder_ != nullptr) {
         regs_->apply(method, value);
@@ -178,10 +187,11 @@ bool RsxConsumer::write(std::uint32_t method, std::uint32_t value) {
             if (requested || captureWanted(next)) startCapture(next, requested);
         }
     }
+    stop_after_write_ = stopAfterWrite();
     return true;
 }
 
-bool RsxConsumer::stopAfterWrite() { return builder_ != nullptr && builder_->drawPending(); }
+bool RsxConsumer::stopAfterWrite() const { return builder_ != nullptr && builder_->drawPending(); }
 
 void RsxConsumer::finishPendingDraw() {
     if (builder_ == nullptr || !builder_->drawPending()) return;
