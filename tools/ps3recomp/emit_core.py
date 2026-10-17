@@ -34,6 +34,7 @@ class EmitEnv:
     thunks: Mapping[int, str]                       # import thunk addr -> trampoline ("imp_%08x")
     switch_targets: Mapping[int, tuple[int, ...]]   # bcctr site -> sorted distinct targets
     comments: bool = False
+    notify_stores: frozenset[int] = frozenset()     # stores routed through the reservation table
 
 
 @dataclass
@@ -46,6 +47,7 @@ class EmitStats:
     loop_hooks: int = 0
     functions: int = 0
     instructions: int = 0
+    notified: set[int] = field(default_factory=set)     # notify_stores addresses actually emitted
 
 
 class Op:
@@ -61,6 +63,7 @@ class Op:
                        or ("rc_vc" in spec.flags and insn.field("Rc_vc")))
         self.oe = bool("oe" in spec.flags and insn.field("OE"))
         self.unhandled_key: str | None = None
+        self.notify_store = False       # set by the emitter; stores then use tox2NotifyWriteN
 
     def f(self, field_name: str) -> int:
         return self.insn.field(field_name)
@@ -371,10 +374,14 @@ class _FunctionEmitter:
             if lines is None:
                 return self.unhandled_stmt(op.unhandled_key or op.name, addr, op.word)
             return lines
+        op.notify_store = addr in self.env.notify_stores
         fn = self.handlers.get(op.name)
         lines = None if fn is None else fn(op)
         if lines is None:
             return self.unhandled_stmt(op.unhandled_key or op.name, addr, op.word)
+        if op.notify_store:
+            # Recorded here, not in the handler, so a listed store that is left unhandled is not counted.
+            self.stats.notified.add(addr)
         if len(lines) > 1:
             # Handler temporaries (t0, t1, ...) stay local to the instruction.
             return ["{"] + [_INDENT + line for line in lines] + ["}"]

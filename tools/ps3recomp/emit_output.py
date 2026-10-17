@@ -325,7 +325,8 @@ def edges_section(edges: Counter) -> dict:
 def build_report(*, sha256: str, db_sha256: str, stats: EmitStats,
                  functions: Sequence[FunctionRecord], thunks: Sequence[DbThunk],
                  without_toc_save: Sequence[int], summary: OutputSummary,
-                 overrides: Sequence[dict], elapsed: float) -> dict:
+                 overrides: Sequence[dict], elapsed: float,
+                 notify_stores: Sequence[dict] = ()) -> dict:
     largest = sorted(functions, key=lambda fn: (-fn.instructions, fn.entry))[:LARGEST_FUNCTIONS]
     return {
         "schema": REPORT_SCHEMA,
@@ -345,6 +346,7 @@ def build_report(*, sha256: str, db_sha256: str, stats: EmitStats,
         "labels": stats.labels,
         "loop_hooks": stats.loop_hooks,
         "overrides": list(overrides),
+        "notify_stores": list(notify_stores),
         "output_bytes": summary.output_bytes,
         "elapsed_s": round(elapsed, 3),
     }
@@ -354,6 +356,7 @@ def report_lines(report: dict, out_dir: str) -> list[str]:
     unhandled = report["unhandled"]
     edges = report["edges"]
     entries = [o["entry"] for o in report["overrides"]]
+    notified = sum(len(n["stores"]) for n in report["notify_stores"])
     top = ", ".join("%s %d" % kv for kv in list(unhandled["by_mnemonic"].items())[:UNHANDLED_TOP])
     return [
         "emit: %d functions (%d insns) in %d chunks, %d import trampolines (%d without TOC save)"
@@ -369,5 +372,6 @@ def report_lines(report: dict, out_dir: str) -> list[str]:
            edges["switch_cases"]),
         "output: %d bytes in %s" % (report["output_bytes"], out_dir),
         "elapsed: %.1f s" % report["elapsed_s"],
+        "notify stores: %d in %d functions" % (notified, len(report["notify_stores"])),
         "overrides: %d%s" % (len(entries), " (%s)" % ", ".join(entries) if entries else ""),
     ]

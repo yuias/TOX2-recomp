@@ -57,6 +57,8 @@ def _build_table() -> dict[str, _Access]:
 _TABLE = _build_table()
 _READ = {1: "tox2Read8", 2: "tox2Read16", 4: "tox2Read32", 8: "tox2Read64"}
 _WRITE = {1: "tox2Write8", 2: "tox2Write16", 4: "tox2Write32", 8: "tox2Write64"}
+_NOTIFY_WRITE = {1: "tox2NotifyWrite8", 2: "tox2NotifyWrite16", 4: "tox2NotifyWrite32",
+                 8: "tox2NotifyWrite64"}
 _UNSIGNED = {1: "uint8_t", 2: "uint16_t", 4: "uint32_t", 8: "uint64_t"}
 _SIGNED = {2: "int16_t", 4: "int32_t"}
 
@@ -102,7 +104,9 @@ def _access_statement(op: Op, access: _Access, ea: str) -> str:
     if kind == "word":
         # stfiwx stores the low word of the FPR bits (RPCS3 `STFIWX`).
         return "tox2Write32(base, %s, (uint32_t)%s.u64);" % (ea, op.fpr(op.f("frS")))
-    return "%s(base, %s, %s);" % (_WRITE[access.width],
+    # Only integer and byte-reversed stores can be routed; the notify-file loader refuses the rest.
+    write = _NOTIFY_WRITE if op.notify_store else _WRITE
+    return "%s(base, %s, %s);" % (write[access.width],
                                   ea, _store_value(access, op.gpr(op.f("rS"))))
 
 

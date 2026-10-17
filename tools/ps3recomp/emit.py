@@ -15,6 +15,9 @@ from . import cell
 from .elf import ElfError
 from .emit_core import EmitEnv, EmitStats, emit_function
 from .emit_db import census_doc, census_lines, check_db_matches, load_function_db, take_census
+from .emit_notify import (DEFAULT_NOTIFY_STORES, check_emitted, image_name_of, load_notify_stores,
+                          store_addresses)
+from .emit_notify import report_section as notify_report_section
 from .emit_output import (ExportRow, FunctionRecord, build_report, func_name, import_name,
                           read_thunk_words, render_trampoline, report_lines, write_output)
 from .emit_overrides import (DEFAULT_OVERRIDES, check_pin, generated_name, load_overrides,
@@ -128,12 +131,18 @@ def _run(args: argparse.Namespace) -> int:
         explicit=bool(args.overrides), entries=[fn.entry for fn in db.functions])
     overridden = {o.entry: o for o in overrides}
 
+    notify_stores = load_notify_stores(
+        Path(args.notify_stores) if args.notify_stores else DEFAULT_NOTIFY_STORES,
+        explicit=bool(args.notify_stores), image_name=image_name_of(prefix), image=image,
+        functions=db.functions)
+
     env = EmitEnv(
         names={fn.entry: func_name(fn.entry, prefix) for fn in db.functions},
         thunks={t.addr: import_name(t.addr, prefix) for t in db.thunks},
         switch_targets={branch: tuple(sorted(set(table.targets)))
                         for branch, table in db.jump_tables.items()},
-        comments=args.comments)
+        comments=args.comments,
+        notify_stores=store_addresses(notify_stores))
     stats = EmitStats()
     functions = []
     for fn in db.functions:
@@ -148,6 +157,8 @@ def _run(args: argparse.Namespace) -> int:
             name = generated_name(name)
         text = emit_function(image, fn.entry, addrs, env, stats, name=name, title=fn.name)
         functions.append(FunctionRecord(fn.entry, len(addrs), text))
+
+    check_emitted(notify_stores, stats.notified)
 
     thunk_texts = []
     without_toc_save = []
@@ -164,6 +175,7 @@ def _run(args: argparse.Namespace) -> int:
     report = build_report(sha256=sha256, db_sha256=db.file_sha256, stats=stats,
                           functions=functions, thunks=db.thunks, without_toc_save=without_toc_save,
                           summary=summary, overrides=report_section(overrides),
+                          notify_stores=notify_report_section(notify_stores),
                           elapsed=time.perf_counter() - started)
     report_path = (Path(args.report) if args.report
                    else _default_analysis_path(DEFAULT_REPORT, prefix))
@@ -220,6 +232,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--overrides", metavar="PATH",
                         help="guest function override file (default: config/ppu_overrides.json, "
                              "optional); refused with --symbol-prefix")
+    parser.add_argument("--notify-stores", metavar="PATH",
+                        help="stores that go through the reservation table (default: "
+                             "config/ppu_notify_stores.json, optional); entries of other images "
+                             "are ignored")
     parser.add_argument("--max-unhandled", type=_non_negative_int, metavar="N",
                         help="exit 9 if more than N words are emitted as unhandled")
     return parser

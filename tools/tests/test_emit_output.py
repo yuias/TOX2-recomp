@@ -25,7 +25,8 @@ STD_R2_40_R1 = 62 << 26 | 2 << 21 | 1 << 16 | 40        # std r2,40(r1)
 FILES = ["ppu_chunk_000.c", "ppu_funcs.h", "ppu_imports.c", "ppu_tables.c", "sources.cmake"]
 REPORT_KEYS = ["schema", "generator", "input", "functions", "instructions", "import_trampolines",
                "thunks_without_toc_save", "chunks", "largest_functions", "unhandled", "edges",
-               "dynamic_targets", "labels", "loop_hooks", "overrides", "output_bytes", "elapsed_s"]
+               "dynamic_targets", "labels", "loop_hooks", "overrides", "notify_stores", "output_bytes",
+               "elapsed_s"]
 
 
 class PlanChunksTest(unittest.TestCase):
