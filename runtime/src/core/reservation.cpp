@@ -366,16 +366,43 @@ bool ReservationTable::storeConditional(std::uint8_t* base, std::uint32_t ea, st
 }
 
 bool ReservationTable::lost(const std::uint8_t* base, const Reservation& res) const {
+    return versionMoved(res) || contentDiffers(base, res);
+}
+
+bool ReservationTable::versionMoved(const Reservation& res) const {
     if (!res.valid) return false;
     // Ignore the lock bit: a writer that holds the stripe briefly and restores it (failed store-conditional,
     // failed PUTLLC compare, stripe collision) leaves the version unchanged. A writer that did write is
-    // caught by the version bump once it unlocks, or by the content compare below while it still holds it.
-    if ((stripe(res.line).load(std::memory_order_acquire) & ~1ull) != res.version) return true;
+    // caught by the version bump once it unlocks, or by the content compare while it still holds it.
+    return (stripe(res.line).load(std::memory_order_acquire) & ~1ull) != res.version;
+}
+
+bool ReservationTable::contentDiffers(const std::uint8_t* base, const Reservation& res) const {
+    if (!res.valid) return false;
+    // The content compare is what sees plain stores, which change neither the version nor the epoch.
     const std::uint8_t* host = base + res.line;
     for (std::uint32_t i = 0; i < kChunkCount; i++) {
         if (loadChunk(host + 8 * i) != readBuffer(res.snapshot + 8 * i)) return true;
     }
     return false;
+}
+
+ReservationLoss ReservationTable::describeLoss(const std::uint8_t* base, const Reservation& res) const {
+    ReservationLoss loss;
+    if (!res.valid) return loss;
+    // Unlike lost(), wait out a writer that holds the stripe: a PUTLLC that has stored its chunks but not yet bumped
+    // the version would otherwise look like a plain store. A failing writer restores the stripe and writes nothing.
+    const std::atomic<std::uint64_t>& s = stripe(res.line);
+    std::uint32_t spins = 0;
+    std::uint64_t v;
+    while (((v = s.load(std::memory_order_acquire)) & 1) != 0) spinOnce(spins);
+    loss.version_moved = v != res.version;
+    const std::uint8_t* host = base + res.line;
+    for (std::uint32_t i = 0; i < kChunkCount; i++) {
+        loss.now[i] = loadChunk(host + 8 * i);
+        if (loss.now[i] != readBuffer(res.snapshot + 8 * i)) loss.changed_chunks |= static_cast<std::uint16_t>(1u << i);
+    }
+    return loss;
 }
 
 StoreWait ReservationTable::waitStoreEpoch(std::uint64_t seen, const std::uint32_t* halt,

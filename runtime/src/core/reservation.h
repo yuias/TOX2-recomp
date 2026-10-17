@@ -30,6 +30,13 @@ struct Reservation {
     alignas(16) std::uint8_t snapshot[kReservationLineSize] = {};
 };
 
+// What a lost reservation looks like now, for diagnostics. Chunks are raw 8-byte loads (guest byte order).
+struct ReservationLoss {
+    bool version_moved = false;        // a reservation-aware write bumped the stripe since GETLLAR
+    std::uint16_t changed_chunks = 0;  // bit i: chunk i (bytes 8i..8i+7) differs from the snapshot now
+    std::array<std::uint64_t, kReservationLineSize / 8> now{};  // the line's chunks as loaded for the compare
+};
+
 // Why waitStoreEpoch() returned.
 enum class StoreWait { Epoch, Timeout, Halt };
 
@@ -119,8 +126,15 @@ public:
 
     // True when the reservation is gone: the stripe version changed or the line differs from the
     // snapshot. The content compare is what sees plain stores. A reservation that is not valid is
-    // never lost.
+    // never lost. Equals versionMoved() || contentDiffers(); both are false for an invalid reservation.
     bool lost(const std::uint8_t* base, const Reservation& res) const;
+    bool versionMoved(const Reservation& res) const;
+    bool contentDiffers(const std::uint8_t* base, const Reservation& res) const;
+
+    // Diagnostic version of lost() for the rare timeout path. It first waits, read-only, while the stripe is locked,
+    // so that a reservation-aware write in progress is seen as a version move and not as a plain store. May block
+    // as long as a writer holds the stripe. Not for the hot wait path.
+    ReservationLoss describeLoss(const std::uint8_t* base, const Reservation& res) const;
 
     // Count of reservation-aware write operations (one PUT counts once, however many lines it spans) and
     // wake() calls so far. Must stay an acquire load: a writer bumps every stripe version it touches before the epoch,

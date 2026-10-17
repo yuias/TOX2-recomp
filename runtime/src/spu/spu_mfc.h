@@ -116,6 +116,8 @@ public:
     // Guest address of the reserved line; meaningful while hasReservation().
     std::uint32_t reservationLine() const { return reservation_.line; }
     bool reservationLost() const { return reservations().lost(base_, reservation_); }
+    // Waits for a writer that holds the stripe; for the timeout diagnostics only.
+    ReservationLoss reservationLoss() const { return reservations().describeLoss(base_, reservation_); }
     const Reservation& reservation() const { return reservation_; }
 
     const SpuMfcCounters& counters() const { return counters_; }

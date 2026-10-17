@@ -446,6 +446,77 @@ void testCompareWindow() {
     table.setCompareHook(nullptr, nullptr);
 }
 
+// A PUTLLC that parks inside its critical section, after the snapshot compare and before the chunk stores.
+struct ParkedPutllc {
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+};
+
+void parkHook(void* arg) {
+    auto* park = static_cast<ParkedPutllc*>(arg);
+    park->entered.store(true);
+    while (!park->release.load()) std::this_thread::sleep_for(milliseconds(1));
+}
+
+void testDescribeLoss() {
+    tox2::ReservationTable table;
+    TestMemory mem;
+    constexpr std::uint32_t kLine = 128;
+    tox2::Reservation res;
+    alignas(16) std::uint8_t ls[128];
+
+    // Nothing written.
+    table.getllar(mem.base(), kLine, ls, res);
+    CHECK(!table.lost(mem.base(), res) && !table.versionMoved(res) && !table.contentDiffers(mem.base(), res));
+    tox2::ReservationLoss loss = table.describeLoss(mem.base(), res);
+    CHECK(!loss.version_moved && loss.changed_chunks == 0);
+
+    // A plain byte store at +0x72 moves neither the version nor the epoch, but changes chunk 14.
+    plainStore8(mem.bytes + kLine + 0x72, 0xff);
+    CHECK(table.lost(mem.base(), res) && !table.versionMoved(res) && table.contentDiffers(mem.base(), res));
+    loss = table.describeLoss(mem.base(), res);
+    CHECK(!loss.version_moved && loss.changed_chunks == 1u << 14);
+    CHECK(loss.now[14] == chunkAt(mem.bytes + kLine + 0x70) && ((loss.now[14] >> 16) & 0xff) == 0xff);
+    CHECK(loss.now[0] == chunkAt(mem.bytes + kLine));
+
+    // A table write of the bytes that are already there moves the version only.
+    table.getllar(mem.base(), kLine, ls, res);
+    table.put(mem.base(), kLine + 0x70, mem.bytes + kLine + 0x70, 8);
+    CHECK(table.lost(mem.base(), res) && table.versionMoved(res) && !table.contentDiffers(mem.base(), res));
+    loss = table.describeLoss(mem.base(), res);
+    CHECK(loss.version_moved && loss.changed_chunks == 0);
+
+    // A reservation that is not valid is never lost.
+    const tox2::Reservation none;
+    CHECK(!table.lost(mem.base(), none) && !table.versionMoved(none) && !table.contentDiffers(mem.base(), none));
+    loss = table.describeLoss(mem.base(), none);
+    CHECK(!loss.version_moved && loss.changed_chunks == 0);
+
+    // A PUTLLC that has changed the line but not yet released the stripe must not be reported as a plain store:
+    // describeLoss waits for it and then sees the version move.
+    ParkedPutllc park;
+    tox2::Reservation writer_res, reader_res;
+    table.getllar(mem.base(), kLine, ls, writer_res);
+    table.getllar(mem.base(), kLine, ls, reader_res);
+    ls[0] ^= 0x5a;
+    table.setCompareHook(&parkHook, &park);
+    std::thread writer([&] { CHECK(table.putllc(mem.base(), kLine, ls, writer_res)); });
+    while (!park.entered.load()) std::this_thread::sleep_for(milliseconds(1));
+    std::atomic<bool> returned{false};
+    tox2::ReservationLoss waited;
+    std::thread reader([&] {
+        waited = table.describeLoss(mem.base(), reader_res);
+        returned.store(true);
+    });
+    std::this_thread::sleep_for(milliseconds(200));
+    CHECK(!returned.load());
+    park.release.store(true);
+    writer.join();
+    reader.join();
+    table.setCompareHook(nullptr, nullptr);
+    CHECK(returned.load() && waited.version_moved);
+}
+
 // Live smoke test only: it can catch a PUTLLC that rewrites an unchanged chunk 5 with a stale snapshot, but
 // only when the rollback happens to be visible. The deterministic evidence is testCompareWindow().
 void testUnchangedChunkSurvivesRace() {
@@ -4471,6 +4542,7 @@ int main(int argc, char** argv) {
     testPpuReservationIsLineGranular();
     testIncrementStress();
     testCompareWindow();
+    testDescribeLoss();
     testUnchangedChunkSurvivesRace();
     testWaitForStoreEpoch();
     testStoreWaitReportsSleep();
