@@ -151,6 +151,14 @@ uint32_t tox2Lwarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea);
 uint64_t tox2Ldarx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea);
 bool tox2Stwcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint32_t value);
 bool tox2Stdcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint64_t value);
+// Same arguments and value order as tox2WriteN, but the store goes through the reservation table: it bumps the stripe
+// version of the line and wakes the waiters on it, like an SPU PUT. For the few plain stores that an SPU waits on
+// (see docs/spu.md); a plain tox2WriteN is invisible to a sleeping waiter. Any alignment; a store that is not
+// naturally aligned is split into byte stores.
+void tox2NotifyWrite8(uint8_t* base, uint32_t ea, uint8_t value);
+void tox2NotifyWrite16(uint8_t* base, uint32_t ea, uint16_t value);
+void tox2NotifyWrite32(uint8_t* base, uint32_t ea, uint32_t value);
+void tox2NotifyWrite64(uint8_t* base, uint32_t ea, uint64_t value);
 void tox2Dcbz(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea);
 uint64_t tox2Mftb(Tox2PpuContext* ctx);
 uint64_t tox2Mffs(Tox2PpuContext* ctx);                                    // FPSCR image in the low 32 bits

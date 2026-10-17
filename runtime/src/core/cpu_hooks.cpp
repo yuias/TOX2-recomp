@@ -80,6 +80,17 @@ void countStoreConditional(bool ok) {
     if (!ok) ReservationCounters::bump(counters.stwcx_failed);
 }
 
+// The put contract needs natural alignment for 1/2/4/8 bytes, and the emitter cannot prove an EA's alignment. A
+// misaligned store is not expected at the routed sites, so the byte-wise path only has to be correct (each byte is a
+// separate reservation-aware write, not atomic as a whole).
+void notifyWrite(std::uint8_t* base, std::uint32_t ea, const std::uint8_t* big_endian, std::uint32_t size) {
+    if (ea % size == 0) {
+        tox2::reservations().put(base, ea, big_endian, size);
+        return;
+    }
+    for (std::uint32_t i = 0; i < size; i++) tox2::reservations().put(base, ea + i, big_endian + i, 1);
+}
+
 }  // namespace
 
 namespace tox2 {
@@ -163,6 +174,26 @@ bool tox2Stdcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint64_t value) 
     ctx->reserve_valid = 0;
     countStoreConditional(ok);
     return ok;
+}
+
+void tox2NotifyWrite8(uint8_t* base, uint32_t ea, uint8_t value) { notifyWrite(base, ea, &value, 1); }
+
+void tox2NotifyWrite16(uint8_t* base, uint32_t ea, uint16_t value) {
+    uint8_t buf[2];
+    tox2Write16(buf, 0, value);
+    notifyWrite(base, ea, buf, 2);
+}
+
+void tox2NotifyWrite32(uint8_t* base, uint32_t ea, uint32_t value) {
+    uint8_t buf[4];
+    tox2Write32(buf, 0, value);
+    notifyWrite(base, ea, buf, 4);
+}
+
+void tox2NotifyWrite64(uint8_t* base, uint32_t ea, uint64_t value) {
+    uint8_t buf[8];
+    tox2Write64(buf, 0, value);
+    notifyWrite(base, ea, buf, 8);
 }
 
 void tox2Dcbz(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {

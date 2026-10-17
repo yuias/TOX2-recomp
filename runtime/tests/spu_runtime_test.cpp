@@ -879,6 +879,105 @@ void testWatchLineWakesOnlyItsWaiter() {
     CHECK(result_b.load() == static_cast<int>(tox2::StoreWait::Epoch));
 }
 
+// The notifying store helpers go through the process reservation table: a sleeping line waiter wakes and a
+// reservation on the line is lost, which a plain tox2Write8 does not do.
+void testNotifyWriteWakesLineWaiter() {
+    constexpr std::uint32_t kLine = tox2::kReservationLineSize;  // line 1 of the buffer; the next line follows it
+    constexpr std::uint32_t kByte = kLine + 0x72;
+    tox2::ReservationTable& table = tox2::reservations();
+    TestMemory mem;
+    std::uint8_t* base = mem.base();
+    std::uint32_t halt = 0;
+
+    // Starts a waiter on kLine that has been asleep for 100 ms (an earlier write would only move the epoch).
+    const auto startWaiter = [&](std::atomic<int>& result, milliseconds timeout) {
+        const std::uint64_t seen = table.storeEpoch();
+        std::thread waiter([&result, &table, &halt, seen, timeout] {
+            result.store(static_cast<int>(table.waitStoreEpoch(seen, &halt, timeout, kLine)));
+        });
+        std::this_thread::sleep_for(milliseconds(100));
+        return waiter;
+    };
+    constexpr int kPending = -1;
+
+    // 1 and 2: the store wakes the waiter, and fails reservations taken before it.
+    {
+        tox2::Reservation lost_res;
+        tox2::Reservation putllc_res;
+        std::uint8_t ls[128];
+        table.getllar(base, kLine, ls, lost_res);
+        table.getllar(base, kLine, ls, putllc_res);
+        std::atomic<int> result{kPending};
+        std::thread waiter = startWaiter(result, milliseconds(3000));
+        CHECK(result.load() == kPending);
+        const auto store_at = Clock::now();
+        tox2NotifyWrite8(base, kByte, 0xff);
+        waiter.join();
+        CHECK(Clock::now() - store_at < milliseconds(2000));
+        CHECK(result.load() == static_cast<int>(tox2::StoreWait::Epoch));
+        CHECK(base[kByte] == 0xff);
+        CHECK(table.lost(base, lost_res));
+        CHECK(table.versionMoved(lost_res));
+        std::uint8_t src[128] = {};
+        CHECK(!table.putllc(base, kLine, src, putllc_res));
+        CHECK(base[kByte] == 0xff);
+
+        // A store that leaves the bytes as they are still moves the version: the content compare alone would miss it.
+        table.getllar(base, kLine, ls, lost_res);
+        CHECK(!table.lost(base, lost_res));
+        tox2NotifyWrite8(base, kByte, 0xff);
+        CHECK(table.versionMoved(lost_res));
+        CHECK(table.lost(base, lost_res));
+    }
+
+    // 3: the plain store is the control. It changes the byte but neither moves the version nor wakes the waiter.
+    {
+        tox2::Reservation res;
+        std::uint8_t ls[128];
+        table.getllar(base, kLine, ls, res);
+        std::atomic<int> result{kPending};
+        std::thread waiter = startWaiter(result, milliseconds(200));
+        tox2Write8(base, kByte, 0x11);
+        waiter.join();
+        CHECK(result.load() == static_cast<int>(tox2::StoreWait::Timeout));
+        CHECK(base[kByte] == 0x11);
+        CHECK(!table.versionMoved(res));
+        CHECK(table.lost(base, res));  // by the content compare only
+    }
+
+    // 4: wider stores write what tox2WriteN writes, including a misaligned one and one that crosses into the next line.
+    {
+        TestMemory reference;
+        std::uint8_t* ref = reference.base();
+        std::memcpy(ref, base, sizeof(TestMemory::bytes));
+        tox2::Reservation first;
+        tox2::Reservation second;
+        std::uint8_t ls[128];
+        table.getllar(base, kLine, ls, first);
+        table.getllar(base, 2 * kLine, ls, second);
+
+        tox2NotifyWrite16(base, kLine + 0x10, 0x1234);
+        tox2Write16(ref, kLine + 0x10, 0x1234);
+        tox2NotifyWrite32(base, kLine + 0x20, 0x01020304u);
+        tox2Write32(ref, kLine + 0x20, 0x01020304u);
+        tox2NotifyWrite64(base, kLine + 0x28, 0x0102030405060708ull);
+        tox2Write64(ref, kLine + 0x28, 0x0102030405060708ull);
+        tox2NotifyWrite64(base, kLine + 0x44, 0x1112131415161718ull);  // not 8-aligned
+        tox2Write64(ref, kLine + 0x44, 0x1112131415161718ull);
+        CHECK(std::memcmp(base, ref, sizeof(TestMemory::bytes)) == 0);
+        CHECK(table.versionMoved(first));
+        CHECK(!table.versionMoved(second));
+
+        table.getllar(base, kLine, ls, first);
+        tox2NotifyWrite32(base, kLine + 0x7e, 0xa1b2c3d4u);
+        tox2Write32(ref, kLine + 0x7e, 0xa1b2c3d4u);
+        CHECK(std::memcmp(base, ref, sizeof(TestMemory::bytes)) == 0);
+        CHECK(base[kLine + 0x7e] == 0xa1 && base[2 * kLine + 1] == 0xd4);
+        CHECK(table.versionMoved(first));
+        CHECK(table.versionMoved(second));
+    }
+}
+
 // A failed store-conditional locks the stripe and restores it unchanged; lost() must not report that as a
 // lost reservation, on the same line or on a line that shares the stripe.
 void testFailedWritersDoNotLoseReservation() {
@@ -4570,6 +4669,7 @@ int main(int argc, char** argv) {
     testWaitersAreNotLost();
     testUnrelatedPutDoesNotNotify();
     testWatchLineWakesOnlyItsWaiter();
+    testNotifyWriteWakesLineWaiter();
     testFailedWritersDoNotLoseReservation();
     testPutllcFailReasons();
     testNotifyByWriterKind();

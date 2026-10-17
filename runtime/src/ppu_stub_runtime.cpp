@@ -158,6 +158,15 @@ bool tox2Stdcx(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea, uint64_t value) 
     return ok;
 }
 
+// No reservation table here, so a notifying store is a plain store.
+void tox2NotifyWrite8(uint8_t* base, uint32_t ea, uint8_t value) { tox2Write8(base, ea, value); }
+
+void tox2NotifyWrite16(uint8_t* base, uint32_t ea, uint16_t value) { tox2Write16(base, ea, value); }
+
+void tox2NotifyWrite32(uint8_t* base, uint32_t ea, uint32_t value) { tox2Write32(base, ea, value); }
+
+void tox2NotifyWrite64(uint8_t* base, uint32_t ea, uint64_t value) { tox2Write64(base, ea, value); }
+
 void tox2Dcbz(Tox2PpuContext* ctx, uint8_t* base, uint32_t ea) {
     (void)ctx;
     std::memset(base + (ea & ~(uint32_t)(kTox2DcbzLine - 1)), 0, kTox2DcbzLine);
