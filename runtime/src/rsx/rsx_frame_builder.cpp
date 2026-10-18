@@ -326,6 +326,9 @@ std::int32_t RsxFrameBuilder::noteSurface(const RsxSurface& surface) {
     }
     const std::int32_t index = findSurface(surface.location, surface.offset);
     if (index >= 0) {
+        // fillTextures reads only the depth format of a known surface (the address matched already), so a draw that
+        // rewrites the entry with the same format leaves the unit states valid.
+        if (known_surfaces_[index].depth_format != surface.depth_format) surfaces_generation_++;
         known_surfaces_[index] = surface;  // size or pitch may have changed
         return index;
     }
@@ -333,6 +336,7 @@ std::int32_t RsxFrameBuilder::noteSurface(const RsxSurface& surface) {
         noteState("too many render targets");
         return -1;
     }
+    surfaces_generation_++;
     known_surfaces_.push_back(surface);
     return static_cast<std::int32_t>(known_surfaces_.size() - 1);
 }
@@ -522,34 +526,88 @@ bool RsxFrameBuilder::fillVertices(const RsxRegisters& regs, RsxDraw& draw, std:
 // content id. A texture at a known render target is an alias and carries no bytes; that test comes first, so
 // a cached blob is never used for an address that is a render target now. RPCS3 takes the pitch from the row
 // size when the register is 0 (`texture_cache.h` upload path).
+//
+// A unit remembers the descriptor it pushed last time. The descriptor is a function of the unit's registers (compared
+// as raw words, since contextReset and a replay's start registers write outside the method path), the known surfaces
+// and, for bytes, of what the texture cache returns. So it is pushed again while the words, the surfaces and the cache
+// state (same epoch, no entry created or dropped, no overlapping write since) are unchanged; that is the descriptor
+// the full path would rebuild, without its decode and its lookups. A unit whose full path made a census note is never
+// remembered, so a note is made on every draw as before. One difference remains: a reuse does not refresh the cache
+// entry's LRU tick inside an epoch; the first use in each epoch does, and trimming by size only matters far above
+// what the captures hold.
 void RsxFrameBuilder::fillTextures(const RsxRegisters& regs, RsxDraw& draw) {
     for (std::uint32_t unit = 0; unit < kRsxTextureUnitCount; unit++) {
         if (!rsxTextureEnabled(regs, unit)) continue;
-        RsxTextureDesc t = decodeTexture(regs, unit);
-
-        t.rt_alias = findSurface(t.location, t.offset);
-        if (t.rt_alias >= 0) {
-            t.rt_depth = known_surfaces_[t.rt_alias].depth_format != RsxDepthFormat::None;
-            draw.textures.push_back(std::move(t));
+        const std::uint32_t base = unit * 0x20;
+        const std::array<std::uint32_t, 9> words = {regs.reg(kMethodNv4097SetTextureOffset + base),
+                                                    regs.reg(kMethodNv4097SetTextureFormat + base),
+                                                    regs.reg(kMethodNv4097SetTextureControl0 + base),
+                                                    regs.reg(kMethodNv4097SetTextureControl1 + base),
+                                                    regs.reg(kMethodNv4097SetTextureFilter + base),
+                                                    regs.reg(kMethodNv4097SetTextureAddress + base),
+                                                    regs.reg(kMethodNv4097SetTextureImageRect + base),
+                                                    regs.reg(kMethodNv4097SetTextureBorderColor + base),
+                                                    regs.reg(kMethodNv4097SetTextureControl3 + unit * 4)};
+        TextureUnitState& state = unit_states_[unit];
+        if (texture_unit_cache_ && state.valid && state.words == words &&
+            state.surfaces_generation == surfaces_generation_ &&
+            (state.desc.rt_alias >= 0 ||
+             (state.epoch == textures_.epoch() && state.cache_generation == textures_.generation() &&
+              !textures_.writtenSince(state.desc.location, state.desc.offset, state.guest_end, state.write_serial)))) {
+            stats_.texture_unit_hits++;
+            draw.textures.push_back(state.desc);
             continue;
         }
-        if (rsxTextureFormatRenderTargetOnly(t.format))
-            rsxNoteUnimplemented("texture format", rsxTextureFormatName(t.format));
 
-        const RsxTextureKind kind = rsxTextureKind(t);
-        if (kind == RsxTextureKind::Unsupported) {
-            rsxNoteUnimplemented("texture layout", std::format("dimension {}", t.dimension));
-        }
+        stats_.texture_unit_misses++;
+        const std::uint64_t notes = rsxUnimplementedThreadNotes();
+        std::uint64_t guest_bytes = 0;
+        draw.textures.push_back(buildTextureDesc(regs, unit, guest_bytes));
+        const RsxTextureDesc& t = draw.textures.back();
 
-        const bool supported_format = rsxTextureFormatSampleable(t.format);
-        if (supported_format && kind != RsxTextureKind::Unsupported && t.width != 0 && t.height != 0) {
-            copyTexture(t);
+        state.valid = false;
+        if (!texture_unit_cache_ || rsxUnimplementedThreadNotes() != notes || (t.rt_alias < 0 && t.data == nullptr)) {
+            continue;
         }
-        draw.textures.push_back(std::move(t));
+        state.words = words;
+        state.surfaces_generation = surfaces_generation_;
+        if (t.rt_alias < 0) {
+            // Read after copyTexture: the state the entry was just found fresh or made fresh at.
+            state.epoch = textures_.epoch();
+            state.write_serial = textures_.writeSerial();
+            state.cache_generation = textures_.generation();
+            state.guest_end = static_cast<std::uint64_t>(t.offset) + guest_bytes;
+        }
+        state.desc = t;
+        state.valid = true;
     }
 }
 
-void RsxFrameBuilder::copyTexture(RsxTextureDesc& t) {
+RsxTextureDesc RsxFrameBuilder::buildTextureDesc(const RsxRegisters& regs, std::uint32_t unit,
+                                                 std::uint64_t& guest_bytes) {
+    RsxTextureDesc t = decodeTexture(regs, unit);
+
+    t.rt_alias = findSurface(t.location, t.offset);
+    if (t.rt_alias >= 0) {
+        t.rt_depth = known_surfaces_[t.rt_alias].depth_format != RsxDepthFormat::None;
+        return t;
+    }
+    if (rsxTextureFormatRenderTargetOnly(t.format))
+        rsxNoteUnimplemented("texture format", rsxTextureFormatName(t.format));
+
+    const RsxTextureKind kind = rsxTextureKind(t);
+    if (kind == RsxTextureKind::Unsupported) {
+        rsxNoteUnimplemented("texture layout", std::format("dimension {}", t.dimension));
+    }
+
+    const bool supported_format = rsxTextureFormatSampleable(t.format);
+    if (supported_format && kind != RsxTextureKind::Unsupported && t.width != 0 && t.height != 0) {
+        guest_bytes = copyTexture(t);
+    }
+    return t;
+}
+
+std::uint64_t RsxFrameBuilder::copyTexture(RsxTextureDesc& t) {
     const std::uint32_t layers = rsxTextureKind(t) == RsxTextureKind::Cube ? 6 : 1;
     const RsxTextureCache::Key key{t.location,     t.offset, t.width,
                                    t.height,       t.pitch,  t.depth,
@@ -560,7 +618,7 @@ void RsxFrameBuilder::copyTexture(RsxTextureDesc& t) {
         t.pitch = entry->pitch;
         t.data = entry->data;
         t.content_id = entry->content_id;
-        return;
+        return entry->guest_bytes;
     }
 
     RsxTextureLayout fresh_layout;
@@ -576,11 +634,11 @@ void RsxFrameBuilder::copyTexture(RsxTextureDesc& t) {
             } else {
                 rsxNoteUnimplemented("texture layout", "pitch below row size");
             }
-            return;
+            return 0;
         }
         if (fresh_layout.guest_bytes > kRsxMaxTextureBytes || fresh_layout.packed_bytes > kRsxMaxTextureBytes) {
             rsxNoteUnimplemented("texture layout", "too large");
-            return;
+            return 0;
         }
     }
     const RsxTextureLayout& layout = entry != nullptr ? entry->layout : fresh_layout;
@@ -595,7 +653,7 @@ void RsxFrameBuilder::copyTexture(RsxTextureDesc& t) {
         if (!memory_.hashRange(t.location, t.offset, layout.guest_bytes, in_place_hash)) {
             textures_.erase(key);
             noteState("unreadable texture memory");
-            return;
+            return 0;
         }
         stats_.texture_bytes_hashed += layout.guest_bytes;
         if (in_place_hash == entry->hash) {
@@ -603,14 +661,14 @@ void RsxFrameBuilder::copyTexture(RsxTextureDesc& t) {
             t.pitch = entry->pitch;
             t.data = entry->data;
             t.content_id = entry->content_id;
-            return;
+            return entry->guest_bytes;
         }
     }
     texture_scratch_.resize(layout.guest_bytes);
     if (!memory_.read(t.location, t.offset, texture_scratch_)) {
         textures_.erase(key);
         noteState("unreadable texture memory");
-        return;
+        return 0;
     }
     stats_.texture_bytes_read += layout.guest_bytes;
     const std::uint64_t hash = rsxHashBytes(texture_scratch_);
@@ -638,7 +696,7 @@ void RsxFrameBuilder::copyTexture(RsxTextureDesc& t) {
             if (!ok) {
                 textures_.erase(key);
                 noteState("unreadable texture memory");
-                return;
+                return 0;
             }
         }
         entry = &textures_.store(key, layout, hash, std::move(blob));
@@ -646,6 +704,7 @@ void RsxFrameBuilder::copyTexture(RsxTextureDesc& t) {
     t.pitch = entry->pitch;
     t.data = entry->data;
     t.content_id = entry->content_id;
+    return entry->guest_bytes;
 }
 
 // SET_SHADER_PROGRAM: location (value & 3) - 1, offset value & ~3 (RPCS3 `rsx_decode.h`). The program

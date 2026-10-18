@@ -1014,6 +1014,11 @@ handful of textures, some of them several megabytes), so the builder keeps the c
   whose range overlaps it, at once and without a new epoch; such an entry is read and hashed again at its
   next use. (The renderer keeps surface contents on the GPU, so the guest bytes are normally unchanged and
   the hash keeps the blob.)
+- *Unit reuse.* Within an epoch, a texture unit whose registers, known render targets and texture cache state
+  (no entry created or dropped, no overlapping write since) are unchanged since its previous draw reuses that
+  draw's descriptor instead of decoding the unit and looking the texture up again. A unit whose full path counted
+  an unimplemented feature is never reused, so those counts do not change. A reuse does not refresh the entry's
+  least-recently-used tick inside the epoch.
 - *Bounds.* Blobs are kept up to 256 MiB; past that the least recently used entries go. Every 32 flips
   entries unused for 600 flips are dropped. A draw that still holds a dropped blob keeps it alive.
 

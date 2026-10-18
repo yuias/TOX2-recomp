@@ -6,6 +6,7 @@
 // `draw_index_array`), `NV47/FW/draw_call.hpp` (`draw_clause::append`), `Core/RSXDrawCommands.cpp`,
 // `Utils/rsx_utils.h` and `VK/VKVertexBuffers.cpp`; clears follow `VK/VKGSRender.cpp` `clear_surface`.
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -13,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "rsx/rsx_decode.h"
 #include "rsx/rsx_frame.h"
 #include "rsx/rsx_registers.h"
 #include "rsx/rsx_state.h"
@@ -109,7 +111,14 @@ public:
     // surface and a depth surface at one address share an entry (the later one wins). Entries are only
     // appended or replaced in place, so an index stays valid for the life of the builder.
     std::span<const RsxSurface> knownSurfaces() const { return known_surfaces_; }
-    void setKnownSurfaces(std::vector<RsxSurface> surfaces) { known_surfaces_ = std::move(surfaces); }
+    void setKnownSurfaces(std::vector<RsxSurface> surfaces) {
+        known_surfaces_ = std::move(surfaces);
+        surfaces_generation_++;
+    }
+
+    // Off makes every enabled texture unit take the full path (decode, surface and cache lookup); on (the default)
+    // lets a unit reuse its previous descriptor while nothing it was made from has changed. For tests.
+    void setTextureUnitCache(bool enabled) { texture_unit_cache_ = enabled; }
 
     // Index the next flip command gets; a replay continues the numbering of the run it was captured from.
     void setFlipIndex(std::uint64_t index) { flips_ = index; }
@@ -129,7 +138,10 @@ private:
     void clear(const RsxRegisters& regs, std::uint32_t mask);
     bool fillVertices(const RsxRegisters& regs, RsxDraw& draw, std::uint32_t vertex_base, std::uint32_t vertex_count);
     void fillTextures(const RsxRegisters& regs, RsxDraw& draw);
-    void copyTexture(RsxTextureDesc& texture);
+    // Returns the guest byte length of the range texture.data was made from (0 when no data was set).
+    std::uint64_t copyTexture(RsxTextureDesc& texture);
+    // The full path of fillTextures for one enabled unit; `guest_bytes` is copyTexture's result (0 for an alias).
+    RsxTextureDesc buildTextureDesc(const RsxRegisters& regs, std::uint32_t unit, std::uint64_t& guest_bytes);
     void fillFragmentProgram(const RsxRegisters& regs, RsxDraw& draw);
     bool matchFragmentProgram(std::uint32_t program, std::uint32_t location, std::uint32_t offset, RsxDraw& draw);
     void fillVertexProgram(const RsxRegisters& regs, RsxDraw& draw);
@@ -142,6 +154,25 @@ private:
     std::uint64_t flips_ = 0;
     RsxTextureCache textures_;
     std::vector<std::uint8_t> texture_scratch_;  // guest bytes of the texture being checked or converted
+
+    // What fillTextures pushed for a unit last time, with the state it was made from (see fillTextures).
+    struct TextureUnitState {
+        // The unit's registers that decodeTexture reads: offset, format, control0, control1, filter, address, image
+        // rect, border color, control3 (in this order).
+        std::array<std::uint32_t, 9> words{};
+        bool valid = false;
+        std::uint64_t surfaces_generation = 0;
+        // Only for a descriptor with bytes (rt_alias < 0): the texture cache state it was taken at and the end of the
+        // guest range its blob was made from.
+        std::uint64_t epoch = 0, write_serial = 0, cache_generation = 0;
+        std::uint64_t guest_end = 0;
+        RsxTextureDesc desc;
+    };
+    std::array<TextureUnitState, kRsxTextureUnitCount> unit_states_;
+    // Moves when a known surface is added or replaced, or changes its depth format: the only surface facts a texture
+    // descriptor depends on. Not once per draw, which rewrites the entry with the same values.
+    std::uint64_t surfaces_generation_ = 1;
+    bool texture_unit_cache_ = true;
     RsxBuilderStats stats_;
     bool timing_enabled_ = false;
 

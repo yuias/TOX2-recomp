@@ -9586,13 +9586,13 @@ void testRecycledDrawBuffers() {
     const tox2::RsxDraw& first = std::get<tox2::RsxDraw>(commands[0]);
     CHECK(first.vertex_data.size() == 1024 * 12 && first.textures.size() == 1 && first.textures[0].data);
     const std::weak_ptr<const std::vector<std::uint8_t>> blob = first.textures[0].data;
-    CHECK(blob.use_count() == 2);  // the texture cache and the draw
+    CHECK(blob.use_count() == 3);  // the texture cache, the unit's remembered descriptor and the draw
     const std::uint8_t* const vertex_buffer = first.vertex_data.data();
     const void* const command_storage = commands.data();
     CHECK(rig->builder.spareDraws() == 0);
 
     rig->builder.recycle(std::move(commands));
-    CHECK(rig->builder.spareDraws() == 1 && blob.use_count() == 1);
+    CHECK(rig->builder.spareDraws() == 1 && blob.use_count() == 2);  // the draw's reference is gone
 
     // The next draw is built in the recycled buffer, in the recycled command vector, and equals a fresh builder's.
     drawArrays(*rig, 1024);
@@ -9609,9 +9609,9 @@ void testRecycledDrawBuffers() {
           second.fp_hash == reference.fp_hash);
     CHECK(second.vp_ucode == reference.vp_ucode && second.vp_hash == reference.vp_hash);
     CHECK(second.textures.size() == 1 && second.textures[0].unit == 1 && *second.textures[0].data == *blob.lock());
-    CHECK(blob.use_count() == 2);
+    CHECK(blob.use_count() == 3);
     rig->builder.recycle(std::move(commands));
-    CHECK(rig->builder.spareDraws() == 1 && blob.use_count() == 1);
+    CHECK(rig->builder.spareDraws() == 1 && blob.use_count() == 2);
 
     // A draw with more than 1 MiB of vertex data is built and recycled without changing the number of spares, and
     // its buffer is not kept: the next small draw gets a vector sized for itself.
@@ -9875,6 +9875,413 @@ void testRsxTextureCache() {
     CHECK(texSize(gone.textures[0]) == 0 && unimplementedCount("state unreadable texture memory") == 2);
     CHECK(builder.textureCache().entryCount() == entries_before + 4);
     CHECK(builder.stats().texture_bytes_read == reads_before);
+}
+
+// A frame builder over fake memory with the register helpers the texture unit cache tests share.
+struct RsxTextureUnitHarness {
+    RsxTextureUnitHarness() : regs(std::make_unique<tox2::RsxRegisters>()), builder(memory) {
+        regs->reset();
+        // A fragment program that ends at its first word, so that the builder does not scan guest memory for the
+        // end flag (and read the texture bytes on the way).
+        memory.putWord(0, 0x2000, 0x00010000);
+    }
+    void write(std::uint32_t method, std::uint32_t value) {
+        regs->apply(method, value);
+        builder.onWrite(*regs, method, value);
+    }
+    void flip() {
+        builder.onFlip(*regs, 0, {});
+        regs->contextReset();
+    }
+    void setSurface(std::uint32_t offset, std::uint32_t pitch, std::uint32_t height) {
+        write(0x0200, 16u << 16);
+        write(0x0204, height << 16);
+        write(0x0208, 8u | (2u << 5) | (1u << 8));
+        write(0x020C, pitch);
+        write(0x0210, offset);
+        write(0x0214, 0x900000);
+        write(0x022C, pitch);
+        write(0x0220, 1);
+        write(0x08C0, 16u << 16);
+        write(0x08C4, height << 16);
+    }
+    void setTexture(std::uint32_t unit, std::uint32_t offset, std::uint32_t fmt, std::uint32_t mips,
+                    std::uint32_t width, std::uint32_t height, std::uint32_t pitch) {
+        write(0x1A00 + unit * 0x20, offset);
+        write(0x1A04 + unit * 0x20, 1u | (2u << 4) | (fmt << 8) | (mips << 16));
+        write(0x1A0C + unit * 0x20, 0x80000000);
+        write(0x1A18 + unit * 0x20, (width << 16) | height);
+        write(0x1840 + unit * 4, pitch);
+    }
+    void clear(std::uint32_t mask) {
+        write(0x1D90, 0xFF102030);
+        write(0x1D8C, 0xFFFFFF00);
+        write(0x1D94, mask);
+    }
+    void fill(std::uint32_t offset, std::uint32_t size, std::uint8_t seed) {
+        for (std::uint32_t i = 0; i < size; i++) memory.local[offset + i] = static_cast<std::uint8_t>(i + seed);
+    }
+    // One draw; the commands since the last call are taken (a flip or a clear may precede it).
+    tox2::RsxDraw draw() {
+        write(0x08E4, 0x2000 | 1);
+        write(0x1808, 5);
+        write(0x1814, 2u << 24);
+        write(0x1808, 0);
+        tox2::RsxDraw result;
+        int draws = 0;
+        for (const tox2::RsxCommand& command : builder.takeCommands()) {
+            if (const auto* found = std::get_if<tox2::RsxDraw>(&command)) {
+                result = *found;
+                draws++;
+            }
+        }
+        CHECK(draws == 1);
+        return result;
+    }
+    std::uint64_t hits() const { return builder.stats().texture_unit_hits; }
+    std::uint64_t misses() const { return builder.stats().texture_unit_misses; }
+    // Whether the unit cache counted exactly `more_hits` hits and `more_misses` misses since the previous call.
+    bool since(std::uint64_t more_hits, std::uint64_t more_misses) {
+        const bool ok = hits() == mark_hits + more_hits && misses() == mark_misses + more_misses;
+        mark_hits = hits();
+        mark_misses = misses();
+        return ok;
+    }
+
+    std::unique_ptr<tox2::RsxRegisters> regs;
+    FakeRsxMemory memory;
+    tox2::RsxFrameBuilder builder;
+    std::uint64_t mark_hits = 0, mark_misses = 0;
+};
+
+// What the equivalence run records per draw: the descriptors and the census after it.
+struct RsxUnitCacheStep {
+    std::vector<tox2::RsxTextureDesc> textures;
+    std::vector<std::pair<std::string, std::uint64_t>> census;
+};
+
+struct RsxUnitCacheRun {
+    std::vector<RsxUnitCacheStep> steps;
+    std::uint64_t validations = 0, hashed = 0, read = 0, hits = 0, misses = 0;
+};
+
+// A scripted sequence with repeats, register changes, a unit with location field 3 (noted every draw), an unreadable
+// range, render targets written over cached ranges, an alias, a semaphore acquire and flips.
+RsxUnitCacheRun runRsxUnitCacheScript(bool unit_cache) {
+    tox2::rsxUnimplementedReset();
+    RsxTextureUnitHarness h;
+    h.builder.setTextureUnitCache(unit_cache);
+    RsxUnitCacheRun run;
+    const auto step = [&] {
+        RsxUnitCacheStep s;
+        s.textures = h.draw().textures;
+        s.census = tox2::rsxUnimplementedSnapshot();
+        run.steps.push_back(std::move(s));
+    };
+    constexpr std::uint32_t kA = 0x3000, kB = 0x3100, kC = 0x3200;
+    h.setSurface(0x100000, 64, 4);
+    h.fill(kA, 64, 1);
+    h.fill(kB, 64, 2);
+    h.fill(kC, 64, 3);
+    h.setTexture(0, kA, 0xA5, 1, 4, 4, 16);
+    h.setTexture(1, kB, 0x85, 1, 4, 4, 0);
+    step();                       // 0: first use
+    step();                       // 1: repeat
+    h.write(0x1A10, 0x0000AAE4);  // 2: unit 0 remap
+    step();
+    h.write(0x1A34, 0x00002000);  // 3: unit 1 filter
+    step();
+    h.write(0x1A00, kC);  // 4: unit 0 at another texture
+    step();
+    step();  // 5: repeat
+    h.setTexture(2, kA, 0xA5, 1, 4, 4, 16);
+    h.write(0x1A44, 3u | (2u << 4) | (0xA5u << 8) | (1u << 16));  // unit 2: location field 3, noted every draw
+    step();                                                       // 6
+    step();                                                       // 7
+    h.write(0x1A4C, 0);                                           // unit 2 off
+    h.setTexture(3, 0xFFF0, 0xA5, 1, 16, 16, 64);                 // 8: unreadable range, noted every draw
+    step();
+    step();                          // 9
+    h.write(0x1A6C, 0);              // unit 3 off
+    h.setSurface(kC - 0x40, 64, 4);  // a target over a cached range
+    h.clear(0xF3);
+    step();              // 10: re-read
+    h.fill(kC, 64, 77);  // unannounced, seen because the draw wrote the target again
+    step();              // 11
+    h.setSurface(0x100000, 64, 4);
+    step();                       // 12
+    step();                       // 13
+    h.write(0x1A10, 0x0000AAE4);  // same value: still a repeat
+    step();                       // 14
+    h.write(0x1A10, 0x0000AAE4 + 1);
+    step();  // 15
+    h.write(tox2::kMethodNv406eSemaphoreAcquire, 0);
+    h.fill(kA, 64, 9);
+    step();  // 16: new epoch, changed bytes
+    step();  // 17
+    h.flip();
+    h.setTexture(0, kA, 0xA5, 1, 4, 4, 16);
+    h.setTexture(1, kB, 0x85, 1, 4, 4, 0);
+    step();                   // 18: new epoch, unchanged bytes
+    step();                   // 19
+    h.setSurface(kB, 64, 4);  // an alias for unit 1
+    h.clear(0xF3);
+    step();  // 20
+    step();  // 21
+    h.setSurface(0x100000, 64, 4);
+    step();               // 22
+    h.write(0x1A00, kC);  // unit 0 back to the texture of step 4
+    step();               // 23
+    step();               // 24
+    run.validations = h.builder.stats().texture_validations;
+    run.hashed = h.builder.stats().texture_bytes_hashed;
+    run.read = h.builder.stats().texture_bytes_read;
+    run.hits = h.hits();
+    run.misses = h.misses();
+    return run;
+}
+
+// A unit reuses its descriptor while its registers, the known surfaces and the texture cache state are unchanged.
+void testRsxTextureUnitCache() {
+    constexpr std::uint32_t kTex = 0x3000;
+
+    // (a) The same registers in one epoch: a hit per enabled unit, the same blob, no guest access. A unit whose
+    // entry was made after another unit's in the same draw sees the entry set change once, so the first repeat of
+    // two new units hits only one of them.
+    {
+        RsxTextureUnitHarness h;
+        h.setSurface(0x100000, 64, 4);
+        h.fill(kTex, 64, 1);
+        h.fill(kTex + 0x100, 64, 2);
+        h.setTexture(0, kTex, 0xA5, 1, 4, 4, 16);
+        h.setTexture(1, kTex + 0x100, 0xA5, 1, 4, 4, 16);
+        const tox2::RsxDraw first = h.draw();
+        CHECK(h.since(0, 2));
+        h.draw();
+        CHECK(h.since(1, 1));
+        const tox2::RsxDraw third = h.draw();
+        CHECK(h.since(2, 0));
+        CHECK(first.textures.size() == 2 && third.textures.size() == 2);
+        for (std::size_t i = 0; i < 2; i++) {
+            CHECK(third.textures[i].data != nullptr && third.textures[i].data == first.textures[i].data);
+            CHECK(third.textures[i].content_id == first.textures[i].content_id && first.textures[i].content_id != 0);
+            CHECK(third.textures[i].pitch == first.textures[i].pitch && third.textures[i].unit == i);
+        }
+        CHECK(first.textures[0].content_id != first.textures[1].content_id);
+        CHECK(h.memory.readsAt(0, kTex) == 1 && h.memory.hashesAt(0, kTex) == 0);
+        CHECK(h.builder.stats().texture_validations == 0);
+
+        // A new epoch starts with a miss (the entry is validated against the guest bytes), then hits again; the
+        // unchanged bytes keep the entries, so nothing moves the entry set.
+        h.write(tox2::kMethodNv406eSemaphoreAcquire, 0);
+        const tox2::RsxDraw fourth = h.draw();
+        CHECK(h.since(0, 2) && h.memory.hashesAt(0, kTex) == 1);
+        const tox2::RsxDraw fifth = h.draw();
+        CHECK(h.since(2, 0) && h.memory.hashesAt(0, kTex) == 1);
+        CHECK(fourth.textures[0].content_id == first.textures[0].content_id &&
+              fifth.textures[0].content_id == first.textures[0].content_id);
+
+        // A flip clears the registers: a unit that is no longer enabled is not counted.
+        h.flip();
+        h.setTexture(0, kTex, 0xA5, 1, 4, 4, 16);
+        const tox2::RsxDraw sixth = h.draw();
+        CHECK(sixth.textures.size() == 1 && h.since(0, 1));
+        h.draw();
+        CHECK(h.since(1, 0));
+    }
+
+    // (b) One register changes: a miss with the new value. A change of the remap or the filter keeps the blob, a
+    // change of the offset gives another one.
+    {
+        RsxTextureUnitHarness h;
+        h.setSurface(0x100000, 64, 4);
+        h.fill(kTex, 64, 1);
+        h.fill(kTex + 0x100, 64, 50);
+        h.setTexture(0, kTex, 0xA5, 1, 4, 4, 16);
+        const tox2::RsxDraw base = h.draw();
+        h.draw();
+        CHECK(h.since(1, 1));
+
+        h.write(0x1A10, base.textures[0].remap ^ 0x100);
+        const tox2::RsxDraw remapped = h.draw();
+        CHECK(h.since(0, 1));
+        CHECK(remapped.textures[0].remap == (base.textures[0].remap ^ 0x100));
+        CHECK(remapped.textures[0].content_id == base.textures[0].content_id &&
+              remapped.textures[0].data == base.textures[0].data);
+        h.draw();
+        CHECK(h.since(1, 0));
+
+        h.write(0x1A14, base.textures[0].filter ^ 0x2000);
+        const tox2::RsxDraw filtered = h.draw();
+        CHECK(h.since(0, 1));
+        CHECK(filtered.textures[0].filter == (base.textures[0].filter ^ 0x2000) &&
+              filtered.textures[0].remap == remapped.textures[0].remap);
+        CHECK(filtered.textures[0].content_id == base.textures[0].content_id);
+
+        h.write(0x1A00, kTex + 0x100);
+        const tox2::RsxDraw moved = h.draw();
+        CHECK(h.since(0, 1));
+        CHECK(moved.textures[0].offset == kTex + 0x100 && moved.textures[0].content_id != base.textures[0].content_id);
+        CHECK(texByte(moved.textures[0], 0) == 50 && texByte(filtered.textures[0], 0) == 1);
+        h.draw();
+        CHECK(h.since(1, 0));
+
+        // The other registers the descriptor is made from.
+        for (const std::uint32_t method : {0x1A08u, 0x1A0Cu, 0x1A18u, 0x1A1Cu, 0x1840u}) {
+            const std::uint32_t old = h.regs->reg(method);
+            const std::uint32_t next = method == 0x1A18u ? ((4u << 16) | 2u) : (method == 0x1840u ? 32u : old ^ 0x10u);
+            h.write(method, next);
+            h.draw();
+            CHECK(h.since(0, 1));
+            h.write(method, old);
+            h.draw();
+            CHECK(h.since(0, 1));
+            h.draw();
+            CHECK(h.since(1, 0));
+        }
+    }
+
+    // (c) A render target written over the cached range between two draws of one epoch: a miss and one more hash,
+    // and the draws after it validate again for as long as the target is the draw's own.
+    {
+        RsxTextureUnitHarness h;
+        h.setSurface(kTex - 0x40, 64, 4);  // covers [kTex - 0x40, kTex + 0xC0); known before the texture is cached
+        h.clear(0xF3);
+        h.setSurface(0x100000, 64, 4);
+        h.fill(kTex, 64, 1);
+        h.setTexture(0, kTex, 0xA5, 1, 4, 4, 16);
+        const tox2::RsxDraw first = h.draw();
+        h.draw();
+        CHECK(h.since(1, 1) && h.memory.hashesAt(0, kTex) == 0);
+        h.setSurface(kTex - 0x40, 64, 4);
+        h.clear(0xF3);
+        const tox2::RsxDraw overlapped = h.draw();
+        CHECK(h.since(0, 1) && h.memory.hashesAt(0, kTex) == 1);
+        CHECK(overlapped.textures[0].content_id == first.textures[0].content_id);
+        h.draw();  // the draw above wrote the target again
+        CHECK(h.since(0, 1) && h.memory.hashesAt(0, kTex) == 2);
+        h.setSurface(0x100000, 64, 4);
+        h.draw();
+        CHECK(h.since(1, 0) && h.memory.hashesAt(0, kTex) == 2);
+        // A write elsewhere does not end the reuse.
+        h.clear(0xF3);
+        h.draw();
+        CHECK(h.since(1, 0) && h.memory.hashesAt(0, kTex) == 2);
+    }
+
+    // (d) A surface registered at the texture's offset turns the unit into an alias; a known surface whose depth
+    // format changes moves rt_depth.
+    {
+        RsxTextureUnitHarness h;
+        h.setSurface(0x100000, 64, 4);
+        h.fill(kTex, 64, 1);
+        h.setTexture(0, kTex, 0xA5, 1, 4, 4, 16);
+        const tox2::RsxDraw plain = h.draw();
+        h.draw();
+        CHECK(h.since(1, 1) && plain.textures[0].rt_alias == -1 && plain.textures[0].data != nullptr);
+
+        h.setSurface(kTex, 64, 4);
+        h.clear(0xF3);  // registers a color surface at kTex and a depth surface at 0x900000
+        h.setSurface(0x100000, 64, 4);
+        const tox2::RsxDraw alias = h.draw();
+        CHECK(h.since(0, 1));
+        CHECK(alias.textures[0].rt_alias >= 0 && !alias.textures[0].rt_depth && alias.textures[0].data == nullptr &&
+              alias.textures[0].content_id == 0);
+        const tox2::RsxDraw alias_again = h.draw();
+        CHECK(h.since(1, 0));
+        CHECK(alias_again.textures[0].rt_alias == alias.textures[0].rt_alias && !alias_again.textures[0].rt_depth);
+
+        // A depth surface at the same address replaces the entry (the later one wins).
+        h.write(0x0214, kTex);
+        h.clear(0x03);
+        h.write(0x0214, 0x900000);
+        const tox2::RsxDraw depth = h.draw();
+        CHECK(h.since(0, 1));
+        CHECK(depth.textures[0].rt_alias == alias.textures[0].rt_alias && depth.textures[0].rt_depth);
+        const tox2::RsxDraw depth_again = h.draw();
+        CHECK(h.since(1, 0) && depth_again.textures[0].rt_depth);
+    }
+
+    // (d2) Known surfaces set from outside end the reuse.
+    {
+        RsxTextureUnitHarness h;
+        h.setSurface(0x100000, 64, 4);
+        h.fill(kTex, 64, 1);
+        h.setTexture(0, kTex, 0xA5, 1, 4, 4, 16);
+        h.draw();
+        h.draw();
+        CHECK(h.since(1, 1));
+        tox2::RsxSurface surface;
+        surface.offset = kTex;
+        surface.pitch = 64;
+        surface.width = 4;
+        surface.height = 4;
+        surface.format = tox2::RsxColorFormat::A8R8G8B8;
+        h.builder.setKnownSurfaces({surface});
+        const tox2::RsxDraw alias = h.draw();
+        CHECK(h.since(0, 1) && alias.textures[0].rt_alias == 0 && alias.textures[0].data == nullptr);
+    }
+
+    // The off switch takes the full path for every unit.
+    {
+        RsxTextureUnitHarness h;
+        h.builder.setTextureUnitCache(false);
+        h.setSurface(0x100000, 64, 4);
+        h.fill(kTex, 64, 1);
+        h.setTexture(0, kTex, 0xA5, 1, 4, 4, 16);
+        h.draw();
+        h.draw();
+        h.draw();
+        CHECK(h.hits() == 0 && h.misses() == 3);
+    }
+
+    // (e) Equivalence: the same script with and without the unit cache gives the same descriptors and census after
+    // every draw, the same sharing of content ids and the same guest access.
+    {
+        const RsxUnitCacheRun off = runRsxUnitCacheScript(false);
+        const RsxUnitCacheRun on = runRsxUnitCacheScript(true);
+        CHECK(off.steps.size() >= 12 && off.steps.size() == on.steps.size());
+        CHECK(off.hits == 0 && on.hits > 0 && off.misses == on.hits + on.misses);
+        CHECK(off.validations == on.validations && off.hashed == on.hashed && off.read == on.read);
+        CHECK(off.hashed > 0 && off.read > 0);
+
+        bool same = true;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> ids;  // (off, on) content id per descriptor
+        std::vector<const tox2::RsxTextureDesc*> off_descs, on_descs;
+        for (std::size_t i = 0; i < off.steps.size() && i < on.steps.size(); i++) {
+            same = same && off.steps[i].census == on.steps[i].census;
+            const auto& a = off.steps[i].textures;
+            const auto& b = on.steps[i].textures;
+            same = same && a.size() == b.size();
+            for (std::size_t u = 0; u < a.size() && u < b.size(); u++) {
+                same = same && a[u].unit == b[u].unit && a[u].format == b[u].format && a[u].mips == b[u].mips &&
+                       a[u].dimension == b[u].dimension && a[u].linear_layout == b[u].linear_layout &&
+                       a[u].normalized == b[u].normalized && a[u].cubemap == b[u].cubemap && a[u].depth == b[u].depth &&
+                       a[u].location == b[u].location && a[u].offset == b[u].offset && a[u].pitch == b[u].pitch &&
+                       a[u].width == b[u].width && a[u].height == b[u].height && a[u].control0 == b[u].control0 &&
+                       a[u].remap == b[u].remap && a[u].filter == b[u].filter && a[u].address == b[u].address &&
+                       a[u].border == b[u].border && a[u].rt_alias == b[u].rt_alias && a[u].rt_depth == b[u].rt_depth &&
+                       (a[u].data == nullptr) == (b[u].data == nullptr) &&
+                       (a[u].content_id == 0) == (b[u].content_id == 0);
+                if (a[u].data != nullptr && b[u].data != nullptr) same = same && *a[u].data == *b[u].data;
+                off_descs.push_back(&a[u]);
+                on_descs.push_back(&b[u]);
+            }
+        }
+        CHECK(same);
+        // Two descriptors share a content id in one run exactly when they share it in the other.
+        bool ids_match = off_descs.size() == on_descs.size();
+        for (std::size_t i = 0; ids_match && i < off_descs.size(); i++) {
+            for (std::size_t j = i + 1; j < off_descs.size(); j++) {
+                if ((off_descs[i]->content_id == off_descs[j]->content_id) !=
+                    (on_descs[i]->content_id == on_descs[j]->content_id)) {
+                    ids_match = false;
+                    break;
+                }
+            }
+        }
+        CHECK(ids_match);
+    }
 }
 
 // The calling thread's note count moves by one per note, ignores other threads and survives a census reset.
@@ -17668,6 +18075,7 @@ int main(int argc, char** argv) {
     testSharedVertexRanges();
     testRecycledDrawBuffers();
     testRsxTextureCache();
+    testRsxTextureUnitCache();
     testRsxTextureCacheValidity();
     testRsxUnimplementedThreadNotes();
     testRsxHashRange();
