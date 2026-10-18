@@ -21,10 +21,10 @@
 //  - Error dialogs (errDialog of the Auto functions; ListSave2/ListLoad2 always ask for one): the
 //    text is logged and the error code is returned, with RPCS3's NOREPEAT bookkeeping. No dialog
 //    object is created, so the game sees no DRAWING_BEGIN/END events for it.
-//  - The save list of ListSave2/ListLoad2 is never shown. The entry is chosen as the list would
-//    highlight it (funcList's focus position); ListLoad2 falls back to the newest entry; ListSave2
-//    falls back to the "new data" slot when the game supplied one; without a choice the call
-//    returns CELL_CANCEL, as RPCS3 does without a save dialog. Confirmation prompts count as YES.
+//  - The save list of ListSave2/ListLoad2 and its Yes/No confirmation go through the SaveDialogDriver
+//    (hle/save_dialog.h). Without a window the Auto policy opens the list on the row it would focus
+//    (funcList's focus position; row 0 when nothing is focused) and answers Yes; with an empty list it
+//    answers back, which returns CELL_CANCEL, as RPCS3 does without a save dialog.
 //  - FixedLoad2/FixedSave2 with option NONE ask for a confirmation in RPCS3; it counts as YES. They
 //    always ask for error dialogs (errDialog ALWAYS), like the List functions.
 //  - cellSaveDataDelete2 only opens a selection UI in RPCS3, so it returns CELL_CANCEL.
@@ -47,11 +47,13 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <span>
@@ -66,6 +68,8 @@
 #include "core/param_sfo.h"
 #include "tox2/ppu_context.h"
 #include "hle/hle.h"
+#include "hle/save_dialog.h"
+#include "hle/save_dialog_text.h"
 #include "lv2/cell_error.h"
 #include "lv2/vfs.h"
 
@@ -79,9 +83,10 @@ constexpr char kModule[] = "cellSysutil";
 // CELL_SAVEDATA_ERROR_*
 constexpr std::uint32_t kErrorCbResult = 0x8002b401;
 constexpr std::uint32_t kErrorAccess = 0x8002b402;
+constexpr std::uint32_t kErrorInternal = 0x8002b403;
 constexpr std::uint32_t kErrorParam = 0x8002b404;
-constexpr std::uint32_t kErrorBroken = 0x8002b406;
-constexpr std::uint32_t kErrorFailure = 0x8002b407;
+constexpr std::uint32_t kErrBroken = 0x8002b406;
+constexpr std::uint32_t kErrFailure = 0x8002b407;
 constexpr std::uint32_t kErrorBusy = 0x8002b408;
 constexpr std::uint32_t kCancel = 1;  // CELL_CANCEL
 
@@ -175,6 +180,12 @@ constexpr std::uint32_t kFixedSetDirName = 0;
 constexpr std::uint32_t kFixedSetOption = 8;
 constexpr std::uint32_t kNewDataIconPosition = 0;
 constexpr std::uint32_t kNewDataDirName = 4;
+constexpr std::uint32_t kNewDataIcon = 8;
+// CellSaveDataNewDataIcon
+constexpr std::uint32_t kIconBufTitle = 0;
+constexpr std::uint32_t kIconBufSize = 4;
+constexpr std::uint32_t kIconBuf = 8;
+constexpr std::uint32_t kIconBufMaxSize = 225280;  // CELL_SAVEDATA_ICONBUF_SIZE
 constexpr std::uint32_t kDirListDirName = 0;
 constexpr std::uint32_t kDirListListParam = 32;
 // CellSaveDataStatGet
@@ -361,6 +372,7 @@ struct SaveEntry {
     std::string details;
     std::uint64_t size = 0;
     Times times;
+    std::shared_ptr<const std::vector<std::uint8_t>> icon0;  // ICON0.PNG of a listed entry
     bool is_new = false;
 };
 
@@ -415,6 +427,38 @@ std::optional<SaveEntry> loadEntry(const stdfs::path& root, const std::string& e
     entry.times = statTimes(std::string(kSaveRoot) + "/" + escaped);
     entry.escaped = escaped;
     return entry;
+}
+
+// The entry's modification time as local calendar time, which is what the console's list shows.
+std::tm localTime(std::int64_t unix_seconds) {
+    std::tm out{};
+    const auto seconds = static_cast<std::time_t>(unix_seconds);
+#ifdef _WIN32
+    const bool ok = localtime_s(&out, &seconds) == 0;
+#else
+    const bool ok = localtime_r(&seconds, &out) != nullptr;
+#endif
+    if (!ok) {
+        out = {};
+        out.tm_year = 70;
+        out.tm_mday = 1;
+    }
+    return out;
+}
+
+// Confirmation text of a listed entry: the question and the info block (title, subtitle, date, size, detail).
+std::string entryConfirmText(std::string_view question, const SaveEntry& entry) {
+    return saveConfirmText(question, entry.title, entry.subtitle, formatSaveDate(localTime(entry.times.mtime)),
+                           formatSaveSize(entry.size), entry.details);
+}
+
+SaveDialogRow entryRow(const SaveEntry& entry) {
+    SaveDialogRow row;
+    row.title = entry.subtitle.empty() ? entry.title : entry.subtitle;
+    row.info = saveRowInfo(localTime(entry.times.mtime), entry.size);
+    row.detail = entry.details;
+    row.icon_png = entry.icon0;
+    return row;
 }
 
 // Everything one savedata_op call works with.
@@ -688,10 +732,17 @@ ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_
         selected_list.insert(name);
     }
     std::erase_if(entries, [&](const SaveEntry& e) { return !selected_list.contains(e.dir_name); });
+    for (SaveEntry& entry : entries) {
+        if (auto bytes = readFile(root / entry.escaped / "ICON0.PNG")) {
+            entry.icon0 = std::make_shared<const std::vector<std::uint8_t>>(std::move(*bytes));
+        }
+    }
 
     const std::uint32_t new_data = tox2Read32(base, s.list_set + kListSetNewData);
     std::string new_dir;
     std::uint32_t new_icon_pos = 0;
+    std::string new_title;
+    std::shared_ptr<const std::vector<std::uint8_t>> new_icon;
     if (new_data != 0) {
         new_icon_pos = tox2Read32(base, new_data + kNewDataIconPosition);
         if (new_icon_pos > kIconPosTail) return fail(paramError(43, std::format("(iconPosition={:#x})", new_icon_pos)));
@@ -704,6 +755,17 @@ ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_
                 if (!new_dir.empty()) return fail(paramError(46));
                 break;
             default: break;
+        }
+        const std::uint32_t icon = tox2Read32(base, new_data + kNewDataIcon);
+        if (icon != 0) {
+            const std::uint32_t title_addr = tox2Read32(base, icon + kIconBufTitle);
+            if (title_addr != 0) new_title = getText(base, title_addr, kTitleSize);
+            const std::uint32_t icon_size = tox2Read32(base, icon + kIconBufSize);
+            const std::uint32_t icon_addr = tox2Read32(base, icon + kIconBuf);
+            if (icon_addr != 0 && icon_size > 0 && icon_size <= kIconBufMaxSize) {
+                new_icon = std::make_shared<const std::vector<std::uint8_t>>(base + icon_addr,
+                                                                             base + icon_addr + icon_size);
+            }
         }
     }
 
@@ -759,37 +821,77 @@ ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_
         default: return fail(paramError(34, std::format("(focusPosition={:#x})", focus_pos)));
     }
 
-    // Headless choice (see the header).
-    std::int32_t selected = -2;
-    const bool can_make_new = op == Op::ListSave && new_data != 0;
-    if (can_make_new && focus_pos == kFocusNewData) {
-        selected = -1;
-    } else if (focused >= 0 && focused < count) {
-        selected = focused;
-    } else if (op == Op::ListLoad && count > 0) {
-        selected = 0;
-        for (std::int32_t i = 1; i < count; i++) {
-            if (entries[static_cast<std::size_t>(i)].times.mtime >
-                entries[static_cast<std::size_t>(selected)].times.mtime) {
-                selected = i;
-            }
-        }
-    } else if (can_make_new) {
-        selected = -1;
+    // Rows in the entries' sorted order, with the new-data row first for HEAD and last for TAIL.
+    const bool has_new_row = new_data != 0;
+    const bool new_first = has_new_row && new_icon_pos != kIconPosTail;
+    const std::int32_t new_row = !has_new_row ? -1 : (new_first ? 0 : count);
+    std::vector<SaveDialogRow> rows;
+    for (const SaveEntry& entry : entries) rows.push_back(entryRow(entry));
+    if (has_new_row) {
+        SaveDialogRow row;
+        row.title = new_title.empty() ? std::string(kNewDataTitle) : new_title;
+        row.info = std::string(kNewDataLine);
+        row.icon_png = new_icon;
+        row.new_data = true;
+        rows.insert(rows.begin() + (new_first ? 0 : count), std::move(row));
     }
-    if (selected == -2) {
-        logInfo("tox2: savedata: {}: no entry to choose without a save list dialog, cancelling", opName(op));
-        return fail(kCancel);
+
+    std::int32_t initial_row = 0;
+    if (focus_pos == kFocusNewData) {
+        initial_row = new_row;
+    } else if (focused >= 0) {
+        initial_row = focused + (new_first ? 1 : 0);
+    }
+
+    bool chose_new = false;
+    const SaveEntry* chosen = nullptr;
+    SaveDialogDriver& driver = saveDialogDriver();
+    for (;;) {
+        auto list = std::make_shared<SaveDialogContent>();
+        list->kind = DialogKind::List;
+        list->list_kind = op == Op::ListSave ? SaveListKind::Save : SaveListKind::Load;
+        list->rows = rows;
+        const std::optional<std::int32_t> row = driver.showList({std::move(list), initial_row});
+        if (!row) {
+            logInfo("tox2: savedata: {}: save list cancelled", opName(op));
+            return fail(kCancel);
+        }
+        if (*row < 0 || *row >= static_cast<std::int32_t>(rows.size())) {
+            logError("tox2: savedata: {}: the dialog returned row {} of {}, cancelling", opName(op), *row, rows.size());
+            return fail(kCancel);
+        }
+        initial_row = *row;
+
+        const bool is_new = *row == new_row;
+        const SaveEntry* entry = is_new ? nullptr : &entries[static_cast<std::size_t>(*row - (new_first ? 1 : 0))];
+        const bool saving = op == Op::ListSave;
+        auto confirm = std::make_shared<SaveDialogContent>();
+        confirm->kind = DialogKind::YesNo;
+        confirm->list_kind = saving ? SaveListKind::Save : SaveListKind::Load;
+        if (is_new) {
+            confirm->message = std::string(saving ? kConfirmSaveNew : kConfirmLoadNew);
+        } else {
+            confirm->message = entryConfirmText(saving ? kConfirmOverwrite : kConfirmLoad, *entry);
+        }
+        const SaveMessageResult answer = driver.showMessage(std::move(confirm));
+        if (answer == SaveMessageResult::Failed) {
+            logError("tox2: savedata: {}: the confirmation could not be shown", opName(op));
+            return fail(kErrorInternal);
+        }
+        if (answer == SaveMessageResult::Yes) {
+            chose_new = is_new;
+            chosen = entry;
+            break;
+        }
     }
 
     if (dir_num != 0) listing.clearBuf(base);  // funcStat gets a clean buffer
-    if (selected == -1) {
+    if (chose_new) {
         logInfo("tox2: savedata: {}: new save '{}' chosen", opName(op), new_dir);
         return {false, kCellOk, new_dir};
     }
-    const std::string& chosen = entries[static_cast<std::size_t>(selected)].dir_name;
-    logInfo("tox2: savedata: {}: entry '{}' chosen of {}", opName(op), chosen, count);
-    return {false, kCellOk, chosen};
+    logInfo("tox2: savedata: {}: entry '{}' chosen of {}", opName(op), chosen->dir_name, count);
+    return {false, kCellOk, chosen->dir_name};
 }
 
 // In-memory copy of a save's files while the callbacks run.
@@ -862,7 +964,7 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
     }
     if (!isValidDirName(save.dir_name)) {
         logError("tox2: savedata: invalid save directory name '{}'", save.dir_name);
-        return kErrorBroken;
+        return kErrBroken;
     }
     save.escaped = save.dir_name;
     const stdfs::path dir_path = root / save.escaped;
@@ -1095,7 +1197,7 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
                 if (file == files.end() || file->second.size() <= file_offset) {
                     logError("tox2: savedata: cannot read '{}' (size {}, offset {})", path,
                              file == files.end() ? -1 : static_cast<std::int64_t>(file->second.size()), file_offset);
-                    savedata_result = kErrorFailure;
+                    savedata_result = kErrFailure;
                     break;
                 }
                 const std::size_t n = std::min<std::size_t>(file_size, file->second.size() - file_offset);
@@ -1117,7 +1219,7 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
             case kFileOpDelete:
                 if (files.erase(path) == 0) {
                     logError("tox2: savedata: cannot delete '{}'", path);
-                    savedata_result = kErrorFailure;
+                    savedata_result = kErrFailure;
                     break;
                 }
                 sfo.ints.erase("*" + path);
@@ -1165,7 +1267,7 @@ void runOp(Tox2PpuContext* ctx, std::uint8_t* base, Op op, std::uint32_t version
         g_scratch = process().main.allocate(kScratchUsed, 16);
         if (g_scratch == 0) {
             logError("tox2: savedata: cannot allocate the callback structures");
-            ctx->gpr[3] = kErrorFailure;
+            ctx->gpr[3] = kErrFailure;
             return;
         }
     }

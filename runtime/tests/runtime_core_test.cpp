@@ -10,6 +10,7 @@
 #include <csetjmp>
 #include <cstdlib>
 #include <condition_variable>
+#include <deque>
 #include <cstring>
 #include <filesystem>
 #include <format>
@@ -48,6 +49,8 @@
 #include "hle/guest_printf.h"
 #include "hle/hle.h"
 #include "hle/libsre.h"
+#include "hle/save_dialog.h"
+#include "hle/save_dialog_text.h"
 #include "hle/sail_service.h"
 #include "input/keyboard_pad.h"
 #include "input/pad_buttons.h"
@@ -6353,6 +6356,55 @@ TOX2_PPU_FUNC(saveFixedCallback) {
     tox2Write32(base, set + 8, g_save.fixed_option);
 }
 
+// A save dialog driver that records every request and returns queued answers. With nothing queued a list
+// answers back and a message answers No.
+struct ScriptedSaveDialog final : tox2::SaveDialogDriver {
+    struct ListCall {
+        tox2::SaveListKind kind = tox2::SaveListKind::Save;
+        std::vector<std::string> titles, infos;
+        std::vector<bool> has_icon, is_new;
+        std::int32_t initial_row = 0;
+    };
+    std::vector<ListCall> lists;
+    std::vector<std::string> messages;
+    std::vector<tox2::DialogKind> message_kinds;
+    std::deque<std::optional<std::int32_t>> list_answers;
+    std::deque<tox2::SaveMessageResult> message_answers;
+
+    void reset() {
+        lists.clear();
+        messages.clear();
+        message_kinds.clear();
+        list_answers.clear();
+        message_answers.clear();
+    }
+    bool interactive() const override { return false; }
+    std::optional<std::int32_t> showList(const tox2::SaveListRequest& request) override {
+        ListCall call;
+        call.kind = request.content->list_kind;
+        call.initial_row = request.initial_row;
+        for (const tox2::SaveDialogRow& row : request.content->rows) {
+            call.titles.push_back(row.title);
+            call.infos.push_back(row.info);
+            call.has_icon.push_back(row.icon_png != nullptr);
+            call.is_new.push_back(row.new_data);
+        }
+        lists.push_back(std::move(call));
+        if (list_answers.empty()) return std::nullopt;
+        const auto answer = list_answers.front();
+        list_answers.pop_front();
+        return answer;
+    }
+    tox2::SaveMessageResult showMessage(std::shared_ptr<tox2::SaveDialogContent> content) override {
+        messages.push_back(content->message);
+        message_kinds.push_back(content->kind);
+        if (message_answers.empty()) return tox2::SaveMessageResult::No;
+        const auto answer = message_answers.front();
+        message_answers.pop_front();
+        return answer;
+    }
+};
+
 void testCellSaveData() {
     namespace stdfs = std::filesystem;
     std::vector<std::string> lines;
@@ -6775,6 +6827,132 @@ void testCellSaveData() {
     put(prefix, "");  // an empty prefix is a parameter error
     CHECK(fixedLoad() == kErrParam);
     CHECK(ctx->gpr[1] == 0x500000);
+
+    // The save list dialog. Three saves match "FX_" (sorted by subtitle: FX_SAVE03 "A-sub", FX_SAVE02 "B-sub",
+    // FX_SAVE01 "M-sub"); the driver is scripted.
+    {
+        using tox2::DialogKind;
+        using tox2::SaveListKind;
+        using tox2::SaveMessageResult;
+        constexpr std::uint32_t kErrInternal = 0x8002b403;
+        const std::uint32_t icon_struct = scratch + 0x7800, icon_title = scratch + 0x7840,
+                            icon_bytes = scratch + 0x7900, missing_dir = scratch + 0x7a00;
+        {
+            std::ofstream icon(saves / "FX_SAVE02" / "ICON0.PNG", std::ios::binary);
+            icon << "PNGBYTES";
+        }
+        put(prefix, "FX_");
+        tox2Write32(base, set_list, 1);
+        tox2Write32(base, set_list + 4, 1);
+        put(fixed_list, "FX_SAVE01");
+        put(fixed_list + 48, "FX_SAVE02");
+        put(fixed_list + 96, "FX_SAVE03");
+        put(new_dir, "FX_NEW001");
+        put(missing_dir, "FX_MISSING");
+        put(icon_title, "Fresh start");
+        put(icon_bytes, "NEWICON");
+        tox2Write32(base, icon_struct, icon_title);
+        tox2Write32(base, icon_struct + 4, 7);
+        tox2Write32(base, icon_struct + 8, icon_bytes);
+        auto script = std::make_unique<ScriptedSaveDialog>();
+        ScriptedSaveDialog& dlg = *script;
+        tox2::setSaveDialogDriver(std::move(script));
+        // `new_pos` 2 means no newData structure. OK_LAST from funcStat ends a call after the choice without
+        // writing anything.
+        auto setup = [&](std::uint32_t focus, std::uint32_t new_pos, std::uint32_t icon) {
+            g_save = SaveScript{};
+            g_save.focus = focus;
+            g_save.focus_dir = focus_dir;
+            g_save.fixed_num = 3;
+            g_save.fixed_list = fixed_list;
+            g_save.new_data = new_pos == 2 ? 0 : new_data;
+            g_save.stat_result = 1;
+            tox2Write32(base, new_data, new_pos);
+            tox2Write32(base, new_data + 8, icon);
+            dlg.reset();
+        };
+        auto run = [&](Import which) { return call(which, {0, set_list, set_buf, list_cb, stat_cb, file_cb, 0, 0}); };
+
+        // TAIL, NEWDATA focus: the new-data row comes last and the list opens on it.
+        setup(5, 1, 0);
+        dlg.list_answers = {3};
+        dlg.message_answers = {SaveMessageResult::Yes};
+        CHECK(run(ListSave) == 0);
+        CHECK(dlg.lists.size() == 1 && dlg.lists[0].kind == SaveListKind::Save && dlg.lists[0].initial_row == 3);
+        CHECK((dlg.lists[0].titles ==
+               std::vector<std::string>{"A-sub", "B-sub", "M-sub", std::string(tox2::kNewDataTitle)}));
+        CHECK((dlg.lists[0].has_icon == std::vector<bool>{false, true, false, false}));
+        CHECK((dlg.lists[0].is_new == std::vector<bool>{false, false, false, true}));
+        CHECK(dlg.lists[0].infos[3] == tox2::kNewDataLine && dlg.lists[0].infos[0].find("KB") != std::string::npos);
+        CHECK(dlg.messages.size() == 1 && dlg.messages[0] == tox2::kConfirmSaveNew &&
+              dlg.message_kinds[0] == DialogKind::YesNo);
+        CHECK(g_save.list_calls == 1 && g_save.stat_dir == "FX_NEW001" && g_save.stat_is_new == 1);
+
+        // HEAD: the new-data row comes first; entry focus 0 opens on row 1, NEWDATA on row 0.
+        setup(1, 0, 0);  // LISTHEAD
+        CHECK(run(ListSave) == 1);
+        CHECK(dlg.lists.size() == 1 && dlg.lists[0].initial_row == 1 && dlg.lists[0].titles.size() == 4 &&
+              dlg.lists[0].titles[0] == tox2::kNewDataTitle && dlg.lists[0].titles[1] == "A-sub");
+        CHECK(g_save.stat_calls == 0 && dlg.messages.empty());
+        setup(5, 0, 0);
+        CHECK(run(ListSave) == 1 && dlg.lists[0].initial_row == 0);
+        setup(2, 0, 0);  // LISTTAIL
+        CHECK(run(ListSave) == 1 && dlg.lists[0].initial_row == 3);
+
+        // The game's newData title and icon buffer; a null title keeps the default.
+        setup(5, 0, icon_struct);
+        CHECK(run(ListSave) == 1 && dlg.lists[0].titles[0] == "Fresh start" && dlg.lists[0].has_icon[0]);
+        tox2Write32(base, icon_struct, 0);
+        setup(5, 0, icon_struct);
+        CHECK(run(ListSave) == 1 && dlg.lists[0].titles[0] == tox2::kNewDataTitle && dlg.lists[0].has_icon[0]);
+        tox2Write32(base, icon_struct + 4, 225281);  // beyond the icon buffer limit: no icon
+        setup(5, 0, icon_struct);
+        CHECK(run(ListSave) == 1 && !dlg.lists[0].has_icon[0]);
+        tox2Write32(base, icon_struct, icon_title);
+        tox2Write32(base, icon_struct + 4, 7);
+
+        // List -> row 2, No, list again on row 2 -> row 1, Yes: row 1's save is used and funcList ran once.
+        setup(1, 2, 0);
+        dlg.list_answers = {2, 1};
+        dlg.message_answers = {SaveMessageResult::No, SaveMessageResult::Yes};
+        CHECK(run(ListLoad) == 0);
+        CHECK(dlg.lists.size() == 2 && dlg.lists[0].kind == SaveListKind::Load && dlg.lists[0].initial_row == 0 &&
+              dlg.lists[1].initial_row == 2);
+        CHECK(dlg.messages.size() == 2 && dlg.messages[0].starts_with(tox2::kConfirmLoad) &&
+              dlg.messages[0].find("M-sub") != std::string::npos && dlg.messages[1].find("B-sub") != std::string::npos);
+        CHECK(g_save.list_calls == 1 && g_save.stat_dir == "FX_SAVE02" && g_save.stat_is_new == 0);
+
+        // ListSave2 asks the overwrite question for an entry.
+        setup(1, 2, 0);
+        dlg.list_answers = {0};
+        dlg.message_answers = {SaveMessageResult::Yes};
+        CHECK(run(ListSave) == 0 && dlg.messages[0].starts_with(tox2::kConfirmOverwrite) &&
+              g_save.stat_dir == "FX_SAVE03");
+
+        // A confirmation that cannot be shown is INTERNAL; back from the list is CELL_CANCEL.
+        setup(1, 2, 0);
+        dlg.list_answers = {1};
+        dlg.message_answers = {SaveMessageResult::Failed};
+        CHECK(run(ListSave) == kErrInternal && g_save.stat_calls == 0);
+        setup(1, 2, 0);
+        CHECK(run(ListSave) == 1 && g_save.stat_calls == 0);
+
+        // ListLoad2 shows the "create new data" question on its new-data row.
+        setup(5, 0, 0);
+        dlg.list_answers = {0};
+        dlg.message_answers = {SaveMessageResult::Yes};
+        CHECK(run(ListLoad) == 0 && dlg.messages.size() == 1 && dlg.messages[0] == tox2::kConfirmLoadNew &&
+              g_save.stat_dir == "FX_NEW001");
+
+        // DIRNAME focus on a name that is not listed opens on row 0 (no newest-entry choice).
+        setup(0, 2, 0);
+        g_save.focus_dir = missing_dir;
+        CHECK(run(ListLoad) == 1 && dlg.lists.size() == 1 && dlg.lists[0].initial_row == 0 &&
+              dlg.lists[0].titles.size() == 3 && g_save.stat_calls == 0);
+
+        tox2::resetSaveDialog();
+        tox2Write32(base, new_data + 8, 0);
+    }
 
     // Delete2 has only a selection UI in RPCS3.
     CHECK(call(Delete, {0}) == 1);
