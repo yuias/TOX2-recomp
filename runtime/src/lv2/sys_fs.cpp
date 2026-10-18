@@ -19,6 +19,7 @@
 #include <system_error>
 #include <vector>
 
+#include "core/build_config.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/threads.h"
@@ -444,6 +445,18 @@ std::uint64_t transferLocked(HANDLE file, bool write, std::uint8_t* data, std::u
     }
     const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
     (write ? g_write_counters : g_read_counters).record(total, static_cast<std::uint64_t>(us.count()));
+#if TOX2_RSX_WRITE_WATCH
+    // Whether the OS write watch reports a kernel write into the buffer is undocumented, so a read into guest memory
+    // is recorded explicitly.
+    GuestMemory& memory = process().memory;
+    if (!write && total != 0 && memory.containsHost(data)) {
+        const std::uint64_t offset = static_cast<std::uint64_t>(data - memory.base());
+        if (offset <= 0xFFFFFFFFull) {
+            memory.markWritten(static_cast<std::uint32_t>(offset),
+                               static_cast<std::uint32_t>(std::min<std::uint64_t>(total, 0x100000000ull - offset)));
+        }
+    }
+#endif
     return total;
 }
 

@@ -11408,7 +11408,18 @@ void testRsxConsumer() {
             CHECK(run() == FifoStatus::Idle);
         };
         // Point x = 4 (as in the game), 4 words, Y32; the destination DMA stays at its post-flip default (local).
+#if TOX2_RSX_WRITE_WATCH
+        // The blit is a user-mode store, so the game view's next check of the range sees it.
+        tox2::GuestRsxMemoryView watch_view(base);
+        const auto blit_before = watch_view.checkWrites(0, kLocalOffset, 16, 0);
+        CHECK(blit_before.tracked && !blit_before.clean);
+        const auto blit_control = watch_view.checkWrites(0, kLocalOffset, 16, blit_before.stamp);
+        CHECK(blit_control.clean);
+#endif
         blit(0, 11, kLocalOffset - 16, 0x00000004, 4, {0x00000000, 0x3F80, 0x01020304, 0x0A0B0C0D});
+#if TOX2_RSX_WRITE_WATCH
+        CHECK(!watch_view.checkWrites(0, kLocalOffset, 16, blit_control.stamp).clean);
+#endif
         CHECK(tox2Read32(base, local_ea) == 0 && tox2Read32(base, local_ea + 4) == 0x3F80);
         CHECK(tox2Read32(base, local_ea + 8) == 0x01020304 && tox2Read32(base, local_ea + 12) == 0x0A0B0C0D);
         CHECK(base[local_ea + 8] == 0x01 && base[local_ea + 11] == 0x04);  // big-endian in guest memory
@@ -15011,6 +15022,106 @@ void testFsReadReleasesKernelLock() {
     tox2::setLogSink({});
 }
 
+// Every way guest bytes reach RSX local memory is seen by the game view's next check: the user-mode stores through the
+// OS write watch, the file read through the explicit mark. A control pair without a write in between stays clean.
+void testRsxWriteCheckWriters() {
+#if TOX2_RSX_WRITE_WATCH
+    HangGuard guard("testRsxWriteCheckWriters");
+    tox2::setLogSink([](std::string_view) {});
+    constexpr std::uint32_t kPage = 0x1000;
+    constexpr std::uint32_t kOffset = 0x0A000000;
+    constexpr std::uint32_t kEa = tox2::kRsxLocalBase + kOffset;
+    constexpr std::size_t kRangeSize = 4 * kPage;
+
+    tox2::resetRsxState();
+    tox2::Process& p = tox2::process();
+    CHECK(p.memory.reserve());
+    std::uint8_t* base = p.memory.base();
+    CHECK(p.memory.commit(kEa, kRangeSize));
+    const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    const std::uint32_t src = scratch, nread = scratch + 0x100;
+    std::memcpy(base + src, "write-watch\0", 12);
+
+    tox2::GuestRsxMemoryView view(base);
+    const auto check = [&](std::uint64_t since) { return view.checkWrites(0, kOffset, kRangeSize, since); };
+    // Runs `write` between two checks, after a control pair that has no write between its checks.
+    const auto expectSeen = [&](const auto& write) {
+        const auto first = check(0);
+        CHECK(first.tracked && !first.clean);
+        const auto control = check(first.stamp);
+        CHECK(control.tracked && control.clean);
+        write();
+        const auto second = check(control.stamp);
+        CHECK(second.tracked && !second.clean);
+    };
+
+    const auto handler = [](std::string_view name) {
+        for (const tox2::HleEntry& entry : tox2::sysPrxForUserLibcHandlers()) {
+            if (name == entry.name) return entry.handler;
+        }
+        CHECK(false);
+        return tox2::GuestHandler{};
+    };
+    const auto call = [&](std::string_view name, std::uint64_t a0, std::uint64_t a1, std::uint64_t a2) {
+        auto ctx = std::make_unique<Tox2PpuContext>();
+        ctx->gpr[3] = a0;
+        ctx->gpr[4] = a1;
+        ctx->gpr[5] = a2;
+        handler(name)(ctx.get(), base);
+        CHECK(ctx->gpr[3] == a0);
+    };
+
+    expectSeen([&] { tox2Write32(base, kEa + kPage + 0x10, 0x01020304u); });
+    expectSeen([&] { call("_sys_memcpy", kEa + 2 * kPage, src, 12); });
+    expectSeen([&] { call("_sys_memset", kEa + kPage, 0x41, 8); });
+    expectSeen([&] { call("_sys_strcpy", kEa + 3 * kPage, src, 0); });
+    expectSeen([&] {
+        std::array<std::uint8_t, 16> bytes{};
+        bytes[0] = 0x5A;
+        tox2::reservations().put(base, kEa + 2 * kPage + 0x40, bytes.data(), 16);
+    });
+
+    // A file read into the buffer: the pipe holds the bytes already, so the read does not wait.
+    HANDLE read_end = nullptr, write_end = nullptr;
+    CHECK(CreatePipe(&read_end, &write_end, nullptr, 0));
+    const std::uint32_t fd = tox2::fsAdoptHostHandleForTesting(read_end, 0);
+    CHECK(fd != 0);
+    const char payload[] = "pipe!";
+    DWORD written = 0;
+    CHECK(WriteFile(write_end, payload, 5, &written, nullptr) && written == 5);
+    {
+        SplitModeScope mode(tox2::PpuThreadsMode::Split1);
+        expectSeen([&] {
+            std::thread reader = slotThread(1001, [&] {
+                tox2::PpuSlots& slots = tox2::ppuSlots();
+                tox2::GuestLock& kernel = tox2::guestLock();
+                slots.acquire();
+                kernel.lock();
+                auto ctx = std::make_unique<Tox2PpuContext>();
+                ctx->gpr[3] = fd;
+                ctx->gpr[4] = kEa + 3 * kPage + 0x20;
+                ctx->gpr[5] = 5;
+                ctx->gpr[6] = nread;
+                tox2::sysFsRead(ctx.get(), base);
+                CHECK(ctx->gpr[3] == 0 && tox2Read64(base, nread) == 5);
+                kernel.unlock();
+                slots.release();
+            });
+            reader.join();
+            CHECK(std::memcmp(base + kEa + 3 * kPage + 0x20, payload, 5) == 0);
+        });
+    }
+
+    CHECK(tox2::fsCloseFd(fd) == 0);
+    CloseHandle(write_end);
+    p.main.free(scratch);
+    tox2::resetRsxState();
+    p.memory.decommit(kEa, kRangeSize);
+    tox2::setLogSink({});
+#endif
+}
+
 // Threads using one fd at the same time: sequential reads, positional reads, lseek queries and append writes keep the
 // file position semantics of a single caller.
 void testFsConcurrentFdUse() {
@@ -18357,6 +18468,7 @@ int main(int argc, char** argv) {
     testSplitKernelHelpers();
     testKernelWaitByCall();
     testFsReadReleasesKernelLock();
+    testRsxWriteCheckWriters();
     testFsConcurrentFdUse();
     testSplitCreatePriority();
     testSplitExitInKernelSection();
