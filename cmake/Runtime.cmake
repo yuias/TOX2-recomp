@@ -140,6 +140,7 @@ function(tox2_runtime_add_core)
     runtime/src/hle/hle.cpp
     runtime/src/hle/libsre.cpp
     runtime/src/hle/sail_service.cpp
+    runtime/src/hle/save_dialog_model.cpp
     runtime/src/hle/sce_np.cpp
     runtime/src/hle/sce_np_trophy.cpp
     runtime/src/hle/sys_prx_for_user.cpp
@@ -238,6 +239,14 @@ function(tox2_runtime_add_core)
   add_test(NAME game_options COMMAND tox2_game_options_tests)
   set_tests_properties(game_options PROPERTIES
     PASS_REGULAR_EXPRESSION "game options tests: [0-9]+ passed, 0 failed")
+
+  add_executable(tox2_save_dialog_tests runtime/tests/save_dialog_test.cpp)
+  target_compile_options(tox2_save_dialog_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_link_libraries(tox2_save_dialog_tests PRIVATE tox2_runtime_core)
+
+  add_test(NAME save_dialog COMMAND tox2_save_dialog_tests)
+  set_tests_properties(save_dialog PROPERTIES
+    PASS_REGULAR_EXPRESSION "save dialog tests: [0-9]+ passed, 0 failed")
 
   # The OS checks call Win32 directly; the library is linked for the build configuration macro only.
   add_executable(tox2_write_watch_tests runtime/tests/write_watch_test.cpp)
