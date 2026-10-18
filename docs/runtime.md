@@ -883,8 +883,8 @@ Deviations from RPCS3 and limits:
   (`cellSaveDataDelete2` still returns `CELL_CANCEL`) and glyphs outside the Basic Multilingual Plane (they show
   ImGui's fallback glyph).
 - The tests cover the model, the text, the drivers (including the timed wait in all three PPU thread modes), the
-  pad interception and the overlay recorded over an offscreen image (see [Tests](tests.md)). The dialog has not been
-  judged by a person in a window run yet, so its layout, colours and timing are as designed, not as checked.
+  pad interception and the overlay recorded over an offscreen image (see [Tests](tests.md)). A window run confirmed the save
+  and load lists, the confirmations, the cancel path and the silent overwrite of the fixed save.
 
 ## Input
 
