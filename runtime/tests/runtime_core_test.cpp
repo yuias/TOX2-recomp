@@ -344,6 +344,103 @@ void testIsCommittedAndRangeNames() {
     CHECK(tox2::guestRangeName(0xE0000000) == nullptr);
 }
 
+// The RSX texture validation asks which pages of a range were written since its last query.
+void testGuestWriteCollection() {
+    tox2::GuestMemory& memory = tox2::process().memory;
+    CHECK(memory.reserve());
+    constexpr std::uint32_t kPage = 0x1000;
+    constexpr std::uint32_t kTestBase = tox2::kRsxLocalBegin + 0x08000000;
+    CHECK(memory.commit(kTestBase, 16 * kPage));
+#if TOX2_RSX_WRITE_WATCH
+    std::uint8_t* base = memory.base();
+    const auto page = [&](std::uint32_t n) { return kTestBase + n * kPage; };
+    using Pages = std::vector<std::uint32_t>;
+    std::vector<std::uint32_t> got;
+    const auto collect = [&](std::uint32_t first, std::uint32_t count) {
+        const bool ok = memory.collectWrites(page(first), count * kPage, got);
+        return ok ? got : Pages{0xFFFFFFFFu};
+    };
+
+    // Committing the pages marked them; the first collection drains that.
+    CHECK(collect(0, 16) == Pages({page(0), page(1), page(2), page(3), page(4), page(5), page(6), page(7), page(8),
+                                   page(9), page(10), page(11), page(12), page(13), page(14), page(15)}));
+    CHECK(collect(0, 16).empty());
+
+    tox2Write32(base, page(3) + 0x40, 0x11223344u);
+    CHECK(collect(0, 16) == Pages({page(3)}));
+    CHECK(collect(0, 16).empty());
+
+    // A collection resets only the pages it covers.
+    tox2Write32(base, page(5), 1);
+    tox2Write32(base, page(12) + 0xFFC, 2);
+    CHECK(collect(0, 8) == Pages({page(5)}));
+    CHECK(collect(8, 8) == Pages({page(12)}));
+    CHECK(collect(0, 16).empty());
+
+    // A range that is not page-aligned is rounded out.
+    tox2Write32(base, page(2), 3);
+    CHECK(memory.collectWrites(page(1) + 0x800, kPage, got) && got == Pages({page(2)}));
+
+    // markWritten stands in for writers the OS does not report, and is consumed by the first collection covering it.
+    memory.markWritten(page(7) + 0x123, 1);
+    CHECK(collect(8, 8).empty());
+    CHECK(collect(0, 16) == Pages({page(7)}));
+    CHECK(collect(0, 16).empty());
+    memory.markWritten(page(14) + 0xFFF, 2);  // straddles pages 14 and 15
+    CHECK(collect(0, 16) == Pages({page(14), page(15)}));
+
+    // Outside the RSX local range nothing is recorded.
+    constexpr std::uint32_t kMainTest = 0x0F000000;
+    CHECK(memory.commit(kMainTest, kPage));
+    CHECK(memory.collectWrites(kMainTest, kPage, got));
+    memory.markWritten(kMainTest, kPage);
+    CHECK(memory.collectWrites(kMainTest, kPage, got) && got.empty());
+    memory.decommit(kMainTest, kPage);
+
+    // The OS does not report decommit and recommit; they are marked. An uncommitted range is refused.
+    memory.decommit(page(9), kPage);
+    CHECK(!memory.collectWrites(page(0), 16 * kPage, got) && got.empty());
+    CHECK(!memory.collectWrites(page(9) + 8, 4, got));
+    CHECK(memory.collectWrites(page(0), 8 * kPage, got) && got.empty());
+    CHECK(memory.commit(page(9), kPage));
+    CHECK(collect(0, 16) == Pages({page(9)}));
+    CHECK(!memory.collectWrites(page(10), 0xFFFFFFFFu - page(10) + 2, got));  // runs past the 32-bit space
+    CHECK(memory.collectWrites(page(10), 0, got) && got.empty());
+
+    // Marks from another thread are never lost while the main thread collects.
+    constexpr std::uint32_t kThreadPages = 1024;
+    const std::uint32_t thread_base = kTestBase + 0x00100000;
+    CHECK(memory.commit(thread_base, kThreadPages * kPage));
+    CHECK(memory.collectWrites(thread_base, kThreadPages * kPage, got));  // drains the commit marks
+    std::atomic<bool> done{false};
+    std::thread marker([&] {
+        for (std::uint32_t i = 0; i < 1000; i++) {
+            memory.markWritten(thread_base + i * kPage + (i % 7), 1);
+        }
+        done.store(true, std::memory_order_release);
+    });
+    std::vector<bool> seen(kThreadPages, false);
+    const auto absorb = [&] {
+        CHECK(memory.collectWrites(thread_base, kThreadPages * kPage, got));
+        for (const std::uint32_t p : got) seen[(p - thread_base) / kPage] = true;
+    };
+    while (!done.load(std::memory_order_acquire)) absorb();
+    marker.join();
+    absorb();
+    CHECK(std::count(seen.begin(), seen.end(), true) == 1000);
+    CHECK(std::count(seen.begin(), seen.begin() + 1000, true) == 1000);
+
+    memory.decommit(thread_base, kThreadPages * kPage);
+#else
+    // Without the macro the reservation is not watched, so the query is refused.
+    void* addresses[4];
+    ULONG_PTR count = 4;
+    ULONG granularity = 0;
+    CHECK(GetWriteWatch(0, memory.base() + kTestBase, kPage, addresses, &count, &granularity) != 0);
+#endif
+    memory.decommit(kTestBase, 16 * kPage);
+}
+
 void testTopOfAddressSpace() {
     std::unique_ptr<tox2::GuestMemory> memory(newMemory());
     std::uint8_t* base = memory->base();
@@ -18003,6 +18100,7 @@ int main(int argc, char** argv) {
     testLogOnce();
     testGuestMemoryRoundTrip();
     testIsCommittedAndRangeNames();
+    testGuestWriteCollection();
     testTopOfAddressSpace();
     testAllocatorFirstFit();
     testAllocatorMarkUsedAndExhaustion();

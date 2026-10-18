@@ -26,6 +26,33 @@ std::atomic<std::uintptr_t> g_reserve_end{0};
 
 std::uint64_t alignUp(std::uint64_t value, std::uint64_t align) { return (value + align - 1) / align * align; }
 
+#if TOX2_RSX_WRITE_WATCH
+constexpr std::uint64_t kLocalPages = (kRsxLocalEnd - kRsxLocalBegin) / kPageSize;
+
+// The bits of one mark word that cover the local pages [page, end_page) (page numbers relative to kRsxLocalBegin).
+std::uint64_t markMask(std::uint64_t page, std::uint64_t end_page, std::uint64_t& bits) {
+    const std::uint64_t first_bit = page % 64;
+    bits = std::min<std::uint64_t>(64 - first_bit, end_page - page);
+    return (bits == 64 ? ~std::uint64_t{0} : ((std::uint64_t{1} << bits) - 1)) << first_bit;
+}
+
+// Sets the mark bits for the part of the page-aligned guest range [begin, end) that lies in RSX local memory.
+void markLocalPages(std::atomic<std::uint64_t>* words, std::uint64_t begin, std::uint64_t end) {
+    begin = std::max<std::uint64_t>(begin, kRsxLocalBegin);
+    end = std::min<std::uint64_t>(end, kRsxLocalEnd);
+    if (begin >= end) {
+        return;
+    }
+    const std::uint64_t end_page = (end - kRsxLocalBegin) / kPageSize;
+    for (std::uint64_t page = (begin - kRsxLocalBegin) / kPageSize; page < end_page;) {
+        std::uint64_t bits = 0;
+        const std::uint64_t mask = markMask(page, end_page, bits);
+        words[page / 64].fetch_or(mask, std::memory_order_release);
+        page += bits;
+    }
+}
+#endif
+
 LONG CALLBACK faultHandler(EXCEPTION_POINTERS* info) {
     const EXCEPTION_RECORD& rec = *info->ExceptionRecord;
     if (rec.ExceptionCode == EXCEPTION_STACK_OVERFLOW) {
@@ -64,13 +91,22 @@ bool GuestMemory::reserve() {
         return true;
     }
     const std::size_t total = static_cast<std::size_t>(kGuestSpace) + kTox2GuestGuardSize;
-    void* p = VirtualAlloc(nullptr, total, MEM_RESERVE, PAGE_NOACCESS);
+#if TOX2_RSX_WRITE_WATCH
+    // The watch covers the whole reservation and stays on until it is released.
+    const DWORD reserve_flags = MEM_RESERVE | MEM_WRITE_WATCH;
+#else
+    const DWORD reserve_flags = MEM_RESERVE;
+#endif
+    void* p = VirtualAlloc(nullptr, total, reserve_flags, PAGE_NOACCESS);
     if (p == nullptr) {
         logError("cannot reserve {:#x} bytes of guest address space (error {})", total, GetLastError());
         return false;
     }
     base_ = static_cast<std::uint8_t*>(p);
     committed_pages_ = std::make_unique<std::atomic<std::uint64_t>[]>(kGuestSpace / kPageSize / 64);  // zeroed
+#if TOX2_RSX_WRITE_WATCH
+    marked_local_ = std::make_unique<std::atomic<std::uint64_t>[]>(kLocalPages / 64);  // zeroed
+#endif
     g_reserve_end.store(reinterpret_cast<std::uintptr_t>(base_) + total);
     g_reserve_begin.store(reinterpret_cast<std::uintptr_t>(base_));
     return true;
@@ -92,6 +128,10 @@ bool GuestMemory::commit(std::uint32_t addr, std::uint32_t size) {
         return false;
     }
     markPages(begin / kPageSize, end / kPageSize, true);
+#if TOX2_RSX_WRITE_WATCH
+    // Recommitting zero-fills the pages, which the OS write watch does not report.
+    markLocalPages(marked_local_.get(), begin, end);
+#endif
     return true;
 }
 
@@ -104,6 +144,9 @@ void GuestMemory::decommit(std::uint32_t addr, std::uint32_t size) {
     // Cleared first, so a concurrent isCommitted never reports a page that is already being released.
     markPages(begin / kPageSize, end / kPageSize, false);
     VirtualFree(base_ + begin, static_cast<std::size_t>(end - begin), MEM_DECOMMIT);
+#if TOX2_RSX_WRITE_WATCH
+    markLocalPages(marked_local_.get(), begin, end);
+#endif
 }
 
 void GuestMemory::markPages(std::uint64_t first_page, std::uint64_t end_page, bool committed) {
@@ -150,6 +193,82 @@ bool GuestMemory::containsHost(const void* host) const {
     const auto b = reinterpret_cast<std::uintptr_t>(base_);
     return p >= b && p < b + kGuestSpace + kTox2GuestGuardSize;
 }
+
+#if TOX2_RSX_WRITE_WATCH
+bool GuestMemory::collectWrites(std::uint32_t addr, std::uint32_t size, std::vector<std::uint32_t>& pages) {
+    pages.clear();
+    if (base_ == nullptr) {
+        return false;
+    }
+    if (size == 0) {
+        return true;
+    }
+    const std::uint64_t begin = addr & ~(kPageSize - 1);
+    const std::uint64_t end = alignUp(static_cast<std::uint64_t>(addr) + size, kPageSize);
+    if (end > kGuestSpace || end - begin > 0xFFFFFFFFull ||
+        !isCommitted(static_cast<std::uint32_t>(begin), static_cast<std::uint32_t>(end - begin))) {
+        return false;
+    }
+
+    // Room for every page of the range, so the result is never cut short (a short buffer would leave the pages past
+    // it reported, but the caller could not tell which).
+    thread_local std::vector<void*> scratch;
+    const std::size_t capacity = static_cast<std::size_t>((end - begin) / kPageSize);
+    if (scratch.size() < capacity) {
+        scratch.resize(capacity);
+    }
+    ULONG_PTR count = capacity;
+    ULONG granularity = 0;
+    if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, base_ + begin, static_cast<std::size_t>(end - begin), scratch.data(),
+                      &count, &granularity) != 0) {
+        return false;
+    }
+    if (granularity != kPageSize) {
+        // The reset already cleared the OS state, so keep the range as marks for the next collect.
+        markLocalPages(marked_local_.get(), begin, end);
+        return false;
+    }
+    pages.reserve(count);
+    for (ULONG_PTR i = 0; i < count; i++) {
+        pages.push_back(static_cast<std::uint32_t>(static_cast<std::uint8_t*>(scratch[i]) - base_));
+    }
+    std::sort(pages.begin(), pages.end());
+
+    // Marks are taken after the OS reset: a mark set meanwhile is kept for the next collection or caught here, never
+    // lost.
+    const std::uint64_t local_begin = std::max<std::uint64_t>(begin, kRsxLocalBegin);
+    const std::uint64_t local_end = std::min<std::uint64_t>(end, kRsxLocalEnd);
+    if (local_begin < local_end) {
+        const std::size_t os_pages = pages.size();
+        const std::uint64_t first_page = (local_begin - kRsxLocalBegin) / kPageSize;
+        const std::uint64_t end_page = (local_end - kRsxLocalBegin) / kPageSize;
+        for (std::uint64_t page = first_page; page < end_page;) {
+            std::uint64_t bits = 0;
+            const std::uint64_t mask = markMask(page, end_page, bits);
+            std::uint64_t taken = marked_local_[page / 64].fetch_and(~mask, std::memory_order_acq_rel) & mask;
+            while (taken != 0) {
+                const std::uint64_t bit = static_cast<std::uint64_t>(std::countr_zero(taken));
+                taken &= taken - 1;
+                pages.push_back(static_cast<std::uint32_t>(kRsxLocalBegin + ((page / 64) * 64 + bit) * kPageSize));
+            }
+            page += bits;
+        }
+        if (pages.size() != os_pages) {
+            std::sort(pages.begin(), pages.end());
+            pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
+        }
+    }
+    return true;
+}
+
+void GuestMemory::markWritten(std::uint32_t addr, std::uint32_t size) {
+    if (base_ == nullptr || size == 0) {
+        return;
+    }
+    markLocalPages(marked_local_.get(), addr & ~(kPageSize - 1),
+                   alignUp(static_cast<std::uint64_t>(addr) + size, kPageSize));
+}
+#endif
 
 const char* guestRangeName(std::uint32_t addr) {
     for (const GuestRegion* region : {&kMainRegion, &kUser1mRegion, &kUser64kRegion, &kStackRegion}) {

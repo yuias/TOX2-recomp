@@ -4,6 +4,9 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <vector>
+
+#include "core/build_config.h"
 
 namespace tox2 {
 
@@ -57,6 +60,20 @@ public:
     // True when `host` points into the reservation, including the guard tail.
     bool containsHost(const void* host) const;
 
+#if TOX2_RSX_WRITE_WATCH
+    // The pages of [addr, addr + size) written since the previous collection that covered them: by any user-mode store
+    // in the process (the OS write watch the reservation is made with) or reported through markWritten. Their state is
+    // reset in the same step (WRITE_WATCH_FLAG_RESET), so a write made after this call is reported by the next one.
+    // `pages` receives the page-aligned guest addresses, ascending, without duplicates. False when any page of the
+    // range is not committed or the OS call fails; the caller then treats the whole range as written. One calling
+    // thread at a time; markWritten may run on any thread meanwhile.
+    bool collectWrites(std::uint32_t addr, std::uint32_t size, std::vector<std::uint32_t>& pages);
+    // Records a write the OS write watch may not report (a file read into guest memory, commit, decommit). Call after
+    // the write is complete. Only the RSX local range [kRsxLocalBegin, kRsxLocalEnd), the only range anything collects,
+    // is recorded; the rest of the range is ignored. Thread-safe.
+    void markWritten(std::uint32_t addr, std::uint32_t size);
+#endif
+
 private:
     // Sets or clears the bitmap bits of the pages [first_page, end_page).
     void markPages(std::uint64_t first_page, std::uint64_t end_page, bool committed);
@@ -65,6 +82,10 @@ private:
     // One bit per 4 KiB page; a set bit means the page was committed by commit() and not decommitted
     // since. Guest pages are never re-protected, so this matches what VirtualQuery would report.
     std::unique_ptr<std::atomic<std::uint64_t>[]> committed_pages_;
+#if TOX2_RSX_WRITE_WATCH
+    // One bit per page of the RSX local range: a write reported through markWritten and not yet collected.
+    std::unique_ptr<std::atomic<std::uint64_t>[]> marked_local_;
+#endif
 };
 
 // First-fit allocator over a sorted map of used ranges. Callers hold the kernel lock, so there is no
