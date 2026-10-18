@@ -39,16 +39,24 @@
         "CMAKE_EXE_LINKER_FLAGS": "-Wl,/DEBUG",
         "CMAKE_SHARED_LINKER_FLAGS": "-Wl,/DEBUG"
       }
+    },
+    {
+      "name": "release-wwoff",
+      "inherits": "release",
+      "displayName": "Release, RSX write watch off",
+      "cacheVariables": { "TOX2_RSX_WRITE_WATCH": "OFF" }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
-    { "name": "profile", "configurePreset": "profile" }
+    { "name": "profile", "configurePreset": "profile" },
+    { "name": "release-wwoff", "configurePreset": "release-wwoff" }
   ],
   "testPresets": [
     { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
     { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
-    { "name": "profile", "configurePreset": "profile", "output": { "outputOnFailure": true } }
+    { "name": "profile", "configurePreset": "profile", "output": { "outputOnFailure": true } },
+    { "name": "release-wwoff", "configurePreset": "release-wwoff", "output": { "outputOnFailure": true } }
   ]
 }

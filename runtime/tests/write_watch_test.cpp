@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "core/build_config.h"
+
 namespace {
 
 int g_passed;
@@ -274,7 +276,12 @@ void testShortBuffer() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // Which configuration this build directory has; the write_watch_config test matches it against the option.
+    std::printf("write watch config: %s\n", TOX2_RSX_WRITE_WATCH ? "on" : "off");
+    if (argc > 1 && std::strcmp(argv[1], "--config") == 0) {
+        return 0;
+    }
     g_window = nullptr;
     void* base = VirtualAlloc(nullptr, kReserveSize, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_NOACCESS);
     CHECK(base != nullptr);

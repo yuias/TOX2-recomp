@@ -1,5 +1,8 @@
 include_guard(GLOBAL)
 
+option(TOX2_RSX_WRITE_WATCH
+  "Skip re-hashing RSX textures whose guest pages had no write (OS write watch on the guest reservation)" ON)
+
 # spdlog is built as a static library rather than header-only: its sources then compile with the
 # project's default flags (no -Werror) and keep <windows.h> out of runtime translation units.
 # SPDLOG_USE_STD_FORMAT reuses the std::format the runtime already depends on instead of bundled fmt.
@@ -197,6 +200,10 @@ function(tox2_runtime_add_core)
   target_link_libraries(tox2_runtime_core PRIVATE yyjson)
   # PRIVATE as well: xxhash.h stays out of the runtime headers.
   target_link_libraries(tox2_runtime_core PRIVATE xxhash)
+  # PUBLIC and always 0 or 1: the layout of GuestMemory, RsxTextureCache::Entry and the RsxMemoryView vtable depends
+  # on it, so every translation unit that includes those headers must see the same value (core/build_config.h).
+  target_compile_definitions(tox2_runtime_core PUBLIC
+    TOX2_RSX_WRITE_WATCH=$<IF:$<BOOL:${TOX2_RSX_WRITE_WATCH}>,1,0>)
 
   add_executable(tox2_runtime_tests runtime/tests/runtime_core_test.cpp)
   target_compile_options(tox2_runtime_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
@@ -232,11 +239,22 @@ function(tox2_runtime_add_core)
   set_tests_properties(game_options PROPERTIES
     PASS_REGULAR_EXPRESSION "game options tests: [0-9]+ passed, 0 failed")
 
-  # Checks the OS write watch itself, so it links no runtime library.
+  # The OS checks call Win32 directly; the library is linked for the build configuration macro only.
   add_executable(tox2_write_watch_tests runtime/tests/write_watch_test.cpp)
   target_compile_options(tox2_write_watch_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_link_libraries(tox2_write_watch_tests PRIVATE tox2_runtime_core)
 
   add_test(NAME write_watch_os COMMAND tox2_write_watch_tests)
   set_tests_properties(write_watch_os PROPERTIES
     PASS_REGULAR_EXPRESSION "write watch tests: [0-9]+ passed, 0 failed")
+
+  # The test binary reports the value it was compiled with, so a build directory configured the other way fails here.
+  if(TOX2_RSX_WRITE_WATCH)
+    set(tox2_write_watch_config_regex "write watch config: on")
+  else()
+    set(tox2_write_watch_config_regex "write watch config: off")
+  endif()
+  add_test(NAME write_watch_config COMMAND tox2_write_watch_tests --config)
+  set_tests_properties(write_watch_config PROPERTIES
+    PASS_REGULAR_EXPRESSION "${tox2_write_watch_config_regex}")
 endfunction()

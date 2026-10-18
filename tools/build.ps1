@@ -1,7 +1,7 @@
 #Requires -Version 7
 [CmdletBinding()]
 param(
-    [ValidateSet('debug', 'release', 'profile')]
+    [ValidateSet('debug', 'release', 'profile', 'release-wwoff')]
     [string]$Preset = 'debug',
     [switch]$Clean,
     [switch]$Test,
