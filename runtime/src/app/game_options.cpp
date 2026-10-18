@@ -23,7 +23,8 @@ constexpr std::string_view kUsage =
         "                [--seconds N] [--strict] [--log FILE] [--hdd-dir DIR] [--sdata-cache DIR]\n"
         "                [--log-level trace|debug|info|warn|error]\n"
         "                [--quiet-hle] [--load-only] [--png-dump DIR]\n"
-        "                [--dialog-answer yes|no|ok] [--pad none|neutral|keyboard|gamepad|keyboard+gamepad]\n"
+        "                [--dialog-answer yes|no|ok] [--save-dialog auto|cancel|window] [--ui-font PATH]\n"
+        "                [--pad none|neutral|keyboard|gamepad|keyboard+gamepad]\n"
         "                [--pad-script FILE] [--pad-probe] [--audio none|wasapi] [--audio-dump FILE]\n"
         "                [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]\n"
         "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
@@ -181,6 +182,19 @@ bool setDialogAnswerOption(ParseState& state, std::string_view label, const RawI
         return fail(error, std::format("error: {} needs yes, no or ok\n", label));
     }
     state.options.dialog_answer = item.text;
+    return true;
+}
+
+bool setSaveDialog(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    if (item.text == "auto") {
+        state.options.save_dialog = SaveDialogMode::Auto;
+    } else if (item.text == "cancel") {
+        state.options.save_dialog = SaveDialogMode::Cancel;
+    } else if (item.text == "window") {
+        state.options.save_dialog = SaveDialogMode::Window;
+    } else {
+        return fail(error, std::format("error: {} needs auto, cancel or window\n", label));
+    }
     return true;
 }
 
@@ -396,10 +410,12 @@ constexpr auto kEntries = std::to_array<OptionEntry>({
         {{"pad-script", OptionKind::Path}, setPadScript},
         {{"audio-dump", OptionKind::Path}, setAudioDump},
         {{"rsx-census", OptionKind::Path}, setPath<&GameOptions::rsx_census>},
+        {{"ui-font", OptionKind::Path}, setPath<&GameOptions::ui_font>},
         {{"dump-frames", OptionKind::Path, false, OptionNeeds::Renderer}, setPath<&GameOptions::dump_frames>},
         {{"shader-cache", OptionKind::Path, false, OptionNeeds::Renderer}, setPath<&GameOptions::shader_cache>},
         {{"log-level", OptionKind::String}, setLogLevelOption},
         {{"dialog-answer", OptionKind::String}, setDialogAnswerOption},
+        {{"save-dialog", OptionKind::String}, setSaveDialog},
         {{"pad", OptionKind::String}, setPad},
         {{"audio", OptionKind::String}, setAudio},
         {{"render", OptionKind::String}, setRender},

@@ -539,6 +539,8 @@ void testOptionTable() {
     CHECK(tox2::gameOptionsUsage().find("[--spu-capture-after SECONDS] [--spu-capture-count N]") !=
           std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--spu-capture-every K]") != std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--save-dialog auto|cancel|window] [--ui-font PATH]") !=
+          std::string_view::npos);
 }
 
 void testDefaultLines() {
@@ -553,6 +555,7 @@ void testDefaultLines() {
         CHECK(windowed->host_priorities && windowed->yield_backoff && windowed->lwmutex_fast_path);
         CHECK(windowed->dump_frames_every == 1 && windowed->seconds == 0 && !windowed->log_level);
         CHECK(windowed->dialog_answer.empty() && windowed->rsx_capture_frames.empty() && windowed->dumps.empty());
+        CHECK(!windowed->save_dialog && windowed->ui_font.empty());
         CHECK(windowed->anisotropy == 1 && windowed->window_size == tox2::WindowSizePreset::Size720p &&
               !windowed->fullscreen);
         CHECK(windowed->frame_gen == tox2::FrameGenTarget::Off &&
@@ -632,6 +635,15 @@ void testValues() {
         CHECK(all->resolution_scale == 3 && all->aa_mode == tox2::AaMode::Supersample && all->dump_frames_every == 4);
         CHECK(all->dialog_answer == "no");
     }
+    // --save-dialog and --ui-font; the absent option stays unset so that main can pick the default.
+    for (const auto& [text, mode] : {std::pair<const char*, tox2::SaveDialogMode>{"auto", tox2::SaveDialogMode::Auto},
+                                     {"cancel", tox2::SaveDialogMode::Cancel},
+                                     {"window", tox2::SaveDialogMode::Window}}) {
+        const auto given = parseLine(std::vector<std::string>{"--game-dir", "g", "--save-dialog", text});
+        CHECK(given && given->save_dialog == mode);
+    }
+    const auto font = parseLine(std::vector<std::string>{"--game-dir", "g", "--ui-font", "fonts/x.ttf"});
+    CHECK(font && font->ui_font == stdfs::path("fonts/x.ttf"));
     // dlaa parses in every build; whether it can run is the renderer's decision.
     const auto dlaa = parseLine(std::vector<std::string>{"--game-dir", "g", "--aa-mode", "dlaa"});
     CHECK(dlaa && dlaa->aa_mode == tox2::AaMode::Dlaa);
@@ -709,6 +721,9 @@ void testErrorMessages() {
                        "error: --log-level needs trace, debug, info, warn or error\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--dialog-answer", "maybe"},
                        "error: --dialog-answer needs yes, no or ok\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--save-dialog", "popup"},
+                       "error: --save-dialog needs auto, cancel or window\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--ui-font"}, "error: --ui-font needs a value\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--pad", "joystick"},
                        "error: --pad needs none, neutral, keyboard, gamepad or keyboard+gamepad\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--audio", "alsa"}, "error: --audio needs none or wasapi\n"));
@@ -886,6 +901,17 @@ void testConfigFileValues() {
     writeFile(file, "{\"game_dir\": \"\xE3\x82\xB2\xE3\x83\xBC\xE3\x83\xA0\"}");
     const auto utf8 = dirs.parse({});
     CHECK(utf8 && samePath(utf8->game_dir, dirs.work / stdfs::path(u8"ゲーム")));
+
+    // save_dialog and ui_font as keys; they stay in effect without a window, because main resolves them.
+    writeFile(file, R"({"game_dir": "g", "save_dialog": "cancel", "ui_font": "fonts/x.ttf", "no_window": true})");
+    const auto dialog = dirs.parse({});
+    CHECK(dialog && dialog->save_dialog == tox2::SaveDialogMode::Cancel &&
+          samePath(dialog->ui_font, dirs.work / "fonts" / "x.ttf") && dialog->config_ignored.empty());
+    // The command line replaces the key, and a bad value in the file names the key.
+    const auto replaced = dirs.parse({"--save-dialog", "window"});
+    CHECK(replaced && replaced->save_dialog == tox2::SaveDialogMode::Window);
+    writeFile(file, R"({"game_dir": "g", "save_dialog": "popup"})");
+    CHECK(dirs.error({}).message == "error: " + file.string() + ": save_dialog needs auto, cancel or window\n");
 }
 
 void testConfigFileLookup() {

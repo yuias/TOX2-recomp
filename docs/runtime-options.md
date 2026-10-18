@@ -6,6 +6,7 @@ The [top-level README](../README.md) shows the command for playing. This page li
 ```sh
 tox2_game [--game-dir DIR] [--vfs-config FILE] [--elf PATH] [--libsre PATH] [--hdd-dir DIR] [--sdata-cache DIR]
          [--seconds N] [--strict] [--log FILE] [--log-level LEVEL] [--quiet-hle] [--dialog-answer yes|no|ok]
+         [--save-dialog auto|cancel|window] [--ui-font PATH]
          [--pad none|neutral|keyboard|gamepad|keyboard+gamepad] [--pad-script FILE] [--pad-probe]
          [--audio none|wasapi] [--audio-dump FILE]
          [--load-only] [--png-dump DIR] [--dump-guest ADDR:SIZE:FILE]...
@@ -61,6 +62,8 @@ prefix (the census lines and the register dump of a fatal stop do not).
 | `--audio none\|wasapi` | Where the game's sound goes. `wasapi` plays it through the default Windows audio device; `none` plays nothing, but the game's mixer and the audio clock run the same. Default: `wasapi` with the window, `none` with `--no-window`, so unattended runs and tests need no sound device. See [Audio](audio.md#options). |
 | `--audio-dump FILE` | Write the mixed sound to `FILE` as a WAV file (48 kHz, stereo, 32-bit float), with either output. A file that cannot be created is a usage error. Its header is updated every second, so a run stopped by `--seconds` or by closing the window leaves a usable file. `tox2_audiotool wavstat FILE` prints its levels per second (see [`tox2_audiotool`](audio.md#tox2_audiotool)). |
 | `--dialog-answer yes\|no\|ok` | What an auto-answered Yes/No message dialog replies (default `yes`; `ok` is the same as `yes`). OK dialogs always answer OK. |
+| `--save-dialog auto\|cancel\|window` | How the game's save data list dialogs (`cellSaveData` with a list) are answered. `window` shows the list in the game window and the player picks an entry with the pad or the keyboard; `auto` picks the entry that is selected first and answers confirmations with yes, without showing anything, and `cancel` goes back out of every list and answers confirmations with no. Default: `window` when the run has a window, a pad that reads host input (`keyboard`, `gamepad` or `keyboard+gamepad`) and no `--pad-script`; otherwise `auto`, so unattended runs and tests never wait for a person. `window` without a window, or with `--pad none` or `neutral`, logs a warning and uses `auto`. The start-up log says which one applies, as `tox2: savedata dialog: window`, `auto` or `cancel`. Any other value is a usage error. The setting is not saved by the debug overlay. |
+| `--ui-font PATH` | A TrueType font for the text of the save data dialog, tried before the fonts the run finds on its own: `SCE-PS3-SR-R-JPN.TTF` next to `libsre.reloc.elf` and next to the executable (`generated/inputs/` after a build with `-Pup`), then `fonts/BIZUDPGothic-Regular.ttf` next to `tox2_game`. A file that cannot be read, is not a font or lacks Japanese glyphs is skipped with a warning. Without any usable font the dialog uses ImGui's built-in font and Japanese text shows as `?`. |
 
 ### Rendering
 
@@ -173,8 +176,8 @@ written the way its kind of option needs it:
 
 | Kind | Keys | Value in the file |
 | --- | --- | --- |
-| Path | `game_dir`, `vfs_config`, `elf`, `libsre`, `hdd_dir`, `sdata_cache`, `log`, `png_dump`, `pad_script`, `audio_dump`, `rsx_census`, `dump_frames`, `shader_cache`, `spu_capture_dir` | A non-empty string. A relative path is relative to the directory of the config file, not to the working directory (on the command line it is relative to the working directory). |
-| Text | `log_level`, `dialog_answer`, `pad`, `audio`, `render`, `ppu_threads`, `frame_limit`, `aa_mode`, `anisotropic_filter`, `window_size`, `frame_gen` | A string with the text the command line takes. A whole number is also accepted and read as its decimal text, so `"frame_limit": 60` and `"ppu_threads": 2` work. |
+| Path | `game_dir`, `vfs_config`, `elf`, `libsre`, `hdd_dir`, `sdata_cache`, `log`, `png_dump`, `pad_script`, `audio_dump`, `rsx_census`, `ui_font`, `dump_frames`, `shader_cache`, `spu_capture_dir` | A non-empty string. A relative path is relative to the directory of the config file, not to the working directory (on the command line it is relative to the working directory). |
+| Text | `log_level`, `dialog_answer`, `save_dialog`, `pad`, `audio`, `render`, `ppu_threads`, `frame_limit`, `aa_mode`, `anisotropic_filter`, `window_size`, `frame_gen` | A string with the text the command line takes. A whole number is also accepted and read as its decimal text, so `"frame_limit": 60` and `"ppu_threads": 2` work. |
 | Number | `seconds`, `dump_frames_every`, `resolution_scale`, `spu_capture_after`, `spu_capture_count`, `spu_capture_every` | A non-negative whole number. |
 | Flag | `strict`, `quiet_hle`, `load_only`, `pad_probe`, `vk_validation`, `no_window`, `lwmutex_watch` | `true` sets the option. `false` is the same as leaving the key out. |
 | On or off | `host_priorities`, `yield_backoff`, `lwmutex_fast_path`, `fullscreen` | `true` or `false`, or the strings `"on"` or `"off"`. |

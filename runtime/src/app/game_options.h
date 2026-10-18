@@ -29,13 +29,19 @@ namespace tox2 {
 // parsing does not depend on Vulkan; game_main maps it.
 enum class FgPresentMode : std::uint8_t { Fifo, Mailbox, Immediate };
 
+// How a save data dialog is answered: Auto and Cancel never show anything, Window is the interactive dialog.
+enum class SaveDialogMode : std::uint8_t { Auto, Cancel, Window };
+
 struct GameOptions {
     std::filesystem::path game_dir, elf, libsre, hdd_dir, sdata_cache, vfs_config, png_dump, rsx_census, log_file,
-            pad_script, audio_dump, dump_frames, shader_cache;
+            pad_script, audio_dump, dump_frames, shader_cache, ui_font;
     std::optional<LogLevel> log_level;  // applied by applyGameOptions
     std::string dialog_answer;          // validated; applied by applyGameOptions
     std::string pad;                    // settled: none|neutral|keyboard|gamepad|keyboard+gamepad
     std::string audio;                  // settled: none|wasapi
+    // --save-dialog as given; unset when absent, because the default depends on the window and the pad, which
+    // game_main resolves (a requested Window may still fall back to Auto there).
+    std::optional<SaveDialogMode> save_dialog;
     PadScript pad_script_data;
     unsigned seconds = 0;
     bool strict = false, quiet_hle = false, load_only = false, pad_probe = false, vk_validation = false,
