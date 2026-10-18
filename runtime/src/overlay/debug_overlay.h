@@ -1,13 +1,13 @@
 #pragma once
 
-// The in-window debug overlay: Dear ImGui drawn over the presented swapchain image. ImGui keeps one global
-// context, guarded by `mutex_`. The window thread feeds it input from the window procedure; the renderer's
-// thread builds the frame and records its draw commands. At most one DebugOverlay may exist at a time.
+// The in-window debug overlay: Dear ImGui drawn over the presented swapchain image. Its context is used only
+// under ImGuiContextScope (imgui_context.h), which also serialises it with other overlays' contexts. The window
+// thread feeds it input from the window procedure; the renderer's thread builds the frame and records its draw
+// commands. At most one DebugOverlay may exist at a time.
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <mutex>
 
 #include "overlay/overlay_model.h"
 #include "render/present_overlay.h"
@@ -39,6 +39,9 @@ public:
     void setVisible(bool visible);                                             // any thread
     // Initialisation failed; the overlay stays off for the rest of the run.
     bool failed() const { return failed_.load(std::memory_order_relaxed); }
+    // The overlay's context; null before the first record() and again after fail() or shutdown(). Renderer's
+    // thread; use it under ImGuiContextScope.
+    ImGuiContext* imguiContext() const { return imgui_; }
 
     PresentOverlayRequests onFlip(const PresentFrameInfo& info) override;
     bool wantsDraw() const override { return visible() && !failed(); }
@@ -48,17 +51,16 @@ private:
     bool initialize(const Presenter::Target& target);
     void shutdown();
     void fail(const char* what);
+    // Creates the context and the backends under the ImGui lock; returns what failed, or null.
+    const char* setUpContext();
 
     VkContext& context_;
     OverlaySources sources_;
     OverlayState state_;  // renderer's thread only
 
-    // The ImGui context; see the file comment. Recursive because the Win32 handler re-enters the window
-    // procedure on the same thread: ReleaseCapture sends WM_CAPTURECHANGED before it returns.
-    std::recursive_mutex mutex_;
     std::atomic<bool> visible_{false};
     std::atomic<bool> failed_{false};
-    std::atomic<bool> initialized_{false};  // set under mutex_ once the backends are up
+    std::atomic<bool> initialized_{false};  // set and cleared under imguiMutex(); true once the backends are up
     std::atomic<void*> hwnd_{nullptr};
 
     // Renderer's thread only (the backends hold pointers into these).

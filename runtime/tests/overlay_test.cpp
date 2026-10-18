@@ -2,14 +2,17 @@
 // overlay tests draw into an offscreen image on the first Vulkan device. The only window they create is a
 // hidden one, to give the Win32 backend a handle.
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -24,9 +27,11 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "overlay/debug_overlay.h"
+#include "overlay/imgui_context.h"
 #include "overlay/overlay_model.h"
 #include "overlay/overlay_panels.h"
 #include "overlay/overlay_sources.h"
+#include "overlay/overlay_stack.h"
 #include "rsx/rsx_unimplemented.h"
 
 namespace {
@@ -1156,6 +1161,155 @@ void testRuntimeSources() {
     CHECK(sources.log_level() == level);
 }
 
+// A PresentOverlay that logs its calls into a shared list, to check the stack's order and merging.
+class FakeOverlay final : public tox2::PresentOverlay {
+public:
+    FakeOverlay(int id, std::vector<std::string>& log, bool wants, tox2::PresentOverlayRequests requests = {})
+        : id_(id), log_(log), wants_(wants), requests_(std::move(requests)) {}
+
+    tox2::PresentOverlayRequests onFlip(const tox2::PresentFrameInfo&) override {
+        log_.push_back("flip" + std::to_string(id_));
+        return requests_;
+    }
+    bool wantsDraw() const override { return wants_; }
+    void record(VkCommandBuffer, const tox2::Presenter::Target&) override {
+        log_.push_back("record" + std::to_string(id_));
+    }
+
+private:
+    int id_;
+    std::vector<std::string>& log_;
+    bool wants_;
+    tox2::PresentOverlayRequests requests_;
+};
+
+void testOverlayStack() {
+    std::vector<std::string> log;
+    tox2::OverlayStack empty;
+    CHECK(!empty.wantsDraw());
+    CHECK(!empty.onFlip({}).dump_display);
+    empty.record(VK_NULL_HANDLE, {});
+    empty.add(nullptr);
+    CHECK(!empty.wantsDraw());
+
+    tox2::PresentOverlayRequests low;
+    low.resolution_scale = 2;
+    low.anisotropy = 4;
+    low.aa_mode = tox2::AaMode::Msaa;
+    low.window_size = tox2::WindowSizePreset::Size720p;
+    tox2::PresentOverlayRequests high;
+    high.dump_display = true;
+    high.resolution_scale = 3;
+    high.frame_gen = tox2::FrameGenTarget::Fps120;
+    FakeOverlay first(1, log, false, low);
+    FakeOverlay second(2, log, true, high);
+    FakeOverlay third(3, log, false);
+    tox2::OverlayStack stack;
+    stack.add(&first);
+    stack.add(&second);
+    stack.add(&third);
+
+    // Every child sees the flip, in insertion order. A later child's field wins; unset fields keep the earlier one.
+    const tox2::PresentOverlayRequests merged = stack.onFlip({});
+    CHECK((log == std::vector<std::string>{"flip1", "flip2", "flip3"}));
+    CHECK(merged.dump_display);
+    CHECK(merged.resolution_scale == 3);
+    CHECK(merged.anisotropy == 4);
+    CHECK(merged.aa_mode == tox2::AaMode::Msaa);
+    CHECK(merged.window_size == tox2::WindowSizePreset::Size720p);
+    CHECK(merged.frame_gen == tox2::FrameGenTarget::Fps120);
+
+    // wantsDraw is true when any child wants; record runs only the children that do.
+    CHECK(stack.wantsDraw());
+    log.clear();
+    stack.record(VK_NULL_HANDLE, {});
+    CHECK((log == std::vector<std::string>{"record2"}));
+
+    std::vector<std::string> log_all;
+    FakeOverlay a(1, log_all, true);
+    FakeOverlay b(2, log_all, false);
+    FakeOverlay c(3, log_all, true);
+    tox2::OverlayStack both;
+    both.add(&a);
+    both.add(&b);
+    both.add(&c);
+    both.record(VK_NULL_HANDLE, {});
+    CHECK((log_all == std::vector<std::string>{"record1", "record3"}));
+
+    std::vector<std::string> log_none;
+    FakeOverlay idle(1, log_none, false);
+    tox2::OverlayStack none;
+    none.add(&idle);
+    CHECK(!none.wantsDraw());
+    none.record(VK_NULL_HANDLE, {});
+    CHECK(log_none.empty());
+}
+
+void testImGuiContextScope() {
+    ImGuiContext* a = ImGui::CreateContext();
+    ImGuiContext* b = ImGui::CreateContext();
+    ImGui::SetCurrentContext(nullptr);
+
+    {
+        tox2::ImGuiContextScope outer(a);
+        CHECK(ImGui::GetCurrentContext() == a);
+        {
+            // Nesting on one thread must not deadlock (recursive lock) and unwinds one level at a time.
+            tox2::ImGuiContextScope inner(b);
+            CHECK(ImGui::GetCurrentContext() == b);
+            {
+                tox2::ImGuiContextScope none(nullptr);
+                CHECK(ImGui::GetCurrentContext() == nullptr);
+            }
+            CHECK(ImGui::GetCurrentContext() == b);
+        }
+        CHECK(ImGui::GetCurrentContext() == a);
+    }
+    CHECK(ImGui::GetCurrentContext() == nullptr);
+
+    // A non-null previous context comes back as well.
+    ImGui::SetCurrentContext(b);
+    {
+        tox2::ImGuiContextScope scope(a);
+        CHECK(ImGui::GetCurrentContext() == a);
+    }
+    CHECK(ImGui::GetCurrentContext() == b);
+    ImGui::SetCurrentContext(nullptr);
+
+    // While one thread holds a scope, another thread's scope blocks until it ends.
+    // The thread does not use CHECK, whose counters are not atomic.
+    std::atomic<bool> second_entered{false};
+    std::atomic<ImGuiContext*> second_context{nullptr};
+    std::thread other;
+    {
+        tox2::ImGuiContextScope held(a);
+        other = std::thread([&] {
+            tox2::ImGuiContextScope scope(b);
+            second_context.store(ImGui::GetCurrentContext());
+            second_entered.store(true);
+        });
+        // Several short waits (50 ms in total) are enough for a missing lock to show as an early entry.
+        for (int i = 0; i < 5; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK(!second_entered.load());
+        CHECK(ImGui::GetCurrentContext() == a);
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!second_entered.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!second_entered.load()) {
+        // Joining a thread that is still blocked would hang the test run.
+        std::fprintf(stderr, "check failed (line %d): second thread never entered its scope\n", __LINE__);
+        std::_Exit(1);
+    }
+    other.join();
+    CHECK(second_context.load() == b);
+    CHECK(ImGui::GetCurrentContext() == nullptr);
+
+    ImGui::DestroyContext(a);
+    ImGui::DestroyContext(b);
+}
+
 // Raw Win32 key message values, so the test needs no windows.h.
 constexpr std::uint32_t kWmKeyDown = 0x0100;
 constexpr std::uint32_t kWmKeyUp = 0x0101;
@@ -1448,7 +1602,10 @@ void testWin32Input(tox2::VkContext& ctx, OffscreenTarget& target) {
         CHECK(target.drawOnce(overlay, stats));
         stats.flips = 3;
         CHECK(target.drawOnce(overlay, stats));
-        CHECK(ImGui::GetIO().WantCaptureMouse);
+        {
+            tox2::ImGuiContextScope scope(overlay.imguiContext());
+            CHECK(ImGui::GetIO().WantCaptureMouse);
+        }
 
         // Hiding and showing again must leave ImGui focused, or it would drop all input.
         overlay.onWindowMessage(keyMessage(kWmKeyDown, tox2::kOverlayToggleScanCode));
@@ -1460,7 +1617,10 @@ void testWin32Input(tox2::VkContext& ctx, OffscreenTarget& target) {
         overlay.onWindowMessage(move);
         stats.flips = 4;
         CHECK(target.drawOnce(overlay, stats));
-        CHECK(ImGui::GetIO().WantCaptureMouse);
+        {
+            tox2::ImGuiContextScope scope(overlay.imguiContext());
+            CHECK(ImGui::GetIO().WantCaptureMouse);
+        }
 
         // A click goes through the window procedure like in the game. The button-up makes the handler call
         // ReleaseCapture, which sends WM_CAPTURECHANGED to the same window procedure before the handler returns.
@@ -1480,6 +1640,23 @@ void testWin32Input(tox2::VkContext& ctx, OffscreenTarget& target) {
     DestroyWindow(hwnd);
 }
 
+// Destroying an overlay while its own context is current must leave no freed context current afterwards.
+void testShutdownInsideScope(tox2::VkContext& ctx, OffscreenTarget& target) {
+    auto overlay = std::make_unique<tox2::DebugOverlay>(ctx, makeFakeSources());
+    overlay->attachWindow(nullptr);
+    overlay->setVisible(true);
+    tox2::RendererStats stats;
+    stats.flips = 1;
+    CHECK(target.drawOnce(*overlay, stats));
+    CHECK(overlay->imguiContext() != nullptr);
+    {
+        tox2::ImGuiContextScope scope(overlay->imguiContext());
+        overlay.reset();
+        CHECK(ImGui::GetCurrentContext() == nullptr);
+    }
+    CHECK(ImGui::GetCurrentContext() == nullptr);
+}
+
 void testOverlayRecording(tox2::VkContext& ctx) {
     OffscreenTarget target(ctx);
     CHECK(target.ok());
@@ -1490,6 +1667,7 @@ void testOverlayRecording(tox2::VkContext& ctx) {
     // The first overlay is gone; a second one starts from scratch on the same device.
     drawTwice(ctx, target);
     testWin32Input(ctx, target);
+    testShutdownInsideScope(ctx, target);
 
     const std::uint32_t errors = ctx.validationErrorCount() - errors_before;
     std::printf("overlay tests: validation %s, %u error(s)\n", ctx.validationEnabled() ? "active" : "inactive", errors);
@@ -1519,6 +1697,8 @@ int main() {
     testWindowSizeLabels();
     testWindowSizePanel();
     testRuntimeSources();
+    testOverlayStack();
+    testImGuiContextScope();
 
     tox2::VkContextOptions options;
     options.validation = true;

@@ -16,6 +16,7 @@
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
 #include "imgui_impl_win32.h"
+#include "overlay/imgui_context.h"
 #include "overlay/overlay_panels.h"
 #include "render/vk_renderer.h"
 
@@ -59,7 +60,10 @@ void DebugOverlay::setVisible(bool visible) {
     if (visible_.exchange(visible) == visible || !initialized_.load(std::memory_order_acquire)) return;
     // ImGui keeps the focus state of the last focus event. Hiding drops held keys and mouse buttons;
     // showing has to restore the focus, or ImGui would clear its input every frame.
-    std::lock_guard lock(mutex_);
+    // initialized_ is re-checked under the lock: shutdown() may have destroyed the context since the test above.
+    std::lock_guard lock(imguiMutex());
+    if (!initialized_.load(std::memory_order_relaxed)) return;
+    ImGuiContextScope scope(imgui_);
     ImGui::GetIO().AddFocusEvent(visible);
 }
 
@@ -80,7 +84,9 @@ MessageRoute DebugOverlay::onWindowMessage(const WindowMessage& message) {
 
     // The handler calls SetCapture, TrackMouseEvent and GetKeyState, which only work on the thread that
     // owns the window, so the input is fed from here and not queued to the renderer's thread.
-    std::lock_guard lock(mutex_);
+    std::lock_guard lock(imguiMutex());
+    if (!initialized_.load(std::memory_order_relaxed)) return route;
+    ImGuiContextScope scope(imgui_);
     const LRESULT result =
             ImGui_ImplWin32_WndProcHandler(static_cast<HWND>(message.hwnd), static_cast<UINT>(message.message),
                                            static_cast<WPARAM>(message.wparam), static_cast<LPARAM>(message.lparam));
@@ -115,14 +121,19 @@ void DebugOverlay::fail(const char* what) {
 }
 
 void DebugOverlay::shutdown() {
-    std::lock_guard lock(mutex_);
+    std::lock_guard lock(imguiMutex());
     initialized_.store(false, std::memory_order_release);
-    if (imgui_ != nullptr) ImGui::SetCurrentContext(imgui_);
-    if (vulkan_backend_) ImGui_ImplVulkan_Shutdown();
-    if (win32_backend_) ImGui_ImplWin32_Shutdown();
-    vulkan_backend_ = false;
-    win32_backend_ = false;
     if (imgui_ != nullptr) {
+        {
+            // The backends' shutdown acts on the current context.
+            ImGuiContextScope scope(imgui_);
+            if (vulkan_backend_) ImGui_ImplVulkan_Shutdown();
+            if (win32_backend_) ImGui_ImplWin32_Shutdown();
+        }
+        vulkan_backend_ = false;
+        win32_backend_ = false;
+        // Outside the scope: DestroyContext clears the current context itself when it is the destroyed one, and
+        // a scope would restore that freed pointer afterwards.
         ImGui::DestroyContext(imgui_);
         imgui_ = nullptr;
     }
@@ -133,13 +144,28 @@ void DebugOverlay::shutdown() {
 }
 
 bool DebugOverlay::initialize(const Presenter::Target& target) {
-    void* hwnd = hwnd_.load(std::memory_order_acquire);
     color_format_ = target.format;
     g_first_vk_error.store(VK_SUCCESS);
+    if (const char* failed_step = setUpContext()) {
+        // Outside the scope of setUpContext, so shutdown() does not restore a context it has just destroyed.
+        fail(failed_step);
+        return false;
+    }
+    return true;
+}
+
+const char* DebugOverlay::setUpContext() {
+    void* hwnd = hwnd_.load(std::memory_order_acquire);
 
     // Nothing here is shared with the window thread yet: it forwards messages only once initialized_ is set.
+    // CreateContext makes the new context current, which would switch another overlay's context under it, so
+    // the previous one is put back before the scope takes over.
+    std::lock_guard lock(imguiMutex());
     IMGUI_CHECKVERSION();
+    ImGuiContext* previous = ImGui::GetCurrentContext();
     imgui_ = ImGui::CreateContext();
+    ImGui::SetCurrentContext(previous);
+    ImGuiContextScope scope(imgui_);
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
@@ -154,10 +180,7 @@ bool DebugOverlay::initialize(const Presenter::Target& target) {
     ImGui::GetStyle().ScaleAllSizes(scale);
 
     if (hwnd != nullptr) {
-        if (!ImGui_ImplWin32_Init(hwnd)) {
-            fail("Win32 backend");
-            return false;
-        }
+        if (!ImGui_ImplWin32_Init(hwnd)) return "Win32 backend";
         win32_backend_ = true;
     }
 
@@ -172,8 +195,7 @@ bool DebugOverlay::initialize(const Presenter::Target& target) {
     pool_info.pPoolSizes = &pool_size;
     if (vkCreateDescriptorPool(context_.device(), &pool_info, nullptr, &descriptor_pool_) != VK_SUCCESS) {
         descriptor_pool_ = VK_NULL_HANDLE;
-        fail("descriptor pool");
-        return false;
+        return "descriptor pool";
     }
 
     ImGui_ImplVulkan_InitInfo init{};
@@ -194,24 +216,15 @@ bool DebugOverlay::initialize(const Presenter::Target& target) {
     init.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
     init.PipelineRenderingCreateInfo.pColorAttachmentFormats = &color_format_;
     init.CheckVkResultFn = &recordVkResult;
-    if (!ImGui_ImplVulkan_Init(&init)) {
-        fail("Vulkan backend");
-        return false;
-    }
+    if (!ImGui_ImplVulkan_Init(&init)) return "Vulkan backend";
     vulkan_backend_ = true;
 
     // One queue submit and a wait: the one-time hitch when the overlay first shows.
-    if (!ImGui_ImplVulkan_CreateFontsTexture() || g_first_vk_error.load() != VK_SUCCESS) {
-        fail("font upload");
-        return false;
-    }
+    if (!ImGui_ImplVulkan_CreateFontsTexture() || g_first_vk_error.load() != VK_SUCCESS) return "font upload";
 
-    {
-        std::lock_guard lock(mutex_);
-        initialized_.store(true, std::memory_order_release);
-    }
+    initialized_.store(true, std::memory_order_release);
     logInfo("tox2: overlay: ready (imgui {}, scale {})", IMGUI_VERSION, scale);
-    return true;
+    return nullptr;
 }
 
 void DebugOverlay::record(VkCommandBuffer cmd, const Presenter::Target& target) {
@@ -226,7 +239,7 @@ void DebugOverlay::record(VkCommandBuffer cmd, const Presenter::Target& target) 
     const auto now = FrameStatsHistory::Clock::now();
     state_.refresh(sources_, now);
 
-    std::lock_guard lock(mutex_);
+    ImGuiContextScope scope(imgui_);
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(static_cast<float>(target.width), static_cast<float>(target.height));
     // ImGui_ImplWin32_NewFrame is not used: its key workaround calls GetKeyState on the calling thread,
