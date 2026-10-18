@@ -7,6 +7,10 @@
 // "neutral" (port 0 holds a standard pad that never changes); a host backend (keyboard, XInput)
 // plugs in through setPadProvider without touching this file.
 //
+// A system dialog (the save data list) can intercept the pad: GetData then reports no change and
+// GetInfo2 sets CELL_PAD_INFO_INTERCEPTED, as the firmware does while a system dialog has the pad.
+// After the dialog the game sees a neutral pad until the buttons that operated the dialog are released.
+//
 // Deviations from RPCS3: a pad that is connected when cellPadInit runs is reported at once, where
 // RPCS3 learns of it through a sys_config event on another thread; the SDK-version check that
 // guards the reserved bytes of cellPadSetActDirect always applies (a title with a missing or old
@@ -24,6 +28,7 @@
 #include "core/log.h"
 #include "tox2/ppu_context.h"
 #include "hle/hle.h"
+#include "input/pad_buttons.h"
 #include "lv2/cell_error.h"
 
 namespace tox2 {
@@ -57,6 +62,7 @@ constexpr std::chrono::milliseconds kSensorInterval{10};
 // CellPadInfo2: max_connect, now_connect, system_info, then four u32[7] arrays.
 constexpr std::uint32_t kInfo2NowConnect = 4;
 constexpr std::uint32_t kInfo2SystemInfo = 8;
+constexpr std::uint32_t kSystemInfoIntercepted = 1u << 0;  // CELL_PAD_INFO_INTERCEPTED
 constexpr std::uint32_t kInfo2PortStatus = 12;
 constexpr std::uint32_t kInfo2PortSetting = kInfo2PortStatus + 4 * kMaxPorts;
 constexpr std::uint32_t kInfo2DeviceCapability = kInfo2PortSetting + 4 * kMaxPorts;
@@ -97,10 +103,18 @@ struct Port {
     std::chrono::steady_clock::time_point last_sensor_update{};
 };
 
+// Buttons that closed a dialog or are likely to be held when it closes; the game must not see them as a
+// fresh press.
+constexpr PadButtons kReleaseWatched = padButtonBit(PadButton::Start) | padButtonBit(PadButton::Select) |
+                                       padButtonBit(PadButton::Cross) | padButtonBit(PadButton::Circle) |
+                                       padButtonBit(PadButton::Triangle) | padButtonBit(PadButton::Square);
+
 struct PadModule {
     std::uint32_t max_connect = 0;  // 0: not initialised
     std::array<Port, kMaxPorts> ports;
     std::unique_ptr<PadProvider> provider;
+    bool intercepted = false;  // a system dialog has the pad
+    bool releasing = false;    // interception ended, a watched button may still be held
 };
 
 PadModule g_pad;
@@ -125,6 +139,18 @@ PadPortState pollPort(std::uint32_t port) {
                 state.connected ? "connected" : "disconnected");
     }
     return state;
+}
+
+// True while a watched button is held on any connected port the game can poll.
+bool watchedButtonHeld() {
+    for (std::uint32_t port = 0; port < portCount(); port++) {
+        const PadPortState state = provider().poll(port);
+        if (!state.connected) continue;
+        const PadButtons held =
+                static_cast<PadButtons>(state.button[kPadButtonDigital1] | (state.button[kPadButtonDigital2] << 8));
+        if ((held & kReleaseWatched) != 0) return true;
+    }
+    return false;
 }
 
 // cellPadInit(u32 max_connect)
@@ -197,11 +223,25 @@ void padGetData(Tox2PpuContext* ctx, std::uint8_t* base) {
         ctx->gpr[3] = kErrorNoDevice;
         return;
     }
-    const PadPortState state = pollPort(port);
+    PadPortState state = pollPort(port);
     Port& entry = g_pad.ports[port];
     if (!state.connected) {
         ctx->gpr[3] = kErrorNoDevice;  // data stays untouched
         return;
+    }
+    if (g_pad.intercepted) {
+        tox2Write32(base, data, kLenNoChange);
+        ctx->gpr[3] = kCellOk;
+        return;
+    }
+    if (g_pad.releasing) {
+        if (watchedButtonHeld()) {
+            // One change to "everything released" is reported, then len 0 until the buttons are up.
+            state = neutralPadState();
+        } else {
+            g_pad.releasing = false;
+            for (Port& each : g_pad.ports) each.buffer_cleared = true;
+        }
     }
 
     const bool press_on = (entry.setting & kSettingPressOn) != 0;
@@ -264,7 +304,7 @@ void padGetInfo2(Tox2PpuContext* ctx, std::uint8_t* base) {
     }
     std::fill_n(base + info, kInfo2Size, std::uint8_t{0});
     tox2Write32(base, info, portCount());  // clamped, unlike the value passed to cellPadInit
-    tox2Write32(base, info + kInfo2SystemInfo, 0);
+    tox2Write32(base, info + kInfo2SystemInfo, g_pad.intercepted ? kSystemInfoIntercepted : 0);
 
     std::uint32_t now_connect = 0;
     for (std::uint32_t port = 0; port < portCount(); port++) {
@@ -356,6 +396,16 @@ bool setPadBackend(std::string_view name) {
     setPadProvider(std::move(made));
     return true;
 }
+
+void setPadIntercepted(bool intercepted) {
+    if (intercepted == g_pad.intercepted) return;
+    g_pad.intercepted = intercepted;
+    if (!intercepted) g_pad.releasing = true;
+}
+
+bool padIntercepted() { return g_pad.intercepted; }
+
+PadPortState pollHostPad(std::uint32_t port) { return provider().poll(port); }
 
 void resetCellPad() { g_pad = {}; }
 

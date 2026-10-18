@@ -1,6 +1,7 @@
 #include "input/pad_buttons.h"
 
 #include <array>
+#include <atomic>
 
 namespace tox2 {
 namespace {
@@ -11,6 +12,8 @@ constexpr std::array<std::string_view, kPadButtonTotal> kNames = {
         "select", "l3", "r3", "start", "up",       "right",  "down",  "left",
         "l2",     "r2", "l1", "r1",    "triangle", "circle", "cross", "square",
 };
+
+std::atomic<EnterButtonAssign> g_enter_button_assign{EnterButtonAssign::Circle};
 
 }  // namespace
 
@@ -72,6 +75,15 @@ std::optional<PadButton> padButtonFromName(std::string_view name) {
         if (kNames[i] == name) return static_cast<PadButton>(i);
     }
     return std::nullopt;
+}
+
+void setEnterButtonAssign(EnterButtonAssign assign) { g_enter_button_assign.store(assign); }
+
+EnterButtonAssign enterButtonAssign() { return g_enter_button_assign.load(); }
+
+DialogButtons dialogButtons() {
+    return enterButtonAssign() == EnterButtonAssign::Cross ? DialogButtons{PadButton::Cross, PadButton::Circle}
+                                                           : DialogButtons{PadButton::Circle, PadButton::Cross};
 }
 
 }  // namespace tox2

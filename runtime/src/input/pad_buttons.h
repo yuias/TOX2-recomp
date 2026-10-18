@@ -70,4 +70,19 @@ PadPortState padStateFromInput(PadButtons buttons, const PadAnalog& analog, PadB
 std::string_view padButtonName(PadButton b);
 std::optional<PadButton> padButtonFromName(std::string_view name);
 
+// The console's "enter button assignment" system setting. Japanese consoles use circle.
+enum class EnterButtonAssign : std::uint8_t { Circle, Cross };
+
+// The buttons system dialogs accept and cancel with.
+struct DialogButtons {
+    PadButton enter;
+    PadButton back;
+};
+
+// Any thread (atomic); default Circle. This and dialogButtons() are the only places that name circle
+// or cross for dialogs, so a later settings option only has to call setEnterButtonAssign.
+void setEnterButtonAssign(EnterButtonAssign assign);
+EnterButtonAssign enterButtonAssign();
+DialogButtons dialogButtons();  // Circle: {Circle, Cross}; Cross: {Cross, Circle}
+
 }  // namespace tox2

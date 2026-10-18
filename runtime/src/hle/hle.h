@@ -171,7 +171,18 @@ void setPadProvider(std::unique_ptr<PadProvider> provider);
 // standard pad that never changes). Returns false for any other name.
 bool setPadBackend(std::string_view name);
 
-// Forgets the init state and restores the default provider. Intended for tests.
+// While on, cellPadGetData reports len 0 and changes nothing, and cellPadGetInfo2 sets system_info bit
+// 0x1 (CELL_PAD_INFO_INTERCEPTED). Turning it off starts a release phase: the game keeps seeing a
+// neutral pad until no face button, START or SELECT is held, so the press that closed a system dialog
+// does not act in the game. Under the kernel lock.
+void setPadIntercepted(bool intercepted);
+bool padIntercepted();
+
+// The provider's state of `port` without touching what the game was told (no change detection, no
+// connect/assign flags). For system dialogs that read the host pad directly. Under the kernel lock.
+PadPortState pollHostPad(std::uint32_t port);
+
+// Forgets the init state, the interception and restores the default provider. Intended for tests.
 void resetCellPad();
 
 // Handlers of the cellPngDec imports: Create, Destroy, ExtOpen, ExtReadHeader, ExtSetParameter,
