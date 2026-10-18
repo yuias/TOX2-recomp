@@ -44,6 +44,7 @@
 #include "hle/cell_audio_ports.h"
 #include "hle/hle.h"
 #include "hle/libsre.h"
+#include "hle/save_dialog.h"
 #include "input/gameinput_backend.h"
 #include "input/gamepad_hub.h"
 #include "input/keyboard_pad.h"
@@ -59,6 +60,9 @@
 #include "media/movie_decoder.h"
 #include "overlay/debug_overlay.h"
 #include "overlay/overlay_sources.h"
+#include "overlay/overlay_stack.h"
+#include "overlay/save_dialog_overlay.h"
+#include "overlay/ui_font.h"
 #include "render/render_scale.h"
 #include "render/shader_compiler.h"
 #include "render/vk_context.h"
@@ -123,22 +127,28 @@ float readGameDt() { return std::bit_cast<float>(tox2Read32(tox2::process().memo
 // counters are published for the census, which reads them from another one.
 class VulkanExecutor final : public tox2::RsxExecutor {
 public:
-    // `presenter` and `overlay` may be null (no window).
+    // `presenter`, `overlay` and `save_overlay` may be null (no window).
     VulkanExecutor(std::unique_ptr<tox2::VkContext> context, std::unique_ptr<tox2::Presenter> presenter,
-                   std::unique_ptr<tox2::DebugOverlay> overlay, const tox2::RenderOptions& options)
+                   std::unique_ptr<tox2::DebugOverlay> overlay, std::unique_ptr<tox2::SaveDialogOverlay> save_overlay,
+                   const tox2::RenderOptions& options)
         : context_(std::move(context)),
           presenter_(std::move(presenter)),
           overlay_(std::move(overlay)),
+          save_overlay_(std::move(save_overlay)),
           renderer_(std::make_unique<tox2::RsxRenderer>(*context_, options)) {
         renderer_->setPresenter(presenter_.get());
-        renderer_->setPresentOverlay(overlay_.get());
+        // The save dialog is drawn first, so the debug overlay stays on top of it.
+        overlays_.add(save_overlay_.get());
+        overlays_.add(overlay_.get());
+        renderer_->setPresentOverlay(overlay_ || save_overlay_ ? &overlays_ : nullptr);
     }
 
     ~VulkanExecutor() override {
         // The renderer and the swapchain go before the device they were created from. The presenter's
-        // destructor joins the window thread, which calls into the overlay, so the overlay outlives it.
+        // destructor joins the window thread, which calls into the overlays, so the overlays outlive it.
         renderer_.reset();
         presenter_.reset();
+        save_overlay_.reset();
         overlay_.reset();
         context_.reset();
     }
@@ -185,6 +195,9 @@ public:
         return counts;
     }
 
+    // RSX thread, no FIFO work: keeps an open save dialog on screen while the game does not flip.
+    void idle() override { renderer_->presentIdle(); }
+
     std::uint64_t flushOutput(std::chrono::milliseconds timeout) override {
         if (!renderer_->savePipelineCache()) tox2::logWarn("tox2: render: pipeline cache not saved");
         renderer_->logFrameGenSummary();
@@ -195,6 +208,8 @@ private:
     std::unique_ptr<tox2::VkContext> context_;
     std::unique_ptr<tox2::Presenter> presenter_;
     std::unique_ptr<tox2::DebugOverlay> overlay_;
+    std::unique_ptr<tox2::SaveDialogOverlay> save_overlay_;
+    tox2::OverlayStack overlays_;
     std::unique_ptr<tox2::RsxRenderer> renderer_;
     std::atomic<std::uint64_t> draws_{0}, skipped_{0}, clears_{0}, flips_{0};
     std::atomic<bool> failed_{false};
@@ -232,6 +247,7 @@ VkPresentModeKHR presentModeFor(tox2::FgPresentMode mode) {
 // Runs on the RSX thread; a null result makes the consumer continue without rendering.
 std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions& opt,
                                                         const std::shared_ptr<tox2::KeyboardPadState>& keyboard,
+                                                        const std::vector<std::filesystem::path>& ui_font_candidates,
                                                         std::string& error) {
     const auto start = std::chrono::steady_clock::now();
     tox2::VkContextOptions context_options;
@@ -281,11 +297,15 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions&
     // Declared before the presenter so that on every return path the presenter (and its window thread, which
     // calls into the overlay) is destroyed first. Only created with a window.
     std::unique_ptr<tox2::DebugOverlay> overlay;
+    std::unique_ptr<tox2::SaveDialogOverlay> save_overlay;
     std::unique_ptr<tox2::Presenter> presenter;
     if (opt.window) {
         tox2::OverlaySources overlay_sources = tox2::makeRuntimeOverlaySources();
         overlay_sources.setting_changed = saveOverlaySetting;
         overlay = std::make_unique<tox2::DebugOverlay>(*context, std::move(overlay_sources));
+        save_overlay = std::make_unique<tox2::SaveDialogOverlay>(
+                *context, tox2::saveDialogBoard(),
+                tox2::SaveDialogOverlayOptions{.font_candidates = ui_font_candidates});
         tox2::PresenterOptions presenter_options;
         presenter_options.on_message = [overlay = overlay.get()](const tox2::WindowMessage& message) {
             return overlay->onWindowMessage(message);
@@ -320,7 +340,7 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions&
         overlay->attachWindow(presenter->nativeWindowHandle());
     }
     auto executor = std::make_unique<VulkanExecutor>(std::move(context), std::move(presenter), std::move(overlay),
-                                                     render_options);
+                                                     std::move(save_overlay), render_options);
     if (!executor->valid()) {
         error = executor->error();
         return nullptr;
@@ -650,6 +670,39 @@ void applyBuildDirDefaults(tox2::VfsLayout& layout) {
     }
 }
 
+// --save-dialog. The interactive dialog needs the window to draw in and a pad that reads host input to answer it.
+// A --pad-script presses buttons by itself, so it only removes the default; an explicit "window" is honoured with one.
+void installSaveDialogDriver(const tox2::GameOptions& opt) {
+    const bool can_show = opt.window && (tox2::padUsesKeyboard(opt.pad) || tox2::padUsesGamepad(opt.pad));
+    tox2::SaveDialogMode mode = tox2::SaveDialogMode::Auto;
+    if (opt.save_dialog) {
+        mode = *opt.save_dialog;
+        if (mode == tox2::SaveDialogMode::Window && !can_show) {
+            tox2::logWarn(
+                    "tox2: --save-dialog window needs the window and a pad that reads the keyboard or a gamepad "
+                    "(--pad {}); using auto",
+                    opt.pad);
+            mode = tox2::SaveDialogMode::Auto;
+        }
+    } else if (can_show && opt.pad_script.empty()) {
+        mode = tox2::SaveDialogMode::Window;
+    }
+    switch (mode) {
+        case tox2::SaveDialogMode::Auto:
+            tox2::setSaveDialogDriver(tox2::makeAutoSaveDialogDriver(tox2::SaveDialogPolicy::Auto));
+            tox2::logInfo("tox2: savedata dialog: auto");
+            break;
+        case tox2::SaveDialogMode::Cancel:
+            tox2::setSaveDialogDriver(tox2::makeAutoSaveDialogDriver(tox2::SaveDialogPolicy::Cancel));
+            tox2::logInfo("tox2: savedata dialog: cancel");
+            break;
+        case tox2::SaveDialogMode::Window:
+            tox2::setSaveDialogDriver(tox2::makeInteractiveSaveDialogDriver(tox2::saveDialogBoard()));
+            tox2::logInfo("tox2: savedata dialog: window");
+            break;
+    }
+}
+
 void flushSettingsStore() {
     if (g_settings_store != nullptr) g_settings_store->flush(std::chrono::milliseconds(250));
 }
@@ -925,11 +978,18 @@ int main(int argc, char** argv) {
     }
 
     configureAudio(opt);
+    installSaveDialogDriver(opt);
+
+    // The firmware font sits next to libsre.reloc.elf (generated/inputs/ after a build with -Pup).
+    std::vector<std::filesystem::path> ui_font_candidates = tox2::uiFontCandidates(
+            opt.ui_font, libsre_path.parent_path(), elf_path.parent_path(), tox2::executableDirectory());
 
     // The device is created on the RSX thread when it starts, so it belongs to that thread.
     if (opt.render_vulkan) {
         tox2::setRsxExecutorFactory(
-                [opt, keyboard](std::string& error) { return createVulkanExecutor(opt, keyboard, error); });
+                [opt, keyboard, ui_font_candidates = std::move(ui_font_candidates)](std::string& error) {
+                    return createVulkanExecutor(opt, keyboard, ui_font_candidates, error);
+                });
     }
 
     // RPCS3 passes this VFS path as argv[0] (`Emu/System.cpp` `Emulator::Load`, "Fake arg").
