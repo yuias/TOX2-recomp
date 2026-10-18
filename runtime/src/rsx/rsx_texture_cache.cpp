@@ -88,6 +88,11 @@ RsxTextureCache::Entry& RsxTextureCache::store(const Key& key, const RsxTextureL
     entry.end = static_cast<std::uint64_t>(key.offset) + layout.guest_bytes;
     entry.last_use = ++use_tick_;
     entry.last_flip = flip_;
+#if TOX2_RSX_WRITE_WATCH
+    // Slots follow store order, so the forced hashes spread evenly over the flips.
+    entry.check_slot = next_check_slot_++;
+    entry.watch_stamp = 0;
+#endif
     markFresh(entry);
     // The new entry is the one in use, so it is never the one dropped to make room.
     if (bytes_ > budget_bytes_) trimBytes(&entry);
@@ -125,6 +130,10 @@ void RsxTextureCache::noteWrite(std::uint32_t location, std::uint64_t begin, std
 
 void RsxTextureCache::onFlip(std::uint64_t flip_index) {
     flip_ = flip_index;
+#if TOX2_RSX_WRITE_WATCH
+    // Own tick: the replay seeds the same flip index in every iteration, so flip_ cannot drive the safety net.
+    check_tick_++;
+#endif
     beginEpoch();
     // A scan of every entry is cheap next to a frame, but not worth doing for every one.
     if ((flip_index & 31) != 0) return;

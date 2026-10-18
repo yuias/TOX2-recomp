@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "core/guest_memory.h"
+#include "core/log.h"
 #include "tox2/ppu_context.h"
 #include "rsx/fifo_parser.h"
 #include "rsx/rsx_census.h"
@@ -689,12 +690,34 @@ std::uint64_t RsxFrameBuilder::copyTexture(RsxTextureDesc& t) {
     }
     const RsxTextureLayout& layout = entry != nullptr ? entry->layout : fresh_layout;
 
-    // First use in this epoch, or after a render target write over the range. A cached texture is first hashed where
-    // it lies; only a changed or new one is copied into the scratch buffer (reused) to be converted. The copy is
-    // hashed again because the guest may have written between the two passes, and the blob and its hash must come
-    // from the same bytes.
+#if TOX2_RSX_WRITE_WATCH
+    // Asked before the bytes are hashed or read, so a write that lands during them is reported by the next check.
+    const RsxWriteCheck check =
+            memory_.checkWrites(t.location, t.offset, layout.guest_bytes, entry != nullptr ? entry->watch_stamp : 0);
+    const std::uint64_t watch_stamp = check.tracked ? check.stamp : 0;
+    const bool reported_clean = check.tracked && check.clean;
+#endif
+    // First use in this epoch, or after a render target write over the range. With write tracking, a range the memory
+    // view reports unwritten since the entry was last checked keeps the entry without reading the bytes, except on the
+    // entry's safety-net flip. Otherwise a cached texture is first hashed where it lies; only a changed or new one is
+    // copied into the scratch buffer (reused) to be converted. The copy is hashed again because the guest may have
+    // written between the two passes, and the blob and its hash must come from the same bytes.
     if (entry != nullptr) {
         stats_.texture_validations++;
+#if TOX2_RSX_WRITE_WATCH
+        if (reported_clean) {
+            if (!textures_.hashCheckDue(*entry)) {
+                stats_.texture_hash_skips++;
+                textures_.markFresh(*entry);
+                entry->watch_stamp = watch_stamp;
+                t.pitch = entry->pitch;
+                t.data = entry->data;
+                t.content_id = entry->content_id;
+                return entry->guest_bytes;
+            }
+            stats_.texture_safety_hashes++;
+        }
+#endif
         std::uint64_t in_place_hash = 0;
         if (!memory_.hashRange(t.location, t.offset, layout.guest_bytes, in_place_hash)) {
             textures_.erase(key);
@@ -704,11 +727,22 @@ std::uint64_t RsxFrameBuilder::copyTexture(RsxTextureDesc& t) {
         stats_.texture_bytes_hashed += layout.guest_bytes;
         if (in_place_hash == entry->hash) {
             textures_.markFresh(*entry);
+#if TOX2_RSX_WRITE_WATCH
+            entry->watch_stamp = watch_stamp;
+#endif
             t.pitch = entry->pitch;
             t.data = entry->data;
             t.content_id = entry->content_id;
             return entry->guest_bytes;
         }
+#if TOX2_RSX_WRITE_WATCH
+        if (reported_clean) {
+            stats_.texture_unreported_changes++;
+            logOnce("rsx-texture-unreported-change",
+                    "tox2: rsx: texture at local offset {:#x} ({} bytes) changed with no reported write", t.offset,
+                    layout.guest_bytes);
+        }
+#endif
     }
     texture_scratch_.resize(layout.guest_bytes);
     if (!memory_.read(t.location, t.offset, texture_scratch_)) {
@@ -747,6 +781,9 @@ std::uint64_t RsxFrameBuilder::copyTexture(RsxTextureDesc& t) {
         }
         entry = &textures_.store(key, layout, hash, std::move(blob));
     }
+#if TOX2_RSX_WRITE_WATCH
+    entry->watch_stamp = watch_stamp;
+#endif
     t.pitch = entry->pitch;
     t.data = entry->data;
     t.content_id = entry->content_id;

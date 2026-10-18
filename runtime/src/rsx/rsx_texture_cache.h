@@ -9,8 +9,10 @@
 // memory transfer, the points where the game synchronizes with the RSX before it reuses memory. Within an
 // epoch an entry is used without touching guest memory. The first use in a later epoch reads the guest bytes
 // and hashes them; an unchanged hash keeps the blob and its content id, a changed one converts a new blob
-// under a new id. A write the RSX itself makes (a render target draw or clear) ends the trust of the entries
-// that overlap it at once, without a new epoch.
+// under a new id. With TOX2_RSX_WRITE_WATCH the first use first asks the memory view for writes to the
+// texture's pages and hashes only when one was reported or the entry's safety-net flip came (hashCheckDue).
+// A write the RSX itself makes (a render target draw or clear) ends the trust of the entries that overlap it
+// at once, without a new epoch.
 
 #include <cstdint>
 #include <memory>
@@ -18,6 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/build_config.h"
 #include "rsx/rsx_texture_layout.h"
 
 namespace tox2 {
@@ -49,6 +52,12 @@ public:
         std::uint64_t begin = 0, end = 0;
         std::uint64_t epoch = 0, serial = 0;  // the epoch and write serial at which the entry was last validated
         std::uint64_t last_use = 0, last_flip = 0;
+#if TOX2_RSX_WRITE_WATCH
+        // Owned by the builder: the stamp of the write check made before the entry was last hashed, read or found
+        // clean (RsxWriteCheck::stamp); 0 = none, so the next check cannot find it clean.
+        std::uint64_t watch_stamp = 0;
+        std::uint64_t check_slot = 0;  // spreads the safety-net hashes over the flips (set by store)
+#endif
     };
 
     // Default bounds: bytes of blobs kept, and flips an entry may go unused before it is dropped.
@@ -78,6 +87,16 @@ public:
     // A flip ended: drops entries unused for kIdleFlips flips and entries beyond the byte budget (least
     // recently used first).
     void onFlip(std::uint64_t flip_index);
+
+#if TOX2_RSX_WRITE_WATCH
+    // An entry is hashed on one flip in every kHashCheckFlips even when the memory view reports no write, so a writer
+    // the view misses can keep a stale blob for at most that many flips.
+    static constexpr std::uint32_t kHashCheckFlips = 16;
+    bool hashCheckDue(const Entry& entry) const {
+        return check_flips_ != 0 && (entry.check_slot + check_tick_) % check_flips_ == 0;
+    }
+    void setHashCheckFlips(std::uint32_t flips) { check_flips_ = flips; }  // for tests; 0 = never due
+#endif
 
     std::uint64_t epoch() const { return epoch_; }
     std::uint64_t writeSerial() const { return serial_; }
@@ -114,6 +133,10 @@ private:
     std::uint64_t bytes_ = 0;
     std::uint64_t epoch_ = 1, serial_ = 0, use_tick_ = 0, flip_ = 0, generation_ = 1;
     std::vector<WriteRange> writes_;
+#if TOX2_RSX_WRITE_WATCH
+    std::uint32_t check_flips_ = kHashCheckFlips;
+    std::uint64_t check_tick_ = 0, next_check_slot_ = 0;  // flips seen; slots handed out by store
+#endif
 };
 
 }  // namespace tox2

@@ -156,6 +156,11 @@ public:
 
     // Converted textures kept across draws (see rsx_texture_cache.h).
     const RsxTextureCache& textureCache() const { return textures_; }
+#if TOX2_RSX_WRITE_WATCH
+    // How often the safety net hashes a texture the memory view reports clean (see RsxTextureCache); 0 = never. For
+    // tests.
+    void setHashCheckFlips(std::uint32_t flips) { textures_.setHashCheckFlips(flips); }
+#endif
 
 private:
     struct Range {

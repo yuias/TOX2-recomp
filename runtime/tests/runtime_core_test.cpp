@@ -10817,6 +10817,444 @@ void testRsxWriteCheck() {
 #endif
 }
 
+// A frame builder over any memory view, with the register helpers the hash skip tests share. The fragment program
+// ends at its first word, at `fp_offset`; every texture is a linear A8R8G8B8 4x4 image (64 guest bytes).
+struct RsxSkipHarness {
+    static constexpr std::uint32_t kTextureBytes = 64;
+    RsxSkipHarness(tox2::RsxMemoryView& view, std::uint32_t fp_offset)
+        : regs(std::make_unique<tox2::RsxRegisters>()), fp(fp_offset), builder(view) {
+        regs->reset();
+    }
+    void write(std::uint32_t method, std::uint32_t value) {
+        regs->apply(method, value);
+        builder.onWrite(*regs, method, value);
+    }
+    void flip() {
+        builder.onFlip(*regs, 0, {});
+        regs->contextReset();
+    }
+    void setSurface(std::uint32_t offset, std::uint32_t pitch, std::uint32_t height) {
+        write(0x0200, 16u << 16);
+        write(0x0204, height << 16);
+        write(0x0208, 8u | (2u << 5) | (1u << 8));
+        write(0x020C, pitch);
+        write(0x0210, offset);
+        write(0x0214, 0x900000);
+        write(0x022C, pitch);
+        write(0x0220, 1);
+        write(0x08C0, 16u << 16);
+        write(0x08C4, height << 16);
+    }
+    void setTexture(std::uint32_t unit, std::uint32_t offset) {
+        write(0x1A00 + unit * 0x20, offset);
+        write(0x1A04 + unit * 0x20, 1u | (2u << 4) | (0xA5u << 8) | (1u << 16));
+        write(0x1A0C + unit * 0x20, 0x80000000);
+        write(0x1A18 + unit * 0x20, (4u << 16) | 4u);
+        write(0x1840 + unit * 4, 16);
+    }
+    void clear(std::uint32_t mask) {
+        write(0x1D90, 0xFF102030);
+        write(0x1D8C, 0xFFFFFF00);
+        write(0x1D94, mask);
+    }
+    // Textures at `offsets` in units 0, 1, ...
+    void bind(std::initializer_list<std::uint32_t> offsets) {
+        setSurface(0x100000, 64, 4);
+        std::uint32_t unit = 0;
+        for (const std::uint32_t offset : offsets) setTexture(unit++, offset);
+    }
+    // A flip (a new epoch and a safety-net tick), then the registers it cleared.
+    void newFrame(std::initializer_list<std::uint32_t> offsets) {
+        flip();
+        bind(offsets);
+    }
+    void newEpoch() { write(tox2::kMethodNv406eSemaphoreAcquire, 0); }
+    tox2::RsxDraw draw() {
+        write(0x08E4, fp | 1);
+        write(0x1808, 5);
+        write(0x1814, 2u << 24);
+        write(0x1808, 0);
+        tox2::RsxDraw result;
+        int draws = 0;
+        for (const tox2::RsxCommand& command : builder.takeCommands()) {
+            if (const auto* found = std::get_if<tox2::RsxDraw>(&command)) {
+                result = *found;
+                draws++;
+            }
+        }
+        CHECK(draws == 1);
+        return result;
+    }
+
+    std::unique_ptr<tox2::RsxRegisters> regs;
+    std::uint32_t fp;
+    tox2::RsxFrameBuilder builder;
+};
+
+// The bytes of a replay view kept in a plain array, so a test can change some and publish them like a capture does.
+// 0x2000 holds the fragment program word; the textures sit in [0x3000, 0x6000).
+struct RsxReplayImage {
+    RsxReplayImage() : bytes(0x8000) {
+        bytes[0x2001] = 0x01;  // the word 0x00010000, big-endian
+        publish(0x2000, 0x4000);
+    }
+    void fill(std::uint32_t offset, std::uint8_t seed) {
+        for (std::uint32_t i = 0; i < RsxSkipHarness::kTextureBytes; i++) {
+            bytes[offset + i] = static_cast<std::uint8_t>(i + seed);
+        }
+    }
+    void publish(std::uint32_t offset, std::size_t size = RsxSkipHarness::kTextureBytes) {
+        view.add(0, offset, std::span<const std::uint8_t>(bytes).subspan(offset, size));
+    }
+    void set(std::uint32_t offset, std::uint8_t seed) {
+        fill(offset, seed);
+        publish(offset);
+    }
+    tox2::ReplayRsxMemoryView view;
+    std::vector<std::uint8_t> bytes;
+};
+
+#if TOX2_RSX_WRITE_WATCH
+// Forwards to another view and reports what the test wants about writes.
+class RsxForwardingView final : public tox2::RsxMemoryView {
+public:
+    enum class Mode { Untracked, AlwaysClean };
+    RsxForwardingView(tox2::RsxMemoryView& inner, Mode mode) : inner_(inner), mode_(mode) {}
+    bool read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override {
+        return inner_.read(location, offset, out);
+    }
+    bool tryRead(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override {
+        return inner_.tryRead(location, offset, out);
+    }
+    bool hashRange(std::uint32_t location, std::uint32_t offset, std::size_t size, std::uint64_t& out) override {
+        return inner_.hashRange(location, offset, size, out);
+    }
+    // AlwaysClean claims no write ever happened after a first check: the writer a view misses.
+    tox2::RsxWriteCheck checkWrites(std::uint32_t, std::uint32_t, std::size_t, std::uint64_t since) override {
+        if (mode_ == Mode::Untracked) return {};
+        return {true, since != 0, ++serial_};
+    }
+
+private:
+    tox2::RsxMemoryView& inner_;
+    Mode mode_;
+    std::uint64_t serial_ = 0;
+};
+
+bool sameDescriptorExceptId(const tox2::RsxTextureDesc& a, const tox2::RsxTextureDesc& b) {
+    return a.unit == b.unit && a.format == b.format && a.mips == b.mips && a.dimension == b.dimension &&
+           a.linear_layout == b.linear_layout && a.normalized == b.normalized && a.cubemap == b.cubemap &&
+           a.depth == b.depth && a.location == b.location && a.offset == b.offset && a.pitch == b.pitch &&
+           a.width == b.width && a.height == b.height && a.control0 == b.control0 && a.remap == b.remap &&
+           a.filter == b.filter && a.address == b.address && a.border == b.border && a.rt_alias == b.rt_alias &&
+           a.rt_depth == b.rt_depth && (a.data == nullptr) == (b.data == nullptr) &&
+           (a.content_id == 0) == (b.content_id == 0) && (a.data == nullptr || *a.data == *b.data);
+}
+
+struct RsxSkipRun {
+    std::vector<tox2::RsxTextureDesc> descs;  // every descriptor of every draw, in order
+    std::size_t draws = 0;
+    std::uint64_t validations = 0, skips = 0, safety_hashes = 0, unreported = 0;
+};
+
+// One scripted sequence of draws: repeats, changed and rewritten textures between epochs, a change inside an epoch
+// (which no validation sees), a render target over a cached range and several flips (so that the safety net comes
+// round). `tracked` picks the replay view itself or a view that reports nothing.
+RsxSkipRun runRsxSkipScript(bool tracked) {
+    constexpr std::uint32_t kA = 0x3000, kB = 0x4000, kC = 0x5000;
+    tox2::rsxUnimplementedReset();
+    RsxReplayImage image;
+    image.set(kA, 1);
+    image.set(kB, 2);
+    image.set(kC, 3);
+    RsxForwardingView untracked(image.view, RsxForwardingView::Mode::Untracked);
+    tox2::RsxMemoryView& view = tracked ? static_cast<tox2::RsxMemoryView&>(image.view) : untracked;
+    RsxSkipHarness h(view, 0x2000);
+    h.builder.setHashCheckFlips(4);
+    RsxSkipRun run;
+    const auto step = [&] {
+        const tox2::RsxDraw draw = h.draw();
+        run.draws++;
+        for (const tox2::RsxTextureDesc& texture : draw.textures) run.descs.push_back(texture);
+    };
+    h.bind({kA, kB});
+    step();  // 1: first use
+    step();  // 2: same epoch
+    h.newEpoch();
+    step();  // 3: unchanged
+    image.set(kA, 9);
+    h.newEpoch();
+    step();  // 4: A changed
+    h.newFrame({kA, kB});
+    step();  // 5
+    image.set(kB, 7);
+    step();  // 6: B changed inside the epoch, nothing looks yet
+    h.newEpoch();
+    step();             // 7: B new
+    image.publish(kA);  // the same bytes again
+    h.newEpoch();
+    step();  // 8
+    h.newFrame({kA, kB, kC});
+    step();            // 9: C joins
+    image.set(kA, 1);  // back to the first bytes: a new blob, not the old id
+    h.newFrame({kA, kC});
+    step();  // 10
+    h.setSurface(kC - 0x40, 64, 4);
+    h.clear(0xF3);
+    step();  // 11: a target over C
+    for (int frame = 0; frame < 4; frame++) {
+        h.newFrame({kA, kB, kC});
+        step();  // 12-15
+    }
+    const tox2::RsxBuilderStats& stats = h.builder.stats();
+    run.validations = stats.texture_validations;
+    run.skips = stats.texture_hash_skips;
+    run.safety_hashes = stats.texture_safety_hashes;
+    run.unreported = stats.texture_unreported_changes;
+    return run;
+}
+#endif
+
+// RsxFrameBuilder::copyTexture with write tracking: a range the memory view reports unwritten keeps its entry without
+// being hashed. With the switch off nothing is skipped.
+void testRsxTextureHashSkip() {
+    constexpr std::uint32_t kA = 0x3000, kBytes = RsxSkipHarness::kTextureBytes;
+
+    // (a) The same bytes added again between two frames. With tracking the second draw validates by a write check
+    // alone and keeps the blob and the id; without it the entry is hashed in place.
+    {
+        tox2::rsxUnimplementedReset();
+        RsxReplayImage image;
+        image.set(kA, 1);
+        RsxSkipHarness h(image.view, 0x2000);
+        h.bind({kA});
+        const tox2::RsxDraw first = h.draw();
+        CHECK(first.textures.size() == 1 && first.textures[0].data != nullptr && first.textures[0].content_id != 0);
+        h.newFrame({kA});
+        image.publish(kA);
+        const tox2::RsxBuilderStats before = h.builder.stats();
+        const tox2::RsxDraw second = h.draw();
+        const tox2::RsxBuilderStats& after = h.builder.stats();
+        CHECK(second.textures.size() == 1 && second.textures[0].content_id == first.textures[0].content_id);
+        CHECK(second.textures[0].data == first.textures[0].data);
+        CHECK(after.texture_validations == before.texture_validations + 1);
+        CHECK(after.texture_bytes_read == before.texture_bytes_read);
+#if TOX2_RSX_WRITE_WATCH
+        CHECK(after.texture_hash_skips == before.texture_hash_skips + 1);
+        CHECK(after.texture_bytes_hashed == before.texture_bytes_hashed);
+        CHECK(after.texture_safety_hashes == 0 && after.texture_unreported_changes == 0);
+#else
+        // (h) Off: every validation hashes.
+        CHECK(after.texture_hash_skips == 0 && after.texture_safety_hashes == 0 &&
+              after.texture_unreported_changes == 0);
+        CHECK(after.texture_bytes_hashed == before.texture_bytes_hashed + kBytes);
+#endif
+    }
+
+#if TOX2_RSX_WRITE_WATCH
+    // (b) Changed bytes added between frames, with no write the RSX could see: the memory view still reports them.
+    {
+        tox2::rsxUnimplementedReset();
+        RsxReplayImage image;
+        image.set(kA, 1);
+        RsxSkipHarness h(image.view, 0x2000);
+        h.bind({kA});
+        const tox2::RsxDraw first = h.draw();
+        h.newFrame({kA});
+        image.set(kA, 40);
+        const tox2::RsxDraw second = h.draw();
+        CHECK(second.textures[0].content_id != first.textures[0].content_id);
+        CHECK(texByte(second.textures[0], 0) == 40 && texByte(first.textures[0], 0) == 1);
+        const tox2::RsxBuilderStats& stats = h.builder.stats();
+        CHECK(stats.texture_hash_skips == 0 && stats.texture_unreported_changes == 0);
+        CHECK(stats.texture_bytes_hashed == kBytes && stats.texture_validations == 1);
+        // The new bytes are the baseline from now on.
+        h.newFrame({kA});
+        const tox2::RsxDraw third = h.draw();
+        CHECK(third.textures[0].content_id == second.textures[0].content_id && stats.texture_hash_skips == 1);
+    }
+
+    // (c) The game view: a store between frames is seen, a texture nobody wrote is skipped.
+    {
+        tox2::rsxUnimplementedReset();
+        tox2::resetRsxState();
+        tox2::Process& process = tox2::process();
+        CHECK(process.memory.reserve());
+        std::uint8_t* base = process.memory.base();
+        constexpr std::uint32_t kPage = 0x1000;
+        constexpr std::uint32_t kOffset = 0x0A000000;
+        constexpr std::uint32_t kEa = tox2::kRsxLocalBase + kOffset;
+        constexpr std::uint32_t kTexA = kOffset + 2 * kPage, kTexB = kOffset + 4 * kPage;
+        CHECK(process.memory.commit(kEa, 8 * kPage));
+        tox2Write32(base, kEa, 0x00010000u);
+        for (std::uint32_t i = 0; i < kBytes; i += 4) {
+            tox2Write32(base, tox2::kRsxLocalBase + kTexA + i, 0x01010101u * (i / 4 + 1));
+            tox2Write32(base, tox2::kRsxLocalBase + kTexB + i, 0x01010101u * (i / 4 + 20));
+        }
+
+        tox2::GuestRsxMemoryView view(base);
+        RsxSkipHarness h(view, kOffset);
+        h.bind({kTexA, kTexB});
+        const tox2::RsxDraw first = h.draw();
+        CHECK(first.textures.size() == 2 && first.textures[0].data != nullptr && first.textures[1].data != nullptr);
+        h.newFrame({kTexA, kTexB});
+        const tox2::RsxDraw second = h.draw();
+        const tox2::RsxBuilderStats& stats = h.builder.stats();
+        CHECK(stats.texture_hash_skips == 2 && stats.texture_bytes_hashed == 0 && stats.texture_validations == 2);
+        CHECK(second.textures[0].content_id == first.textures[0].content_id &&
+              second.textures[1].content_id == first.textures[1].content_id);
+
+        tox2Write32(base, tox2::kRsxLocalBase + kTexA + 8, 0xFFEEDDCCu);
+        h.newFrame({kTexA, kTexB});
+        const tox2::RsxDraw third = h.draw();
+        CHECK(third.textures[0].content_id != second.textures[0].content_id);
+        CHECK(third.textures[1].content_id == second.textures[1].content_id);
+        CHECK(texByte(third.textures[0], 8) == 0xFF && texByte(third.textures[0], 11) == 0xCC);
+        CHECK(stats.texture_hash_skips == 3 && stats.texture_bytes_hashed == kBytes);
+        CHECK(stats.texture_unreported_changes == 0);
+
+        tox2::resetRsxState();
+        process.memory.decommit(kEa, 8 * kPage);
+    }
+
+    // (d) A view that never reports a write. The safety net hashes the entry on one flip in every N, so a change
+    // shows within N flips; with the net off the stale blob stays.
+    {
+        tox2::rsxUnimplementedReset();
+        FakeRsxMemory memory;
+        memory.putWord(0, 0x2000, 0x00010000);
+        for (std::uint32_t i = 0; i < kBytes; i++) memory.local[kA + i] = static_cast<std::uint8_t>(i + 1);
+        RsxForwardingView view(memory, RsxForwardingView::Mode::AlwaysClean);
+        RsxSkipHarness h(view, 0x2000);
+        h.builder.setHashCheckFlips(2);
+        h.bind({kA});
+        const tox2::RsxDraw first = h.draw();
+        for (std::uint32_t i = 0; i < kBytes; i++) memory.local[kA + i] = static_cast<std::uint8_t>(i + 40);
+        tox2::RsxDraw latest = first;
+        int frames = 0;
+        while (frames < 2 && latest.textures[0].content_id == first.textures[0].content_id) {
+            h.newFrame({kA});
+            latest = h.draw();
+            frames++;
+        }
+        const tox2::RsxBuilderStats& stats = h.builder.stats();
+        CHECK(frames == 2 && latest.textures[0].content_id != first.textures[0].content_id);
+        CHECK(texByte(latest.textures[0], 0) == 40);
+        CHECK(stats.texture_unreported_changes == 1 && stats.texture_safety_hashes == 1 &&
+              stats.texture_hash_skips == 1);
+    }
+    {
+        tox2::rsxUnimplementedReset();
+        FakeRsxMemory memory;
+        memory.putWord(0, 0x2000, 0x00010000);
+        for (std::uint32_t i = 0; i < kBytes; i++) memory.local[kA + i] = static_cast<std::uint8_t>(i + 1);
+        RsxForwardingView view(memory, RsxForwardingView::Mode::AlwaysClean);
+        RsxSkipHarness h(view, 0x2000);
+        h.builder.setHashCheckFlips(0);
+        h.bind({kA});
+        const tox2::RsxDraw first = h.draw();
+        for (std::uint32_t i = 0; i < kBytes; i++) memory.local[kA + i] = static_cast<std::uint8_t>(i + 40);
+        for (int frame = 0; frame < 40; frame++) {
+            h.newFrame({kA});
+            const tox2::RsxDraw stale = h.draw();
+            CHECK(stale.textures[0].content_id == first.textures[0].content_id && texByte(stale.textures[0], 0) == 1);
+        }
+        const tox2::RsxBuilderStats& stats = h.builder.stats();
+        CHECK(stats.texture_hash_skips == 40 && stats.texture_safety_hashes == 0 && stats.texture_bytes_hashed == 0);
+        CHECK(stats.texture_unreported_changes == 0);
+    }
+
+    // (e) A render target drawn over a cached range ends the trust in the entry, but the pages are clean, so the next
+    // validation keeps it, as an equal hash does without tracking.
+    {
+        tox2::rsxUnimplementedReset();
+        RsxReplayImage image;
+        image.set(kA, 1);
+        RsxSkipHarness h(image.view, 0x2000);
+        h.bind({kA});
+        const tox2::RsxDraw first = h.draw();
+        h.newFrame({kA});
+        const tox2::RsxDraw second = h.draw();
+        const tox2::RsxBuilderStats& stats = h.builder.stats();
+        CHECK(stats.texture_hash_skips == 1 && second.textures[0].content_id == first.textures[0].content_id);
+        h.setSurface(kA - 0x40, 64, 4);
+        h.clear(0xF3);
+        const tox2::RsxDraw third = h.draw();
+        CHECK(stats.texture_validations == 2 && stats.texture_hash_skips == 2 && stats.texture_bytes_hashed == 0);
+        CHECK(third.textures[0].content_id == first.textures[0].content_id &&
+              third.textures[0].data == first.textures[0].data);
+    }
+
+    // (f) While a capture records, the bytes must be read so that they are recorded: nothing is skipped and the
+    // capture holds the texture range.
+    {
+        tox2::rsxUnimplementedReset();
+        RsxReplayImage image;
+        image.set(kA, 1);
+        tox2::RsxRecordingMemoryView recording(image.view);
+        RsxSkipHarness h(recording, 0x2000);
+        h.bind({kA});
+        h.draw();
+        h.newFrame({kA});
+        h.draw();
+        const tox2::RsxBuilderStats& stats = h.builder.stats();
+        CHECK(stats.texture_hash_skips == 1);  // no capture yet: tracked
+
+        auto regs = std::make_unique<tox2::RsxRegisters>();
+        regs->reset();
+        tox2::RsxCaptureWriter writer(1, *regs, {});
+        recording.setWriter(&writer);
+        h.newFrame({kA});
+        h.draw();
+        CHECK(stats.texture_hash_skips == 1 && stats.texture_validations == 2 && stats.texture_bytes_hashed == kBytes);
+        recording.setWriter(nullptr);
+        tox2::RsxCaptureReader reader;
+        std::string error;
+        CHECK(reader.parse(writer.finish({}, 0).flatten(), error));
+        bool has_texture = false;
+        for (const tox2::RsxCaptureReader::Event& event : reader.events()) {
+            has_texture = has_texture || (event.kind == tox2::RsxCaptureReader::EventKind::Memory && event.a == 0 &&
+                                          event.b == kA && event.size == kBytes);
+        }
+        CHECK(has_texture);
+
+        // The untracked validation left the entry without a baseline: one more hash, then skips again.
+        h.newFrame({kA});
+        h.draw();
+        CHECK(stats.texture_hash_skips == 1 && stats.texture_bytes_hashed == 2 * kBytes);
+        h.newFrame({kA});
+        h.draw();
+        CHECK(stats.texture_hash_skips == 2 && stats.texture_bytes_hashed == 2 * kBytes);
+    }
+
+    // (g) Equivalence: the same script over a view that tracks nothing and over the replay view.
+    {
+        const RsxSkipRun plain = runRsxSkipScript(false);
+        const RsxSkipRun tracked = runRsxSkipScript(true);
+        CHECK(plain.draws >= 12 && plain.draws == tracked.draws && plain.descs.size() == tracked.descs.size());
+        CHECK(plain.validations == tracked.validations && plain.validations > 0);
+        CHECK(plain.skips == 0 && tracked.skips > 0);
+        CHECK(tracked.safety_hashes > 0 && plain.unreported == 0 && tracked.unreported == 0);
+        bool same = true;
+        for (std::size_t i = 0; i < plain.descs.size() && i < tracked.descs.size(); i++) {
+            same = same && sameDescriptorExceptId(plain.descs[i], tracked.descs[i]);
+        }
+        CHECK(same);
+        bool classes = true;
+        for (std::size_t i = 0; classes && i < plain.descs.size() && i < tracked.descs.size(); i++) {
+            for (std::size_t j = i + 1; j < plain.descs.size() && j < tracked.descs.size(); j++) {
+                if ((plain.descs[i].content_id == plain.descs[j].content_id) !=
+                    (tracked.descs[i].content_id == tracked.descs[j].content_id)) {
+                    classes = false;
+                    break;
+                }
+            }
+        }
+        CHECK(classes);
+    }
+#endif
+}
+
 void testRsxFloatAndDepthSurfaces() {
     auto regs = std::make_unique<tox2::RsxRegisters>();
     regs->reset();
@@ -18429,6 +18867,7 @@ int main(int argc, char** argv) {
     testRsxUnimplementedThreadNotes();
     testRsxHashRange();
     testRsxWriteCheck();
+    testRsxTextureHashSkip();
     testRsxFloatAndDepthSurfaces();
     testRsxCapture();
     testRsxSyntheticCaptures();
