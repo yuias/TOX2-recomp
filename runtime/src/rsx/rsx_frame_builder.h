@@ -101,6 +101,11 @@ struct RsxBuilderStats {
     // Enabled texture units fillTextures handled: reused from the unit's previous descriptor (hit) or decoded and
     // looked up in full (miss). hits + misses = enabled units seen.
     std::uint64_t texture_unit_hits = 0, texture_unit_misses = 0;
+    // Write tracking (all 0 when TOX2_RSX_WRITE_WATCH is off): validations that kept the entry because the memory view
+    // reported no write to its pages (nothing hashed); validations hashed only because the entry's safety-net flip
+    // came (their bytes count in texture_bytes_hashed); and of those, the ones whose bytes had changed although no
+    // write was reported (a writer the view misses).
+    std::uint64_t texture_hash_skips = 0, texture_safety_hashes = 0, texture_unreported_changes = 0;
 };
 
 class RsxFrameBuilder {

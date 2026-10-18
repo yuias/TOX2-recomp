@@ -209,6 +209,7 @@ struct IterationSample {
     std::uint64_t barriers = 0, barriers_skipped = 0, instances = 0, state_calls = 0, state_skipped = 0;
     std::uint64_t uploads_reused = 0;
     std::uint64_t tex_unit_hits = 0, tex_unit_misses = 0, tex_bind_hits = 0, tex_bind_misses = 0;
+    std::uint64_t tex_hash_skips = 0, tex_safety_hashes = 0, tex_unreported = 0;
     // Thread cycles of the replay thread: build, the whole execute loop, and the iteration.
     std::uint64_t build_cycles = 0, record_cycles = 0, total_cycles = 0;
 };
@@ -294,6 +295,9 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
         sample.tex_read = builder_after.texture_bytes_read - builder_before.texture_bytes_read;
         sample.tex_unit_hits = builder_after.texture_unit_hits - builder_before.texture_unit_hits;
         sample.tex_unit_misses = builder_after.texture_unit_misses - builder_before.texture_unit_misses;
+        sample.tex_hash_skips = builder_after.texture_hash_skips - builder_before.texture_hash_skips;
+        sample.tex_safety_hashes = builder_after.texture_safety_hashes - builder_before.texture_safety_hashes;
+        sample.tex_unreported = builder_after.texture_unreported_changes - builder_before.texture_unreported_changes;
 
         const tox2::RendererStats renderer_before = renderer.stats();
         for (tox2::RsxCommand& command : commands) {
@@ -354,7 +358,8 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
     std::printf(
             "builder: per iteration %llu draws, fp cache %llu hits %llu misses, vp cache %llu hits %llu misses, "
             "vertex bytes %llu copied (union %llu), texture validations %llu (%llu bytes hashed in place, %llu bytes "
-            "read), texture unit cache %llu hits %llu misses\n",
+            "read), texture unit cache %llu hits %llu misses, texture hash skips %llu (safety hashes %llu, unreported "
+            "changes %llu)\n",
             toUll(median(samples, &IterationSample::draws)), toUll(median(samples, &IterationSample::fp_hits)),
             toUll(median(samples, &IterationSample::fp_misses)), toUll(median(samples, &IterationSample::vp_hits)),
             toUll(median(samples, &IterationSample::vp_misses)), toUll(median(samples, &IterationSample::bytes_copied)),
@@ -362,7 +367,10 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
             toUll(median(samples, &IterationSample::tex_validations)),
             toUll(median(samples, &IterationSample::tex_hashed)), toUll(median(samples, &IterationSample::tex_read)),
             toUll(median(samples, &IterationSample::tex_unit_hits)),
-            toUll(median(samples, &IterationSample::tex_unit_misses)));
+            toUll(median(samples, &IterationSample::tex_unit_misses)),
+            toUll(median(samples, &IterationSample::tex_hash_skips)),
+            toUll(median(samples, &IterationSample::tex_safety_hashes)),
+            toUll(median(samples, &IterationSample::tex_unreported)));
     std::printf(
             "render: per iteration %llu barriers (%llu skipped), %llu rendering instances, %llu state calls (%llu "
             "skipped), %llu vp constant uploads reused, texture binds %llu cached %llu full; upload memory %s\n",

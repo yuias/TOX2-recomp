@@ -323,6 +323,12 @@ function(tox2_render_add)
       PASS_REGULAR_EXPRESSION
       "builder: per iteration .*, texture unit cache [0-9]+ hits [0-9]+ misses"
       FAIL_REGULAR_EXPRESSION "error: ")
+    add_test(NAME rsx_replay_hash_counters
+      COMMAND tox2_rsxreplay "${replay_repeat_capture}" --repeat 3 --quiet --no-validation)
+    set_tests_properties(rsx_replay_hash_counters PROPERTIES
+      PASS_REGULAR_EXPRESSION
+      "builder: per iteration .*, texture hash skips [0-9]+ \\(safety hashes [0-9]+, unreported changes [0-9]+\\)"
+      FAIL_REGULAR_EXPRESSION "error: ")
     add_test(NAME rsx_replay_render_counters
       COMMAND tox2_rsxreplay "${replay_repeat_capture}" --repeat 3 --quiet --no-validation)
     set_tests_properties(rsx_replay_render_counters PROPERTIES

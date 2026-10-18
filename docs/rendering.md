@@ -1177,7 +1177,7 @@ illustrative figures:
 ```
 timing: frame_9400_room, 30 iterations (first excluded), median ms per iteration: build 6.10 (buildDraw 4.83), recordDraw 5.33, recordClear 0.10, submit 0.41, gpu wait 0.02, total 11.94
 cycles: frame_9400_room, 30 iterations (first excluded), median thread cycles per iteration: build 21334455, record 18273645, total 40112233
-builder: per iteration 627 draws, fp cache 620 hits 7 misses, vp cache 600 hits 27 misses, vertex bytes 1234567 copied (union 1234567), texture validations 40 (3456789 bytes hashed in place, 0 bytes read), texture unit cache 0 hits 0 misses
+builder: per iteration 627 draws, fp cache 620 hits 7 misses, vp cache 600 hits 27 misses, vertex bytes 1234567 copied (union 1234567), texture validations 40 (3456789 bytes hashed in place, 0 bytes read), texture unit cache 0 hits 0 misses, texture hash skips 0 (safety hashes 0, unreported changes 0)
 render: per iteration 115 barriers (3 skipped), 31 rendering instances, 552 state calls (11988 skipped), 12 vp constant uploads reused, texture binds 0 cached 0 full; upload memory 0x7 device-local host-visible host-coherent
 ```
 
@@ -1207,7 +1207,11 @@ The `builder` line gives, per iteration, the draws, the hits and misses of the f
 and the vertex bytes copied. The union figure is the size of the union of the attribute ranges per location, counted
 separately from the merge; it equals the bytes copied unless the merge is wrong. The line ends with the texture
 unit cache: the enabled texture units the builder reused from the unit's previous descriptor (hits) and the ones it
-decoded and looked up in full (misses). The `render` line gives the
+decoded and looked up in full (misses). After it come the write-tracking figures (`TOX2_RSX_WRITE_WATCH`): the
+validations that kept a cached texture because the memory view reported no write to its pages (hash skips, nothing
+hashed), the validations hashed only because the entry's safety-net flip came (safety hashes), and, of those, the ones
+whose bytes had changed with no write reported (unreported changes, a writer the view misses). All three are 0 for now,
+and in a build with the option off. The `render` line gives the
 barriers recorded and the transitions that needed none, the rendering instances begun, the state calls recorded and
 skipped, the vertex constant uploads reused (see [Rendering](#rendering)), the texture binds that reused the unit's
 previous bind of the frame (cached) and the ones that ran the full acquire, view and sampler path (full), and the property flags of the memory
@@ -1218,9 +1222,10 @@ a difference smaller than that is noise; compare interleaved runs of the two bin
 
 The CTest entry `rsx_replay_repeat` runs `tox2_rsxreplay generated/rsx/captures/frame_9400_room.tox2cap --repeat 3
 --quiet --no-validation` (the capture is named in `cmake/rsx_replay.cmake`) and passes when the `cycles` line is
-printed. It is registered only when the capture exists. The entries `rsx_replay_builder_counters` and
-`rsx_replay_render_counters` run the same command and pass when the `builder` line ends with the texture unit cache
-figures and the `render` line holds the texture bind figures.
+printed. It is registered only when the capture exists. The entries `rsx_replay_builder_counters`,
+`rsx_replay_hash_counters` and `rsx_replay_render_counters` run the same command and pass when the `builder` line holds
+the texture unit cache figures, the `builder` line ends with the hash skip figures, and the `render` line holds the
+texture bind figures.
 
 The CTest entry `rsx_replay` runs `tox2_rsxreplay` on `generated/rsx/captures/title.tox2cap` with
 the options pinned in `cmake/rsx_replay.cmake`. The capture name `title` is only the name the test looks up; it says nothing about the
