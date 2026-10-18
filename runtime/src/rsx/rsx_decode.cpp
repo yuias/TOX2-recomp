@@ -104,10 +104,10 @@ struct MethodRange {
 
 // Methods the frame builder does not turn into commands: the integer immediate vertex data forms (the
 // float forms are decoded into the default attribute registers by RsxRegisters::apply), element and
-// inline arrays, and the data-moving trigger of the NV3089 and NV0039 blit engines. Counts are registers:
+// inline arrays, and the data-moving trigger of the NV3089 blit engine. Counts are registers:
 // 16 attributes times the words per attribute (RPCS3 `bind_range` of the `NV4097_SET_VERTEX_DATA*_M`
-// methods). NV308A_COLOR is not listed: the consumer writes it into guest memory and counts only the
-// formats it cannot copy.
+// methods). NV308A_COLOR and NV0039_BUFFER_NOTIFY are not listed: the consumer writes them into guest memory
+// and counts only the formats and ranges it cannot copy.
 constexpr MethodRange kIgnoredMethods[] = {
         {kMethodNv4097SetVertexDataScaled4sM, 32, "NV4097_SET_VERTEX_DATA_SCALED4S_M"},
         {kMethodNv4097ArrayElement16, 1, "NV4097_ARRAY_ELEMENT16"},
@@ -116,7 +116,6 @@ constexpr MethodRange kIgnoredMethods[] = {
         {kMethodNv4097SetVertexData2sM, 16, "NV4097_SET_VERTEX_DATA2S_M"},
         {kMethodNv4097SetVertexData4ubM, 16, "NV4097_SET_VERTEX_DATA4UB_M"},
         {kMethodNv4097SetVertexData4sM, 32, "NV4097_SET_VERTEX_DATA4S_M"},
-        {kMethodNv0039BufferNotify, 1, "NV0039_BUFFER_NOTIFY"},
         {kMethodNv3089ImageIn, 1, "NV3089_IMAGE_IN"},
 };
 

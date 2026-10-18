@@ -213,6 +213,16 @@ private:
     void getReport(std::uint32_t value);
     // One NV308A_COLOR register write: the word goes to the NV3062 destination surface.
     void inlineBlitWord(std::uint32_t method, std::uint32_t value);
+    // NV0039_BUFFER_NOTIFY: copies line_count lines of line_length bytes between context DMA objects.
+    void bufferNotify();
+    // Copies `length` bytes between guest-visible ranges of the context DMA objects; memmove semantics. False,
+    // with nothing written, when either range is not addressable.
+    bool copyBytes(std::uint32_t dma_in, std::int64_t offset_in, std::uint32_t dma_out, std::int64_t offset_out,
+                   std::uint32_t length);
+    // The longest run, up to `size` bytes, that starts at `offset` of a context DMA object and is contiguous in
+    // guest memory. False when it is out of range, uncommitted, or the object is neither local nor main.
+    bool dmaRun(std::uint32_t dma, std::int64_t offset, std::uint32_t size, std::uint32_t& ea,
+                std::uint32_t& bytes) const;
     // True when a flip command may complete now; otherwise the flip is held. `vblank_paced` tells whether the
     // vblank rule decided it, in which case the wall-clock deadline does not move on.
     bool flipDue(bool& vblank_paced);
@@ -248,6 +258,12 @@ private:
     // set by resetDmaRegisters().
     std::uint32_t blit_dma_ = 0, blit_offset_ = 0, blit_pitch_ = 0, blit_format_ = 0;
     std::uint32_t blit_point_ = 0, blit_size_out_ = 0;
+
+    // NV0039 memory-to-memory copy registers, latched until NV0039_BUFFER_NOTIFY. The DMA objects are set by
+    // resetDmaRegisters(). Pitches are signed on the hardware.
+    std::uint32_t copy_dma_in_ = 0, copy_dma_out_ = 0, copy_offset_in_ = 0, copy_offset_out_ = 0;
+    std::int32_t copy_pitch_in_ = 0, copy_pitch_out_ = 0;
+    std::uint32_t copy_line_length_ = 0, copy_line_count_ = 0, copy_format_ = 0;
 
     std::uint64_t last_timestamp_ns_ = 0;
 

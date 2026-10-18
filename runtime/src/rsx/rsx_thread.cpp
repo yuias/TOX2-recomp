@@ -146,6 +146,9 @@ void RsxConsumer::resetDmaRegisters() {
     // The NV3062 destination is set once per boot by the game and falls back to local memory with every
     // context reset (the register table in rsx_registers.cpp).
     blit_dma_ = kRsxContextDmaLocal;
+    // NV0039 starts main to local, as the register table in rsx_registers.cpp has it.
+    copy_dma_in_ = kRsxContextDmaMain;
+    copy_dma_out_ = kRsxContextDmaLocal;
 }
 
 bool RsxConsumer::readIo(std::uint32_t io, std::uint32_t& word) {
@@ -341,6 +344,16 @@ bool RsxConsumer::execute(std::uint32_t method, std::uint32_t value) {
         case kMethodNv3062SetOffsetDestin: blit_offset_ = value; return true;
         case kMethodNv308aPoint: blit_point_ = value; return true;
         case kMethodNv308aSizeOut: blit_size_out_ = value; return true;
+        case kMethodNv0039SetContextDmaBufferIn: copy_dma_in_ = value; return true;
+        case kMethodNv0039SetContextDmaBufferOut: copy_dma_out_ = value; return true;
+        case kMethodNv0039OffsetIn: copy_offset_in_ = value; return true;
+        case kMethodNv0039OffsetOut: copy_offset_out_ = value; return true;
+        case kMethodNv0039PitchIn: copy_pitch_in_ = static_cast<std::int32_t>(value); return true;
+        case kMethodNv0039PitchOut: copy_pitch_out_ = static_cast<std::int32_t>(value); return true;
+        case kMethodNv0039LineLengthIn: copy_line_length_ = value; return true;
+        case kMethodNv0039LineCount: copy_line_count_ = value; return true;
+        case kMethodNv0039Format: copy_format_ = value; return true;
+        case kMethodNv0039BufferNotify: bufferNotify(); return true;
         case kMethodGcmSetUserCommand:
         case kMethodGcmSetUserCommand + 4:  // two registers share the handler
             userCommand(value);
@@ -392,6 +405,110 @@ void RsxConsumer::inlineBlitWord(std::uint32_t method, std::uint32_t value) {
         return;
     }
     tox2Write32(base_, ea, value);
+}
+
+bool RsxConsumer::dmaRun(std::uint32_t dma, std::int64_t offset, std::uint32_t size, std::uint32_t& ea,
+                         std::uint32_t& bytes) const {
+    if (offset < 0 || offset > 0xFFFFFFFFll) return false;
+    const auto off = static_cast<std::uint32_t>(offset);
+    if (dma == kRsxContextDmaLocal) {
+        if (off >= kRsxLocalSize || size > kRsxLocalSize - off) return false;
+        ea = kRsxLocalBase + off;
+        bytes = size;
+    } else if (dma == kRsxContextDmaMain) {
+        // IO pages need not be contiguous in guest memory, so a run ends at the page boundary.
+        if (!rsxIoToEaSpan(off, ea, bytes)) return false;
+        bytes = std::min(bytes, size);
+    } else {
+        return false;
+    }
+    return process().memory.isCommitted(ea, bytes);
+}
+
+bool RsxConsumer::copyBytes(std::uint32_t dma_in, std::int64_t offset_in, std::uint32_t dma_out,
+                            std::int64_t offset_out, std::uint32_t length) {
+    std::uint32_t src_ea = 0, src_bytes = 0, dst_ea = 0, dst_bytes = 0;
+    if (!dmaRun(dma_in, offset_in, length, src_ea, src_bytes) ||
+        !dmaRun(dma_out, offset_out, length, dst_ea, dst_bytes)) {
+        return false;
+    }
+    if (src_bytes == length && dst_bytes == length) {
+        std::memmove(base_ + dst_ea, base_ + src_ea, length);
+        return true;
+    }
+    // A range crosses an IO page that is not contiguous in guest memory. Both ranges are resolved before the first
+    // store, so a bad later page leaves memory intact, and before any allocation, so the length the guest wrote is
+    // bounded by committed memory by then.
+    using Pieces = std::vector<std::pair<std::uint32_t, std::uint32_t>>;  // (ea, bytes)
+    const auto resolveAll = [&](std::uint32_t dma, std::int64_t offset, Pieces& pieces) {
+        std::uint32_t ea = 0, bytes = 0;
+        for (std::uint32_t done = 0; done < length; done += bytes) {
+            if (!dmaRun(dma, offset + done, length - done, ea, bytes)) return false;
+            pieces.emplace_back(ea, bytes);
+        }
+        return true;
+    };
+    Pieces src, dst;
+    if (!resolveAll(dma_in, offset_in, src) || !resolveAll(dma_out, offset_out, dst)) return false;
+
+    bool overlap = false;
+    for (const auto& [s_ea, s_bytes] : src) {
+        for (const auto& [d_ea, d_bytes] : dst) {
+            overlap = overlap || (s_ea < d_ea + d_bytes && d_ea < s_ea + s_bytes);
+        }
+    }
+    std::vector<std::uint8_t> staging;
+    if (overlap) {
+        staging.resize(length);
+        std::uint32_t done = 0;
+        for (const auto& [ea, bytes] : src) {
+            std::memcpy(staging.data() + done, base_ + ea, bytes);
+            done += bytes;
+        }
+    }
+    // Walks both piece lists in step, copying the common part of the current source and destination pieces.
+    std::size_t si = 0, di = 0;
+    std::uint32_t s_used = 0, d_used = 0;
+    for (std::uint32_t done = 0; done < length;) {
+        const std::uint32_t n = std::min(src[si].second - s_used, dst[di].second - d_used);
+        const std::uint8_t* from = overlap ? staging.data() + done : base_ + src[si].first + s_used;
+        std::memcpy(base_ + dst[di].first + d_used, from, n);
+        done += n;
+        s_used += n;
+        d_used += n;
+        if (s_used == src[si].second) si++, s_used = 0;
+        if (d_used == dst[di].second) di++, d_used = 0;
+    }
+    return true;
+}
+
+void RsxConsumer::bufferNotify() {
+    if (copy_line_count_ == 0 || copy_line_length_ == 0) return;
+    // Only the byte-to-byte format is done (0x101, what the game uses). The wider element strides need the
+    // element conversion rules of the hardware, which are not implemented.
+    if (copy_format_ != 0x101) {
+        rsxNoteUnimplemented("method", std::format("NV0039 format {:#x}", copy_format_));
+        return;
+    }
+    const std::int64_t length = copy_line_length_;
+    // Lines that follow each other in both buffers are one range; it also keeps the common upload to one memmove.
+    const bool contiguous =
+            copy_pitch_in_ == length && copy_pitch_out_ == length && length * copy_line_count_ <= 0xFFFFFFFFll;
+    const std::uint32_t lines = contiguous ? 1 : copy_line_count_;
+    const std::uint32_t line_bytes =
+            contiguous ? static_cast<std::uint32_t>(length * copy_line_count_) : copy_line_length_;
+    for (std::uint32_t line = 0; line < lines; line++) {
+        const std::int64_t offset_in = copy_offset_in_ + static_cast<std::int64_t>(line) * copy_pitch_in_;
+        const std::int64_t offset_out = copy_offset_out_ + static_cast<std::int64_t>(line) * copy_pitch_out_;
+        if (copyBytes(copy_dma_in_, offset_in, copy_dma_out_, offset_out, line_bytes)) continue;
+        // The lines before this one are already copied; the rest is dropped.
+        rsxNoteUnimplemented("method", "NV0039 copy out of range");
+        logOnce("rsx-nv0039-bad-address",
+                "tox2: rsx: NV0039 copy of {} bytes from offset {:#x} in DMA {:#010x} to offset {:#x} in DMA "
+                "{:#010x} ignored",
+                line_bytes, offset_in, copy_dma_in_, offset_out, copy_dma_out_);
+        return;
+    }
 }
 
 bool RsxConsumer::resolve(std::uint32_t offset, std::uint32_t location, std::uint32_t size, std::uint32_t& ea) const {

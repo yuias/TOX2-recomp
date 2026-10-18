@@ -1000,7 +1000,9 @@ handful of textures, some of them several megabytes), so the builder keeps the c
   inside an epoch. A new epoch starts at every flip, every `NV406E_SEMAPHORE_ACQUIRE` and
   `NV406E_SEMAPHORE_RELEASE`, every `NV4097` semaphore release, and on the inline blit and image-in methods
   (`NV308A_COLOR`, `NV3089_IMAGE_IN`, `NV0039_BUFFER_NOTIFY`): the points where the game learns how far the
-  RSX has got, or the RSX writes memory itself. A game has to synchronize with the RSX before it reuses
+  RSX has got, or the RSX writes memory itself. The consumer performs the `NV0039_BUFFER_NOTIFY` copy before
+  the builder sees the write (main and local memory, plain byte format `0x101`; other formats are counted as
+  unimplemented), and the builder then starts the epoch. A game has to synchronize with the RSX before it reuses
   texture memory the RSX may still read, so a change it makes behind the RSX's back shows up at the next of
   these points (this title does two acquires per flip); a guest write inside an epoch, with none of them
   in between, is not seen until the epoch ends. Inside an epoch an entry is used without reading guest
@@ -1043,7 +1045,7 @@ handful of textures, some of them several megabytes), so the builder keeps the c
     `changed with no reported write` once.
   - *Explicit marks.* Writes that the watch may not see are marked in the guest memory by hand
     (`GuestMemory::markWritten`): the bytes a file read delivers, and commit and decommit of guest pages. Ordinary
-    stores (generated PPU code, HLE copies, SPU DMA puts, the inline blit methods) are reported by the watch.
+    stores (generated PPU code, HLE copies, SPU DMA puts, the inline blit and buffer copy methods) are reported by the watch.
   - *Untracked cases.* While a capture records, the recording view reports nothing tracked, because it has to read
     the bytes to record them; a capture made by a build with the option on therefore holds the same texture bytes
     as one made with it off. Views that do not implement `checkWrites` (test doubles) take the hash path.

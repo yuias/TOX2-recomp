@@ -8203,7 +8203,6 @@ void testRsxDecode() {
                 {tox2::kMethodNv4097SetVertexData2sM, 16, "NV4097_SET_VERTEX_DATA2S_M"},
                 {tox2::kMethodNv4097SetVertexData4ubM, 16, "NV4097_SET_VERTEX_DATA4UB_M"},
                 {tox2::kMethodNv4097SetVertexData4sM, 32, "NV4097_SET_VERTEX_DATA4S_M"},
-                {tox2::kMethodNv0039BufferNotify, 1, "NV0039_BUFFER_NOTIFY"},
                 {tox2::kMethodNv3089ImageIn, 1, "NV3089_IMAGE_IN"},
         };
         std::size_t ignored = 0;
@@ -8220,7 +8219,7 @@ void testRsxDecode() {
             if (actual != nullptr && expected != nullptr) CHECK(std::string_view(actual) == expected);
             ignored += actual != nullptr;
         }
-        CHECK(ignored == (32 + 1 + 1 + 1 + 16 + 16 + 32 + 1 + 1) * 4);
+        CHECK(ignored == (32 + 1 + 1 + 1 + 16 + 16 + 32 + 1) * 4);
         CHECK(tox2::rsxIgnoredMethodName(0xFFFFFFFC) == nullptr);
     }
 
@@ -11883,6 +11882,143 @@ void testRsxConsumer() {
         CHECK(unimplementedCount("method NV308A_COLOR destination out of range") == 6);
         CHECK(countContaining(lines, "NV308A inline blit") == 1 && !consumer.faulted());
         tox2::rsxUnimplementedReset();
+    }
+
+    // NV0039 buffer copy: main and local windows are seeded, every copy is replayed on a byte model, and the
+    // whole windows are compared, so a byte written outside the destination shows up.
+    {
+        tox2::rsxUnimplementedReset();
+        // A second IO page that is not contiguous in guest memory with the first.
+        CHECK(tox2::rsxMapEaIo(area + 0x200000, 0x100000, 0x100000) == 0);
+        constexpr std::uint32_t kLocalWin = 0x4000, kLocalLen = 0x400;
+        constexpr std::uint32_t kMainWin = 0xFFF00, kMainLen = 0x300;  // crosses the IO page boundary
+        const std::uint32_t local_ea = 0xC0000000 + kLocalWin;
+        const auto mainEa = [&](std::uint32_t io) {
+            return io < 0x100000 ? area + io : area + 0x200000 + io - 0x100000;
+        };
+        std::vector<std::uint8_t> local_model(kLocalLen), main_model(kMainLen);
+        const auto seed = [&] {
+            for (std::uint32_t i = 0; i < kLocalLen; i++) {
+                local_model[i] = static_cast<std::uint8_t>(i * 37 + 11);
+                base[local_ea + i] = local_model[i];
+            }
+            for (std::uint32_t i = 0; i < kMainLen; i++) {
+                main_model[i] = static_cast<std::uint8_t>(i * 53 + 5);
+                base[mainEa(kMainWin + i)] = main_model[i];
+            }
+        };
+        const auto matchesModel = [&] {
+            bool same = std::memcmp(base + local_ea, local_model.data(), kLocalLen) == 0;
+            for (std::uint32_t i = 0; i < kMainLen; i++) same = same && base[mainEa(kMainWin + i)] == main_model[i];
+            return same;
+        };
+        const auto modelByte = [&](std::uint32_t dma, std::int64_t offset) -> std::uint8_t& {
+            return dma == tox2::kRsxContextDmaLocal ? local_model[offset - kLocalWin] : main_model[offset - kMainWin];
+        };
+        const auto copy = [&](std::uint32_t dma_in, std::uint32_t offset_in, std::uint32_t dma_out,
+                              std::uint32_t offset_out, std::int32_t pitch_in, std::int32_t pitch_out,
+                              std::uint32_t length, std::uint32_t line_count, std::uint32_t format = 0x101) {
+            emit(tox2::kMethodNv0039SetContextDmaBufferIn, {dma_in, dma_out});
+            emit(tox2::kMethodNv0039OffsetIn, {offset_in, offset_out, static_cast<std::uint32_t>(pitch_in),
+                                               static_cast<std::uint32_t>(pitch_out), length, line_count, format, 0});
+            CHECK(run() == FifoStatus::Idle);
+        };
+        // The same copy on the model, line by line through a temporary so that overlap cannot matter.
+        const auto replay = [&](std::uint32_t dma_in, std::uint32_t offset_in, std::uint32_t dma_out,
+                                std::uint32_t offset_out, std::int32_t pitch_in, std::int32_t pitch_out,
+                                std::uint32_t length, std::uint32_t line_count) {
+            for (std::uint32_t line = 0; line < line_count; line++) {
+                std::vector<std::uint8_t> bytes(length);
+                for (std::uint32_t i = 0; i < length; i++) {
+                    bytes[i] = modelByte(dma_in, std::int64_t{offset_in} + std::int64_t{line} * pitch_in + i);
+                }
+                for (std::uint32_t i = 0; i < length; i++) {
+                    modelByte(dma_out, std::int64_t{offset_out} + std::int64_t{line} * pitch_out + i) = bytes[i];
+                }
+            }
+        };
+        constexpr std::uint32_t kLocal = tox2::kRsxContextDmaLocal, kMain = tox2::kRsxContextDmaMain;
+
+        // Main to local, across the IO page boundary (the source is split in guest memory): one block.
+        seed();
+        copy(kMain, kMainWin + 0x80, kLocal, kLocalWin + 0x40, 0x200, 0x200, 0x200, 1);
+        replay(kMain, kMainWin + 0x80, kLocal, kLocalWin + 0x40, 0x200, 0x200, 0x200, 1);
+        CHECK(matchesModel() && base[local_ea + 0x40] == static_cast<std::uint8_t>(0x80 * 53 + 5));
+        CHECK(base[local_ea + 0x3F] == static_cast<std::uint8_t>(0x3F * 37 + 11));
+        CHECK(base[local_ea + 0x240] == static_cast<std::uint8_t>(0x240 * 37 + 11));
+        // The block form: pitches equal to the line length, several lines, still one range.
+        seed();
+        copy(kMain, kMainWin, kLocal, kLocalWin + 0x100, 0x40, 0x40, 0x40, 8);
+        replay(kMain, kMainWin, kLocal, kLocalWin + 0x100, 0x40, 0x40, 0x40, 8);
+        CHECK(matchesModel() && base[local_ea + 0x100 + 0x1FF] == static_cast<std::uint8_t>(0x1FF * 53 + 5));
+        // Local to main, the destination crossing the page boundary.
+        seed();
+        copy(kLocal, kLocalWin + 0x10, kMain, kMainWin + 0xF0, 0x100, 0x100, 0x100, 1);
+        replay(kLocal, kLocalWin + 0x10, kMain, kMainWin + 0xF0, 0x100, 0x100, 0x100, 1);
+        CHECK(matchesModel() && base[mainEa(kMainWin + 0xF0)] == static_cast<std::uint8_t>(0x10 * 37 + 11));
+        CHECK(base[mainEa(0x100000)] == static_cast<std::uint8_t>((0x10 + 0x10) * 37 + 11));
+        // Local to local.
+        seed();
+        copy(kLocal, kLocalWin, kLocal, kLocalWin + 0x300, 0x40, 0x40, 0x40, 1);
+        replay(kLocal, kLocalWin, kLocal, kLocalWin + 0x300, 0x40, 0x40, 0x40, 1);
+        CHECK(matchesModel() && base[local_ea + 0x300] == 11 &&
+              base[local_ea + 0x33F] == static_cast<std::uint8_t>(0x3F * 37 + 11));
+        // Pitched, pitch_in != pitch_out, four lines of 0x10 bytes; the gaps keep their bytes.
+        seed();
+        copy(kLocal, kLocalWin + 0x200, kLocal, kLocalWin + 0x100, 0x20, 0x30, 0x10, 4);
+        replay(kLocal, kLocalWin + 0x200, kLocal, kLocalWin + 0x100, 0x20, 0x30, 0x10, 4);
+        CHECK(matchesModel() && base[local_ea + 0x130] == static_cast<std::uint8_t>(0x220 * 37 + 11));
+        CHECK(base[local_ea + 0x110] == static_cast<std::uint8_t>(0x110 * 37 + 11));  // gap between lines
+        // Pitched between main and local, and a negative destination pitch (lines go downwards in memory).
+        seed();
+        copy(kMain, kMainWin + 0x100, kLocal, kLocalWin + 0x380, 0x10, -0x20, 0x10, 3);
+        replay(kMain, kMainWin + 0x100, kLocal, kLocalWin + 0x380, 0x10, -0x20, 0x10, 3);
+        CHECK(matchesModel() && base[local_ea + 0x340] == static_cast<std::uint8_t>((0x100 + 0x20) * 53 + 5));
+        // Overlapping local to local, destination above and below the source: memmove.
+        seed();
+        copy(kLocal, kLocalWin + 0x10, kLocal, kLocalWin + 0x30, 0x80, 0x80, 0x80, 1);
+        replay(kLocal, kLocalWin + 0x10, kLocal, kLocalWin + 0x30, 0x80, 0x80, 0x80, 1);
+        CHECK(matchesModel() && base[local_ea + 0x30] == static_cast<std::uint8_t>(0x10 * 37 + 11));
+        CHECK(base[local_ea + 0xAF] == static_cast<std::uint8_t>(0x8F * 37 + 11));
+        seed();
+        copy(kLocal, kLocalWin + 0x30, kLocal, kLocalWin + 0x10, 0x80, 0x80, 0x80, 1);
+        replay(kLocal, kLocalWin + 0x30, kLocal, kLocalWin + 0x10, 0x80, 0x80, 0x80, 1);
+        CHECK(matchesModel() && base[local_ea + 0x10] == static_cast<std::uint8_t>(0x30 * 37 + 11));
+        // Overlap inside main memory across the page boundary (the staged path).
+        seed();
+        copy(kMain, kMainWin + 0x40, kMain, kMainWin + 0x50, 0x200, 0x200, 0x200, 1);
+        replay(kMain, kMainWin + 0x40, kMain, kMainWin + 0x50, 0x200, 0x200, 0x200, 1);
+        CHECK(matchesModel());
+
+        // Nothing is copied for an empty line or an empty count.
+        seed();
+        copy(kLocal, kLocalWin, kLocal, kLocalWin + 0x100, 0x40, 0x40, 0x40, 0);
+        copy(kLocal, kLocalWin, kLocal, kLocalWin + 0x100, 0x40, 0x40, 0, 4);
+        CHECK(matchesModel() && unimplementedCount("method NV0039 copy out of range") == 0);
+        // Other formats are counted and write nothing.
+        copy(kLocal, kLocalWin, kLocal, kLocalWin + 0x100, 0x40, 0x40, 0x40, 1, 0x202);
+        CHECK(matchesModel() && unimplementedCount("method NV0039 format 0x202") == 1);
+        // Out-of-range addresses write nothing and are reported once: destination past local memory, a source
+        // that is not mapped, a negative offset, an unknown DMA object, and a later line that leaves the buffer.
+        copy(kLocal, kLocalWin, kLocal, 0x0F900000 - 8, 0x10, 0x10, 0x10, 1);
+        CHECK(matchesModel() && unimplementedCount("method NV0039 copy out of range") == 1);
+        copy(kMain, 0x3F000000, kLocal, kLocalWin, 0x10, 0x10, 0x10, 1);
+        copy(kLocal, kLocalWin, kMain, 0x3F000000, 0x10, 0x10, 0x10, 1);
+        copy(kLocal, kLocalWin, kLocal, kLocalWin + 0x10, 0x10, -0x10000000, 0x10, 2);
+        copy(0x12345678, 0, kLocal, kLocalWin, 0x10, 0x10, 0x10, 1);
+        copy(kLocal, kLocalWin, 0x12345678, 0, 0x10, 0x10, 0x10, 1);
+        // A destination that runs from the mapped IO page 1 into page 2, which nothing maps, is rejected as a whole,
+        // before the first store; so is a huge length, before anything is allocated.
+        copy(kMain, 0x80000, kMain, kMainWin, 0x180000, 0x180000, 0x180000, 1);
+        copy(kMain, kMainWin, kMain, kMainWin + 0x1000, 0x70000000, 0x70000000, 0x70000000, 1);
+        copy(kMain, kMainWin, kMain, kMainWin + 0x1000, 0, 0, 0xFFFFFFFF, 1);
+        CHECK(unimplementedCount("method NV0039 copy out of range") == 9);
+        // The last case copies its first line before the second leaves the buffer; the rest is untouched.
+        replay(kLocal, kLocalWin, kLocal, kLocalWin + 0x10, 0x10, -0x10000000, 0x10, 1);
+        CHECK(matchesModel());
+        CHECK(countContaining(lines, "NV0039 copy") == 1 && !consumer.faulted());
+        tox2::rsxUnimplementedReset();
+        tox2::rsxUnmapEa(area + 0x200000);
     }
 
     // The census counts completed writes by register: a flip counts once.
