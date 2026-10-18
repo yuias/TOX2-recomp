@@ -197,6 +197,81 @@ void testReadFile() {
     }
 }
 
+void printQuery(const char* what, const Query& q) {
+    std::printf("write watch: %s: result %u error %lu count %lu granularity %lu pages %s\n", what, q.result, q.error,
+                static_cast<unsigned long>(q.count), static_cast<unsigned long>(q.granularity),
+                describe(q.pages).c_str());
+}
+
+bool pageIsZero(std::size_t page) {
+    const std::uint8_t* p = pageAddr(page);
+    return std::all_of(p, p + kPageSize, [](std::uint8_t b) { return b == 0; });
+}
+
+// (C1) Decommit and recommit are printed, not asserted: the runtime marks both explicitly.
+void testDecommitRecommit() {
+    constexpr std::size_t kFirst = 50;
+    constexpr std::size_t kCount = 4;
+    constexpr std::size_t kVictim = 51;
+
+    // Start from freshly committed pages so the commit below is a real one.
+    CHECK(VirtualFree(pageAddr(kFirst), kCount * kPageSize, MEM_DECOMMIT) != 0);
+    CHECK(VirtualAlloc(pageAddr(kFirst), kCount * kPageSize, MEM_COMMIT, PAGE_READWRITE) == pageAddr(kFirst));
+    for (std::size_t page = kFirst; page < kFirst + kCount; ++page) {
+        touch(page);
+    }
+    query(kFirst, kCount, true);
+
+    CHECK(VirtualFree(pageAddr(kVictim), kPageSize, MEM_DECOMMIT) != 0);
+    printQuery("C1 after decommit of page 51, query 50-53 (no reset)", query(kFirst, kCount, false));
+
+    SetLastError(0);
+    const void* recommitted = VirtualAlloc(pageAddr(kVictim), kPageSize, MEM_COMMIT, PAGE_READWRITE);
+    CHECK(recommitted == pageAddr(kVictim));
+    std::printf("write watch: C1 recommit of page 51: %s (error %lu)\n", recommitted != nullptr ? "ok" : "failed",
+                GetLastError());
+    const Query after = query(kFirst, kCount, false);
+    printQuery("C1 after recommit of page 51, query 50-53 (no reset)", after);
+    std::printf("write watch: C1 recommitted page 51 is %s\n",
+                std::find(after.pages.begin(), after.pages.end(), kVictim) != after.pages.end() ? "reported"
+                                                                                                : "not reported");
+    CHECK(pageIsZero(kVictim));
+}
+
+// (C2) A range with an uncommitted page, printed. The page lies past the committed window of the reservation.
+void testUncommittedInRange() {
+    constexpr std::size_t kFirst = kWindowPages + 4;
+    constexpr std::size_t kHole = kFirst + 2;
+
+    for (std::size_t page = kFirst; page < kFirst + 4; ++page) {
+        if (page != kHole) {
+            CHECK(VirtualAlloc(pageAddr(page), kPageSize, MEM_COMMIT, PAGE_READWRITE) == pageAddr(page));
+        }
+    }
+    query(kFirst, 1, true);
+    touch(kFirst + 1);
+    std::printf("write watch: C2 pages %zu-%zu, page %zu never committed, page %zu written\n", kFirst, kFirst + 3,
+                kHole, kFirst + 1);
+    // Reported page numbers are relative to the window; the range is not.
+    printQuery("C2 query over the range with an uncommitted page (no reset)", query(kFirst, 4, false));
+    printQuery("C2 query over the range with an uncommitted page (reset)", query(kFirst, 4, true));
+}
+
+// (C3) A result buffer smaller than the dirty count: whether a reset also clears pages that were not returned.
+void testShortBuffer() {
+    constexpr std::size_t kFirst = 70;
+    constexpr std::size_t kCount = 4;
+
+    query(kFirst, kCount, true);
+    for (std::size_t page = kFirst; page < kFirst + kCount; ++page) {
+        touch(page);
+    }
+    printQuery("C3 four pages written, reset with room for 2", query(kFirst, kCount, true, 2));
+    const Query rest = query(kFirst, kCount, false, 8);
+    printQuery("C3 then query with room for 8 (no reset)", rest);
+    std::printf("write watch: C3 a reset with a short buffer left %zu of 4 pages reported\n", rest.pages.size());
+}
+
 }  // namespace
 
 int main() {
@@ -218,6 +293,9 @@ int main() {
         }
         testSubRangeIsolation();
         testReadFile();
+        testDecommitRecommit();
+        testUncommittedInRange();
+        testShortBuffer();
     }
     VirtualFree(base, 0, MEM_RELEASE);
     std::printf("write watch tests: %d passed, %d failed\n", g_passed, g_failed);
