@@ -791,7 +791,8 @@ interface, so each module follows a documented policy that never blocks on a per
   error result of a callback with error dialogs requested (always for the list and fixed functions)
   logs its English text and shows an OK message with the Japanese text; the call returns
   `CELL_SAVEDATA_ERROR_CBRESULT` whatever the player does. `cellSaveDataDelete2` returns
-  `CELL_CANCEL`. Secure files are stored in plain text.
+  `CELL_CANCEL`. Secure files are stored in plain text. With a window the player answers the dialogs
+  instead of the Auto policy; see [Save data dialog](#save-data-dialog).
 - **Trophies**: no trophy pack is installed from the network and no notification is shown. The
   pack is read for its trophy list, and the unlock state is kept as a text file in the trophy
   directory under `/dev_hdd0/home/00000001`. The registration status callbacks run inside
@@ -807,6 +808,84 @@ interface, so each module follows a documented policy that never blocks on a per
   (`runtime/src/hle/hle.h`): none, neutral, or the host pad state that the keyboard, a pad script and
   gamepads write. Runs with `--no-window` never load a gamepad backend.
 
+## Save data dialog
+
+`cellSaveDataListSave2` and `cellSaveDataListLoad2` show a list of saves that the player picks from with the pad, so
+the game can use more than one save slot. With a window the runtime draws the list over the final presented image
+with the game dimmed behind it, then a Yes/No confirmation for the picked row, and the OK message for an error
+result; all text is Japanese. Runs without a window, replays and the unit tests keep the [Auto policy](#headless-policy)
+and never wait. The window itself is described in [Overlays](rendering.md#overlays); this section covers the
+runtime side.
+
+| Part | File | Role |
+| --- | --- | --- |
+| Model | `runtime/src/hle/save_dialog_model.*` | `DialogInput` (edges and auto-repeat), `SaveDialogModel` (selection, scrolling, fades, result). Pure and driven by an injected clock, so it needs no window and no pad provider |
+| Text | `runtime/src/hle/save_dialog_text.*` | Every Japanese string in one header, and the formatting of sizes, dates, confirmations and error texts |
+| Driver and board | `runtime/src/hle/save_dialog.*` | `SaveDialogDriver` (Auto, Cancel and Interactive), `SaveDialogBoard` (the latest snapshot, read by the overlay) and `saveDialogOpen()` |
+| Handlers | `runtime/src/hle/cell_save_data.cpp` | Builds the rows and the confirmations and calls the driver |
+
+- **`--save-dialog`.** `window` uses the interactive driver; `auto` and `cancel` use the Auto and Cancel policies,
+  which answer at once and log one `tox2: savedata: dialog (auto): ...` line per call. Without the option the
+  dialog is `window` when the run has a window, a pad that reads host input and no `--pad-script`, otherwise
+  `auto`; the start-up line `tox2: savedata dialog: window|auto|cancel` says which (see
+  [`tox2_game` options](runtime-options.md#window-input-and-sound)). The setting is not saved by the debug overlay.
+- **The list.** The game's list callback (`funcList`) runs first, as before. The rows are its saves in the sort order
+  the game asked for, with the new-data row last for `iconPosition` TAIL and first otherwise. A row shows the subtitle (or the
+  title when there is none), the date and size and the first lines of the detail text, with the save's
+  `ICON0.PNG`; the new-data row uses the icon and title the game passed, or a placeholder and `新しいデータ`. The
+  list opens on the row the callback focuses (`CELL_SAVEDATA_FOCUSPOS_*`), and `funcList` is not called again when
+  the player comes back to the list. Four rows are visible, with a scrollbar for more; the d-pad or a stick moves one
+  row and L1/R1 ten.
+- **Picking.** The enter button on a row asks `このデータに上書きしますか？` (save) or `このデータをロードしますか？`
+  (load) with the save's title, subtitle, date, size and detail, or `新しいデータにセーブしますか？` for the new-data
+  row. はい continues with that save; いいえ returns to the list on the same row. The back button on the list
+  returns `CELL_CANCEL`, and so does an empty list (it shows `セーブデータがありません`).
+- **Error messages.** An error result of a callback with error dialogs requested shows an OK message with the
+  Japanese text (`空き容量が足りません。` followed by `必要な空き容量：N KB`, `セーブまたはロードに失敗しました。`,
+  `セーブデータが壊れています。`, `セーブデータが見つかりません。`, or the text the game gave for
+  `CELL_SAVEDATA_ERR_INVALID`), after the English text has been logged as before. The call still returns
+  `CELL_SAVEDATA_ERROR_CBRESULT` whatever the player does. A save error then makes the game open its own
+  `cellMsgDialogOpen2` Yes/No (type `0x116`); that dialog keeps the auto-answer of `--dialog-answer`, because the
+  game's own message dialogs have no overlay.
+- **Waiting.** The interactive driver runs on the guest thread that called, with the guest lock (the kernel lock in
+  `--ppu-threads 1|2`) held. It queues
+  `CELL_SYSUTIL_DRAWING_BEGIN` (`0x0121`), takes over the pad (see [Input](input.md#system-dialogs)), publishes
+  the dialog on the board and then waits in 5 ms steps with `blockingWait`: every step gives up the kernel lock
+  (and the PPU slot in the split modes) so the rest of the game keeps running, and the timeout keeps the thread out
+  of the supervisor's "waits indefinitely" verdict while the player reads. After each step it polls the host pad
+  (`pollHostPad`, under the lock again), steps the model and publishes a new snapshot. When the dialog closes it
+  clears the board, releases the pad and queues `CELL_SYSUTIL_DRAWING_END` (`0x0122`). The game's callback handles
+  neither event; they are sent to match RPCS3. Sequential dialogs (list, confirmation, list again) each get their
+  own pair.
+- **While a dialog is open.** A savedata call from another thread returns `CELL_SAVEDATA_ERROR_BUSY` and
+  `cellMsgDialogOpen2` returns `CELL_SYSUTIL_ERROR_BUSY` (the game opens its own message dialog only after the
+  savedata call has returned). If `DRAWING_BEGIN` is refused because another system dialog holds it, a
+  confirmation ends the call with `CELL_SAVEDATA_ERROR_INTERNAL` (an error message is just not shown) and a list
+  opens anyway, without sending the matching END.
+- **No drawer.** If no overlay can draw (the window has no overlay, or its set-up failed, also after the dialog
+  opened), the driver warns once and answers as the Cancel policy: back for a list, No for a confirmation, OK for a
+  message. A dialog that nobody can draw never hangs the game.
+- **Flips continue.** The game runs each savedata call on a short-lived worker thread; its main thread keeps
+  calling `cellSysutilCheckCallback` and another thread keeps flipping, so the picture keeps being presented while
+  the dialog waits. The renderer's idle present only matters when the game stops flipping (see [Overlays](rendering.md#overlays)).
+
+Deviations from RPCS3 and limits:
+
+- `FixedLoad2` and `FixedSave2` never show a confirmation. RPCS3 asks Yes/No for option NONE, but this game uses
+  NONE for its quick save, which the console overwrites without asking.
+- The enter button is circle and the back button is cross, as on a Japanese console. This is fixed for now:
+  `setEnterButtonAssign` in `runtime/src/input/pad_buttons.*` is the only place that would take a setting, and
+  no option or menu calls it.
+- The confirmation for the new-data row of a load list asks `新しいデータを作成しますか？` where RPCS3 shows its
+  save text, and the HEAD focus off-by-one of RPCS3 is not copied.
+- Not done: sounds, the clock in the list header, the animated `ICON1.PAM`, the user name, an OPTIONS menu,
+  keyboard or mouse control of the dialog (the keyboard works only through the pad mapping), a delete list
+  (`cellSaveDataDelete2` still returns `CELL_CANCEL`) and glyphs outside the Basic Multilingual Plane (they show
+  ImGui's fallback glyph).
+- The tests cover the model, the text, the drivers (including the timed wait in all three PPU thread modes), the
+  pad interception and the overlay recorded over an offscreen image (see [Tests](tests.md)). The dialog has not been
+  judged by a person in a window run yet, so its layout, colours and timing are as designed, not as checked.
+
 ## Input
 
 `cellPad` asks a `PadProvider` for the state of a port on every `cellPadGetData` call and reports
@@ -816,16 +895,18 @@ port 0 that never changes), `keyboard`, `gamepad` or `keyboard+gamepad`. The las
 gamepad thread; `setPadBackend` accepts only `none` and `neutral`. The option defaults are in
 [`tox2_game` options](runtime-options.md#window-input-and-sound) and the key table in the
 [README](../README.md#keyboard); the script format is [below](#pad-script). Gamepads (mapping,
-selection, Steam, the GameInput runtime, log lines and tools) are described in [Input](input.md).
+selection, Steam, the GameInput runtime, log lines and tools) are described in [Input](input.md). While the
+[save data dialog](#save-data-dialog) is open it takes the pad from the game (see [System dialogs](input.md#system-dialogs)).
 
 | Part | File | Role |
 | --- | --- | --- |
-| Buttons | `runtime/src/input/pad_buttons.*` | The 16 buttons as a bit mask, `PadAnalog` (sticks and trigger pressure), `padStateFromButtons` and `padStateFromInput` (digital words, pressure words at 0xFF for pressed buttons or the analog trigger value, sticks, everything else as the neutral pad) and the button names used by scripts |
+| Buttons | `runtime/src/input/pad_buttons.*` | The 16 buttons as a bit mask, `PadAnalog` (sticks and trigger pressure), `padStateFromButtons` and `padStateFromInput` (digital words, pressure words at 0xFF for pressed buttons or the analog trigger value, sticks, everything else as the neutral pad) and the button names used by scripts, and `dialogButtons()`, the enter and back buttons of system dialogs (circle and cross, see [Input](input.md#system-dialogs)) |
 | State and provider | `runtime/src/input/keyboard_pad.*` | The scan-code table, `KeyboardPadState` (the state of every host source: keyboard, script, gamepad) and the provider for port 0 (always connected, or connected only while a gamepad is in use with `--pad gamepad`; other ports empty) |
 | Script | `runtime/src/input/pad_script.*` | The script parser and the player thread |
 | Gamepad | `runtime/src/input/gamepad_*`, `gameinput_backend.*` | Backend interface, GameInput backend, mapping, selection, the gamepad thread and `--pad-probe`; see [Input](input.md#design) |
 | Window | `runtime/src/render/vk_window.*` | Key and focus messages from the window thread; turns the IME off for the window |
 | Overlay | `runtime/src/overlay/debug_overlay.*` | The `F1` toggle and the message hook that decides which key presses the [debug overlay](#debug-overlay) withholds from the pad |
+| Dialog interception | `runtime/src/hle/cell_pad.cpp` | `setPadIntercepted`, `padIntercepted` and `pollHostPad`, used by the [save data dialog](#save-data-dialog) |
 
 The renderer library does not depend on `input/` or on the overlay: the window reports raw scan codes
 and, through `PresenterOptions::on_message`, raw window messages through callbacks, and `game_main.cpp`
@@ -1028,7 +1109,8 @@ is written once.
 The overlay is drawn on the swapchain image after the letterboxed blit, so it is never part of
 `--dump-frames` files, requested dumps, `readDisplay` or captures (see
 [Rendering](rendering.md#rendering)). It redraws only when the game flips: during a stall without
-flips (a load, for example) it freezes and takes no input. Without the window (`--no-window`,
+flips (a load, for example) it freezes and takes no input, except while a [save data dialog](#save-data-dialog) is
+open: the idle present then draws it again with the figures of the last flip (see [Overlays](rendering.md#overlays)). Without the window (`--no-window`,
 `--render none`) there is no overlay and `F1` does nothing.
 
 Design notes:
@@ -1051,7 +1133,10 @@ Design notes:
   `scale` is the DPI scale of the window at that moment and is not updated later. If the setup fails,
   one `tox2: overlay: ... failed, overlay disabled` warning is logged and the game goes on without
   the overlay.
-- One global ImGui context is guarded by a mutex. The window thread feeds it the mouse and key
+- The overlay has an ImGui context of its own. ImGui keeps its current context in one process global, so every use of
+  any overlay's context (this one and the save dialog's) takes the shared lock `imguiMutex()` in
+  `runtime/src/overlay/imgui_context.h` and makes its context current for the scope (`ImGuiContextScope`). The window
+  thread feeds the context the mouse and key
   messages (the Win32 backend calls `SetCapture` and `GetKeyState`, which only work on the thread that
   owns the window); the RSX thread holds the mutex while it builds and records a frame, and never
   across a swapchain call. `ImGui_ImplWin32_NewFrame` is not used, because its key workaround reads

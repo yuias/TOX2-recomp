@@ -206,7 +206,7 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   The [debug overlay](runtime.md#debug-overlay) is drawn on the swapchain image after that blit, in a
   separate pass before the image is presented. It is not drawn into the render target, so it never
   appears in `--dump-frames` files, requested PNG dumps, the display readback or captures, and it only
-  redraws when a flip completes.
+  redraws when a flip completes, apart from the idle presents described under [Overlays](#overlays).
 - **`rsx unimplemented` census.** The decoders, the frame builder and the renderer count what they
   meet but cannot handle yet (surface, depth and texture formats, texture layouts, vertex types,
   primitives, vertex and fragment opcodes, blend modes, other state and unknown methods) under
@@ -221,6 +221,74 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   the renderer does not model, a multisampled pass over newer layout data (`state anti-aliased pass over layout
   data`) and, on a device without 2-sample support, the fallback to supersampling (`state 2-sample multisampling
   unavailable`). The game's frames count none of the last two.
+
+### Overlays
+
+With a window the renderer's one `PresentOverlay` slot holds an `OverlayStack`
+(`runtime/src/overlay/overlay_stack.h`): the save data dialog overlay and, drawn after it so that it stays on top,
+the [debug overlay](runtime.md#debug-overlay). The stack gives every child every flip (`onFlip`), merges what they
+request (a field set by a later child wins), draws the children that want to draw (`wantsDraw`), and wants an idle
+present when any child does. Each child has its own ImGui context; all use of any context happens under the shared
+lock `imguiMutex()` (`runtime/src/overlay/imgui_context.h`), so the two never share windows, focus or input.
+While the dialog is shown `wantsDraw()` is true, so [frame generation](#frame-generation) reports `overlay open` and
+passes the frames through, as it does for the debug overlay.
+
+**Save data dialog overlay** (`runtime/src/overlay/save_dialog_overlay.*`). It draws the latest snapshot of the
+`SaveDialogBoard` that the waiting guest thread publishes (see [Save data dialog](runtime.md#save-data-dialog)), with
+the foreground draw list and no ImGui windows, on the swapchain image after the letterboxed blit like the debug overlay.
+It takes no window input; the pad drives the dialog.
+
+- *Layout.* A canvas of 1280x720 is mapped onto the 16:9 image area of the target (`scale` is that area's height over 720),
+  and the dim covers the whole target. A list has the heading (`セーブ` or `ロード`) at the top left, a rule, a box of
+  four rows of 130 px, a rule and a legend with the enter and back symbols. A row has the icon in a 160x88 cell, the
+  title, the date and size, and up to three lines of detail text. The selected row has a frame with a glow that pulses
+  about once per 1.2 s, and a scrollbar shows when there are more than four rows. The symbols are drawn as shapes, a
+  circle and a cross, in the order that `dialogButtons()` gives. A confirmation or an error message is centred text
+  between two rules with the buttons below, on a darker dim. Every alpha is multiplied by the snapshot's opacity,
+  which the model fades over 150 ms when the dialog opens and closes.
+- *Fonts.* The text is Japanese. At run time the first usable font of this list is used: the `--ui-font` file,
+  `SCE-PS3-SR-R-JPN.TTF` next to `libsre.reloc.elf`, the same file next to the executable's ELF, then
+  `fonts/BIZUDPGothic-Regular.ttf` next to `tox2_game` (see [Fallback UI font](building.md#fallback-ui-font)). A
+  candidate counts only if it can be read, stb_truetype parses it and it has a glyph for `セ`; the check is made before
+  the font reaches ImGui, whose font loader asserts on a font it cannot parse. The log names the font used. Without a
+  usable font the dialog uses ImGui's built-in font and Japanese text shows as `?`.
+- *Atlas.* ImGui 1.91.9b has no dynamic glyph loading, so the atlas bakes a fixed set of code points at three sizes
+  (32, 22 and 17 px times `scale`). The set holds printable ASCII, every string of the dialog text and every string of the
+  dialog being shown (titles and details come from the game's save files). It is rebuilt, and the font texture
+  uploaded again, when a dialog needs a glyph that is not baked or the image area changes height; a rebuild waits for the
+  queue, so a dialog with new glyphs costs one hitch when it opens. Baked sets are only added to, up to 8000 code
+  points.
+- *Icons.* `ICON0.PNG` of the rows near the visible ones is decoded with libpng (`decodePngRgba8`, at most four per
+  frame) and uploaded as a texture, at most 32 at once. A row whose icon cannot be decoded keeps the placeholder. A texture
+  that leaves the window is released after the frames in flight have finished.
+- *Failure.* A set-up error (the Vulkan backend, the descriptor pool, the font atlas) is logged once, switches the
+  overlay off for the rest of the run and tells the board that nothing can draw, so a dialog that is open or opens
+  later is answered as cancelled instead of waiting. Destroying the overlay does the same.
+
+**Idle present.** The game normally keeps flipping while a dialog is open, but a stall (a load, a hang) would freeze
+the dialog on its last frame. When the RSX consumer loop finds a pass without FIFO work it calls
+`RsxExecutor::idle()`, which `tox2_game` forwards to `RsxRenderer::presentIdle()`; the call is not made while a flip is
+held back by the flip limit or a vblank, because that flip is presented shortly. `presentIdle` re-presents the last
+displayed image, black when the last flip was black, with the overlays, and only when:
+
+- a presenter and an overlay are set, the overlay `wantsIdlePresent()` (the dialog is shown), at least one flip has
+  been presented and the renderer is valid;
+- no real flip happened for 100 ms (`kIdleStallThreshold`, above the 33 ms interval of a 30 fps game, so idle presents
+  never interleave with the game's own flips) and the last idle present is at least 33 ms ago
+  (`kIdlePresentInterval`, about 30 per second), tested by `RsxRenderer::idlePresentDue`;
+- no frame is open, that is no draw or clear has been recorded since the last flip (the game is then mid-frame and its
+  next flip presents); this logs once, `tox2: render: idle present skipped, a frame is open; an overlay shows only when
+  the game flips`;
+- frame generation is not loaded; this logs once, `tox2: render: idle present skipped, frame generation is loaded; an
+  overlay shows only when the game flips`.
+
+The last condition is a known limit. An idle frame would reuse the frame index of the next real frame, and Streamline's
+frame token and latency markers expect each index once, so with frame generation loaded (a windowed run whose
+`--frame-gen` target is not `off`; the plugins are unloaded while it is `off`) the dialog is drawn only on real flips. The game keeps
+flipping while a save dialog is open, so this is not seen in normal use; a stall with frame generation loaded would
+freeze the dialog. An idle present is not a flip: it does not call `onFlip`, `flipEntered` or the frame generation
+present, does not count in the flip statistics, makes no readback and no dump, and leaves `readDisplay` reading the
+last real flip.
 
 ### Vertex programs
 
@@ -783,8 +851,8 @@ described in [NVIDIA Streamline (DLAA)](building.md#nvidia-streamline-dlaa).
 - **Limits of the inputs.** Moving objects, characters, particles and screen-space effects have no vectors of their own
   (DLSS-G's optical flow is all that covers them). No HUD-less colour and no UI colour or alpha is tagged: the game
   draws its HUD and text into the same buffer as the scene, so during camera motion they take the scene's motion and
-  can ghost or warp. The debug overlay would be interpolated the same way, so generation is suspended while it is open
-  (`overlay open`) and resumes when it is closed. Whether the generated frames look right was not judged by these
+  can ghost or warp. The debug overlay and the save data dialog would be interpolated the same way, so generation is
+  suspended while either is shown (`overlay open`) and resumes when it is closed. Whether the generated frames look right was not judged by these
   measurements. `--fg-only-generated` presents only the generated frames, to look at them without the real ones.
 - **Reflex.** DLSS-G needs Reflex: with it off, DLSS-G reports `Reflex not detected` at the first activation and
   stops, and the controller keeps generation off until the target changes (one warning names the status bits). The
