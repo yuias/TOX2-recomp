@@ -785,9 +785,8 @@ interface, so each module follows a documented policy that never blocks on a per
   for an empty list, and answers OK to messages without showing them. `cellSaveDataListAutoLoad`,
   `FixedLoad2` and `FixedSave2` have no list: the list of saves that match the prefixes (sorted, as
   `ListLoad2` sorts it) goes to the game's `funcFixed`, which names the save or ends the call with an
-  error result. With option NONE, `FixedLoad2` and `FixedSave2` then ask a Yes/No confirmation (the
-  load or overwrite question for a listed name, the new-data question otherwise); anything but Yes
-  returns `CELL_CANCEL`. The game's boot call answers `CELL_SAVEDATA_ERR_NODATA`, and the handler
+  error result. They never ask for a confirmation, unlike RPCS3, which shows a Yes/No for option
+  NONE: the console overwrites this game's fixed save silently. The game's boot call answers `CELL_SAVEDATA_ERR_NODATA`, and the handler
   returns `CELL_SAVEDATA_ERROR_CBRESULT` without a dialog, which the game counts as success. An
   error result of a callback with error dialogs requested (always for the list and fixed functions)
   logs its English text and shows an OK message with the Japanese text; the call returns

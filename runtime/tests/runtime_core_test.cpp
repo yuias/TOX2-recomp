@@ -6738,7 +6738,7 @@ void testCellSaveData() {
     CHECK(g_save.fixed_calls == 1 && g_save.fixed_dir_num == 0 && g_save.fixed_userdata == 0x55 &&
           g_save.stat_calls == 1 && g_save.stat_is_new == 1 && g_save.stat_dir == "FX_SAVE01" &&
           g_save.stat_file_num == 0);
-    CHECK(logged("confirmation for 'FX_SAVE01' counted as YES"));
+    CHECK(logged("confirmation for 'FX_SAVE01' skipped (option NONE)"));
     CHECK(text(saves / "FX_SAVE01" / "NEWF.DAT") == "fixed");
     {
         const auto sfo = tox2::readParamSfoFile(saves / "FX_SAVE01" / "PARAM.SFO");
@@ -6761,7 +6761,7 @@ void testCellSaveData() {
     CHECK(std::strcmp(reinterpret_cast<const char*>(base + buf + 40), "NEWF.DAT") == 0);
     CHECK(std::memcmp(base + data + 0x400, "fixed", 6) == 0);
     CHECK(g_save.file_exc.size() == 2 && g_save.file_exc[1] == 5);
-    CHECK(!logged("counted as YES"));  // NOCONFIRM asks nothing
+    CHECK(!logged("skipped (option NONE)"));  // NOCONFIRM takes the path without the NONE log line
     CHECK(text(saves / "FX_SAVE01" / "NEWF.DAT") == "fixed");
 
     g_save.next_op = 0;
@@ -6951,47 +6951,37 @@ void testCellSaveData() {
         CHECK(run(ListLoad) == 1 && dlg.lists.size() == 1 && dlg.lists[0].initial_row == 0 &&
               dlg.lists[0].titles.size() == 3 && g_save.stat_calls == 0);
 
-        // FixedSave2 / FixedLoad2 with option NONE: the confirmation depends on whether the name is listed.
-        // OK_LAST from funcStat ends a call after the confirmation without writing anything.
+        // FixedSave2 / FixedLoad2 with option NONE show no confirmation, whether or not the name is listed
+        // (the console overwrites the game's fixed save silently); funcStat runs right away. OK_LAST from
+        // funcStat ends a call without writing anything.
         auto fixedSetup = [&](std::uint32_t name) {
             g_save = SaveScript{};
             g_save.fixed_name = name;
             g_save.stat_result = 1;
             dlg.reset();
+            lines.clear();
         };
         put(fixed_name, "FX_SAVE01");
         fixedSetup(fixed_name);
-        dlg.message_answers = {SaveMessageResult::No};
-        lines.clear();
-        CHECK(fixedSave() == 1);
-        CHECK(dlg.lists.empty() && dlg.messages.size() == 1 && dlg.message_kinds[0] == DialogKind::YesNo);
-        CHECK(dlg.messages[0].starts_with(tox2::kConfirmOverwrite) &&
-              dlg.messages[0].find("My title") != std::string::npos &&
-              dlg.messages[0].find("M-sub") != std::string::npos && dlg.messages[0].find("KB") != std::string::npos);
-        CHECK(g_save.fixed_calls == 1 && g_save.stat_calls == 0);  // No: funcFixed is not asked again
-        CHECK(logged("confirmation for 'FX_SAVE01' counted as NO"));
-        fixedSetup(fixed_name);
-        dlg.message_answers = {SaveMessageResult::Yes};
-        CHECK(fixedLoad() == 0 && dlg.messages.size() == 1 && dlg.messages[0].starts_with(tox2::kConfirmLoad) &&
-              g_save.stat_calls == 1 && g_save.stat_dir == "FX_SAVE01" && g_save.stat_is_new == 0);
+        CHECK(fixedSave() == 0);
+        CHECK(dlg.lists.empty() && dlg.messages.empty());
+        CHECK(g_save.fixed_calls == 1 && g_save.stat_calls == 1 && g_save.stat_dir == "FX_SAVE01" &&
+              g_save.stat_is_new == 0);
+        CHECK(logged("confirmation for 'FX_SAVE01' skipped (option NONE)"));
 
         put(other_name, "FX_NONE001");
         fixedSetup(other_name);
-        dlg.message_answers = {SaveMessageResult::Yes};
-        CHECK(fixedLoad() == 0 && dlg.messages.size() == 1 && dlg.messages[0] == tox2::kConfirmLoadNew &&
-              g_save.stat_calls == 1 && g_save.stat_dir == "FX_NONE001" && g_save.stat_is_new == 1);
-        fixedSetup(other_name);
-        dlg.message_answers = {SaveMessageResult::Yes};
-        CHECK(fixedSave() == 0 && dlg.messages.size() == 1 && dlg.messages[0] == tox2::kConfirmSaveNew);
-        fixedSetup(other_name);
-        dlg.message_answers = {SaveMessageResult::No};
-        CHECK(fixedLoad() == 1 && g_save.stat_calls == 0);
+        CHECK(fixedSave() == 0 && dlg.messages.empty() && g_save.stat_calls == 1 && g_save.stat_dir == "FX_NONE001" &&
+              g_save.stat_is_new == 1);
+        CHECK(logged("confirmation for 'FX_NONE001' skipped (option NONE)"));
 
         fixedSetup(fixed_name);
-        dlg.message_answers = {SaveMessageResult::Failed};
-        CHECK(fixedSave() == kErrInternal && g_save.stat_calls == 0);
+        CHECK(fixedLoad() == 0 && dlg.messages.empty() && g_save.stat_calls == 1 && g_save.stat_dir == "FX_SAVE01" &&
+              g_save.stat_is_new == 0);
+        fixedSetup(other_name);
+        CHECK(fixedLoad() == 0 && dlg.messages.empty() && g_save.stat_calls == 1 && g_save.stat_is_new == 1);
 
-        // NOCONFIRM and ListAutoLoad ask nothing.
+        // NOCONFIRM and ListAutoLoad ask nothing either.
         fixedSetup(fixed_name);
         g_save.fixed_option = 1;
         CHECK(fixedLoad() == 0 && dlg.messages.empty() && g_save.stat_calls == 1);

@@ -10,8 +10,7 @@
 // ListAutoLoad, FixedLoad2 and FixedSave2 share one path: the directory list (setList's prefixes,
 // sorted) is handed to funcFixed, which names the save to use or returns an error result, then funcStat
 // and funcFile run as for the Auto functions. They differ only in their arguments (ListAutoLoad has
-// errDialog and a ninth, stack-passed argument) and in the confirmation RPCS3 shows for Fixed* with
-// option NONE.
+// errDialog and a ninth, stack-passed argument). Fixed* never ask for a confirmation.
 //
 // A save lives in /dev_hdd0/home/00000001/savedata/<dir name>/ with a PARAM.SFO (written through
 // core/param_sfo) next to the files. Files are collected in memory and committed through a
@@ -24,9 +23,6 @@
 //    row it would focus (funcList's focus position; row 0 when nothing is focused) and answers Yes;
 //    with an empty list it answers back, which returns CELL_CANCEL, as RPCS3 does without a save
 //    dialog.
-//  - FixedLoad2/FixedSave2 with option NONE ask for a Yes/No confirmation (the overwrite or load
-//    question when the name is listed, the new-data question otherwise); anything but Yes returns
-//    CELL_CANCEL without asking funcFixed again.
 //  - Error dialogs (errDialog of the Auto functions; ListSave2/ListLoad2/FixedLoad2/FixedSave2 always
 //    ask for one): the English text is logged, an OK message with the Japanese text is shown through
 //    the driver, and CBRESULT is returned whatever the player does, with RPCS3's NOREPEAT bookkeeping.
@@ -34,6 +30,8 @@
 //  - cellSaveDataDelete2 only opens a selection UI in RPCS3, so it returns CELL_CANCEL.
 //
 // Deviations from RPCS3:
+//  - FixedLoad2/FixedSave2 never show a confirmation. RPCS3 asks Yes/No for option NONE, but the
+//    console overwrites this game's fixed save (option NONE) without asking.
 //  - Secure files are stored in plain text: the secure file id and the PFD/crypto layer are
 //    ignored, but each file's secure flag ("*<name>" entries of PARAM.SFO) is kept so its file type
 //    survives a reload.
@@ -712,27 +710,9 @@ ListResult runFixedStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32
     if (option != kFixedOptionNone && option != kFixedOptionNoConfirm) {
         return fail(paramError(81, std::format("(option={:#x})", option)));
     }
+    // RPCS3 asks Yes/No for option NONE, but the console overwrites this game's fixed save silently.
     if (option == kFixedOptionNone && op != Op::ListAutoLoad) {
-        const bool saving = op == Op::FixedSave;
-        const auto found = std::find_if(listing.entries.begin(), listing.entries.end(),
-                                        [&](const SaveEntry& e) { return e.dir_name == name; });
-        auto confirm = std::make_shared<SaveDialogContent>();
-        confirm->kind = DialogKind::YesNo;
-        confirm->list_kind = saving ? SaveListKind::Save : SaveListKind::Load;
-        if (found == listing.entries.end()) {
-            confirm->message = std::string(saving ? kConfirmSaveNew : kConfirmLoadNew);
-        } else {
-            confirm->message = entryConfirmText(saving ? kConfirmOverwrite : kConfirmLoad, *found);
-        }
-        const SaveMessageResult answer = saveDialogDriver().showMessage(std::move(confirm));
-        if (answer == SaveMessageResult::Failed) {
-            logError("tox2: savedata: {}: the confirmation could not be shown", opName(op));
-            return fail(kErrorInternal);
-        }
-        const bool yes = answer == SaveMessageResult::Yes;
-        logInfo("tox2: savedata: {}: confirmation for '{}' counted as {}", opName(op), name, yes ? "YES" : "NO");
-        // Declining ends the call; funcFixed is not asked again.
-        if (!yes) return fail(kCancel);
+        logInfo("tox2: savedata: {}: confirmation for '{}' skipped (option NONE)", opName(op), name);
     }
 
     if (listing.dir_num != 0) listing.clearBuf(base);  // funcStat gets a clean buffer
