@@ -2,6 +2,7 @@
 // overlay tests draw into an offscreen image on the first Vulkan device. The only window they create is a
 // hidden one, to give the Win32 backend a handle.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -34,6 +35,7 @@
 #include "overlay/overlay_panels.h"
 #include "overlay/overlay_sources.h"
 #include "overlay/overlay_stack.h"
+#include "overlay/save_dialog_overlay.h"
 #include "overlay/ui_font.h"
 #include "rsx/rsx_unimplemented.h"
 
@@ -1561,9 +1563,9 @@ public:
 
     bool ok() const { return ok_; }
 
-    // One submit that follows the renderer's present path: clear to black (the blit), the barriers around
+    // One submit that follows the renderer's present path: clear to `clear` (the blit), the barriers around
     // the overlay, then a copy into the host buffer instead of the present.
-    bool drawOnce(tox2::DebugOverlay& overlay, const tox2::RendererStats& stats) {
+    bool drawOnce(tox2::PresentOverlay& overlay, const tox2::RendererStats& stats, VkClearColorValue clear = {}) {
         tox2::Presenter::Target target;
         target.image = image_;
         target.view = view_;
@@ -1579,9 +1581,8 @@ public:
 
         imageBarrier(cmd_, image_, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_CLEAR_BIT,
                      VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        VkClearColorValue black{};
         const VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        vkCmdClearColorImage(cmd_, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+        vkCmdClearColorImage(cmd_, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &range);
 
         tox2::PresentFrameInfo info;
         info.stats = &stats;
@@ -1625,6 +1626,17 @@ public:
         vkResetFences(ctx_.device(), 1, &fence_);
         vmaInvalidateAllocation(ctx_.allocator(), buffer_alloc_, 0, VK_WHOLE_SIZE);
         return done;
+    }
+
+    // The pixel's channels in memory order (B, G, R, A); the target is B8G8R8A8.
+    struct Pixel {
+        std::uint8_t b, g, r, a;
+        int minChannel() const { return std::min({b, g, r}); }
+        int maxChannel() const { return std::max({b, g, r}); }
+    };
+    Pixel pixel(std::uint32_t x, std::uint32_t y) const {
+        const std::uint8_t* p = pixels_ + (static_cast<std::size_t>(y) * kTargetWidth + x) * 4;
+        return {p[0], p[1], p[2], p[3]};
     }
 
     // True when any pixel of the rectangle (inclusive) has a non-zero colour channel.
@@ -1771,6 +1783,119 @@ void testShutdownInsideScope(tox2::VkContext& ctx, OffscreenTarget& target) {
     CHECK(ImGui::GetCurrentContext() == nullptr);
 }
 
+std::shared_ptr<const tox2::SaveDialogContent> messageContent(std::uint64_t id, tox2::DialogKind kind,
+                                                              std::string message) {
+    auto content = std::make_shared<tox2::SaveDialogContent>();
+    content->id = id;
+    content->kind = kind;
+    content->message = std::move(message);
+    return content;
+}
+
+void publishDialog(tox2::SaveDialogBoard& board, std::shared_ptr<const tox2::SaveDialogContent> content,
+                   float opacity) {
+    tox2::SaveDialogSnapshot snapshot;
+    snapshot.content = std::move(content);
+    snapshot.opacity = opacity;
+    board.publish(std::move(snapshot));
+}
+
+// True when a pixel of the rectangle (inclusive) is lighter than the dimmed white background (at most 38).
+bool anyBright(const OffscreenTarget& target, std::uint32_t x0, std::uint32_t y0, std::uint32_t x1, std::uint32_t y1) {
+    for (std::uint32_t y = y0; y <= y1; ++y) {
+        for (std::uint32_t x = x0; x <= x1; ++x) {
+            if (target.pixel(x, y).minChannel() > 120) return true;
+        }
+    }
+    return false;
+}
+
+void testSaveDialogOverlay(tox2::VkContext& ctx, OffscreenTarget& target) {
+    constexpr VkClearColorValue kWhite = {{1.0f, 1.0f, 1.0f, 1.0f}};
+    tox2::RendererStats stats;
+    stats.flips = 1;
+
+    tox2::SaveDialogBoard board;
+    CHECK(board.drawer() == tox2::SaveDialogDrawer::None);
+    // The bundled font when the build copied it, otherwise ImGui's default font; the checks do not depend on which.
+    tox2::SaveDialogOverlayOptions options;
+    options.font_candidates.push_back(exePath().parent_path() / "fonts" / "BIZUDPGothic-Regular.ttf");
+    {
+        tox2::SaveDialogOverlay overlay(ctx, board, options);
+        CHECK(board.drawer() == tox2::SaveDialogDrawer::Ready);
+        CHECK(!overlay.wantsDraw() && !overlay.wantsIdlePresent());
+        publishDialog(board, messageContent(1, tox2::DialogKind::YesNo, "line one\n\nline two"), 1.0f);
+        CHECK(overlay.wantsDraw() && overlay.wantsIdlePresent());
+        board.clear();
+        CHECK(!overlay.wantsDraw() && !overlay.wantsIdlePresent());
+        CHECK(overlay.atlasBuildCount() == 0);
+
+        publishDialog(board, messageContent(1, tox2::DialogKind::YesNo, "line one\n\nline two"), 1.0f);
+        CHECK(target.drawOnce(overlay, stats, kWhite));
+        CHECK(!overlay.failed());
+        CHECK(board.drawer() == tox2::SaveDialogDrawer::Ready);
+        CHECK(overlay.atlasBuildCount() == 1);
+        // The dim is alpha 0.85 over white, and the rule below the text is white at alpha 0.6 over that.
+        CHECK(target.pixel(4, 700).maxChannel() <= 50);
+        CHECK(target.pixel(640, 400).minChannel() > 140);
+        CHECK(anyBright(target, 560, 290, 720, 330));  // the first message line
+
+        // The same content again builds nothing.
+        CHECK(target.drawOnce(overlay, stats, kWhite));
+        CHECK(overlay.atlasBuildCount() == 1);
+
+        // A Japanese message that the dialog constants do not cover needs one more build, once.
+        const std::string rare = "\xE9\xAC\xB1\xE9\xAC\xB1";  // "鬱鬱"
+        publishDialog(board, messageContent(2, tox2::DialogKind::Ok, rare), 1.0f);
+        CHECK(target.drawOnce(overlay, stats, kWhite));
+        CHECK(overlay.atlasBuildCount() == 2);
+        CHECK(target.drawOnce(overlay, stats, kWhite));
+        CHECK(overlay.atlasBuildCount() == 2);
+        CHECK(target.pixel(4, 700).maxChannel() <= 50);
+        CHECK(target.pixel(640, 400).minChannel() > 140);
+
+        // New content with glyphs the atlas already has builds nothing.
+        publishDialog(board, messageContent(3, tox2::DialogKind::YesNo, "line"), 1.0f);
+        CHECK(target.drawOnce(overlay, stats, kWhite));
+        CHECK(overlay.atlasBuildCount() == 2);
+
+        // A list draws its dim for now.
+        auto list = std::make_shared<tox2::SaveDialogContent>();
+        list->id = 4;
+        list->kind = tox2::DialogKind::List;
+        publishDialog(board, list, 1.0f);
+        CHECK(target.drawOnce(overlay, stats, kWhite));
+        CHECK(target.pixel(4, 700).maxChannel() <= 115);
+        CHECK(target.pixel(4, 700).minChannel() > 50);
+
+        // Fully faded out: nothing is drawn.
+        publishDialog(board, messageContent(5, tox2::DialogKind::YesNo, "line"), 0.0f);
+        CHECK(target.drawOnce(overlay, stats, kWhite));
+        CHECK(target.pixel(4, 700).minChannel() >= 250);
+        CHECK(target.pixel(640, 400).minChannel() >= 250);
+
+        // Half way: the dim is half as strong.
+        publishDialog(board, messageContent(5, tox2::DialogKind::YesNo, "line"), 0.5f);
+        CHECK(target.drawOnce(overlay, stats, kWhite));
+        CHECK(target.pixel(4, 700).maxChannel() > 100 && target.pixel(4, 700).maxChannel() < 160);
+        CHECK(!overlay.failed());
+    }
+    // The overlay is gone: a waiting dialog must not expect a drawer.
+    CHECK(board.drawer() == tox2::SaveDialogDrawer::None);
+
+    // No usable font: the default font stands in and the dialog still draws.
+    {
+        tox2::SaveDialogOverlay overlay(ctx, board, {});
+        publishDialog(board, messageContent(1, tox2::DialogKind::Ok, "line one"), 1.0f);
+        CHECK(target.drawOnce(overlay, stats, kWhite));
+        CHECK(!overlay.failed());
+        CHECK(overlay.atlasBuildCount() == 1);
+        CHECK(target.pixel(4, 700).maxChannel() <= 50);
+        CHECK(target.pixel(640, 400).minChannel() > 140);
+        CHECK(anyBright(target, 560, 340, 720, 380));
+    }
+}
+
 void testOverlayRecording(tox2::VkContext& ctx) {
     OffscreenTarget target(ctx);
     CHECK(target.ok());
@@ -1782,6 +1907,7 @@ void testOverlayRecording(tox2::VkContext& ctx) {
     drawTwice(ctx, target);
     testWin32Input(ctx, target);
     testShutdownInsideScope(ctx, target);
+    testSaveDialogOverlay(ctx, target);
 
     const std::uint32_t errors = ctx.validationErrorCount() - errors_before;
     std::printf("overlay tests: validation %s, %u error(s)\n", ctx.validationEnabled() ? "active" : "inactive", errors);
