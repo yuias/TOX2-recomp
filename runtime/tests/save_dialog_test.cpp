@@ -3,11 +3,14 @@
 
 #include <chrono>
 #include <cstdio>
+#include <ctime>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "hle/save_dialog_model.h"
+#include "hle/save_dialog_text.h"
 #include "input/pad_buttons.h"
 
 namespace {
@@ -335,6 +338,64 @@ void testOpacity() {
     CHECK(model.opacity(at(2000)) == 0.0f);
 }
 
+void testFormatSaveSize() {
+    CHECK(tox2::formatSaveSize(0) == "0 KB");
+    CHECK(tox2::formatSaveSize(1) == "1 KB");
+    CHECK(tox2::formatSaveSize(1000) == "1 KB");
+    CHECK(tox2::formatSaveSize(1001) == "2 KB");
+    CHECK(tox2::formatSaveSize(1000000) == "1000 KB");
+    CHECK(tox2::formatSaveSize(1000001) == "2 MB");
+    CHECK(tox2::formatSaveSize(2000000) == "2 MB");
+    CHECK(tox2::formatSaveSize(2000001) == "3 MB");
+}
+
+std::tm fixedTime() {
+    std::tm t{};
+    t.tm_year = 2015 - 1900;
+    t.tm_mon = 7;
+    t.tm_mday = 21;
+    t.tm_hour = 13;
+    t.tm_min = 52;
+    return t;
+}
+
+void testFormatSaveDate() {
+    CHECK(tox2::formatSaveDate(fixedTime()) == "2015/08/21  13:52");
+    std::tm early{};
+    early.tm_year = 2001 - 1900;
+    early.tm_mon = 0;
+    early.tm_mday = 2;
+    early.tm_hour = 3;
+    early.tm_min = 4;
+    CHECK(tox2::formatSaveDate(early) == "2001/01/02  03:04");
+    CHECK(tox2::saveRowInfo(fixedTime(), 1001) == "2015/08/21  13:52   2 KB");
+}
+
+void testSaveConfirmText() {
+    CHECK(tox2::saveConfirmText("Q?", "T", "S", "D", "Z", "detail") == "Q?\n\nT\nS\nD\nZ\n\ndetail");
+    // Empty fields keep their lines.
+    CHECK(tox2::saveConfirmText("Q?", "T", "", "D", "Z", "") == "Q?\n\nT\n\nD\nZ\n\n");
+    CHECK(tox2::saveConfirmText(tox2::kConfirmOverwrite, "", "", "", "", "") ==
+          std::string(tox2::kConfirmOverwrite) + "\n\n\n\n\n\n\n");
+}
+
+void testSaveErrorText() {
+    const auto no_space = tox2::saveErrorText(-1, 12, "");
+    CHECK(no_space.has_value() && *no_space == "空き容量が足りません。\n\n必要な空き容量：12 KB");
+    const auto failure = tox2::saveErrorText(-2, 0, "");
+    CHECK(failure.has_value() && *failure == "セーブまたはロードに失敗しました。");
+    const auto broken = tox2::saveErrorText(-3, 0, "");
+    CHECK(broken.has_value() && *broken == "セーブデータが壊れています。");
+    const auto no_data = tox2::saveErrorText(-4, 0, "");
+    CHECK(no_data.has_value() && *no_data == "セーブデータが見つかりません。");
+    const auto invalid = tox2::saveErrorText(-5, 0, "custom message");
+    CHECK(invalid.has_value() && *invalid == "custom message");
+    const auto invalid_empty = tox2::saveErrorText(-5, 0, "");
+    CHECK(invalid_empty.has_value() && invalid_empty->empty());
+    CHECK(!tox2::saveErrorText(3, 0, "ignored").has_value());
+    CHECK(!tox2::saveErrorText(0, 0, "ignored").has_value());
+}
+
 }  // namespace
 
 int main() {
@@ -357,6 +418,10 @@ int main() {
     testInitialRowAndScroll();
     testScrollKeepsSelectionVisible();
     testOpacity();
+    testFormatSaveSize();
+    testFormatSaveDate();
+    testSaveConfirmText();
+    testSaveErrorText();
     std::printf("save dialog tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }
