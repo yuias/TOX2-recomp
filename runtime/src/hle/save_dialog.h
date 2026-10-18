@@ -1,6 +1,7 @@
 // Save data dialogs as seen by cellSaveData: what is shown (content), what the overlay draws (snapshot on the board)
 // and who answers (the driver). The Auto and Cancel drivers answer at once and never wait, so runs without a window,
-// replays and tests never block.
+// replays and tests never block. The interactive driver holds DRAWING_BEGIN, takes over the pad and waits for the
+// player in timed waits that give up the kernel lock; it answers as Cancel when no overlay can draw the dialog.
 
 #pragma once
 
@@ -86,7 +87,7 @@ std::unique_ptr<SaveDialogDriver> makeInteractiveSaveDialogDriver(SaveDialogBoar
 // null: Auto. Before the guest runs or under the kernel lock.
 void setSaveDialogDriver(std::unique_ptr<SaveDialogDriver> driver);
 SaveDialogDriver& saveDialogDriver();
-bool saveDialogOpen();   // an interactive dialog holds DRAWING_BEGIN now (kernel lock)
+bool saveDialogOpen();   // an interactive dialog is open now: cellMsgDialogOpen2 answers BUSY (kernel lock)
 void resetSaveDialog();  // tests: Auto driver, board cleared, drawer None
 
 }  // namespace tox2

@@ -1,21 +1,33 @@
 // Self-checking tests for the save data dialog model. Time is injected, so nothing sleeps and no pad provider,
 // window or game data is involved.
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
+#include <thread>
+#include <utility>
 #include <vector>
 
+#include "core/log.h"
+#include "core/threads.h"
+#include "hle/hle.h"
 #include "hle/save_dialog.h"
 #include "hle/save_dialog_model.h"
 #include "hle/save_dialog_text.h"
+#include "input/keyboard_pad.h"
 #include "input/pad_buttons.h"
+#include "tox2/ppu_context.h"
 
 namespace {
 
@@ -487,6 +499,339 @@ void testDriverRegistry() {
     CHECK(tox2::saveDialogBoard().drawer() == tox2::SaveDialogDrawer::None);
 }
 
+// Every wait below has a deadline. When one expires the dialog is told its overlay failed, which makes the driver
+// leave its loop, so a broken driver fails checks instead of hanging the run.
+constexpr std::chrono::milliseconds kDeadline{5000};
+
+bool waitFor(const std::function<bool()>& pred, std::chrono::milliseconds timeout = kDeadline) {
+    const auto deadline = Clock::now() + timeout;
+    while (!pred()) {
+        if (Clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+}
+
+// A host thread that holds the kernel lock (and in the split PPU modes a PPU slot) while it runs `body`, like a guest
+// thread inside a handler.
+class GuestRun {
+public:
+    GuestRun(tox2::SaveDialogBoard& board, std::function<void()> body, bool use_slot = false) : board_(board) {
+        thread_ = std::thread([this, body = std::move(body), use_slot] {
+            if (use_slot) tox2::ppuSlots().acquire();
+            tox2::guestLock().lock();
+            body();
+            tox2::guestLock().unlock();
+            if (use_slot) tox2::ppuSlots().release();
+            finished_at_ = Clock::now();
+            done_.store(true);
+        });
+    }
+    ~GuestRun() { join(); }
+    GuestRun(const GuestRun&) = delete;
+    GuestRun& operator=(const GuestRun&) = delete;
+
+    // False when the body did not end within `timeout`.
+    bool join(std::chrono::milliseconds timeout = kDeadline) {
+        const bool finished = waitFor([this] { return done_.load(); }, timeout);
+        if (!finished) board_.setDrawer(tox2::SaveDialogDrawer::Failed);
+        if (thread_.joinable()) thread_.join();
+        return finished;
+    }
+
+    // When the body ended; valid after join() returned true.
+    Clock::time_point finishedAt() const { return finished_at_; }
+
+private:
+    tox2::SaveDialogBoard& board_;
+    Clock::time_point finished_at_{};
+    std::atomic<bool> done_{false};
+    std::thread thread_;
+};
+
+// Runs `fn` on a thread that holds the kernel lock, as the test's own view into state that handlers guard. In the split
+// modes it also needs a PPU slot, so a driver that kept its slot or the lock during the wait leaves this call waiting
+// until the join deadline, which then fails the check (and makes the driver give up) instead of passing. A driver that
+// ignored the drawer as well would still hang the join.
+bool underGuestLock(tox2::SaveDialogBoard& board, std::function<void()> fn) {
+    GuestRun run(board, std::move(fn), tox2::splitPpuMode());
+    return run.join();
+}
+
+struct DialogFixture {
+    std::shared_ptr<tox2::KeyboardPadState> pad = std::make_shared<tox2::KeyboardPadState>();
+    tox2::SaveDialogBoard board;
+    std::unique_ptr<tox2::SaveDialogDriver> driver;
+
+    explicit DialogFixture(bool drawer_ready = true) {
+        tox2::resetCellSysutil();
+        tox2::resetCellPad();
+        tox2::resetSaveDialog();
+        tox2::setPadProvider(tox2::makeKeyboardPadProvider(pad));
+        if (drawer_ready) board.setDrawer(tox2::SaveDialogDrawer::Ready);
+        driver = tox2::makeInteractiveSaveDialogDriver(board);
+    }
+    ~DialogFixture() {
+        tox2::resetCellMsgDialog();
+        tox2::setPadProvider(nullptr);
+        tox2::resetCellPad();
+        tox2::resetSaveDialog();
+        tox2::resetCellSysutil();
+    }
+
+    void press(PadButton button, bool down) {
+        pad->setButtons(tox2::InputSource::Keyboard, tox2::padButtonBit(button), down, Clock::now());
+    }
+    bool waitForDialog() {
+        return waitFor([this] { return board.read().content != nullptr; });
+    }
+    // Input is dropped during the fade-in, so presses wait for it to end.
+    bool waitForFadeIn() {
+        return waitFor([this] {
+            const auto snapshot = board.read();
+            return snapshot.content && snapshot.opacity >= 0.999f;
+        });
+    }
+};
+
+// What the test thread sees of the system state while no dialog code runs.
+struct SystemView {
+    bool intercepted = false;
+    bool dialog_open = false;
+    std::int32_t begin = 0;  // queueSysutilEvent(DRAWING_BEGIN)
+};
+
+SystemView viewSystem(DialogFixture& f, bool probe_begin) {
+    SystemView view;
+    CHECK(underGuestLock(f.board, [&] {
+        view.intercepted = tox2::padIntercepted();
+        view.dialog_open = tox2::saveDialogOpen();
+        if (probe_begin) view.begin = tox2::queueSysutilEvent(tox2::kSysutilDrawingBegin, 0);
+    }));
+    return view;
+}
+
+// DRAWING_END for a BEGIN the test sent itself or probed successfully.
+std::int32_t sendEnd(DialogFixture& f) {
+    std::int32_t result = 0;
+    CHECK(underGuestLock(f.board, [&] { result = tox2::queueSysutilEvent(tox2::kSysutilDrawingEnd, 0); }));
+    return result;
+}
+
+constexpr auto kBusy = static_cast<std::int32_t>(tox2::kSysutilErrorBusy);
+
+// The interactive list: published, pad taken over, pad given back, DRAWING_BEGIN held and released. In the split
+// modes the dialog thread also holds a PPU slot, which the wait has to give up as well as the kernel lock.
+void testInteractiveList(tox2::PpuThreadsMode mode) {
+    tox2::setPpuThreadsMode(mode);
+    {
+        DialogFixture f;
+        std::optional<std::int32_t> row = 99;
+        GuestRun run(
+                f.board, [&] { row = f.driver->showList({contentWithRows(3), 1}); },
+                mode != tox2::PpuThreadsMode::Legacy);
+
+        CHECK(f.waitForDialog());
+        const auto first = f.board.read();
+        CHECK(first.content && first.content->kind == DialogKind::List && first.content->id != 0);
+        CHECK(first.selected_row == 1);
+
+        // The kernel lock is free during the wait: a second BEGIN is refused and the pad is intercepted.
+        const SystemView during = viewSystem(f, true);
+        CHECK(during.begin == kBusy);
+        CHECK(during.intercepted);
+        CHECK(during.dialog_open);
+
+        CHECK(f.waitForFadeIn());
+        f.press(PadButton::Down, true);
+        CHECK(waitFor([&] { return f.board.read().selected_row == 2; }));
+        f.press(PadButton::Down, false);
+        f.press(PadButton::Circle, true);
+        CHECK(run.join());
+        f.press(PadButton::Circle, false);
+
+        CHECK(row == std::optional<std::int32_t>(2));
+        CHECK(f.board.read().content == nullptr);
+        const SystemView after = viewSystem(f, true);
+        CHECK(!after.intercepted);
+        CHECK(!after.dialog_open);
+        CHECK(after.begin == 0);  // the dialog's END went out, so BEGIN is accepted again
+        CHECK(sendEnd(f) == 0);
+    }
+    tox2::setPpuThreadsMode(tox2::PpuThreadsMode::Legacy);
+}
+
+void testInteractiveMessage() {
+    struct Case {
+        DialogKind kind;
+        PadButton button;
+        tox2::SaveMessageResult expected;
+    };
+    const Case cases[] = {
+            {DialogKind::YesNo, PadButton::Circle, tox2::SaveMessageResult::Yes},
+            {DialogKind::YesNo, PadButton::Cross, tox2::SaveMessageResult::No},
+            {DialogKind::Ok, PadButton::Circle, tox2::SaveMessageResult::Ok},
+    };
+    for (const Case& c : cases) {
+        DialogFixture f;
+        tox2::SaveMessageResult result = tox2::SaveMessageResult::Failed;
+        GuestRun run(f.board, [&] { result = f.driver->showMessage(contentWithRows(0, c.kind)); });
+        CHECK(f.waitForFadeIn());
+        const auto shown = f.board.read();
+        CHECK(shown.content && shown.content->kind == c.kind);
+        f.press(c.button, true);
+        CHECK(run.join());
+        f.press(c.button, false);
+        CHECK(result == c.expected);
+        CHECK(sendEnd(f) == -1);  // END already went out
+    }
+}
+
+// Without anything to draw the dialog is answered as Cancel at once and touches neither the pad nor DRAWING_BEGIN.
+void testNoDrawerAnswersCancel() {
+    for (const tox2::SaveDialogDrawer drawer : {tox2::SaveDialogDrawer::None, tox2::SaveDialogDrawer::Failed}) {
+        DialogFixture f(false);
+        f.board.setDrawer(drawer);
+        std::optional<std::int32_t> row = 99;
+        tox2::SaveMessageResult yes_no = tox2::SaveMessageResult::Failed;
+        tox2::SaveMessageResult ok = tox2::SaveMessageResult::Failed;
+        SystemView after;
+        GuestRun run(f.board, [&] {
+            row = f.driver->showList({contentWithRows(3), 1});
+            yes_no = f.driver->showMessage(contentWithRows(0, DialogKind::YesNo));
+            ok = f.driver->showMessage(contentWithRows(0, DialogKind::Ok));
+            after.intercepted = tox2::padIntercepted();
+            after.dialog_open = tox2::saveDialogOpen();
+            after.begin = tox2::queueSysutilEvent(tox2::kSysutilDrawingBegin, 0);
+        });
+        CHECK(run.join());
+        CHECK(!row.has_value());
+        CHECK(yes_no == tox2::SaveMessageResult::No);
+        CHECK(ok == tox2::SaveMessageResult::Ok);
+        CHECK(!after.intercepted && !after.dialog_open);
+        CHECK(after.begin == 0);
+        CHECK(f.board.read().content == nullptr);
+    }
+}
+
+// The overlay can fail while a dialog waits. The driver must notice within a few ticks, answer as Cancel and still
+// release the pad and DRAWING_BEGIN.
+void testDrawerFailsDuringWait() {
+    for (const DialogKind kind : {DialogKind::List, DialogKind::YesNo}) {
+        DialogFixture f;
+        std::optional<std::int32_t> row = 99;
+        tox2::SaveMessageResult message = tox2::SaveMessageResult::Failed;
+        GuestRun run(f.board, [&] {
+            if (kind == DialogKind::List) {
+                row = f.driver->showList({contentWithRows(2), 0});
+            } else {
+                message = f.driver->showMessage(contentWithRows(0, kind));
+            }
+        });
+        CHECK(f.waitForDialog());
+        CHECK(viewSystem(f, false).intercepted);
+        const auto failed_at = Clock::now();
+        f.board.setDrawer(tox2::SaveDialogDrawer::Failed);
+        const std::uint64_t serial_at_failure = f.board.read().serial;
+        CHECK(run.join());
+        // The driver notices on its next wake: at most one publish already in flight, then the clear. Counting
+        // publishes keeps this independent of machine load; the wall-time bound only guards against a hang.
+        CHECK(f.board.read().serial <= serial_at_failure + 2);
+        CHECK(run.finishedAt() - failed_at < std::chrono::milliseconds(1000));
+        if (kind == DialogKind::List) {
+            CHECK(!row.has_value());
+        } else {
+            CHECK(message == tox2::SaveMessageResult::No);
+        }
+        CHECK(f.board.read().content == nullptr);
+        const SystemView after = viewSystem(f, false);
+        CHECK(!after.intercepted && !after.dialog_open);
+        CHECK(sendEnd(f) == -1);  // END was sent
+    }
+}
+
+// Another system dialog holds DRAWING_BEGIN. A message cannot be shown; a list opens anyway and leaves that BEGIN
+// alone (description 2.1).
+void testBeginOutstanding() {
+    {
+        DialogFixture f;
+        CHECK(underGuestLock(f.board, [&] { CHECK(tox2::queueSysutilEvent(tox2::kSysutilDrawingBegin, 0) == 0); }));
+        tox2::SaveMessageResult result = tox2::SaveMessageResult::Ok;
+        GuestRun run(f.board, [&] { result = f.driver->showMessage(contentWithRows(0, DialogKind::YesNo)); });
+        CHECK(run.join());
+        CHECK(result == tox2::SaveMessageResult::Failed);
+        const SystemView after = viewSystem(f, true);
+        CHECK(!after.intercepted && !after.dialog_open);
+        CHECK(after.begin == kBusy);  // still the other dialog's
+        CHECK(f.board.read().content == nullptr);
+        CHECK(sendEnd(f) == 0);
+    }
+    {
+        DialogFixture f;
+        CHECK(underGuestLock(f.board, [&] { CHECK(tox2::queueSysutilEvent(tox2::kSysutilDrawingBegin, 0) == 0); }));
+        std::optional<std::int32_t> row = 99;
+        GuestRun run(f.board, [&] { row = f.driver->showList({contentWithRows(2), 0}); });
+        CHECK(f.waitForFadeIn());
+        const SystemView during = viewSystem(f, false);
+        CHECK(during.intercepted && during.dialog_open);
+        f.press(PadButton::Circle, true);
+        CHECK(run.join());
+        f.press(PadButton::Circle, false);
+        CHECK(row == std::optional<std::int32_t>(0));
+        const SystemView after = viewSystem(f, true);
+        CHECK(!after.intercepted && !after.dialog_open);
+        CHECK(after.begin == kBusy);  // no END was sent for a BEGIN the dialog did not make
+        CHECK(sendEnd(f) == 0);
+    }
+}
+
+// The game's own cellMsgDialogOpen2 is refused while a save dialog is open, and accepted once it closed.
+void testMsgDialogBusy() {
+    DialogFixture f;
+    std::vector<std::uint8_t> memory(0x400);
+    std::memcpy(memory.data() + 0x100, "hello", 6);
+    const tox2::HleEntry* open2 = nullptr;
+    for (const tox2::HleEntry& entry : tox2::cellMsgDialogHandlers()) {
+        if (std::string_view(entry.name) == "cellMsgDialogOpen2") open2 = &entry;
+    }
+    CHECK(open2 != nullptr);
+    if (open2 == nullptr) return;
+    auto callOpen2 = [&] {
+        Tox2PpuContext ctx{};
+        ctx.gpr[3] = 2u << 4;  // OK button
+        ctx.gpr[4] = 0x100;
+        open2->handler(&ctx, memory.data());
+        return static_cast<std::uint32_t>(ctx.gpr[3]);
+    };
+
+    std::optional<std::int32_t> row = 99;
+    GuestRun run(f.board, [&] { row = f.driver->showList({contentWithRows(1), 0}); });
+    CHECK(f.waitForFadeIn());
+
+    // BEGIN is outstanding too, so the result alone cannot tell the two refusals apart; the DRAWING_BEGIN error
+    // line only appears when the handler got as far as asking for it.
+    std::mutex lines_mutex;
+    std::vector<std::string> lines;
+    tox2::setLogSink([&](std::string_view line) {
+        std::lock_guard lock(lines_mutex);
+        lines.emplace_back(line);
+    });
+    std::uint32_t during = 0;
+    CHECK(underGuestLock(f.board, [&] { during = callOpen2(); }));
+    tox2::setLogSink({});
+    CHECK(during == tox2::kSysutilErrorBusy);
+    bool asked_for_begin = false;
+    for (const std::string& line : lines) asked_for_begin |= line.find("second DRAWING_BEGIN") != std::string::npos;
+    CHECK(!asked_for_begin);
+
+    f.press(PadButton::Circle, true);
+    CHECK(run.join());
+    f.press(PadButton::Circle, false);
+    std::uint32_t after = 0xffffffff;
+    CHECK(underGuestLock(f.board, [&] { after = callOpen2(); }));
+    CHECK(after == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -517,6 +862,14 @@ int main() {
     testCancelDriver();
     testBoard();
     testDriverRegistry();
+    testInteractiveList(tox2::PpuThreadsMode::Legacy);
+    testInteractiveList(tox2::PpuThreadsMode::Split1);
+    testInteractiveList(tox2::PpuThreadsMode::Split2);
+    testInteractiveMessage();
+    testNoDrawerAnswersCancel();
+    testDrawerFailsDuringWait();
+    testBeginOutstanding();
+    testMsgDialogBusy();
     std::printf("save dialog tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }

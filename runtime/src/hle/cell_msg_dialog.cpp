@@ -15,6 +15,10 @@
 // is observed by the guest thread that pumps cellSysutilCheckCallback, as in RPCS3 (the dialog's
 // callback runs there).
 //
+// While a save data dialog is open (it holds DRAWING_BEGIN) cellMsgDialogOpen2 answers BUSY, as it does
+// when its own DRAWING_BEGIN is refused. The game's own Open2 after a save error comes after the
+// savedata call returned and the save dialog closed, so it is never refused.
+//
 // Deviations from RPCS3: cellMsgDialogOpen2 never blocks, a dialog has no overlay, and a failed
 // DRAWING_BEGIN leaves no dialog behind. The progress bars keep no value; only their index is
 // validated.
@@ -32,6 +36,7 @@
 #include "core/log.h"
 #include "tox2/ppu_context.h"
 #include "hle/hle.h"
+#include "hle/save_dialog.h"
 #include "lv2/cell_error.h"
 
 namespace tox2 {
@@ -164,7 +169,7 @@ void open2(Tox2PpuContext* ctx, std::uint8_t* base) {
         return;
     }
 
-    if (g_dialog.open) {
+    if (g_dialog.open || saveDialogOpen()) {
         ctx->gpr[3] = kSysutilErrorBusy;
         return;
     }
