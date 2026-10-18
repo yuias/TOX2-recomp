@@ -80,6 +80,11 @@ public:
     // Hashes in place through the inner view when no capture is active; with a writer the bytes must be read so that
     // they are recorded.
     bool hashRange(std::uint32_t location, std::uint32_t offset, std::size_t size, std::uint64_t& out) override;
+#if TOX2_RSX_WRITE_WATCH
+    // Forwards when no capture is active; with a writer the bytes must be read to be recorded, so nothing is tracked.
+    RsxWriteCheck checkWrites(std::uint32_t location, std::uint32_t offset, std::size_t size,
+                              std::uint64_t since) override;
+#endif
 
 private:
     RsxMemoryView& inner_;
@@ -132,6 +137,11 @@ public:
     bool read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override;
     bool tryRead(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override;
     bool hashRange(std::uint32_t location, std::uint32_t offset, std::size_t size, std::uint64_t& out) override;
+#if TOX2_RSX_WRITE_WATCH
+    // A range is clean when every byte of it was recorded and no add() changed any of its pages after `since`.
+    RsxWriteCheck checkWrites(std::uint32_t location, std::uint32_t offset, std::size_t size,
+                              std::uint64_t since) override;
+#endif
 
 private:
     bool lookup(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) const;
@@ -144,12 +154,19 @@ private:
         std::array<std::uint8_t, kPageSize> data{};
         std::array<std::uint64_t, kPageSize / 64> valid{};  // bit per byte that the capture recorded
         std::uint32_t valid_count = 0;
+#if TOX2_RSX_WRITE_WATCH
+        std::uint64_t stamp = 0;  // stamp_ of the add() that last changed the page
+#endif
         // Sets the bits of [first, first + count) and returns how many were clear.
         std::uint32_t mark(std::uint32_t first, std::uint32_t count);
         // True when every byte of [first, first + count) was recorded.
         bool covers(std::uint32_t first, std::uint32_t count) const;
     };
     std::array<std::unordered_map<std::uint32_t, std::unique_ptr<Page>>, 2> pages_;
+#if TOX2_RSX_WRITE_WATCH
+    // Name of the current contents; an add() that changes a page moves it on and gives that page the new value.
+    std::uint64_t stamp_ = 1;
+#endif
 };
 
 // Feeds the capture to `builder` (which must read through `memory`) in the order the live consumer

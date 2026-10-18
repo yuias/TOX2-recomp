@@ -178,6 +178,14 @@ bool RsxRecordingMemoryView::hashRange(std::uint32_t location, std::uint32_t off
     return RsxMemoryView::hashRange(location, offset, size, out);
 }
 
+#if TOX2_RSX_WRITE_WATCH
+RsxWriteCheck RsxRecordingMemoryView::checkWrites(std::uint32_t location, std::uint32_t offset, std::size_t size,
+                                                  std::uint64_t since) {
+    if (writer_ != nullptr) return {};
+    return inner_.checkWrites(location, offset, size, since);
+}
+#endif
+
 bool RsxCaptureReader::parse(std::vector<std::uint8_t> bytes, std::string& error) {
     data_ = std::move(bytes);
     events_.clear();
@@ -393,17 +401,36 @@ void ReplayRsxMemoryView::add(std::uint32_t location, std::uint32_t offset, std:
     auto& pages = pages_[location];
     std::uint64_t pos = offset;
     std::size_t done = 0;
+#if TOX2_RSX_WRITE_WATCH
+    bool changed = false;
+#endif
     while (done < bytes.size() && pos <= 0xFFFFFFFFull) {
         const std::uint32_t index = static_cast<std::uint32_t>(pos / kPageSize);
         const std::uint32_t in_page = static_cast<std::uint32_t>(pos % kPageSize);
         const std::size_t chunk = std::min<std::size_t>(bytes.size() - done, kPageSize - in_page);
         std::unique_ptr<Page>& page = pages[index];
+#if TOX2_RSX_WRITE_WATCH
+        // A repeated replay adds the same bytes again; leaving them alone keeps the page's stamp and the cost low.
+        if (page && page->covers(in_page, static_cast<std::uint32_t>(chunk)) &&
+            std::memcmp(page->data.data() + in_page, bytes.data() + done, chunk) == 0) {
+            done += chunk;
+            pos += chunk;
+            continue;
+        }
+#endif
         if (!page) page = std::make_unique<Page>();
+#if TOX2_RSX_WRITE_WATCH
+        page->stamp = stamp_ + 1;
+        changed = true;
+#endif
         std::memcpy(page->data.data() + in_page, bytes.data() + done, chunk);
         if (page->valid_count != kPageSize) page->valid_count += page->mark(in_page, static_cast<std::uint32_t>(chunk));
         done += chunk;
         pos += chunk;
     }
+#if TOX2_RSX_WRITE_WATCH
+    if (changed) stamp_++;
+#endif
 }
 
 template <class Visit>
@@ -457,6 +484,33 @@ bool ReplayRsxMemoryView::hashRange(std::uint32_t location, std::uint32_t offset
     out = stream.digest();
     return true;
 }
+
+#if TOX2_RSX_WRITE_WATCH
+RsxWriteCheck ReplayRsxMemoryView::checkWrites(std::uint32_t location, std::uint32_t offset, std::size_t size,
+                                               std::uint64_t since) {
+    if (location > 1) return {};
+    if (static_cast<std::uint64_t>(offset) + size > 0x100000000ull) return {true, false, stamp_};
+    const auto& pages = pages_[location];
+    std::uint64_t newest = 0;
+    std::uint64_t pos = offset;
+    std::size_t done = 0;
+    while (done < size) {
+        const std::uint32_t in_page = static_cast<std::uint32_t>(pos % kPageSize);
+        const std::size_t chunk = std::min<std::size_t>(size - done, kPageSize - in_page);
+        const auto it = pages.find(static_cast<std::uint32_t>(pos / kPageSize));
+        // Bytes that were never recorded cannot be vouched for; the caller reads them and fails there as before.
+        if (it == pages.end()) return {true, false, stamp_};
+        const Page& page = *it->second;
+        if (page.valid_count != kPageSize && !page.covers(in_page, static_cast<std::uint32_t>(chunk))) {
+            return {true, false, stamp_};
+        }
+        newest = std::max(newest, page.stamp);
+        done += chunk;
+        pos += chunk;
+    }
+    return {true, since != 0 && newest <= since, stamp_};
+}
+#endif
 
 void replayCapture(const RsxCaptureReader& reader, ReplayRsxMemoryView& memory, RsxFrameBuilder& builder) {
     auto regs = std::make_unique<RsxRegisters>(reader.startRegisters());

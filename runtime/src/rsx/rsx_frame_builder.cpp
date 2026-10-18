@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <format>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -181,6 +182,51 @@ bool GuestRsxMemoryView::hashRange(std::uint32_t location, std::uint32_t offset,
     out = stream.digest();
     return true;
 }
+
+#if TOX2_RSX_WRITE_WATCH
+namespace {
+
+constexpr std::uint32_t kWatchPageSize = 0x1000;
+
+// Process-wide because the OS state it mirrors is: a report that one view consumes must stay visible to the others.
+struct LocalWriteTable {
+    std::mutex mutex;
+    std::vector<std::uint64_t> stamps;  // per local page: the serial of the check that last saw it written
+    std::uint64_t serial = 0;
+    std::vector<std::uint32_t> pages;  // scratch for collectWrites
+};
+
+LocalWriteTable& localWriteTable() {
+    static LocalWriteTable table;
+    return table;
+}
+
+}  // namespace
+
+RsxWriteCheck GuestRsxMemoryView::checkWrites(std::uint32_t location, std::uint32_t offset, std::size_t size,
+                                              std::uint64_t since) {
+    if (location != 0) return {};
+    LocalWriteTable& table = localWriteTable();
+    const std::lock_guard<std::mutex> lock(table.mutex);
+    if (table.stamps.empty()) table.stamps.assign(kRsxLocalSize / kWatchPageSize, 0);
+    const std::uint64_t now = ++table.serial;
+    if (offset >= kRsxLocalSize || size > kRsxLocalSize - offset) return {true, false, now};
+    if (size == 0) return {true, since != 0, now};
+    // A refused collection (uncommitted page, OS error) leaves the range reported for the next one.
+    if (!process().memory.collectWrites(kRsxLocalBase + offset, static_cast<std::uint32_t>(size), table.pages)) {
+        return {true, false, now};
+    }
+    for (const std::uint32_t page_address : table.pages) {
+        table.stamps[(page_address - kRsxLocalBase) / kWatchPageSize] = now;
+    }
+    std::uint64_t newest = 0;
+    const std::size_t last = (static_cast<std::uint64_t>(offset) + size - 1) / kWatchPageSize;
+    for (std::size_t page = offset / kWatchPageSize; page <= last; page++) {
+        newest = std::max(newest, table.stamps[page]);
+    }
+    return {true, since != 0 && newest <= since, now};
+}
+#endif
 
 void RsxFrameBuilder::onWrite(const RsxRegisters& regs, std::uint32_t method, std::uint32_t value) {
     method &= 0xFFFC;

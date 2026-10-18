@@ -10677,6 +10677,146 @@ void testRsxHashRange() {
     }
 }
 
+// RsxMemoryView::checkWrites: each view answers "was anything in this range written since the check that returned
+// `since`" without reading the bytes.
+void testRsxWriteCheck() {
+#if TOX2_RSX_WRITE_WATCH
+    constexpr std::uint32_t kPage = 0x1000;
+
+    // Live view over committed local pages.
+    {
+        tox2::resetRsxState();
+        tox2::Process& process = tox2::process();
+        CHECK(process.memory.reserve());
+        std::uint8_t* base = process.memory.base();
+        constexpr std::uint32_t kOffset = 0x09000000;
+        constexpr std::uint32_t kEa = tox2::kRsxLocalBase + kOffset;
+        CHECK(process.memory.commit(kEa, 8 * kPage));
+
+        tox2::GuestRsxMemoryView view(base);
+        const auto first = view.checkWrites(0, kOffset, 4 * kPage, 0);
+        CHECK(first.tracked && !first.clean && first.stamp != 0);
+        // Nothing was written since, whichever stamp-0 check asks again.
+        CHECK(!view.checkWrites(0, kOffset, 4 * kPage, 0).clean);
+        const auto second = view.checkWrites(0, kOffset, 4 * kPage, first.stamp);
+        CHECK(second.tracked && second.clean && second.stamp > first.stamp);
+
+        tox2Write32(base, kEa + 2 * kPage + 0x10, 0x01020304u);
+        const auto after_write = view.checkWrites(0, kOffset, 4 * kPage, second.stamp);
+        CHECK(after_write.tracked && !after_write.clean);
+        // The report is consumed, so a check made with the stamp just returned is clean again.
+        CHECK(view.checkWrites(0, kOffset, 4 * kPage, after_write.stamp).clean);
+
+        // A write outside the range does not dirty it; the neighbour page does see its own write.
+        const auto head = view.checkWrites(0, kOffset, kPage, 0);
+        tox2Write32(base, kEa + kPage, 5);
+        CHECK(view.checkWrites(0, kOffset, kPage, head.stamp).clean);
+        CHECK(!view.checkWrites(0, kOffset + kPage, kPage, head.stamp).clean);
+
+        // A mark the OS does not report.
+        const auto before_mark = view.checkWrites(0, kOffset, 8 * kPage, 0);
+        process.memory.markWritten(kEa + 5 * kPage + 7, 1);
+        CHECK(!view.checkWrites(0, kOffset, 8 * kPage, before_mark.stamp).clean);
+
+        // A page written during one texture's check is still seen by another texture on the same page.
+        const auto texture_a = view.checkWrites(0, kOffset, 2 * kPage, 0);
+        const auto texture_b = view.checkWrites(0, kOffset + kPage, 2 * kPage, 0);
+        tox2Write32(base, kEa + kPage + 8, 6);
+        CHECK(!view.checkWrites(0, kOffset, 2 * kPage, texture_a.stamp).clean);
+        CHECK(!view.checkWrites(0, kOffset + kPage, 2 * kPage, texture_b.stamp).clean);
+
+        // Another location is not tracked, and a range that is out of local memory or not committed is tracked but
+        // never clean.
+        CHECK(!view.checkWrites(1, 0, kPage, 1).tracked);
+        const auto beyond = view.checkWrites(0, tox2::kRsxLocalSize - 8, 16, 1);
+        CHECK(beyond.tracked && !beyond.clean);
+        const auto uncommitted = view.checkWrites(0, kOffset + 6 * kPage, 4 * kPage, 1);
+        CHECK(uncommitted.tracked && !uncommitted.clean);
+        CHECK(!view.checkWrites(0, kOffset + 6 * kPage, 4 * kPage, uncommitted.stamp).clean);
+
+        // Two views: the second one consumes the OS report, the first still sees the write.
+        tox2::GuestRsxMemoryView view_a(base), view_b(base);
+        const auto a = view_a.checkWrites(0, kOffset, 4 * kPage, 0);
+        CHECK(view_a.checkWrites(0, kOffset, 4 * kPage, a.stamp).clean);
+        tox2Write32(base, kEa + 3 * kPage, 7);
+        const auto b = view_b.checkWrites(0, kOffset, 4 * kPage, 0);
+        CHECK(!b.clean);
+        CHECK(!view_a.checkWrites(0, kOffset, 4 * kPage, a.stamp).clean);
+
+        // The recording view forwards while no capture is active and tracks nothing while one is.
+        tox2::RsxRecordingMemoryView recording(view);
+        const auto r0 = recording.checkWrites(0, kOffset, 4 * kPage, 0);
+        CHECK(r0.tracked && !r0.clean);
+        CHECK(recording.checkWrites(0, kOffset, 4 * kPage, r0.stamp).clean);
+        auto regs = std::make_unique<tox2::RsxRegisters>();
+        regs->reset();
+        tox2::RsxCaptureWriter writer(1, *regs, {});
+        recording.setWriter(&writer);
+        CHECK(!recording.checkWrites(0, kOffset, 4 * kPage, r0.stamp).tracked);
+        recording.setWriter(nullptr);
+        CHECK(recording.checkWrites(0, kOffset, 4 * kPage, r0.stamp).tracked);
+
+        tox2::resetRsxState();
+        process.memory.decommit(kEa, 8 * kPage);
+    }
+
+    // Replay view: the bytes added are the writes.
+    {
+        std::vector<std::uint8_t> bytes(0x4000);
+        std::uint32_t x = 99;
+        for (std::uint8_t& b : bytes) {
+            x = x * 1664525u + 1013904223u;
+            b = static_cast<std::uint8_t>(x >> 24);
+        }
+        const auto add = [&](tox2::ReplayRsxMemoryView& view, std::uint32_t location, std::uint32_t offset,
+                             std::size_t size) {
+            view.add(location, offset, std::span<const std::uint8_t>(bytes).first(size));
+        };
+
+        tox2::ReplayRsxMemoryView view;
+        add(view, 0, 0x1000, 0x2000);  // pages 1 and 2
+        const auto first = view.checkWrites(0, 0x1000, 0x2000, 0);
+        CHECK(first.tracked && !first.clean && first.stamp != 0);
+
+        // The same bytes again change nothing.
+        add(view, 0, 0x1000, 0x2000);
+        const auto same = view.checkWrites(0, 0x1000, 0x2000, first.stamp);
+        CHECK(same.tracked && same.clean && same.stamp == first.stamp);
+
+        // One changed byte in page 2 dirties the range that holds it and not the range on page 1 only.
+        bytes[0x1010] ^= 0x5A;
+        view.add(0, 0x2000, std::span<const std::uint8_t>(bytes).subspan(0x1000, 0x1000));
+        bytes[0x1010] ^= 0x5A;
+        CHECK(!view.checkWrites(0, 0x1000, 0x2000, first.stamp).clean);
+        CHECK(view.checkWrites(0, 0x1000, 0x1000, first.stamp).clean);
+        const auto changed = view.checkWrites(0, 0x1000, 0x2000, first.stamp);
+        CHECK(view.checkWrites(0, 0x1000, 0x2000, changed.stamp).clean);
+
+        // New bytes in an unrecorded part of a recorded page.
+        add(view, 0, 0x4000, 0x800);
+        const auto half = view.checkWrites(0, 0x4000, 0x800, 0);
+        CHECK(!half.clean && !view.checkWrites(0, 0x4000, 0x1000, half.stamp).clean);
+        view.add(0, 0x4800, std::span<const std::uint8_t>(bytes).subspan(0x800, 0x800));
+        CHECK(!view.checkWrites(0, 0x4000, 0x800, half.stamp).clean);
+        const auto whole = view.checkWrites(0, 0x4000, 0x1000, 0);
+        CHECK(view.checkWrites(0, 0x4000, 0x1000, whole.stamp).clean);
+
+        // A missing page, or a range that runs into one, is tracked and never clean.
+        const auto missing = view.checkWrites(0, 0x9000, 16, first.stamp);
+        CHECK(missing.tracked && !missing.clean);
+        CHECK(!view.checkWrites(0, 0x2000, 0x2000, changed.stamp).clean);
+        CHECK(!view.checkWrites(0, 0xFFFFFFF0u, 0x20, changed.stamp).clean);
+
+        // Location 1 is tracked, location 2 is not.
+        add(view, 1, 0x10000, 0x1000);
+        const auto io = view.checkWrites(1, 0x10000, 0x1000, 0);
+        CHECK(io.tracked && !io.clean);
+        CHECK(view.checkWrites(1, 0x10000, 0x1000, io.stamp).clean);
+        CHECK(!view.checkWrites(2, 0, 16, 1).tracked);
+    }
+#endif
+}
+
 void testRsxFloatAndDepthSurfaces() {
     auto regs = std::make_unique<tox2::RsxRegisters>();
     regs->reset();
@@ -18177,6 +18317,7 @@ int main(int argc, char** argv) {
     testRsxTextureCacheValidity();
     testRsxUnimplementedThreadNotes();
     testRsxHashRange();
+    testRsxWriteCheck();
     testRsxFloatAndDepthSurfaces();
     testRsxCapture();
     testRsxSyntheticCaptures();

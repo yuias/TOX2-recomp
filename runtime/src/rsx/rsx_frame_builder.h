@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/build_config.h"
 #include "rsx/rsx_decode.h"
 #include "rsx/rsx_frame.h"
 #include "rsx/rsx_registers.h"
@@ -21,6 +22,15 @@
 #include "rsx/rsx_texture_cache.h"
 
 namespace tox2 {
+
+#if TOX2_RSX_WRITE_WATCH
+// What RsxMemoryView::checkWrites reports for a range.
+struct RsxWriteCheck {
+    bool tracked = false;     // the view tracks writes to this range; when false the rest means nothing
+    bool clean = false;       // no page of the range was written after the `since` stamp
+    std::uint64_t stamp = 0;  // names this check: a write the view learns of later gets a larger stamp
+};
+#endif
 
 // RSX-visible memory; location 0 = local (offset from kRsxLocalBase), 1 = main memory through the IO map.
 class RsxMemoryView {
@@ -37,6 +47,16 @@ public:
     // not readable (the failure read() would report). The default reads into a scratch buffer, which is what a view
     // that has to see every byte it hands out (the capture recorder) needs; views over plain memory override it.
     virtual bool hashRange(std::uint32_t location, std::uint32_t offset, std::size_t size, std::uint64_t& out);
+#if TOX2_RSX_WRITE_WATCH
+    // Collects the writes made so far to the pages of [offset, offset + size) of `location` and reports whether any
+    // came after `since`, a stamp an earlier check returned (0 = none: never clean). Keep the returned stamp to ask
+    // "written since this check" later. Call it before reading or hashing the bytes, so a write that lands during them
+    // is reported by the next check. The default tracks nothing.
+    virtual RsxWriteCheck checkWrites([[maybe_unused]] std::uint32_t location, [[maybe_unused]] std::uint32_t offset,
+                                      [[maybe_unused]] std::size_t size, [[maybe_unused]] std::uint64_t since) {
+        return {};
+    }
+#endif
 
 private:
     std::vector<std::uint8_t> hash_scratch_;
@@ -49,6 +69,12 @@ public:
     explicit GuestRsxMemoryView(const std::uint8_t* base) : base_(base) {}
     bool read(std::uint32_t location, std::uint32_t offset, std::span<std::uint8_t> out) override;
     bool hashRange(std::uint32_t location, std::uint32_t offset, std::size_t size, std::uint64_t& out) override;
+#if TOX2_RSX_WRITE_WATCH
+    // Location 0 only. The OS reports each write once, so the reports are kept in a process-wide table of page stamps:
+    // a check by one view never hides a write from another view or from another texture on the same page.
+    RsxWriteCheck checkWrites(std::uint32_t location, std::uint32_t offset, std::size_t size,
+                              std::uint64_t since) override;
+#endif
 
 private:
     const std::uint8_t* base_;
