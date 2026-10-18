@@ -224,7 +224,9 @@ bool GuestMemory::collectWrites(std::uint32_t addr, std::uint32_t size, std::vec
         return false;
     }
     if (granularity != kPageSize) {
-        // The reset already cleared the OS state, so keep the range as marks for the next collect.
+        // Windows on x64 always reports 4 KiB pages, so this is not expected to run. A port to a host with 16 KiB
+        // pages (macOS on Apple silicon, recent Android) would need its own tracking, since kPageSize is the guest's
+        // 4 KiB. The reset already cleared the OS state, so keep the range as marks for the next collect.
         markLocalPages(marked_local_.get(), begin, end);
         return false;
     }
