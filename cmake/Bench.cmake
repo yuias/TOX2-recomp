@@ -61,6 +61,19 @@ function(tox2_bench_add)
     PASS_REGULAR_EXPRESSION "bench rsx-hash: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
     TIMEOUT 120)
 
+  add_test(NAME bench_rsx_write_watch
+    COMMAND tox2_bench rsx-write-watch --range-kib 1024 --dirty-pages 4 --calls 4 --local-mib 8
+            --iterations 2 --warmup 1)
+  set_tests_properties(bench_rsx_write_watch PROPERTIES
+    PASS_REGULAR_EXPRESSION "bench rsx-write-watch: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
+    TIMEOUT 120)
+
+  add_test(NAME bench_rsx_write_watch_first
+    COMMAND tox2_bench rsx-write-watch --mode first-write --pages 64 --local-mib 8 --iterations 2 --warmup 1)
+  set_tests_properties(bench_rsx_write_watch_first PROPERTIES
+    PASS_REGULAR_EXPRESSION "bench rsx-write-watch: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
+    TIMEOUT 120)
+
   add_test(NAME bench_vertex_convert COMMAND tox2_bench vertex-convert --vertices 1024 --reps 2 --iterations 2 --warmup 1)
   set_tests_properties(bench_vertex_convert PROPERTIES
     PASS_REGULAR_EXPRESSION "bench vertex-convert: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"

@@ -50,8 +50,13 @@
 #include "spu/spu_mfc.h"
 #include "spu/spu_thread.h"
 #include "spu_lzma_fixture.h"
+#include "tox2/ppu_context.h"
 #include "tox2/spu_context.h"
 #include "tox2/spu_lower_stackfree.h"
+
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
 
 namespace {
 
@@ -1531,6 +1536,221 @@ int runRsvIdle(const Case& self, const Options& options) {
     });
 }
 
+// Layout of the rsx-write-watch case, mirroring the game: one reservation of the 32-bit space plus the guard, a main
+// window at offset 0 and a window of RSX local memory at its guest address.
+constexpr std::uint64_t kWatchReserveSize = (1ull << 32) + kTox2GuestGuardSize;
+constexpr std::uint64_t kWatchMainSize = 16ull << 20;
+constexpr std::uint64_t kWatchPageSize = 4096;
+
+// The reservation of the rsx-write-watch case, released on destruction.
+class WriteWatchArena {
+public:
+    WriteWatchArena() = default;
+    WriteWatchArena(const WriteWatchArena&) = delete;
+    WriteWatchArena& operator=(const WriteWatchArena&) = delete;
+    ~WriteWatchArena() {
+        if (base_ != nullptr) VirtualFree(base_, 0, MEM_RELEASE);
+    }
+
+    // Reserves, commits both windows and writes one byte to every committed page so that demand-zero faults stay out
+    // of the measured spans.
+    bool init(bool watched, std::uint64_t local_bytes) {
+        const DWORD flags = MEM_RESERVE | (watched ? MEM_WRITE_WATCH : 0);
+        base_ = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, kWatchReserveSize, flags, PAGE_NOACCESS));
+        if (base_ == nullptr) {
+            std::fprintf(stderr, "error: reserving the guest space failed (%lu)\n", GetLastError());
+            return false;
+        }
+        local_ = base_ + tox2::kRsxLocalBegin;
+        for (const auto& [window, size] : {std::pair<std::uint8_t*, std::uint64_t>{base_, kWatchMainSize},
+                                           std::pair<std::uint8_t*, std::uint64_t>{local_, local_bytes}}) {
+            if (VirtualAlloc(window, size, MEM_COMMIT, PAGE_READWRITE) == nullptr) {
+                std::fprintf(stderr, "error: committing %llu bytes failed (%lu)\n",
+                             static_cast<unsigned long long>(size), GetLastError());
+                return false;
+            }
+            for (std::uint64_t offset = 0; offset < size; offset += kWatchPageSize) store(window + offset, 1);
+        }
+        return true;
+    }
+
+    std::uint8_t* local() const { return local_; }
+
+    // One-byte store the compiler may not drop or merge.
+    static void store(std::uint8_t* p, std::uint8_t value) { *reinterpret_cast<volatile std::uint8_t*>(p) = value; }
+
+private:
+    std::uint8_t* base_ = nullptr;
+    std::uint8_t* local_ = nullptr;
+};
+
+// GetWriteWatch over [begin, begin + bytes) with room for every page of the range. Returns the Win32 result; `pages`
+// and `granularity` are valid when it is 0.
+UINT queryWrites(DWORD flags, std::uint8_t* begin, std::uint64_t bytes, std::vector<void*>& pages, ULONG* granularity,
+                 std::size_t* count) {
+    ULONG_PTR n = pages.size();
+    const UINT result = GetWriteWatch(flags, begin, bytes, pages.data(), &n, granularity);
+    *count = n;
+    return result;
+}
+
+// Sorted pages the query reported equal the pages that were written.
+bool sameWrittenPages(std::vector<void*>& reported, std::size_t count, const std::vector<void*>& expected) {
+    std::sort(reported.begin(), reported.begin() + static_cast<std::ptrdiff_t>(count));
+    return count == expected.size() && std::equal(expected.begin(), expected.end(), reported.begin());
+}
+
+// Median of the per-iteration sums of the measured iterations so far, divided by `per`.
+double medianPerUnit(const std::vector<std::uint64_t>& samples, double per) {
+    return static_cast<double>(tox2::summarizeCycles(samples).median) / per;
+}
+
+// The OS write watch, as the RSX texture validation would use it. query: the cycles of GetWriteWatch(RESET) calls over
+// a range of the local window with some pages written since the last call. first-write: the cycles of the first store
+// to each page after a reset, in a watched or a plain reservation. It calls the Win32 API directly.
+int runRsxWriteWatch(const Case& self, const Options& options) {
+    const std::string_view mode_text = options.value("mode").empty() ? "query" : options.value("mode");
+    const std::string_view region_text = options.value("region").empty() ? "watched" : options.value("region");
+    if ((mode_text != "query" && mode_text != "first-write") || (region_text != "watched" && region_text != "plain")) {
+        std::fputs("error: rsx-write-watch takes --mode query|first-write and --region watched|plain\n", stderr);
+        return 2;
+    }
+    const bool query = mode_text == "query";
+    const bool watched = region_text == "watched";
+    if (query && !watched) {
+        std::fputs("error: --mode query needs a watched region\n", stderr);
+        return 2;
+    }
+
+    std::uint32_t local_mib = 256;
+    if (!options.value("local-mib").empty() &&
+        !parseCount("--local-mib", options.value("local-mib"), 1, 256, &local_mib)) {
+        return 2;
+    }
+    const std::uint64_t local_bytes = static_cast<std::uint64_t>(local_mib) << 20;
+    const std::uint64_t local_pages = local_bytes / kWatchPageSize;
+
+    std::uint32_t range_kib = 262144;
+    std::uint32_t dirty_pages = 0;
+    std::uint32_t calls = 64;
+    std::uint32_t write_pages = 4096;
+    if (query) {
+        if ((!options.value("range-kib").empty() &&
+             !parseCount("--range-kib", options.value("range-kib"), 4, 262144, &range_kib)) ||
+            (!options.value("dirty-pages").empty() &&
+             !parseCount("--dirty-pages", options.value("dirty-pages"), 0, 65536, &dirty_pages)) ||
+            (!options.value("calls").empty() && !parseCount("--calls", options.value("calls"), 1, 1u << 20, &calls))) {
+            return 2;
+        }
+        if (range_kib % 4 != 0 || static_cast<std::uint64_t>(range_kib) * 1024 > local_bytes ||
+            dirty_pages > range_kib / 4) {
+            std::fputs("error: --range-kib must be a multiple of 4 that fits --local-mib and holds --dirty-pages\n",
+                       stderr);
+            return 2;
+        }
+    } else if (!options.value("pages").empty() &&
+               !parseCount("--pages", options.value("pages"), 1, 65536, &write_pages)) {
+        return 2;
+    } else if (write_pages > local_pages) {
+        std::fputs("error: --pages does not fit --local-mib\n", stderr);
+        return 2;
+    }
+
+    WriteWatchArena arena;
+    if (!arena.init(watched, local_bytes)) return 1;
+    std::uint8_t* const local = arena.local();
+    std::vector<void*> reported(local_pages);
+    ULONG granularity = 0;
+    std::size_t count = 0;
+    if (watched && (queryWrites(WRITE_WATCH_FLAG_RESET, local, local_bytes, reported, &granularity, &count) != 0 ||
+                    granularity != 4096)) {
+        std::fputs("error: the setup reset of the write watch failed\n", stderr);
+        return 1;
+    }
+
+    const std::uint32_t total_iterations = options.warmup + options.iterations;
+    std::uint32_t iteration_index = 0;
+    std::vector<std::uint64_t> sums;  // measured iterations only, for the diagnostic line
+
+    if (!query) {
+        std::vector<void*> expected(write_pages);
+        for (std::uint32_t i = 0; i < write_pages; i++)
+            expected[i] = local + static_cast<std::uint64_t>(i) * kWatchPageSize;
+        return runMeasured(self, options, [&](std::uint64_t* cycles) {
+            const std::uint8_t value = static_cast<std::uint8_t>(0x40 + iteration_index);
+            if (watched &&
+                queryWrites(WRITE_WATCH_FLAG_RESET, local, local_bytes, reported, &granularity, &count) != 0) {
+                return false;
+            }
+            const std::uint64_t start = tox2::currentThreadCycles();
+            for (std::uint32_t i = 0; i < write_pages; i++) {
+                WriteWatchArena::store(local + static_cast<std::uint64_t>(i) * kWatchPageSize, value);
+            }
+            *cycles = tox2::currentThreadCycles() - start;
+
+            bool ok = true;
+            if (watched) {
+                // Without reset: the check must not hide pages from the next query; the reset follows.
+                ok = queryWrites(0, local, local_bytes, reported, &granularity, &count) == 0 && granularity == 4096 &&
+                     sameWrittenPages(reported, count, expected);
+                ok = queryWrites(WRITE_WATCH_FLAG_RESET, local, local_bytes, reported, &granularity, &count) == 0 && ok;
+            } else {
+                for (std::uint32_t i = 0; i < write_pages; i++) {
+                    ok = ok && local[static_cast<std::uint64_t>(i) * kWatchPageSize] == value;
+                }
+            }
+            if (iteration_index++ >= options.warmup) sums.push_back(*cycles);
+            // The diagnostic goes out before the summary line, so it is printed once, with the last iteration.
+            if (iteration_index == total_iterations) {
+                std::printf("bench %s: first-write %s %u pages, %.1f cycles per page\n", self.name, region_text.data(),
+                            write_pages, medianPerUnit(sums, write_pages));
+            }
+            return ok;
+        });
+    }
+
+    // The span covers two reads of the cycle counter plus the call; the empty spans measure what the reads cost.
+    std::vector<std::uint64_t> empty(calls);
+    for (std::uint64_t& e : empty) {
+        const std::uint64_t start = tox2::currentThreadCycles();
+        e = tox2::currentThreadCycles() - start;
+    }
+    const std::uint64_t reader_overhead = tox2::summarizeCycles(empty).median;
+
+    const std::uint64_t range_bytes = static_cast<std::uint64_t>(range_kib) * 1024;
+    const std::uint64_t range_pages = range_bytes / kWatchPageSize;
+    std::vector<void*> expected(dirty_pages);
+    std::vector<std::uint64_t> dirty_offsets(dirty_pages);
+    for (std::uint32_t i = 0; i < dirty_pages; i++) {
+        dirty_offsets[i] = static_cast<std::uint64_t>(i) * range_pages / dirty_pages * kWatchPageSize;
+        expected[i] = local + dirty_offsets[i];
+    }
+    reported.resize(range_pages);
+    return runMeasured(self, options, [&](std::uint64_t* cycles) {
+        std::uint64_t sum = 0;
+        bool ok = true;
+        for (std::uint32_t c = 0; c < calls; c++) {
+            for (const std::uint64_t offset : dirty_offsets)
+                WriteWatchArena::store(local + offset, static_cast<std::uint8_t>(c));
+            const std::uint64_t start = tox2::currentThreadCycles();
+            const UINT result = queryWrites(WRITE_WATCH_FLAG_RESET, local, range_bytes, reported, &granularity, &count);
+            sum += tox2::currentThreadCycles() - start;
+            ok = ok && result == 0 && granularity == 4096 && sameWrittenPages(reported, count, expected);
+        }
+        *cycles = sum;
+        if (iteration_index++ >= options.warmup) sums.push_back(sum);
+        // The diagnostic goes out before the summary line, so it is printed once, with the last iteration.
+        if (iteration_index == total_iterations) {
+            std::printf(
+                    "bench %s: query %u KiB, %u dirty pages, %u calls per iteration, %.1f cycles per call "
+                    "(reader overhead %llu cycles per call)\n",
+                    self.name, range_kib, dirty_pages, calls, medianPerUnit(sums, calls),
+                    static_cast<unsigned long long>(reader_overhead));
+        }
+        return ok;
+    });
+}
+
 const std::vector<Case>& cases() {
     static const std::vector<Case> kCases = {
             {"spu-lzma",
@@ -1613,6 +1833,15 @@ const std::vector<Case>& cases() {
              {"capture"},
              {"synthetic"},
              runRsxFifo},
+            {"rsx-write-watch",
+             "OS write watch of the guest reservation: GetWriteWatch(RESET) calls (--mode query, --range-kib K, "
+             "--dirty-pages N, --calls N) or the first store to each page after a reset (--mode first-write, "
+             "--pages N, --region watched|plain); both: --local-mib M",
+             20,
+             2,
+             {"mode", "range-kib", "dirty-pages", "calls", "pages", "region", "local-mib"},
+             {},
+             runRsxWriteWatch},
     };
     return kCases;
 }
