@@ -140,6 +140,7 @@ function(tox2_runtime_add_core)
     runtime/src/hle/hle.cpp
     runtime/src/hle/libsre.cpp
     runtime/src/hle/sail_service.cpp
+    runtime/src/hle/save_dialog.cpp
     runtime/src/hle/save_dialog_model.cpp
     runtime/src/hle/save_dialog_text.cpp
     runtime/src/hle/sce_np.cpp

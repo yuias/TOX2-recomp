@@ -2,13 +2,17 @@
 // window or game data is involved.
 
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
+#include "hle/save_dialog.h"
 #include "hle/save_dialog_model.h"
 #include "hle/save_dialog_text.h"
 #include "input/pad_buttons.h"
@@ -396,6 +400,93 @@ void testSaveErrorText() {
     CHECK(!tox2::saveErrorText(0, 0, "ignored").has_value());
 }
 
+std::shared_ptr<tox2::SaveDialogContent> contentWithRows(int rows, DialogKind kind = DialogKind::List) {
+    auto content = std::make_shared<tox2::SaveDialogContent>();
+    content->kind = kind;
+    content->rows.resize(static_cast<std::size_t>(rows));
+    return content;
+}
+
+void testAutoDriver() {
+    auto driver = tox2::makeAutoSaveDialogDriver(tox2::SaveDialogPolicy::Auto);
+    CHECK(!driver->interactive());
+
+    CHECK(driver->showList({contentWithRows(3), 1}) == std::optional<std::int32_t>(1));
+    CHECK(driver->showList({contentWithRows(3), 9}) == std::optional<std::int32_t>(2));
+    CHECK(driver->showList({contentWithRows(3), -4}) == std::optional<std::int32_t>(0));
+    CHECK(!driver->showList({contentWithRows(0), 0}).has_value());
+
+    CHECK(driver->showMessage(contentWithRows(0, DialogKind::YesNo)) == tox2::SaveMessageResult::Yes);
+    CHECK(driver->showMessage(contentWithRows(0, DialogKind::Ok)) == tox2::SaveMessageResult::Ok);
+}
+
+void testCancelDriver() {
+    auto driver = tox2::makeAutoSaveDialogDriver(tox2::SaveDialogPolicy::Cancel);
+    CHECK(!driver->interactive());
+    CHECK(!driver->showList({contentWithRows(3), 1}).has_value());
+    CHECK(!driver->showList({contentWithRows(0), 0}).has_value());
+    CHECK(driver->showMessage(contentWithRows(0, DialogKind::YesNo)) == tox2::SaveMessageResult::No);
+    CHECK(driver->showMessage(contentWithRows(0, DialogKind::Ok)) == tox2::SaveMessageResult::Ok);
+}
+
+void testBoard() {
+    tox2::SaveDialogBoard board;
+    CHECK(board.read().content == nullptr);
+    CHECK(board.drawer() == tox2::SaveDialogDrawer::None);
+
+    auto content = contentWithRows(2);
+    tox2::SaveDialogSnapshot snapshot;
+    snapshot.content = content;
+    snapshot.selected_row = 1;
+    snapshot.first_visible_row = 1;
+    snapshot.opacity = 0.5f;
+    board.publish(snapshot);
+    const auto first = board.read();
+    CHECK(first.content == content);
+    CHECK(first.selected_row == 1);
+    CHECK(first.first_visible_row == 1);
+    CHECK(first.opacity == 0.5f);
+
+    board.publish(snapshot);
+    const auto second = board.read();
+    CHECK(second.serial > first.serial);
+
+    board.clear();
+    const auto cleared = board.read();
+    CHECK(cleared.content == nullptr);
+    CHECK(cleared.serial > second.serial);
+
+    board.setDrawer(tox2::SaveDialogDrawer::Ready);
+    CHECK(board.drawer() == tox2::SaveDialogDrawer::Ready);
+    board.setDrawer(tox2::SaveDialogDrawer::Failed);
+    CHECK(board.drawer() == tox2::SaveDialogDrawer::Failed);
+    board.clear();
+    CHECK(board.drawer() == tox2::SaveDialogDrawer::Failed);
+}
+
+void testDriverRegistry() {
+    tox2::resetSaveDialog();
+    CHECK(!tox2::saveDialogDriver().interactive());
+    CHECK(tox2::saveDialogDriver().showMessage(contentWithRows(0, DialogKind::YesNo)) == tox2::SaveMessageResult::Yes);
+    CHECK(!tox2::saveDialogOpen());
+
+    tox2::setSaveDialogDriver(tox2::makeAutoSaveDialogDriver(tox2::SaveDialogPolicy::Cancel));
+    CHECK(tox2::saveDialogDriver().showMessage(contentWithRows(0, DialogKind::YesNo)) == tox2::SaveMessageResult::No);
+    tox2::setSaveDialogDriver(nullptr);
+    CHECK(tox2::saveDialogDriver().showMessage(contentWithRows(0, DialogKind::YesNo)) == tox2::SaveMessageResult::Yes);
+
+    tox2::saveDialogBoard().setDrawer(tox2::SaveDialogDrawer::Ready);
+    tox2::SaveDialogSnapshot snapshot;
+    snapshot.content = contentWithRows(1);
+    tox2::saveDialogBoard().publish(snapshot);
+    tox2::setSaveDialogDriver(tox2::makeInteractiveSaveDialogDriver(tox2::saveDialogBoard()));
+    CHECK(tox2::saveDialogDriver().interactive());
+    tox2::resetSaveDialog();
+    CHECK(!tox2::saveDialogDriver().interactive());
+    CHECK(tox2::saveDialogBoard().read().content == nullptr);
+    CHECK(tox2::saveDialogBoard().drawer() == tox2::SaveDialogDrawer::None);
+}
+
 }  // namespace
 
 int main() {
@@ -422,6 +513,10 @@ int main() {
     testFormatSaveDate();
     testSaveConfirmText();
     testSaveErrorText();
+    testAutoDriver();
+    testCancelDriver();
+    testBoard();
+    testDriverRegistry();
     std::printf("save dialog tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }
