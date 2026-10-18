@@ -11,6 +11,9 @@
 #include <filesystem>
 #include <optional>
 #include <set>
+#include <span>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "hle/save_dialog.h"
@@ -26,6 +29,16 @@ namespace tox2 {
 
 struct SaveDialogOverlayOptions {
     std::vector<std::filesystem::path> font_candidates;  // uiFontCandidates(...)
+};
+
+// The GPU objects of one list icon. Handles are null once released.
+struct SaveDialogIconTexture {
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    VkImageView view = VK_NULL_HANDLE;
+    VkDescriptorSet descriptor = VK_NULL_HANDLE;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
 };
 
 class SaveDialogOverlay final : public PresentOverlay {
@@ -47,6 +60,9 @@ public:
     bool failed() const { return failed_.load(std::memory_order_relaxed); }
     // Number of font atlas rebuilds so far. Renderer's thread; for tests.
     int atlasBuildCount() const { return atlas_build_count_; }
+    // Icon textures that still hold a descriptor, including the ones waiting for their frames to finish. Renderer's
+    // thread; for tests.
+    std::size_t iconTextureCount() const;
 
 private:
     bool initialize(const Presenter::Target& target);
@@ -56,6 +72,24 @@ private:
     // Renderer's thread, under the context scope. False after a failure (the overlay is then shut down).
     bool ensureAtlas(const SaveDialogContent& content, std::uint32_t scene_height);
     bool rebuildAtlas(const std::set<ImWchar>& code_points, std::uint32_t scene_height);
+
+    // A texture or staging buffer that frames in flight may still use; destroyed `kFramesInFlight + 1` records later.
+    struct RetiredIcon {
+        std::uint64_t record = 0;
+        SaveDialogIconTexture texture;
+        VkBuffer staging = VK_NULL_HANDLE;
+        VmaAllocation staging_allocation = nullptr;
+    };
+
+    // Renderer's thread, under the context scope, before the rendering pass starts. Releases icons that left the
+    // window or belong to an older dialog, and uploads the missing ones of the rows around `first`.
+    void updateIcons(VkCommandBuffer cmd, const SaveDialogContent& content, int first);
+    std::optional<SaveDialogIconTexture> createIcon(VkCommandBuffer cmd, std::span<const std::uint8_t> png);
+    bool createIconSampler();
+    void retireIcon(const SaveDialogIconTexture& texture);
+    void destroyRetired(RetiredIcon& retired);
+    // Waits for the device and destroys every icon object; the backend must still be up.
+    void releaseAllIcons();
 
     VkContext& context_;
     SaveDialogBoard& board_;
@@ -79,6 +113,15 @@ private:
     std::uint32_t baked_scene_height_ = 0;  // 0: no atlas built yet
     std::uint64_t checked_content_id_ = 0;
     int atlas_build_count_ = 0;
+
+    // Icon textures of the current dialog, keyed by row. A row that failed to decode has no entry and is listed in
+    // icon_failed_ instead, so it is not decoded again.
+    std::unordered_map<int, SaveDialogIconTexture> icons_;
+    std::unordered_set<int> icon_failed_;
+    std::vector<RetiredIcon> retired_icons_;
+    std::uint64_t icons_content_id_ = 0;
+    std::uint64_t icon_record_count_ = 0;  // records that reached updateIcons()
+    VkSampler icon_sampler_ = VK_NULL_HANDLE;
 };
 
 }  // namespace tox2

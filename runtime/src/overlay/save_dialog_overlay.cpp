@@ -4,11 +4,13 @@
 #include <array>
 #include <cfloat>
 #include <cmath>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <utility>
 
 #include "core/log.h"
+#include "core/png_image.h"
 #include "hle/save_dialog_text.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
@@ -24,6 +26,13 @@ namespace {
 // Descriptor sets: the font atlas plus the icon textures of the list (kMaxIconTextures).
 constexpr std::uint32_t kMaxIconTextures = 32;
 constexpr std::uint32_t kDescriptorCount = 1 + kMaxIconTextures;
+
+// Icons are kept for the visible rows and some around them, so a short scroll finds them ready. The rows are
+// uploaded a few per record to bound the hitch of decoding.
+constexpr int kIconRowsBefore = 5;
+constexpr int kIconRowsAfter = 10;  // counted from the first visible row
+constexpr int kIconUploadsPerRecord = 4;
+constexpr std::uint32_t kMaxIconSide = 1024;
 
 // The canvas is 1280x720 and scales with the image area's height; every layout number below is in canvas pixels.
 constexpr float kCanvasWidth = 1280.0f;
@@ -227,14 +236,34 @@ void drawPlaceholder(ImDrawList* list, const Canvas& canvas, float x, float y, b
     list->AddRectFilled(ImVec2(mid.x - half, mid.y - arm), ImVec2(mid.x + half, mid.y + arm), color);
 }
 
+// The icon scaled to fit the icon cell, centred, with its edges on whole pixels.
+void drawIcon(ImDrawList* list, const Canvas& canvas, float x, float y, const SaveDialogIconTexture& icon) {
+    const float fit =
+            std::min(kIconWidth / static_cast<float>(icon.width), kIconHeight / static_cast<float>(icon.height));
+    const float width = static_cast<float>(icon.width) * fit;
+    const float height = static_cast<float>(icon.height) * fit;
+    const ImVec2 a = canvas.pt(x + (kIconWidth - width) * 0.5f, y + (kIconHeight - height) * 0.5f);
+    const ImVec2 b = canvas.pt(x + (kIconWidth + width) * 0.5f, y + (kIconHeight + height) * 0.5f);
+    const ImTextureID id = static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(icon.descriptor));
+    list->AddImage(id, ImVec2(std::round(a.x), std::round(a.y)), ImVec2(std::round(b.x), std::round(b.y)),
+                   ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), canvas.white(1.0f));
+}
+
 struct ListFonts {
     ImFont* heading;
     ImFont* title;
     ImFont* caption;  // 17 px: info, detail, legend
 };
 
-void drawRow(ImDrawList* list, const Canvas& canvas, const ListFonts& fonts, const SaveDialogRow& row, float y) {
-    drawPlaceholder(list, canvas, kRowX + 12.0f, y + 8.0f, row.new_data);
+using IconMap = std::unordered_map<int, SaveDialogIconTexture>;
+
+void drawRow(ImDrawList* list, const Canvas& canvas, const ListFonts& fonts, const SaveDialogRow& row, float y,
+             const SaveDialogIconTexture* icon) {
+    if (icon != nullptr) {
+        drawIcon(list, canvas, kRowX + 12.0f, y + 8.0f, *icon);
+    } else {
+        drawPlaceholder(list, canvas, kRowX + 12.0f, y + 8.0f, row.new_data);
+    }
 
     const float text_x = canvas.pt(kRowX + kTextOffset, 0.0f).x;
     const float wrap = canvas.px(kTextWidth);
@@ -298,8 +327,14 @@ std::string_view headingFor(SaveListKind kind) {
     return kHeadingSave;
 }
 
+// The board's first visible row, kept where a full page of rows is shown.
+int clampedFirstRow(std::size_t rows, int requested) {
+    const int max_first = std::max(0, static_cast<int>(rows) - static_cast<int>(kVisibleRows));
+    return std::clamp(requested, 0, max_first);
+}
+
 void drawList(ImDrawList* list, const Canvas& canvas, const ListFonts& fonts, const SaveDialogContent& content,
-              const SaveDialogSnapshot& snapshot, double time) {
+              const SaveDialogSnapshot& snapshot, const IconMap& icons, double time) {
     const std::string_view heading = headingFor(content.list_kind);
     const ImVec2 heading_pos = canvas.pt(64.0f, 36.0f);
     list->AddText(fonts.heading, fonts.heading->FontSize, heading_pos, canvas.white(1.0f), heading.data(),
@@ -316,15 +351,16 @@ void drawList(ImDrawList* list, const Canvas& canvas, const ListFonts& fonts, co
         list->AddText(fonts.title, fonts.title->FontSize, ImVec2(center.x - size.x * 0.5f, center.y - size.y * 0.5f),
                       canvas.white(1.0f), text, end);
     } else {
-        const int max_first = std::max(0, static_cast<int>(rows) - static_cast<int>(kVisibleRows));
-        const int first = std::clamp(snapshot.first_visible_row, 0, max_first);
+        const int first = clampedFirstRow(rows, snapshot.first_visible_row);
         const float pulse = 0.75f + 0.25f * static_cast<float>(std::sin(2.0 * 3.14159265358979323846 * time / 1.2));
 
         // Only vertically: the focus glow reaches past the row's left and right edges.
         list->PushClipRect(canvas.pt(0.0f, kListTop), canvas.pt(kCanvasWidth, kListBottom), true);
         for (int i = first; i < static_cast<int>(rows) && i < first + static_cast<int>(kVisibleRows); ++i) {
             const float y = kListTop + kRowHeight * static_cast<float>(i - first);
-            drawRow(list, canvas, fonts, content.rows[static_cast<std::size_t>(i)], y);
+            const auto icon = icons.find(i);
+            drawRow(list, canvas, fonts, content.rows[static_cast<std::size_t>(i)], y,
+                    icon == icons.end() ? nullptr : &icon->second);
             if (i == snapshot.selected_row) drawFocus(list, canvas, y, pulse);
         }
         list->PopClipRect();
@@ -339,6 +375,38 @@ void drawList(ImDrawList* list, const Canvas& canvas, const ListFonts& fonts, co
         drawSymbolAndLabel(list, canvas, fonts.caption, buttons.enter, kLegendEnter, canvas.pt(184.0f, 0.0f).x,
                            legend_y);
     }
+}
+
+void imageBarrier(VkCommandBuffer cmd, VkImage image, VkPipelineStageFlags2 src_stage, VkAccessFlags2 src_access,
+                  VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access, VkImageLayout from, VkImageLayout to) {
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = src_stage;
+    barrier.srcAccessMask = src_access;
+    barrier.dstStageMask = dst_stage;
+    barrier.dstAccessMask = dst_access;
+    barrier.oldLayout = from;
+    barrier.newLayout = to;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.imageMemoryBarrierCount = 1;
+    dependency.pImageMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+}
+
+// The rows whose icons are kept for a list whose first visible row is `first`, in the order they are uploaded: the
+// visible page, the rows below it, then the rows above.
+std::vector<int> iconRowOrder(int first, int rows) {
+    const int begin = std::max(0, first - kIconRowsBefore);
+    const int end = std::min(rows, first + kIconRowsAfter);
+    std::vector<int> order;
+    for (int row = first; row < end; ++row) order.push_back(row);
+    for (int row = first - 1; row >= begin; --row) order.push_back(row);
+    return order;
 }
 
 }  // namespace
@@ -372,7 +440,11 @@ void SaveDialogOverlay::shutdown() {
         {
             // The backend's shutdown acts on the current context.
             ImGuiContextScope scope(imgui_);
-            if (vulkan_backend_) ImGui_ImplVulkan_Shutdown();
+            if (vulkan_backend_) {
+                // Removing a texture's descriptor needs the backend.
+                releaseAllIcons();
+                ImGui_ImplVulkan_Shutdown();
+            }
         }
         vulkan_backend_ = false;
         // Outside the scope: DestroyContext clears the current context itself when it is the destroyed one, and
@@ -517,6 +589,201 @@ bool SaveDialogOverlay::rebuildAtlas(const std::set<ImWchar>& code_points, std::
     return true;
 }
 
+std::size_t SaveDialogOverlay::iconTextureCount() const {
+    std::size_t count = icons_.size();
+    for (const RetiredIcon& retired : retired_icons_) {
+        if (retired.texture.descriptor != VK_NULL_HANDLE) ++count;
+    }
+    return count;
+}
+
+bool SaveDialogOverlay::createIconSampler() {
+    VkSamplerCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    info.magFilter = VK_FILTER_LINEAR;
+    info.minFilter = VK_FILTER_LINEAR;
+    info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    info.maxLod = 0.0f;
+    if (vkCreateSampler(context_.device(), &info, nullptr, &icon_sampler_) == VK_SUCCESS) return true;
+    icon_sampler_ = VK_NULL_HANDLE;
+    return false;
+}
+
+void SaveDialogOverlay::retireIcon(const SaveDialogIconTexture& texture) {
+    RetiredIcon retired;
+    retired.record = icon_record_count_;
+    retired.texture = texture;
+    retired_icons_.push_back(retired);
+}
+
+void SaveDialogOverlay::destroyRetired(RetiredIcon& retired) {
+    SaveDialogIconTexture& texture = retired.texture;
+    if (texture.descriptor != VK_NULL_HANDLE) ImGui_ImplVulkan_RemoveTexture(texture.descriptor);
+    if (texture.view != VK_NULL_HANDLE) vkDestroyImageView(context_.device(), texture.view, nullptr);
+    if (texture.image != VK_NULL_HANDLE) vmaDestroyImage(context_.allocator(), texture.image, texture.allocation);
+    if (retired.staging != VK_NULL_HANDLE)
+        vmaDestroyBuffer(context_.allocator(), retired.staging, retired.staging_allocation);
+    retired = RetiredIcon{};
+}
+
+void SaveDialogOverlay::releaseAllIcons() {
+    if (!icons_.empty() || !retired_icons_.empty()) vkDeviceWaitIdle(context_.device());
+    for (const auto& entry : icons_) retireIcon(entry.second);
+    icons_.clear();
+    icon_failed_.clear();
+    for (RetiredIcon& retired : retired_icons_) destroyRetired(retired);
+    retired_icons_.clear();
+    if (icon_sampler_ != VK_NULL_HANDLE) {
+        vkDestroySampler(context_.device(), icon_sampler_, nullptr);
+        icon_sampler_ = VK_NULL_HANDLE;
+    }
+    icons_content_id_ = 0;
+}
+
+std::optional<SaveDialogIconTexture> SaveDialogOverlay::createIcon(VkCommandBuffer cmd,
+                                                                   std::span<const std::uint8_t> png) {
+    const std::optional<RgbaImage> decoded = decodePngRgba8(png, kMaxIconSide);
+    if (!decoded || decoded->width == 0 || decoded->height == 0) return std::nullopt;
+    const VkDeviceSize byte_count = static_cast<VkDeviceSize>(decoded->width) * decoded->height * 4;
+    if (decoded->pixels.size() < byte_count) return std::nullopt;
+    if (icon_sampler_ == VK_NULL_HANDLE && !createIconSampler()) return std::nullopt;
+
+    // Everything created so far, so that one cleanup serves every failure below.
+    RetiredIcon made;
+    made.record = icon_record_count_;
+    SaveDialogIconTexture& texture = made.texture;
+    texture.width = decoded->width;
+    texture.height = decoded->height;
+
+    VkImageCreateInfo image_info{};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    image_info.extent = {texture.width, texture.height, 1};
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VmaAllocationCreateInfo image_alloc{};
+    image_alloc.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    if (vmaCreateImage(context_.allocator(), &image_info, &image_alloc, &texture.image, &texture.allocation, nullptr) !=
+        VK_SUCCESS) {
+        return std::nullopt;
+    }
+
+    VkImageViewCreateInfo view_info{};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = texture.image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(context_.device(), &view_info, nullptr, &texture.view) != VK_SUCCESS) {
+        texture.view = VK_NULL_HANDLE;  // not guaranteed to be reset on failure
+        destroyRetired(made);
+        return std::nullopt;
+    }
+
+    VkBufferCreateInfo buffer_info{};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = byte_count;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    VmaAllocationCreateInfo buffer_alloc{};
+    buffer_alloc.usage = VMA_MEMORY_USAGE_AUTO;
+    buffer_alloc.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationInfo mapped{};
+    if (vmaCreateBuffer(context_.allocator(), &buffer_info, &buffer_alloc, &made.staging, &made.staging_allocation,
+                        &mapped) != VK_SUCCESS ||
+        mapped.pMappedData == nullptr) {
+        // VMA leaves a null handle when the creation failed; a buffer that cannot be mapped is released here.
+        destroyRetired(made);
+        return std::nullopt;
+    }
+    std::memcpy(mapped.pMappedData, decoded->pixels.data(), static_cast<std::size_t>(byte_count));
+    vmaFlushAllocation(context_.allocator(), made.staging_allocation, 0, VK_WHOLE_SIZE);
+
+    g_first_vk_error.store(VK_SUCCESS);
+    texture.descriptor =
+            ImGui_ImplVulkan_AddTexture(icon_sampler_, texture.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (g_first_vk_error.load() != VK_SUCCESS) {
+        // The allocation failed, so there is no set to free.
+        texture.descriptor = VK_NULL_HANDLE;
+        destroyRetired(made);
+        return std::nullopt;
+    }
+
+    imageBarrier(cmd, texture.image, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COPY_BIT,
+                 VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {texture.width, texture.height, 1};
+    vkCmdCopyBufferToImage(cmd, made.staging, texture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    imageBarrier(cmd, texture.image, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    // Only the copy reads the staging buffer, but it is released with the frames in flight like the image.
+    RetiredIcon staging;
+    staging.record = icon_record_count_;
+    staging.staging = made.staging;
+    staging.staging_allocation = made.staging_allocation;
+    retired_icons_.push_back(staging);
+    return texture;
+}
+
+void SaveDialogOverlay::updateIcons(VkCommandBuffer cmd, const SaveDialogContent& content, int first) {
+    ++icon_record_count_;
+    // The frames that may still use a texture have finished by now, with one more frame as margin.
+    constexpr std::uint64_t kRetireRecords = RsxRenderer::kFramesInFlight + 1;
+    for (auto it = retired_icons_.begin(); it != retired_icons_.end();) {
+        if (icon_record_count_ - it->record >= kRetireRecords) {
+            destroyRetired(*it);
+            it = retired_icons_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    if (content.id != icons_content_id_) {
+        for (const auto& entry : icons_) retireIcon(entry.second);
+        icons_.clear();
+        icon_failed_.clear();
+        icons_content_id_ = content.id;
+    }
+
+    // Message dialogs show no rows.
+    const int rows = content.kind == DialogKind::List ? static_cast<int>(content.rows.size()) : 0;
+    const int begin = std::max(0, first - kIconRowsBefore);
+    const int end = std::min(rows, first + kIconRowsAfter);
+    for (auto it = icons_.begin(); it != icons_.end();) {
+        if (it->first < begin || it->first >= end) {
+            retireIcon(it->second);
+            it = icons_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    int decoded = 0;
+    for (const int row : iconRowOrder(first, rows)) {
+        if (decoded >= kIconUploadsPerRecord) break;
+        const auto& png = content.rows[static_cast<std::size_t>(row)].icon_png;
+        if (!png || png->empty() || icons_.contains(row) || icon_failed_.contains(row)) continue;
+        // Textures waiting to be released still hold their descriptors; the pool must not run dry.
+        if (iconTextureCount() >= kMaxIconTextures) break;
+        ++decoded;
+        if (const std::optional<SaveDialogIconTexture> texture = createIcon(cmd, *png)) {
+            icons_.emplace(row, *texture);
+        } else {
+            icon_failed_.insert(row);
+        }
+    }
+}
+
 void SaveDialogOverlay::record(VkCommandBuffer cmd, const Presenter::Target& target) {
     if (failed() || target.view == VK_NULL_HANDLE) return;
     // The board is read before the context scope opens (lock order, see imgui_context.h).
@@ -536,6 +803,9 @@ void SaveDialogOverlay::record(VkCommandBuffer cmd, const Presenter::Target& tar
     // Built before the opacity check, so the hitch falls into the fade-in instead of the first visible frame.
     if (!ensureAtlas(*snapshot.content, scene.height)) return;
     if (snapshot.opacity <= 0.0f) return;
+
+    // The upload commands go into `cmd` here, ahead of the rendering pass that samples the textures.
+    updateIcons(cmd, *snapshot.content, clampedFirstRow(snapshot.content->rows.size(), snapshot.first_visible_row));
 
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(static_cast<float>(target.width), static_cast<float>(target.height));
@@ -567,7 +837,7 @@ void SaveDialogOverlay::record(VkCommandBuffer cmd, const Presenter::Target& tar
             } else {
                 const ListFonts fonts = {io.Fonts->Fonts[kFontHeading], io.Fonts->Fonts[kFontBody],
                                          io.Fonts->Fonts[kFontSmall]};
-                drawList(list, canvas, fonts, content, snapshot, ImGui::GetTime());
+                drawList(list, canvas, fonts, content, snapshot, icons_, ImGui::GetTime());
             }
         }
     }
