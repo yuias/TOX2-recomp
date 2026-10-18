@@ -758,7 +758,10 @@ bool Streamline::evaluateDlaa(VkCommandBuffer cmd, const DlaaFrame& frame, std::
 
     const sl::BaseStructure* inputs[] = {&viewport};
     result = impl.api.evaluate_feature(sl::kFeatureDLSS, *token, inputs, 1, cmd);
-    if (result != sl::Result::eOk) {
+    // sl.common replaces eOk with this warning after the dispatch was recorded, so the output is valid.
+    if (result == sl::Result::eWarnOutOfVRAM) {
+        logOnce(LogLevel::Warn, "streamline-dlaa-vram", "tox2: streamline: DLAA evaluated over the VRAM budget");
+    } else if (result != sl::Result::eOk) {
         error = "slEvaluateFeature failed: " + resultName(result);
         return false;
     }
@@ -906,7 +909,12 @@ bool Streamline::frameGenState(FrameGenState& out, const FrameGenOptions* estima
     if (estimate_for != nullptr) estimate = makeDlssgOptions(*estimate_for, true);
     const sl::Result result = impl.dlssg_get_state(sl::ViewportHandle(kFrameGenViewport), state,
                                                    estimate_for != nullptr ? &estimate : nullptr);
-    if (result != sl::Result::eOk) {
+    // A warning, not a failure. Should the plugin leave the state unfilled, its defaults (status eOk, no frame
+    // counts) are what the caller already tolerates.
+    if (result == sl::Result::eWarnOutOfVRAM) {
+        logOnce(LogLevel::Warn, "streamline-dlssg-vram",
+                "tox2: streamline: DLSS-G state reported over the VRAM budget");
+    } else if (result != sl::Result::eOk) {
         error = "slDLSSGGetState failed: " + resultName(result);
         return false;
     }
