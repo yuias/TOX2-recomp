@@ -7,7 +7,7 @@ test runs.
 ## `tools/build.ps1`
 
 ```powershell
-pwsh -NoProfile -File tools/build.ps1 [-Preset debug|release|profile] [-Clean] [-Test]
+pwsh -NoProfile -File tools/build.ps1 [-Preset debug|release|profile|release-wwoff] [-Clean] [-Test]
      [-GeneratedDir <dir>] [-GameDir <dir>] [-EbootElf <path>] [-LlvmBin <dir>]
      [-EbootBin <path>] [-Pup <path>] [-Rpcs3CryptoDir <dir>]
 ```
@@ -17,7 +17,7 @@ then configures, builds, and optionally runs CTest.
 
 | Parameter | Meaning |
 | --- | --- |
-| `-Preset debug\|release\|profile` | The CMake preset (default `debug`). Build output goes to `build/<preset>/`, executables to `build/<preset>/bin/`. `release` builds with `-O3` and no debug info; `profile` is described below. |
+| `-Preset debug\|release\|profile\|release-wwoff` | The CMake preset (default `debug`). Build output goes to `build/<preset>/`, executables to `build/<preset>/bin/`. `release` builds with `-O3` and no debug info; `profile` and `release-wwoff` are described below. |
 | `-Clean` | Delete `build/<preset>/` before configuring. This also deletes the default hdd directory `build/<preset>/hdd` (game data and saves). |
 | `-Test` | Run CTest after the build. Which tests run depends on the other parameters; see [Tests](tests.md). |
 | `-GeneratedDir <dir>` | The directory written by `ps3tool.py emit --out <dir>`. Compiles it into `tox2_ppu_generated` and `tox2_spu_generated` and builds `tox2_game` and the link tests. This game's executable is large, so it is emitted with `--chunks 256` and a full build compiles 256 generated C files; if the compiler runs out of memory, lower the parallelism with the `CMAKE_BUILD_PARALLEL_LEVEL` environment variable. Without it only the runtime libraries, tools and unit tests are built. The directory must hold the executable's `sources.cmake`, the libsre tree `<dir>/libsre/libsre_sources.cmake` (the second `emit` command in [Emitting C](emitter.md#a-prx-module-libsre)) and the SPU tree `<dir>/spu/spu_sources.cmake` (the `spu-emit` command in [Emitting C](emitter.md#spu-images)); if one is missing, configuration fails and prints the command to run. CMake variable `TOX2_PPU_GENERATED_DIR`. |
@@ -30,6 +30,14 @@ then configures, builds, and optionally runs CTest.
 
 Relative paths are resolved against the current directory. The parameters set CMake cache
 variables, so a later build of the same preset keeps them until they are given again.
+
+### The `release-wwoff` preset
+
+`release-wwoff` is `release` with `TOX2_RSX_WRITE_WATCH` set to `OFF` (see [CMake variables](#cmake-variables)),
+built into `build/release-wwoff/`. It is for comparing the two behaviours on the same tree, for example with
+`tox2_bench rsx-fifo` or `tox2_rsxreplay`; use `release` to play. Give it the same build-script parameters as
+`release`; its saves are in `build/release-wwoff/hdd`, so do not start the game from it unless a fresh hdd directory
+is wanted (`--hdd-dir` can name another build's directory).
 
 ### The `profile` preset
 
@@ -57,6 +65,7 @@ These can also be passed to `cmake` directly (`cmake --preset release -D<name>=<
 | `TOX2_GAMEINPUT_DIR` | empty | An extracted `Microsoft.GameInput` package to use instead of `generated/deps/gameinput/<pinned version>` (see [Input](input.md#the-gameinput-package)). Configure needs the package from `tools/fetch-gameinput.ps1`. |
 | `TOX2_ENABLE_DLSS` | `AUTO` | `AUTO`, `ON` or `OFF`: whether to build the DLAA anti-aliasing mode and frame generation on NVIDIA Streamline (see [NVIDIA Streamline (DLAA)](#nvidia-streamline-dlaa)). |
 | `TOX2_STREAMLINE_DIR` | `externals/Streamline` | The unpacked Streamline SDK to build against. |
+| `TOX2_RSX_WRITE_WATCH` | `ON` | Create the guest memory reservation with the Windows write watch (`MEM_WRITE_WATCH`) and let the RSX frame builder keep a cached texture, without hashing its bytes, when no page of its range was written since its last check (see the write tracking entry of the texture cache in [Rendering](rendering.md#textures)). `OFF` hashes every validated texture once per epoch, as before. The setting is compiled into every target through `tox2_runtime_core`, so change it only by reconfiguring a whole build directory. The write watch is a Windows API; a port to a host with 16 KiB pages would need its own tracking. |
 | `TOX2_PPU_WERROR` | `ON` | Add `-Werror` for generated code and the code that mirrors it (header check, semantics harness, link test). Every such target is compiled with `-O1 -march=x86-64-v3 -ffp-contract=off -fpatchable-function-entry=8 -Wall -Wextra`, whatever the preset's optimization level; the generated SPU tree and the SPU tests that run generated code (`spu_semantics`, `spu_programs`) use `-O3` instead of `-O1` (`TOX2_SPU_CODEGEN_OPT_LEVEL` in `cmake/SpuCodegen.cmake`), because the game's SPU decode loops run several times faster at that level. |
 
 No tracked file contains a game path: they are command-line arguments, CMake cache variables, a

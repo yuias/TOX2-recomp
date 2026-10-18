@@ -1019,6 +1019,46 @@ handful of textures, some of them several megabytes), so the builder keeps the c
   draw's descriptor instead of decoding the unit and looking the texture up again. A unit whose full path counted
   an unimplemented feature is never reused, so those counts do not change. A reuse does not refresh the entry's
   least-recently-used tick inside the epoch.
+- *Write tracking* (`TOX2_RSX_WRITE_WATCH`, on by default; see [Building](building.md#cmake-variables)). Hashing the
+  guest bytes of every validated texture once per epoch is most of the texture cost in a frame, and most of those
+  textures have not changed. With the option on, the guest memory reservation is made with the Windows write
+  watch (`MEM_WRITE_WATCH`), which records the pages any user-mode store of the process wrote. The first use of an
+  entry in an epoch first asks the memory view, `RsxMemoryView::checkWrites`, whether a page of the texture's range
+  was written since the entry was last checked. If none was, the entry keeps its blob and content id and the bytes
+  are not read (a hash skip, still counted as a validation). Otherwise the range is hashed as before.
+  - *Why per validation.* One query for the whole local memory at the start of each epoch would be cheaper, but a
+    write that lands after the epoch began and before a texture's first use in it would be seen one epoch later
+    than the hash path sees it. Asking at the first use, for exactly the pages of the range, keeps today's
+    behaviour, and the check is made before the bytes are hashed or read, so a write that lands during the hash
+    is reported by the next check.
+  - *Page stamps.* Because the OS reports a write once, the game's view keeps one process-wide table with a stamp
+    per local-memory page: a check stamps the pages it collected with a new serial, and an entry is clean when no
+    page of its range has a stamp newer than the one it stored at its last check. A second builder or view
+    therefore cannot consume a report that the first one still needs. Only the local memory (location 0) is
+    tracked; main memory textures always take the hash path.
+  - *Safety net.* A writer that the watch does not report would keep a stale blob. Each entry is therefore hashed
+    on one flip in every 16 (`RsxTextureCache::kHashCheckFlips`) even when its range is reported clean; the entries'
+    flips are spread over the 16, so the forced hashes do not arrive together. A stale blob lives at most 16
+    flips. A forced hash that finds changed bytes after a clean report counts as an unreported change and logs
+    `changed with no reported write` once.
+  - *Explicit marks.* Writes that the watch may not see are marked in the guest memory by hand
+    (`GuestMemory::markWritten`): the bytes a file read delivers, and commit and decommit of guest pages. Ordinary
+    stores (generated PPU code, HLE copies, SPU DMA puts, the inline blit methods) are reported by the watch.
+  - *Untracked cases.* While a capture records, the recording view reports nothing tracked, because it has to read
+    the bytes to record them; a capture made by a build with the option on therefore holds the same texture bytes
+    as one made with it off. Views that do not implement `checkWrites` (test doubles) take the hash path.
+  - *Replay.* The replay view has no OS watch. Its `add` compares each incoming chunk with the page it already
+    holds and stamps only the pages that differ, so a repeated frame reports its unchanged textures clean. That
+    byte compare reads about as many bytes as the hash it replaces, so `tox2_rsxreplay` is not faster with the
+    option on, and can be slightly slower; the gain is in the game and in `tox2_bench rsx-fifo`, where the hash
+    reads cold guest memory.
+  - *Switch.* `TOX2_RSX_WRITE_WATCH=OFF` removes the tracking from the build (no `MEM_WRITE_WATCH`, no marks, no
+    checks) and hashes every validated texture once per epoch, as before. The `release-wwoff` preset builds with it
+    off into `build/release-wwoff`. The three counters on the replay's `builder` line (hash skips, safety hashes,
+    unreported changes) stay 0 then.
+  - *Platform.* The tracking uses `GetWriteWatch`, so it is specific to Windows. A host whose write tracking
+    reports a granularity other than the guest's 4 KiB page (16 KiB pages on Apple silicon or recent Android) would
+    need its own tracking; a mismatch is reported as "range written", so every validation hashes.
 - *Bounds.* Blobs are kept up to 256 MiB; past that the least recently used entries go. Every 32 flips
   entries unused for 600 flips are dropped. A draw that still holds a dropped blob keeps it alive.
 
@@ -1210,8 +1250,9 @@ unit cache: the enabled texture units the builder reused from the unit's previou
 decoded and looked up in full (misses). After it come the write-tracking figures (`TOX2_RSX_WRITE_WATCH`): the
 validations that kept a cached texture because the memory view reported no write to its pages (hash skips, nothing
 hashed), the validations hashed only because the entry's safety-net flip came (safety hashes), and, of those, the ones
-whose bytes had changed with no write reported (unreported changes, a writer the view misses). All three are 0 for now,
-and in a build with the option off. The `render` line gives the
+whose bytes had changed with no write reported (unreported changes, a writer the view misses). Unreported changes
+should stay 0; all three are always 0 in a build with the option off. In the replay, the skips come from the textures
+that repeat unchanged between iterations. The `render` line gives the
 barriers recorded and the transitions that needed none, the rendering instances begun, the state calls recorded and
 skipped, the vertex constant uploads reused (see [Rendering](#rendering)), the texture binds that reused the unit's
 previous bind of the frame (cached) and the ones that ran the full acquire, view and sampler path (full), and the property flags of the memory
@@ -1225,7 +1266,8 @@ The CTest entry `rsx_replay_repeat` runs `tox2_rsxreplay generated/rsx/captures/
 printed. It is registered only when the capture exists. The entries `rsx_replay_builder_counters`,
 `rsx_replay_hash_counters` and `rsx_replay_render_counters` run the same command and pass when the `builder` line holds
 the texture unit cache figures, the `builder` line ends with the hash skip figures, and the `render` line holds the
-texture bind figures.
+texture bind figures. The entry `rsx_replay_hash_skip` runs it too and checks the value of the hash skip figures for the
+build: more than 0 skips and 0 unreported changes with `TOX2_RSX_WRITE_WATCH` on, and all three figures 0 with it off.
 
 The CTest entry `rsx_replay` runs `tox2_rsxreplay` on `generated/rsx/captures/title.tox2cap` with
 the options pinned in `cmake/rsx_replay.cmake`. The capture name `title` is only the name the test looks up; it says nothing about the

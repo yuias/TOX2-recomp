@@ -329,6 +329,19 @@ function(tox2_render_add)
       PASS_REGULAR_EXPRESSION
       "builder: per iteration .*, texture hash skips [0-9]+ \\(safety hashes [0-9]+, unreported changes [0-9]+\\)"
       FAIL_REGULAR_EXPRESSION "error: ")
+    # The tracking skips hashes of unchanged textures only when the option is on; with it off the counters stay 0.
+    if(TOX2_RSX_WRITE_WATCH)
+      set(hash_skip_regex
+        "texture hash skips [1-9][0-9]* \\(safety hashes [0-9]+, unreported changes 0\\)")
+    else()
+      set(hash_skip_regex
+        "texture hash skips 0 \\(safety hashes 0, unreported changes 0\\)")
+    endif()
+    add_test(NAME rsx_replay_hash_skip
+      COMMAND tox2_rsxreplay "${replay_repeat_capture}" --repeat 3 --quiet --no-validation)
+    set_tests_properties(rsx_replay_hash_skip PROPERTIES
+      PASS_REGULAR_EXPRESSION "builder: per iteration .*, ${hash_skip_regex}"
+      FAIL_REGULAR_EXPRESSION "error: ")
     add_test(NAME rsx_replay_render_counters
       COMMAND tox2_rsxreplay "${replay_repeat_capture}" --repeat 3 --quiet --no-validation)
     set_tests_properties(rsx_replay_render_counters PROPERTIES
