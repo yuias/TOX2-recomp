@@ -231,4 +231,12 @@ function(tox2_runtime_add_core)
   add_test(NAME game_options COMMAND tox2_game_options_tests)
   set_tests_properties(game_options PROPERTIES
     PASS_REGULAR_EXPRESSION "game options tests: [0-9]+ passed, 0 failed")
+
+  # Checks the OS write watch itself, so it links no runtime library.
+  add_executable(tox2_write_watch_tests runtime/tests/write_watch_test.cpp)
+  target_compile_options(tox2_write_watch_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+
+  add_test(NAME write_watch_os COMMAND tox2_write_watch_tests)
+  set_tests_properties(write_watch_os PROPERTIES
+    PASS_REGULAR_EXPRESSION "write watch tests: [0-9]+ passed, 0 failed")
 endfunction()
