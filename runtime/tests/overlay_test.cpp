@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -26,12 +27,14 @@
 
 #include "imgui.h"
 #include "imgui_internal.h"
+#include "hle/save_dialog_text.h"
 #include "overlay/debug_overlay.h"
 #include "overlay/imgui_context.h"
 #include "overlay/overlay_model.h"
 #include "overlay/overlay_panels.h"
 #include "overlay/overlay_sources.h"
 #include "overlay/overlay_stack.h"
+#include "overlay/ui_font.h"
 #include "rsx/rsx_unimplemented.h"
 
 namespace {
@@ -1325,6 +1328,102 @@ void testImGuiContextScope() {
     ImGui::DestroyContext(b);
 }
 
+std::filesystem::path exePath() {
+    wchar_t buf[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    return std::filesystem::path(std::wstring(buf, n));
+}
+
+void testUiFontCandidates() {
+    namespace fs = std::filesystem;
+    const auto c = tox2::uiFontCandidates("custom.ttf", "libsre", "elf", "exe");
+    CHECK(c.size() == 4);
+    if (c.size() == 4) {
+        CHECK(c[0] == fs::path("custom.ttf"));
+        CHECK(c[1] == fs::path("libsre") / "SCE-PS3-SR-R-JPN.TTF");
+        CHECK(c[2] == fs::path("elf") / "SCE-PS3-SR-R-JPN.TTF");
+        CHECK(c[3] == fs::path("exe") / "fonts" / "BIZUDPGothic-Regular.ttf");
+    }
+    const auto no_explicit = tox2::uiFontCandidates({}, "libsre", "elf", "exe");
+    CHECK(no_explicit.size() == 3);
+    if (no_explicit.size() == 3) CHECK(no_explicit[0] == fs::path("libsre") / "SCE-PS3-SR-R-JPN.TTF");
+}
+
+void testLoadUiFont() {
+    namespace fs = std::filesystem;
+    const fs::path missing = exePath().parent_path() / "no-such-font.ttf";
+    const fs::path not_a_font = exePath();  // an executable is readable but not a font
+    const fs::path bundled = exePath().parent_path() / "fonts" / "BIZUDPGothic-Regular.ttf";
+
+    const std::vector<fs::path> junk = {missing, not_a_font};
+    CHECK(!tox2::loadUiFont(junk).has_value());
+
+    wchar_t windir[MAX_PATH];
+    const UINT windir_len = GetWindowsDirectoryW(windir, MAX_PATH);
+    const fs::path arial = windir_len > 0 ? fs::path(windir) / "Fonts" / "arial.ttf" : fs::path();
+    std::error_code ec;
+    if (!arial.empty() && fs::exists(arial, ec)) {
+        const std::vector<fs::path> latin_only = {arial};
+        CHECK(!tox2::loadUiFont(latin_only).has_value());
+    } else {
+        std::printf("overlay tests: ui font: arial.ttf check skipped (not found)\n");
+    }
+
+    if (fs::exists(bundled, ec)) {
+        const std::vector<fs::path> list = {missing, not_a_font, arial, bundled};
+        const auto font = tox2::loadUiFont(list);
+        CHECK(font.has_value());
+        if (font) {
+            CHECK(font->path == bundled);
+            CHECK(font->bytes.size() > 1000);
+        }
+    } else {
+        std::printf("overlay tests: ui font: BIZ UDPGothic check skipped (%s not found)\n", bundled.string().c_str());
+    }
+}
+
+void testDialogCodePoints() {
+    tox2::SaveDialogContent content;
+    content.kind = tox2::DialogKind::List;
+    tox2::SaveDialogRow row;
+    row.title = "\xE3\x83\x86\xE3\x82\xB9\xE3\x83\x88 \xE9\x9B\xA3";  // "テスト 難"
+    row.info = "2026/10/18  12:34   5 KB";
+    content.rows.push_back(row);
+    content.message = "line1\nline2";
+    const auto points = tox2::dialogCodePoints(content);
+
+    bool ascii = true;
+    for (ImWchar c = 0x20; c <= 0x7E; ++c) ascii = ascii && points.count(c) == 1;
+    CHECK(ascii);
+    CHECK(points.count(0x30BB) == 1);  // セ
+    CHECK(points.count(0x96E3) == 1);  // 難, only in the row title
+    CHECK(points.count(0x30C6) == 1);  // テ
+    CHECK(points.count('\n') == 0);
+
+    // Every code point of a constant, including one that is not in the content.
+    ImFontGlyphRangesBuilder probe;
+    probe.AddText(tox2::kConfirmOverwrite.data(), tox2::kConfirmOverwrite.data() + tox2::kConfirmOverwrite.size());
+    ImVector<ImWchar> expected;
+    probe.BuildRanges(&expected);
+    bool all = expected.Size > 1;
+    for (int i = 0; i + 1 < expected.Size && expected[i] != 0; i += 2) {
+        for (ImWchar c = expected[i]; c <= expected[i + 1]; ++c) all = all && points.count(c) == 1;
+    }
+    CHECK(all);
+}
+
+void testGlyphRanges() {
+    const ImVector<ImWchar> ranges = tox2::glyphRanges({'A', 'B', 'C', 0x30BB});
+    CHECK(ranges.Size == 5);
+    if (ranges.Size == 5) {
+        CHECK(ranges[0] == 'A');
+        CHECK(ranges[1] == 'C');
+        CHECK(ranges[2] == 0x30BB);
+        CHECK(ranges[3] == 0x30BB);
+        CHECK(ranges[4] == 0);
+    }
+}
+
 // Raw Win32 key message values, so the test needs no windows.h.
 constexpr std::uint32_t kWmKeyDown = 0x0100;
 constexpr std::uint32_t kWmKeyUp = 0x0101;
@@ -1714,6 +1813,10 @@ int main() {
     testRuntimeSources();
     testOverlayStack();
     testImGuiContextScope();
+    testUiFontCandidates();
+    testLoadUiFont();
+    testDialogCodePoints();
+    testGlyphRanges();
 
     tox2::VkContextOptions options;
     options.validation = true;
