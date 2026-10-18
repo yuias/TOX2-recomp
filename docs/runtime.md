@@ -776,16 +776,23 @@ interface, so each module follows a documented policy that never blocks on a per
   `cellMsgDialogClose`. This game opens a dialog without buttons and with a progress bar (a game
   data installation message) just before its trap. The answer is delivered through the cellSysutil
   callback queue, so the guest sees it from `cellSysutilCheckCallback`, as on the console.
-- **Save data**: a save lives in `/dev_hdd0/home/00000001/savedata/<dir name>/`. Error dialogs
-  are logged and their error code is returned, without a dialog object. A save list is never
-  shown; the entry is the one the game's list callback highlights, with RPCS3's fallbacks, and
-  without a choice the call returns `CELL_CANCEL`. `cellSaveDataDelete2` returns `CELL_CANCEL`.
-  `cellSaveDataListAutoLoad`, `FixedLoad2` and `FixedSave2` have no list either: the list of saves
-  that match the prefixes (sorted, as `ListLoad2` sorts it) goes to the game's `funcFixed`, which
-  names the save or ends the call with an error result. The game's boot call answers
-  `CELL_SAVEDATA_ERR_NODATA`, and the handler returns `CELL_SAVEDATA_ERROR_CBRESULT` without a
-  dialog, which the game counts as success. The confirmation that `FixedLoad2` and `FixedSave2` ask
-  for with option NONE counts as yes. Secure files are stored in plain text.
+- **Save data**: a save lives in `/dev_hdd0/home/00000001/savedata/<dir name>/`. The dialogs go
+  through a driver (`hle/save_dialog.h`). `cellSaveDataListSave2` and `ListLoad2` show a list of the
+  saves the game's list callback offers, with a new-data row when it asks for one, then a Yes/No
+  confirmation for the picked row; No returns to the list on that row and back from the list returns
+  `CELL_CANCEL`. Without a window the Auto policy takes the place of the player: it opens the list on
+  the row the game's callback focuses (row 0 when nothing is focused), answers Yes, answers back
+  for an empty list, and answers OK to messages without showing them. `cellSaveDataListAutoLoad`,
+  `FixedLoad2` and `FixedSave2` have no list: the list of saves that match the prefixes (sorted, as
+  `ListLoad2` sorts it) goes to the game's `funcFixed`, which names the save or ends the call with an
+  error result. With option NONE, `FixedLoad2` and `FixedSave2` then ask a Yes/No confirmation (the
+  load or overwrite question for a listed name, the new-data question otherwise); anything but Yes
+  returns `CELL_CANCEL`. The game's boot call answers `CELL_SAVEDATA_ERR_NODATA`, and the handler
+  returns `CELL_SAVEDATA_ERROR_CBRESULT` without a dialog, which the game counts as success. An
+  error result of a callback with error dialogs requested (always for the list and fixed functions)
+  logs its English text and shows an OK message with the Japanese text; the call returns
+  `CELL_SAVEDATA_ERROR_CBRESULT` whatever the player does. `cellSaveDataDelete2` returns
+  `CELL_CANCEL`. Secure files are stored in plain text.
 - **Trophies**: no trophy pack is installed from the network and no notification is shown. The
   pack is read for its trophy list, and the unlock state is kept as a text file in the trophy
   directory under `/dev_hdd0/home/00000001`. The registration status callbacks run inside

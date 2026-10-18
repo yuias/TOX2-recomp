@@ -6378,7 +6378,8 @@ struct ScriptedSaveDialog final : tox2::SaveDialogDriver {
         list_answers.clear();
         message_answers.clear();
     }
-    bool interactive() const override { return false; }
+    bool is_interactive = false;
+    bool interactive() const override { return is_interactive; }
     std::optional<std::int32_t> showList(const tox2::SaveListRequest& request) override {
         ListCall call;
         call.kind = request.content->list_kind;
@@ -6949,6 +6950,103 @@ void testCellSaveData() {
         g_save.focus_dir = missing_dir;
         CHECK(run(ListLoad) == 1 && dlg.lists.size() == 1 && dlg.lists[0].initial_row == 0 &&
               dlg.lists[0].titles.size() == 3 && g_save.stat_calls == 0);
+
+        // FixedSave2 / FixedLoad2 with option NONE: the confirmation depends on whether the name is listed.
+        // OK_LAST from funcStat ends a call after the confirmation without writing anything.
+        auto fixedSetup = [&](std::uint32_t name) {
+            g_save = SaveScript{};
+            g_save.fixed_name = name;
+            g_save.stat_result = 1;
+            dlg.reset();
+        };
+        put(fixed_name, "FX_SAVE01");
+        fixedSetup(fixed_name);
+        dlg.message_answers = {SaveMessageResult::No};
+        lines.clear();
+        CHECK(fixedSave() == 1);
+        CHECK(dlg.lists.empty() && dlg.messages.size() == 1 && dlg.message_kinds[0] == DialogKind::YesNo);
+        CHECK(dlg.messages[0].starts_with(tox2::kConfirmOverwrite) &&
+              dlg.messages[0].find("My title") != std::string::npos &&
+              dlg.messages[0].find("M-sub") != std::string::npos && dlg.messages[0].find("KB") != std::string::npos);
+        CHECK(g_save.fixed_calls == 1 && g_save.stat_calls == 0);  // No: funcFixed is not asked again
+        CHECK(logged("confirmation for 'FX_SAVE01' counted as NO"));
+        fixedSetup(fixed_name);
+        dlg.message_answers = {SaveMessageResult::Yes};
+        CHECK(fixedLoad() == 0 && dlg.messages.size() == 1 && dlg.messages[0].starts_with(tox2::kConfirmLoad) &&
+              g_save.stat_calls == 1 && g_save.stat_dir == "FX_SAVE01" && g_save.stat_is_new == 0);
+
+        put(other_name, "FX_NONE001");
+        fixedSetup(other_name);
+        dlg.message_answers = {SaveMessageResult::Yes};
+        CHECK(fixedLoad() == 0 && dlg.messages.size() == 1 && dlg.messages[0] == tox2::kConfirmLoadNew &&
+              g_save.stat_calls == 1 && g_save.stat_dir == "FX_NONE001" && g_save.stat_is_new == 1);
+        fixedSetup(other_name);
+        dlg.message_answers = {SaveMessageResult::Yes};
+        CHECK(fixedSave() == 0 && dlg.messages.size() == 1 && dlg.messages[0] == tox2::kConfirmSaveNew);
+        fixedSetup(other_name);
+        dlg.message_answers = {SaveMessageResult::No};
+        CHECK(fixedLoad() == 1 && g_save.stat_calls == 0);
+
+        fixedSetup(fixed_name);
+        dlg.message_answers = {SaveMessageResult::Failed};
+        CHECK(fixedSave() == kErrInternal && g_save.stat_calls == 0);
+
+        // NOCONFIRM and ListAutoLoad ask nothing.
+        fixedSetup(fixed_name);
+        g_save.fixed_option = 1;
+        CHECK(fixedLoad() == 0 && dlg.messages.empty() && g_save.stat_calls == 1);
+        fixedSetup(fixed_name);
+        CHECK(listAutoLoad(0) == 0 && dlg.messages.empty() && g_save.stat_calls == 1);
+
+        // Error dialogs: one OK message per error with the Japanese text; the result is ignored.
+        auto errorSetup = [&](std::int32_t stat_result) {
+            g_save = SaveScript{};
+            g_save.stat_result = stat_result;
+            dlg.reset();
+            lines.clear();
+        };
+        put(dir_addr, "SAVE0001");
+        tox2::resetCellSaveData();
+        errorSetup(-4);
+        dlg.message_answers = {SaveMessageResult::Failed};
+        CHECK(autoLoad(1) == kErrCbResult);
+        CHECK(dlg.messages.size() == 1 && dlg.messages[0] == tox2::kErrorNoData &&
+              dlg.message_kinds[0] == DialogKind::Ok);
+        CHECK(logged("error dialog (headless, not shown): there is no save data"));
+        dlg.is_interactive = true;
+        errorSetup(-4);
+        CHECK(autoLoad(1) == kErrCbResult && dlg.messages.size() == 1 &&
+              logged("error dialog: there is no save data") && !logged("headless"));
+        dlg.is_interactive = false;
+        errorSetup(-2);
+        CHECK(autoLoad(1) == kErrCbResult && dlg.messages.size() == 1 && dlg.messages[0] == tox2::kErrorFailure);
+        errorSetup(-3);
+        CHECK(autoLoad(1) == kErrCbResult && dlg.messages.size() == 1 && dlg.messages[0] == tox2::kErrorBroken);
+        errorSetup(-4);
+        CHECK(autoLoad(0) == kErrCbResult && dlg.messages.empty() && logged("no dialog requested"));
+        errorSetup(9);  // a result without a dialog is a parameter error
+        CHECK(autoLoad(1) == kErrParam && dlg.messages.empty());
+        errorSetup(-5);  // the game's message pointer is null: the dialog opens with an empty text
+        CHECK(autoLoad(1) == kErrCbResult && dlg.messages.size() == 1 && dlg.messages[0].empty());
+        errorSetup(-1);
+        CHECK(autoLoad(1) == kErrCbResult && dlg.messages.size() == 1 &&
+              dlg.messages[0].starts_with(tox2::kErrorNoSpace) && dlg.messages[0].find("KB") != std::string::npos);
+
+        // ListSave2 and the Fixed functions always ask for the error dialog.
+        errorSetup(0);
+        g_save.list_result = -4;
+        put(prefix, "FX_");
+        CHECK(run(ListSave) == kErrCbResult && dlg.messages.size() == 1 && dlg.messages[0] == tox2::kErrorNoData);
+        errorSetup(0);
+        g_save.fixed_result = -3;
+        CHECK(fixedLoad() == kErrCbResult && dlg.messages.size() == 1 && dlg.messages[0] == tox2::kErrorBroken);
+
+        // NOREPEAT shows the same error once.
+        tox2::resetCellSaveData();
+        errorSetup(-4);
+        CHECK(autoLoad(2) == kErrCbResult && autoLoad(2) == kErrCbResult && dlg.messages.size() == 1);
+        errorSetup(-3);  // a different error shows again
+        CHECK(autoLoad(2) == kErrCbResult && dlg.messages.size() == 1 && dlg.messages[0] == tox2::kErrorBroken);
 
         tox2::resetSaveDialog();
         tox2Write32(base, new_data + 8, 0);

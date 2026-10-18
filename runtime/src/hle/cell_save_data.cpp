@@ -17,16 +17,20 @@
 // core/param_sfo) next to the files. Files are collected in memory and committed through a
 // ".working_<dir>" directory and a ".backup_<dir>" swap, as RPCS3 does.
 //
-// Headless policy (RPCS3 opens dialogs and waits for the user; nothing here can):
-//  - Error dialogs (errDialog of the Auto functions; ListSave2/ListLoad2 always ask for one): the
-//    text is logged and the error code is returned, with RPCS3's NOREPEAT bookkeeping. No dialog
-//    object is created, so the game sees no DRAWING_BEGIN/END events for it.
-//  - The save list of ListSave2/ListLoad2 and its Yes/No confirmation go through the SaveDialogDriver
-//    (hle/save_dialog.h). Without a window the Auto policy opens the list on the row it would focus
-//    (funcList's focus position; row 0 when nothing is focused) and answers Yes; with an empty list it
-//    answers back, which returns CELL_CANCEL, as RPCS3 does without a save dialog.
-//  - FixedLoad2/FixedSave2 with option NONE ask for a confirmation in RPCS3; it counts as YES. They
-//    always ask for error dialogs (errDialog ALWAYS), like the List functions.
+// Dialogs (RPCS3 opens them and waits for the user) all go through the SaveDialogDriver
+// (hle/save_dialog.h); with a window the player answers them, without one the Auto policy does:
+//  - The save list of ListSave2/ListLoad2 and the Yes/No confirmation after a pick. A No returns to
+//    the list on the picked row; back from the list returns CELL_CANCEL. Auto opens the list on the
+//    row it would focus (funcList's focus position; row 0 when nothing is focused) and answers Yes;
+//    with an empty list it answers back, which returns CELL_CANCEL, as RPCS3 does without a save
+//    dialog.
+//  - FixedLoad2/FixedSave2 with option NONE ask for a Yes/No confirmation (the overwrite or load
+//    question when the name is listed, the new-data question otherwise); anything but Yes returns
+//    CELL_CANCEL without asking funcFixed again.
+//  - Error dialogs (errDialog of the Auto functions; ListSave2/ListLoad2/FixedLoad2/FixedSave2 always
+//    ask for one): the English text is logged, an OK message with the Japanese text is shown through
+//    the driver, and CBRESULT is returned whatever the player does, with RPCS3's NOREPEAT bookkeeping.
+//    Auto answers OK without showing anything.
 //  - cellSaveDataDelete2 only opens a selection UI in RPCS3, so it returns CELL_CANCEL.
 //
 // Deviations from RPCS3:
@@ -481,9 +485,11 @@ std::int32_t runCallback(OpState& s, std::uint32_t func, std::uint32_t get, std:
     return read32s(s, s.result + kResultResult);
 }
 
-// RPCS3 `display_callback_result_error_message`, minus the blocking dialog (see the header).
+// RPCS3 `display_callback_result_error_message`. The log text is English; the dialog shows the Japanese text
+// of saveErrorText(), or the game's own message for ERR_INVALID.
 std::uint32_t reportCallbackError(const OpState& s, std::int32_t result, std::uint32_t err_dialog) {
     std::string msg;
+    std::string invalid_msg;  // empty when the game's pointer is null
     switch (result) {
         case kCbErrNoSpace:
             msg = std::format("not enough space ({} KB needed)", read32s(s, s.result + kResultErrNeedSizeKb));
@@ -493,7 +499,8 @@ std::uint32_t reportCallbackError(const OpState& s, std::int32_t result, std::ui
         case kCbErrNoData: msg = "there is no save data"; break;
         case kCbErrInvalid: {
             const std::uint32_t text = tox2Read32(s.base, s.result + kResultInvalidMsg);
-            msg = text != 0 ? getText(s.base, text, 256) : std::string("invalid");
+            if (text != 0) invalid_msg = getText(s.base, text, 256);
+            msg = text != 0 ? invalid_msg : std::string("invalid");
             break;
         }
         default:
@@ -504,8 +511,23 @@ std::uint32_t reportCallbackError(const OpState& s, std::int32_t result, std::ui
     if (err_dialog == kErrDialogNoRepeat) g_last_error_dialog = result;
     if (err_dialog == kErrDialogNone || (err_dialog == kErrDialogNoRepeat && repeat)) {
         logInfo("tox2: savedata: callback result {}: {} (no dialog requested)", result, msg);
+        return kErrorCbResult;
+    }
+
+    SaveDialogDriver& driver = saveDialogDriver();
+    if (driver.interactive()) {
+        logWarn("tox2: savedata: error dialog: {}", msg);
     } else {
         logWarn("tox2: savedata: error dialog (headless, not shown): {}", msg);
+    }
+    // The result is ignored, as in RPCS3: the game sees CBRESULT whether or not the player read the message.
+    const std::optional<std::string> text =
+            saveErrorText(result, read32s(s, s.result + kResultErrNeedSizeKb), invalid_msg);
+    if (text) {
+        auto content = std::make_shared<SaveDialogContent>();
+        content->kind = DialogKind::Ok;
+        content->message = *text;
+        driver.showMessage(std::move(content));
     }
     return kErrorCbResult;
 }
@@ -691,7 +713,26 @@ ListResult runFixedStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32
         return fail(paramError(81, std::format("(option={:#x})", option)));
     }
     if (option == kFixedOptionNone && op != Op::ListAutoLoad) {
-        logInfo("tox2: savedata: {}: confirmation for '{}' counted as YES", opName(op), name);
+        const bool saving = op == Op::FixedSave;
+        const auto found = std::find_if(listing.entries.begin(), listing.entries.end(),
+                                        [&](const SaveEntry& e) { return e.dir_name == name; });
+        auto confirm = std::make_shared<SaveDialogContent>();
+        confirm->kind = DialogKind::YesNo;
+        confirm->list_kind = saving ? SaveListKind::Save : SaveListKind::Load;
+        if (found == listing.entries.end()) {
+            confirm->message = std::string(saving ? kConfirmSaveNew : kConfirmLoadNew);
+        } else {
+            confirm->message = entryConfirmText(saving ? kConfirmOverwrite : kConfirmLoad, *found);
+        }
+        const SaveMessageResult answer = saveDialogDriver().showMessage(std::move(confirm));
+        if (answer == SaveMessageResult::Failed) {
+            logError("tox2: savedata: {}: the confirmation could not be shown", opName(op));
+            return fail(kErrorInternal);
+        }
+        const bool yes = answer == SaveMessageResult::Yes;
+        logInfo("tox2: savedata: {}: confirmation for '{}' counted as {}", opName(op), name, yes ? "YES" : "NO");
+        // Declining ends the call; funcFixed is not asked again.
+        if (!yes) return fail(kCancel);
     }
 
     if (listing.dir_num != 0) listing.clearBuf(base);  // funcStat gets a clean buffer
