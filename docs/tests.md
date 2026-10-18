@@ -11,6 +11,7 @@ files are registered only when those are configured, and configuration prints wh
 | `decrypt_eboot` | `tox2_decrypt self` on the real `EBOOT.BIN`; the output must match the pin of `EBOOT.elf` (the file is written under `build/<preset>/decrypt_test`) | `-EbootBin` |
 | `decrypt_libsre` | `tox2_decrypt pup` on the real `PS3UPDAT.PUP`; the output must match the pin of `libsre.prx` | `-Pup` |
 | `decrypt_libsre_reloc` | `tox2_decrypt reloc` on `generated/inputs/libsre.prx` at `0x011d0000`; the output must match the pin of `libsre.reloc.elf` (written under `build/<preset>/decrypt_test`). The input file is written by the build step before this test runs | `-Pup` |
+| `decrypt_font` | `tox2_decrypt pup --raw` on the real `PS3UPDAT.PUP`; the output must match the pin of `SCE-PS3-SR-R-JPN.TTF` | `-Pup` |
 | `runtime_version`, `runtime_musttail` | The runtime stub starts, and the compiler supports `musttail` | - |
 | `tools_unittest` | The Python unit tests (below). CTest passes `TOX2_EBOOT_ELF` and `TOX2_LIBSRE_ELF` to them, so they include the real-executable tests when `-EbootElf` or `-EbootBin` is given, and the real-libsre tests when `-Pup` is given | - |
 | `ppu_header_check`, `ppu_semantics` | Contract header and the semantics harness (see [Emitting C](emitter.md)) | - |

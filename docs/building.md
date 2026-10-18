@@ -114,6 +114,7 @@ both presets, never into the game directory):
 | `generated/inputs/EBOOT.elf` | The decrypted `EBOOT.BIN` | `-EbootBin` is given |
 | `generated/inputs/libsre.prx` | `dev_flash/sys/external/libsre.sprx`, extracted from the PUP and decrypted | `-Pup` is given |
 | `generated/inputs/libsre.reloc.elf` | `libsre.prx` placed at the guest address `0x011d0000` with its relocations applied (`tox2_decrypt reloc`). `emit` and `recover` read it, and `tox2_game` loads it | `-Pup` is given |
+| `generated/inputs/SCE-PS3-SR-R-JPN.TTF` | `dev_flash/data/font/SCE-PS3-SR-R-JPN.TTF`, the firmware's Japanese system font, extracted from the PUP as stored (`tox2_decrypt pup --raw`). The save dialog draws its text with it | `-Pup` is given |
 
 Decryption runs at build time, not at configure time, and again only when an input file or the tool
 has changed. The produced `EBOOT.elf` is the default of `TOX2_EBOOT_ELF`, so `emit`, the Python
@@ -157,29 +158,31 @@ when one differs from the pin, and the output pins below catch a real problem.
   address (`0x011d0000`, a multiple of 64 KiB) comes from the `libsre_reloc_elf` entry. Every
   relocation record must apply to bytes that equal the value for the unrelocated, pre-linked file,
   and an unknown relocation type is an error.
-- The output: its size and SHA-256 must match the `eboot_elf`, `libsre_prx` or `libsre_reloc_elf` entry
-  of `config/target.json`. On a mismatch the tool prints both values and writes nothing, and an existing
+- The output: its size and SHA-256 must match the `eboot_elf`, `libsre_prx`, `libsre_reloc_elf` or
+  `jpn_font` entry of `config/target.json`. On a mismatch the tool prints both values and writes nothing, and an existing
   output file stays as it was. A match is written as `<name>.part` and then renamed.
 
 NPDRM SELFs, debug SELFs and 32-bit (SPU) SELFs are refused with an error.
 
 ### The tool
 
-`tox2_decrypt` has four commands. The build runs `self`, `pup` and `reloc` with the pins read from
+`tox2_decrypt` has four commands. The build runs `self`, `pup` (twice) and `reloc` with the pins read from
 `config/target.json`; running `tox2_decrypt` without arguments prints the usage text and exits with 2.
 
 ```text
 tox2_decrypt self --keys DIR --in EBOOT.BIN --out EBOOT.elf --expect-size N --expect-sha256 HEX
                   [--expect-input-sha256 HEX]
 tox2_decrypt pup  --keys DIR --in PS3UPDAT.PUP --path PATH --firmware VERSION --out libsre.prx
-                  --expect-size N --expect-sha256 HEX
+                  --expect-size N --expect-sha256 HEX [--raw]
 tox2_decrypt reloc --in libsre.prx --base 0xADDR --out libsre.reloc.elf --expect-size N
                   --expect-sha256 HEX [--expect-input-sha256 HEX]
 tox2_decrypt keys --keys DIR
 ```
 
 `--keys` is the directory with `key_vault.h` and `key_vault.cpp`. `pup` finds the file `PATH` (the
-build uses `dev_flash/sys/external/libsre.sprx`) in the `dev_flash_*` packages of the PUP. `keys`
+build uses `dev_flash/sys/external/libsre.sprx`) in the `dev_flash_*` packages of the PUP. `--raw`
+(a flag without a value) writes the extracted file as stored, with no SELF decryption, and applies the
+same size and SHA-256 check; the build uses it for the font, which is a plain TrueType file. `keys`
 prints how many keys of each type were read, never the keys. `reloc` needs no keys: it reads the
 unrelocated `libsre.prx`, applies the relocations for the base `--base` (`0x`-prefixed hexadecimal, a
 multiple of `0x10000`; the build passes the pinned `0x011d0000`) and prints
@@ -187,7 +190,7 @@ multiple of `0x10000`; the build passes the pinned `0x011d0000`) and prints
 before the pin check. A successful `self`, `pup` or `reloc` prints
 `<name>: <size> bytes, sha256 <hex>: matches the pin`. Every error is one line that starts with
 `error: `, and no key bytes appear in any output. The exit code is 0 on success, 1 on a failure and 2
-on a usage error. The tests `decrypt_core`, `decrypt_eboot`, `decrypt_libsre` and `decrypt_libsre_reloc` are listed in
+on a usage error. The tests `decrypt_core`, `decrypt_eboot`, `decrypt_libsre`, `decrypt_libsre_reloc` and `decrypt_font` are listed in
 [Tests](tests.md).
 
 ## What gets built
@@ -284,7 +287,7 @@ Unit tests plus the Python tests that read the real executable:
 pwsh -NoProfile -File tools/build.ps1 -Preset release -EbootBin <game-dir>/PS3_GAME/USRDIR/EBOOT.BIN -Pup <path>/PS3UPDAT.PUP -Test
 ```
 
-This also runs `decrypt_eboot`, `decrypt_libsre` and `decrypt_libsre_reloc`, and the Python tests that
+This also runs `decrypt_eboot`, `decrypt_libsre`, `decrypt_libsre_reloc` and `decrypt_font`, and the Python tests that
 read the real `libsre.reloc.elf`. With an `EBOOT.elf` that you already have,
 `-EbootElf <path-to-EBOOT.elf>` replaces `-EbootBin` and `-Pup`.
 

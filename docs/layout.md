@@ -28,7 +28,7 @@
 | `cmake/Audio.cmake` | Audio targets and tests (`audio_core`, `audio_wasapi`) |
 | `tools/build.ps1` | Windows build wrapper |
 | `tools/tox2_decrypt/` | `tox2_decrypt`: decrypts `EBOOT.BIN`, extracts `libsre.prx` from a firmware `PS3UPDAT.PUP` and relocates it to `libsre.reloc.elf` (`prx_reloc.*`), with its synthetic unit tests; see [Decrypting the inputs](building.md#decrypting-the-inputs) |
-| `cmake/Decrypt.cmake`, `cmake/rpcs3_keys.cmake` | The `tox2_decrypt` targets, the `tox2_inputs` target that writes `generated/inputs` and the tests `decrypt_core`, `decrypt_eboot`, `decrypt_libsre`, `decrypt_libsre_reloc`; and the pin of the two RPCS3 key files and their download |
+| `cmake/Decrypt.cmake`, `cmake/rpcs3_keys.cmake` | The `tox2_decrypt` targets, the `tox2_inputs` target that writes `generated/inputs` and the tests `decrypt_core`, `decrypt_eboot`, `decrypt_libsre`, `decrypt_libsre_reloc`, `decrypt_font`; and the pin of the two RPCS3 key files and their download |
 | `tools/ps3tool.py` | Command-line entry point for the analysis tools |
 | `tools/ps3recomp/` | ELF/PRX parsing (module info of a relocated PRX), PPU decoder and formatter, probe, Ghidra export, diff and summary, function recovery (seeds, partition, jump tables, coverage, syscall resolution), name table generator |
 | `tools/ghidra/` | Java `GhidraScript`s run by `ghidra-export` |

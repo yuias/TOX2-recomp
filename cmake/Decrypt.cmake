@@ -10,7 +10,7 @@ set(TOX2_PUP "" CACHE FILEPATH
 # Shared by both presets: the decrypted content is identical.
 set(TOX2_INPUTS_DIR "${CMAKE_SOURCE_DIR}/generated/inputs")
 
-# tox2_decrypt: the offline decryption tool for EBOOT.BIN and the firmware's libsre.sprx, its synthetic
+# tox2_decrypt: the offline decryption tool for EBOOT.BIN and the firmware's libsre.sprx and Japanese font, its synthetic
 # unit tests, and the build steps that produce generated/inputs. Call after tox2_runtime_add_core() and
 # enable_testing().
 function(tox2_decrypt_add)
@@ -68,6 +68,9 @@ function(tox2_decrypt_add)
   string(JSON libsre_reloc_base GET "${target_text}" libsre_reloc_elf base)
   string(JSON libsre_reloc_size GET "${target_text}" libsre_reloc_elf size)
   string(JSON libsre_reloc_sha256 GET "${target_text}" libsre_reloc_elf sha256)
+  string(JSON jpn_font_path GET "${target_text}" jpn_font path)
+  string(JSON jpn_font_size GET "${target_text}" jpn_font size)
+  string(JSON jpn_font_sha256 GET "${target_text}" jpn_font sha256)
 
   set(key_files "${TOX2_RPCS3_KEYS_DIR}/key_vault.h" "${TOX2_RPCS3_KEYS_DIR}/key_vault.cpp")
   set(libsre_path "dev_flash/sys/external/libsre.sprx")
@@ -119,6 +122,22 @@ function(tox2_decrypt_add)
     add_test(NAME decrypt_libsre_reloc COMMAND tox2_decrypt ${libsre_reloc_args} --out "${test_dir}/libsre.reloc.elf")
     set_tests_properties(decrypt_libsre_reloc PROPERTIES
       PASS_REGULAR_EXPRESSION "sha256 ${libsre_reloc_sha256}: matches the pin"
+      TIMEOUT 120)
+
+    # A plain TrueType file in the same packages: no SELF decryption, so --raw.
+    set(font_name SCE-PS3-SR-R-JPN.TTF)
+    set(font_args pup --keys "${TOX2_RPCS3_KEYS_DIR}" --in "${TOX2_PUP}" --path ${jpn_font_path}
+      --firmware ${libsre_firmware} --expect-size ${jpn_font_size} --expect-sha256 ${jpn_font_sha256} --raw)
+    add_custom_command(OUTPUT "${TOX2_INPUTS_DIR}/${font_name}"
+      COMMAND tox2_decrypt ${font_args} --out "${TOX2_INPUTS_DIR}/${font_name}"
+      DEPENDS tox2_decrypt "${TOX2_PUP}" ${key_files}
+      COMMENT "Extracting the Japanese system font from the PUP to generated/inputs/${font_name}"
+      VERBATIM)
+    list(APPEND input_outputs "${TOX2_INPUTS_DIR}/${font_name}")
+
+    add_test(NAME decrypt_font COMMAND tox2_decrypt ${font_args} --out "${test_dir}/${font_name}")
+    set_tests_properties(decrypt_font PROPERTIES
+      PASS_REGULAR_EXPRESSION "sha256 ${jpn_font_sha256}: matches the pin"
       TIMEOUT 120)
   endif()
 

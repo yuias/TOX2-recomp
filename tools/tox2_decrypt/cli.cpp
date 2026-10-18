@@ -28,7 +28,7 @@ constexpr std::string_view kUsage =
         "  tox2_decrypt self --keys DIR --in EBOOT.BIN --out EBOOT.elf --expect-size N --expect-sha256 HEX\n"
         "                    [--expect-input-sha256 HEX]\n"
         "  tox2_decrypt pup  --keys DIR --in PS3UPDAT.PUP --path PATH --firmware VERSION --out libsre.prx\n"
-        "                    --expect-size N --expect-sha256 HEX\n"
+        "                    --expect-size N --expect-sha256 HEX [--raw]\n"
         "  tox2_decrypt reloc --in libsre.prx --base 0xADDR --out libsre.reloc.elf --expect-size N\n"
         "                    --expect-sha256 HEX [--expect-input-sha256 HEX]\n"
         "  tox2_decrypt keys --keys DIR\n";
@@ -36,6 +36,7 @@ constexpr std::string_view kUsage =
 struct OptionSpec {
     std::string_view name;
     bool required;
+    bool flag = false;  // takes no value; present in the map with an empty string
 };
 
 using OptionMap = std::map<std::string, std::string, std::less<>>;
@@ -57,7 +58,7 @@ int usageError(std::string& err, std::string_view message) {
 // error; the message names the option, never a value.
 bool parseOptions(std::span<const std::string_view> args, std::span<const OptionSpec> specs, OptionMap& options,
                   std::string& error) {
-    for (std::size_t i = 0; i < args.size(); i += 2) {
+    for (std::size_t i = 0; i < args.size();) {
         const std::string_view name = args[i];
         const OptionSpec* spec = nullptr;
         for (const OptionSpec& candidate : specs) {
@@ -69,14 +70,16 @@ bool parseOptions(std::span<const std::string_view> args, std::span<const Option
             error = "unknown option " + std::string(name);
             return false;
         }
-        if (i + 1 >= args.size()) {
+        const std::size_t width = spec->flag ? 1 : 2;
+        if (i + width > args.size()) {
             error = "option " + std::string(name) + " needs a value";
             return false;
         }
-        if (!options.emplace(std::string(spec->name), std::string(args[i + 1])).second) {
+        if (!options.emplace(std::string(spec->name), spec->flag ? std::string() : std::string(args[i + 1])).second) {
             error = "option " + std::string(name) + " given twice";
             return false;
         }
+        i += width;
     }
     for (const OptionSpec& spec : specs) {
         if (spec.required && !options.contains(std::string(spec.name))) {
@@ -282,9 +285,9 @@ int runSelf(std::span<const std::string_view> args, std::string& out, std::strin
 }
 
 int runPup(std::span<const std::string_view> args, std::string& out, std::string& err) {
-    static constexpr OptionSpec kSpecs[] = {{"keys", true},         {"in", true},  {"path", true},
-                                            {"firmware", true},     {"out", true}, {"expect-size", true},
-                                            {"expect-sha256", true}};
+    static constexpr OptionSpec kSpecs[] = {{"keys", true},          {"in", true},        {"path", true},
+                                            {"firmware", true},      {"out", true},       {"expect-size", true},
+                                            {"expect-sha256", true}, {"raw", false, true}};
     OptionMap options;
     std::string error;
     if (!parseOptions(args, kSpecs, options, error)) {
@@ -320,6 +323,10 @@ int runPup(std::span<const std::string_view> args, std::string& out, std::string
     }
     out += in_name + ": firmware " + version + ", " + path + " in " + extract.package + "\n";
 
+    // Plain files such as fonts are stored in the package without SELF encryption.
+    if (options.contains("raw")) {
+        return finishOutput(options, pin, extract.data, out, err);
+    }
     Bytes elf;
     SelfInfo info;
     if (!decryptSelf(extract.data, keys, elf, info, error)) {

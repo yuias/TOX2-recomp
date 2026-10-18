@@ -42,6 +42,7 @@ using test::TarBuildEntry;
 
 constexpr std::uint16_t kRevision = 0x001C;
 constexpr const char* kLibsrePath = "dev_flash/sys/external/libsre.sprx";
+constexpr const char* kFontPath = "dev_flash/data/font/SCE-PS3-SR-R-JPN.TTF";
 constexpr std::size_t kSegmentOffset = 0x100;
 constexpr std::size_t kSegmentSize = 0x300;
 
@@ -104,6 +105,7 @@ struct Fixture {
     Bytes self_file;
     Bytes expected_elf;
     Bytes pup_file;
+    Bytes font_file;  // plain (non-SELF) file stored in the PUP next to the SELF
 
     Fixture() {
         static std::atomic<int> counter{0};
@@ -145,7 +147,9 @@ struct Fixture {
         std::copy(segment.begin(), segment.end(), expected_elf.begin() + kSegmentOffset);
         writeFile(dir / "EBOOT.BIN", self_file);
 
-        const Bytes inner = buildTar({tarEntry("dev_flash/", {}, '5'), tarEntry(kLibsrePath, self_file, '0')});
+        font_file = patternBytes(0x200, 77);
+        const Bytes inner = buildTar({tarEntry("dev_flash/", {}, '5'), tarEntry(kLibsrePath, self_file, '0'),
+                                      tarEntry(kFontPath, font_file, '0')});
         const Bytes package = buildScePackage(vault, patternBytes(0x40, 1), patternBytes(0x40, 2), inner).file;
         const Bytes outer = buildTar({tarEntry("dev_flash_000.tar.aa.2026_01_08_191610", package, '0')});
         pup_file = buildPup(vault, {{0x100, textBytes("4.93\n")}, {0x300, outer}});
@@ -314,6 +318,60 @@ TOX2_TEST(cliPup) {
     const Result missing = run(args);
     CHECK(missing.code == 1);
     CHECK(contains(missing.err, "dev_flash/sys/external/none.sprx"));
+}
+
+TOX2_TEST(cliPupRaw) {
+    const Fixture fixture;
+    std::vector<std::string> args = fixture.pupArgs("font.ttf");
+    setOption(args, "--path", kFontPath);
+    setOption(args, "--expect-size", std::to_string(fixture.font_file.size()));
+    setOption(args, "--expect-sha256", sha256Hex(fixture.font_file));
+
+    // Without --raw the plain file is not a SELF.
+    const Result plain = run(args);
+    CHECK(plain.code == 1);
+    CHECK(startsWithError(plain.err));
+    CHECK(contains(plain.err, "bad magic"));
+    CHECK(!fs::exists(fixture.dir / "font.ttf"));
+
+    // With --raw, in any position, the archived bytes are written unchanged and pinned.
+    std::vector<std::string> raw = args;
+    raw.push_back("--raw");
+    Result result = run(raw);
+    CHECK(result.code == 0);
+    CHECK(result.err.empty());
+    CHECK(contains(result.out, "font.ttf: " + std::to_string(fixture.font_file.size()) + " bytes, sha256 " +
+                                       sha256Hex(fixture.font_file) + ": matches the pin\n"));
+    CHECK(readBytes(fixture.dir / "font.ttf") == fixture.font_file);
+
+    raw = args;
+    raw.insert(raw.begin() + 1, "--raw");
+    fs::remove(fixture.dir / "font.ttf");
+    CHECK(run(raw).code == 0);
+    CHECK(readBytes(fixture.dir / "font.ttf") == fixture.font_file);
+
+    // A pin mismatch writes nothing and leaves an existing output alone.
+    raw = args;
+    raw.push_back("--raw");
+    setOption(raw, "--expect-sha256", flipLastDigit(sha256Hex(fixture.font_file)));
+    writeText(fixture.dir / "font.ttf", "previous");
+    result = run(raw);
+    CHECK(result.code == 1);
+    CHECK(startsWithError(result.err));
+    CHECK(readBytes(fixture.dir / "font.ttf") == textBytes("previous"));
+
+    // --raw takes no value and may not be repeated.
+    raw = args;
+    raw.insert(raw.end(), {"--raw", "--raw"});
+    CHECK(run(raw).code == 2);
+
+    // A SELF extracted with --raw is the encrypted file, not the ELF.
+    raw = fixture.pupArgs("libsre.raw");
+    setOption(raw, "--expect-size", std::to_string(fixture.self_file.size()));
+    setOption(raw, "--expect-sha256", sha256Hex(fixture.self_file));
+    raw.push_back("--raw");
+    CHECK(run(raw).code == 0);
+    CHECK(readBytes(fixture.dir / "libsre.raw") == fixture.self_file);
 }
 
 TOX2_TEST(cliKeys) {
