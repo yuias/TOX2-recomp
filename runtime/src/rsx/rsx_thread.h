@@ -156,6 +156,8 @@ public:
     // write.
     void enableFrameBuilder();
     bool frameBuilderEnabled() const { return builder_ != nullptr; }
+    // The builder's counters, or null while the frame builder is off. Read from the thread that pumps.
+    const RsxBuilderStats* builderStats() const { return builder_ != nullptr ? &builder_->stats() : nullptr; }
     // True while a frame builder exists, so a capture can be requested. Any thread.
     bool frameBuilderLive() const { return builder_live_.load(std::memory_order_acquire); }
     // Drops the frame builder again. Only while nothing was written yet and no capture is enabled.

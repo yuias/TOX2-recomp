@@ -1262,16 +1262,27 @@ bool placeFifoMemory(const tox2::RsxCaptureReader& reader, std::uint8_t* base, s
     return true;
 }
 
+// One 8-byte read per 64-byte line of `words`; the caller compares the sum so the walk cannot be dropped.
+TOX2_NOINLINE std::uint64_t sumPolluteLines(const std::uint64_t* words, std::size_t lines) {
+    std::uint64_t sum = 0;
+    for (std::size_t line = 0; line < lines; line++) sum += words[line * (kPolluteLine / sizeof(std::uint64_t))];
+    return sum;
+}
+
 // Cycles of the RSX consumer side of one frame: the real RsxConsumer pumps the FIFO words of a capture, with the frame
 // builder on and no renderer (the draws are built, counted and recycled, as the consumer loop does without a sink).
 // The consumer, its builder caches and the guest memory are reused by every pass, so a pass is a steady-state frame.
 // The pass runs on one thread and without the kernel lock and the clock reads of the consumer loop.
+// --pollute-mb N walks an N MiB buffer before each measured pass, so that the pass reads the texture bytes from cold
+// caches, as the game's builder does after a frame of other work.
 int runRsxFifo(const Case& self, const Options& options) {
     const std::string path(options.value("capture"));
     if (options.flag("synthetic") == !path.empty()) {
         std::fputs("error: rsx-fifo needs either --synthetic or --capture FILE\n", stderr);
         return 2;
     }
+    std::uint32_t pollute_mb = 0;
+    if (!caseCount(options, "pollute-mb", 0, 4096, &pollute_mb)) return 2;
     tox2::RsxCaptureReader reader;
     std::string error;
     const std::string name = path.empty() ? "synthetic" : std::filesystem::path(path).stem().string();
@@ -1401,6 +1412,19 @@ int runRsxFifo(const Case& self, const Options& options) {
         return 1;
     }
 
+    // Line i holds i + 1, so a walk that read every line sums to lines * (lines + 1) / 2.
+    std::vector<std::uint64_t> pollute;
+    std::size_t pollute_lines = 0;
+    std::uint64_t pollute_expected = 0;
+    if (pollute_mb != 0) {
+        pollute_lines = std::size_t{pollute_mb} * (1u << 20) / kPolluteLine;
+        pollute.assign(pollute_lines * (kPolluteLine / sizeof(std::uint64_t)), 0);
+        for (std::size_t line = 0; line < pollute_lines; line++) {
+            pollute[line * (kPolluteLine / sizeof(std::uint64_t))] = line + 1;
+        }
+        pollute_expected = pollute_lines * (pollute_lines + 1) / 2;
+    }
+
     std::uint32_t iteration_index = 0;
     const std::uint32_t total_iterations = options.warmup + options.iterations;
     return runMeasured(self, options, [&](std::uint64_t* cycles) {
@@ -1408,6 +1432,10 @@ int runRsxFifo(const Case& self, const Options& options) {
         const std::uint64_t headers_before = consumer.census().headers;
         const std::uint64_t writes_before = methodWrites();
         const tox2::RsxConsumer::CommandCounts before = consumer.commandCounts();
+        const tox2::RsxBuilderStats* const builder_stats = consumer.builderStats();
+        const tox2::RsxBuilderStats stats_before = builder_stats != nullptr ? *builder_stats : tox2::RsxBuilderStats{};
+        const bool pollute_ok =
+                pollute_lines == 0 || sumPolluteLines(pollute.data(), pollute_lines) == pollute_expected;
 
         const std::uint64_t start = tox2::currentThreadCycles();
         const Pass pass = drainTo(buffer_end);
@@ -1439,8 +1467,24 @@ int runRsxFifo(const Case& self, const Options& options) {
                     self.name, static_cast<unsigned long long>(seed_after.draws - seed_before.draws),
                     static_cast<unsigned long long>(expected_draws),
                     static_cast<double>(*cycles) / static_cast<double>(frame.writes));
+            if (builder_stats != nullptr) {
+                std::printf(
+                        "bench %s: texture validations %llu per pass, %llu hash skips, %llu safety hashes, %llu bytes "
+                        "hashed, %llu unreported changes\n",
+                        self.name,
+                        static_cast<unsigned long long>(builder_stats->texture_validations -
+                                                        stats_before.texture_validations),
+                        static_cast<unsigned long long>(builder_stats->texture_hash_skips -
+                                                        stats_before.texture_hash_skips),
+                        static_cast<unsigned long long>(builder_stats->texture_safety_hashes -
+                                                        stats_before.texture_safety_hashes),
+                        static_cast<unsigned long long>(builder_stats->texture_bytes_hashed -
+                                                        stats_before.texture_bytes_hashed),
+                        static_cast<unsigned long long>(builder_stats->texture_unreported_changes -
+                                                        stats_before.texture_unreported_changes));
+            }
         }
-        return words_ok && builder_ok && rewind();
+        return words_ok && builder_ok && pollute_ok && rewind();
     });
 }
 
@@ -1827,10 +1871,10 @@ const std::vector<Case>& cases() {
              runVertexConvert},
             {"rsx-fifo",
              "the RSX consumer pumping the FIFO words of a captured frame with the frame builder on and no renderer "
-             "(--capture FILE) or --synthetic",
+             "(--capture FILE) or --synthetic; --pollute-mb N walks an N MiB buffer before each measured pass",
              20,
              2,
-             {"capture"},
+             {"capture", "pollute-mb"},
              {"synthetic"},
              runRsxFifo},
             {"rsx-write-watch",
