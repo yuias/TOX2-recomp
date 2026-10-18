@@ -61,6 +61,8 @@ These can also be passed to `cmake` directly (`cmake --preset release -D<name>=<
 | `TOX2_EBOOT_BIN` | empty | Set by `-EbootBin`. |
 | `TOX2_PUP` | empty | Set by `-Pup`. |
 | `TOX2_RPCS3_CRYPTO_DIR` | empty | Set by `-Rpcs3CryptoDir`. |
+| `TOX2_UI_FONT_FILE` | empty | A local `BIZUDPGothic-Regular.ttf` to use as the save dialog's fallback font instead of the download (see [Fallback UI font](#fallback-ui-font)). |
+| `TOX2_UI_FONT_URL_BASE` | the pinned raw GitHub URL | URL prefix the fallback font and its licence are downloaded from. Change it only to test the failure path. |
 | `TOX2_FFMPEG_DIR` | empty | An extracted FFmpeg build to use instead of `generated/deps/ffmpeg/<pinned build>` (see [Movies](movies.md); FFmpeg is used for ATRAC3plus decoding and by the inherited movie code). |
 | `TOX2_GAMEINPUT_DIR` | empty | An extracted `Microsoft.GameInput` package to use instead of `generated/deps/gameinput/<pinned version>` (see [Input](input.md#the-gameinput-package)). Configure needs the package from `tools/fetch-gameinput.ps1`. |
 | `TOX2_ENABLE_DLSS` | `AUTO` | `AUTO`, `ON` or `OFF`: whether to build the DLAA anti-aliasing mode and frame generation on NVIDIA Streamline (see [NVIDIA Streamline (DLAA)](#nvidia-streamline-dlaa)). |
@@ -208,6 +210,30 @@ the target that writes `generated/inputs`, exists only with `-EbootBin` or `-Pup
 of the executable and of libsre are compiled together into `tox2_ppu_generated`, and the generated SPU code
 of the game and of libsre into `tox2_spu_generated`. The stub runtimes `tox2_ppu_stub` and `tox2_spu_stub`
 supply the hooks for the link checks and the header and semantics tests; `tox2_game` links the runtime core instead.
+
+## Fallback UI font
+
+The save dialog draws its text with the firmware's Japanese font when `-Pup` is given (see
+[Decrypting the inputs](#decrypting-the-inputs)). Without the PUP it falls back to BIZ UDPGothic Regular
+(SIL Open Font License 1.1, <https://github.com/googlefonts/morisawa-biz-ud-gothic>). Configuration downloads
+`fonts/ttf/BIZUDPGothic-Regular.ttf` and `OFL.txt` from commit `18934af56b9c003ca58c54bffbf226848cb11032`
+into `generated/deps/fonts/<commit>/` and checks their SHA-256 (the pins are in `cmake/ui_font.cmake`):
+
+| File | SHA-256 |
+| --- | --- |
+| `BIZUDPGothic-Regular.ttf` | `258d7156c165f2ff774b6efee637c22c3b950de0d8a10e501137061bc8085d01` |
+| `OFL.txt` | `e753d7155d53c747d037a445e584c8ecfca6dd79846db610417e282a736b28bc` |
+
+The ALL target `tox2_ui_fonts` copies the font to `build/<preset>/bin/fonts/` and the licence to
+`build/<preset>/bin/licenses/biz-udgothic/OFL.txt`. Unlike the keys, the font is optional: a failed
+download, or a file whose hash differs from the pin, prints one `TOX2: warning:` line, configuration goes on and
+`tox2_ui_fonts` is not created. Without any font the save dialog uses ImGui's default font, which has no
+Japanese glyphs, so they show as `?`.
+
+To build offline, put `BIZUDPGothic-Regular.ttf` and `OFL.txt` with the pinned hashes into
+`generated/deps/fonts/<commit>/` before configuring, or set `TOX2_UI_FONT_FILE` to a local
+`BIZUDPGothic-Regular.ttf`. A file given that way is used even if its hash differs from the pin (configuration
+prints a line); its licence text is still taken from the pinned `OFL.txt` when that can be had.
 
 ## NVIDIA Streamline (DLAA)
 
