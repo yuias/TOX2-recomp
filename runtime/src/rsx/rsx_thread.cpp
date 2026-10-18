@@ -936,7 +936,12 @@ void consumerLoop(RsxConsumer* consumer, std::uint8_t* base) {
         // for it. flipHeldForVblank() compares with the live count: a tick delivered after the last pump (by the
         // slice loop below) already ended the hold, and the flip must be pumped now, not one tick later.
         const bool flip_held = (flip_deadline && woke < *flip_deadline) || consumer->flipHeldForVblank();
-        if (!tick && (flip_held || !consumer->hasWork(put))) continue;
+        if (!tick && (flip_held || !consumer->hasWork(put))) {
+            // Not while a flip is held back by the limit or a vblank: it is presented shortly, so the game has not
+            // stopped. Without a held flip, hasWork() was false here.
+            if (!flip_held && executor) executor->idle();
+            continue;
+        }
 
         bool pending_tick = tick;
         FifoStatus status;

@@ -410,6 +410,7 @@ RsxRenderer::~RsxRenderer() {
         if (placeholder.image != VK_NULL_HANDLE)
             vmaDestroyImage(context_.allocator(), placeholder.image, placeholder.allocation);
     }
+    last_display_.reset();
     color_targets_.clear();
     depth_targets_.clear();
 }
@@ -3050,10 +3051,12 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
         display_width_ = flip.width * resolution_scale_;
         display_height_ = flip.height * resolution_scale_;
         display_copied_ = read_back;
+        last_display_.reset();
     } else {
         const std::shared_ptr<RenderTarget> target = it->second;
         touch(target);
         if (!syncLayout(*target)) return;
+        last_display_ = target;
         display_width_ = target->image_width;
         display_height_ = target->image_height;
         if (read_back && ensureReadback(slot, static_cast<VkDeviceSize>(display_width_) * display_height_ * 4)) {
@@ -3084,6 +3087,7 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     }
     if (submitFrame()) {
         has_flip_ = true;
+        last_flip_ = Clock::now();
         collectFgMvCheck();
     }
     // Applied only now: this flip, its readback and the present blit were all recorded at the old scale, and
@@ -3094,6 +3098,38 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     if (requested_anisotropy != 0 && valid()) setAnisotropy(requested_anisotropy);
     if (requested_frame_gen && valid()) setFrameGenTarget(*requested_frame_gen);
     if (frame_gen_ && valid()) frame_gen_->tick();
+}
+
+// A frame that holds only the present blit and the overlays. A draw or clear since the last flip means the game is
+// mid-frame: that recording also holds draws the next flip must submit with it, and last_display_ may already be
+// overwritten, so only the game's own flip presents then.
+void RsxRenderer::presentIdle() {
+    if (presenter_ == nullptr || overlay_ == nullptr || !valid() || !has_flip_) return;
+    if (!overlay_->wantsIdlePresent()) return;
+    const Clock::time_point now = Clock::now();
+    if (!idlePresentDue(last_flip_, last_idle_present_, now)) return;
+    // Known limit: an idle frame would reuse the frame index of the next real frame, and Streamline's frame token and
+    // latency markers expect each index once. With frame generation loaded an overlay is therefore drawn only on
+    // real flips, which the game keeps issuing while a system dialog is open.
+    if (frame_gen_ && frame_gen_->loaded()) {
+        logOnce(LogLevel::Warn, "render-idle-present-frame-gen",
+                "tox2: render: idle present skipped, frame generation is loaded; an overlay shows only when the game "
+                "flips");
+        return;
+    }
+    if (recording_) {
+        logOnce(LogLevel::Warn, "render-idle-present-frame-open",
+                "tox2: render: idle present skipped, a frame is open; an overlay shows only when the game flips");
+        return;
+    }
+    if (!beginFrame()) return;
+    if (last_display_) touch(last_display_);
+    recordPresentBlit(last_display_.get());
+    // readDisplay and the dumps read the slot of the last flip, which this frame must not take over.
+    const std::size_t flip_slot = display_slot_;
+    submitFrame();
+    display_slot_ = flip_slot;
+    last_idle_present_ = now;
 }
 
 void RsxRenderer::recordFrameGenPresent() {

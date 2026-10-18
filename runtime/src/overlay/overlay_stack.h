@@ -38,6 +38,13 @@ public:
         return false;
     }
 
+    bool wantsIdlePresent() const override {
+        for (const PresentOverlay* overlay : overlays_) {
+            if (overlay->wantsIdlePresent()) return true;
+        }
+        return false;
+    }
+
     void record(VkCommandBuffer cmd, const Presenter::Target& target) override {
         for (PresentOverlay* overlay : overlays_) {
             if (overlay->wantsDraw()) overlay->record(cmd, target);

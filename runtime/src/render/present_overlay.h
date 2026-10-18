@@ -74,6 +74,9 @@ public:
     virtual PresentOverlayRequests onFlip(const PresentFrameInfo& info) = 0;
     // After the blit into an acquired image; false skips record() and its barriers.
     virtual bool wantsDraw() const = 0;
+    // True while something on screen must stay visible when the game stops flipping: the renderer then re-presents
+    // the last image with the overlays every so often.
+    virtual bool wantsIdlePresent() const { return false; }
     // `target.image` is in COLOR_ATTACHMENT_OPTIMAL and must be left so; target.view/format are valid.
     virtual void record(VkCommandBuffer cmd, const Presenter::Target& target) = 0;
 };

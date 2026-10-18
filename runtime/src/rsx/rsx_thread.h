@@ -333,6 +333,9 @@ public:
     virtual ~RsxExecutor() = default;
     // Runs on the RSX thread without the kernel lock; the commands carry every byte they need.
     virtual void execute(std::span<RsxCommand> commands) = 0;
+    // Runs on the RSX thread without the kernel lock, on a pass of the consumer loop that found no FIFO work. Passes
+    // come about every millisecond, so an override must return at once when it has nothing to do.
+    virtual void idle() {}
     // Any thread.
     virtual RsxRenderCounts counts() const = 0;
     // Waits up to `timeout` for background output (dumped frames, the pipeline cache) to reach disk; returns

@@ -266,8 +266,30 @@ public:
         createFrameGen();
     }
 
+    using Clock = std::chrono::steady_clock;
+
     // Frames recorded before a slot is reused; a presenter needs one acquire semaphore per slot.
     static constexpr std::size_t kFramesInFlight = 2;
+    // The game counts as stopped when no real flip happened for this long. Above any normal frame interval (a 30 fps
+    // game flips every 33 ms), so idle presents never interleave with its own flips.
+    static constexpr std::chrono::milliseconds kIdleStallThreshold{100};
+    // Once the game has stopped, the minimum time between idle presents (about 30 per second).
+    static constexpr std::chrono::milliseconds kIdlePresentInterval{33};
+
+    // True when no real flip happened for kIdleStallThreshold (measured from `last_flip`, not from the last idle
+    // present) and the last idle present is at least kIdlePresentInterval ago. An idle present older than the last
+    // flip is then older than the threshold too, so it never holds the next one back.
+    static bool idlePresentDue(Clock::time_point last_flip, Clock::time_point last_idle_present,
+                               Clock::time_point now) {
+        return now - last_flip >= kIdleStallThreshold && now - last_idle_present >= kIdlePresentInterval;
+    }
+
+    // Re-presents the last flip's image with the overlays while an overlay wants it (wantsIdlePresent()) and the game
+    // has stopped flipping, so e.g. a system dialog stays visible and animated. Does nothing without a presenter and
+    // overlay, before the first flip, while a frame is open (a draw or clear was recorded since the last flip: the
+    // game is mid-frame and its next flip presents), while frame generation is loaded, or before idlePresentDue().
+    // It is not a flip: no onFlip, no stats_.flips, no readback or dump. Renderer thread, between commands.
+    void presentIdle();
 
 private:
     struct RenderTarget;
@@ -499,6 +521,12 @@ private:
     PresentOverlay* overlay_ = nullptr;
 
     bool has_flip_ = false;
+    // The target the last flip showed, for presentIdle(); null when that flip was black. Held so the image stays alive
+    // when the target map drops or replaces its entry. presentIdle() reads it only while no command was recorded since
+    // that flip, so its contents are still what the flip showed.
+    std::shared_ptr<RenderTarget> last_display_;
+    Clock::time_point last_flip_{};          // the last real flip
+    Clock::time_point last_idle_present_{};  // the last idle present
     bool display_black_ = false;
     bool display_copied_ = false;  // the last flip's pixels are in its slot's readback buffer
     std::size_t display_slot_ = 0;
