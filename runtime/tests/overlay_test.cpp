@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -37,6 +38,7 @@
 #include "overlay/overlay_stack.h"
 #include "overlay/save_dialog_overlay.h"
 #include "overlay/ui_font.h"
+#include "render/frame_dump.h"
 #include "rsx/rsx_unimplemented.h"
 
 namespace {
@@ -1639,6 +1641,12 @@ public:
         return {p[0], p[1], p[2], p[3]};
     }
 
+    // Writes the readback as an RGB PNG.
+    bool savePng(const std::filesystem::path& path, std::string& error) const {
+        const std::span<const std::uint8_t> bgra(pixels_, static_cast<std::size_t>(kTargetWidth) * kTargetHeight * 4);
+        return tox2::writePngRgb(path, tox2::rgbFromBgra(bgra, kTargetWidth, kTargetHeight), error);
+    }
+
     // True when any pixel of the rectangle (inclusive) has a non-zero colour channel.
     bool anyLit(std::uint32_t x0, std::uint32_t y0, std::uint32_t x1, std::uint32_t y1) const {
         for (std::uint32_t y = y0; y <= y1; ++y) {
@@ -1810,6 +1818,111 @@ bool anyBright(const OffscreenTarget& target, std::uint32_t x0, std::uint32_t y0
     return false;
 }
 
+// True when a pixel of the rectangle (inclusive) is lighter than the dim in any channel; unlike anyBright this also
+// finds the saturated colours of the button symbols.
+bool anyAboveDim(const OffscreenTarget& target, std::uint32_t x0, std::uint32_t y0, std::uint32_t x1,
+                 std::uint32_t y1) {
+    for (std::uint32_t y = y0; y <= y1; ++y) {
+        for (std::uint32_t x = x0; x <= x1; ++x) {
+            if (target.pixel(x, y).maxChannel() > 130) return true;
+        }
+    }
+    return false;
+}
+
+std::shared_ptr<tox2::SaveDialogContent> listContent(std::uint64_t id, int row_count) {
+    auto content = std::make_shared<tox2::SaveDialogContent>();
+    content->id = id;
+    content->kind = tox2::DialogKind::List;
+    content->list_kind = tox2::SaveListKind::Save;
+    for (int i = 0; i < row_count; ++i) {
+        tox2::SaveDialogRow row;
+        row.new_data = i == 0;
+        row.title =
+                row.new_data
+                        ? "\xE6\x96\xB0\xE3\x81\x97\xE3\x81\x84\xE3\x83\x87\xE3\x83\xBC\xE3\x82\xBF"  // 新しいデータ
+                        : "Stage " + std::to_string(i) + " \xE3\x82\xBB\xE3\x83\xBC\xE3\x83\x96";     // セーブ
+        row.info = row.new_data
+                           ? "\xE6\x96\xB0\xE3\x81\x97\xE3\x81\x84\xE3\x83\x87\xE3\x83\xBC\xE3\x82\xBF\xE3\x82\x92"
+                             "\xE4\xBD\x9C\xE6\x88\x90\xE3\x81\x97\xE3\x81\xBE\xE3\x81\x99"  // 新しいデータを作成します
+                           : "2026/10/" + std::to_string(10 + i) + " 21:" + std::to_string(30 + i) + "   " +
+                                     std::to_string(120 + i * 7) + " KB";
+        // Three detail lines like the game's, and one row with a fourth that the row cuts with "...".
+        if (!row.new_data && i % 2 == 1) {
+            row.detail =
+                    "走り出す運命\nルドガー　Ｌｖ　" + std::to_string(i) + "\nプレイ時間　0：0" + std::to_string(i);
+        } else if (i == 2) {
+            row.detail = "Chapter 2\nAfter the harbour\nThe long road to the capital\nA fourth line is cut";
+        }
+        content->rows.push_back(std::move(row));
+    }
+    return content;
+}
+
+// Set TOX2_OVERLAY_TEST_LIST_PNG to a file path to keep the render of a 7-row list for looking at.
+void saveListRenderIfRequested(const OffscreenTarget& target) {
+    char path[MAX_PATH] = {};
+    const DWORD length = GetEnvironmentVariableA("TOX2_OVERLAY_TEST_LIST_PNG", path, sizeof(path));
+    if (length == 0 || length >= sizeof(path)) return;
+    std::string error;
+    const bool saved = target.savePng(path, error);
+    std::printf("overlay tests: list render %s %s\n", saved ? "saved to" : "not saved:", saved ? path : error.c_str());
+}
+
+void testSaveListLayout(tox2::SaveDialogBoard& board, tox2::SaveDialogOverlay& overlay, OffscreenTarget& target,
+                        const tox2::RendererStats& stats) {
+    constexpr VkClearColorValue kWhite = {{1.0f, 1.0f, 1.0f, 1.0f}};
+
+    // Seven rows of which four show, the second one selected: the dim, the heading, the focus border and the scrollbar
+    // thumb.
+    tox2::SaveDialogSnapshot snapshot;
+    snapshot.content = listContent(10, 7);
+    snapshot.selected_row = 1;
+    snapshot.first_visible_row = 0;
+    snapshot.opacity = 1.0f;
+    board.publish(snapshot);
+    CHECK(target.drawOnce(overlay, stats, kWhite));
+    CHECK(!overlay.failed());
+    CHECK(target.pixel(4, 700).maxChannel() <= 115);
+    CHECK(target.pixel(4, 700).minChannel() > 50);
+    const OffscreenTarget::Pixel focus = target.pixel(210, 112 + 130 + 65);
+    CHECK(focus.b >= focus.r + 60);
+    CHECK(anyBright(target, 64, 36, 200, 72));
+    const OffscreenTarget::Pixel thumb = target.pixel(1085, 114);
+    const OffscreenTarget::Pixel track = target.pixel(1085, 620);
+    CHECK(thumb.minChannel() > track.minChannel());
+    CHECK(track.minChannel() > 102);                 // the track is lighter than the plain dim
+    CHECK(anyAboveDim(target, 184, 662, 200, 678));  // the enter symbol
+    CHECK(anyAboveDim(target, 64, 662, 80, 678));    // the back symbol
+    saveListRenderIfRequested(target);
+
+    // Scrolled to the end: the thumb is at the bottom of the track.
+    snapshot.selected_row = 6;
+    snapshot.first_visible_row = 3;
+    board.publish(snapshot);
+    CHECK(target.drawOnce(overlay, stats, kWhite));
+    CHECK(target.pixel(1085, 114).minChannel() == track.minChannel());
+    CHECK(target.pixel(1085, 628).minChannel() > track.minChannel());
+
+    // Three rows fit: no scrollbar.
+    snapshot.content = listContent(11, 3);
+    snapshot.selected_row = 0;
+    snapshot.first_visible_row = 0;
+    board.publish(snapshot);
+    CHECK(target.drawOnce(overlay, stats, kWhite));
+    CHECK(target.pixel(1085, 114).maxChannel() <= 115);
+    CHECK(target.pixel(1085, 300).maxChannel() <= 115);
+
+    // An empty list shows only the back item.
+    snapshot.content = listContent(12, 0);
+    board.publish(snapshot);
+    CHECK(target.drawOnce(overlay, stats, kWhite));
+    CHECK(target.pixel(4, 700).maxChannel() <= 115);
+    CHECK(!anyAboveDim(target, 184, 662, 200, 678));
+    CHECK(anyAboveDim(target, 64, 662, 80, 678));
+    CHECK(anyBright(target, 400, 350, 880, 390));  // the "no data" line in the middle of the list box
+}
+
 void testSaveDialogOverlay(tox2::VkContext& ctx, OffscreenTarget& target) {
     constexpr VkClearColorValue kWhite = {{1.0f, 1.0f, 1.0f, 1.0f}};
     tox2::RendererStats stats;
@@ -1859,14 +1972,7 @@ void testSaveDialogOverlay(tox2::VkContext& ctx, OffscreenTarget& target) {
         CHECK(target.drawOnce(overlay, stats, kWhite));
         CHECK(overlay.atlasBuildCount() == 2);
 
-        // A list draws its dim for now.
-        auto list = std::make_shared<tox2::SaveDialogContent>();
-        list->id = 4;
-        list->kind = tox2::DialogKind::List;
-        publishDialog(board, list, 1.0f);
-        CHECK(target.drawOnce(overlay, stats, kWhite));
-        CHECK(target.pixel(4, 700).maxChannel() <= 115);
-        CHECK(target.pixel(4, 700).minChannel() > 50);
+        testSaveListLayout(board, overlay, target, stats);
 
         // Fully faded out: nothing is drawn.
         publishDialog(board, messageContent(5, tox2::DialogKind::YesNo, "line"), 0.0f);

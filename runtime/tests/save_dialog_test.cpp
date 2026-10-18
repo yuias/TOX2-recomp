@@ -307,7 +307,7 @@ void testInitialRowAndScroll() {
     CHECK(SaveDialogModel(DialogKind::List, 20, 0, at(0)).firstVisibleRow() == 0);
     CHECK(SaveDialogModel(DialogKind::List, 20, 2, at(0)).firstVisibleRow() == 0);
     CHECK(SaveDialogModel(DialogKind::List, 20, 10, at(0)).firstVisibleRow() == 8);
-    CHECK(SaveDialogModel(DialogKind::List, 20, 19, at(0)).firstVisibleRow() == 15);
+    CHECK(SaveDialogModel(DialogKind::List, 20, 19, at(0)).firstVisibleRow() == 16);
     CHECK(SaveDialogModel(DialogKind::List, 3, 1, at(0)).firstVisibleRow() == 0);
     // initial_row is clamped into the list.
     CHECK(SaveDialogModel(DialogKind::List, 4, 99, at(0)).selectedRow() == 3);
@@ -323,7 +323,7 @@ void testScrollKeepsSelectionVisible() {
         CHECK(model.selectedRow() < model.firstVisibleRow() + SaveDialogModel::kVisibleRows);
     }
     CHECK(model.selectedRow() == 11);
-    CHECK(model.firstVisibleRow() == 7);
+    CHECK(model.firstVisibleRow() == 8);
     // Moving up inside the window does not scroll; leaving it scrolls by the minimum.
     for (int i = 0; i < 4; i++, ms += 10) stepOne(model, DialogAction::Up, ms);
     CHECK(model.selectedRow() == 7);
@@ -338,7 +338,7 @@ void testScrollKeepsSelectionVisible() {
     ms += 10;
     stepOne(model, DialogAction::PageDown, ms);
     CHECK(model.selectedRow() == 10);
-    CHECK(model.firstVisibleRow() == 6);
+    CHECK(model.firstVisibleRow() == 7);
 }
 
 void testOpacity() {

@@ -4,6 +4,7 @@
 #include <array>
 #include <cfloat>
 #include <cmath>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -25,11 +26,30 @@ constexpr std::uint32_t kMaxIconTextures = 32;
 constexpr std::uint32_t kDescriptorCount = 1 + kMaxIconTextures;
 
 // The canvas is 1280x720 and scales with the image area's height; every layout number below is in canvas pixels.
+constexpr float kCanvasWidth = 1280.0f;
 constexpr float kCanvasHeight = 720.0f;
 
 // Font sizes in canvas pixels; the atlas holds one font per entry.
 constexpr std::array<float, 3> kFontSizes = {32.0f, 22.0f, 17.0f};
-constexpr int kFontBody = 1;
+constexpr int kFontHeading = 0;
+constexpr int kFontBody = 1;  // messages and row titles
+constexpr int kFontSmall = 2;
+
+// The list: four rows of 130 px inside the box x 208..1072, y 112..632, and the scrollbar right of it. A row holds the
+// title, the date/size line and three detail lines.
+// Must match the model, or the selected row could scroll out of view.
+constexpr std::size_t kVisibleRows = static_cast<std::size_t>(SaveDialogModel::kVisibleRows);
+constexpr std::size_t kDetailLines = 3;
+constexpr float kRowX = 208.0f;
+constexpr float kRowWidth = 864.0f;
+constexpr float kRowHeight = 130.0f;
+constexpr float kListTop = 112.0f;
+constexpr float kListBottom = kListTop + kRowHeight * kVisibleRows;
+constexpr float kScrollbarX = 1084.0f;
+constexpr float kIconWidth = 160.0f;
+constexpr float kIconHeight = 88.0f;
+constexpr float kTextOffset = 192.0f;  // from the row's left edge
+constexpr float kTextWidth = 656.0f;
 
 // A glyph set above this restarts from the current dialog's glyphs, which keeps the atlas texture bounded.
 constexpr std::size_t kMaxBakedCodePoints = 8000;
@@ -86,19 +106,25 @@ float textWidth(ImFont* font, const char* begin, const char* end) {
     return font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, begin, end).x;
 }
 
-// A symbol and its label, centred on canvas x as one item; `top` is the canvas y of the text line.
-void drawButtonItem(ImDrawList* list, const Canvas& canvas, ImFont* font, PadButton button, std::string_view label,
-                    float center_x, float top) {
+// A symbol followed by its label; `x0` is the left edge and `y` the top of the text line, both in target pixels.
+void drawSymbolAndLabel(ImDrawList* list, const Canvas& canvas, ImFont* font, PadButton button, std::string_view label,
+                        float x0, float y) {
     const float size = font->FontSize;
     const char* begin = label.data();
     const char* end = begin + label.size();
     const float symbol = canvas.px(16.0f);
     const float gap = canvas.px(8.0f);
-    const float total = symbol + gap + textWidth(font, begin, end);
+    drawSymbol(list, canvas, button, ImVec2(x0 + symbol * 0.5f, y + size * 0.5f));
+    list->AddText(font, size, ImVec2(x0 + symbol + gap, y), canvas.white(1.0f), begin, end);
+}
+
+// A symbol and its label, centred on canvas x as one item; `top` is the canvas y of the text line.
+void drawButtonItem(ImDrawList* list, const Canvas& canvas, ImFont* font, PadButton button, std::string_view label,
+                    float center_x, float top) {
+    const char* begin = label.data();
+    const float total = canvas.px(16.0f) + canvas.px(8.0f) + textWidth(font, begin, begin + label.size());
     const ImVec2 origin = canvas.pt(center_x, top);
-    const float x0 = origin.x - total * 0.5f;
-    drawSymbol(list, canvas, button, ImVec2(x0 + symbol * 0.5f, origin.y + size * 0.5f));
-    list->AddText(font, size, ImVec2(x0 + symbol + gap, origin.y), canvas.white(1.0f), begin, end);
+    drawSymbolAndLabel(list, canvas, font, button, label, origin.x - total * 0.5f, origin.y);
 }
 
 struct TextLine {
@@ -157,6 +183,161 @@ void drawMessage(ImDrawList* list, const Canvas& canvas, ImFont* font, const Sav
         drawButtonItem(list, canvas, font, buttons.back, kButtonNo, 720.0f, 420.0f);
     } else {
         drawButtonItem(list, canvas, font, buttons.enter, kButtonOk, 640.0f, 420.0f);
+    }
+}
+
+// A rectangular outline of `thickness` px lying inside [min, max], drawn as four strips so every edge covers whole
+// pixels (a stroked path would straddle two pixel rows at odd offsets).
+void drawFrame(ImDrawList* list, ImVec2 min, ImVec2 max, float thickness, ImU32 color) {
+    list->AddRectFilled(min, ImVec2(max.x, min.y + thickness), color);
+    list->AddRectFilled(ImVec2(min.x, max.y - thickness), max, color);
+    list->AddRectFilled(ImVec2(min.x, min.y + thickness), ImVec2(min.x + thickness, max.y - thickness), color);
+    list->AddRectFilled(ImVec2(max.x - thickness, min.y + thickness), ImVec2(max.x, max.y - thickness), color);
+}
+
+// `text` cut to `width_px`, with "..." where it was cut. `force_dots` adds the dots even when the text fits, for a
+// line whose text continues on a line that is not shown. ASCII dots, because the atlas always holds ASCII.
+std::string fitLine(ImFont* font, const char* begin, const char* end, float width_px, bool force_dots) {
+    if (!force_dots && textWidth(font, begin, end) <= width_px) return std::string(begin, end);
+    static constexpr std::string_view kDots = "...";
+    const float dots = textWidth(font, kDots.data(), kDots.data() + kDots.size());
+    const char* keep = begin;
+    for (const char* p = begin; p < end;) {
+        unsigned int c = 0;
+        const int used = ImTextCharFromUtf8(&c, p, end);
+        p += std::max(1, used);
+        if (textWidth(font, begin, p) + dots > width_px) break;
+        keep = p;
+    }
+    return std::string(begin, keep) + std::string(kDots);
+}
+
+void drawPlaceholder(ImDrawList* list, const Canvas& canvas, float x, float y, bool new_data) {
+    const ImVec2 min = canvas.pt(x, y);
+    const ImVec2 max = canvas.pt(x + kIconWidth, y + kIconHeight);
+    list->AddRectFilled(min, max, canvas.white(0.08f));
+    drawFrame(list, min, max, canvas.line(1.0f), canvas.white(0.3f));
+    if (!new_data) return;
+    // The "+" of the new-data cell.
+    const ImVec2 mid = canvas.pt(x + kIconWidth * 0.5f, y + kIconHeight * 0.5f);
+    const float arm = canvas.px(14.0f);
+    const float half = canvas.line(2.0f) * 0.5f;
+    const ImU32 color = canvas.white(0.6f);
+    list->AddRectFilled(ImVec2(mid.x - arm, mid.y - half), ImVec2(mid.x + arm, mid.y + half), color);
+    list->AddRectFilled(ImVec2(mid.x - half, mid.y - arm), ImVec2(mid.x + half, mid.y + arm), color);
+}
+
+struct ListFonts {
+    ImFont* heading;
+    ImFont* title;
+    ImFont* caption;  // 17 px: info, detail, legend
+};
+
+void drawRow(ImDrawList* list, const Canvas& canvas, const ListFonts& fonts, const SaveDialogRow& row, float y) {
+    drawPlaceholder(list, canvas, kRowX + 12.0f, y + 8.0f, row.new_data);
+
+    const float text_x = canvas.pt(kRowX + kTextOffset, 0.0f).x;
+    const float wrap = canvas.px(kTextWidth);
+    const char* title_end = row.title.data();
+    while (title_end < row.title.data() + row.title.size() && *title_end != '\n') ++title_end;
+    const std::string title = fitLine(fonts.title, row.title.data(), title_end, wrap, false);
+    list->AddText(fonts.title, fonts.title->FontSize, ImVec2(text_x, canvas.pt(0.0f, y + 10.0f).y), canvas.white(1.0f),
+                  title.data(), title.data() + title.size());
+
+    const char* info_end = row.info.data();
+    while (info_end < row.info.data() + row.info.size() && *info_end != '\n') ++info_end;
+    const std::string info = fitLine(fonts.caption, row.info.data(), info_end, wrap, false);
+    list->AddText(fonts.caption, fonts.caption->FontSize, ImVec2(text_x, canvas.pt(0.0f, y + 40.0f).y),
+                  canvas.white(0.85f), info.data(), info.data() + info.size());
+
+    const std::vector<TextLine> lines = wrapLines(fonts.caption, row.detail, wrap);
+    for (std::size_t i = 0; i < lines.size() && i < kDetailLines; ++i) {
+        const bool cut = i + 1 == kDetailLines && lines.size() > kDetailLines;
+        const std::string line = fitLine(fonts.caption, lines[i].begin, lines[i].end, wrap, cut);
+        if (line.empty()) continue;
+        const float line_y = canvas.pt(0.0f, y + 64.0f + 20.0f * static_cast<float>(i)).y;
+        list->AddText(fonts.caption, fonts.caption->FontSize, ImVec2(text_x, line_y), canvas.white(0.85f), line.data(),
+                      line.data() + line.size());
+    }
+
+    drawRule(list, canvas, kRowX + 12.0f, kRowX + kRowWidth - 12.0f, y + kRowHeight - 1.0f, canvas.white(0.15f));
+}
+
+// The focus frame: a border and three fainter outlines around it, all pulsing with `pulse` (0.5 .. 1).
+void drawFocus(ImDrawList* list, const Canvas& canvas, float y, float pulse) {
+    const ImVec2 min = canvas.pt(kRowX + 2.0f, y + 2.0f);
+    const ImVec2 max = canvas.pt(kRowX + kRowWidth - 2.0f, y + kRowHeight - 2.0f);
+    const float thickness = canvas.line(2.0f);
+    constexpr std::array<float, 3> kGlowAlpha = {0.45f, 0.25f, 0.12f};
+    for (std::size_t i = 0; i < kGlowAlpha.size(); ++i) {
+        const float grow = thickness * static_cast<float>(i + 1);
+        drawFrame(list, ImVec2(min.x - grow, min.y - grow), ImVec2(max.x + grow, max.y + grow), thickness,
+                  canvas.color(0.30f, 0.80f, 1.00f, kGlowAlpha[i] * pulse));
+    }
+    drawFrame(list, min, max, thickness, canvas.color(0.30f, 0.80f, 1.00f, pulse));
+}
+
+void drawScrollbar(ImDrawList* list, const Canvas& canvas, std::size_t rows, int first) {
+    const float track_h = kListBottom - kListTop;
+    const float thumb_h = std::max(24.0f, track_h * static_cast<float>(kVisibleRows) / static_cast<float>(rows));
+    const int max_first = static_cast<int>(rows) - static_cast<int>(kVisibleRows);
+    const float ratio = max_first > 0 ? static_cast<float>(first) / static_cast<float>(max_first) : 0.0f;
+    const float thumb_y = kListTop + ratio * (track_h - thumb_h);
+    list->AddRectFilled(canvas.pt(kScrollbarX, kListTop), canvas.pt(kScrollbarX + 4.0f, kListBottom),
+                        canvas.white(0.15f));
+    list->AddRectFilled(canvas.pt(kScrollbarX, thumb_y), canvas.pt(kScrollbarX + 4.0f, thumb_y + thumb_h),
+                        canvas.white(0.7f));
+}
+
+std::string_view headingFor(SaveListKind kind) {
+    switch (kind) {
+        case SaveListKind::Load: return kHeadingLoad;
+        case SaveListKind::Delete: return kHeadingDelete;
+        case SaveListKind::Save: break;
+    }
+    return kHeadingSave;
+}
+
+void drawList(ImDrawList* list, const Canvas& canvas, const ListFonts& fonts, const SaveDialogContent& content,
+              const SaveDialogSnapshot& snapshot, double time) {
+    const std::string_view heading = headingFor(content.list_kind);
+    const ImVec2 heading_pos = canvas.pt(64.0f, 36.0f);
+    list->AddText(fonts.heading, fonts.heading->FontSize, heading_pos, canvas.white(1.0f), heading.data(),
+                  heading.data() + heading.size());
+    drawRule(list, canvas, 0.0f, kCanvasWidth, 92.0f, canvas.white(0.3f));
+    drawRule(list, canvas, 0.0f, kCanvasWidth, 652.0f, canvas.white(0.3f));
+
+    const std::size_t rows = content.rows.size();
+    if (rows == 0) {
+        const char* text = kEmptyList.data();
+        const char* end = text + kEmptyList.size();
+        const ImVec2 size = fonts.title->CalcTextSizeA(fonts.title->FontSize, FLT_MAX, 0.0f, text, end);
+        const ImVec2 center = canvas.pt((kRowX + kRowX + kRowWidth) * 0.5f, (kListTop + kListBottom) * 0.5f);
+        list->AddText(fonts.title, fonts.title->FontSize, ImVec2(center.x - size.x * 0.5f, center.y - size.y * 0.5f),
+                      canvas.white(1.0f), text, end);
+    } else {
+        const int max_first = std::max(0, static_cast<int>(rows) - static_cast<int>(kVisibleRows));
+        const int first = std::clamp(snapshot.first_visible_row, 0, max_first);
+        const float pulse = 0.75f + 0.25f * static_cast<float>(std::sin(2.0 * 3.14159265358979323846 * time / 1.2));
+
+        // Only vertically: the focus glow reaches past the row's left and right edges.
+        list->PushClipRect(canvas.pt(0.0f, kListTop), canvas.pt(kCanvasWidth, kListBottom), true);
+        for (int i = first; i < static_cast<int>(rows) && i < first + static_cast<int>(kVisibleRows); ++i) {
+            const float y = kListTop + kRowHeight * static_cast<float>(i - first);
+            drawRow(list, canvas, fonts, content.rows[static_cast<std::size_t>(i)], y);
+            if (i == snapshot.selected_row) drawFocus(list, canvas, y, pulse);
+        }
+        list->PopClipRect();
+        if (rows > kVisibleRows) drawScrollbar(list, canvas, rows, first);
+    }
+
+    // The order of the PS4 reference: back, then enter. An empty list has nothing to confirm.
+    const DialogButtons buttons = dialogButtons();
+    const float legend_y = canvas.pt(0.0f, 670.0f).y;
+    drawSymbolAndLabel(list, canvas, fonts.caption, buttons.back, kLegendBack, canvas.pt(64.0f, 0.0f).x, legend_y);
+    if (rows != 0) {
+        drawSymbolAndLabel(list, canvas, fonts.caption, buttons.enter, kLegendEnter, canvas.pt(184.0f, 0.0f).x,
+                           legend_y);
     }
 }
 
@@ -379,7 +560,16 @@ void SaveDialogOverlay::record(VkCommandBuffer cmd, const Presenter::Target& tar
         // The dim covers the whole target, including the bars beside the 16:9 image.
         const ImVec2 target_size(static_cast<float>(target.width), static_cast<float>(target.height));
         list->AddRectFilled(ImVec2(0.0f, 0.0f), target_size, canvas.color(0.0f, 0.0f, 0.0f, message ? 0.85f : 0.6f));
-        if (message && io.Fonts->Fonts.Size > kFontBody) drawMessage(list, canvas, io.Fonts->Fonts[kFontBody], content);
+        // Fonts are missing only when the atlas build failed, which has already shut the overlay down.
+        if (io.Fonts->Fonts.Size >= static_cast<int>(kFontSizes.size())) {
+            if (message) {
+                drawMessage(list, canvas, io.Fonts->Fonts[kFontBody], content);
+            } else {
+                const ListFonts fonts = {io.Fonts->Fonts[kFontHeading], io.Fonts->Fonts[kFontBody],
+                                         io.Fonts->Fonts[kFontSmall]};
+                drawList(list, canvas, fonts, content, snapshot, ImGui::GetTime());
+            }
+        }
     }
     ImGui::Render();
 

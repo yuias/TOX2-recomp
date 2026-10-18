@@ -64,7 +64,7 @@ class SaveDialogModel {
 public:
     using Clock = std::chrono::steady_clock;
     static constexpr std::chrono::milliseconds kFade{150};
-    static constexpr std::int32_t kVisibleRows = 5;
+    static constexpr std::int32_t kVisibleRows = 4;
     static constexpr std::int32_t kPageRows = 10;
 
     SaveDialogModel(DialogKind kind, std::int32_t row_count, std::int32_t initial_row, Clock::time_point now);
