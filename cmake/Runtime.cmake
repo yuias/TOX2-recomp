@@ -115,6 +115,7 @@ function(tox2_runtime_add_core)
     runtime/src/core/log.cpp
     runtime/src/core/param_sfo.cpp
     runtime/src/core/perf_log.cpp
+    runtime/src/core/png_image.cpp
     runtime/src/core/reservation.cpp
     runtime/src/core/thread_cpu.cpp
     runtime/src/core/threads.cpp

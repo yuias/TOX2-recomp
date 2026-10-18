@@ -41,6 +41,7 @@
 #include "core/log.h"
 #include "core/param_sfo.h"
 #include "core/perf_log.h"
+#include "core/png_image.h"
 #include "core/reservation.h"
 #include "core/thread_cpu.h"
 #include "core/threads.h"
@@ -7735,6 +7736,91 @@ void testCellPngDec() {
     tox2::setLogSink({});
     tox2::resetCensus();
     tox2::resetLogOnce();
+}
+
+void testDecodePngRgba8() {
+    using Bytes = std::vector<std::uint8_t>;
+
+    // RGB: alpha is added as opaque.
+    {
+        const PngTestImage png =
+                encodePng(2, 2, {10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120}, PNG_COLOR_TYPE_RGB, 8);
+        const auto image = tox2::decodePngRgba8(png.file);
+        CHECK(image.has_value());
+        if (image) {
+            CHECK(image->width == 2 && image->height == 2);
+            CHECK(image->pixels == (Bytes{10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255}));
+        }
+    }
+
+    // Palette with a translucent entry, 2 bits per index.
+    {
+        const std::vector<PngPaletteEntry> palette = {{1, 2, 3, 255}, {4, 5, 6, 128}, {7, 8, 9, 0}};
+        const PngTestImage png = encodePng(3, 1, {0, 1, 2}, PNG_COLOR_TYPE_PALETTE, 2, 0, palette);
+        const auto image = tox2::decodePngRgba8(png.file);
+        CHECK(image.has_value());
+        if (image) {
+            CHECK(image->width == 3 && image->height == 1);
+            CHECK(image->pixels == (Bytes{1, 2, 3, 255, 4, 5, 6, 128, 7, 8, 9, 0}));
+        }
+    }
+
+    // Gray + alpha expands to R = G = B.
+    {
+        const PngTestImage png = encodePng(2, 1, {100, 200, 50, 7}, PNG_COLOR_TYPE_GRAY_ALPHA, 8);
+        const auto image = tox2::decodePngRgba8(png.file);
+        CHECK(image.has_value());
+        if (image) CHECK(image->pixels == (Bytes{100, 100, 100, 200, 50, 50, 50, 7}));
+    }
+
+    // 16-bit RGBA keeps the high byte of each sample.
+    {
+        const PngTestImage png =
+                encodePng(1, 1, {0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0}, PNG_COLOR_TYPE_RGB_ALPHA, 16);
+        const auto image = tox2::decodePngRgba8(png.file);
+        CHECK(image.has_value());
+        if (image) CHECK(image->pixels == (Bytes{0x12, 0x56, 0x9a, 0xde}));
+    }
+
+    // Interlaced images are assembled into whole rows.
+    {
+        Bytes raw;
+        for (int i = 0; i < 5 * 5; i++) raw.push_back(static_cast<std::uint8_t>(i * 10));
+        const PngTestImage png = encodePng(5, 5, raw, PNG_COLOR_TYPE_GRAY, 8, 1);
+        const auto image = tox2::decodePngRgba8(png.file);
+        CHECK(image.has_value());
+        if (image) {
+            CHECK(image->pixels.size() == 5 * 5 * 4);
+            bool same = true;
+            for (int i = 0; i < 5 * 5; i++) {
+                same = same && image->pixels[i * 4] == raw[i] && image->pixels[i * 4 + 1] == raw[i] &&
+                       image->pixels[i * 4 + 2] == raw[i] && image->pixels[i * 4 + 3] == 255;
+            }
+            CHECK(same);
+        }
+    }
+
+    // Truncated data and non-PNG data fail.
+    {
+        Bytes raw(8 * 8 * 3);
+        for (std::size_t i = 0; i < raw.size(); i++) raw[i] = static_cast<std::uint8_t>(i * 7);
+        PngTestImage png = encodePng(8, 8, raw, PNG_COLOR_TYPE_RGB, 8);
+        CHECK(tox2::decodePngRgba8(png.file).has_value());
+        png.file.resize(png.file.size() / 2);
+        CHECK(!tox2::decodePngRgba8(png.file).has_value());
+        png.file.resize(20);  // ends inside IHDR
+        CHECK(!tox2::decodePngRgba8(png.file).has_value());
+        CHECK(!tox2::decodePngRgba8(Bytes{}).has_value());
+        CHECK(!tox2::decodePngRgba8(Bytes{'n', 'o', 't', ' ', 'a', ' ', 'p', 'n', 'g'}).has_value());
+    }
+
+    // A side above max_side is refused before any pixel buffer is allocated.
+    {
+        const PngTestImage png = encodePng(2000, 10, Bytes(2000 * 10 * 3, 0x55), PNG_COLOR_TYPE_RGB, 8);
+        CHECK(!tox2::decodePngRgba8(png.file, 1024).has_value());
+        const auto image = tox2::decodePngRgba8(png.file, 2000);
+        CHECK(image.has_value() && image->width == 2000 && image->height == 10);
+    }
 }
 
 void testFifoParser() {
@@ -19363,6 +19449,7 @@ int main(int argc, char** argv) {
     testCellMsgDialog();
     testCellSaveData();
     testCellPngDec();
+    testDecodePngRgba8();
     testFifoParser();
     testRsxArgCensus();
     testRsxRegisters();
