@@ -26,7 +26,7 @@ function(tox2_overlay_add_imgui)
     IMGUI_DISABLE_OBSOLETE_FUNCTIONS
     IMGUI_IMPL_WIN32_DISABLE_GAMEPAD
     IMGUI_DISABLE_WIN32_DEFAULT_IME_FUNCTIONS)
-  target_compile_options(imgui PRIVATE -march=x86-64-v3)
+  target_compile_options(imgui PRIVATE ${TOX2_ARCH_FLAGS})
   target_link_libraries(imgui PUBLIC volk PRIVATE dwmapi gdi32)
 endfunction()
 
@@ -42,13 +42,13 @@ function(tox2_overlay_add)
     runtime/src/overlay/overlay_sources.cpp
     runtime/src/overlay/save_dialog_overlay.cpp
     runtime/src/overlay/ui_font.cpp)
-  target_compile_options(tox2_overlay PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_overlay PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_include_directories(tox2_overlay PUBLIC ${CMAKE_SOURCE_DIR}/runtime/src)
   target_link_libraries(tox2_overlay PUBLIC imgui tox2_render)
 
   # Needs no GPU for the model tests; the Vulkan parts skip without a device.
   add_executable(tox2_overlay_tests runtime/tests/overlay_test.cpp)
-  target_compile_options(tox2_overlay_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_overlay_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_overlay_tests PRIVATE tox2_overlay)
 
   add_test(NAME overlay_core COMMAND tox2_overlay_tests)

@@ -60,7 +60,7 @@ function(tox2_media_add)
   tox2_media_find_ffmpeg()
 
   add_library(tox2_media STATIC runtime/src/media/ffmpeg_api.cpp runtime/src/media/ffmpeg_codecs.cpp)
-  target_compile_options(tox2_media PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_media PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_include_directories(tox2_media PUBLIC ${CMAKE_SOURCE_DIR}/runtime/src)
   # SYSTEM keeps the FFmpeg headers out of our warnings; nothing links against FFmpeg itself.
   target_include_directories(tox2_media SYSTEM PUBLIC "${TOX2_FFMPEG_RESOLVED_DIR}/include")
@@ -96,7 +96,7 @@ function(tox2_media_add)
   add_custom_target(tox2_ffmpeg_runtime ALL DEPENDS ${copied})
 
   add_executable(tox2_media_ffmpeg_tests runtime/tests/media_ffmpeg_test.cpp)
-  target_compile_options(tox2_media_ffmpeg_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_media_ffmpeg_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_media_ffmpeg_tests PRIVATE tox2_media)
   add_dependencies(tox2_media_ffmpeg_tests tox2_ffmpeg_runtime)
 

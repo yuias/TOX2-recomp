@@ -16,7 +16,7 @@ function(tox2_bench_add)
   endif()
 
   add_executable(tox2_bench tools/tox2_bench/main.cpp)
-  target_compile_options(tox2_bench PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_bench PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   # The fixtures shared with the correctness tests live next to them.
   target_include_directories(tox2_bench PRIVATE runtime/tests)
   target_link_libraries(tox2_bench PRIVATE tox2_spu_generated tox2_runtime_core tox2_render)

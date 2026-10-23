@@ -20,7 +20,7 @@ function(tox2_render_add_libraries)
     ${CMAKE_SOURCE_DIR}/externals/Vulkan-Headers/include)
   # No link against the Vulkan loader import library: volk loads it at run time.
   target_compile_definitions(volk PUBLIC VK_NO_PROTOTYPES)
-  target_compile_options(volk PRIVATE -march=x86-64-v3)
+  target_compile_options(volk PRIVATE ${TOX2_ARCH_FLAGS})
 endfunction()
 
 # The run-time shader compiler is the SDK's static shaderc, located through $VULKAN_SDK. The
@@ -180,7 +180,7 @@ function(tox2_render_add)
     runtime/src/render/vk_textures.cpp
     runtime/src/render/vk_window.cpp
     runtime/src/render/vp_translator.cpp)
-  target_compile_options(tox2_render PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_render PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_include_directories(tox2_render PUBLIC ${CMAKE_SOURCE_DIR}/runtime/src)
   target_include_directories(tox2_render SYSTEM PUBLIC
     ${CMAKE_SOURCE_DIR}/externals/VulkanMemoryAllocator/include)
@@ -206,7 +206,7 @@ function(tox2_render_add)
   endif()
 
   add_executable(tox2_render_tests runtime/tests/render_test.cpp)
-  target_compile_options(tox2_render_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_render_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_render_tests PRIVATE tox2_render)
 
   add_test(NAME render_core COMMAND tox2_render_tests)
@@ -216,7 +216,7 @@ function(tox2_render_add)
 
   # Needs no GPU. The dumped programs come from generated/rsx; the test skips them when absent.
   add_executable(tox2_vp_translator_tests runtime/tests/vp_translator_test.cpp)
-  target_compile_options(tox2_vp_translator_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_vp_translator_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_compile_definitions(tox2_vp_translator_tests PRIVATE
     TOX2_RSX_DUMP_DIR="${CMAKE_SOURCE_DIR}/generated/rsx")
   target_link_libraries(tox2_vp_translator_tests PRIVATE tox2_render)
@@ -225,7 +225,7 @@ function(tox2_render_add)
     PASS_REGULAR_EXPRESSION "vp translator tests: [0-9]+ passed, 0 failed")
 
   add_executable(tox2_fp_translator_tests runtime/tests/fp_translator_test.cpp)
-  target_compile_options(tox2_fp_translator_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_fp_translator_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_compile_definitions(tox2_fp_translator_tests PRIVATE
     TOX2_RSX_DUMP_DIR="${CMAKE_SOURCE_DIR}/generated/rsx")
   target_link_libraries(tox2_fp_translator_tests PRIVATE tox2_render)
@@ -235,7 +235,7 @@ function(tox2_render_add)
 
   # Header-only maths; needs no GPU.
   add_executable(tox2_frame_gen_tests runtime/tests/frame_gen_test.cpp)
-  target_compile_options(tox2_frame_gen_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_frame_gen_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_frame_gen_tests PRIVATE tox2_render)
   add_test(NAME frame_gen COMMAND tox2_frame_gen_tests)
   set_tests_properties(frame_gen PROPERTIES
@@ -244,7 +244,7 @@ function(tox2_render_add)
   # Replays a capture without the game: prints the command list from the frame builder, renders it
   # headless and writes the displayed frame as a PNG.
   add_executable(tox2_rsxreplay tools/tox2_rsxreplay/main.cpp)
-  target_compile_options(tox2_rsxreplay PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_rsxreplay PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_rsxreplay PRIVATE tox2_render)
 
   if(TOX2_STREAMLINE_ENABLED)

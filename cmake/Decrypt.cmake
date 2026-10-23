@@ -14,7 +14,7 @@ set(TOX2_INPUTS_DIR "${CMAKE_SOURCE_DIR}/generated/inputs")
 # unit tests, and the build steps that produce generated/inputs. Call after tox2_runtime_add_core() and
 # enable_testing().
 function(tox2_decrypt_add)
-  set(decrypt_options -march=x86-64-v3 -Wall -Wextra)
+  set(decrypt_options ${TOX2_ARCH_FLAGS} -Wall -Wextra)
 
   add_library(tox2_decrypt_lib STATIC
     tools/tox2_decrypt/cli.cpp

@@ -59,7 +59,7 @@ function(tox2_spu_add_generated_tree)
   target_include_directories(tox2_spu_generated PUBLIC "${generated_dir}/spu")
 
   add_executable(tox2_spu_link_test runtime/tests/spu_link_test.cpp)
-  target_compile_options(tox2_spu_link_test PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_spu_link_test PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_spu_link_test PRIVATE tox2_spu_generated tox2_spu_stub)
 
   add_test(NAME spu_link COMMAND tox2_spu_link_test)
@@ -157,7 +157,7 @@ function(tox2_spu_add_programs)
   add_executable(tox2_spu_programs runtime/tests/spu_programs_main.cpp
     $<TARGET_OBJECTS:tox2_spu_programs_generated>)
   add_dependencies(tox2_spu_programs tox2_spu_programs_gen)
-  target_compile_options(tox2_spu_programs PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_spu_programs PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_include_directories(tox2_spu_programs PRIVATE "${gen_dir}")
   target_link_libraries(tox2_spu_programs PRIVATE tox2_runtime_core)
 
@@ -180,7 +180,7 @@ function(tox2_spu_add_lzma_inflate_test)
   endif()
 
   add_executable(tox2_spu_lzma_inflate_test runtime/tests/spu_lzma_inflate_test.cpp)
-  target_compile_options(tox2_spu_lzma_inflate_test PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_spu_lzma_inflate_test PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_spu_lzma_inflate_test PRIVATE tox2_spu_generated tox2_runtime_core)
 
   add_test(NAME spu_lzma_inflate

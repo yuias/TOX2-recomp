@@ -74,8 +74,8 @@ function(tox2_runtime_add_yyjson)
 endfunction()
 
 # xxHash is used header-only: XXH_INLINE_ALL compiles its functions into each translation unit that includes
-# xxhash.h, with the unit's own flags, so XXH3 picks the AVX2 code path from -march=x86-64-v3. Nothing is built
-# or installed from the submodule; SYSTEM keeps its header out of our warnings.
+# xxhash.h, with the unit's own flags, so XXH3 picks its vector code path (AVX2 or NEON) from TOX2_ARCH_FLAGS.
+# Nothing is built or installed from the submodule; SYSTEM keeps its header out of our warnings.
 function(tox2_runtime_add_xxhash)
   if(NOT EXISTS ${CMAKE_SOURCE_DIR}/externals/xxHash/xxhash.h)
     message(FATAL_ERROR
@@ -187,15 +187,17 @@ function(tox2_runtime_add_core)
     runtime/src/spu/spu_dispatch.cpp
     runtime/src/spu/spu_mfc.cpp
     runtime/src/spu/spu_thread.cpp)
-  target_compile_options(tox2_runtime_core PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_runtime_core PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_include_directories(tox2_runtime_core PUBLIC
     ${CMAKE_SOURCE_DIR}/runtime/src
     ${CMAKE_SOURCE_DIR}/runtime/include)
-  target_link_libraries(tox2_runtime_core PUBLIC bcrypt)
-  # timeBeginPeriod (core/timer_resolution.cpp).
-  target_link_libraries(tox2_runtime_core PRIVATE winmm)
-  # WaitOnAddress / WakeByAddressAll (core/reservation.cpp).
-  target_link_libraries(tox2_runtime_core PRIVATE synchronization)
+  if(WIN32)
+    target_link_libraries(tox2_runtime_core PUBLIC bcrypt)
+    # timeBeginPeriod (core/timer_resolution.cpp).
+    target_link_libraries(tox2_runtime_core PRIVATE winmm)
+    # WaitOnAddress / WakeByAddressAll (core/reservation.cpp).
+    target_link_libraries(tox2_runtime_core PRIVATE synchronization)
+  endif()
   # PRIVATE: spdlog types stay out of core/log.h, so consumers never compile against its headers.
   target_link_libraries(tox2_runtime_core PRIVATE spdlog::spdlog)
   # PRIVATE as well: the PNG codec stays inside cell_png_dec.cpp.
@@ -210,7 +212,7 @@ function(tox2_runtime_add_core)
     TOX2_RSX_WRITE_WATCH=$<IF:$<BOOL:${TOX2_RSX_WRITE_WATCH}>,1,0>)
 
   add_executable(tox2_runtime_tests runtime/tests/runtime_core_test.cpp)
-  target_compile_options(tox2_runtime_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_runtime_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   # The tests build their PNG inputs with libpng's writer.
   target_link_libraries(tox2_runtime_tests PRIVATE tox2_runtime_core png_static)
 
@@ -220,7 +222,7 @@ function(tox2_runtime_add_core)
 
   # The movie pipeline's core needs no FFmpeg, so its tests link the core library only.
   add_executable(tox2_media_core_tests runtime/tests/media_core_test.cpp)
-  target_compile_options(tox2_media_core_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_media_core_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_media_core_tests PRIVATE tox2_runtime_core)
 
   add_test(NAME media_core COMMAND tox2_media_core_tests)
@@ -228,7 +230,7 @@ function(tox2_runtime_add_core)
     PASS_REGULAR_EXPRESSION "media core tests: [0-9]+ passed, 0 failed")
 
   add_executable(tox2_spu_runtime_tests runtime/tests/spu_runtime_test.cpp)
-  target_compile_options(tox2_spu_runtime_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_spu_runtime_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_spu_runtime_tests PRIVATE tox2_runtime_core)
 
   add_test(NAME spu_runtime COMMAND tox2_spu_runtime_tests)
@@ -236,7 +238,7 @@ function(tox2_runtime_add_core)
     PASS_REGULAR_EXPRESSION "spu runtime tests: [0-9]+ passed, 0 failed")
 
   add_executable(tox2_game_options_tests runtime/tests/game_options_test.cpp)
-  target_compile_options(tox2_game_options_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_game_options_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_game_options_tests PRIVATE tox2_runtime_core)
 
   add_test(NAME game_options COMMAND tox2_game_options_tests)
@@ -244,7 +246,7 @@ function(tox2_runtime_add_core)
     PASS_REGULAR_EXPRESSION "game options tests: [0-9]+ passed, 0 failed")
 
   add_executable(tox2_save_dialog_tests runtime/tests/save_dialog_test.cpp)
-  target_compile_options(tox2_save_dialog_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_save_dialog_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_save_dialog_tests PRIVATE tox2_runtime_core)
 
   add_test(NAME save_dialog COMMAND tox2_save_dialog_tests)
@@ -253,7 +255,7 @@ function(tox2_runtime_add_core)
 
   # The OS checks call Win32 directly; the library is linked for the build configuration macro only.
   add_executable(tox2_write_watch_tests runtime/tests/write_watch_test.cpp)
-  target_compile_options(tox2_write_watch_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_write_watch_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_write_watch_tests PRIVATE tox2_runtime_core)
 
   add_test(NAME write_watch_os COMMAND tox2_write_watch_tests)
