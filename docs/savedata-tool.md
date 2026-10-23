@@ -221,8 +221,8 @@ tox2_game --hdd-dir <hdd-dir> ...
 
 The `info` and `patch` steps are optional. After the run starts, the log should show the save in the
 list and a `tox2: savedata: file op ... 'SAVE'` line with no `cannot read` error after it. The save data
-handlers are described in [Runtime](runtime.md). Whether the game accepts a US `SAVE` depends on the data
-inside it; the tool does not change the contents of `SAVE`.
+handlers are described in [Runtime](runtime.md). A decrypted US save installed this way loads in the
+Japanese build. The tool does not change the contents of `SAVE`.
 
 ## Tests
 
