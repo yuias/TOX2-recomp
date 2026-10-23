@@ -11,11 +11,15 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
 #include <immintrin.h>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <os/os_sync_wait_on_address.h>
+#endif
 
 #include "core/log.h"
 
@@ -42,12 +46,43 @@ std::uint64_t readBuffer(const std::uint8_t* p) {
     return value;
 }
 
+// The processor's spin-wait hint.
+void cpuRelax() {
+#if defined(__x86_64__) || defined(_M_X64)
+    _mm_pause();
+#elif defined(__aarch64__)
+    __builtin_arm_yield();
+#endif
+}
+
+// Wakes every thread sleeping in waitWhileEqual on `word`.
+void wakeAll(std::atomic<std::uint32_t>& word) {
+#if defined(_WIN32)
+    WakeByAddressAll(&word);
+#else
+    os_sync_wake_by_address_all(&word, sizeof(std::uint32_t), OS_SYNC_WAKE_BY_ADDRESS_NONE);
+#endif
+}
+
+// Sleeps while `word` holds `expected`, for at most `timeout_ms` (at least 1). Returns on a wake, a changed word, the
+// timeout, or spuriously; the caller checks the word.
+void waitWhileEqual(std::atomic<std::uint32_t>& word, std::uint32_t expected, std::int64_t timeout_ms) {
+#if defined(_WIN32)
+    const DWORD wait_ms = static_cast<DWORD>(std::min<std::int64_t>(timeout_ms, INFINITE - 1));
+    WaitOnAddress(&word, &expected, sizeof(expected), wait_ms);
+#else
+    const auto timeout_ns = static_cast<std::uint64_t>(timeout_ms) * 1'000'000u;
+    os_sync_wait_on_address_with_timeout(&word, expected, sizeof(std::uint32_t), OS_SYNC_WAIT_ON_ADDRESS_NONE,
+                                         OS_CLOCK_MACH_ABSOLUTE_TIME, timeout_ns);
+#endif
+}
+
 // A stripe is held for a few hundred nanoseconds, so a short spin is the right wait. A holder that was
 // preempted is another matter: yield() only gives way to threads that are ready on this processor, and a
 // raised SPU thread (host_priority.h) could keep the holder from running, so a long wait ends in a sleep.
 void spinOnce(std::uint32_t& spins) {
     if (++spins < 64) {
-        _mm_pause();
+        cpuRelax();
     } else if (spins < 64 + 64) {
         std::this_thread::yield();
     } else {
@@ -137,7 +172,7 @@ private:
 // sleep yet finds the word changed.
 void bumpAndWake(std::atomic<std::uint32_t>& word) {
     word.fetch_add(1, std::memory_order_seq_cst);
-    WakeByAddressAll(&word);
+    wakeAll(word);
 }
 
 }  // namespace
@@ -172,7 +207,7 @@ void ReservationTable::unlockClean(std::atomic<std::uint64_t>& s) { s.fetch_sub(
 // reads the epoch, all seq_cst; a writer bumps the epoch, then reads the registrations, then bumps the word. If the
 // writer's registration read misses the waiter, it precedes the registration, so the epoch bump precedes the waiter's
 // epoch read and the waiter returns Epoch without sleeping. If it sees the registration, the word bump comes either
-// before the waiter's word read (then it also precedes the epoch read: Epoch) or after it, and then WaitOnAddress
+// before the waiter's word read (then it also precedes the epoch read: Epoch) or after it, and then waitWhileEqual
 // finds the word changed or is woken by the writer's wake. A slot reused between the writer's read and its bump gets
 // a spurious Epoch, which costs nothing. The waiter watches the stripe of its line, and every written line's version
 // moved before this call, so whatever makes lost() true reaches the waiter through a stripe it watches.
@@ -421,9 +456,8 @@ StoreWait ReservationTable::waitStoreEpoch(std::uint64_t seen, const std::uint32
         if (left <= std::chrono::steady_clock::duration::zero()) return StoreWait::Timeout;
         // Rounded up: a shorter wait would return early and spin through this loop.
         const auto left_ms = std::chrono::ceil<std::chrono::milliseconds>(left).count();
-        const DWORD wait_ms = static_cast<DWORD>(std::min<std::int64_t>(left_ms, INFINITE - 1));
         if (slept) *slept = true;
-        WaitOnAddress(&word, &before, sizeof(before), wait_ms);
+        waitWhileEqual(word, before, left_ms);
         if (word.load(std::memory_order_seq_cst) != before) {
             return haltRequested(halt) ? StoreWait::Halt : StoreWait::Epoch;
         }
