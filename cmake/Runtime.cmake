@@ -308,14 +308,17 @@ function(tox2_runtime_add_core)
   set_tests_properties(save_dialog PROPERTIES
     PASS_REGULAR_EXPRESSION "save dialog tests: [0-9]+ passed, 0 failed")
 
-  # The OS checks call Win32 directly; the library is linked for the build configuration macro only.
+  # The OS checks call Win32 directly and run on Windows only; the library is linked for the build configuration
+  # macro only.
   add_executable(tox2_write_watch_tests runtime/tests/write_watch_test.cpp)
   target_compile_options(tox2_write_watch_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_write_watch_tests PRIVATE tox2_runtime_core)
 
-  add_test(NAME write_watch_os COMMAND tox2_write_watch_tests)
-  set_tests_properties(write_watch_os PROPERTIES
-    PASS_REGULAR_EXPRESSION "write watch tests: [0-9]+ passed, 0 failed")
+  if(WIN32)
+    add_test(NAME write_watch_os COMMAND tox2_write_watch_tests)
+    set_tests_properties(write_watch_os PROPERTIES
+      PASS_REGULAR_EXPRESSION "write watch tests: [0-9]+ passed, 0 failed")
+  endif()
 
   # The test binary reports the value it was compiled with, so a build directory configured the other way fails here.
   if(TOX2_RSX_WRITE_WATCH)
