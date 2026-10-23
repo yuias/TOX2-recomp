@@ -2,21 +2,33 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <string>
+#include <system_error>
 
 #include "core/event_history.h"
 #include "core/guest_memory.h"
+#include "core/host_memory.h"
 #include "core/log.h"
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 
 #include <crtdbg.h>
+#else
+#include <limits.h>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+#endif
 
 namespace tox2 {
 namespace {
@@ -39,7 +51,11 @@ void enterStop() {
     t_in_stop = true;
     if (g_stopping.exchange(true)) {
         for (;;) {
+#if defined(_WIN32)
             Sleep(INFINITE);
+#else
+            pause();
+#endif
         }
     }
 }
@@ -60,16 +76,12 @@ void enterStop() {
 }
 
 // True when [addr, addr + 8) is 8-byte aligned, inside the stack region and committed readable
-// host memory. An aligned 8-byte range never crosses a page, so one query is enough.
+// host memory.
 bool readableStackWord(const std::uint8_t* base, std::uint64_t addr) {
     if ((addr & 7) != 0 || addr < kStackRegion.begin || addr + 8 > kStackRegion.end) {
         return false;
     }
-    MEMORY_BASIC_INFORMATION info;
-    if (VirtualQuery(base + addr, &info, sizeof info) != sizeof info || info.State != MEM_COMMIT) {
-        return false;
-    }
-    return (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+    return host::readable(base + addr, 8);
 }
 
 void dumpContext(const Tox2PpuContext& ctx) {
@@ -188,6 +200,7 @@ void stopProcess(ExitCode code, std::string_view line) {
 }
 
 void installProcessSettings() {
+#if defined(_WIN32)
     // abort() would otherwise show the debug CRT dialog or hand the process to Windows Error
     // Reporting; with both off it just terminates.
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
@@ -201,9 +214,11 @@ void installProcessSettings() {
         _CrtSetReportFile(type, _CRTDBG_FILE_STDERR);
     }
 #endif
+#endif
 }
 
 std::filesystem::path executableDirectory() {
+#if defined(_WIN32)
     std::wstring buffer(MAX_PATH, L'\0');
     for (;;) {
         const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
@@ -214,6 +229,22 @@ std::filesystem::path executableDirectory() {
         }
         buffer.resize(buffer.size() * 2);
     }
+#elif defined(__APPLE__)
+    std::string buffer(PATH_MAX, '\0');
+    auto size = static_cast<std::uint32_t>(buffer.size());
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        // `size` now holds the length the path needs.
+        buffer.resize(size);
+        if (_NSGetExecutablePath(buffer.data(), &size) != 0) return {};
+    }
+    buffer.resize(std::strlen(buffer.c_str()));
+    // The reported path can contain symlinks and "..", which would leak into the paths derived from it.
+    std::error_code ec;
+    const std::filesystem::path resolved = std::filesystem::weakly_canonical(buffer, ec);
+    return (ec ? std::filesystem::path(buffer) : resolved).parent_path();
+#else
+#error "executableDirectory: unsupported platform"
+#endif
 }
 
 }  // namespace tox2

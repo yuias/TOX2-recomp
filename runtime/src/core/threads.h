@@ -509,6 +509,12 @@ inline constexpr std::chrono::microseconds kStartFirstBound{5000};
 // lock (legacy) or a slot (split modes).
 bool startGuestThreadFirst(GuestThread* thread, std::chrono::microseconds bound = kStartFirstBound);
 
+// Runs `body` on a new detached host thread with a stack of `stack_bytes`. It is not a guest thread
+// (no guest lock, no census entry); it is for host work that needs more than the default stack,
+// such as the RSX consumer compiling shaders. The size is ignored on Windows, where the thread
+// keeps the default stack.
+void startHostThread(std::function<void()> body, std::size_t stack_bytes);
+
 // prepareGuestThread + startGuestThread. Returns the new thread id, 0 on failure.
 std::uint32_t createGuestThread(const GuestThreadParams& params);
 

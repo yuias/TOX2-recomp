@@ -22,11 +22,15 @@
 #include "core/thread_cpu.h"
 #include "tox2/ppu_context.h"
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 
 #include <process.h>
+#else
+#include <pthread.h>
+#endif
 
 namespace tox2 {
 namespace {
@@ -34,6 +38,25 @@ namespace {
 // Guest call depth maps to host frames, so guest threads need far more than the default stack.
 // Only reserved: pages are committed as they are touched.
 constexpr unsigned kHostStackBytes = 16u << 20;
+
+#if !defined(_WIN32)
+// Unlike Windows, POSIX has no reserve flag and the default guard is one page, so overflowing the
+// stack of a deep guest call chain would have little to stop it before it hit a neighbour.
+constexpr std::size_t kHostGuardBytes = 64u << 10;
+
+// Starts a detached pthread with the given stack size; false when the system refuses.
+bool startPthread(void* (*entry)(void*), void* arg, std::size_t stack_bytes) {
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) return false;
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_attr_setstacksize(&attr, stack_bytes);
+    pthread_attr_setguardsize(&attr, kHostGuardBytes);
+    pthread_t thread;
+    const bool started = pthread_create(&thread, &attr, entry, arg) == 0;
+    pthread_attr_destroy(&attr);
+    return started;
+}
+#endif
 
 // Initial r1 offset below the stack top (RPCS3 `ppu_stack_start_offset`).
 constexpr std::uint32_t kStackStartOffset = 0x70;
@@ -272,7 +295,11 @@ void installThreadHooks() {
     setGuestLockCensusProvider(&guestLockCensus);
 }
 
+#if defined(_WIN32)
 unsigned __stdcall guestThreadMain(void* arg) {
+#else
+void* guestThreadMain(void* arg) {
+#endif
     auto* thread = static_cast<GuestThread*>(arg);
     registerHostThreadCpu(std::format("ppu.{:08x}", thread->id()));
     reserveFaultStack();
@@ -994,12 +1021,39 @@ GuestThread* prepareGuestThread(const GuestThreadParams& params) {
 }
 
 void startGuestThread(GuestThread* thread) {
+#if defined(_WIN32)
     const std::uintptr_t handle = _beginthreadex(nullptr, kHostStackBytes, &guestThreadMain, thread,
                                                  STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
     if (handle == 0) {
         fatal(FatalKind::Internal, std::format("cannot start the host thread of guest thread {:#010x}", thread->id()));
     }
     CloseHandle(reinterpret_cast<HANDLE>(handle));
+#else
+    if (!startPthread(&guestThreadMain, thread, kHostStackBytes)) {
+        fatal(FatalKind::Internal, std::format("cannot start the host thread of guest thread {:#010x}", thread->id()));
+    }
+#endif
+}
+
+void startHostThread(std::function<void()> body, std::size_t stack_bytes) {
+#if defined(_WIN32)
+    (void)stack_bytes;
+    std::thread(std::move(body)).detach();
+#else
+    // The thread owns the callable from here on and frees it when the body returns.
+    auto* owned = new std::function<void()>(std::move(body));
+    const bool started = startPthread(
+            [](void* arg) -> void* {
+                const std::unique_ptr<std::function<void()>> body(static_cast<std::function<void()>*>(arg));
+                (*body)();
+                return nullptr;
+            },
+            owned, stack_bytes);
+    if (!started) {
+        delete owned;
+        fatal(FatalKind::Internal, std::format("cannot start a host thread with a {} KiB stack", stack_bytes >> 10));
+    }
+#endif
 }
 
 namespace {
@@ -1093,8 +1147,12 @@ void exitCurrentThread(std::uint64_t value) {
     setFatalContext(nullptr);
     t_current = nullptr;
     guestLock().unlock();
+#if defined(_WIN32)
     _endthreadex(0);
-    // _endthreadex does not return; this keeps the [[noreturn]] contract visible to the compiler.
+#else
+    pthread_exit(nullptr);
+#endif
+    // Neither call returns; this keeps the [[noreturn]] contract visible to the compiler.
     std::_Exit(static_cast<int>(ExitCode::Fatal));
 }
 
