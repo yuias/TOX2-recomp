@@ -69,6 +69,19 @@ function(tox2_input_add)
     target_link_libraries(tox2_input_gameinput PUBLIC tox2_runtime_core PRIVATE "${TOX2_GAMEINPUT_LIB}")
   endif()
 
+  if(APPLE)
+    # Objective-C++; the only target that sees the GameController headers. tox2_runtime_core stays free
+    # of Apple types. AppKit is for NSRunningApplication (the focus check).
+    add_library(tox2_input_gamecontroller STATIC runtime/src/input/gamecontroller_backend.mm)
+    target_compile_options(tox2_input_gamecontroller PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+    target_link_libraries(tox2_input_gamecontroller PUBLIC tox2_runtime_core
+      PRIVATE "-framework Cocoa" "-framework GameController")
+
+    if(TARGET tox2_game)
+      target_link_libraries(tox2_game PRIVATE tox2_input_gamecontroller)
+    endif()
+  endif()
+
   # Pure core code behind the GamepadBackend interface; no GameInput or Windows.
   add_executable(tox2_input_core_tests runtime/tests/input_core_test.cpp)
   target_compile_options(tox2_input_core_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
@@ -77,6 +90,19 @@ function(tox2_input_add)
   add_test(NAME input_core COMMAND tox2_input_core_tests)
   set_tests_properties(input_core PROPERTIES
     PASS_REGULAR_EXPRESSION "input core tests: [0-9]+ passed, 0 failed")
+
+  if(APPLE)
+    # Waits up to 3 s for a controller; exits 77 (skipped) when none is connected.
+    add_executable(tox2_input_gamecontroller_tests runtime/tests/input_gamecontroller_test.cpp)
+    target_compile_options(tox2_input_gamecontroller_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+    target_link_libraries(tox2_input_gamecontroller_tests PRIVATE tox2_input_gamecontroller
+      "-framework CoreFoundation")
+
+    add_test(NAME input_gamecontroller COMMAND tox2_input_gamecontroller_tests)
+    set_tests_properties(input_gamecontroller PROPERTIES
+      SKIP_RETURN_CODE 77
+      PASS_REGULAR_EXPRESSION "input gamecontroller tests: [0-9]+ passed, 0 failed")
+  endif()
 
   if(WIN32)
     # Exits 77 (skipped) when no GameInput runtime with API version 3 is available.

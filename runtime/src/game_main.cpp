@@ -51,6 +51,8 @@
 #include "hle/save_dialog.h"
 #if defined(_WIN32)
 #include "input/gameinput_backend.h"
+#elif defined(__APPLE__)
+#include "input/gamecontroller_backend.h"
 #endif
 #include "input/gamepad_hub.h"
 #include "input/keyboard_pad.h"
@@ -1013,6 +1015,18 @@ int main(int argc, char** argv) {
         tox2::startGamepadHub(
                 []() -> std::expected<std::shared_ptr<tox2::GamepadBackend>, std::string> {
                     return tox2::makeGameInputBackend({});
+                },
+                tox2::padUsesGamepad(opt.pad) ? keyboard : nullptr,
+                {.is_foreground = tox2::processOwnsForegroundWindow,
+                 .detect_steam = tox2::detectSteamContext,
+                 .probe = opt.pad_probe});
+    }
+#elif defined(__APPLE__)
+    // The framework reports controllers on the main queue, which runWithHostEventLoop below serves.
+    if (tox2::padUsesGamepad(opt.pad) || opt.pad_probe) {
+        tox2::startGamepadHub(
+                []() -> std::expected<std::shared_ptr<tox2::GamepadBackend>, std::string> {
+                    return tox2::makeGameControllerBackend();
                 },
                 tox2::padUsesGamepad(opt.pad) ? keyboard : nullptr,
                 {.is_foreground = tox2::processOwnsForegroundWindow,
