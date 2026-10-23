@@ -56,16 +56,18 @@ endfunction()
 
 # The input libraries and tools. Call after tox2_runtime_add_core() and enable_testing().
 function(tox2_input_add)
-  tox2_input_find_gameinput()
+  if(WIN32)
+    tox2_input_find_gameinput()
 
-  # The only target that sees GameInput.h and Windows.h for gamepads; tox2_runtime_core stays free of
-  # them. The v3 header directory is a SYSTEM include so it is searched before the Windows SDK's
-  # older GameInput.h. GameInput.lib is the package's static loader (it resolves the installed
-  # runtime with LoadLibrary), so no GameInput DLL appears in an import table.
-  add_library(tox2_input_gameinput STATIC runtime/src/input/gameinput_backend.cpp)
-  target_compile_options(tox2_input_gameinput PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
-  target_include_directories(tox2_input_gameinput SYSTEM PRIVATE "${TOX2_GAMEINPUT_INCLUDE_DIR}")
-  target_link_libraries(tox2_input_gameinput PUBLIC tox2_runtime_core PRIVATE "${TOX2_GAMEINPUT_LIB}")
+    # The only target that sees GameInput.h and Windows.h for gamepads; tox2_runtime_core stays free
+    # of them. The v3 header directory is a SYSTEM include so it is searched before the Windows SDK's
+    # older GameInput.h. GameInput.lib is the package's static loader (it resolves the installed
+    # runtime with LoadLibrary), so no GameInput DLL appears in an import table.
+    add_library(tox2_input_gameinput STATIC runtime/src/input/gameinput_backend.cpp)
+    target_compile_options(tox2_input_gameinput PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+    target_include_directories(tox2_input_gameinput SYSTEM PRIVATE "${TOX2_GAMEINPUT_INCLUDE_DIR}")
+    target_link_libraries(tox2_input_gameinput PUBLIC tox2_runtime_core PRIVATE "${TOX2_GAMEINPUT_LIB}")
+  endif()
 
   # Pure core code behind the GamepadBackend interface; no GameInput or Windows.
   add_executable(tox2_input_core_tests runtime/tests/input_core_test.cpp)
@@ -76,17 +78,19 @@ function(tox2_input_add)
   set_tests_properties(input_core PROPERTIES
     PASS_REGULAR_EXPRESSION "input core tests: [0-9]+ passed, 0 failed")
 
-  # Exits 77 (skipped) when no GameInput runtime with API version 3 is available.
-  add_executable(tox2_input_gameinput_tests runtime/tests/input_gameinput_test.cpp)
-  target_compile_options(tox2_input_gameinput_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
-  target_link_libraries(tox2_input_gameinput_tests PRIVATE tox2_input_gameinput)
+  if(WIN32)
+    # Exits 77 (skipped) when no GameInput runtime with API version 3 is available.
+    add_executable(tox2_input_gameinput_tests runtime/tests/input_gameinput_test.cpp)
+    target_compile_options(tox2_input_gameinput_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+    target_link_libraries(tox2_input_gameinput_tests PRIVATE tox2_input_gameinput)
 
-  add_test(NAME input_gameinput COMMAND tox2_input_gameinput_tests)
-  set_tests_properties(input_gameinput PROPERTIES
-    SKIP_RETURN_CODE 77
-    PASS_REGULAR_EXPRESSION "input gameinput tests: [0-9]+ passed, 0 failed")
+    add_test(NAME input_gameinput COMMAND tox2_input_gameinput_tests)
+    set_tests_properties(input_gameinput PROPERTIES
+      SKIP_RETURN_CODE 77
+      PASS_REGULAR_EXPRESSION "input gameinput tests: [0-9]+ passed, 0 failed")
 
-  add_executable(tox2_padtool tools/tox2_padtool/main.cpp)
-  target_compile_options(tox2_padtool PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
-  target_link_libraries(tox2_padtool PRIVATE tox2_input_gameinput)
+    add_executable(tox2_padtool tools/tox2_padtool/main.cpp)
+    target_compile_options(tox2_padtool PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+    target_link_libraries(tox2_padtool PRIVATE tox2_input_gameinput)
+  endif()
 endfunction()

@@ -108,7 +108,10 @@ function(tox2_ppu_add_generated_tree)
   # The runtime core supplies every hook; neither stub may be linked here (duplicate symbols).
   add_executable(tox2_game runtime/src/game_main.cpp)
   target_compile_options(tox2_game PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
-  target_link_libraries(tox2_game PRIVATE tox2_ppu_generated tox2_spu_generated tox2_runtime_core tox2_audio_wasapi tox2_input_gameinput)
+  target_link_libraries(tox2_game PRIVATE tox2_ppu_generated tox2_spu_generated tox2_runtime_core)
+  if(WIN32)
+    target_link_libraries(tox2_game PRIVATE tox2_audio_wasapi tox2_input_gameinput)
+  endif()
   target_sources(tox2_game PRIVATE $<TARGET_OBJECTS:tox2_ppu_overrides>)
 
   # Pins how far the game gets; updated by whoever moves the milestone.
