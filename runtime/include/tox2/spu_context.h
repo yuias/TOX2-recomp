@@ -126,6 +126,12 @@ TOX2_FORCEINLINE bool tox2SpuHaltRequested(const Tox2SpuContext* ctx) {
 // it (the SPU truncates, and its denormals are zeros). The runtime sets it around the generated code
 // (runSpu); a helper that needs the default environment, round to nearest with denormals, switches
 // to it for its own duration and restores the caller's value.
+//
+// On arm64 the same environment lives in FPCR, and the names below keep "Mxcsr" for the one control
+// word either host has: RMode (bits 23:22) 0b11 rounds toward zero, and FZ (bit 24) flushes denormal
+// operands as well as results, so it stands for both FTZ and DAZ. FPCR has no trap enables set by
+// default, which matches the masked exceptions.
+#if defined(__x86_64__) || defined(_M_X64)
 enum Tox2SpuMxcsr : uint32_t {
     kTox2SpuMxcsrHost = 0x1f80u,  // round to nearest, exceptions masked
     kTox2SpuMxcsrSpu = 0xffc0u,   // host | round toward zero (0x6000) | FTZ (0x8000) | DAZ (0x40)
@@ -134,6 +140,18 @@ enum Tox2SpuMxcsr : uint32_t {
 TOX2_FORCEINLINE uint32_t tox2SpuMxcsrGet(void) { return __builtin_ia32_stmxcsr(); }
 
 TOX2_FORCEINLINE void tox2SpuMxcsrSet(uint32_t value) { __builtin_ia32_ldmxcsr(value); }
+#elif defined(__aarch64__)
+enum Tox2SpuMxcsr : uint32_t {
+    kTox2SpuMxcsrHost = 0u,                      // round to nearest, no flush
+    kTox2SpuMxcsrSpu = (3u << 22) | (1u << 24),  // round toward zero | FZ
+};
+
+TOX2_FORCEINLINE uint32_t tox2SpuMxcsrGet(void) { return (uint32_t)__builtin_arm_rsr64("fpcr"); }
+
+TOX2_FORCEINLINE void tox2SpuMxcsrSet(uint32_t value) { __builtin_arm_wsr64("fpcr", (uint64_t)value); }
+#else
+#error "no SPU floating-point environment for this host"
+#endif
 
 // Switches to the default environment and returns the previous MXCSR for tox2SpuMxcsrSet. The float
 // operations of the scope must sit between the two calls; the SPU codegen options (-frounding-math) and

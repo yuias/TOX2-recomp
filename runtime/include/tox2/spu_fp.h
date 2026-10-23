@@ -126,15 +126,15 @@ TOX2_FORCEINLINE uint32_t tox2SpuSfNegMulSub(uint32_t a, uint32_t b, uint32_t c)
 //
 // The audio decoder's transforms are made of these instructions, so each has two paths.
 //
-// Fast path: native single-precision AVX operations in the SPU environment (MXCSR round toward zero,
+// Fast path: native single-precision vector operations in the SPU environment (MXCSR round toward zero,
 // FTZ, DAZ; see spu_context.h). Rounding toward zero is the SPU's truncation, FTZ makes a result below
 // Smin zero (tininess is the same before and after rounding when rounding toward zero, so the
 // threshold is exactly Smin), DAZ reads an exponent-0 operand as zero, and a fused multiply-add rounds
 // once without limiting its product, so a product beyond the single range with a sum inside it is
 // exact. What differs is handled on the result words:
-//   - a zero result is +0 on the SPU but can be -0 on x86 (a negative zero, a flushed negative
+//   - a zero result is +0 on the SPU but can be -0 on the host (a negative zero, a flushed negative
 //     result): the sign of every lane with exponent field 0 is cleared;
-//   - an exponent-255 operand is an ordinary number on the SPU and Inf or NaN on x86, and any
+//   - an exponent-255 operand is an ordinary number on the SPU and Inf or NaN on the host, and any
 //     operation with such an operand gives an Inf or NaN result (exponent 255);
 //   - an overflow gives 0x7f7fffff when rounding toward zero, where the SPU has values up to
 //     2^128 and saturates only beyond that.
@@ -272,16 +272,20 @@ TOX2_SPU_SLOW Tox2U32x4 tox2SpuFnmsExact(const Tox2Vr a, const Tox2Vr b, const T
 // least 0x7f7fffff.
 TOX2_FORCEINLINE bool tox2SpuSf4NeedsExact(Tox2U32x4 r) {
     const Tox2S32x4 magnitude = (Tox2S32x4)(r & 0x7fffffffu);
+#if defined(__x86_64__) || defined(_M_X64)
     return __builtin_ia32_movmskps((Tox2F32x4)(magnitude > 0x7f7ffffe)) != 0;
+#else
+    return __builtin_reduce_max(magnitude) > 0x7f7ffffe;
+#endif
 }
 
 // A zero result is +0: clears the whole word of the lanes with exponent field 0. Written as a float
-// compare against zero, which needs DAZ: with it a word with exponent field 0 (a zero or a denormal, of
-// either sign) compares equal to zero whatever its fraction, so exactly those lanes are cleared, as an
-// exponent mask would. This is the same environment the fast path already depends on; it is set by runSpu
-// for every thread that runs generated code, and by the test harnesses that call the helpers directly.
-// An Inf or NaN lane never gets here (tox2SpuSf4NeedsExact sends it to the exact path), and a NaN would
-// compare unequal and be kept anyway.
+// compare against zero, which needs DAZ (FZ on arm64, which flushes compare operands too): with it a word with exponent
+// field 0 (a zero or a denormal, of either sign) compares equal to zero whatever its fraction, so exactly those lanes
+// are cleared, as an exponent mask would. This is the same environment the fast path already depends on; it is set by
+// runSpu for every thread that runs generated code, and by the test harnesses that call the helpers directly. An Inf or
+// NaN lane never gets here (tox2SpuSf4NeedsExact sends it to the exact path), and a NaN would compare unequal and be
+// kept anyway.
 TOX2_FORCEINLINE Tox2U32x4 tox2SpuSf4ZeroSign(Tox2U32x4 r) { return r & (Tox2U32x4)((Tox2F32x4)r != 0.0f); }
 
 // --- Single precision: register helpers (RT = f(RA, RB[, RC])) --------------------------------------
