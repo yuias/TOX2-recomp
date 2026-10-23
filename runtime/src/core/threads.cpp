@@ -30,6 +30,7 @@
 #include <process.h>
 #else
 #include <pthread.h>
+#include <sys/resource.h>
 #endif
 
 namespace tox2 {
@@ -276,6 +277,7 @@ std::vector<std::string> guestLockCensus() {
                 hit(LwmutexWatchKind::SpuPutlluc), hit(LwmutexWatchKind::SpuPut), hit(LwmutexWatchKind::HleCopy),
                 hit(LwmutexWatchKind::OwnerValue), hit(LwmutexWatchKind::WaiterValue)));
     }
+#if defined(_WIN32)
     FILETIME created, exited, kernel, user;
     if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
         // FILETIME counts 100 ns units.
@@ -285,6 +287,16 @@ std::vector<std::string> guestLockCensus() {
         lines.push_back(
                 std::format("census: process cpu user {:.1f} s kernel {:.1f} s", seconds_of(user), seconds_of(kernel)));
     }
+#else
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        const auto seconds_of = [](const timeval& t) {
+            return static_cast<double>(t.tv_sec) + static_cast<double>(t.tv_usec) / 1e6;
+        };
+        lines.push_back(std::format("census: process cpu user {:.1f} s kernel {:.1f} s", seconds_of(usage.ru_utime),
+                                    seconds_of(usage.ru_stime)));
+    }
+#endif
     return lines;
 }
 
@@ -1123,11 +1135,15 @@ namespace {
     setFatalContext(nullptr);
     t_current = nullptr;
     // Whoever took the kernel lock: a handler that called sys_ppu_thread_exit holds it through a KernelSection whose
-    // destructor never runs, because _endthreadex does not unwind.
+    // destructor never runs, because neither _endthreadex nor pthread_exit (on macOS) unwinds.
     if (kernel.heldByCurrentThread()) kernel.unlock();
     if (ppuSlots().heldByCurrentThread()) ppuSlots().release();
     thread->markFirstRelease();
+#if defined(_WIN32)
     _endthreadex(0);
+#else
+    pthread_exit(nullptr);
+#endif
     std::_Exit(static_cast<int>(ExitCode::Fatal));
 }
 
