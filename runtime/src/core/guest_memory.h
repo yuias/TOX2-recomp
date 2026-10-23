@@ -12,7 +12,9 @@ namespace tox2 {
 
 // One address range of the guest address space with its own allocator. `guard` bytes below and
 // above every allocation stay uncommitted so that a stray access faults instead of corrupting a
-// neighbour.
+// neighbour. The guarantee holds when the host page is no larger than the 4 KiB logical page; on a
+// 16 KiB host (Apple Silicon) a guard that shares a host page with a live allocation stays
+// accessible, so a stray access into it no longer faults.
 struct GuestRegion {
     std::uint32_t begin, end, granularity, guard;
     const char* name;
@@ -35,6 +37,9 @@ const char* guestRangeName(std::uint32_t addr);
 
 // The flat guest address space: 4 GiB plus a guard tail reserved up front, with pages committed on
 // demand. Memory is zero-filled when it is first committed or committed again after a decommit.
+// Pages are 4 KiB logical pages tracked in a bitmap; the host may use larger pages. A host page stays
+// committed while any of its logical pages is, and a logical page that becomes committed in a kept
+// host page is zeroed explicitly.
 class GuestMemory {
 public:
     GuestMemory() = default;
@@ -42,19 +47,19 @@ public:
     GuestMemory(const GuestMemory&) = delete;
     GuestMemory& operator=(const GuestMemory&) = delete;
 
-    // Reserves 4 GiB + kTox2GuestGuardSize as PAGE_NOACCESS. The newest reservation is the one the
-    // fault handler recognises.
+    // Reserves 4 GiB + kTox2GuestGuardSize of inaccessible address space. The newest reservation is
+    // the one the fault handler recognises.
     bool reserve();
     std::uint8_t* base() const { return base_; }
 
-    // Page-rounded (outward) read/write commit of [addr, addr + size). Committing pages that are
-    // already committed keeps their contents.
+    // Logical-page-rounded (outward) read/write commit of [addr, addr + size). Committing pages that
+    // are already committed keeps their contents.
     bool commit(std::uint32_t addr, std::uint32_t size);
     void decommit(std::uint32_t addr, std::uint32_t size);
 
     // True when every page of [addr, addr + size) is committed. False before reserve() and when the
     // range runs past the 32-bit space. Answered from a page bitmap kept by commit()/decommit();
-    // VirtualQuery costs hundreds of microseconds inside a large committed block.
+    // asking the OS (VirtualQuery on Windows) costs hundreds of microseconds inside a large block.
     bool isCommitted(std::uint32_t addr, std::uint32_t size) const;
 
     // True when `host` points into the reservation, including the guard tail.
@@ -80,7 +85,7 @@ private:
 
     std::uint8_t* base_ = nullptr;
     // One bit per 4 KiB page; a set bit means the page was committed by commit() and not decommitted
-    // since. Guest pages are never re-protected, so this matches what VirtualQuery would report.
+    // since. Guest pages are never re-protected, so this matches what the OS would report.
     std::unique_ptr<std::atomic<std::uint64_t>[]> committed_pages_;
 #if TOX2_RSX_WRITE_WATCH
     // One bit per page of the RSX local range: a write reported through markWritten and not yet collected.
