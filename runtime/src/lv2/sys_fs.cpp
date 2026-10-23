@@ -17,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <system_error>
+#include <tuple>
 #include <vector>
 
 #include "core/build_config.h"
@@ -439,7 +440,8 @@ std::uint64_t transfer(FsObject& file, bool write, std::uint8_t* data, std::uint
     if (size == 0) return 0;
     const HostIoRegion region(file);
     if (write && (file.flags & kOAppend) != 0) {
-        file.file.seek(0, kSeekEnd);
+        // A failed seek leaves the position as it was; the write below reports any I/O error.
+        std::ignore = file.file.seek(0, kSeekEnd);
     }
     return transferLocked(file.file, write, data, size, code);
 }
@@ -465,7 +467,8 @@ std::uint64_t transferAt(FsObject& file, bool write, std::uint64_t offset, std::
     } else {
         total = transferLocked(file.file, write, data, size, code);
     }
-    file.file.seek(static_cast<std::int64_t>(*saved), kSeekSet);
+    // Best effort: the transfer's result is already decided, and a failed restore has no error to report.
+    std::ignore = file.file.seek(static_cast<std::int64_t>(*saved), kSeekSet);
     return total;
 }
 
