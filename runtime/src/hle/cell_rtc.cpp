@@ -12,8 +12,8 @@
 //
 // Deviations from RPCS3: there is no lv2 time-zone syscall in this runtime, so the local offset is
 // read from the host time zone (the same source RPCS3 uses on Windows: minus the bias, minus the
-// standard or daylight bias while in effect). The clock is the host UTC clock with no scaling or
-// console time offset.
+// standard or daylight bias while in effect; elsewhere the UTC offset of the local time now, which
+// includes daylight saving). The clock is the host UTC clock with no scaling or console time offset.
 
 #include <atomic>
 #include <chrono>
@@ -22,9 +22,13 @@
 #include <optional>
 #include <span>
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <time.h>
+#endif
 
 #include "core/guest_memory.h"
 #include "tox2/ppu_context.h"
@@ -56,6 +60,7 @@ bool mapped(std::uint32_t addr, std::uint32_t size) { return addr != 0 && proces
 std::int32_t localOffsetMinutes() {
     const std::int64_t override_minutes = g_local_offset_override.load(std::memory_order_relaxed);
     if (override_minutes != kNoOffsetOverride) return static_cast<std::int32_t>(override_minutes);
+#if defined(_WIN32)
     TIME_ZONE_INFORMATION info{};
     const DWORD state = GetTimeZoneInformation(&info);
     if (state == TIME_ZONE_ID_INVALID) return 0;
@@ -63,6 +68,12 @@ std::int32_t localOffsetMinutes() {
     if (state == TIME_ZONE_ID_STANDARD) summertime = -info.StandardBias;
     if (state == TIME_ZONE_ID_DAYLIGHT) summertime = -info.DaylightBias;
     return static_cast<std::int32_t>(-info.Bias + summertime);
+#else
+    const time_t now = time(nullptr);
+    tm local{};
+    if (localtime_r(&now, &local) == nullptr) return 0;
+    return static_cast<std::int32_t>(local.tm_gmtoff / 60);
+#endif
 }
 
 bool isLeapYear(std::uint64_t year) { return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0); }
