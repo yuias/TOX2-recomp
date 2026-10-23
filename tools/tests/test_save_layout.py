@@ -109,7 +109,7 @@ class DescribeTest(unittest.TestCase):
         self.assertEqual(doc["size"], save.SAVE_SIZE)
         self.assertEqual(doc["total_size"], save.SAVE_SIZE)
         self.assertEqual(doc["gald"], 123456)
-        self.assertEqual(doc["play_time_raw"], 789)
+        self.assertEqual(doc["play_time_frames"], 789)
         self.assertEqual(doc["sections"][1], {
             "index": 1,
             "name": "PLAYER_3_STATUS_SAVE_DATA",

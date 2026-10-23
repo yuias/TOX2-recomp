@@ -10,7 +10,7 @@ from . import EXIT_FORMAT, CliError
 SAVE_MAGIC = 0x0064
 SAVE_SIZE = 0xACD00  # size of the game's SAVE; informational, not enforced
 GALD_OFFSET = 0x2E8  # u32
-PLAY_TIME_OFFSET = 0x2DC  # u32, unit unknown: printed raw
+PLAY_TIME_OFFSET = 0x2DC  # u32 frames at 60 fps; matches the hh:mm in PARAM.SFO
 CHARACTER_BASE = 0x8890
 CHARACTER_STRIDE = 0xA000
 # Order taken from the nine "All Stats MAX" community codes, which write at 0x88D6 + k * 0xA000.
@@ -107,6 +107,6 @@ def describe(save: SaveFile) -> dict:
             "size": s.size
         } for s in save.sections],
         "gald": struct.unpack_from(">I", data, GALD_OFFSET)[0],
-        "play_time_raw": struct.unpack_from(">I", data, PLAY_TIME_OFFSET)[0],
+        "play_time_frames": struct.unpack_from(">I", data, PLAY_TIME_OFFSET)[0],
         "characters": characters,
     }
