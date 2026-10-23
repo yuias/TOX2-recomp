@@ -15,6 +15,15 @@ The code was taken over from an earlier recompilation project of another game an
 at *Tales of Xillia 2* (BLJS10188); the parts that this game has not reached have never run against
 its executable.
 
+On macOS (Apple Silicon) the same code runs: a Cocoa window, Vulkan on Metal through KosmicKrisp or MoltenVK, sound
+through CoreAudio and gamepads through GameController.framework (see [Building on macOS](building.md#building-on-macos)).
+There the game has been run from boot through the title screen, NEW GAME and the config screen into the opening scenes, with
+picture and sound. Differences from Windows: DLAA and frame generation are not available (the macOS build has no
+Streamline), the RSX write watch is off so textures are re-hashed, and changing the internal resolution scale while the game
+runs cannot rescale depth targets (KosmicKrisp has no blit for `D32_SFLOAT_S8_UINT`; the contents of those targets restart for that
+frame). No gamepad has been checked on macOS: `input_gamecontroller` skipped its device part there
+because no controller was connected.
+
 ## What the current run does
 
 The run below was made with the build of commit `e013aa8`. `libsre.prx` of firmware 4.93 is part of the program (see
@@ -221,7 +230,7 @@ These exist and are generic. They came from the project this one was derived fro
   capture made before this change lacks the swizzled and mipmapped texture bytes (the builder did not
   read them), so a replay of it counts `capture missing range` and shows the same image as before.
   The captures never write the branch bits register, so every draw in them ran with the bits at 0.
-- Sound through the runtime's audio engine and WASAPI (see [Audio](audio.md)). The game initialises
+- Sound through the runtime's audio engine and WASAPI on Windows or CoreAudio on macOS (see [Audio](audio.md)). The game initialises
   `cellAudio` in the current run and creates two ATRAC3plus decoders, which the host decodes; a 120 s
   headless run (output `none`) counts 22,071 blocks, 4,017 of them non-silent, and the audio dump is
   non-silent in three stretches from about 50 s on. The sound engine's SPU thread runs (see
@@ -293,19 +302,19 @@ Measured on the executable with the analysis tools, and confirmed by the load lo
   samples of a pixel; `--aa-mode supersample` draws them per sample in the layout instead (see
   [Rendering](rendering.md#anti-aliased-surfaces) for how both differ from the hardware: its sample positions
   are not known, and the standard Vulkan ones are used). `--aa-mode dlaa` draws them with one sample and
-  anti-aliases the scene with NVIDIA DLAA at the game's resolve, on RTX GPUs with the Streamline SDK (see
+  anti-aliases the scene with NVIDIA DLAA at the game's resolve, on RTX GPUs with the Streamline SDK (Windows only; see
   [DLAA](rendering.md#dlaa)). A warm 260 s run lists only `state zpass report constant`,
   with no skipped draw. The 30 s headless run counts 6.9 million FIFO headers, 238 distinct methods and 8,208 flips in the
   fake RSX. With `--dump-frames` the dumped frames of the first 30 s are the plain grey loading screen.
-- Audio: WASAPI is the only device output, in shared mode on the default device. The output is
-  stereo (an 8-channel port is reduced to its front pair), and there is no volume setting or device
+- Audio: the only device outputs are WASAPI on Windows (shared mode, on the default device) and CoreAudio on macOS (the default
+  output device). The output is stereo (an 8-channel port is reduced to its front pair), and there is no volume setting or device
   choice. ATRAC3 (non-plus) is not supported. The `cellAtrac` calls of this game all have handlers,
   but only the two sounds held in memory have been seen; the streaming path (`GetVacantSize` with
   a ring, starvation) is covered by tests only. `cellAudioSetPortLevel` and the `cellAudioOut` imports have handlers; the mixer
   is stereo only, so `cellAudioOutGetSoundAvailability` offers LPCM 2 ch at 48 kHz only.
 - Input: the `neutral`, `none`, `keyboard`, `gamepad` and `keyboard+gamepad` pad providers. The
   keyboard has a fixed mapping, no analog sticks and no vibration; gamepads are read through
-  GameInput with a fixed mapping. Only port 0 exists; there is no mouse or `cellKb` input. See
+  GameInput on Windows and GameController.framework on macOS, with a fixed mapping. Only port 0 exists; there is no mouse or `cellKb` input. See
   [Input](input.md). The game reads port 0 (7,794 `cellPadGetData` calls in the 30 s run); no input has been sent to it.
 - Scheduling beyond the lock order: the guest lock and the PPU slots hand over by lv2 priority, but there is no
   displacement of the holder when a better thread becomes ready, no rescheduling on `sys_ppu_thread_set_priority`, no
