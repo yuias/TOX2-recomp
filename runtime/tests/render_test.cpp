@@ -4876,6 +4876,16 @@ std::vector<std::uint8_t> makeScaleChangeFrame(std::uint32_t frame) {
     return scene.finish();
 }
 
+// A scale change copies depth targets with a blit, which some devices do not offer for the depth/stencil format
+// (Apple GPUs). The renderer then keeps the new target at its initial contents and notes it, so the comparisons that
+// depend on the rescaled depth do not apply there.
+bool depthRescaleBlittable(tox2::VkContext& ctx) {
+    VkFormatProperties props{};
+    vkGetPhysicalDeviceFormatProperties(ctx.physicalDevice(), ctx.depthStencilFormat(), &props);
+    constexpr VkFormatFeatureFlags kBlit = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    return (props.optimalTilingFeatures & kBlit) == kBlit;
+}
+
 // Two frames on one renderer whose scale is changed from `from` to `to` between them. The second display is `to`
 // times the guest size and its box downsample equals the scale-1 rendering of both frames: the colour contents and
 // the depth buffer both survive the change.
@@ -4925,6 +4935,11 @@ void testRendererScaleChange(tox2::VkContext& ctx) {
     CHECK(pixelArgb(reference.bgra, reference.width, 60, 32) == kBlack);
     CHECK(reference.notes.empty());
 
+    if (!depthRescaleBlittable(ctx)) {
+        std::printf("render tests: scale change skipped: the depth format cannot be blitted\n");
+        tox2::rsxUnimplementedReset();
+        return;
+    }
     expectScaleChange(ctx, reference, 1, 2);
     expectScaleChange(ctx, reference, 2, 1);
     expectScaleChange(ctx, reference, 1, 3);
@@ -5778,7 +5793,10 @@ void testRendererMsaaInherit(tox2::VkContext& ctx) {
     // Rescale: the scale changes between the frames, and binding the targets again copies the sidecars into the
     // layout images before the blit.
     Words words;
-    if (referenceWords(1, words)) {
+    const bool depth_blit = depthRescaleBlittable(ctx);
+    if (!depth_blit)
+        std::printf("render tests: multisampled depth rescale skipped: the depth format cannot be blitted\n");
+    if (depth_blit && referenceWords(1, words)) {
         const auto runTwoFrames = [&](MsaaInherit second, std::vector<std::uint8_t>* image, std::uint32_t& width,
                                       std::uint32_t& height, std::uint64_t& copies,
                                       std::vector<std::pair<std::string, std::uint64_t>>& notes) {
