@@ -130,6 +130,11 @@ function(tox2_runtime_add_core)
   else()
     message(FATAL_ERROR "TOX2: no host memory provider for this platform")
   endif()
+  if(WIN32)
+    set(timer_resolution_provider runtime/src/core/timer_resolution.cpp)
+  else()
+    set(timer_resolution_provider runtime/src/core/timer_resolution_posix.cpp)
+  endif()
   tox2_runtime_add_spdlog()
   tox2_runtime_add_libpng()
   tox2_runtime_add_yyjson()
@@ -161,7 +166,7 @@ function(tox2_runtime_add_core)
     runtime/src/core/reservation.cpp
     runtime/src/core/thread_cpu.cpp
     runtime/src/core/threads.cpp
-    runtime/src/core/timer_resolution.cpp
+    ${timer_resolution_provider}
     runtime/src/hle/cell_atrac.cpp
     runtime/src/hle/cell_atrac_stream.cpp
     runtime/src/hle/cell_audio.cpp
