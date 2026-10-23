@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from . import EXIT_FORMAT, EXIT_IO, EXIT_USAGE, EXIT_VERIFY, CliError
-from . import pfd, save
+from . import codes, pfd, save
 
 _PFD_FILE = "PARAM.PFD"
 _SECURE_ID_RE = re.compile(r"[0-9A-Fa-f]{32}")
@@ -152,6 +152,75 @@ def _info(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_savepatch(path: Path) -> codes.Savepatch:
+    try:
+        text = _read(path).decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise CliError(EXIT_FORMAT, "%s is not valid UTF-8 (%s)" % (path, e.reason)) from e
+    return codes.parse_savepatch(text, str(path))
+
+
+def _patch_list(args: argparse.Namespace) -> int:
+    group = None
+    for code in _load_savepatch(args.patch).codes:
+        if code.group != group:
+            group = code.group
+            print("[GROUP:%s]" % group)
+        print(code.name)
+    return 0
+
+
+def _patch(args: argparse.Namespace) -> int:
+    # Option rules first, so that a bad combination never touches a file.
+    if args.list:
+        if args.patch is None:
+            raise CliError(EXIT_USAGE, "--list needs --patch")
+        if args.save is not None or args.code or args.raw or args.output is not None or args.in_place:
+            raise CliError(EXIT_USAGE, "--list cannot be combined with SAVE, --code, --raw, -o or --in-place")
+        return _patch_list(args)
+    if args.save is None:
+        raise CliError(EXIT_USAGE, "SAVE is required (or use --patch FILE --list)")
+    if not args.code and not args.raw:
+        raise CliError(EXIT_USAGE, "give at least one --code or --raw")
+    if args.code and args.patch is None:
+        raise CliError(EXIT_USAGE, "--code needs --patch")
+    if args.in_place == (args.output is not None):
+        raise CliError(EXIT_USAGE, "give exactly one of -o OUT and --in-place")
+    if args.output is not None:
+        if args.output.resolve() == args.save.resolve():
+            raise CliError(EXIT_USAGE, "-o names the input file; use --in-place")
+        if os.path.lexists(args.output):
+            raise CliError(EXIT_IO, "refusing to overwrite existing %s" % args.output)
+
+    plain = save.parse_save(_read(args.save)).data
+    summary: list[str] = []
+    writes: list[codes.Write] = []
+    if args.code:
+        patchfile = _load_savepatch(args.patch)
+        for name in args.code:
+            code = patchfile.find(name)
+            if code.target not in (None, "SAVE"):
+                raise CliError(
+                    EXIT_FORMAT, "%s:%d: code '%s' targets '%s'; only SAVE is supported" %
+                    (patchfile.source, code.line_no, code.name, code.target))
+            compiled = codes.compile_code(code.lines, patchfile.source)
+            writes += compiled
+            summary.append("code '%s': %d write(s)" % (name, len(compiled)))
+    for i, text in enumerate(args.raw, 1):
+        compiled = codes.compile_code(codes.parse_raw(text, i), "--raw %d" % i)
+        writes += compiled
+        summary.append("raw %d: %d write(s)" % (i, len(compiled)))
+
+    patched = bytearray(plain)
+    codes.apply_writes(patched, writes)
+    target = args.save if args.in_place else args.output
+    _write(target, bytes(patched))
+    for line in summary:
+        print(line)
+    print("output: %s" % target)
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tox2_savetool.py",
                                      description="Decrypt and inspect Tales of Xillia 2 save data.")
@@ -170,6 +239,18 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("save", type=Path, help="decrypted SAVE file")
     p.add_argument("--json", action="store_true", help="print JSON instead of text")
     p.set_defaults(func=_info)
+
+    p = sub.add_parser("patch", help="apply Game Genie codes to a plain SAVE")
+    p.add_argument("save", type=Path, nargs="?", help="decrypted SAVE file")
+    p.add_argument("--patch", type=Path, metavar="FILE", help="Apollo .savepatch file")
+    p.add_argument("--list", action="store_true", help="list the codes of --patch and exit")
+    p.add_argument("--code", action="append", default=[], metavar="NAME",
+                   help="name of a code in --patch; may be repeated")
+    p.add_argument("--raw", action="append", default=[], metavar="CODE",
+                   help="Game Genie lines as pairs of 8 hex digits; may be repeated")
+    p.add_argument("-o", "--output", type=Path, metavar="OUT", help="output file; must not exist")
+    p.add_argument("--in-place", action="store_true", help="overwrite SAVE")
+    p.set_defaults(func=_patch)
     return parser
 
 
