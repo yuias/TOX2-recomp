@@ -19,7 +19,7 @@ function(tox2_bench_add)
   target_compile_options(tox2_bench PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   # The fixtures shared with the correctness tests live next to them.
   target_include_directories(tox2_bench PRIVATE runtime/tests)
-  target_link_libraries(tox2_bench PRIVATE tox2_spu_generated tox2_runtime_core tox2_render)
+  target_link_libraries(tox2_bench PRIVATE tox2_spu_generated tox2_runtime_core tox2_render tox2_crypto)
 
   # The LZMA case reads a real item, so it is registered under the conditions of spu_lzma_inflate.
   if(NOT TOX2_GAME_DIR STREQUAL "" AND NOT TOX2_EBOOT_ELF STREQUAL "")

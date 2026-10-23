@@ -22,13 +22,9 @@
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/thread_cpu.h"
+#include "crypto/host_crypto.h"
 #include "spu/spu_thread.h"
 #include "tox2/spu_context.h"
-
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <bcrypt.h>
 
 namespace tox2::lzma_fixture {
 
@@ -63,9 +59,8 @@ struct Owner : SpuOwner {
 };
 
 inline std::string sha256Hex(const std::uint8_t* data, std::size_t size) {
-    std::array<std::uint8_t, 32> digest{};
-    if (BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0, const_cast<PUCHAR>(data), static_cast<ULONG>(size),
-                   digest.data(), static_cast<ULONG>(digest.size())) < 0) {
+    crypto::Sha256Digest digest{};
+    if (!crypto::sha256({data, size}, digest)) {
         return {};
     }
     static constexpr char kDigits[] = "0123456789abcdef";

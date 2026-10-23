@@ -20,13 +20,14 @@ std::uint32_t readBe32(const std::uint8_t* p);
 std::uint64_t readBe64(const std::uint8_t* p);
 
 // `in.size()` must be a multiple of 16; `out` may equal `in`. All AES functions return false on a
-// CNG failure or a bad size.
+// provider failure or a bad size.
 bool aes128EcbEncrypt(const Block16& key, std::span<const std::uint8_t> in, std::uint8_t* out);
 bool aes256CbcDecrypt(const Key256& key, const Block16& iv, std::span<const std::uint8_t> in, std::uint8_t* out);
 bool aes256CbcEncrypt(const Key256& key, const Block16& iv, std::span<const std::uint8_t> in, std::uint8_t* out);
 
 // Big-endian 128-bit counter starting at `iv`; any length (the last partial block uses the leading
-// keystream bytes). CNG has no CTR mode, so the keystream is produced with ECB. `out` may equal `in`.
+// keystream bytes). The host crypto library has no CTR mode, so the keystream is produced with ECB.
+// `out` may equal `in`.
 bool aes128Ctr(const Block16& key, const Block16& iv, std::span<const std::uint8_t> in, std::uint8_t* out);
 
 bool hmacSha1(std::span<const std::uint8_t> key, std::span<const std::uint8_t> data, Sha1Digest& out);

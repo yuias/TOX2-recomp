@@ -181,7 +181,7 @@ function(tox2_spu_add_lzma_inflate_test)
 
   add_executable(tox2_spu_lzma_inflate_test runtime/tests/spu_lzma_inflate_test.cpp)
   target_compile_options(tox2_spu_lzma_inflate_test PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
-  target_link_libraries(tox2_spu_lzma_inflate_test PRIVATE tox2_spu_generated tox2_runtime_core)
+  target_link_libraries(tox2_spu_lzma_inflate_test PRIVATE tox2_spu_generated tox2_runtime_core tox2_crypto)
 
   add_test(NAME spu_lzma_inflate
     COMMAND tox2_spu_lzma_inflate_test "${TOX2_GAME_DIR}" "${TOX2_EBOOT_ELF}")
