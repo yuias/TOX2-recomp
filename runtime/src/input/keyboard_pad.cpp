@@ -125,7 +125,7 @@ bool KeyboardPadState::keyEvent(std::uint32_t scan_code, bool down, bool repeat,
 void KeyboardPadState::setButtons(InputSource source, PadButtons buttons, bool down, Clock::time_point now) {
     std::atomic<PadButtons>& mask = held_[static_cast<std::size_t>(source)];
     if (!down) {
-        mask.fetch_and(static_cast<PadButtons>(~buttons), std::memory_order_relaxed);
+        mask.fetch_and(static_cast<PadButtons>(~buttons), std::memory_order_release);
         return;
     }
     const std::int64_t now_ns = toNanoseconds(now);
@@ -135,11 +135,12 @@ void KeyboardPadState::setButtons(InputSource source, PadButtons buttons, bool d
             times[i].store(now_ns, std::memory_order_relaxed);
         }
     }
-    mask.fetch_or(buttons, std::memory_order_relaxed);
+    // Release: a reader that sees the bit also sees its press time (reported() keeps short taps).
+    mask.fetch_or(buttons, std::memory_order_release);
 }
 
 void KeyboardPadState::releaseAll(InputSource source) {
-    const PadButtons released = held_[static_cast<std::size_t>(source)].exchange(0, std::memory_order_relaxed);
+    const PadButtons released = held_[static_cast<std::size_t>(source)].exchange(0, std::memory_order_release);
     auto& times = pressed_at_ns_[static_cast<std::size_t>(source)];
     for (std::size_t i = 0; i < kPadButtonTotal; i++) {
         if ((released & padButtonBit(static_cast<PadButton>(i))) != 0) {
@@ -159,11 +160,11 @@ void KeyboardPadState::setHeld(InputSource source, PadButtons buttons, Clock::ti
             times[i].store(now_ns, std::memory_order_relaxed);
         }
     }
-    mask.store(buttons, std::memory_order_relaxed);
+    mask.store(buttons, std::memory_order_release);
 }
 
 PadButtons KeyboardPadState::held(InputSource source) const {
-    return held_[static_cast<std::size_t>(source)].load(std::memory_order_relaxed);
+    return held_[static_cast<std::size_t>(source)].load(std::memory_order_acquire);
 }
 
 void KeyboardPadState::setAnalog(const PadAnalog& analog) {
@@ -209,7 +210,9 @@ std::pair<std::uint8_t, std::uint8_t> KeyboardPadState::vibration() const {
 
 PadButtons KeyboardPadState::held() const {
     PadButtons all = 0;
-    for (std::size_t i = 0; i < kSourceCount; i++) all |= held_[i].load(std::memory_order_relaxed);
+    // Acquire pairs with the release in setButtons/setHeld, so reported() reads press times at least
+    // as new as the bits it saw.
+    for (std::size_t i = 0; i < kSourceCount; i++) all |= held_[i].load(std::memory_order_acquire);
     return all;
 }
 
