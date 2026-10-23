@@ -215,6 +215,11 @@ function(tox2_render_add)
     runtime/src/render/vk_textures.cpp
     runtime/src/render/vk_window.cpp
     runtime/src/render/vp_translator.cpp)
+  if(WIN32)
+    target_sources(tox2_render PRIVATE runtime/src/render/vk_window_win32.cpp)
+  elseif(APPLE)
+    target_sources(tox2_render PRIVATE runtime/src/render/vk_window_macos.mm)
+  endif()
   target_compile_options(tox2_render PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_include_directories(tox2_render PUBLIC ${CMAKE_SOURCE_DIR}/runtime/src)
   target_include_directories(tox2_render SYSTEM PUBLIC
@@ -230,6 +235,9 @@ function(tox2_render_add)
   if(WIN32)
     # ImmAssociateContext turns the IME off for the game window.
     target_link_libraries(tox2_render PRIVATE imm32)
+  elseif(APPLE)
+    # AppKit windows; QuartzCore for the CAMetalLayer that MoltenVK renders into.
+    target_link_libraries(tox2_render PRIVATE "-framework Cocoa" "-framework QuartzCore")
   endif()
   # PRIVATE: libpng types stay inside frame_dump.cpp.
   target_link_libraries(tox2_render PRIVATE png_static)
