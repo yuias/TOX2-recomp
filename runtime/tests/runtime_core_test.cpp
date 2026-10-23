@@ -711,9 +711,8 @@ std::vector<std::uint8_t> syntheticElf(std::uint16_t machine) {
 }
 
 std::filesystem::path writeTempFile(const char* name, const std::vector<std::uint8_t>& bytes) {
-    const std::filesystem::path path =
-            std::filesystem::temp_directory_path() /
-            (std::string("tox2_runtime_test_") + std::to_string(processId()) + name);
+    const std::filesystem::path path = std::filesystem::temp_directory_path() /
+                                       (std::string("tox2_runtime_test_") + std::to_string(processId()) + name);
     std::ofstream out(path, std::ios::binary);
     out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     return path;
@@ -3807,8 +3806,7 @@ void testCellFs() {
     const std::uint32_t path_a = scratch, buf = scratch + 0x2000, out = scratch + 0x3000, sb = scratch + 0x3100,
                         arg = scratch + 0x3200;
 
-    const stdfs::path root =
-            stdfs::temp_directory_path() / ("tox2_cellfs_test_" + std::to_string(processId()));
+    const stdfs::path root = stdfs::temp_directory_path() / ("tox2_cellfs_test_" + std::to_string(processId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
     const stdfs::path game = root / "game";
@@ -4014,8 +4012,7 @@ void testVfsConfig() {
     tox2::resetCensus();
     tox2::resetLogOnce();
 
-    const stdfs::path root =
-            stdfs::temp_directory_path() / ("tox2_vfs_config_test_" + std::to_string(processId()));
+    const stdfs::path root = stdfs::temp_directory_path() / ("tox2_vfs_config_test_" + std::to_string(processId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
     auto hostFile = [](const stdfs::path& path, std::string_view data) {
@@ -4392,8 +4389,7 @@ void testSceNpAndTrophy() {
     put32(64 + 44, static_cast<std::uint32_t>(config.size()));  // entry size (low word)
     trp.insert(trp.end(), config.begin(), config.end());
 
-    const stdfs::path root =
-            stdfs::temp_directory_path() / ("tox2_trophy_test_" + std::to_string(processId()));
+    const stdfs::path root = stdfs::temp_directory_path() / ("tox2_trophy_test_" + std::to_string(processId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
     const stdfs::path game = root / "game";
@@ -6535,8 +6531,7 @@ void testCellSaveData() {
                         prefix = scratch + 0x7200, new_data = scratch + 0x7300, new_dir = scratch + 0x7340,
                         fixed_list = scratch + 0x7400, focus_dir = scratch + 0x7500;
 
-    const stdfs::path root =
-            stdfs::temp_directory_path() / ("tox2_savedata_test_" + std::to_string(processId()));
+    const stdfs::path root = stdfs::temp_directory_path() / ("tox2_savedata_test_" + std::to_string(processId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
     stdfs::create_directories(root / "game", ec);
@@ -7352,8 +7347,7 @@ void testCellPngDec() {
     g_png_feed = {};
     g_png_feed.staging = staging;
 
-    const stdfs::path root =
-            stdfs::temp_directory_path() / ("tox2_pngdec_test_" + std::to_string(processId()));
+    const stdfs::path root = stdfs::temp_directory_path() / ("tox2_pngdec_test_" + std::to_string(processId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
     stdfs::create_directories(root / "game", ec);
@@ -8322,8 +8316,7 @@ void testRsxArgCensus() {
 
     // Collector: feed the register writes of one draw.
     namespace stdfs = std::filesystem;
-    const stdfs::path root =
-            stdfs::temp_directory_path() / ("tox2_rsx_census_test_" + std::to_string(processId()));
+    const stdfs::path root = stdfs::temp_directory_path() / ("tox2_rsx_census_test_" + std::to_string(processId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
     tox2::RsxArgCensus census(
@@ -16281,8 +16274,7 @@ void testFsConcurrentFdUse() {
     const std::uint32_t path_addr = scratch, fd_addr = scratch + 0x200;
     const auto threadBuf = [&](std::uint32_t index) { return scratch + 0x1000 * (index + 1); };
 
-    const stdfs::path root =
-            stdfs::temp_directory_path() / ("tox2_fs_io_test_" + std::to_string(processId()));
+    const stdfs::path root = stdfs::temp_directory_path() / ("tox2_fs_io_test_" + std::to_string(processId()));
     std::error_code ec;
     stdfs::remove_all(root, ec);
     stdfs::create_directories(root / "game");
@@ -18785,24 +18777,35 @@ void testTimerResolution() {
     if (!fast) std::fprintf(stderr, "1 ms sleep median %.2f ms\n", ms[ms.size() / 2]);
 }
 
-// A fresh thread per call: the priority belongs to the thread, and the test thread must stay at normal.
+// A fresh thread per call: the priority belongs to the thread, and the test thread must keep its own.
 int appliedPriority(tox2::HostThreadRole role) {
     int priority = -100;
     std::thread([&] { priority = tox2::applyHostThreadPriority(role); }).join();
     return priority;
 }
 
+int freshThreadPriority() {
+    int priority = -100;
+    std::thread([&] { priority = tox2::currentHostThreadPriority(); }).join();
+    return priority;
+}
+
 void testHostPriority() {
+    const int own = tox2::currentHostThreadPriority();
+    const int fresh = freshThreadPriority();
     CHECK(tox2::hostPrioritiesEnabled());
-    CHECK(appliedPriority(tox2::HostThreadRole::AudioEngine) == THREAD_PRIORITY_TIME_CRITICAL);
-    CHECK(appliedPriority(tox2::HostThreadRole::HighPrioritySpu) == THREAD_PRIORITY_HIGHEST);
+    CHECK(appliedPriority(tox2::HostThreadRole::AudioEngine) ==
+          tox2::hostThreadPriorityOf(tox2::HostThreadRole::AudioEngine));
+    CHECK(appliedPriority(tox2::HostThreadRole::HighPrioritySpu) ==
+          tox2::hostThreadPriorityOf(tox2::HostThreadRole::HighPrioritySpu));
+    CHECK(tox2::hostThreadPriorityOf(tox2::HostThreadRole::AudioEngine) != fresh);
 
     tox2::setHostPrioritiesEnabled(false);
     CHECK(!tox2::hostPrioritiesEnabled());
-    CHECK(appliedPriority(tox2::HostThreadRole::AudioEngine) == THREAD_PRIORITY_NORMAL);
-    CHECK(appliedPriority(tox2::HostThreadRole::HighPrioritySpu) == THREAD_PRIORITY_NORMAL);
+    CHECK(appliedPriority(tox2::HostThreadRole::AudioEngine) == fresh);
+    CHECK(appliedPriority(tox2::HostThreadRole::HighPrioritySpu) == fresh);
     tox2::setHostPrioritiesEnabled(true);
-    CHECK(GetThreadPriority(GetCurrentThread()) == THREAD_PRIORITY_NORMAL);
+    CHECK(tox2::currentHostThreadPriority() == own);
 }
 
 void testReservationAndDcbz() {
@@ -19195,7 +19198,8 @@ ChildResult runChild(const char* arg) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     char buffer[4096];
     for (;;) {
-        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        const auto left =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
         if (left.count() <= 0) {
             kill(pid, SIGKILL);
             break;
