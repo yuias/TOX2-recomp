@@ -3,9 +3,9 @@ include_guard(GLOBAL)
 include("${CMAKE_SOURCE_DIR}/cmake/ui_font.cmake")
 
 # Dear ImGui comes from a pinned submodule and is built from its core files plus the Vulkan backend
-# and, on Windows, the Win32 backend (no demo window). Vulkan entry points resolve through volk, so
-# the backend must not include <vulkan/vulkan.h> prototypes. Nothing is fetched or generated at
-# configure time.
+# and, on Windows, the Win32 backend or, on macOS, the Cocoa bridge (no demo window). Vulkan entry
+# points resolve through volk, so the backend must not include <vulkan/vulkan.h> prototypes. Nothing
+# is fetched or generated at configure time.
 function(tox2_overlay_add_imgui)
   if(NOT EXISTS ${CMAKE_SOURCE_DIR}/externals/imgui/LICENSE.txt)
     message(FATAL_ERROR
@@ -32,6 +32,13 @@ function(tox2_overlay_add_imgui)
       IMGUI_IMPL_WIN32_DISABLE_GAMEPAD
       IMGUI_DISABLE_WIN32_DEFAULT_IME_FUNCTIONS)
     target_link_libraries(imgui PRIVATE dwmapi gdi32)
+  elseif(APPLE)
+    # imgui_impl_osx.mm is not a source of its own: the bridge includes it to reach the backend's static
+    # event handler. The backend needs ARC, and it links GameController unconditionally.
+    target_sources(imgui PRIVATE ${CMAKE_SOURCE_DIR}/runtime/src/overlay/imgui_osx_bridge.mm)
+    set_source_files_properties(${CMAKE_SOURCE_DIR}/runtime/src/overlay/imgui_osx_bridge.mm
+      PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+    target_link_libraries(imgui PUBLIC "-framework Cocoa" "-framework GameController")
   endif()
 endfunction()
 

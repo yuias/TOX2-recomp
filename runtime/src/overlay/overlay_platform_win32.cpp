@@ -10,6 +10,7 @@
 
 #include "imgui.h"
 #include "imgui_impl_win32.h"
+#include "overlay/imgui_context.h"
 
 // The header keeps this declaration under `#if 0` so that it does not pull in <windows.h>.
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -24,7 +25,10 @@ bool usesPointCoordinates() { return false; }
 
 bool initBackend(void* native_window) { return ImGui_ImplWin32_Init(native_window); }
 
-void shutdownBackend() { ImGui_ImplWin32_Shutdown(); }
+void shutdownBackend(ImGuiContext* context) {
+    ImGuiContextScope scope(context);
+    ImGui_ImplWin32_Shutdown();
+}
 
 std::optional<KeyMessage> keyOf(const WindowMessage& message) {
     return keyMessageFromWin32(message.message, message.wparam, static_cast<std::uint64_t>(message.lparam));

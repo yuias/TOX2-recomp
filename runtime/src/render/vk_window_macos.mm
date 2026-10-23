@@ -333,6 +333,8 @@ private:
             [window_ setReleasedWhenClosed:NO];
             [window_ setTitle:[NSString stringWithUTF8String:kWindowTitle]];
             [window_ setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
+            // The debug overlay hovers its widgets, which needs the pointer position without a button down.
+            [window_ setAcceptsMouseMovedEvents:YES];
 
             view_ = [[Tox2MetalView alloc] initWithFrame:content];
             [view_ setWantsLayer:YES];

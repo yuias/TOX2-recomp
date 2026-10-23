@@ -103,17 +103,25 @@ void DebugOverlay::fail(const char* what) {
 }
 
 void DebugOverlay::shutdown() {
+    bool platform_backend = false;
+    {
+        std::lock_guard lock(imguiMutex());
+        initialized_.store(false, std::memory_order_release);
+        platform_backend = platform_backend_;
+        platform_backend_ = false;
+    }
+    // Not under imguiMutex(): the macOS backend stops on the main thread, which may be inside onWindowMessage
+    // waiting for the lock. It cannot touch the context from there any more, as initialized_ is clear.
+    if (platform_backend) overlay_platform::shutdownBackend(imgui_);
+
     std::lock_guard lock(imguiMutex());
-    initialized_.store(false, std::memory_order_release);
     if (imgui_ != nullptr) {
         {
             // The backends' shutdown acts on the current context.
             ImGuiContextScope scope(imgui_);
             if (vulkan_backend_) ImGui_ImplVulkan_Shutdown();
-            if (platform_backend_) overlay_platform::shutdownBackend();
         }
         vulkan_backend_ = false;
-        platform_backend_ = false;
         // Outside the scope: DestroyContext clears the current context itself when it is the destroyed one, and
         // a scope would restore that freed pointer afterwards.
         ImGui::DestroyContext(imgui_);
