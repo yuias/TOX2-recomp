@@ -197,7 +197,7 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   while [frame generation](#frame-generation) is loaded, which then presents more frames than the game flips);
   presenting runs outside the guest lock. The window's client area is a size preset in physical pixels
   (`--window-size`, 720p by default; see [Window](runtime.md#window)); the swapchain follows it through
-  `WM_SIZE`, and the blit scales the frame to it, so a frame of `N` times 1280x720 maps one to one onto
+  `WM_SIZE` (on macOS through the layout notifications of the Cocoa window), and the blit scales the frame to it, so a frame of `N` times 1280x720 maps one to one onto
   the preset of the same size (`--resolution-scale 2` and 1440p, 3 and 2160p). The limit paces the flips before they reach the swapchain, so a
   display that refreshes faster than 60 Hz does not speed the game up; with `--frame-limit off` the display's
   refresh paces the RSX thread instead. Frame generation changes none of this: the flips, the vblank timer and the
@@ -221,6 +221,60 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   the renderer does not model, a multisampled pass over newer layout data (`state anti-aliased pass over layout
   data`) and, on a device without 2-sample support, the fallback to supersampling (`state 2-sample multisampling
   unavailable`). The game's frames count none of the last two.
+
+### Vulkan on macOS
+
+On macOS the renderer runs on a Vulkan driver that sits on top of Metal. The window is a Cocoa window
+whose content view is backed by a `CAMetalLayer`; the surface is made with `VK_EXT_metal_surface`, and
+the swapchain, the letterboxing and the overlay work as described above. The window belongs to the
+process main thread, which runs the event loop while the game runs on another thread (see
+[Building](building.md#running-and-debugging-on-a-mac)). The swapchain size is the window's size in
+pixels, the content size in points times the backing scale of the screen. Without a window-server
+session (an SSH login, for example) no window can be created: the RSX thread logs the reason and the
+game goes on without rendering, as for any other renderer failure.
+
+- **Drivers.** The LunarG Vulkan SDK installs two: KosmicKrisp and MoltenVK. macOS can list both, in no
+  fixed order, so `tox2_game` does not depend on the order: among the usable devices it takes a discrete
+  GPU first, then the device whose driver is KosmicKrisp (a full driver, without the portability subset),
+  then the first usable one. The log line `tox2: render: vulkan device ...` names the driver
+  (`driver <name>`). `vulkaninfo --summary` shows which drivers are installed.
+- **Choosing a driver yourself.** `tox2_game` has no option for it; use the Vulkan loader's variables.
+  `VK_LOADER_DRIVERS_SELECT` takes a comma-separated list of patterns for the driver manifest file
+  names and uses only the matching drivers; the manifests are in `/usr/local/share/vulkan/icd.d`
+  after the SDK's system-global install (`libkosmickrisp_icd.json`, `MoltenVK_icd.json`).
+  `VK_DRIVER_FILES` replaces the list of manifests with the files you name. `VK_ADD_DRIVER_FILES`
+  adds files to the list and so does not restrict it.
+
+  ```sh
+  VK_LOADER_DRIVERS_SELECT='*MoltenVK*' build/macos-release/bin/tox2_game --game-dir <game-dir>
+  VK_DRIVER_FILES=/usr/local/share/vulkan/icd.d/libkosmickrisp_icd.json build/macos-release/bin/tox2_game --game-dir <game-dir>
+  ```
+
+- **Portability.** The loader hides portability drivers unless the application asks, so the instance
+  is created with `VK_KHR_portability_enumeration` and its enumeration flag when the loader offers
+  it. A device that advertises `VK_KHR_portability_subset` (MoltenVK) is created with that extension
+  and with every subset feature it reports as supported.
+- **Depth format.** Apple GPUs have no `D24_UNORM_S8_UINT`; the renderer uses `D32_SFLOAT_S8_UINT`,
+  its existing fallback. The log line `tox2: render: vulkan device ...` shows `d24s8 no`.
+- **Triangle fans.** MoltenVK reports triangle fans as supported but draws only the first triangle of a
+  fan when the primitive topology is set dynamically, which is how the renderer sets it. The renderer
+  therefore draws a triangle fan as a triangle list wherever the device cannot do fans: on MoltenVK,
+  and on any portability-subset device that reports no `triangleFans`. A fan of N vertices becomes
+  N-2 triangles `first, first+i, first+i+1`; an array draw becomes an indexed draw with 32-bit indices,
+  and an indexed fan is expanded by its indices, split at the restart index when primitive restart is
+  on. The list topology takes no restart. KosmicKrisp draws fans directly. The same log line shows
+  `triangle fans yes` or `no`.
+- **Resolution scale and depth.** KosmicKrisp has no blit for `D32_SFLOAT_S8_UINT`. Changing the
+  internal resolution scale while the game runs therefore cannot rescale depth targets there: their
+  contents restart for that frame, and the census counts `state rescale of a depth target unavailable`
+  (see [Resolution scale](#resolution-scale)). The render tests skip the depth rescale checks where
+  depth cannot be blitted.
+- **Loader.** The loader is found at run time. If the normal search fails, the paths in
+  [Building](building.md#vulkan-shaderc-and-ffmpeg) are tried.
+- **Windows-only features.** DLAA and frame generation need NVIDIA Streamline, which is built on
+  Windows only; the macOS build always reports it as off (see [DLAA](#dlaa) and
+  [Frame generation](#frame-generation)). The RSX write watch is off too (see
+  [Textures](#textures)).
 
 ### Overlays
 
@@ -664,7 +718,8 @@ Differences from the hardware:
 sub-pixel jitter, and lets NVIDIA DLSS in its DLAA mode (anti-aliasing at the input resolution, no upscaling) produce
 the anti-aliased picture that the game's resolve pass then reads. It runs at the scaled scene resolution: the clip size
 times `--resolution-scale`. DLSS is reached through the NVIDIA Streamline SDK; building with the SDK is described in
-[NVIDIA Streamline (DLAA)](building.md#nvidia-streamline-dlaa).
+[NVIDIA Streamline (DLAA)](building.md#nvidia-streamline-dlaa). This mode is Windows only: the macOS build has no
+Streamline, so `dlaa` falls back to `msaa` there.
 
 - **Availability.** `sl.interposer.dll` is loaded at run time from the directory of the executable, after its NVIDIA
   signature has been checked; it is never linked. Over-the-air updates and downloaded plugins are switched off, so
@@ -795,7 +850,8 @@ frames between the game's flips, so that the window shows `game rate x multiplie
 presentation only. The guest's simulation, its flip rate, the vblank timer and `--frame-limit` are as they were: a
 260 s dungeon run counted 9232 flips and 15449 vblanks with generation off and 9228 and 15452 with target
 `120` (generating at 2x and 4x), and no vblank was coalesced. Building with the SDK and the DLLs it needs are
-described in [NVIDIA Streamline (DLAA)](building.md#nvidia-streamline-dlaa).
+described in [NVIDIA Streamline (DLAA)](building.md#nvidia-streamline-dlaa). Frame generation is Windows only; the macOS
+build never has it.
 
 - **Availability.** Everything DLAA needs, and in addition: `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll` and
   `nvngx_dlssg.dll` next to the executable, a GPU and driver for which DLSS-G reports itself supported (RTX 40 or 50
@@ -1126,7 +1182,8 @@ handful of textures, some of them several megabytes), so the builder keeps the c
     checks) and hashes every validated texture once per epoch, as before. The `release-wwoff` preset builds with it
     off into `build/release-wwoff`. The three counters on the replay's `builder` line (hash skips, safety hashes,
     unreported changes) stay 0 then.
-  - *Platform.* The tracking uses `GetWriteWatch`, so it is specific to Windows. A host whose write tracking
+  - *Platform.* The tracking uses `GetWriteWatch`, so it is specific to Windows. The macOS build forces
+    `TOX2_RSX_WRITE_WATCH` to `OFF` (`cmake/Runtime.cmake`), so every validated texture is hashed there. A host whose write tracking
     reports a granularity other than the guest's 4 KiB page (16 KiB pages on Apple silicon or recent Android) would
     need its own tracking; a mismatch is reported as "range written", so every validation hashes.
 - *Bounds.* Blobs are kept up to 256 MiB; past that the least recently used entries go. Every 32 flips

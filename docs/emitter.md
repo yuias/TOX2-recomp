@@ -9,6 +9,9 @@ python tools/ps3tool.py emit    <elf> --chunks 256 --out generated/ppu --max-unh
 pwsh -NoProfile -File tools/build.ps1 -Preset release -GeneratedDir generated/ppu -Test
 ```
 
+On macOS the last command is `tools/build.sh --preset macos-release --generated-dir generated/ppu --test`
+and the tools run as `python3`.
+
 The `--chunks` default is 16. This executable has about 3 million code words, so it is emitted
 with `--chunks 256`; see [Chunks and build time](#chunks-and-build-time). The firmware module libsre
 is emitted as a second tree with its own symbol prefix; see [A PRX module (libsre)](#a-prx-module-libsre).
@@ -485,7 +488,8 @@ into the module of its group (`tools/ps3recomp/spu_emit_ops_<group>.py`) togethe
   error-free sum), so it needs IEEE double arithmetic in the default environment and `-ffp-contract=off`,
   which the codegen options set. `fa`, `fs`, `fm`, `fma`, `fms` and `fnms` run as native single-precision
   instructions: `runSpu` sets MXCSR to round toward zero with FTZ and DAZ while generated code runs (and
-  restores the caller's value), a zero result is turned into +0, and a vector with a result lane of
+  restores the caller's value; on arm64 the same environment is FPCR with round toward zero and FZ, which flushes
+  denormal operands as well as results, and `shufb` and the byte shifts use NEON `tbl` where x86-64 uses `pshufb`), a zero result is turned into +0, and a vector with a result lane of
   magnitude 0x7f7fffff or more (an overflow, or an Inf or NaN from an exponent-255 operand) is recomputed
   exactly with the host `double` in round to nearest. The helpers that need round to nearest or
   denormals (the exact path, double precision, `frest`, `frsqest`, `frds`) switch MXCSR around their

@@ -1,8 +1,9 @@
 # Building
 
 The [top-level README](../README.md) shows the build steps. This page lists
-every parameter of the build script, the CMake variables behind them, and the commands for the
-test runs.
+every parameter of the build scripts (`tools/build.ps1` on Windows, `tools/build.sh` on macOS), the CMake
+variables behind them, and the commands for the test runs. The Windows instructions come first;
+[Building on macOS](#building-on-macos) has the macOS ones.
 
 ## `tools/build.ps1`
 
@@ -49,9 +50,142 @@ cache variables of the build script (`-GeneratedDir`, `-GameDir` and so on) are 
 Its saves are in `build/profile/hdd`; `--hdd-dir` can name another build's directory instead. Do not use
 `profile` for play: the PDBs make the build directory larger and add nothing at run time.
 
+## Building on macOS
+
+The prerequisites are in the [README](../README.md#macos). The build runs on Apple Silicon (arm64, 16 KiB
+pages) and uses Homebrew's clang and Homebrew's FFmpeg and the LunarG Vulkan SDK; the Windows presets and
+scripts are unchanged and cannot be used on a Mac. macOS 14.4 or newer is required: the SPU reservation
+waits use `os_sync_wait_on_address_with_timeout` (`runtime/src/core/reservation.cpp`).
+
+### Presets and toolchain
+
+| Preset | Build type | Output |
+| --- | --- | --- |
+| `macos-debug` | `Debug` | `build/macos-debug/`, executables in `build/macos-debug/bin/` |
+| `macos-release` | `Release` | `build/macos-release/`, executables in `build/macos-release/bin/` |
+
+Both are available only on a macOS host and use Ninja and `cmake/toolchains/macos-homebrew-llvm.cmake`.
+That file selects Homebrew's `clang` and `clang++` (also for the Objective-C++ files), `llvm-ar` and
+`llvm-ranlib`, and links against Homebrew's libc++ and libunwind, because the sources use C++26
+library features that the C++ library in the macOS SDK lacks. The LLVM prefix is the CMake variable
+or environment variable `TOX2_LLVM_PREFIX`, else `$(brew --prefix llvm)`; configuration stops with an
+install hint when no `bin/clang++` is found there. Apple's clang is refused by the compiler check
+(`cmake/CompilerChecks.cmake`). The binaries refer to Homebrew's libraries by path, so they run on the
+Mac that built them.
+
+All targets, the generated code included, are compiled with `-mcpu=apple-m1` on arm64 where the Windows
+build uses `-march=x86-64-v3`; configuration prints `TOX2: arch flags: -mcpu=apple-m1`. A platform other
+than Windows and macOS stops with `TOX2: unsupported platform`. The commands behind `tools/build.sh` are:
+
+```sh
+cmake --preset macos-debug
+cmake --build --preset macos-debug
+ctest --preset macos-debug
+```
+
+`macos-release` is the build to play with, like `release` on Windows; `macos-debug` is slower.
+
+### `tools/build.sh`
+
+```sh
+tools/build.sh [--preset <name>] [--clean] [--test]
+               [--generated-dir <dir>] [--game-dir <dir>] [--eboot-elf <path>]
+               [--eboot-bin <path>] [--pup <path>] [--rpcs3-crypto-dir <dir>] [--llvm-prefix <dir>]
+```
+
+It is a POSIX `sh` script that configures, builds and optionally runs CTest, with the parameters of
+`tools/build.ps1` in kebab case.
+
+| Parameter | Meaning |
+| --- | --- |
+| `--preset <name>` | The CMake preset. The default is `macos-debug` on macOS; on other systems the option is required. |
+| `--clean` | Delete `build/<preset>/` before configuring. This also deletes the default hdd directory `build/<preset>/hdd` (game data and saves). |
+| `--test` | Run CTest after the build (see [Tests](tests.md)). |
+| `--generated-dir <dir>`, `--game-dir <dir>`, `--eboot-elf <path>`, `--eboot-bin <path>`, `--pup <path>`, `--rpcs3-crypto-dir <dir>` | The same as `-GeneratedDir`, `-GameDir`, `-EbootElf`, `-EbootBin`, `-Pup` and `-Rpcs3CryptoDir` above, and they set the same CMake variables. The paths of `--eboot-elf`, `--eboot-bin`, `--pup` and `--rpcs3-crypto-dir` must exist. |
+| `--llvm-prefix <dir>` | The LLVM installation to use, exported as `TOX2_LLVM_PREFIX`. Defaults to the `TOX2_LLVM_PREFIX` environment variable, then to `$(brew --prefix llvm)`. |
+
+Relative paths are resolved against the current directory. The script prints the first line of
+`clang --version` of the LLVM it uses and, after the build, `build: N.N s`. Its exit code is the
+exit code of the command that failed, 1 for a failed check of the script itself and 2 for a usage
+error.
+
+The starter `config.json` (see [The starter `config.json`](#the-starter-configjson)) is written by the
+configure step on both systems, with the same rules; there is no separate script.
+
+### Decrypting and emitting on a Mac
+
+`tox2_decrypt` is built and used exactly as described under
+[Decrypting the inputs](#decrypting-the-inputs); only the AES, CMAC, HMAC and SHA code differs, as the macOS
+build uses CommonCrypto where Windows uses CNG (the library `tox2_crypto`; its test is `crypto_core`). The pins
+and the keys are the same. The full sequence:
+
+```sh
+tools/build.sh --preset macos-release --eboot-bin <game-dir>/PS3_GAME/USRDIR/EBOOT.BIN --pup <path>/PS3UPDAT.PUP
+python3 tools/ps3tool.py emit generated/inputs/EBOOT.elf --chunks 256 --out generated/ppu
+python3 tools/ps3tool.py emit generated/inputs/libsre.reloc.elf --db config/libsre_functions.json --symbol-prefix libsre --chunks 4 --out generated/ppu/libsre --max-unhandled 0
+python3 tools/ps3tool.py spu-emit --eboot generated/inputs/EBOOT.elf --libsre generated/inputs/libsre.reloc.elf --out generated/ppu/spu --max-unhandled 0
+tools/build.sh --preset macos-release --generated-dir generated/ppu --game-dir <game-dir>
+```
+
+Run the Python tools with `python3` 3.10 or newer; the `python3` that macOS provides (`/usr/bin/python3`) can be
+3.9, and the CMake configuration (which finds its own Python) does not tell you which one your shell uses.
+
+### Vulkan, shaderc and FFmpeg
+
+- **Loader.** `tox2_game` loads the Vulkan loader at run time. When the normal search fails (it does
+  when `DYLD_FALLBACK_LIBRARY_PATH` is set), it tries `/usr/local/lib/libvulkan.1.dylib`, then
+  `libvulkan.1.dylib` in the `lib` directory of the `VULKAN_SDK` that was set when CMake configured.
+- **Shaders.** The run-time shader compiler is `libshaderc_combined.a` with `include/shaderc/shaderc.hpp`.
+  Configuration takes them from `$VULKAN_SDK` when it is set and has them, else from `/usr/local`
+  (where the SDK's system-global install puts a copy) and prints `TOX2: shaderc: libshaderc_combined.a
+  from $VULKAN_SDK/lib` or `... from /usr/local/lib`. There is one archive for every configuration.
+- **Drivers.** The SDK installs two Vulkan drivers on top of Metal, KosmicKrisp and MoltenVK.
+  `tox2_game` uses KosmicKrisp when both are present; MoltenVK works too. How to choose one yourself
+  is under [Rendering](rendering.md#vulkan-on-macos).
+- **FFmpeg.** The Homebrew installation in `TOX2_FFMPEG_DIR` (default `$(brew --prefix ffmpeg)`) must
+  hold `include/libavcodec/avcodec.h` and `lib/`. Configuration prints `TOX2: FFmpeg: <directory>`.
+  The headers are used at build time, and the directory of the libraries and the major version
+  numbers in their file names are compiled into `tox2_game`; build again after an upgrade that
+  changes a major version. Nothing is copied and nothing is pinned or checked (see
+  [Movies](movies.md#ffmpeg-on-macos)). `tools/fetch-ffmpeg.sh [--from <zip>] [--force]` is the
+  POSIX version of `tools/fetch-ffmpeg.ps1`: it fetches the pinned Windows build, which the macOS
+  build does not use.
+
+### Running and debugging on a Mac
+
+- **Event loop.** AppKit must be used from the main thread. `tox2_game` therefore runs the Cocoa
+  event loop on the main thread and the boot and the supervisor on a second thread
+  (`runWithHostEventLoop` in `runtime/src/render/vk_window.h`). The window, and the code that
+  creates or destroys it, belongs to the main thread; the controller notifications of
+  GameController.framework also arrive there. With `--no-window` the main thread runs a plain
+  `CFRunLoop` and the process never connects to the window server, so unattended runs and the game
+  tests work from an SSH session. The tests `render_window`, `audio_coreaudio` and
+  `input_gamecontroller` need a logged-in session or a device and skip themselves otherwise.
+- **Quitting.** `Cmd+Q`, the application menu's Quit and the close button end the run through the same
+  path (`tox2: stop: window closed`).
+- **lldb.** The runtime reserves the 4 GiB guest address space and finds out about guest accesses
+  to uncommitted memory from `SIGSEGV` and `SIGBUS` (macOS reports some protection faults as `SIGBUS`).
+  lldb stops on each of these as `EXC_BAD_ACCESS`. To let the runtime's handler run, tell lldb to pass
+  them on without stopping:
+
+  ```text
+  (lldb) process handle SIGSEGV SIGBUS -n true -p true -s false
+  ```
+
+  A real crash then still ends the run with a `tox2: stop: fatal ...` line and the call trace.
+- **Page size and guard pages.** The guest keeps 4 KiB logical pages, but the host page of an Apple
+  Silicon Mac is 16 KiB, and the host protects whole pages. A host page stays accessible while any
+  of its logical pages is committed. The 4 KiB guard page on each side of a guest thread stack, which
+  is uncommitted so that an overrun faults, therefore stays accessible when it shares its host page
+  with a live allocation, and a stray access there does not fault. Guest addresses and the other
+  behaviour of guest memory are the same as on Windows.
+- **No RSX write watch.** `TOX2_RSX_WRITE_WATCH` is forced to `OFF` on macOS, because the write watch
+  is a Windows API; every validated texture is hashed (see [Rendering](rendering.md#textures)).
+
 ## CMake variables
 
-These can also be passed to `cmake` directly (`cmake --preset release -D<name>=<value>`):
+These can also be passed to `cmake` directly (`cmake --preset release -D<name>=<value>`, or
+`macos-release` on a Mac):
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -63,12 +197,13 @@ These can also be passed to `cmake` directly (`cmake --preset release -D<name>=<
 | `TOX2_RPCS3_CRYPTO_DIR` | empty | Set by `-Rpcs3CryptoDir`. |
 | `TOX2_UI_FONT_FILE` | empty | A local `BIZUDPGothic-Regular.ttf` to use as the save dialog's fallback font instead of the download (see [Fallback UI font](#fallback-ui-font)). |
 | `TOX2_UI_FONT_URL_BASE` | the pinned raw GitHub URL | URL prefix the fallback font and its licence are downloaded from. Change it only to test the failure path. |
-| `TOX2_FFMPEG_DIR` | empty | An extracted FFmpeg build to use instead of `generated/deps/ffmpeg/<pinned build>` (see [Movies](movies.md); FFmpeg is used for ATRAC3plus decoding and by the inherited movie code). |
-| `TOX2_GAMEINPUT_DIR` | empty | An extracted `Microsoft.GameInput` package to use instead of `generated/deps/gameinput/<pinned version>` (see [Input](input.md#the-gameinput-package)). Configure needs the package from `tools/fetch-gameinput.ps1`. |
-| `TOX2_ENABLE_DLSS` | `AUTO` | `AUTO`, `ON` or `OFF`: whether to build the DLAA anti-aliasing mode and frame generation on NVIDIA Streamline (see [NVIDIA Streamline (DLAA)](#nvidia-streamline-dlaa)). |
+| `TOX2_FFMPEG_DIR` | empty | An extracted FFmpeg build to use instead of `generated/deps/ffmpeg/<pinned build>` (see [Movies](movies.md); FFmpeg is used for ATRAC3plus decoding and by the inherited movie code). On macOS: the Homebrew prefix of FFmpeg to use instead of `$(brew --prefix ffmpeg)`. |
+| `TOX2_GAMEINPUT_DIR` | empty | Windows only. An extracted `Microsoft.GameInput` package to use instead of `generated/deps/gameinput/<pinned version>` (see [Input](input.md#the-gameinput-package)). Configure needs the package from `tools/fetch-gameinput.ps1`. |
+| `TOX2_LLVM_PREFIX` | `$(brew --prefix llvm)` | macOS only. The LLVM installation whose clang is used (a CMake variable or an environment variable); set by `--llvm-prefix`. |
+| `TOX2_ENABLE_DLSS` | `AUTO` | Windows only (`ON` is a configuration error elsewhere, and `AUTO` prints `TOX2: Streamline: off (Windows only)`). `AUTO`, `ON` or `OFF`: whether to build the DLAA anti-aliasing mode and frame generation on NVIDIA Streamline (see [NVIDIA Streamline (DLAA)](#nvidia-streamline-dlaa)). |
 | `TOX2_STREAMLINE_DIR` | `externals/Streamline` | The unpacked Streamline SDK to build against. |
-| `TOX2_RSX_WRITE_WATCH` | `ON` | Create the guest memory reservation with the Windows write watch (`MEM_WRITE_WATCH`) and let the RSX frame builder keep a cached texture, without hashing its bytes, when no page of its range was written since its last check (see the write tracking entry of the texture cache in [Rendering](rendering.md#textures)). `OFF` hashes every validated texture once per epoch, as before. The setting is compiled into every target through `tox2_runtime_core`, so change it only by reconfiguring a whole build directory. The write watch is a Windows API; a port to a host with 16 KiB pages would need its own tracking. |
-| `TOX2_PPU_WERROR` | `ON` | Add `-Werror` for generated code and the code that mirrors it (header check, semantics harness, link test). Every such target is compiled with `-O1 -march=x86-64-v3 -ffp-contract=off -fpatchable-function-entry=8 -Wall -Wextra`, whatever the preset's optimization level; the generated SPU tree and the SPU tests that run generated code (`spu_semantics`, `spu_programs`) use `-O3` instead of `-O1` (`TOX2_SPU_CODEGEN_OPT_LEVEL` in `cmake/SpuCodegen.cmake`), because the game's SPU decode loops run several times faster at that level. |
+| `TOX2_RSX_WRITE_WATCH` | `ON` | Create the guest memory reservation with the Windows write watch (`MEM_WRITE_WATCH`) and let the RSX frame builder keep a cached texture, without hashing its bytes, when no page of its range was written since its last check (see the write tracking entry of the texture cache in [Rendering](rendering.md#textures)). `OFF` hashes every validated texture once per epoch, as before. The setting is compiled into every target through `tox2_runtime_core`, so change it only by reconfiguring a whole build directory. The write watch is a Windows API: on macOS the variable is forced to `OFF`, because a host with 16 KiB pages would need its own tracking. |
+| `TOX2_PPU_WERROR` | `ON` | Add `-Werror` for generated code and the code that mirrors it (header check, semantics harness, link test). Every such target is compiled with `-O1 -march=x86-64-v3 -ffp-contract=off -fpatchable-function-entry=8 -Wall -Wextra`, whatever the preset's optimization level (`-mcpu=apple-m1` replaces `-march=x86-64-v3` on macOS); the generated SPU tree and the SPU tests that run generated code (`spu_semantics`, `spu_programs`) use `-O3` instead of `-O1` (`TOX2_SPU_CODEGEN_OPT_LEVEL` in `cmake/SpuCodegen.cmake`), because the game's SPU decode loops run several times faster at that level. |
 
 No tracked file contains a game path: they are command-line arguments, CMake cache variables, a
 user-local VFS configuration (`config/vfs.example.json` shows the format with placeholders) or the
@@ -85,13 +220,15 @@ be started from any working directory without arguments. The file holds:
 | --- | --- | --- |
 | `game_dir` | `TOX2_GAME_DIR` | always (nothing is written without it) |
 | `elf` | `TOX2_EBOOT_ELF`: the file `-EbootElf` names, or `generated/inputs/EBOOT.elf` from `-EbootBin` | the variable is set |
-| `libsre` | `generated/inputs/libsre.reloc.elf` | `-Pup` is given |
+| `libsre` | `generated/inputs/libsre.reloc.elf` | `-Pup` (`--pup`) is given |
 
 `hdd_dir` is not written: the default `build/<preset>/hdd` is the directory the README describes. A
 path inside the repository or the build directory is stored relative to `bin/`, any other path is
 absolute (the file is git-ignored and machine-local).
 
-The file is written at configuration, which also covers `cmake --preset <preset>` without the script.
+The file is written at configuration, which also covers `cmake --preset <preset>` without the script. On macOS
+`tools/build.sh` passes the same variables (`--game-dir`, `--eboot-elf`, `--pup`), and the file is written next to
+`build/macos-release/bin/tox2_game` under the same rules.
 An existing file is never changed, so hand edits and settings the game saved survive; if its
 `game_dir`, `elf` or `libsre` differ from the build's, configuration prints one line naming them. To
 get a new starter file, delete the old one and configure again. The `game_boot` test passes
@@ -198,8 +335,11 @@ on a usage error. The tests `decrypt_core`, `decrypt_eboot`, `decrypt_libsre`, `
 ## What gets built
 
 The runtime core (`tox2_runtime_core`: `runtime/src/core`, `lv2`, `hle`, `input`, `rsx`, `audio`
-without the WASAPI output, and the PAMF demuxer, movie player and ATRAC3plus file parser in `runtime/src/media`, the first two unused by this game)
-does not reference generated symbols and is always built, together with its unit tests. The renderer
+without the WASAPI and CoreAudio outputs, and the PAMF demuxer, movie player and ATRAC3plus file parser in `runtime/src/media`, the first two unused by this game)
+does not reference generated symbols and is always built, together with its unit tests. Next to it are the
+host crypto library `tox2_crypto` (CNG or CommonCrypto), the shared device-thread code of the audio outputs
+`tox2_audio_stream`, and the platform libraries: on Windows `tox2_audio_wasapi`, `tox2_input_gameinput` and
+`tox2_padtool`; on macOS `tox2_audio_coreaudio` and `tox2_input_gamecontroller`. The renderer
 (`tox2_render`, `runtime/src/render`) is a separate library on top of it, so the core itself needs no
 GPU. `tox2_game` is built only with `-GeneratedDir`, because only `runtime/src/game_main.cpp` passes
 the generated tables to the core. It checks the executable against the SHA-256 that the generated
@@ -238,7 +378,8 @@ prints a line); its licence text is still taken from the pinned `OFL.txt` when t
 ## NVIDIA Streamline (DLAA)
 
 The `dlaa` anti-aliasing mode (`--aa-mode dlaa`, see [DLAA](rendering.md#dlaa)) runs NVIDIA
-DLSS in its DLAA mode through the NVIDIA Streamline SDK. The SDK is optional and is not part of the
+DLSS in its DLAA mode through the NVIDIA Streamline SDK. This section is Windows only: the macOS build never uses
+Streamline, and DLAA and frame generation are unavailable there. The SDK is optional and is not part of the
 repository. Without it the build succeeds, DLAA is compiled out and a requested `dlaa` falls back to `msaa`. The same SDK
 provides DLSS Frame Generation and NVIDIA Reflex, which `--frame-gen` uses (see
 [Frame generation](rendering.md#frame-generation)); it has no build option of its own. In a build without the SDK the option is still accepted, and frame generation is
@@ -325,6 +466,16 @@ earlier `-Pup` stays in the cache):
 ```powershell
 pwsh -NoProfile -File tools/build.ps1 -Preset release -GeneratedDir generated/ppu -EbootBin <game-dir>/PS3_GAME/USRDIR/EBOOT.BIN -Pup <path>/PS3UPDAT.PUP -GameDir <game-dir> -Test
 ```
+
+On macOS the same builds are:
+
+```sh
+tools/build.sh --preset macos-debug --clean --test
+tools/build.sh --preset macos-release --eboot-bin <game-dir>/PS3_GAME/USRDIR/EBOOT.BIN --pup <path>/PS3UPDAT.PUP --test
+tools/build.sh --preset macos-release --generated-dir generated/ppu --eboot-bin <game-dir>/PS3_GAME/USRDIR/EBOOT.BIN --pup <path>/PS3UPDAT.PUP --game-dir <game-dir> --test
+```
+
+`--eboot-elf <path-to-EBOOT.elf>` replaces `--eboot-bin` and `--pup` as on Windows.
 
 The full list of tests and the conditions under which each one is registered are in
 [Tests](tests.md).
