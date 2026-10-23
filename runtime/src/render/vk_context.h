@@ -46,6 +46,14 @@ public:
     const VkPhysicalDeviceProperties& deviceProperties() const { return properties_; }
     std::string_view deviceName() const { return properties_.deviceName; }
 
+    VkDriverId driverId() const { return driver_id_; }
+    std::string_view driverName() const { return driver_name_; }
+    std::string_view driverInfo() const { return driver_info_; }
+
+    // False when triangle fans must be drawn as lists: a portability-subset device without them, or MoltenVK,
+    // whose fans break with a dynamic topology.
+    bool triangleFans() const { return triangle_fans_; }
+
     bool hasD24S8() const { return has_d24s8_; }
     // True when the device was created with textureCompressionBC (BC1/BC2/BC3 sampled images).
     bool hasTextureBC() const { return has_texture_bc_; }
@@ -102,7 +110,11 @@ private:
     VkQueue graphics_queue_ = VK_NULL_HANDLE;
     VmaAllocator allocator_ = nullptr;
     VkPhysicalDeviceProperties properties_{};
+    VkDriverId driver_id_ = static_cast<VkDriverId>(0);
+    std::string driver_name_;
+    std::string driver_info_;
     std::uint32_t graphics_family_ = 0;
+    bool triangle_fans_ = true;
     bool has_d24s8_ = false;
     bool has_texture_bc_ = false;
     bool has_clip_distance_ = false;

@@ -6295,6 +6295,7 @@ void testChoosePresentMode() {
     CHECK(tox2::WindowStatus{}.refresh_hz == 0);
 }
 
+#if defined(_WIN32)
 // lParam of a key message: repeat count, scan code (bits 16..23), extended (24), previous state (30).
 std::uint64_t keyLparam(std::uint32_t scan, bool extended, bool was_down) {
     return 1u | (static_cast<std::uint64_t>(scan) << 16) | (extended ? 1u << 24 : 0u) | (was_down ? 1u << 30 : 0u);
@@ -6338,6 +6339,7 @@ void testKeyMessages() {
     CHECK(!tox2::keyMessageFromWin32(kSize, 0, 0x02D00500));
     CHECK(!tox2::keyMessageFromWin32(kKillFocus, 0, 0));
 }
+#endif
 
 // The presenter's overlay-facing types; no window is opened.
 void testPresenterTypes() {
@@ -6347,6 +6349,7 @@ void testPresenterTypes() {
     tox2::PresenterOptions options;
     CHECK(!options.on_message && !options.on_fullscreen_changed);
     CHECK(options.window_size == tox2::WindowSizePreset::Size720p && !options.fullscreen);
+#if defined(_WIN32)
     int calls = 0;
     options.on_message = [&calls](const tox2::WindowMessage& message) {
         calls++;
@@ -6358,6 +6361,23 @@ void testPresenterTypes() {
 
     const tox2::WindowMessage blank;
     CHECK(blank.hwnd == nullptr && blank.message == 0 && blank.wparam == 0 && blank.lparam == 0);
+#else
+    int calls = 0;
+    options.on_message = [&calls](const tox2::WindowMessage& message) {
+        calls++;
+        CHECK(message.view == nullptr && message.event == nullptr && message.kind == tox2::WindowEventKind::Key);
+        CHECK(message.key && message.key->scan_code == 0x3B && message.key->down);
+        return tox2::MessageRoute{.withhold_key = true};
+    };
+    tox2::WindowMessage key_message;
+    key_message.kind = tox2::WindowEventKind::Key;
+    key_message.key = tox2::KeyMessage{0x3B, true, false};
+    const tox2::MessageRoute route = options.on_message(key_message);
+    CHECK(calls == 1 && route.withhold_key && !route.handled && route.result == 0);
+
+    const tox2::WindowMessage blank;
+    CHECK(blank.view == nullptr && blank.event == nullptr && blank.kind == tox2::WindowEventKind::Other && !blank.key);
+#endif
 
     const tox2::Presenter::Target empty;
     CHECK(empty.view == VK_NULL_HANDLE && empty.format == VK_FORMAT_UNDEFINED);
@@ -7168,7 +7188,9 @@ int main() {
     std::printf("validation layer: %s\n", layer ? "installed" : "not installed");
     testLetterbox();
     testChoosePresentMode();
+#if defined(_WIN32)
     testKeyMessages();
+#endif
     testPresenterTypes();
     testShaderCompiler();
     testTextureMapping();
@@ -7207,11 +7229,14 @@ int main() {
     }
 
     const std::uint32_t api = ctx->deviceProperties().apiVersion;
-    std::printf("device: %s (Vulkan %u.%u.%u), D24S8 %s, clip distance %s, large points %s, validation %s\n",
-                ctx->deviceName().data(), VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api),
-                VK_API_VERSION_PATCH(api), ctx->hasD24S8() ? "supported" : "unsupported (D32S8 fallback)",
-                ctx->hasClipDistance() ? "supported" : "unsupported",
-                ctx->hasLargePoints() ? "supported" : "unsupported", ctx->validationEnabled() ? "active" : "inactive");
+    std::printf(
+            "device: %s (Vulkan %u.%u.%u), driver %s %s, triangle fans %s, D24S8 %s, clip distance %s, large points %s, "
+            "validation %s\n",
+            ctx->deviceName().data(), VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api), VK_API_VERSION_PATCH(api),
+            std::string(ctx->driverName()).c_str(), std::string(ctx->driverInfo()).c_str(),
+            ctx->triangleFans() ? "yes" : "no", ctx->hasD24S8() ? "supported" : "unsupported (D32S8 fallback)",
+            ctx->hasClipDistance() ? "supported" : "unsupported", ctx->hasLargePoints() ? "supported" : "unsupported",
+            ctx->validationEnabled() ? "active" : "inactive");
     CHECK(layer == ctx->validationEnabled());
 
     testStreamlineContext(*ctx);

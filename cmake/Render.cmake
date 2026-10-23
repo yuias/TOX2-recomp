@@ -239,6 +239,11 @@ function(tox2_render_add)
     # AppKit windows; QuartzCore for the CAMetalLayer that MoltenVK renders into.
     target_link_libraries(tox2_render PRIVATE "-framework Cocoa" "-framework QuartzCore")
   endif()
+  if(APPLE AND DEFINED ENV{VULKAN_SDK} AND NOT "$ENV{VULKAN_SDK}" STREQUAL "")
+    # The loader search in vk_context.cpp falls back to the SDK's copy when /usr/local/lib has none.
+    file(TO_CMAKE_PATH "$ENV{VULKAN_SDK}" sdk_root)
+    target_compile_definitions(tox2_render PRIVATE TOX2_VULKAN_SDK_LIB_DIR="${sdk_root}/lib")
+  endif()
   # PRIVATE: libpng types stay inside frame_dump.cpp.
   target_link_libraries(tox2_render PRIVATE png_static)
   if(TOX2_STREAMLINE_ENABLED)
@@ -258,6 +263,19 @@ function(tox2_render_add)
   set_tests_properties(render_core PROPERTIES
     PASS_REGULAR_EXPRESSION
       "render tests: [0-9]+ passed, 0 failed|render tests: skipped: no Vulkan device")
+
+  if(APPLE)
+    # Opens a window, so it needs a logged-in session and must not run next to other window tests. The
+    # test exits 77 (skipped) when the window server is not reachable.
+    add_executable(tox2_render_window_tests runtime/tests/render_window_test.cpp)
+    target_compile_options(tox2_render_window_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+    target_link_libraries(tox2_render_window_tests PRIVATE tox2_render)
+    add_test(NAME render_window COMMAND tox2_render_window_tests)
+    set_tests_properties(render_window PROPERTIES
+      PASS_REGULAR_EXPRESSION "render window tests: [0-9]+ passed, 0 failed"
+      SKIP_RETURN_CODE 77
+      RUN_SERIAL TRUE)
+  endif()
 
   # Needs no GPU. The dumped programs come from generated/rsx; the test skips them when absent.
   add_executable(tox2_vp_translator_tests runtime/tests/vp_translator_test.cpp)
