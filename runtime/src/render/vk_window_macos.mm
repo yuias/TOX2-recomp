@@ -20,11 +20,14 @@
 #include <cstdint>
 #include <exception>
 #include <format>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 
 #include "core/log.h"
 #include "core/threads.h"
+#include "input/mac_key_codes.h"
 
 namespace {
 
@@ -34,7 +37,7 @@ constexpr char kWindowTitle[] = "Tales of Xillia 2";
 // on the main thread.
 struct WindowEvents {
     virtual ~WindowEvents() = default;
-    // Returns true when the event must be dropped.
+    // Returns true when the event must not reach AppKit's own dispatch.
     virtual bool onEvent(NSEvent* event) = 0;
     // The user asked to close the window. Returns true when the client took over (the window stays open).
     virtual bool requestClose() = 0;
@@ -47,13 +50,30 @@ struct WindowEvents {
 
 }  // namespace
 
+// AppKit does not deliver the key-up of a key that went down with Command held to the key window (it
+// ends the key equivalent search), so a key pressed together with Command would stay down for the pad.
+// Handing those key-ups to the window makes up for it.
+@interface Tox2Application : NSApplication
+@end
+
+@implementation Tox2Application
+- (void)sendEvent:(NSEvent*)event {
+    if (event.type == NSEventTypeKeyUp && (event.modifierFlags & NSEventModifierFlagCommand) != 0) {
+        [self.keyWindow sendEvent:event];
+        return;
+    }
+    [super sendEvent:event];
+}
+@end
+
 @interface Tox2Window : NSWindow
 @property(nonatomic, assign) WindowEvents* events;
 @end
 
 @implementation Tox2Window
 // The single routing point for window input: every event sent to this window reaches the client first.
-// Key equivalents (Cmd+Q and other menu shortcuts) are handled by NSApplication before they get here.
+// Key equivalents (Cmd+Q and other menu shortcuts) are handled by NSApplication before they get here, so
+// the client never sees those key-downs.
 - (void)sendEvent:(NSEvent*)event {
     if (self.events != nullptr && self.events->onEvent(event)) return;
     [super sendEvent:event];
@@ -81,7 +101,8 @@ struct WindowEvents {
     return YES;
 }
 // Keys are not text input here: the view is no NSTextInputClient and never calls interpretKeyEvents:, so
-// no input method opens. The empty overrides keep unhandled keys from beeping.
+// no input method opens. The empty overrides keep the keys that still reach the responder chain (unmapped
+// keys, Command combinations) from beeping.
 - (void)keyDown:(NSEvent*)event {
 }
 - (void)keyUp:(NSEvent*)event {
@@ -184,7 +205,7 @@ bool ensureApplication(std::string& error) {
         }
         CFRelease(session);
 
-        [NSApplication sharedApplication];
+        [Tox2Application sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         g_app_delegate = [[Tox2AppDelegate alloc] init];
         [NSApp setDelegate:g_app_delegate];
@@ -284,6 +305,7 @@ private:
     explicit Impl(const PresenterOptions& options)
         : on_close_(options.on_close),
           on_message_(options.on_message),
+          on_key_(options.on_key),
           on_focus_lost_(options.on_focus_lost),
           on_fullscreen_changed_(options.on_fullscreen_changed),
           start_fullscreen_(options.fullscreen),
@@ -441,12 +463,47 @@ private:
         height_.store(hidden ? 0 : static_cast<std::uint32_t>(pixels_h));
     }
 
+    // The key message of a key event, or nullopt for any other event and for keys without a scan code.
+    static std::optional<KeyMessage> keyMessageFromEvent(NSEvent* event) {
+        const NSEventType type = event.type;
+        if (type != NSEventTypeKeyDown && type != NSEventTypeKeyUp && type != NSEventTypeFlagsChanged) {
+            return std::nullopt;
+        }
+        const std::optional<std::uint32_t> scan_code = scanCodeFromMacKeyCode(event.keyCode);
+        if (!scan_code) return std::nullopt;
+        if (type == NSEventTypeFlagsChanged) {
+            // A modifier has no key-down or key-up event, only the new flag state. Its own device-dependent
+            // bit tells which key changed, even while the other key of the pair is held.
+            const std::optional<std::uint64_t> mask = macModifierDownMask(event.keyCode);
+            if (!mask) return std::nullopt;
+            return KeyMessage{*scan_code, (event.modifierFlags & *mask) != 0, false};
+        }
+        // isARepeat raises an exception for events that are not key-down or key-up.
+        const bool down = type == NSEventTypeKeyDown;
+        return KeyMessage{*scan_code, down, down && event.isARepeat};
+    }
+
     bool onEvent(NSEvent* event) override {
-        if (!on_message_ || closing_.load()) return false;
-        WindowMessage message;
-        message.view = view();
-        message.event = (__bridge void*)event;
-        return on_message_(message).handled;
+        if (closing_.load()) return false;
+        const std::optional<KeyMessage> key = keyMessageFromEvent(event);
+        bool withhold_key = false;
+        if (on_message_) {
+            WindowMessage message;
+            message.view = view();
+            message.event = (__bridge void*)event;
+            if (key) {
+                message.kind = WindowEventKind::Key;
+                message.key = key;
+            }
+            const MessageRoute route = on_message_(message);
+            if (route.handled) return true;
+            withhold_key = route.withhold_key;
+        }
+        if (!key) return false;
+        if (on_key_ && !withhold_key) on_key_(*key);
+        // The client has the key. Command combinations still go on to AppKit for the system shortcuts that
+        // are not menu items; other keys end here, so nothing beeps.
+        return (event.modifierFlags & NSEventModifierFlagCommand) == 0 || event.type == NSEventTypeFlagsChanged;
     }
 
     bool requestClose() override {
@@ -486,6 +543,7 @@ private:
 
     std::function<void()> on_close_;
     std::function<MessageRoute(const WindowMessage&)> on_message_;
+    std::function<void(const KeyMessage&)> on_key_;
     std::function<void()> on_focus_lost_;
     std::function<void(bool)> on_fullscreen_changed_;
     bool start_fullscreen_;

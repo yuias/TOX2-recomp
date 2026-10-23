@@ -206,6 +206,7 @@ function(tox2_runtime_add_core)
     runtime/src/input/gamepad_probe.cpp
     runtime/src/input/gamepad_select.cpp
     runtime/src/input/keyboard_pad.cpp
+    runtime/src/input/mac_key_codes.cpp
     runtime/src/input/pad_buttons.cpp
     runtime/src/input/pad_script.cpp
     runtime/src/lv2/sys_event.cpp
