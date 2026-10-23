@@ -54,6 +54,10 @@ function(tox2_audio_add)
       SKIP_RETURN_CODE 77
       RUN_SERIAL TRUE
       PASS_REGULAR_EXPRESSION "audio coreaudio tests: [0-9]+ passed, 0 failed")
+
+    if(TARGET tox2_game)
+      target_link_libraries(tox2_game PRIVATE tox2_audio_coreaudio)
+    endif()
   endif()
 
   add_executable(tox2_audiotool tools/tox2_audiotool/main.cpp)

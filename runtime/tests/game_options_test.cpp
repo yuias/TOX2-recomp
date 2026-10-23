@@ -549,7 +549,7 @@ void testDefaultLines() {
     if (windowed) {
         CHECK(windowed->game_dir == stdfs::path("g"));
         CHECK(windowed->window && windowed->render_vulkan && !windowed->no_window);
-        CHECK(windowed->pad == "keyboard+gamepad" && windowed->audio == "wasapi");
+        CHECK(windowed->pad == "keyboard+gamepad" && windowed->audio == tox2::kHostAudioOutput);
         CHECK(windowed->frame_limit == tox2::RsxFlipLimit::Vsync && windowed->resolution_scale == 1);
         CHECK(windowed->aa_mode == tox2::AaMode::Msaa && windowed->ppu_threads == tox2::PpuThreadsMode::Split2);
         CHECK(windowed->host_priorities && windowed->yield_backoff && windowed->lwmutex_fast_path);
@@ -578,9 +578,9 @@ void testDefaultLines() {
     const auto dumping = parseLine(std::vector<std::string>{"--game-dir", "g", "--no-window", "--dump-frames", "d"});
     CHECK(dumping && !dumping->window && dumping->render_vulkan && dumping->dump_frames == stdfs::path("d"));
     // An explicit pad and audio are kept.
-    const auto explicit_pad =
-            parseLine(std::vector<std::string>{"--game-dir", "g", "--no-window", "--pad", "none", "--audio", "wasapi"});
-    CHECK(explicit_pad && explicit_pad->pad == "none" && explicit_pad->audio == "wasapi");
+    const auto explicit_pad = parseLine(std::vector<std::string>{"--game-dir", "g", "--no-window", "--pad", "none",
+                                                                 "--audio", std::string(tox2::kHostAudioOutput)});
+    CHECK(explicit_pad && explicit_pad->pad == "none" && explicit_pad->audio == tox2::kHostAudioOutput);
 }
 
 void testValues() {
@@ -726,7 +726,8 @@ void testErrorMessages() {
     CHECK(rejectedLine({"--game-dir", "g", "--ui-font"}, "error: --ui-font needs a value\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--pad", "joystick"},
                        "error: --pad needs none, neutral, keyboard, gamepad or keyboard+gamepad\n"));
-    CHECK(rejectedLine({"--game-dir", "g", "--audio", "alsa"}, "error: --audio needs none or wasapi\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--audio", "alsa"},
+                       "error: --audio needs none or " + std::string(tox2::kHostAudioOutput) + "\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--render", "opengl"}, "error: --render needs none or vulkan\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--aa-mode", "none"}, "error: --aa-mode needs supersample|msaa|dlaa\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--aa-mode", "foo"}, "error: --aa-mode needs supersample|msaa|dlaa\n"));

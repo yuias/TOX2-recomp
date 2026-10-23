@@ -25,6 +25,15 @@
 
 namespace tox2 {
 
+// The device output --audio can select besides "none": WASAPI on Windows, CoreAudio on macOS.
+#if defined(_WIN32)
+inline constexpr std::string_view kHostAudioOutput = "wasapi";
+#elif defined(__APPLE__)
+inline constexpr std::string_view kHostAudioOutput = "coreaudio";
+#else
+#error "no host audio output for this platform"
+#endif
+
 // The present mode requested while frame generation is loaded. Kept here, apart from VkPresentModeKHR, so that option
 // parsing does not depend on Vulkan; game_main maps it.
 enum class FgPresentMode : std::uint8_t { Fifo, Mailbox, Immediate };
@@ -38,7 +47,7 @@ struct GameOptions {
     std::optional<LogLevel> log_level;  // applied by applyGameOptions
     std::string dialog_answer;          // validated; applied by applyGameOptions
     std::string pad;                    // settled: none|neutral|keyboard|gamepad|keyboard+gamepad
-    std::string audio;                  // settled: none|wasapi
+    std::string audio;                  // settled: none|kHostAudioOutput
     // --save-dialog as given; unset when absent, because the default depends on the window and the pad, which
     // game_main resolves (a requested Window may still fall back to Auto there).
     std::optional<SaveDialogMode> save_dialog;
