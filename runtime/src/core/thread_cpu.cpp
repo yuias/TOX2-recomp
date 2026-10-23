@@ -7,16 +7,30 @@
 
 #include "core/log.h"
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <mach/mach.h>
+#include <pthread.h>
+#include <time.h>
+#endif
 
 namespace tox2 {
 namespace {
 
 struct RegisteredThread {
     std::string label;
+#if defined(_WIN32)
     HANDLE handle = nullptr;
+#else
+    // A send right of its own, so the name stays valid (as a dead name) after the thread ends.
+    mach_port_t port = MACH_PORT_NULL;
+    // The thread's CPU time at the last successful query: thread_info fails once the thread has ended, and the
+    // figure then stays at its final value.
+    std::uint64_t last_ns = 0;
+#endif
 };
 
 struct Registry {
@@ -58,9 +72,14 @@ double hostCyclesPerMs() {
 }
 
 std::uint64_t currentThreadCycles() {
+#if defined(_WIN32)
     ULONG64 cycles = 0;
     QueryThreadCycleTime(GetCurrentThread(), &cycles);
     return cycles;
+#else
+    // Nanoseconds of CPU time; hostCyclesPerMs calibrates to about 1e6.
+    return clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
+#endif
 }
 
 CycleStats summarizeCycles(std::span<const std::uint64_t> samples) {
@@ -72,16 +91,25 @@ CycleStats summarizeCycles(std::span<const std::uint64_t> samples) {
 
 void registerHostThreadCpu(std::string label) {
     if (t_registered) return;
+#if defined(_WIN32)
     const DWORD tid = GetCurrentThreadId();
     const HANDLE handle = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
     if (handle == nullptr) return;
+    RegisteredThread entry{label, handle};
+    const auto host_tid = static_cast<unsigned long>(tid);
+#else
+    RegisteredThread entry{label, mach_thread_self()};
+    std::uint64_t tid = 0;
+    pthread_threadid_np(nullptr, &tid);
+    const auto host_tid = static_cast<unsigned long>(tid);
+#endif
     t_registered = true;
     {
         Registry& reg = registry();
         std::lock_guard lock(reg.mutex);
-        reg.threads.push_back({label, handle});
+        reg.threads.push_back(std::move(entry));
     }
-    logDebug("tox2: thread cpu: {} host thread {}", label, static_cast<unsigned long>(tid));
+    logDebug("tox2: thread cpu: {} host thread {}", label, host_tid);
 }
 
 std::vector<HostThreadCpu> hostThreadCpuSnapshot() {
@@ -90,22 +118,39 @@ std::vector<HostThreadCpu> hostThreadCpuSnapshot() {
     std::lock_guard lock(reg.mutex);
     std::vector<HostThreadCpu> out;
     out.reserve(reg.threads.size());
+#if defined(_WIN32)
     for (const RegisteredThread& thread : reg.threads) {
         ULONG64 cycles = 0;
         QueryThreadCycleTime(thread.handle, &cycles);
         const double cpu_us = cycles_per_ms > 0.0 ? static_cast<double>(cycles) / cycles_per_ms * 1000.0 : 0.0;
         out.push_back({thread.label, static_cast<std::uint64_t>(cpu_us)});
     }
+#else
+    (void)cycles_per_ms;  // the times are nanoseconds already
+    for (RegisteredThread& thread : reg.threads) {
+        thread_extended_info_data_t info{};
+        mach_msg_type_number_t count = THREAD_EXTENDED_INFO_COUNT;
+        if (thread_info(thread.port, THREAD_EXTENDED_INFO, reinterpret_cast<thread_info_t>(&info), &count) ==
+            KERN_SUCCESS) {
+            thread.last_ns = info.pth_user_time + info.pth_system_time;
+        }
+        out.push_back({thread.label, thread.last_ns / 1000});
+    }
+#endif
     return out;
 }
 
 std::uint64_t processCpuUs() {
     // Cycle counts, like the per-thread figures, so the two are comparable within one second. GetProcessTimes only
     // advances in scheduler ticks (about 15.6 ms), which makes a one-second delta too coarse and too low.
+#if defined(_WIN32)
     const double cycles_per_ms = hostCyclesPerMs();
     ULONG64 cycles = 0;
     if (cycles_per_ms <= 0.0 || !QueryProcessCycleTime(GetCurrentProcess(), &cycles)) return 0;
     return static_cast<std::uint64_t>(static_cast<double>(cycles) / cycles_per_ms * 1000.0);
+#else
+    return clock_gettime_nsec_np(CLOCK_PROCESS_CPUTIME_ID) / 1000;
+#endif
 }
 
 std::string formatHostThreadCpu(std::span<const HostThreadCpu> before, std::span<const HostThreadCpu> after,
