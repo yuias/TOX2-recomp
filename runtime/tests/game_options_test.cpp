@@ -6,6 +6,7 @@
 #define NOMINMAX
 #include <windows.h>
 #else
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -35,6 +36,16 @@ unsigned long processId() {
     return GetCurrentProcessId();
 #else
     return static_cast<unsigned long>(getpid());
+#endif
+}
+
+// Makes `path` a file that cannot be replaced, or replaceable again. Windows refuses to replace a read-only file;
+// POSIX renames over one, so the macOS side uses the immutable flag, which a rename onto the name respects.
+void setUnreplaceable(const std::filesystem::path& path, bool on) {
+#if defined(_WIN32)
+    SetFileAttributesW(path.c_str(), on ? FILE_ATTRIBUTE_READONLY : FILE_ATTRIBUTE_NORMAL);
+#else
+    chflags(path.c_str(), on ? UF_IMMUTABLE : 0);
 #endif
 }
 
@@ -436,8 +447,8 @@ void testWriteFileAtomic() {
     CHECK(readFile(target) == "second \xE3\x82\xB2\r\n");  // bytes are written as they are
     CHECK(!stdfs::exists(temp));
 
-    // A read-only target cannot be replaced: the old content stays and no temp file is left behind.
-    SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_READONLY);
+    // A target that cannot be replaced: the old content stays and no temp file is left behind.
+    setUnreplaceable(target, true);
     const auto blocked = tox2::writeFileAtomic(target, "third\n");
     CHECK(!blocked.has_value());
     if (!blocked) {
@@ -445,7 +456,7 @@ void testWriteFileAtomic() {
     }
     CHECK(readFile(target) == "second \xE3\x82\xB2\r\n");
     CHECK(!stdfs::exists(temp));
-    SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_NORMAL);
+    setUnreplaceable(target, false);
 
     // A directory that does not exist fails at the first step.
     const auto missing = tox2::writeFileAtomic(dir / "no_such_dir" / "config.json", "x");
@@ -1291,7 +1302,7 @@ struct StoreDir {
     }
     ~StoreDir() {
         std::error_code ec;
-        SetFileAttributesW(file.c_str(), FILE_ATTRIBUTE_NORMAL);
+        setUnreplaceable(file, false);
         stdfs::remove_all(dir, ec);
     }
 };
@@ -1416,7 +1427,7 @@ void testStoreReadOnlyFile() {
     tox2::SettingsStore store(dir.file, kSpecs, kSlowTiming);
     store.set("resolution_scale", "2");
 
-    SetFileAttributesW(dir.file.c_str(), FILE_ATTRIBUTE_READONLY);
+    setUnreplaceable(dir.file, true);
     CHECK(!store.flush(std::chrono::seconds(1)));
     CHECK(readFile(dir.file) == original);
     CHECK(!stdfs::exists(dir.file.string() + ".tmp"));
@@ -1427,7 +1438,7 @@ void testStoreReadOnlyFile() {
     CHECK(log.count("cannot save settings to ") == 1);
 
     // The change was kept.
-    SetFileAttributesW(dir.file.c_str(), FILE_ATTRIBUTE_NORMAL);
+    setUnreplaceable(dir.file, false);
     CHECK(store.flush(std::chrono::seconds(1)));
     CHECK(store.writes() == 1);
     CHECK(readFile(dir.file) == "{\n  \"my_note\": \"keep\",\n  \"resolution_scale\": 2\n}\n");
