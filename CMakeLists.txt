@@ -16,6 +16,9 @@ set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# No C++ modules are used. The module scan would otherwise preprocess every source of a target before
+# any of its objects builds, so one source that does not compile blocks the whole target.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 include(cmake/CompilerChecks.cmake)
 include(cmake/PpuCodegen.cmake)
