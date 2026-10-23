@@ -1,10 +1,12 @@
 #include "input/gamecontroller_backend.h"
 
 #import <Cocoa/Cocoa.h>
+#import <CoreHaptics/CoreHaptics.h>
 #import <GameController/GameController.h>
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -13,6 +15,8 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include "core/log.h"
 
 namespace tox2 {
 
@@ -65,11 +69,151 @@ GamepadReading readState(GCExtendedGamepad* pad) {
     return reading;
 }
 
+// One motor of a controller: a haptic engine on one handle (or on the whole controller), playing a
+// long continuous event whose strength is set with a dynamic intensity parameter. The player loops so
+// the event does not end while the game keeps the motor on. Used by the gamepad thread only; the
+// engine's own callbacks on other queues just raise `stale_`.
+class Motor {
+public:
+    Motor(GCController* controller, GCHapticsLocality locality, float sharpness)
+        : controller_(controller), locality_(locality), sharpness_(sharpness) {}
+
+    ~Motor() { teardown(); }
+    Motor(const Motor&) = delete;
+    Motor& operator=(const Motor&) = delete;
+
+    void set(float intensity) {
+        if (intensity <= 0.0f) {
+            if (playing_) {
+                NSError* error = nil;
+                if (![player_ stopAtTime:CHHapticTimeImmediate error:&error]) report("stop", error);
+                playing_ = false;
+            }
+            return;
+        }
+        // The engine stopped or was reset by the system (for example after the app was suspended).
+        if (stale_->load()) teardown();
+        if (engine_ == nil && !build()) return;
+        NSError* error = nil;
+        if (!playing_) {
+            if (![player_ startAtTime:CHHapticTimeImmediate error:&error]) return report("start", error);
+            playing_ = true;
+        }
+        CHHapticDynamicParameter* parameter =
+                [[CHHapticDynamicParameter alloc] initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl
+                                                                value:intensity
+                                                         relativeTime:0];
+        if (![player_ sendParameters:@[ parameter ] atTime:CHHapticTimeImmediate error:&error]) {
+            report("set intensity", error);
+        }
+    }
+
+private:
+    bool build() {
+        NSError* error = nil;
+        CHHapticEngine* engine = [controller_.haptics createEngineWithLocality:locality_];
+        if (engine == nil) {
+            report("create engine", nil);
+            return false;
+        }
+        engine.playsHapticsOnly = YES;
+        // A flag per engine: the stop of a replaced engine must not mark its successor stale.
+        const auto stale = std::make_shared<std::atomic<bool>>(false);
+        engine.stoppedHandler = ^(CHHapticEngineStoppedReason) {
+          stale->store(true);
+        };
+        engine.resetHandler = ^{
+          stale->store(true);
+        };
+        if (![engine startAndReturnError:&error]) {
+            report("start engine", error);
+            return false;
+        }
+        // 30 s is the longest continuous event Core Haptics accepts.
+        CHHapticEvent* event = [[CHHapticEvent alloc]
+                initWithEventType:CHHapticEventTypeHapticContinuous
+                       parameters:@[
+                           [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity
+                                                                         value:1.0f],
+                           [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticSharpness
+                                                                         value:sharpness_],
+                       ]
+                     relativeTime:0
+                         duration:30.0];
+        CHHapticPattern* pattern = [[CHHapticPattern alloc] initWithEvents:@[ event ] parameters:@[] error:&error];
+        id<CHHapticAdvancedPatternPlayer> player =
+                pattern != nil ? [engine createAdvancedPlayerWithPattern:pattern error:&error] : nil;
+        if (player == nil) {
+            [engine stopWithCompletionHandler:nil];
+            report("create player", error);
+            return false;
+        }
+        player.loopEnabled = YES;
+        engine_ = engine;
+        player_ = player;
+        stale_ = stale;
+        playing_ = false;
+        return true;
+    }
+
+    void teardown() {
+        if (engine_ == nil) return;
+        [engine_ stopWithCompletionHandler:nil];
+        engine_ = nil;
+        player_ = nil;
+        playing_ = false;
+    }
+
+    // One warning per motor: a failing engine would otherwise repeat it on every change of strength.
+    void report(const char* what, NSError* error) {
+        if (reported_) return;
+        reported_ = true;
+        logWarn("tox2: pad: haptics: {} failed: {}", what,
+                error != nil ? error.localizedDescription.UTF8String : "no engine for this locality");
+    }
+
+    GCController* controller_;
+    GCHapticsLocality locality_;
+    float sharpness_;
+    CHHapticEngine* engine_ = nil;
+    id<CHHapticAdvancedPatternPlayer> player_ = nil;
+    std::shared_ptr<std::atomic<bool>> stale_ = std::make_shared<std::atomic<bool>>(false);
+    bool playing_ = false;
+    bool reported_ = false;
+};
+
+// The two body motors of a controller. Engines are created on the first nonzero strength, so a
+// controller that is never rumbled never claims its haptics hardware.
+class Haptics {
+public:
+    explicit Haptics(GCController* controller) {
+        NSSet<GCHapticsLocality>* supported = controller.haptics.supportedLocalities;
+        if ([supported containsObject:GCHapticsLocalityLeftHandle] &&
+            [supported containsObject:GCHapticsLocalityRightHandle]) {
+            low_.emplace(controller, GCHapticsLocalityLeftHandle, 0.5f);
+            high_.emplace(controller, GCHapticsLocalityRightHandle, 0.5f);
+        } else {
+            // One actuator group: the two engines differ in sharpness only.
+            low_.emplace(controller, GCHapticsLocalityDefault, 0.0f);
+            high_.emplace(controller, GCHapticsLocalityDefault, 1.0f);
+        }
+    }
+
+    void set(const GamepadRumble& rumble) {
+        low_->set(std::clamp(rumble.low_frequency, 0.0f, 1.0f));
+        high_->set(std::clamp(rumble.high_frequency, 0.0f, 1.0f));
+    }
+
+private:
+    std::optional<Motor> low_, high_;
+};
+
 struct Device {
     GamepadDeviceInfo info;
     GCController* controller = nil;
     bool readable = false;  // has an extended gamepad profile
     std::shared_ptr<SharedReading> reading;
+    std::shared_ptr<Haptics> haptics;  // null without haptics support
 };
 
 class Backend : public GamepadBackend, public std::enable_shared_from_this<Backend> {
@@ -125,7 +269,16 @@ public:
         return reading->load();
     }
 
-    void setRumble(std::uint64_t, const GamepadRumble&) override {}
+    void setRumble(std::uint64_t id, const GamepadRumble& rumble) override {
+        std::shared_ptr<Haptics> haptics;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const Device& device : devices_) {
+                if (device.info.id == id) haptics = device.haptics;
+            }
+        }
+        if (haptics) haptics->set(rumble);
+    }
 
 private:
     void add(id object) {
@@ -145,6 +298,10 @@ private:
         device.info.kinds = device.readable ? kGamepadKindGamepad : kGamepadKindController;
         if (NSString* name = controller.vendorName) device.info.display_name = name.UTF8String;
         device.reading = std::make_shared<SharedReading>();
+        if (controller.haptics != nil) {
+            device.info.rumble = true;
+            device.haptics = std::make_shared<Haptics>(controller);
+        }
         if (extended != nil) {
             // A private serial queue per controller; the handler writes only this device's reading.
             controller.handlerQueue = dispatch_queue_create(

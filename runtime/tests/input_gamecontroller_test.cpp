@@ -76,6 +76,22 @@ void testBackend(tox2::GamepadBackend& backend) {
     spinMainRunLoop(std::chrono::milliseconds(250));  // let the rest of a multi-controller arrival in
 }
 
+// The motors are driven for a moment each so that a person holding the controller can feel which is
+// which; the calls themselves cannot fail visibly (the backend logs a warning if an engine does).
+void testRumble(tox2::GamepadBackend& backend, const tox2::GamepadDeviceInfo& info) {
+    constexpr auto kHold = std::chrono::milliseconds(700);
+    std::printf("input gamecontroller: rumble on id %llu: low frequency, high frequency, off\n",
+                static_cast<unsigned long long>(info.id));
+    backend.setRumble(info.id, {.low_frequency = 1.0f, .high_frequency = 0.0f});
+    spinMainRunLoop(kHold);
+    backend.setRumble(info.id, {.low_frequency = 0.0f, .high_frequency = 1.0f});
+    spinMainRunLoop(kHold);
+    backend.setRumble(info.id, {.low_frequency = 0.0f, .high_frequency = 0.0f});
+    spinMainRunLoop(std::chrono::milliseconds(100));
+    // Still readable and still the same device afterwards.
+    CHECK(backend.read(info.id).has_value() == ((info.kinds & tox2::kGamepadKindGamepad) != 0));
+}
+
 // Returns whether a controller was present.
 bool testControllers(tox2::GamepadBackend& backend) {
     const std::uint64_t generation = backend.deviceGeneration();
@@ -92,9 +108,8 @@ bool testControllers(tox2::GamepadBackend& backend) {
                     info.kinds, info.rumble ? 1 : 0, info.display_name.c_str());
     }
     CHECK(ids.size() == devices.size());
-    CHECK(std::any_of(devices.begin(), devices.end(), [](const tox2::GamepadDeviceInfo& info) {
-        return (info.kinds & tox2::kGamepadKindGamepad) != 0;
-    }));
+    CHECK(std::any_of(devices.begin(), devices.end(),
+                      [](const tox2::GamepadDeviceInfo& info) { return (info.kinds & tox2::kGamepadKindGamepad) != 0; }));
 
     for (const tox2::GamepadDeviceInfo& info : devices) {
         const std::optional<tox2::GamepadReading> reading = backend.read(info.id);
@@ -106,6 +121,14 @@ bool testControllers(tox2::GamepadBackend& backend) {
         CHECK(stick(reading->left_x) && stick(reading->left_y) && stick(reading->right_x) && stick(reading->right_y));
         CHECK(trigger(reading->left_trigger) && trigger(reading->right_trigger));
     }
+
+    bool any_rumble = false;
+    for (const tox2::GamepadDeviceInfo& info : devices) {
+        if (!info.rumble) continue;
+        any_rumble = true;
+        testRumble(backend, info);
+    }
+    if (!any_rumble) std::printf("input gamecontroller: no controller with haptics, rumble not tried\n");
 
     // Nothing is plugged in or out while the test runs.
     spinMainRunLoop(std::chrono::milliseconds(300));
