@@ -13,7 +13,7 @@ import time
 import unittest
 from pathlib import Path
 
-from tox2_save import cli, pfd
+from tox2_save import cli, pfd, sfo
 
 from tests import save_fixture as fx
 
@@ -156,6 +156,25 @@ class RealInfoUsTest(_RealInfoMixin, unittest.TestCase):
         result = _decrypted_us()
         self.assertEqual(result["code"], 0, result["stderr"])
         return result["out_dir"] / "SAVE"
+
+
+@unittest.skipUnless(_JP_DIR, "TOX2_JP_SAVE_DIR is not set")
+class RealSfoJpTest(unittest.TestCase):
+    def test_round_trip_is_identical(self):
+        # The runtime wrote this file with serializeParamSfo, so the Python writer must reproduce it.
+        data = (Path(_JP_DIR) / "PARAM.SFO").read_bytes()
+        self.assertTrue(sfo.serialize_sfo(sfo.parse_sfo(data)) == data, "re-serialized PARAM.SFO differs")
+
+    def test_save_is_secure(self):
+        parsed = sfo.parse_sfo((Path(_JP_DIR) / "PARAM.SFO").read_bytes())
+        self.assertEqual(parsed.ints["*SAVE"], 1)
+
+
+@unittest.skipUnless(_US_DIR, "TOX2_US_SAVE_DIR is not set")
+class RealSfoUsTest(unittest.TestCase):
+    def test_parses_with_params(self):
+        parsed = sfo.parse_sfo((Path(_US_DIR) / "PARAM.SFO").read_bytes())
+        self.assertIn("PARAMS", parsed.binary)
 
 
 if __name__ == "__main__":
