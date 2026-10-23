@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -361,10 +362,57 @@ bool testRealDevicePlaysSilence() {
     }
     std::printf("real device: %s\n", output->description().c_str());
 
+    // The unit starts hardware in open(), so the start latency (6-34 ms) is spent before the first
+    // block. When it was spent after, the engine kept producing meanwhile and the fill began 288-1632
+    // frames above the primed amount. The sampler averages the fill reported in the first 250 ms of
+    // streaming. Blocks arrive at the block rate, so the mean stays near the primed blocks plus the
+    // preroll (one period) minus half a period, about 1230 frames for a 256-frame period; the
+    // limit of kPrimeBlocks blocks plus two periods is about 300 frames above that. A mean rather than a
+    // maximum keeps one late device-thread pass (one extra block in the ring for a moment) from
+    // failing the test.
+    const auto devices = tox2::listRenderDevices();
+    double period_ms = 0.0;
+    if (devices) {
+        for (const tox2::RenderDeviceInfo& device : *devices) {
+            if (device.is_default) period_ms = device.default_period_ms;
+        }
+    }
+    const auto period_frames = static_cast<std::uint64_t>(period_ms * tox2::kAudioSampleRate / 1000.0);
+    std::atomic<bool> sampling{true};
+    std::atomic<std::uint64_t> fill_sum{0};
+    std::atomic<std::uint64_t> fill_max{0};
+    std::atomic<std::uint64_t> fill_count{0};
+    std::thread sampler([&] {
+        std::optional<Clock::time_point> first;
+        while (sampling.load()) {
+            if (const auto fill = output->fillFrames()) {
+                if (!first) first = Clock::now();
+                if (Clock::now() - *first <= 250ms) {
+                    fill_sum += *fill;
+                    fill_count++;
+                    if (*fill > fill_max.load()) fill_max.store(*fill);
+                }
+            }
+            std::this_thread::sleep_for(2ms);
+        }
+    });
+
     // 1 s of silence at the block rate.
     constexpr std::uint64_t kBlocks = 188;
     submitPaced(*output, 0, kBlocks, std::chrono::duration_cast<std::chrono::microseconds>(tox2::kAudioBlockPeriod),
                 fillSilence);
+    sampling = false;
+    sampler.join();
+    const std::uint64_t fill_limit = tox2::kPrimeBlocks * tox2::kAudioBlockFrames + 2 * period_frames;
+    const std::uint64_t fill_mean = fill_count.load() != 0 ? fill_sum.load() / fill_count.load() : 0;
+    std::printf(
+            "real device early fill: mean %llu, max %llu frames over %llu samples, limit %llu (period %llu frames)\n",
+            static_cast<unsigned long long>(fill_mean), static_cast<unsigned long long>(fill_max.load()),
+            static_cast<unsigned long long>(fill_count.load()), static_cast<unsigned long long>(fill_limit),
+            static_cast<unsigned long long>(period_frames));
+    CHECK(period_frames != 0);
+    CHECK(fill_count.load() >= 20);
+    CHECK(fill_mean <= fill_limit);
     CHECK(waitFor([&] { return output->stats().frames_played >= 44000; }, 1000ms));
 
     const tox2::AudioOutputStats stats = output->stats();

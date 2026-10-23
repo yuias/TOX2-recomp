@@ -254,6 +254,18 @@ public:
             return nullptr;
         }
 
+        // Starting the hardware takes 6-34 ms before the first render callback. Spent here, it
+        // passes before the stream is published as open and the engine's block clock runs; spent in
+        // start() it would pile up in the engine's fill, which then sits 1000-1500 frames above its
+        // target and keeps the clock controller at its limit for about a minute. The callback
+        // plays silence until start() opens the gate.
+        status = AudioOutputUnitStart(stream->unit_);
+        if (status != noErr) {
+            error = failure("AudioOutputUnitStart", status);
+            return nullptr;
+        }
+        stream->started_ = true;
+
         stream->period_frames_ = static_cast<std::uint32_t>(facts.default_period_ms * kAudioSampleRate / 1000.0);
         stream->description_ = std::format("{}, mix {} Hz {} ch, buffer {:.1f} ms, period {:.1f} ms",
                                            deviceName(stream->device_), facts.mix_rate, facts.mix_channels,
@@ -262,7 +274,7 @@ public:
     }
 
     // The listeners go first so that none runs against a destroyed stream; stopping the unit waits
-    // for a render callback that is still running.
+    // for a render callback that is still running. started_ is set once open() has started the unit.
     ~CoreAudioStream() override {
         removeListeners();
         if (started_) AudioOutputUnitStop(unit_);
@@ -298,11 +310,11 @@ public:
         return 0;
     }
 
+    // The unit already runs (see open()); this lets the callback consume the FIFO.
     RenderStatus start() override {
         if (lost_.load(std::memory_order_relaxed)) return kDeviceLost;
-        const OSStatus status = AudioOutputUnitStart(unit_);
-        if (status == noErr) started_ = true;
-        return toStatus(status);
+        playing_.store(true, std::memory_order_release);
+        return 0;
     }
 
 private:
@@ -314,6 +326,18 @@ private:
                                    UInt32 frames, AudioBufferList* data) {
         auto& self = *static_cast<CoreAudioStream*>(context);
         if (data == nullptr) return noErr;
+        if (!self.playing_.load(std::memory_order_acquire)) {
+            // Not started by the device thread yet: the primed frames stay in the FIFO. Signals sent
+            // meanwhile only make the first waitForBuffer() return at once; the device thread then
+            // reads the real fill from pendingFrames().
+            for (UInt32 i = 0; i < data->mNumberBuffers; ++i) {
+                if (data->mBuffers[i].mData != nullptr)
+                    std::memset(data->mBuffers[i].mData, 0, data->mBuffers[i].mDataByteSize);
+            }
+            *flags |= kAudioUnitRenderAction_OutputIsSilence;
+            dispatch_semaphore_signal(self.signal_);
+            return noErr;
+        }
         std::uint32_t copied = 0;
         for (UInt32 i = 0; i < data->mNumberBuffers; ++i) {
             AudioBuffer& buffer = data->mBuffers[i];
@@ -376,6 +400,7 @@ private:
     AudioComponentInstance unit_ = nullptr;
     AudioObjectID device_ = kAudioObjectUnknown;
     std::atomic<bool> lost_{false};
+    std::atomic<bool> playing_{false};  // set by start(); until then the callback plays silence
     std::uint32_t period_frames_ = 0;
     std::string description_;
     bool initialized_ = false;
