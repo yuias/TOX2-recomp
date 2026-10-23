@@ -23,7 +23,9 @@
 #include "app/settings_store.h"
 #include "audio/audio_engine.h"
 #include "audio/audio_output.h"
+#if defined(_WIN32)
 #include "audio/wasapi_output.h"
+#endif
 #include "audio/wav_file.h"
 #include "core/boot.h"
 #include "core/census.h"
@@ -45,7 +47,9 @@
 #include "hle/hle.h"
 #include "hle/libsre.h"
 #include "hle/save_dialog.h"
+#if defined(_WIN32)
 #include "input/gameinput_backend.h"
+#endif
 #include "input/gamepad_hub.h"
 #include "input/keyboard_pad.h"
 #include "input/pad_script.h"
@@ -637,8 +641,10 @@ tox2::PerfSource cpuPerfSource() {
 
 void configureAudio(const tox2::GameOptions& opt) {
     tox2::AudioEngineConfig config;
+#if defined(_WIN32)
     // Only the wasapi choice builds a device output, so a run without it never touches COM.
     if (opt.audio == "wasapi") config.make_output = [] { return tox2::makeWasapiOutput(); };
+#endif
     config.dump = opt.audio_dump;
     tox2::configureAudioEngine(std::move(config));
     tox2::setAudioCensusProvider(&audioCensusLines);
@@ -998,6 +1004,7 @@ int main(int argc, char** argv) {
     if (keyboard && !opt.pad_script.empty()) tox2::startPadScript(opt.pad_script_data, keyboard);
     // GameInput takes about a second to initialise, so the gamepad thread creates the backend itself.
     // The probe alone (no gamepad in the pad) runs the thread without a state to write.
+#if defined(_WIN32)
     if (tox2::padUsesGamepad(opt.pad) || opt.pad_probe) {
         tox2::startGamepadHub(
                 []() -> std::expected<std::shared_ptr<tox2::GamepadBackend>, std::string> {
@@ -1008,6 +1015,15 @@ int main(int argc, char** argv) {
                  .detect_steam = tox2::detectSteamContext,
                  .probe = opt.pad_probe});
     }
-    tox2::bootMainThread(exe, "/dev_bdvd/PS3_GAME/USRDIR/EBOOT.BIN", module.image_end - module.base);
-    tox2::runSupervisor(opt.seconds);
+#else
+    if (tox2::padUsesGamepad(opt.pad) || opt.pad_probe) tox2::logWarn("tox2: pad: no gamepad backend on this platform");
+#endif
+    // The window belongs to the main thread on macOS, so the boot and the supervisor run on a thread of
+    // their own while the main thread serves the user interface; on Windows this is a plain call.
+    tox2::runWithHostEventLoop(
+            [&] {
+                tox2::bootMainThread(exe, "/dev_bdvd/PS3_GAME/USRDIR/EBOOT.BIN", module.image_end - module.base);
+                tox2::runSupervisor(opt.seconds);
+            },
+            opt.window);
 }
