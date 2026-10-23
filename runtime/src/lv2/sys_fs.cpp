@@ -21,16 +21,13 @@
 
 #include "core/build_config.h"
 #include "core/guest_memory.h"
+#include "core/host_file.h"
 #include "core/log.h"
 #include "core/threads.h"
 #include "tox2/ppu_context.h"
 #include "lv2/cell_error.h"
 #include "lv2/sys_sync.h"
 #include "lv2/vfs.h"
-
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
 
 namespace tox2 {
 namespace {
@@ -71,17 +68,12 @@ struct FsObject {
     FsObject() = default;
     FsObject(const FsObject&) = delete;
     FsObject& operator=(const FsObject&) = delete;
-    ~FsObject() {
-        if (file != INVALID_HANDLE_VALUE) {
-            CloseHandle(file);
-        }
-    }
 
     bool is_dir = false;
     VfsDevice device = VfsDevice::None;
     VfsDeviceInfo info = {512, true};
     bool read_only = false;
-    HANDLE file = INVALID_HANDLE_VALUE;
+    host::File file;
     std::int32_t flags = 0;
     std::vector<DirEntry> entries;
     std::size_t pos = 0;
@@ -194,45 +186,37 @@ std::uint32_t notFoundOrNotDir(const stdfs::path& host) {
     return kCellEnoent;
 }
 
-std::uint32_t mapWinError(DWORD error, const stdfs::path& host) {
-    switch (error) {
-        case ERROR_FILE_NOT_FOUND:
-        case ERROR_PATH_NOT_FOUND: return notFoundOrNotDir(host);
-        case ERROR_INVALID_NAME: return kCellEnoent;
-        case ERROR_DIRECTORY: return kCellEnotdir;
-        case ERROR_ACCESS_DENIED: return kCellEacces;
-        case ERROR_FILE_EXISTS:
-        case ERROR_ALREADY_EXISTS: return kCellEexist;
-        case ERROR_SHARING_VIOLATION:
-        case ERROR_LOCK_VIOLATION: return kCellEbusy;
-        case ERROR_NEGATIVE_SEEK:
-        case ERROR_INVALID_PARAMETER: return kCellEinval;
-        default:
-            logOnce(std::format("fs-win-error-{}", error), "tox2: fs: unmapped host error {}", error);
+std::uint32_t mapHostError(const host::FileFailure& failure, const stdfs::path& host) {
+    switch (failure.kind) {
+        case host::FileError::NotFound: return notFoundOrNotDir(host);
+        case host::FileError::InvalidName: return kCellEnoent;
+        case host::FileError::NotDirectory: return kCellEnotdir;
+        case host::FileError::AccessDenied: return kCellEacces;
+        case host::FileError::Exists: return kCellEexist;
+        case host::FileError::Busy: return kCellEbusy;
+        case host::FileError::InvalidArgument: return kCellEinval;
+        case host::FileError::Other:
+#if defined(_WIN32)
+            logOnce(std::format("fs-win-error-{}", failure.native), "tox2: fs: unmapped host error {}", failure.native);
+#else
+            logOnce(std::format("fs-errno-{}", failure.native), "tox2: fs: unmapped host error {}", failure.native);
+#endif
             return kCellEio;
     }
+    return kCellEio;
 }
 
-std::int64_t toUnixTime(const FILETIME& ft) {
-    ULARGE_INTEGER value;
-    value.LowPart = ft.dwLowDateTime;
-    value.HighPart = ft.dwHighDateTime;
-    constexpr std::int64_t kEpochDiffSeconds = 11644473600;  // 1601 -> 1970
-    return static_cast<std::int64_t>(value.QuadPart / 10000000ull) - kEpochDiffSeconds;
-}
-
-FsStat makeStat(bool is_dir, bool read_only, const VfsDeviceInfo& info, std::uint64_t size, const FILETIME& atime,
-                const FILETIME& mtime, const FILETIME& ctime) {
+FsStat makeStat(bool is_dir, bool read_only, const VfsDeviceInfo& info, const host::PathInfo& host_info) {
     FsStat out;
     out.mode = is_dir ? (kSIfDir | 0777) : (kSIfReg | 0666);
     if (read_only) {
         out.mode &= ~0222;
     }
     out.uid = out.gid = info.no_uid_gid ? -1 : 0;
-    out.atime = toUnixTime(atime);
-    out.mtime = toUnixTime(mtime);
-    out.ctime = toUnixTime(ctime);
-    out.size = is_dir ? info.block_size : size;
+    out.atime = host_info.times.atime;
+    out.mtime = host_info.times.mtime;
+    out.ctime = host_info.times.ctime;
+    out.size = is_dir ? info.block_size : host_info.size;
     out.blksize = info.block_size;
     return out;
 }
@@ -276,39 +260,39 @@ std::uint32_t openFile(std::string_view path, std::int32_t flags, std::uint32_t&
         }
     }
 
-    DWORD access = GENERIC_READ;
-    DWORD disposition = OPEN_EXISTING;
+    bool want_read = true;
+    bool want_write = false;
+    host::OpenMode mode = host::OpenMode::OpenExisting;
     if (!no_write) {
         const bool create = (flags & kOCreat) != 0;
         const bool trunc = (flags & kOTrunc) != 0;
         if (access_mode == kOWronly) {
-            access = GENERIC_WRITE;
+            want_read = false;
+            want_write = true;
         } else if (access_mode != 0) {
-            access = GENERIC_READ | GENERIC_WRITE;
+            want_write = true;
         }
         if (trunc) {
-            access |= GENERIC_WRITE;
+            want_write = true;
         }
         if (create && (flags & kOExcl) != 0) {
-            disposition = CREATE_NEW;
+            mode = host::OpenMode::CreateNew;
         } else if (create && trunc) {
-            disposition = CREATE_ALWAYS;
+            mode = host::OpenMode::CreateAlways;
         } else if (create) {
-            disposition = OPEN_ALWAYS;
+            mode = host::OpenMode::OpenAlways;
         } else if (trunc) {
-            disposition = TRUNCATE_EXISTING;
+            mode = host::OpenMode::TruncateExisting;
         }
     }
 
-    // Sharing everything lets the guest unlink or reopen a file it still holds open.
-    const HANDLE handle = CreateFileW(res.host.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                      nullptr, disposition, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        return mapWinError(GetLastError(), res.host);
+    auto file = host::File::open(res.host, want_read, want_write, mode);
+    if (!file) {
+        return mapHostError(file.error(), res.host);
     }
 
     auto object = std::make_shared<FsObject>();
-    object->file = handle;
+    object->file = std::move(*file);
     object->flags = flags;
     object->device = res.device;
     object->info = res.info;
@@ -365,18 +349,9 @@ std::uint32_t openDirectory(std::string_view path, std::uint32_t& fd) {
     return fd != 0 ? kCellOk : kCellEmfile;
 }
 
-bool setPos(HANDLE file, std::int64_t offset, DWORD method, std::uint64_t* result) {
-    LARGE_INTEGER distance;
-    distance.QuadPart = offset;
-    LARGE_INTEGER position;
-    if (!SetFilePointerEx(file, distance, &position, method)) {
-        return false;
-    }
-    if (result != nullptr) {
-        *result = static_cast<std::uint64_t>(position.QuadPart);
-    }
-    return true;
-}
+constexpr int kSeekSet = 0;
+constexpr int kSeekCur = 1;
+constexpr int kSeekEnd = 2;
 
 // Per-interval figures behind takeFsTransferStats(); relaxed, since they only feed a periodic log line.
 struct TransferCounters {
@@ -426,20 +401,19 @@ private:
 
 // Reads or writes `size` bytes at the current position; returns the byte count and sets `code` on
 // a host error. The caller holds the file's io_mutex. Timed over the host calls only.
-std::uint64_t transferLocked(HANDLE file, bool write, std::uint8_t* data, std::uint64_t size, std::uint32_t& code) {
+std::uint64_t transferLocked(host::File& file, bool write, std::uint8_t* data, std::uint64_t size,
+                             std::uint32_t& code) {
     const auto start = std::chrono::steady_clock::now();
     std::uint64_t total = 0;
     while (total < size) {
-        const DWORD chunk = static_cast<DWORD>(std::min<std::uint64_t>(size - total, 0x40000000));
-        DWORD done = 0;
-        const BOOL ok = write ? WriteFile(file, data + total, chunk, &done, nullptr)
-                              : ReadFile(file, data + total, chunk, &done, nullptr);
-        if (!ok) {
-            code = mapWinError(GetLastError(), {});
+        const std::uint64_t chunk = std::min(size - total, host::kMaxTransferBytes);
+        const auto done = write ? file.write(data + total, chunk) : file.read(data + total, chunk);
+        if (!done) {
+            code = mapHostError(done.error(), {});
             break;
         }
-        total += done;
-        if (done < chunk) {
+        total += *done;
+        if (*done < chunk) {
             break;
         }
     }
@@ -465,7 +439,7 @@ std::uint64_t transfer(FsObject& file, bool write, std::uint8_t* data, std::uint
     if (size == 0) return 0;
     const HostIoRegion region(file);
     if (write && (file.flags & kOAppend) != 0) {
-        setPos(file.file, 0, FILE_END, nullptr);
+        file.file.seek(0, kSeekEnd);
     }
     return transferLocked(file.file, write, data, size, code);
 }
@@ -477,21 +451,21 @@ std::uint64_t transferAt(FsObject& file, bool write, std::uint64_t offset, std::
     // An empty read moves nothing; an empty write still reports an offset it cannot place.
     if (size == 0 && !write) return 0;
     const HostIoRegion region(file);
-    std::uint64_t saved = 0;
-    if (!setPos(file.file, 0, FILE_CURRENT, &saved)) {
-        code = mapWinError(GetLastError(), {});
+    const auto saved = file.file.seek(0, kSeekCur);
+    if (!saved) {
+        code = mapHostError(saved.error(), {});
         return 0;
     }
     std::uint64_t total = 0;
     if (offset > static_cast<std::uint64_t>(INT64_MAX)) {
         // Beyond any file: a read hits the end, a write cannot be placed.
         code = write ? kCellEinval : kCellOk;
-    } else if (!setPos(file.file, static_cast<std::int64_t>(offset), FILE_BEGIN, nullptr)) {
-        code = mapWinError(GetLastError(), {});
+    } else if (const auto moved = file.file.seek(static_cast<std::int64_t>(offset), kSeekSet); !moved) {
+        code = mapHostError(moved.error(), {});
     } else {
         total = transferLocked(file.file, write, data, size, code);
     }
-    setPos(file.file, static_cast<std::int64_t>(saved), FILE_BEGIN, nullptr);
+    file.file.seek(static_cast<std::int64_t>(*saved), kSeekSet);
     return total;
 }
 
@@ -517,16 +491,14 @@ std::uint32_t openSdata(std::string_view path, std::uint32_t& fd) {
         logOnce(LogLevel::Warn, std::format("fs-sdata:{}", path), "tox2: fs: sdata open not supported: {}", path);
         return kCellEnoent;
     }
-    const HANDLE handle =
-            CreateFileW(cached->c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
+    auto file = host::File::open(*cached, true, false, host::OpenMode::OpenExisting);
+    if (!file) {
         logOnce(LogLevel::Warn, std::format("fs-sdata:{}", path),
                 "tox2: fs: no readable decrypted copy of sdata file {}", path);
         return kCellEnoent;
     }
     auto object = std::make_shared<FsObject>();
-    object->file = handle;
+    object->file = std::move(*file);
     object->device = res.device;
     object->info = res.info;
     object->read_only = true;
@@ -566,9 +538,9 @@ std::uint32_t openGuest(std::uint8_t* base, std::uint32_t path_addr, std::int32_
 
 }  // namespace
 
-std::uint32_t fsAdoptHostHandleForTesting(void* handle, std::int32_t flags) {
+std::uint32_t fsAdoptHostHandleForTesting(std::intptr_t native, std::int32_t flags) {
     auto object = std::make_shared<FsObject>();
-    object->file = static_cast<HANDLE>(handle);
+    object->file = host::File::adopt(native);
     object->flags = flags;
     return addObject(std::move(object));
 }
@@ -594,17 +566,14 @@ std::uint32_t fsStatPath(std::string_view guest_path, FsStat& out) {
     if (res.status != VfsStatus::Ok) {
         return vfsError(res.status);
     }
-    WIN32_FILE_ATTRIBUTE_DATA data;
-    if (!GetFileAttributesExW(res.host.c_str(), GetFileExInfoStandard, &data)) {
-        return mapWinError(GetLastError(), res.host);
+    const auto info = host::statPath(res.host);
+    if (!info) {
+        return mapHostError(info.error(), res.host);
     }
-    const bool is_dir = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    if (res.dir_only && !is_dir) {
+    if (res.dir_only && !info->is_dir) {
         return kCellEnotdir;
     }
-    const std::uint64_t size = (static_cast<std::uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
-    out = makeStat(is_dir, res.read_only, res.info, size, data.ftLastAccessTime, data.ftLastWriteTime,
-                   data.ftCreationTime);
+    out = makeStat(info->is_dir, res.read_only, res.info, *info);
     return kCellOk;
 }
 
@@ -613,13 +582,11 @@ std::uint32_t fsStatFd(std::uint32_t fd, FsStat& out) {
     if (object == nullptr) {
         return kCellEbadf;
     }
-    BY_HANDLE_FILE_INFORMATION info;
-    if (!GetFileInformationByHandle(object->file, &info)) {
+    const auto info = object->file.info();
+    if (!info) {
         return kCellEio;
     }
-    const std::uint64_t size = (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
-    out = makeStat(false, object->read_only, object->info, size, info.ftLastAccessTime, info.ftLastWriteTime,
-                   info.ftCreationTime);
+    out = makeStat(false, object->read_only, object->info, *info);
     return kCellOk;
 }
 
@@ -709,8 +676,8 @@ std::uint32_t fsMkdirGuest(std::uint8_t* base, std::uint32_t path_addr) {
             code = kCellEexist;
         } else if (res.protected_parent) {
             code = kCellEacces;
-        } else if (!CreateDirectoryW(res.host.c_str(), nullptr)) {
-            code = mapWinError(GetLastError(), res.host);
+        } else if (const auto created = host::createDirectory(res.host); !created) {
+            code = mapHostError(created.error(), res.host);
         }
     }
     logPathOp("mkdir", path, code);
@@ -734,8 +701,8 @@ std::uint32_t fsUnlinkGuest(std::uint8_t* base, std::uint32_t path_addr) {
             code = kCellEisdir;
         } else if (res.read_only) {
             code = kCellErofs;
-        } else if (!DeleteFileW(res.host.c_str())) {
-            code = mapWinError(GetLastError(), res.host);
+        } else if (const auto removed = host::removeFile(res.host); !removed) {
+            code = mapHostError(removed.error(), res.host);
         }
     }
     logPathOp("unlink", path, code);
@@ -996,14 +963,9 @@ void sysFsLseek(Tox2PpuContext* ctx, std::uint8_t* base) {
         setResultCode(ctx, kCellEfault);
         return;
     }
-    // FILE_BEGIN, FILE_CURRENT and FILE_END have the same values as SEEK_SET, SEEK_CUR and SEEK_END.
-    std::uint64_t result = 0;
-    bool moved = false;
-    DWORD error = 0;
-    const auto seek = [&] {
-        moved = setPos(file->file, offset, whence, &result);
-        error = moved ? 0 : GetLastError();
-    };
+    // The guest's whence values 0, 1 and 2 are the host's.
+    std::expected<std::uint64_t, host::FileFailure> result;
+    const auto seek = [&] { result = file->file.seek(offset, static_cast<int>(whence)); };
     // A seek never waits on the disk, so the mutex is taken in place when no transfer holds it. Otherwise wait for it
     // outside the kernel lock and the slot, as a transfer does.
     if (std::unique_lock io(file->io_mutex, std::try_to_lock); io.owns_lock()) {
@@ -1012,11 +974,11 @@ void sysFsLseek(Tox2PpuContext* ctx, std::uint8_t* base) {
         const HostIoRegion region(*file);
         seek();
     }
-    if (!moved) {
-        setResultCode(ctx, mapWinError(error, {}));
+    if (!result) {
+        setResultCode(ctx, mapHostError(result.error(), {}));
         return;
     }
-    tox2Write64(base, pos, result);
+    tox2Write64(base, pos, *result);
     setResultCode(ctx, kCellOk);
 }
 

@@ -16004,7 +16004,7 @@ void testFsReadReleasesKernelLock() {
 
     HANDLE read_end = nullptr, write_end = nullptr;
     CHECK(CreatePipe(&read_end, &write_end, nullptr, 0));
-    const std::uint32_t fd = tox2::fsAdoptHostHandleForTesting(read_end, 0);
+    const std::uint32_t fd = tox2::fsAdoptHostHandleForTesting(reinterpret_cast<std::intptr_t>(read_end), 0);
     CHECK(fd != 0);
     const char payload[] = "pipe!";
     const auto writePayload = [&] {
@@ -16124,7 +16124,7 @@ void testRsxWriteCheckWriters() {
     // A file read into the buffer: the pipe holds the bytes already, so the read does not wait.
     HANDLE read_end = nullptr, write_end = nullptr;
     CHECK(CreatePipe(&read_end, &write_end, nullptr, 0));
-    const std::uint32_t fd = tox2::fsAdoptHostHandleForTesting(read_end, 0);
+    const std::uint32_t fd = tox2::fsAdoptHostHandleForTesting(reinterpret_cast<std::intptr_t>(read_end), 0);
     CHECK(fd != 0);
     const char payload[] = "pipe!";
     DWORD written = 0;
