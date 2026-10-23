@@ -64,10 +64,11 @@ function(tox2_audio_add)
   target_compile_options(tox2_audiotool PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   # tox2_media supplies the FFmpeg ATRAC3plus decoder for `at3`; the DLLs are loaded from the
   # executable's directory.
+  target_link_libraries(tox2_audiotool PRIVATE tox2_media tox2_crypto)
   if(WIN32)
-    target_link_libraries(tox2_audiotool PRIVATE tox2_audio_wasapi tox2_media)
+    target_link_libraries(tox2_audiotool PRIVATE tox2_audio_wasapi)
   else()
-    target_link_libraries(tox2_audiotool PRIVATE tox2_media)
+    target_link_libraries(tox2_audiotool PRIVATE tox2_audio_coreaudio)
   endif()
   add_dependencies(tox2_audiotool tox2_ffmpeg_runtime)
 endfunction()

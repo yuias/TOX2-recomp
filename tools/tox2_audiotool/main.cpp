@@ -1,10 +1,11 @@
 // tox2_audiotool: audio utilities for the runtime. Subcommands:
 //   wavstat FILE [--window S]   per-window levels of a WAV file (the audio dump, tool output)
 //   devices                     the active render devices and their mix formats
-//   tone [--output none|wasapi] [--seconds N] [--hz F] [--db L]   a sine through an output
-//   play FILE.wav [--output none|wasapi]                          a 48 kHz WAV through an output
+//   tone [--output none|HOST] [--seconds N] [--hz F] [--db L]   a sine through an output
+//   play FILE.wav [--output none|HOST]                          a 48 kHz WAV through an output
 //   at3scan FILE                the ATRAC3plus RIFF entries of an archive
 //   at3 FILE [--offset N | --index N] [--wav OUT] [--hash] [--play]   decode one entry
+// HOST is the device output of the platform: wasapi on Windows, coreaudio on macOS (the default).
 // Exits 0 on success, 1 when the work fails, 2 on a usage error.
 
 #include <algorithm>
@@ -28,20 +29,29 @@
 #include <system_error>
 #include <vector>
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <bcrypt.h>
-
+#include "app/game_options.h"
 #include "audio/audio_output.h"
+#include "audio/stream_output.h"
+#if defined(_WIN32)
 #include "audio/wasapi_output.h"
+#elif defined(__APPLE__)
+#include "audio/coreaudio_output.h"
+#endif
 #include "audio/wav_file.h"
 #include "core/sleeper.h"
+#include "crypto/host_crypto.h"
 #include "media/at3_file.h"
 #include "media/atrac_decoder.h"
 #include "media/ffmpeg_codecs.h"
 
 namespace {
+
+// How the usage text names the host's audio API; the option value is tox2::kHostAudioOutput.
+#if defined(_WIN32)
+constexpr std::string_view kHostAudioApi = "WASAPI";
+#else
+constexpr std::string_view kHostAudioApi = "CoreAudio";
+#endif
 
 struct Subcommand {
     std::string_view name;
@@ -49,23 +59,26 @@ struct Subcommand {
 };
 
 void printUsage() {
-    std::fputs(
+    const std::string host(tox2::kHostAudioOutput);
+    const std::string api(kHostAudioApi);
+    std::fprintf(
+            stderr,
             "usage: tox2_audiotool wavstat FILE [--window S]\n"
             "       tox2_audiotool devices\n"
-            "       tox2_audiotool tone [--output none|wasapi] [--seconds N] [--hz F] [--db L]\n"
-            "       tox2_audiotool play FILE.wav [--output none|wasapi]\n"
+            "       tox2_audiotool tone [--output none|%s] [--seconds N] [--hz F] [--db L]\n"
+            "       tox2_audiotool play FILE.wav [--output none|%s]\n"
             "       tox2_audiotool at3scan FILE\n"
             "       tox2_audiotool at3 FILE [--offset N | --index N] [--wav OUT] [--hash] [--play]\n"
             "                     [--expect-frames N] [--expect-samples N] [--expect-pcm SHA256]\n"
             "  wavstat   print RMS, peak and non-silent frame count per window of S seconds (default 1)\n"
             "  devices   list the active render devices with their mix format and device periods\n"
-            "  tone      play a sine (default wasapi, 2 s, 440 Hz, -18 dBFS) and print the output statistics\n"
+            "  tone      play a sine (default %s, 2 s, 440 Hz, -18 dBFS) and print the output statistics\n"
             "  play      play a 48 kHz mono or stereo WAV file and print the output statistics\n"
             "  at3scan   list the ATRAC3plus RIFF entries of an archive (offset, size, format, samples, delay, loop)\n"
             "  at3       decode one RIFF entry (--index N of the at3scan list, default 0, or the one at byte --offset N)\n"
             "            and cut it to the valid samples [delay, delay + samples); --hash prints the SHA-256 of the\n"
-            "            interleaved little-endian float32 result, --wav writes it, --play plays it through WASAPI\n",
-            stderr);
+            "            interleaved little-endian float32 result, --wav writes it, --play plays it through %s\n",
+            host.c_str(), host.c_str(), host.c_str(), api.c_str());
 }
 
 void printLine(const std::string& line) {
@@ -151,14 +164,22 @@ bool parseNumber(std::string_view text, double& value) {
 
 // Takes the value of an option that must be one of the two output names.
 bool parseOutputName(std::string_view text, std::string_view& output) {
-    if (text != "none" && text != "wasapi") return false;
+    if (text != "none" && text != tox2::kHostAudioOutput) return false;
     output = text;
     return true;
 }
 
+std::unique_ptr<tox2::AudioOutput> makeHostOutput() {
+#if defined(_WIN32)
+    return tox2::makeWasapiOutput();
+#else
+    return tox2::makeCoreAudioOutput();
+#endif
+}
+
 std::unique_ptr<tox2::AudioOutput> openOutput(std::string_view kind) {
     std::unique_ptr<tox2::AudioOutput> output =
-            kind == "wasapi" ? tox2::makeWasapiOutput() : tox2::makeNullAudioOutput();
+            kind == tox2::kHostAudioOutput ? makeHostOutput() : tox2::makeNullAudioOutput();
     std::string error;
     if (!output->open(error)) {
         std::fprintf(stderr, "error: %.*s output: %s\n", static_cast<int>(kind.size()), kind.data(), error.c_str());
@@ -203,7 +224,7 @@ int playBlocks(tox2::AudioOutput& output, std::uint64_t blocks,
 }
 
 int runTone(std::span<const std::string_view> args) {
-    std::string_view output_kind = "wasapi";
+    std::string_view output_kind = tox2::kHostAudioOutput;
     double seconds = 2.0;
     double hz = 440.0;
     double db = -18.0;
@@ -275,11 +296,12 @@ int playInterleaved(tox2::AudioOutput& output, std::span<const float> samples, s
 
 int runPlay(std::span<const std::string_view> args) {
     std::string_view file;
-    std::string_view output_kind = "wasapi";
+    std::string_view output_kind = tox2::kHostAudioOutput;
     for (std::size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "--output") {
             if (i + 1 >= args.size() || !parseOutputName(args[++i], output_kind)) {
-                std::fputs("error: --output needs none or wasapi\n", stderr);
+                std::fprintf(stderr, "error: --output needs none or %.*s\n",
+                             static_cast<int>(tox2::kHostAudioOutput.size()), tox2::kHostAudioOutput.data());
                 return 2;
             }
         } else if (file.empty() && !args[i].starts_with("--")) {
@@ -394,11 +416,8 @@ bool parseUnsigned(std::string_view text, std::uint64_t& value) {
 
 // Lower-case hex SHA-256 of `data`; empty when the hash is unavailable.
 std::string sha256Hex(std::span<const std::uint8_t> data) {
-    std::array<std::uint8_t, 32> digest{};
-    const NTSTATUS status =
-            BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0, const_cast<PUCHAR>(data.data()),
-                       static_cast<ULONG>(data.size()), digest.data(), static_cast<ULONG>(digest.size()));
-    if (status < 0) return {};
+    tox2::crypto::Sha256Digest digest{};
+    if (!tox2::crypto::sha256(data, digest)) return {};
     std::string text;
     for (const std::uint8_t byte : digest) text += std::format("{:02x}", byte);
     return text;
@@ -608,7 +627,7 @@ int runAt3(std::span<const std::string_view> args) {
     if (options.play && status == 0) {
         if (info->sample_rate != tox2::kAudioSampleRate || channels > 2) {
             fail("--play needs 48 kHz mono or stereo");
-        } else if (auto output = openOutput("wasapi")) {
+        } else if (auto output = openOutput(tox2::kHostAudioOutput)) {
             status = playInterleaved(*output, pcm, info->channels);
         } else {
             status = 1;

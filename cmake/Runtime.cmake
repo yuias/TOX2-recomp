@@ -248,8 +248,6 @@ function(tox2_runtime_add_core)
   # PRIVATE: the ELF loader, guest dumps and the SPU image registry hash with it.
   target_link_libraries(tox2_runtime_core PRIVATE tox2_crypto)
   if(WIN32)
-    # Stays PUBLIC until the tools move to tox2_crypto: they still call BCrypt.
-    target_link_libraries(tox2_runtime_core PUBLIC bcrypt)
     # timeBeginPeriod (core/timer_resolution.cpp).
     target_link_libraries(tox2_runtime_core PRIVATE winmm)
     # WaitOnAddress / WakeByAddressAll (core/reservation.cpp).
