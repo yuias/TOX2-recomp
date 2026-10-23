@@ -1,7 +1,13 @@
 include_guard(GLOBAL)
 
-option(TOX2_RSX_WRITE_WATCH
-  "Skip re-hashing RSX textures whose guest pages had no write (OS write watch on the guest reservation)" ON)
+if(WIN32)
+  option(TOX2_RSX_WRITE_WATCH
+    "Skip re-hashing RSX textures whose guest pages had no write (OS write watch on the guest reservation)" ON)
+else()
+  # The write watch is a Windows memory API (MEM_WRITE_WATCH); other hosts re-hash every texture.
+  set(TOX2_RSX_WRITE_WATCH OFF CACHE BOOL
+    "Skip re-hashing RSX textures whose guest pages had no write (Windows only)" FORCE)
+endif()
 
 # spdlog is built as a static library rather than header-only: its sources then compile with the
 # project's default flags (no -Werror) and keep <windows.h> out of runtime translation units.
@@ -117,6 +123,13 @@ endfunction()
 # run without a generated tree. Call after enable_testing().
 function(tox2_runtime_add_core)
   tox2_crypto_add()
+  if(WIN32)
+    set(host_memory_provider runtime/src/core/host_memory_win32.cpp)
+  elseif(APPLE)
+    set(host_memory_provider runtime/src/core/host_memory_posix.cpp)
+  else()
+    message(FATAL_ERROR "TOX2: no host memory provider for this platform")
+  endif()
   tox2_runtime_add_spdlog()
   tox2_runtime_add_libpng()
   tox2_runtime_add_yyjson()
@@ -138,6 +151,7 @@ function(tox2_runtime_add_core)
     runtime/src/core/fatal.cpp
     runtime/src/core/guest_dump.cpp
     runtime/src/core/guest_memory.cpp
+    ${host_memory_provider}
     runtime/src/core/host_priority.cpp
     runtime/src/core/latency_stats.cpp
     runtime/src/core/log.cpp
