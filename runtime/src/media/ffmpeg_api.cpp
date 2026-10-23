@@ -8,9 +8,13 @@
 #include <system_error>
 #include <vector>
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 extern "C" {
 #include <libswresample/version_major.h>
@@ -23,37 +27,28 @@ namespace tox2 {
 
 namespace {
 
+#if defined(_WIN32)
+using LibraryHandle = HMODULE;
+
 // Everything this project loads comes from one directory, so FFmpeg dependencies of the DLLs
 // (avutil, swresample) are found there too (DLL_LOAD_DIR) and a copy on PATH or in the current
 // directory is never used.
 constexpr DWORD kLoadFlags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
 
-struct Modules {
-    HMODULE avutil = nullptr;
-    HMODULE avcodec = nullptr;
-    HMODULE swscale = nullptr;
-};
+std::string errorText(DWORD error) { return std::system_category().message(static_cast<int>(error)); }
 
-// Library order of the load; also indexes the file names and handles.
-enum Library : std::size_t { kAvutil, kSwresample, kSwscale, kAvcodec, kLibraryCount };
+// `path` must be absolute for DLL_LOAD_DIR to take effect. On failure returns null and sets `error`.
+LibraryHandle openLibrary(const std::filesystem::path& path, std::string& error) {
+    const LibraryHandle handle = LoadLibraryExW(path.c_str(), nullptr, kLoadFlags);
+    if (handle == nullptr) error = errorText(GetLastError());
+    return handle;
+}
 
-// Frees the libraries of a failed load, last loaded first. Windows resolves an already loaded
-// module by its base name, so a leaked handle would make a later load from another directory
-// return the old DLLs.
-struct LoadedLibraries {
-    std::array<HMODULE, kLibraryCount> handles{};
-    bool keep = false;
+void closeLibrary(LibraryHandle handle) { FreeLibrary(handle); }
 
-    LoadedLibraries() = default;
-    LoadedLibraries(const LoadedLibraries&) = delete;
-    LoadedLibraries& operator=(const LoadedLibraries&) = delete;
-    ~LoadedLibraries() {
-        if (keep) return;
-        for (std::size_t i = handles.size(); i-- > 0;) {
-            if (handles[i] != nullptr) FreeLibrary(handles[i]);
-        }
-    }
-};
+void* findSymbol(LibraryHandle handle, const char* name) {
+    return reinterpret_cast<void*>(GetProcAddress(handle, name));
+}
 
 // Per-thread, so it does not change what other threads of the game see.
 class ScopedErrorMode {
@@ -72,6 +67,51 @@ public:
 private:
     DWORD old_mode_ = 0;
     bool active_ = true;
+};
+#else
+using LibraryHandle = void*;
+
+// RTLD_LOCAL keeps FFmpeg's symbols out of the global namespace; everything is resolved by dlsym.
+// An absolute path is always passed, so dyld's search path is never consulted for the library itself.
+LibraryHandle openLibrary(const std::filesystem::path& path, std::string& error) {
+    void* const handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (handle == nullptr) {
+        const char* text = dlerror();
+        error = text != nullptr ? text : "unknown error";
+    }
+    return handle;
+}
+
+void closeLibrary(LibraryHandle handle) { dlclose(handle); }
+
+void* findSymbol(LibraryHandle handle, const char* name) { return dlsym(handle, name); }
+#endif
+
+struct Modules {
+    LibraryHandle avutil = nullptr;
+    LibraryHandle avcodec = nullptr;
+    LibraryHandle swscale = nullptr;
+};
+
+// Library order of the load; also indexes the file names and handles.
+enum Library : std::size_t { kAvutil, kSwresample, kSwscale, kAvcodec, kLibraryCount };
+
+// Frees the libraries of a failed load, last loaded first. Both loaders resolve an already loaded
+// library by its name, so a leaked handle would make a later load from another directory return the
+// old libraries.
+struct LoadedLibraries {
+    std::array<LibraryHandle, kLibraryCount> handles{};
+    bool keep = false;
+
+    LoadedLibraries() = default;
+    LoadedLibraries(const LoadedLibraries&) = delete;
+    LoadedLibraries& operator=(const LoadedLibraries&) = delete;
+    ~LoadedLibraries() {
+        if (keep) return;
+        for (std::size_t i = handles.size(); i-- > 0;) {
+            if (handles[i] != nullptr) closeLibrary(handles[i]);
+        }
+    }
 };
 
 using FormatLineFn = decltype(&::av_log_format_line2);
@@ -96,8 +136,6 @@ void ffmpegLogCallback(void* ptr, int level, const char* fmt, va_list vl) {
     logWrite(mapped, std::format("ffmpeg: {}", text));
 }
 
-std::string errorText(DWORD error) { return std::system_category().message(static_cast<int>(error)); }
-
 std::string joinNames(const std::vector<std::string>& names) {
     std::string joined;
     for (const std::string& name : names) {
@@ -116,10 +154,10 @@ std::expected<FfmpegApi, std::string> loadFrom(const std::filesystem::path& dir)
 
     // Load order puts the dependencies first. swresample is only a static import of avcodec.
     std::array<std::string, kLibraryCount> files;
-    files[kAvutil] = std::format("avutil-{}.dll", LIBAVUTIL_VERSION_MAJOR);
-    files[kSwresample] = std::format("swresample-{}.dll", LIBSWRESAMPLE_VERSION_MAJOR);
-    files[kSwscale] = std::format("swscale-{}.dll", LIBSWSCALE_VERSION_MAJOR);
-    files[kAvcodec] = std::format("avcodec-{}.dll", LIBAVCODEC_VERSION_MAJOR);
+    files[kAvutil] = ffmpegLibraryFileName("avutil", LIBAVUTIL_VERSION_MAJOR);
+    files[kSwresample] = ffmpegLibraryFileName("swresample", LIBSWRESAMPLE_VERSION_MAJOR);
+    files[kSwscale] = ffmpegLibraryFileName("swscale", LIBSWSCALE_VERSION_MAJOR);
+    files[kAvcodec] = ffmpegLibraryFileName("avcodec", LIBAVCODEC_VERSION_MAJOR);
 
     std::vector<std::string> missing_files;
     for (const std::string& file : files) {
@@ -131,17 +169,18 @@ std::expected<FfmpegApi, std::string> loadFrom(const std::filesystem::path& dir)
     }
 
     LoadedLibraries loaded;
+#if defined(_WIN32)
     // A corrupt or truncated DLL would otherwise raise a modal "Bad Image" dialog and block the
     // process; with the error mode set it is reported through GetLastError instead.
     const ScopedErrorMode error_mode;
+#endif
     for (std::size_t i = 0; i < files.size(); ++i) {
-        // The directory must be part of an absolute path for DLL_LOAD_DIR to take effect.
-        loaded.handles[i] = LoadLibraryExW((absolute_dir / files[i]).c_str(), nullptr, kLoadFlags);
+        // The error text is read inside openLibrary, before anything else can overwrite it.
+        std::string error;
+        loaded.handles[i] = openLibrary(absolute_dir / files[i], error);
         if (loaded.handles[i] == nullptr) {
-            // Read before anything else can overwrite it (std::format argument order is unspecified).
-            const DWORD error = GetLastError();
-            return std::unexpected(std::format("cannot load {} from {}: {}", files[i], absolute_dir.generic_string(),
-                                               errorText(error)));
+            return std::unexpected(
+                    std::format("cannot load {} from {}: {}", files[i], absolute_dir.generic_string(), error));
         }
     }
     const Modules modules{.avutil = loaded.handles[kAvutil],
@@ -150,8 +189,8 @@ std::expected<FfmpegApi, std::string> loadFrom(const std::filesystem::path& dir)
 
     FfmpegApi api;
     std::vector<std::string> missing_symbols;
-#define TOX2_FFMPEG_RESOLVE(library, name)                                                                            \
-    api.name = reinterpret_cast<decltype(api.name)>(reinterpret_cast<void*>(GetProcAddress(modules.library, #name))); \
+#define TOX2_FFMPEG_RESOLVE(library, name)                                               \
+    api.name = reinterpret_cast<decltype(api.name)>(findSymbol(modules.library, #name)); \
     if (api.name == nullptr) missing_symbols.emplace_back(#name);
     TOX2_FFMPEG_FUNCTIONS(TOX2_FFMPEG_RESOLVE)
 #undef TOX2_FFMPEG_RESOLVE
@@ -194,6 +233,24 @@ std::expected<FfmpegApi, std::string> loadFrom(const std::filesystem::path& dir)
 
 }  // namespace
 
+std::string ffmpegLibraryFileName(std::string_view stem, unsigned major) {
+#if defined(_WIN32)
+    return std::format("{}-{}.dll", stem, major);
+#else
+    return std::format("lib{}.{}.dylib", stem, major);
+#endif
+}
+
+std::filesystem::path defaultFfmpegDirectory() {
+#if defined(_WIN32)
+    return executableDirectory();
+#elif defined(TOX2_FFMPEG_LIBRARY_DIR)
+    return TOX2_FFMPEG_LIBRARY_DIR;
+#else
+#error "TOX2_FFMPEG_LIBRARY_DIR must name the directory of the FFmpeg libraries"
+#endif
+}
+
 std::expected<FfmpegApi, std::string> loadFfmpeg(const std::filesystem::path& dir) {
     // Serialized because the log bridge state is process-wide.
     static std::mutex mutex;
@@ -203,10 +260,10 @@ std::expected<FfmpegApi, std::string> loadFfmpeg(const std::filesystem::path& di
 
 const std::expected<FfmpegApi, std::string>& defaultFfmpeg() {
     static const std::expected<FfmpegApi, std::string> result = [] {
-        const std::filesystem::path dir = executableDirectory();
+        const std::filesystem::path dir = defaultFfmpegDirectory();
         if (dir.empty()) {
             return std::expected<FfmpegApi, std::string>(
-                    std::unexpected(std::string("cannot determine the executable directory")));
+                    std::unexpected(std::string("cannot determine the FFmpeg directory")));
         }
         return loadFfmpeg(dir);
     }();
