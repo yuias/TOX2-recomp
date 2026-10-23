@@ -1,6 +1,6 @@
 // Self-checking tests for the debug overlay library. The model and panel tests need no GPU or window; the
-// overlay tests draw into an offscreen image on the first Vulkan device. The only window they create is a
-// hidden one, to give the Win32 backend a handle.
+// overlay tests draw into an offscreen image on the first Vulkan device. On Windows they also create a
+// hidden window, to give the Win32 backend a handle.
 
 #include <algorithm>
 #include <array>
@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -27,6 +28,11 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include <mach-o/dyld.h>
+
+#include <cstring>
+#endif
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -1335,9 +1341,29 @@ void testImGuiContextScope() {
 }
 
 std::filesystem::path exePath() {
+#if defined(_WIN32)
     wchar_t buf[MAX_PATH];
     const DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
     return std::filesystem::path(std::wstring(buf, n));
+#else
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);  // fails and reports the needed size
+    std::string path(size, '\0');
+    if (_NSGetExecutablePath(path.data(), &size) != 0) return {};
+    path.resize(std::strlen(path.c_str()));
+    return path;
+#endif
+}
+
+// A system font with Latin glyphs only, or empty when the system has none at the usual place.
+std::filesystem::path latinOnlySystemFont() {
+#if defined(_WIN32)
+    wchar_t windir[MAX_PATH];
+    const UINT windir_len = GetWindowsDirectoryW(windir, MAX_PATH);
+    return windir_len > 0 ? std::filesystem::path(windir) / "Fonts" / "arial.ttf" : std::filesystem::path();
+#else
+    return "/System/Library/Fonts/Supplemental/Arial.ttf";
+#endif
 }
 
 void testUiFontCandidates() {
@@ -1364,9 +1390,7 @@ void testLoadUiFont() {
     const std::vector<fs::path> junk = {missing, not_a_font};
     CHECK(!tox2::loadUiFont(junk).has_value());
 
-    wchar_t windir[MAX_PATH];
-    const UINT windir_len = GetWindowsDirectoryW(windir, MAX_PATH);
-    const fs::path arial = windir_len > 0 ? fs::path(windir) / "Fonts" / "arial.ttf" : fs::path();
+    const fs::path arial = latinOnlySystemFont();
     std::error_code ec;
     if (!arial.empty() && fs::exists(arial, ec)) {
         const std::vector<fs::path> latin_only = {arial};
@@ -1430,18 +1454,30 @@ void testGlyphRanges() {
     }
 }
 
-// Raw Win32 key message values, so the test needs no windows.h.
+constexpr bool kKeyDown = true;
+constexpr bool kKeyUp = false;
+
+#if defined(_WIN32)
+// Raw Win32 key message values, so these helpers need no windows.h.
 constexpr std::uint32_t kWmKeyDown = 0x0100;
 constexpr std::uint32_t kWmKeyUp = 0x0101;
 constexpr std::int64_t kRepeatBit = std::int64_t{1} << 30;
 
-tox2::WindowMessage keyMessage(std::uint32_t message, std::uint32_t scan_code, bool repeat = false) {
+tox2::WindowMessage keyMessage(bool down, std::uint32_t scan_code, bool repeat = false) {
     tox2::WindowMessage result;
-    result.message = message;
+    result.message = down ? kWmKeyDown : kWmKeyUp;
     result.wparam = 0x70;  // the virtual key is only a fallback when the scan code is zero
     result.lparam = static_cast<std::int64_t>(scan_code) << 16 | (repeat ? kRepeatBit : 0);
     return result;
 }
+#else
+tox2::WindowMessage keyMessage(bool down, std::uint32_t scan_code, bool repeat = false) {
+    tox2::WindowMessage result;
+    result.kind = tox2::WindowEventKind::Key;
+    result.key = tox2::KeyMessage{scan_code, down, repeat};
+    return result;
+}
+#endif
 
 // The overlay needs a VkContext only to be constructed; the key path touches neither Vulkan nor ImGui.
 void testToggleKey(tox2::VkContext& ctx) {
@@ -1449,26 +1485,26 @@ void testToggleKey(tox2::VkContext& ctx) {
     const std::uint32_t f1 = tox2::kOverlayToggleScanCode;
     CHECK(!overlay.visible() && !overlay.wantsDraw());
 
-    tox2::MessageRoute route = overlay.onWindowMessage(keyMessage(kWmKeyDown, f1));
+    tox2::MessageRoute route = overlay.onWindowMessage(keyMessage(kKeyDown, f1));
     CHECK(overlay.visible() && overlay.wantsDraw() && route.withhold_key && !route.handled);
 
     // Auto-repeat neither toggles nor reaches the pad.
-    route = overlay.onWindowMessage(keyMessage(kWmKeyDown, f1, true));
+    route = overlay.onWindowMessage(keyMessage(kKeyDown, f1, true));
     CHECK(overlay.visible() && route.withhold_key);
-    route = overlay.onWindowMessage(keyMessage(kWmKeyUp, f1));
+    route = overlay.onWindowMessage(keyMessage(kKeyUp, f1));
     CHECK(overlay.visible() && route.withhold_key);
 
-    route = overlay.onWindowMessage(keyMessage(kWmKeyDown, f1));
+    route = overlay.onWindowMessage(keyMessage(kKeyDown, f1));
     CHECK(!overlay.visible() && route.withhold_key);
-    overlay.onWindowMessage(keyMessage(kWmKeyUp, f1));
+    overlay.onWindowMessage(keyMessage(kKeyUp, f1));
 
     // Other keys are never withheld here: the overlay is hidden or has no window input yet.
     constexpr std::uint32_t kScanZ = 0x2C;
-    CHECK(!overlay.onWindowMessage(keyMessage(kWmKeyDown, kScanZ)).withhold_key);
-    CHECK(!overlay.onWindowMessage(keyMessage(kWmKeyUp, kScanZ)).withhold_key);
+    CHECK(!overlay.onWindowMessage(keyMessage(kKeyDown, kScanZ)).withhold_key);
+    CHECK(!overlay.onWindowMessage(keyMessage(kKeyUp, kScanZ)).withhold_key);
     overlay.setVisible(true);
-    CHECK(!overlay.onWindowMessage(keyMessage(kWmKeyDown, kScanZ)).withhold_key);
-    CHECK(!overlay.onWindowMessage(keyMessage(kWmKeyUp, kScanZ)).withhold_key);
+    CHECK(!overlay.onWindowMessage(keyMessage(kKeyDown, kScanZ)).withhold_key);
+    CHECK(!overlay.onWindowMessage(keyMessage(kKeyUp, kScanZ)).withhold_key);
 }
 
 constexpr std::uint32_t kTargetWidth = 1280;
@@ -1697,6 +1733,7 @@ void drawTwice(tox2::VkContext& ctx, OffscreenTarget& target) {
     CHECK(!target.anyLit(1270, 710, 1270, 710));
 }
 
+#if defined(_WIN32)
 tox2::DebugOverlay* g_forward_overlay = nullptr;
 WNDPROC g_forward_previous = nullptr;
 int g_forwarded_capture_changes = 0;
@@ -1744,11 +1781,11 @@ void testWin32Input(tox2::VkContext& ctx, OffscreenTarget& target) {
         }
 
         // Hiding and showing again must leave ImGui focused, or it would drop all input.
-        overlay.onWindowMessage(keyMessage(kWmKeyDown, tox2::kOverlayToggleScanCode));
-        overlay.onWindowMessage(keyMessage(kWmKeyUp, tox2::kOverlayToggleScanCode));
+        overlay.onWindowMessage(keyMessage(kKeyDown, tox2::kOverlayToggleScanCode));
+        overlay.onWindowMessage(keyMessage(kKeyUp, tox2::kOverlayToggleScanCode));
         CHECK(!overlay.visible());
-        overlay.onWindowMessage(keyMessage(kWmKeyDown, tox2::kOverlayToggleScanCode));
-        overlay.onWindowMessage(keyMessage(kWmKeyUp, tox2::kOverlayToggleScanCode));
+        overlay.onWindowMessage(keyMessage(kKeyDown, tox2::kOverlayToggleScanCode));
+        overlay.onWindowMessage(keyMessage(kKeyUp, tox2::kOverlayToggleScanCode));
         CHECK(overlay.visible());
         overlay.onWindowMessage(move);
         stats.flips = 4;
@@ -1775,6 +1812,7 @@ void testWin32Input(tox2::VkContext& ctx, OffscreenTarget& target) {
     }
     DestroyWindow(hwnd);
 }
+#endif
 
 // Destroying an overlay while its own context is current must leave no freed context current afterwards.
 void testShutdownInsideScope(tox2::VkContext& ctx, OffscreenTarget& target) {
@@ -1958,9 +1996,14 @@ std::shared_ptr<tox2::SaveDialogContent> listContent(std::uint64_t id, int row_c
 
 // Set TOX2_OVERLAY_TEST_LIST_PNG to a file path to keep the render of a 7-row list for looking at.
 void saveListRenderIfRequested(const OffscreenTarget& target) {
+#if defined(_WIN32)
     char path[MAX_PATH] = {};
     const DWORD length = GetEnvironmentVariableA("TOX2_OVERLAY_TEST_LIST_PNG", path, sizeof(path));
     if (length == 0 || length >= sizeof(path)) return;
+#else
+    const char* path = std::getenv("TOX2_OVERLAY_TEST_LIST_PNG");
+    if (path == nullptr || *path == '\0') return;
+#endif
     std::string error;
     const bool saved = target.savePng(path, error);
     std::printf("overlay tests: list render %s %s\n", saved ? "saved to" : "not saved:", saved ? path : error.c_str());
@@ -2215,7 +2258,9 @@ void testOverlayRecording(tox2::VkContext& ctx) {
     drawTwice(ctx, target);
     // The first overlay is gone; a second one starts from scratch on the same device.
     drawTwice(ctx, target);
+#if defined(_WIN32)
     testWin32Input(ctx, target);
+#endif
     testShutdownInsideScope(ctx, target);
     testSaveDialogOverlay(ctx, target);
     testSaveDialogIcons(ctx, target);

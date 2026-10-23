@@ -47,6 +47,12 @@ function(tox2_overlay_add)
     runtime/src/overlay/overlay_sources.cpp
     runtime/src/overlay/save_dialog_overlay.cpp
     runtime/src/overlay/ui_font.cpp)
+  if(WIN32)
+    target_sources(tox2_overlay PRIVATE runtime/src/overlay/overlay_platform_win32.cpp)
+  elseif(APPLE)
+    target_sources(tox2_overlay PRIVATE runtime/src/overlay/overlay_platform_macos.mm)
+    target_link_libraries(tox2_overlay PRIVATE "-framework Cocoa")
+  endif()
   target_compile_options(tox2_overlay PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_include_directories(tox2_overlay PUBLIC ${CMAKE_SOURCE_DIR}/runtime/src)
   target_link_libraries(tox2_overlay PUBLIC imgui tox2_render)
