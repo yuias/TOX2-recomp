@@ -1533,6 +1533,14 @@ void testVertexConvert() {
     CHECK(!tox2::indicesInRange(false, restart_u32, 3, 5, 7, false, 0xFFFFFFFF));
     CHECK(!tox2::indicesInRange(false, restart_u32, 4, 5, 7, true, 0xFFFFFFFF));  // source too short
 
+    // Triangle fans as lists.
+    CHECK((tox2::triangleFanToList(2, 5) == std::vector<std::uint32_t>{2, 3, 4, 2, 4, 5, 2, 5, 6}));
+    CHECK(tox2::triangleFanToList(0, 2).empty() && tox2::triangleFanToList(7, 0).empty());
+    const std::uint32_t fan_indices[4] = {9, 8, 7, 6};
+    CHECK((tox2::triangleFanIndicesToList(fan_indices) == std::vector<std::uint32_t>{9, 8, 7, 9, 7, 6}));
+    CHECK(tox2::triangleFanIndicesToList(std::span<const std::uint32_t>(fan_indices, 2)).empty());
+    CHECK(tox2::triangleFanIndicesToList({}).empty());
+
     // Scaled-integer types can be widened to floats: s32k is signed, ub256 is not normalized.
     const auto s32k3 = vertexAttribFormat(tox2::kVertexTypeSint16, 3);
     CHECK(s32k3 && s32k3->format == VK_FORMAT_R16G16B16A16_SSCALED);

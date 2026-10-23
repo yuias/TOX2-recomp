@@ -2247,6 +2247,10 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         return skip("primitive", rsxPrimitiveName(static_cast<std::uint32_t>(draw.primitive)));
     }
 
+    // A device without usable fans (see VkContext::triangleFans) draws the fan as a triangle list.
+    const bool expand_fan = draw.primitive == RsxPrimitive::TriangleFan && !context_.triangleFans();
+    if (expand_fan) topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
     DrawShaders shaders;
     if (!pipelines_->shaders(draw, shaders)) {
         if (!pipelines_->valid()) fail(pipelines_->error());
@@ -2396,6 +2400,42 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         key.vertex_strides[slot] = 0;
         vertex_buffers[slot] = defaults.buffer;
         vertex_offsets[slot] = defaults.offset + slot * 16;
+    }
+
+    // An expanded fan is drawn from u32 indices, so an array draw becomes an indexed one; a restart index
+    // splits the fan, and the list topology takes no restart.
+    std::uint32_t draw_count = draw.count;
+    bool index_u16 = is_u16;
+    if (expand_fan) {
+        std::vector<std::uint32_t> list;
+        if (!draw.indexed) {
+            list = triangleFanToList(0, draw.count);
+        } else {
+            std::vector<std::uint32_t> fan(draw.count);
+            for (std::uint32_t i = 0; i < draw.count; i++) {
+                const std::uint8_t* p = draw.index_data.data() + static_cast<std::size_t>(i) * (is_u16 ? 2 : 4);
+                fan[i] = is_u16 ? (static_cast<std::uint32_t>(p[0]) << 8 | p[1])
+                                : (static_cast<std::uint32_t>(p[0]) << 24 | static_cast<std::uint32_t>(p[1]) << 16 |
+                                   static_cast<std::uint32_t>(p[2]) << 8 | p[3]);
+            }
+            std::size_t begin = 0;
+            for (std::size_t end = 0; end <= fan.size(); end++) {
+                if (end != fan.size() && !(restart && fan[end] == draw.restart_index)) continue;
+                const std::vector<std::uint32_t> part =
+                        triangleFanIndicesToList(std::span<const std::uint32_t>(fan.data() + begin, end - begin));
+                list.insert(list.end(), part.begin(), part.end());
+                begin = end + 1;
+            }
+        }
+        if (list.empty()) {
+            stats_.draws++;
+            return;
+        }
+        draw_count = static_cast<std::uint32_t>(list.size());
+        index_u16 = false;
+        const std::size_t index_bytes = list.size() * sizeof(std::uint32_t);
+        if (!allocUpload(index_bytes, indices)) return;
+        std::memcpy(indices.data, list.data(), index_bytes);
     }
 
     // Fixed-function state baked into the pipeline.
@@ -2608,7 +2648,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
             raster.front_face == kFrontFaceCw ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
     if (set(shadow.front_face, front_face)) vkCmdSetFrontFace(cmd, front_face);
     if (set(shadow.topology, topology)) vkCmdSetPrimitiveTopology(cmd, topology);
-    const VkBool32 restart_enable = restart ? VK_TRUE : VK_FALSE;
+    const VkBool32 restart_enable = restart && !expand_fan ? VK_TRUE : VK_FALSE;
     if (set(shadow.restart, restart_enable)) vkCmdSetPrimitiveRestartEnable(cmd, restart_enable);
     const bool depth_test = depth && raster.depth_test;
     const VkBool32 depth_test_enable = depth_test ? VK_TRUE : VK_FALSE;
@@ -2713,9 +2753,10 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
 
     // Element 0 of every array is vertex min_index (rsx_frame.h), so indexed draws offset the vertex
     // index by -min_index; array draws start at element 0.
-    if (draw.indexed) {
-        vkCmdBindIndexBuffer(cmd, indices.buffer, indices.offset, is_u16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(cmd, draw.count, 1, 0, -static_cast<std::int32_t>(min_index), 0);
+    if (draw.indexed || expand_fan) {
+        vkCmdBindIndexBuffer(cmd, indices.buffer, indices.offset,
+                             index_u16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, draw_count, 1, 0, -static_cast<std::int32_t>(min_index), 0);
     } else {
         vkCmdDraw(cmd, draw.count, 1, 0, 0);
     }

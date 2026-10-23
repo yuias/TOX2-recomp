@@ -509,4 +509,28 @@ bool convertIndicesChecked(bool is_u16, std::span<const std::uint8_t> src, std::
     return convertIndicesLoop<std::uint32_t, false>(src.data(), count, min_index, max_index, restart_index, dst.data());
 }
 
+std::vector<std::uint32_t> triangleFanToList(std::uint32_t first, std::uint32_t count) {
+    std::vector<std::uint32_t> list;
+    if (count < 3) return list;
+    list.reserve(static_cast<std::size_t>(count - 2) * 3);
+    for (std::uint32_t i = 1; i + 1 < count; i++) {
+        list.push_back(first);
+        list.push_back(first + i);
+        list.push_back(first + i + 1);
+    }
+    return list;
+}
+
+std::vector<std::uint32_t> triangleFanIndicesToList(std::span<const std::uint32_t> fan) {
+    std::vector<std::uint32_t> list;
+    if (fan.size() < 3) return list;
+    list.reserve((fan.size() - 2) * 3);
+    for (std::size_t i = 1; i + 1 < fan.size(); i++) {
+        list.push_back(fan[0]);
+        list.push_back(fan[i]);
+        list.push_back(fan[i + 1]);
+    }
+    return list;
+}
+
 }  // namespace tox2
