@@ -9,6 +9,7 @@ parameter and describe how the project works:
 | [runtime-options.md](runtime-options.md) | Every `tox2_game` option, exit codes and stop lines, and example runs by purpose |
 | [status.md](status.md) | How far a run gets and what is not implemented |
 | [analysis-tools.md](analysis-tools.md) | ELF summary, SPU probe, disassembler, Ghidra cross-check, NID and syscall name tables, target pin |
+| [savedata-tool.md](savedata-tool.md) | `tools/tox2_savetool.py`: decrypting a PS3 save, `info`, Game Genie `patch`, `install` into the hdd tree, keys, exit codes, the known `SAVE` fields |
 | [function-recovery.md](function-recovery.md) | Recovering function starts and extents, the function database and its report |
 | [emitter.md](emitter.md) | Turning the recovered functions into C, the contract header and the semantics harness |
 | [runtime.md](runtime.md) | Runtime internals: logging, census, memory map, dispatch, threads, system calls, HLE imports, headless policy, PNG decoding, default handlers |
