@@ -35,6 +35,27 @@ function(tox2_audio_add)
     set_tests_properties(audio_wasapi PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
   endif()
 
+  if(APPLE)
+    # CoreAudio's C APIs only; no Objective-C.
+    add_library(tox2_audio_coreaudio STATIC runtime/src/audio/coreaudio_output.cpp)
+    target_compile_options(tox2_audio_coreaudio PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+    target_link_libraries(tox2_audio_coreaudio PUBLIC tox2_audio_stream
+      PRIVATE "-framework AudioToolbox" "-framework CoreAudio" "-framework CoreFoundation")
+
+    # Opens the default output device; exits 77 (skipped) when the machine has none. The tests over
+    # fake streams run everywhere.
+    add_executable(tox2_audio_coreaudio_tests runtime/tests/audio_coreaudio_test.cpp)
+    target_compile_options(tox2_audio_coreaudio_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+    target_link_libraries(tox2_audio_coreaudio_tests PRIVATE tox2_audio_coreaudio)
+
+    add_test(NAME audio_coreaudio COMMAND tox2_audio_coreaudio_tests)
+    # Serial: the timing checks assume the machine is not saturated by other tests.
+    set_tests_properties(audio_coreaudio PROPERTIES
+      SKIP_RETURN_CODE 77
+      RUN_SERIAL TRUE
+      PASS_REGULAR_EXPRESSION "audio coreaudio tests: [0-9]+ passed, 0 failed")
+  endif()
+
   add_executable(tox2_audiotool tools/tox2_audiotool/main.cpp)
   target_compile_options(tox2_audiotool PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   # tox2_media supplies the FFmpeg ATRAC3plus decoder for `at3`; the DLLs are loaded from the
