@@ -1,4 +1,4 @@
-"""Command-line interface of the save data tool: decrypt and inspect Tales of Xillia 2 saves."""
+"""Command-line interface of the save data tool: decrypt, inspect, patch and install Tales of Xillia 2 saves."""
 
 from __future__ import annotations
 
@@ -11,10 +11,16 @@ import sys
 from pathlib import Path
 
 from . import EXIT_FORMAT, EXIT_IO, EXIT_USAGE, EXIT_VERIFY, CliError
-from . import codes, pfd, save
+from . import codes, pfd, save, sfo
 
 _PFD_FILE = "PARAM.PFD"
 _SECURE_ID_RE = re.compile(r"[0-9A-Fa-f]{32}")
+_SFO_FILE = "PARAM.SFO"
+_SAVE_ROOT = Path("dev_hdd0") / "home" / "00000001" / "savedata"
+_SLOT_PREFIX = "BLJS10188_SAVE1_"
+_MAX_SLOT = 999
+# Same rule as PFD entry names: the file names end up in the hdd tree.
+_SAFE_FILE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}")
 
 
 def _read(path: Path) -> bytes:
@@ -221,6 +227,66 @@ def _patch(args: argparse.Namespace) -> int:
     return 0
 
 
+def _install(args: argparse.Namespace) -> int:
+    plain_dir: Path = args.plain_dir
+    hdd: Path = args.hdd
+    if args.slot is not None and not 1 <= args.slot <= _MAX_SLOT:
+        raise CliError(EXIT_USAGE, "--slot must be between 1 and %d" % _MAX_SLOT)
+    if not plain_dir.is_dir():
+        raise CliError(EXIT_IO, "%s is not a directory" % plain_dir)
+    if (plain_dir / _PFD_FILE).exists():
+        raise CliError(EXIT_FORMAT, "%s has %s; it is encrypted, run 'decrypt' first" % (plain_dir, _PFD_FILE))
+
+    present = {p.name for p in _list_dir(plain_dir) if p.is_file()}
+    for name in (_SFO_FILE, "SAVE"):
+        if name not in present:
+            raise CliError(EXIT_FORMAT, "%s has no %s" % (plain_dir, name))
+    source_sfo = sfo.parse_sfo(_read(plain_dir / _SFO_FILE))
+    save.parse_save(_read(plain_dir / "SAVE"))
+
+    if not hdd.is_dir():
+        raise CliError(EXIT_IO, "%s is not a directory" % hdd)
+    # The save root is created only after every check has passed, so a failed run leaves --hdd as it was.
+    save_root = hdd / _SAVE_ROOT
+    if args.slot is not None:
+        slot_name = "%s%03d" % (_SLOT_PREFIX, args.slot)
+        if os.path.lexists(save_root / slot_name):
+            raise CliError(EXIT_IO, "%s already exists" % (save_root / slot_name))
+    else:
+        # The game numbers its slots from 1.
+        free = (n for n in ("%s%03d" % (_SLOT_PREFIX, i) for i in range(1, _MAX_SLOT + 1))
+                if not os.path.lexists(save_root / n))
+        slot_name = next(free, None)
+        if slot_name is None:
+            raise CliError(EXIT_IO, "no free slot (001..%d) in %s" % (_MAX_SLOT, save_root))
+
+    files: dict[str, bytes] = {}
+    for path in _list_dir(plain_dir):
+        if path.name == _SFO_FILE:
+            continue
+        if path.is_dir():
+            print("note: skipping subdirectory %s" % path.name, file=sys.stderr)
+        elif path.is_file():
+            if not _SAFE_FILE_RE.fullmatch(path.name):
+                print("note: skipping %s: unsupported file name" % path.name, file=sys.stderr)
+                continue
+            files[path.name] = _read(path)
+    files[_SFO_FILE] = sfo.serialize_sfo(sfo.build_install_sfo(source_sfo, slot_name, files))
+
+    slot_dir = save_root / slot_name
+    _mkdir(save_root)
+    try:
+        slot_dir.mkdir()
+    except OSError as e:
+        raise CliError(EXIT_IO, "cannot write %s: %s" % (slot_dir, os.strerror(e.errno or errno.EIO))) from e
+    for name, data in files.items():
+        _write(slot_dir / name, data)
+    print("slot:   %s" % slot_name)
+    print("files:  %s" % ", ".join(sorted(files)))
+    print("output: %s" % slot_dir)
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tox2_savetool.py",
                                      description="Decrypt and inspect Tales of Xillia 2 save data.")
@@ -251,6 +317,13 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--output", type=Path, metavar="OUT", help="output file; must not exist")
     p.add_argument("--in-place", action="store_true", help="overwrite SAVE")
     p.set_defaults(func=_patch)
+
+    p = sub.add_parser("install", help="copy a plain save into the runtime's hdd tree")
+    p.add_argument("plain_dir", type=Path, help="plain save directory (SAVE, PARAM.SFO, ...), e.g. from decrypt")
+    p.add_argument("--hdd", type=Path, required=True, metavar="DIR", help="hdd directory given to tox2_game --hdd-dir")
+    p.add_argument("--slot", type=int, metavar="N",
+                   help="slot number 1..%d (default: the lowest free one)" % _MAX_SLOT)
+    p.set_defaults(func=_install)
     return parser
 
 

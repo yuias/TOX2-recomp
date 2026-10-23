@@ -158,6 +158,30 @@ class RealInfoUsTest(_RealInfoMixin, unittest.TestCase):
         return result["out_dir"] / "SAVE"
 
 
+@unittest.skipUnless(_US_DIR, "TOX2_US_SAVE_DIR is not set")
+@unittest.skipUnless(_have_keys(), "key_vault.h is not available")
+class RealInstallTest(unittest.TestCase):
+    def test_install_decrypted_us_save(self):
+        result = _decrypted_us()
+        self.assertEqual(result["code"], 0, result["stderr"])
+        before = fx.tree_digest(result["out_dir"])
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, err = _run_cli("install", result["out_dir"], "--hdd", tmp)
+            self.assertEqual(code, 0, err)
+            slot = Path(tmp) / "dev_hdd0" / "home" / "00000001" / "savedata" / "BLJS10188_SAVE1_001"
+            self.assertEqual(out.splitlines()[0], "slot:   BLJS10188_SAVE1_001")
+            self.assertTrue((slot / "SAVE").read_bytes() == (result["out_dir"] / "SAVE").read_bytes(),
+                            "installed SAVE differs from the decrypted one")
+            parsed = sfo.parse_sfo((slot / "PARAM.SFO").read_bytes())
+            self.assertEqual(parsed.binary, {})
+            self.assertEqual(parsed.strings["SAVEDATA_DIRECTORY"], "BLJS10188_SAVE1_001")
+            self.assertEqual(parsed.strings["ACCOUNT_ID"], "0000000000000000")
+            self.assertEqual(parsed.strings["CATEGORY"], "SD")
+            self.assertEqual(parsed.ints["*SAVE"], 1)
+            self.assertEqual(parsed.ints["*ICON0.PNG"], 0)
+        self.assertEqual(fx.tree_digest(result["out_dir"]), before)
+
+
 @unittest.skipUnless(_JP_DIR, "TOX2_JP_SAVE_DIR is not set")
 class RealSfoJpTest(unittest.TestCase):
     def test_round_trip_is_identical(self):
