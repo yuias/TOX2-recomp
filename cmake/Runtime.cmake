@@ -86,9 +86,37 @@ function(tox2_runtime_add_xxhash)
   target_compile_definitions(xxhash INTERFACE XXH_INLINE_ALL)
 endfunction()
 
+# Host crypto (AES, AES-CMAC, HMAC-SHA1, SHA-256) on the OS's own library: CNG on Windows,
+# CommonCrypto (part of libSystem, nothing to link) on macOS. Independent of the runtime core.
+# Call after enable_testing().
+function(tox2_crypto_add)
+  if(WIN32)
+    set(crypto_provider runtime/src/crypto/host_crypto_bcrypt.cpp)
+  elseif(APPLE)
+    set(crypto_provider runtime/src/crypto/host_crypto_commoncrypto.cpp)
+  else()
+    message(FATAL_ERROR "TOX2: no host crypto provider for this platform")
+  endif()
+  add_library(tox2_crypto STATIC ${crypto_provider})
+  target_compile_options(tox2_crypto PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+  target_include_directories(tox2_crypto PUBLIC ${CMAKE_SOURCE_DIR}/runtime/src)
+  if(WIN32)
+    target_link_libraries(tox2_crypto PRIVATE bcrypt)
+  endif()
+
+  add_executable(tox2_crypto_tests runtime/tests/crypto_test.cpp)
+  target_compile_options(tox2_crypto_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+  target_link_libraries(tox2_crypto_tests PRIVATE tox2_crypto)
+
+  add_test(NAME crypto_core COMMAND tox2_crypto_tests)
+  set_tests_properties(crypto_core PROPERTIES
+    PASS_REGULAR_EXPRESSION "crypto tests: [0-9]+ passed, 0 failed")
+endfunction()
+
 # Runtime core: everything that does not reference generated symbols, so it builds and its tests
 # run without a generated tree. Call after enable_testing().
 function(tox2_runtime_add_core)
+  tox2_crypto_add()
   tox2_runtime_add_spdlog()
   tox2_runtime_add_libpng()
   tox2_runtime_add_yyjson()
