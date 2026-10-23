@@ -13,6 +13,10 @@
 
 #include "spu_context.h"
 
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -406,16 +410,22 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuRotmah(Tox2Vr a, Tox2Vr b) {
 // instruction names (the preferred word of RB, or the sign-extended I7) and applies its own mask, so
 // the register and immediate forms share the code.
 
-#if defined(__SSSE3__)
+#if defined(__SSSE3__) || defined(__ARM_NEON)
 // The vector forms below avoid unsigned __int128: its shifts compile to a pair of 64-bit GPR halves, which are written
 // to the register file as two 8-byte stores, and the next 16-byte load of that register cannot be forwarded from two
-// stores. The byte forms are one pshufb with a computed control; the bit forms are two-step shifts of the u64 lanes.
-typedef char Tox2SpuQwC8x16 __attribute__((vector_size(16)));
+// stores. The byte forms are one pshufb (tbl on arm64) with a computed control; the bit forms are two-step shifts of
+// the u64 lanes.
 
 // pshufb: lane h of the result is lane control[h] & 15 of a, or 0 when bit 7 of control[h] is set.
 TOX2_FORCEINLINE Tox2Vr tox2SpuQwPermute(Tox2Vr a, Tox2U8x16 control) {
     Tox2Vr r;
+#if defined(__SSSE3__)
+    typedef char Tox2SpuQwC8x16 __attribute__((vector_size(16)));
     r.u8 = (Tox2U8x16)__builtin_ia32_pshufb128((Tox2SpuQwC8x16)a.u8, (Tox2SpuQwC8x16)control);
+#else
+    // tbl gives 0 for an index of 16 or more, so keeping bit 7 and bits 0-3 gives pshufb's rule.
+    r.u8 = (Tox2U8x16)vqtbl1q_u8((uint8x16_t)a.u8, (uint8x16_t)(control & (uint8_t)0x8f));
+#endif
     return r;
 }
 
@@ -552,6 +562,19 @@ TOX2_FORCEINLINE Tox2Vr tox2SpuShufb(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
     const Tox2U8x16 special = ones | (sign & (uint8_t)0x80);
     Tox2Vr r;
     r.u8 = v | special;
+    return r;
+#elif defined(__ARM_NEON)
+    // Architected byte k of RA || RB is entry k ^ 0x0f of the table a, b (host lanes reversed within each register).
+    // Keeping bit 7 makes every special control (1xxxxxxx) index past the table, which reads 0: the 10xxxxxx
+    // result. The other special results are ORed in as above.
+    const Tox2U8x16 sel = c.u8;
+    const uint8x16x2_t ab = {{(uint8x16_t)a.u8, (uint8x16_t)b.u8}};
+    const Tox2U8x16 v = (Tox2U8x16)vqtbl2q_u8(ab, (uint8x16_t)((sel & (uint8_t)0x9f) ^ (uint8_t)0x0f));
+    const Tox2U8x16 high = sel & (uint8_t)0xe0;
+    const Tox2U8x16 ones = (Tox2U8x16)(high == (uint8_t)0xc0);
+    const Tox2U8x16 sign = (Tox2U8x16)(high == (uint8_t)0xe0);
+    Tox2Vr r;
+    r.u8 = v | ones | (sign & (uint8_t)0x80);
     return r;
 #else
     uint8_t concat[32];
