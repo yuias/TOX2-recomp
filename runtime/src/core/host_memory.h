@@ -6,8 +6,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
-#include <vector>
 
 namespace tox2::host {
 
@@ -32,10 +32,11 @@ void decommit(void* address, std::size_t bytes);
 void* reserveWriteWatched(std::size_t bytes);
 
 // The pages of [address, address + bytes) written since the previous call that covered them, with
-// their state reset in the same step. `pages` comes in sized to the most pages the range can report
-// and is shrunk to the ones found; `granularity` receives the page size the OS reports in. Returns
-// false on failure.
-bool collectWrittenPages(void* address, std::size_t bytes, std::vector<void*>& pages, std::size_t& granularity);
+// their state reset in the same step. `pages` must have room for every page of the range; the first
+// `count` entries receive the pages found. `granularity` receives the page size the OS reports in.
+// Returns false on failure.
+bool collectWrittenPages(void* address, std::size_t bytes, std::span<void*> pages, std::size_t& count,
+                         std::size_t& granularity);
 #endif
 
 // Gives back a whole reservation. `bytes` is the size passed to reserve().

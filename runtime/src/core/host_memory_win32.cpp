@@ -55,13 +55,14 @@ void* reserveWriteWatched(std::size_t bytes) {
     return VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_NOACCESS);
 }
 
-bool collectWrittenPages(void* address, std::size_t bytes, std::vector<void*>& pages, std::size_t& granularity) {
-    ULONG_PTR count = pages.size();
+bool collectWrittenPages(void* address, std::size_t bytes, std::span<void*> pages, std::size_t& count,
+                         std::size_t& granularity) {
+    ULONG_PTR found = pages.size();
     ULONG os_granularity = 0;
-    if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, address, bytes, pages.data(), &count, &os_granularity) != 0) {
+    if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, address, bytes, pages.data(), &found, &os_granularity) != 0) {
         return false;
     }
-    pages.resize(count);
+    count = found;
     granularity = os_granularity;
     return true;
 }

@@ -262,9 +262,14 @@ bool GuestMemory::collectWrites(std::uint32_t addr, std::uint32_t size, std::vec
     // Room for every page of the range, so the result is never cut short (a short buffer would leave the pages past
     // it reported, but the caller could not tell which).
     thread_local std::vector<void*> scratch;
-    scratch.resize(static_cast<std::size_t>((end - begin) / kPageSize));
+    const std::size_t capacity = static_cast<std::size_t>((end - begin) / kPageSize);
+    if (scratch.size() < capacity) {
+        scratch.resize(capacity);
+    }
+    std::size_t count = 0;
     std::size_t granularity = 0;
-    if (!host::collectWrittenPages(base_ + begin, static_cast<std::size_t>(end - begin), scratch, granularity)) {
+    if (!host::collectWrittenPages(base_ + begin, static_cast<std::size_t>(end - begin),
+                                   std::span<void*>(scratch.data(), capacity), count, granularity)) {
         return false;
     }
     if (granularity != kPageSize) {
@@ -274,9 +279,9 @@ bool GuestMemory::collectWrites(std::uint32_t addr, std::uint32_t size, std::vec
         markLocalPages(marked_local_.get(), begin, end);
         return false;
     }
-    pages.reserve(scratch.size());
-    for (void* page : scratch) {
-        pages.push_back(static_cast<std::uint32_t>(static_cast<std::uint8_t*>(page) - base_));
+    pages.reserve(count);
+    for (std::size_t i = 0; i < count; i++) {
+        pages.push_back(static_cast<std::uint32_t>(static_cast<std::uint8_t*>(scratch[i]) - base_));
     }
     std::sort(pages.begin(), pages.end());
 
