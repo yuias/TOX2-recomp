@@ -268,9 +268,11 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions&
     std::unique_ptr<tox2::VkContext> context = tox2::createVkContext(context_options, error);
     if (!context) return nullptr;
     const std::uint32_t api = context->deviceProperties().apiVersion;
-    tox2::logInfo("tox2: render: vulkan device {} (api {}.{}.{}, d24s8 {})", context->deviceName(),
-                  VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api), VK_API_VERSION_PATCH(api),
-                  context->hasD24S8() ? "yes" : "no");
+    // The driver is named because one GPU can be listed by several drivers (KosmicKrisp and MoltenVK on macOS).
+    tox2::logInfo("tox2: render: vulkan device {} (api {}.{}.{}, driver {}, d24s8 {}, triangle fans {})",
+                  context->deviceName(), VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api),
+                  VK_API_VERSION_PATCH(api), context->driverName(), context->hasD24S8() ? "yes" : "no",
+                  context->triangleFans() ? "yes" : "no");
     if (context->streamline() != nullptr) {
         tox2::logInfo("tox2: render: DLAA available (Streamline {})", context->streamline()->version());
     } else {
