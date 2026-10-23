@@ -1,9 +1,13 @@
 // Self-checking tests for the config file reader and writer and for the command-line parser. No game data and no
 // player config file are read.
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <array>
 #include <chrono>
@@ -25,6 +29,14 @@
 #include "core/log.h"
 
 namespace {
+
+unsigned long processId() {
+#if defined(_WIN32)
+    return GetCurrentProcessId();
+#else
+    return static_cast<unsigned long>(getpid());
+#endif
+}
 
 int g_passed;
 int g_failed;
@@ -409,7 +421,7 @@ void writeFile(const stdfs::path& path, std::string_view text) {
 void testWriteFileAtomic() {
     // One directory per process, so parallel test runs do not share files.
     const stdfs::path dir =
-            stdfs::temp_directory_path() / ("tox2_game_options_test_" + std::to_string(GetCurrentProcessId()));
+            stdfs::temp_directory_path() / ("tox2_game_options_test_" + std::to_string(processId()));
     std::error_code ec;
     stdfs::remove_all(dir, ec);
     stdfs::create_directories(dir);
@@ -454,7 +466,7 @@ void testWriteFileAtomic() {
 // Directories that do not exist, so that a line without --config never reads the player's config.json.
 tox2::ConfigSearch noConfigSearch() {
     static const stdfs::path root =
-            stdfs::temp_directory_path() / ("tox2_game_options_absent_" + std::to_string(GetCurrentProcessId()));
+            stdfs::temp_directory_path() / ("tox2_game_options_absent_" + std::to_string(processId()));
     return {root / "work", root / "exe"};
 }
 
@@ -770,7 +782,7 @@ void testCheckOrder() {
 void testPadScriptAndAudioDump() {
     std::error_code ec;
     const stdfs::path dir =
-            stdfs::temp_directory_path() / ("tox2_game_options_args_" + std::to_string(GetCurrentProcessId()));
+            stdfs::temp_directory_path() / ("tox2_game_options_args_" + std::to_string(processId()));
     stdfs::remove_all(dir, ec);
     stdfs::create_directories(dir);
     const stdfs::path good = dir / "ok.pad";
@@ -824,7 +836,7 @@ struct ConfigDirs {
     stdfs::path root, work, exe;
 
     explicit ConfigDirs(const char* name) {
-        root = stdfs::temp_directory_path() / (std::string(name) + std::to_string(GetCurrentProcessId()));
+        root = stdfs::temp_directory_path() / (std::string(name) + std::to_string(processId()));
         work = root / "work";
         exe = root / "exe";
         std::error_code ec;
@@ -1271,7 +1283,7 @@ struct StoreDir {
     stdfs::path file;
 
     explicit StoreDir(const std::string& name)
-        : dir(stdfs::temp_directory_path() / (name + std::to_string(GetCurrentProcessId()))),
+        : dir(stdfs::temp_directory_path() / (name + std::to_string(processId()))),
           file(dir / "config.json") {
         std::error_code ec;
         stdfs::remove_all(dir, ec);
