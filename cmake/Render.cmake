@@ -26,7 +26,42 @@ endfunction()
 # The run-time shader compiler is the SDK's static shaderc, located through $VULKAN_SDK. The
 # debug variant (shaderc_combinedd.lib) is built against the debug CRT (/MDd) and must be used
 # with Debug only; every other configuration uses the release library (/MD).
+#
+# On macOS the SDK ships one libshaderc_combined.a for every configuration. $VULKAN_SDK (the SDK's
+# macOS directory) is tried first, then /usr/local, where the SDK's system-global install puts the
+# same files; the variable is often not exported in the shell that runs CMake.
 function(tox2_render_add_shaderc)
+  if(APPLE)
+    set(shaderc_prefix "")
+    set(shaderc_label "")
+    if(DEFINED ENV{VULKAN_SDK} AND NOT "$ENV{VULKAN_SDK}" STREQUAL "")
+      file(TO_CMAKE_PATH "$ENV{VULKAN_SDK}" sdk)
+      if(EXISTS "${sdk}/lib/libshaderc_combined.a" AND EXISTS "${sdk}/include/shaderc/shaderc.hpp")
+        set(shaderc_prefix "${sdk}")
+        set(shaderc_label "$VULKAN_SDK")
+      endif()
+    endif()
+    if(shaderc_prefix STREQUAL "" AND
+       EXISTS "/usr/local/lib/libshaderc_combined.a" AND
+       EXISTS "/usr/local/include/shaderc/shaderc.hpp")
+      set(shaderc_prefix "/usr/local")
+      set(shaderc_label "/usr/local")
+    endif()
+    if(shaderc_prefix STREQUAL "")
+      message(FATAL_ERROR
+        "TOX2: shaderc not found. Install the LunarG Vulkan SDK and export VULKAN_SDK (the SDK's "
+        "macOS directory) or install its system-global component; expected "
+        "lib/libshaderc_combined.a and include/shaderc/shaderc.hpp")
+    endif()
+
+    add_library(shaderc_combined STATIC IMPORTED GLOBAL)
+    set_target_properties(shaderc_combined PROPERTIES
+      IMPORTED_LOCATION "${shaderc_prefix}/lib/libshaderc_combined.a")
+    target_include_directories(shaderc_combined SYSTEM INTERFACE "${shaderc_prefix}/include")
+    message(STATUS "TOX2: shaderc: libshaderc_combined.a from ${shaderc_label}/lib")
+    return()
+  endif()
+
   if(NOT DEFINED ENV{VULKAN_SDK} OR "$ENV{VULKAN_SDK}" STREQUAL "")
     message(FATAL_ERROR
       "TOX2: VULKAN_SDK is not set; expected $VULKAN_SDK/Lib/shaderc_combined.lib "
@@ -192,8 +227,10 @@ function(tox2_render_add)
     VMA_VULKAN_VERSION=1003000)
   target_link_libraries(tox2_render PUBLIC volk tox2_runtime_core)
   target_link_libraries(tox2_render PRIVATE shaderc_combined)
-  # ImmAssociateContext turns the IME off for the game window.
-  target_link_libraries(tox2_render PRIVATE imm32)
+  if(WIN32)
+    # ImmAssociateContext turns the IME off for the game window.
+    target_link_libraries(tox2_render PRIVATE imm32)
+  endif()
   # PRIVATE: libpng types stay inside frame_dump.cpp.
   target_link_libraries(tox2_render PRIVATE png_static)
   if(TOX2_STREAMLINE_ENABLED)

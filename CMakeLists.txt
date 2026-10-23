@@ -42,6 +42,12 @@ target_include_directories(tox2_runtime PRIVATE runtime/include)
 add_library(tox2_ppu_stub STATIC runtime/src/ppu_stub_runtime.cpp)
 target_compile_options(tox2_ppu_stub PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
 target_include_directories(tox2_ppu_stub PUBLIC runtime/include)
+if(APPLE)
+  # The stub refers to the generated import table through weak references (see ppu_stub_runtime.cpp).
+  # ld64 rejects an undefined weak symbol unless it is declared allowed; dyld then binds it to null.
+  target_link_options(tox2_ppu_stub INTERFACE
+    LINKER:-U,_kTox2PpuImports LINKER:-U,_kTox2PpuImportCount)
+endif()
 
 add_library(tox2_spu_stub STATIC runtime/src/spu_stub_runtime.cpp)
 target_compile_options(tox2_spu_stub PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
