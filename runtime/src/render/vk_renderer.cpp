@@ -2576,6 +2576,14 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         std::memcpy(indices.data, list.data(), index_bytes);
     }
 
+    // A 32-bit float target has no alpha test and no 8-bit rounding (RPCS3 `rsx_methods.h`
+    // `alpha_test_enabled`, `RSXThread.cpp` RSX_SHADER_CONTROL_8BIT_FRAMEBUFFER).
+    const bool float_target = color->format == VK_FORMAT_R32_SFLOAT;
+    const std::uint32_t alpha_func = raster.alpha_test && !float_target ? (raster.alpha_func & 7u) : 7u;
+    // Func 7 (always) is the same as no test; "never" (0) is a test. The pipeline without the test has no
+    // alpha discard, which keeps hidden surface removal on Apple GPUs.
+    key.alpha_test = alpha_func != 7u;
+
     // Fixed-function state baked into the pipeline.
     key.color_mask = colorWriteMask(raster.color_mask);
     if (raster.blend && !blendSupported(color->format)) {
@@ -2682,11 +2690,8 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         }
     }
 
-    // A 32-bit float target has no alpha test and no 8-bit rounding (RPCS3 `rsx_methods.h`
-    // `alpha_test_enabled`, `RSXThread.cpp` RSX_SHADER_CONTROL_8BIT_FRAMEBUFFER).
-    const bool float_target = color->format == VK_FORMAT_R32_SFLOAT;
     FpDrawUniforms fp{};
-    fp.alpha_func = raster.alpha_test && !float_target ? (raster.alpha_func & 7u) : 7u;
+    fp.alpha_func = alpha_func;
     fp.alpha_ref = static_cast<float>(raster.alpha_ref) / 255.0f;
     fp.flags = (float_target ? 0u : kFpFlagRound8Bit) | (raster.two_sided_lighting ? kFpFlagTwoSided : 0u);
     std::memcpy(fp.texture_scale, texture_scale, sizeof(texture_scale));

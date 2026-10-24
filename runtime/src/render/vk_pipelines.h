@@ -50,6 +50,9 @@ struct PipelineKey {
     // (0: one element shared by every vertex).
     std::array<VkFormat, kPipelineVertexSlots> vertex_formats{};
     std::array<std::uint8_t, kPipelineVertexSlots> vertex_strides{};
+    // The fragment stage runs the alpha test (kFpAlphaTestConstantId). Off, the pipeline has no alpha-test
+    // discard, which keeps hidden surface removal on Apple GPUs.
+    bool alpha_test = false;
     bool blend = false;
     VkBlendFactor src_color = VK_BLEND_FACTOR_ZERO, dst_color = VK_BLEND_FACTOR_ZERO;
     VkBlendFactor src_alpha = VK_BLEND_FACTOR_ZERO, dst_alpha = VK_BLEND_FACTOR_ZERO;

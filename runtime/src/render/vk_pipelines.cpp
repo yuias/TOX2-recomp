@@ -458,6 +458,15 @@ VkPipeline DrawPipelines::pipeline(const PipelineKey& key, const DrawShaders& sh
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     stages[1].module = shaders.fragment;
     stages[1].pName = "main";
+    // VkBool32 data for the one constant of the fragment stage.
+    const std::uint32_t alpha_test = key.alpha_test ? VK_TRUE : VK_FALSE;
+    const VkSpecializationMapEntry alpha_test_entry{kFpAlphaTestConstantId, 0, sizeof(alpha_test)};
+    VkSpecializationInfo specialization{};
+    specialization.mapEntryCount = 1;
+    specialization.pMapEntries = &alpha_test_entry;
+    specialization.dataSize = sizeof(alpha_test);
+    specialization.pData = &alpha_test;
+    stages[1].pSpecializationInfo = &specialization;
 
     VkVertexInputBindingDescription bindings[kPipelineVertexSlots]{};
     VkVertexInputAttributeDescription attributes[kPipelineVertexSlots]{};

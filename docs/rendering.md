@@ -204,7 +204,13 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   cube texture (see [Sampler types](#sampler-types)). RCP, EX2 and LG2 read the x lane of source 0 and replicate the result;
   DIV and DIVSQ divide the whole of source 0 by the x lane of source 1 (DIVSQ leaves a zero
   numerator at zero and ignores the sign of the divisor). KIL discards the fragment when any lane
-  selected by its condition passes. Other opcodes (for example RSQ, DP2, LIT, the pack and
+  selected by its condition passes. The alpha test (the `alpha_func` and `alpha_ref` members of the draw
+  uniforms) runs only while the specialization constant `kAlphaTest` (id `kFpAlphaTestConstantId`) is true.
+  `PipelineKey::alpha_test` sets it, and it is false for a draw whose function is 7 (test disabled, or a
+  float target); function 0 ("never") is a test. A pipeline without the test has no alpha-test discard, because
+  Apple GPUs lose hidden surface removal for a shader that can discard, even when the draw never takes the
+  discard. A program with KIL keeps that discard in both variants. The same SPIR-V module serves both
+  pipeline variants, so a program that is drawn with and without the test costs one more pipeline only. Other opcodes (for example RSQ, DP2, LIT, the pack and
   unpack group and the flow-control opcodes), the WPOS, FOGC and SSA inputs, and the texture
   expand bit are not translated.
 - **Flips and vsync.** A flip is done when the command executes, once the flip limit allows it: with the default
@@ -506,7 +512,8 @@ come from RPCS3 (`VKGSRender.cpp` `get_compatible_surface_format`, `rsx_methods.
 - The fragment program writes its usual four-component colour and the attachment keeps the red channel.
   RPCS3 applies no output swizzle to a float surface (the swizzle word is only set for the integer formats).
 - A float surface has no 8-bit quantisation of the output and no alpha test, so the draw uniform block gets
-  neither `kFpFlagRound8Bit` nor the alpha function. The fragment GLSL does not change.
+  neither `kFpFlagRound8Bit` nor the alpha function, and its pipeline is the variant without the alpha test.
+  The fragment GLSL does not change.
 - A colour clear of an F_X32 surface does nothing, as in RPCS3 `clear_surface`; the depth and stencil bits of
   the same clear still apply.
 - Blending into `R32_SFLOAT` is optional in Vulkan: the draw is made without blending, and counted

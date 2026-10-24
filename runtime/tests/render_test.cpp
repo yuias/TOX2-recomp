@@ -1879,6 +1879,8 @@ struct QuadOptions {
     // Color comes from slot 5, which has no array: -1 leaves the default register unwritten, 0 writes four
     // zeros, 1 writes (1, 0, 0, 1).
     int default_color = -2;  // -2: color comes from the array in slot 3
+    int alpha_func = -1;     // -1: alpha test disabled; otherwise the GCM compare enum (0x200 never .. 0x207 always)
+    std::uint32_t alpha_ref = 0;
 };
 
 constexpr float kQuadCorners[4][3] = {
@@ -1914,6 +1916,11 @@ std::vector<std::uint8_t> makeRenderedQuadCapture(const QuadOptions& options) {
     scene.write(tox2::kMethodNv4097SetCullFaceEnable, options.cull ? 1 : 0);
     scene.write(tox2::kMethodNv4097SetCullFace, options.cull_face);
     scene.write(tox2::kMethodNv4097SetFrontFace, options.front_face);
+    if (options.alpha_func >= 0) {
+        scene.write(tox2::kMethodNv4097SetAlphaTestEnable, 1);
+        scene.write(tox2::kMethodNv4097SetAlphaFunc, static_cast<std::uint32_t>(options.alpha_func));
+        scene.write(tox2::kMethodNv4097SetAlphaRef, options.alpha_ref);
+    }
     if (options.blend) {
         scene.write(tox2::kMethodNv4097SetBlendEnable, 1);
         scene.write(tox2::kMethodNv4097SetBlendFuncSfactor, 0x302 | (0x302u << 16));  // SRC_ALPHA
@@ -2092,6 +2099,83 @@ void testRendererQuad(tox2::VkContext& ctx) {
     CHECK(pixelArgb(bgra, width, 2, 2) == 0xFF404040);
 
     CHECK(renderer.valid());
+    tox2::rsxUnimplementedReset();
+}
+
+// The alpha test is a specialization constant of the fragment stage, so a draw with the test off and one with it
+// on use two pipelines of one shader module. The quad's alpha is 0x80; the 8-bit rounding makes the compare against
+// the reference exact.
+void testRendererAlphaTest(tox2::VkContext& ctx) {
+    tox2::rsxUnimplementedReset();
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+    CHECK(renderer.valid());
+    constexpr std::uint32_t kQuadColor = 0x80FFFFFF;
+    constexpr std::uint32_t kDrawn = 0x80FFFFFF;  // alpha comes through unblended
+    constexpr std::uint32_t kBackground = 0xFF004000;
+
+    const auto render = [&](int alpha_func, std::uint32_t alpha_ref) {
+        QuadOptions options;
+        options.clear = kBackground;
+        options.uniform_color = kQuadColor;
+        options.alpha_func = alpha_func;
+        options.alpha_ref = alpha_ref;
+        std::vector<tox2::RsxCommand> commands = replaySynthetic(makeRenderedQuadCapture(options));
+        tox2::rsxUnimplementedReset();
+        const std::uint64_t created = renderer.pipelineCacheStats().created;
+        renderer.execute(commands);
+        CHECK(renderer.valid());
+        std::vector<std::uint8_t> bgra;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        CHECK(renderer.readDisplay(bgra, width, height));
+        CHECK(width == 64 && height == 64 && bgra.size() == 64 * 64 * 4);
+        if (bgra.size() != 64 * 64 * 4) bgra.assign(64 * 64 * 4, 0);
+        CHECK(pixelArgb(bgra, width, 2, 2) == kBackground);
+        CHECK(tox2::rsxUnimplementedSnapshot().empty());
+        struct Result {
+            bool drawn;
+            std::uint64_t pipelines;
+        };
+        const std::uint32_t center = pixelArgb(bgra, width, 32, 32);
+        CHECK(center == kDrawn || center == kBackground);
+        return Result{center == kDrawn, renderer.pipelineCacheStats().created - created};
+    };
+
+    // The first scene also creates the pipelines shared by all scenes; later ones add only what differs.
+    CHECK(render(-1, 0).drawn);
+    CHECK(render(-1, 0).pipelines == 0);
+    // "Always" is no test, whatever the enable register says: same pipeline, quad drawn.
+    const auto always = render(0x207, 0);
+    CHECK(always.drawn && always.pipelines == 0);
+
+    const struct {
+        std::uint32_t func, ref;
+        bool drawn;
+    } kCases[] = {
+            {0x200, 0x00, false},                                             // never
+            {0x200, 0x80, false}, {0x201, 0x81, true},                        // less
+            {0x201, 0x80, false}, {0x201, 0x40, false}, {0x202, 0x80, true},  // equal
+            {0x202, 0x7F, false}, {0x203, 0x80, true},                        // lequal
+            {0x203, 0x7F, false}, {0x204, 0x7F, true},                        // greater
+            {0x204, 0x80, false}, {0x205, 0x7F, true},                        // notequal
+            {0x205, 0x80, false}, {0x206, 0x80, true},                        // gequal
+            {0x206, 0x81, false}, {0x207, 0xFF, true},                        // always
+    };
+    bool first_test = true;
+    for (const auto& test : kCases) {
+        const auto result = render(static_cast<int>(test.func), test.ref);
+        CHECK(result.drawn == test.drawn);
+        if (result.drawn != test.drawn) {
+            std::fprintf(stderr, "alpha test func %#x ref %#x\n", test.func, test.ref);
+        }
+        // The first draw with the test on adds the pipeline of that variant; every other function shares it.
+        if (test.func != 0x207) {
+            CHECK(result.pipelines == (first_test ? 1u : 0u));
+            first_test = false;
+        }
+    }
+    // Back to the test off: its pipeline is still there.
+    CHECK(render(-1, 0).pipelines == 0);
     tox2::rsxUnimplementedReset();
 }
 
@@ -7605,6 +7689,7 @@ int main() {
     testPresentIdleNeedsPresenter(*ctx);
     testRendererScissorAndMask(*ctx);
     testRendererQuad(*ctx);
+    testRendererAlphaTest(*ctx);
     testIndexOutsideRange(*ctx);
     testRendererBranchBits(*ctx);
     testVertexConstantUploadReuse(*ctx);

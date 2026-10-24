@@ -668,12 +668,19 @@ void testInputsAndEpilogue() {
                    "var_back_specular : var_front_specular, 0.0, 1.0);"));
     CHECK(contains(result.glsl, "vec4 in_tex1 = vec4(var_tex1.xy, 0.0, gl_FragCoord.w);"));
     CHECK(contains(result.glsl, "  h_0 = in_tex1;\n"));
+    CHECK(contains(result.glsl, "layout(constant_id = 0) const bool kAlphaTest = true;\n"));
     CHECK(contains(result.glsl, "case 4u: alpha_passes = h_0.a > draw.alpha_ref; break;"));
     CHECK(contains(result.glsl, "  out_color0 = h_0;\n"));
     // The 8-bit rounding flag applies before the alpha compare.
     CHECK(contains(result.glsl,
                    "  if ((draw.flags & 2u) != 0u) h_0 = floor(max(h_0, 0.0) * 255.0 + 0.5) / 255.0;\n"
-                   "  bool alpha_passes = true;\n"));
+                   "  if (kAlphaTest) {\n"
+                   "    bool alpha_passes = true;\n"));
+    // The discard of the test sits inside the constant's branch, the output after it.
+    CHECK(contains(result.glsl,
+                   "    if (!alpha_passes) discard;\n"
+                   "  }\n"
+                   "  out_color0 = h_0;\n"));
     CHECK(compiles(result, 0xf0f7));
 
     // An empty program still exports the (zero) output register under either control value.
