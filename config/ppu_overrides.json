@@ -9,6 +9,11 @@
       "entry": "0x00956a00",
       "generated_sha256": "5f36a5964155b3a1b262025d8471a011f227284884097c026cb9dc9a7f33e04b",
       "reason": "ATRAC stream loader: flag check, ring copy and byte count in one critical section"
+    },
+    {
+      "entry": "0x00523fb8",
+      "generated_sha256": "6c07dd44600f33fb81d0ad76856f3b0ff19541e424f2c6280cbe62c9f9ffaa47",
+      "reason": "Save DLC check: a save that used DLC which is not installed loads instead of being rejected"
     }
   ]
 }
