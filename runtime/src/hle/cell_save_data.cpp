@@ -5,7 +5,10 @@
 // `select_and_delete`) and `cellSysutil.cpp` (`sysutil_check_name_string`). Handlers run under the
 // kernel lock; the callbacks (funcList, funcStat, funcFile) run synchronously on the calling thread
 // through callGuestFunction, as in RPCS3, with their Get/Set/Result structures in one guest scratch
-// block that is allocated on first use and reused (a nested or concurrent call gets BUSY).
+// block that is allocated on first use and reused (a nested or concurrent call gets BUSY). The host
+// file I/O (the directory list, PARAM.SFO, icons, the file preload and the commit) runs in a
+// HostCallRegion, outside the kernel lock and the PPU slot: held across a cold read of the save
+// directory, the lock stalled the game's audio mixer long enough to drop sound.
 //
 // ListAutoLoad, FixedLoad2 and FixedSave2 share one path: the directory list (setList's prefixes,
 // sorted) is handed to funcFixed, which names the save to use or returns an error result, then funcStat
@@ -68,6 +71,7 @@
 #include "core/guest_memory.h"
 #include "core/log.h"
 #include "core/param_sfo.h"
+#include "core/threads.h"
 #include "tox2/ppu_context.h"
 #include "hle/hle.h"
 #include "hle/save_dialog.h"
@@ -379,9 +383,15 @@ struct SaveEntry {
 };
 
 std::optional<std::vector<std::uint8_t>> readFile(const stdfs::path& path) {
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
     if (!in) return std::nullopt;
-    return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    const std::streamoff size = in.tellg();
+    if (size < 0) return std::nullopt;
+    // One read of the whole file, not a per-character copy through istreambuf_iterator.
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+    in.seekg(0);
+    if (!in.read(reinterpret_cast<char*>(bytes.data()), size)) return std::nullopt;
+    return bytes;
 }
 
 bool writeFile(const stdfs::path& path, std::span<const std::uint8_t> bytes) {
@@ -646,17 +656,20 @@ DirListing buildDirListing(OpState& s, Op op, std::uint32_t set_list, std::uint3
 
     std::vector<SaveEntry>& entries = listing.entries;
     std::uint32_t dir_list_num = 0;
-    for (const std::string& name : listSaveDirs(root)) {
-        for (const std::string& prefix : prefixes) {
-            if (!name.starts_with(prefix)) continue;
-            if (listing.dir_num++ == 0) listing.clearBuf(base);
+    {
+        const HostCallRegion host_io;
+        for (const std::string& name : listSaveDirs(root)) {
+            const bool matches =
+                    std::ranges::any_of(prefixes, [&](const std::string& p) { return name.starts_with(p); });
+            if (!matches) continue;
+            listing.dir_num++;
             if (dir_list_num < dir_list_max) {
                 dir_list_num++;
                 if (auto entry = loadEntry(root, name)) entries.push_back(std::move(*entry));
             }
-            break;
         }
     }
+    if (listing.dir_num != 0) listing.clearBuf(base);
     tox2Write32(base, s.list_get + kListGetDirNum, listing.dir_num);
     tox2Write32(base, s.list_get + kListGetDirListNum, dir_list_num);
 
@@ -753,9 +766,12 @@ ListResult runListStep(OpState& s, Op op, std::uint32_t err_dialog, std::uint32_
         selected_list.insert(name);
     }
     std::erase_if(entries, [&](const SaveEntry& e) { return !selected_list.contains(e.dir_name); });
-    for (SaveEntry& entry : entries) {
-        if (auto bytes = readFile(root / entry.escaped / "ICON0.PNG")) {
-            entry.icon0 = std::make_shared<const std::vector<std::uint8_t>>(std::move(*bytes));
+    {
+        const HostCallRegion host_io;
+        for (SaveEntry& entry : entries) {
+            if (auto bytes = readFile(root / entry.escaped / "ICON0.PNG")) {
+                entry.icon0 = std::make_shared<const std::vector<std::uint8_t>>(std::move(*bytes));
+            }
         }
     }
 
@@ -991,8 +1007,30 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
     const stdfs::path dir_path = root / save.escaped;
     const std::string guest_dir = std::string(kSaveRoot) + "/" + save.escaped;
 
+    // The host side of the stat step, read outside the kernel lock: PARAM.SFO and the listed files in name order.
+    struct StatFile {
+        std::string name;
+        std::uint64_t size = 0;
+        Times times;
+    };
     ParamSfo sfo;
-    if (auto parsed = readParamSfoFile(dir_path / "PARAM.SFO")) sfo = std::move(*parsed);
+    Times times;
+    std::vector<StatFile> files_on_disk;
+    {
+        const HostCallRegion host_io;
+        if (auto parsed = readParamSfoFile(dir_path / "PARAM.SFO")) sfo = std::move(*parsed);
+        times = statTimes(guest_dir);
+        for (stdfs::directory_iterator it(dir_path, ec), end; !ec && it != end; it.increment(ec)) {
+            std::error_code entry_ec;
+            if (it->is_directory(entry_ec)) continue;
+            std::string name = it->path().filename().string();
+            if (checkFilename(name, false, false) != 0) continue;  // system files are not listed
+            files_on_disk.push_back({std::move(name), it->file_size(entry_ec), {}});
+        }
+        ec.clear();
+        std::ranges::sort(files_on_disk, {}, &StatFile::name);
+        for (StatFile& file : files_on_disk) file.times = statTimes(guest_dir + "/" + file.name);
+    }
     bool has_modified = false;
     bool recreated = false;
 
@@ -1003,7 +1041,6 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
         const std::uint32_t file_list_max = tox2Read32(base, set_buf + kSetBufFileListMax);
         if (func_stat == 0) return paramError(20);
 
-        const Times times = statTimes(guest_dir);
         save.is_new = sfo.empty();
         tox2Write32(base, s.stat_get + kStatGetHddFreeSizeKb, static_cast<std::uint32_t>(kHddFreeSizeKb));
         tox2Write32(base, s.stat_get + kStatGetIsNewData, save.is_new ? 1 : 0);
@@ -1022,27 +1059,15 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
         tox2Write32(base, s.stat_get + kStatGetFileList, buf);
         if (!save.is_new && buf_size != 0) std::memset(base + buf, 0, buf_size);
 
-        std::vector<std::pair<std::string, std::uint64_t>> files;
-        for (stdfs::directory_iterator it(dir_path, ec), end; !ec && it != end; it.increment(ec)) {
-            std::error_code entry_ec;
-            if (it->is_directory(entry_ec)) continue;
-            std::string name = it->path().filename().string();
-            if (checkFilename(name, false, false) != 0) continue;  // system files are not listed
-            files.emplace_back(std::move(name), it->file_size(entry_ec));
-        }
-        ec.clear();
-        std::sort(files.begin(), files.end());
-
         std::uint32_t file_num = 0;
         std::uint32_t file_list_num = 0;
         std::uint64_t size_bytes = 0;
-        for (const auto& [name, size] : files) {
+        for (const auto& [name, size, file_times] : files_on_disk) {
             file_num++;
             size_bytes += (size + 1023) / 1024 * 1024;  // the firmware rounds this up
             if (file_list_num >= file_list_max) continue;
             const std::uint32_t item = buf + file_list_num * kFileStatSize;
             file_list_num++;
-            const Times file_times = statTimes(guest_dir + "/" + name);
             std::uint32_t type = kFileTypeNormal;
             if (name == "ICON0.PNG")
                 type = kFileTypeIcon0;
@@ -1135,6 +1160,7 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
     // Preload the files so the callbacks work on a snapshot.
     FileMap files;
     if (!recreated) {
+        const HostCallRegion host_io;
         for (stdfs::directory_iterator it(dir_path, ec), end; !ec && it != end; it.increment(ec)) {
             std::error_code entry_ec;
             if (it->is_directory(entry_ec)) continue;
@@ -1256,7 +1282,11 @@ std::uint32_t savedataOp(OpState& s, Op op, std::uint32_t err_dialog, std::uint3
     }
 
     if (!sfo.empty() && has_modified) {
-        if (!commitSave(root, save.escaped, files, sfo)) return kErrorAccess;
+        const bool committed = [&] {
+            const HostCallRegion host_io;
+            return commitSave(root, save.escaped, files, sfo);
+        }();
+        if (!committed) return kErrorAccess;
         logInfo("tox2: savedata: committed '{}' ({} file(s))", save.dir_name, files.size());
     }
 
