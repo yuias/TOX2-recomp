@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tox2_save import cli, sfo
+from tox2_save import cli, save, sfo
 
 from tests import save_fixture as fx
 
@@ -16,6 +16,24 @@ def run_cli(*argv):
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         code = cli.main([str(a) for a in argv])
     return code, out.getvalue(), err.getvalue()
+
+
+def name_offset(k: int) -> int:
+    return save.CHARACTER_BASE + k * save.CHARACTER_STRIDE + save.NAME
+
+
+def set_names(data: bytearray, names) -> None:
+    for k, name in enumerate(names):
+        raw = name.encode("utf-8")
+        data[name_offset(k):name_offset(k) + len(raw) + 1] = raw + b"\0"
+
+
+def stored_names(data: bytes) -> list[str]:
+    names = []
+    for k in range(len(save.CHARACTERS)):
+        field = data[name_offset(k):name_offset(k) - save.NAME + save.NAME_END]
+        names.append(field[:field.find(b"\0")].decode("utf-8"))
+    return names
 
 
 def us_like_sfo(sub_title: str = "000 Sub") -> bytes:
@@ -127,6 +145,59 @@ class InstallTest(unittest.TestCase):
                 self.assertEqual(code, 0, err)
                 slot = out.splitlines()[0][-3:]
                 self.assertEqual(self.installed_sfo(slot).strings["SUB_TITLE"], sub_title)
+
+    def test_names_are_left_alone_by_default(self):
+        data = bytearray(self.files["SAVE"])
+        set_names(data, save.DEFAULT_NAMES["en"])
+        (self.plain / "SAVE").write_bytes(data)
+        code, out, err = run_cli("install", self.plain, "--hdd", self.hdd)
+        self.assertEqual(code, 0, err)
+        self.assertEqual((self.root / "BLJS10188_SAVE1_001" / "SAVE").read_bytes(), data)
+        self.assertNotIn("names:", out)
+
+    def test_names_both_directions(self):
+        for source, target in (("en", "ja"), ("ja", "en")):
+            with self.subTest(target=target):
+                data = bytearray(self.files["SAVE"])
+                set_names(data, save.DEFAULT_NAMES[source])
+                (self.plain / "SAVE").write_bytes(data)
+                code, out, err = run_cli("install", self.plain, "--hdd", self.hdd, "--names", target)
+                self.assertEqual(code, 0, err)
+                self.assertIn("names:  9 of 9 set to %s" % target, out.splitlines())
+                installed = (self.root / out.splitlines()[0].split()[-1] / "SAVE").read_bytes()
+                self.assertEqual(stored_names(installed), list(save.DEFAULT_NAMES[target]))
+                expected = bytearray(self.files["SAVE"])
+                set_names(expected, save.DEFAULT_NAMES[target])
+                # Only the name fields change, and no tail of a longer name is left behind.
+                self.assertEqual(installed, expected)
+
+    def test_unknown_and_target_names_are_kept(self):
+        data = bytearray(self.files["SAVE"])
+        names = list(save.DEFAULT_NAMES["en"])
+        names[0] = "Custom"
+        names[1] = save.DEFAULT_NAMES["ja"][1]
+        names[7] = "Muzet"  # without the accent it is not the US default
+        set_names(data, names)
+        (self.plain / "SAVE").write_bytes(data)
+        code, out, err = run_cli("install", self.plain, "--hdd", self.hdd, "--names", "ja")
+        self.assertEqual(code, 0, err)
+        self.assertIn("names:  6 of 9 set to ja", out.splitlines())
+        installed = (self.root / "BLJS10188_SAVE1_001" / "SAVE").read_bytes()
+        expected = list(save.DEFAULT_NAMES["ja"])
+        expected[0], expected[7] = "Custom", "Muzet"
+        self.assertEqual(stored_names(installed), expected)
+
+    def test_names_need_a_full_size_save(self):
+        (self.plain / "SAVE").write_bytes(bytes(fx.build_save(size=0x10000)))
+        code, _, err = run_cli("install", self.plain, "--hdd", self.hdd, "--names", "ja")
+        self.assertEqual(code, 3)
+        self.assertFormatted(err)
+        self.assertEqual(list(self.hdd.iterdir()), [])
+
+    def test_unknown_names_value(self):
+        code, _, _ = run_cli("install", self.plain, "--hdd", self.hdd, "--names", "fr")
+        self.assertEqual(code, 2)
+        self.assertEqual(list(self.hdd.iterdir()), [])
 
     def test_encrypted_dir(self):
         (self.plain / "PARAM.PFD").write_bytes(b"x")
