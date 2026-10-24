@@ -17,7 +17,8 @@
 namespace tox2 {
 namespace {
 
-constexpr std::string_view kUsage =
+// A string built once because the --audio choices name the host's output.
+const std::string kUsage = std::format(
         "usage: tox2_game [--game-dir DIR] [--vfs-config FILE] (at least one) [--elf PATH]\n"
         "                [--libsre PATH]\n"
         "                [--seconds N] [--strict] [--log FILE] [--hdd-dir DIR] [--sdata-cache DIR]\n"
@@ -25,7 +26,7 @@ constexpr std::string_view kUsage =
         "                [--quiet-hle] [--load-only] [--png-dump DIR]\n"
         "                [--dialog-answer yes|no|ok] [--save-dialog auto|cancel|window] [--ui-font PATH]\n"
         "                [--pad none|neutral|keyboard|gamepad|keyboard+gamepad]\n"
-        "                [--pad-script FILE] [--pad-probe] [--audio none|wasapi] [--audio-dump FILE]\n"
+        "                [--pad-script FILE] [--pad-probe] [--audio none|{}] [--audio-dump FILE]\n"
         "                [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]\n"
         "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
         "                [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--vk-validation] [--no-window]\n"
@@ -38,7 +39,8 @@ constexpr std::string_view kUsage =
         "                [--dump-guest ADDR:SIZE:FILE]...\n"
         "                [--spu-capture IMAGE:S[+S...]:E[:dispatches=N]]... [--spu-capture-dir DIR]\n"
         "                [--spu-capture-after SECONDS] [--spu-capture-count N] [--spu-capture-every K]\n"
-        "                [--config FILE | --no-config]\n";
+        "                [--config FILE | --no-config]\n",
+        kHostAudioOutput);
 
 std::string rsxCaptureError(std::string_view label) {
     return std::format("error: {} needs frame numbers (1-based), e.g. 300,600\n", label);
@@ -210,8 +212,8 @@ bool setPad(ParseState& state, std::string_view label, const RawItem& item, std:
 }
 
 bool setAudio(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
-    if (item.text != "none" && item.text != "wasapi") {
-        return fail(error, std::format("error: {} needs none or wasapi\n", label));
+    if (item.text != "none" && item.text != kHostAudioOutput) {
+        return fail(error, std::format("error: {} needs none or {}\n", label, kHostAudioOutput));
     }
     state.options.audio = item.text;
     state.audio_given = true;
@@ -696,7 +698,7 @@ std::optional<OptionsError> settle(ParseState& state, const std::string& file_no
         return combined("error: --pad-script needs --pad keyboard or keyboard+gamepad\n");
     }
     // A window means somebody is listening; unattended runs must not need a sound device.
-    if (!state.audio_given) opt.audio = opt.window ? "wasapi" : "none";
+    if (!state.audio_given) opt.audio = opt.window ? std::string(kHostAudioOutput) : "none";
     if (!opt.audio_dump.empty()) {
         // The engine creates the file again on its own thread; creating it here makes a bad path a
         // usage error instead of a warning in the middle of a run.

@@ -52,8 +52,13 @@ static uint32_t pickWord(void) {
 
 enum { kBatch = 512 };
 
-// The sticky exception flags in the low bits of the MXCSR are not part of the environment.
+// The sticky exception flags in the low bits of the MXCSR are not part of the environment. FPCR has none
+// (they live in FPSR), so on arm64 the whole word is.
+#if defined(__x86_64__) || defined(_M_X64)
 static const uint32_t kControlBits = 0xffc0u;
+#else
+static const uint32_t kControlBits = 0xffffffffu;
+#endif
 
 static Tox2Vr g_a[kBatch];
 static Tox2Vr g_b[kBatch];

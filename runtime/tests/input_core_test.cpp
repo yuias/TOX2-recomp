@@ -31,6 +31,7 @@
 #include "input/gamepad_probe.h"
 #include "input/gamepad_select.h"
 #include "input/keyboard_pad.h"
+#include "input/mac_key_codes.h"
 #include "input/pad_buttons.h"
 
 namespace {
@@ -1349,6 +1350,112 @@ void testHubThreadProbeOnly() {
 
 }  // namespace
 
+// The anchors are kVK_* values from HIToolbox Events.h against the set 1 codes the Windows window
+// reports for the same physical key.
+void testMacKeyCodes() {
+    struct Anchor {
+        std::uint16_t key_code;
+        std::uint32_t scan_code;
+    };
+    constexpr Anchor kAnchors[] = {
+            {0x06, 0x2C},    // kVK_ANSI_Z
+            {0x24, 0x1C},    // kVK_Return
+            {0x30, 0x0F},    // kVK_Tab
+            {0x7A, 0x3B},    // kVK_F1
+            {0x7E, 0xE048},  // kVK_UpArrow
+            {0x38, 0x2A},    // kVK_Shift
+            {0x3C, 0x36},    // kVK_RightShift
+            {0x3B, 0x1D},    // kVK_Control
+            {0x3E, 0xE01D},  // kVK_RightControl
+            {0x3A, 0x38},    // kVK_Option
+            {0x3D, 0xE038},  // kVK_RightOption
+            {0x37, 0xE05B},  // kVK_Command
+            {0x36, 0xE05C},  // kVK_RightCommand
+            {0x35, 0x01},    // kVK_Escape
+            {0x33, 0x0E},    // kVK_Delete
+            {0x5D, 0x7D},    // kVK_JIS_Yen
+            {0x5E, 0x73},    // kVK_JIS_Underscore
+    };
+    for (const Anchor& anchor : kAnchors) {
+        const std::optional<std::uint32_t> scan = tox2::scanCodeFromMacKeyCode(anchor.key_code);
+        CHECK(scan.has_value() && *scan == anchor.scan_code);
+    }
+
+    // No set 1 code: Fn, a key code outside the table, the JIS input switch keys, the volume keys.
+    CHECK(!tox2::scanCodeFromMacKeyCode(0x3F).has_value());
+    CHECK(!tox2::scanCodeFromMacKeyCode(0x7F).has_value());
+    CHECK(!tox2::scanCodeFromMacKeyCode(0x1234).has_value());
+    CHECK(!tox2::scanCodeFromMacKeyCode(0x66).has_value());
+    CHECK(!tox2::scanCodeFromMacKeyCode(0x68).has_value());
+    CHECK(!tox2::scanCodeFromMacKeyCode(0x48).has_value());
+
+    // Distinct keys never share a scan code, or one press would release another key's button.
+    for (std::uint16_t a = 0; a < 0x80; a++) {
+        const std::optional<std::uint32_t> scan_a = tox2::scanCodeFromMacKeyCode(a);
+        if (!scan_a) continue;
+        for (std::uint16_t b = a + 1; b < 0x80; b++) {
+            const std::optional<std::uint32_t> scan_b = tox2::scanCodeFromMacKeyCode(b);
+            CHECK(!scan_b || *scan_a != *scan_b);
+        }
+    }
+
+    // Every key of the pad map is reachable, on the same pad button as on Windows.
+    struct PadKey {
+        std::uint16_t key_code;
+        tox2::PadButton button;
+    };
+    constexpr PadKey kPadKeys[] = {
+            {0x7E, tox2::PadButton::Up},        // Up arrow
+            {0x7D, tox2::PadButton::Down},      // Down arrow
+            {0x7B, tox2::PadButton::Left},      // Left arrow
+            {0x7C, tox2::PadButton::Right},     // Right arrow
+            {0x06, tox2::PadButton::Cross},     // Z
+            {0x07, tox2::PadButton::Circle},    // X
+            {0x01, tox2::PadButton::Square},    // S
+            {0x02, tox2::PadButton::Triangle},  // D
+            {0x0D, tox2::PadButton::L1},        // W
+            {0x0E, tox2::PadButton::L2},        // E
+            {0x0F, tox2::PadButton::R1},        // R
+            {0x20, tox2::PadButton::R2},        // U
+            {0x12, tox2::PadButton::L3},        // 1
+            {0x14, tox2::PadButton::R3},        // 3
+            {0x09, tox2::PadButton::Start},     // V
+            {0x08, tox2::PadButton::Select},    // C
+    };
+    for (const PadKey& key : kPadKeys) {
+        const std::optional<std::uint32_t> scan = tox2::scanCodeFromMacKeyCode(key.key_code);
+        const std::optional<tox2::PadButton> button = scan ? tox2::padButtonForScanCode(*scan) : std::nullopt;
+        CHECK(button.has_value() && *button == key.button);
+    }
+    // The keypad digits are not the arrows, and F1 and Tab (overlay and fast-forward) are not pad keys.
+    CHECK(!tox2::padButtonForScanCode(*tox2::scanCodeFromMacKeyCode(0x56)).has_value());  // keypad 4
+    CHECK(!tox2::padButtonForScanCode(*tox2::scanCodeFromMacKeyCode(0x7A)).has_value());
+    CHECK(!tox2::padButtonForScanCode(*tox2::scanCodeFromMacKeyCode(0x30)).has_value());
+
+    struct Modifier {
+        std::uint16_t key_code;
+        std::uint64_t mask;
+    };
+    constexpr Modifier kModifiers[] = {
+            {0x3B, 0x01},     // left Control
+            {0x3E, 0x2000},   // right Control
+            {0x38, 0x02},     // left Shift
+            {0x3C, 0x04},     // right Shift
+            {0x3A, 0x20},     // left Option
+            {0x3D, 0x40},     // right Option
+            {0x37, 0x08},     // left Command
+            {0x36, 0x10},     // right Command
+            {0x39, 0x10000},  // Caps Lock
+    };
+    for (const Modifier& modifier : kModifiers) {
+        const std::optional<std::uint64_t> mask = tox2::macModifierDownMask(modifier.key_code);
+        CHECK(mask.has_value() && *mask == modifier.mask);
+        CHECK(tox2::scanCodeFromMacKeyCode(modifier.key_code).has_value());
+    }
+    CHECK(!tox2::macModifierDownMask(0x06).has_value());
+    CHECK(!tox2::macModifierDownMask(0x3F).has_value());
+}
+
 int main() {
     testFormatValue();
     testFormatReading();
@@ -1387,6 +1494,7 @@ int main() {
     testHubThreadFeedsPad();
     testHubThreadStartLinesWithProbe();
     testHubThreadProbeOnly();
+    testMacKeyCodes();
 
     std::printf("input core tests: %d passed, %d failed\n", g_passed, g_failed);
     std::fflush(stdout);

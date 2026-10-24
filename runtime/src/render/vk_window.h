@@ -1,6 +1,7 @@
 #pragma once
 
-// Win32 window on its own UI thread plus the swapchain that presents the display buffer to it. The
+// OS window plus the swapchain that presents the display buffer to it. The window is a Win32 window on its
+// own UI thread, or a Cocoa window served by the process main thread (see runWithHostEventLoop). The
 // Vulkan side (surface, swapchain, acquire, present) runs on the one thread that owns the renderer; only
 // the window handle and the client size cross threads.
 
@@ -45,6 +46,7 @@ struct KeyMessage {
     bool repeat = false;  // the key was already down (auto-repeat)
 };
 
+#if defined(_WIN32)
 // WM_KEYDOWN/WM_KEYUP/WM_SYSKEYDOWN/WM_SYSKEYUP -> KeyMessage; nullopt for any other message. The scan
 // code is the physical key position, so it does not depend on the keyboard layout or on an IME. A zero
 // scan code (some injected input) falls back to the virtual key in `wparam`.
@@ -57,20 +59,43 @@ struct WindowMessage {
     std::uint64_t wparam = 0;
     std::int64_t lparam = 0;
 };
+#else
+enum class WindowEventKind : std::uint8_t { Other, Key, FocusGained, FocusLost };
+
+// An event the Cocoa window is about to dispatch, so this header stays free of Objective-C types.
+struct WindowMessage {
+    void* view = nullptr;   // the window's content NSView
+    void* event = nullptr;  // the NSEvent being dispatched; null for focus changes
+    WindowEventKind kind = WindowEventKind::Other;
+    std::optional<KeyMessage> key;  // set when kind == Key
+};
+#endif
 
 // What PresenterOptions::on_message decided for one message.
 struct MessageRoute {
-    bool handled = false;  // the window procedure returns `result` at once
+    // Windows: the window procedure returns `result` at once. macOS: the event is dropped (`result` is unused).
+    bool handled = false;
     std::intptr_t result = 0;
     bool withhold_key = false;  // a key message that on_key does not receive
 };
 
+// Runs `body` so that the process main thread serves the OS user interface where the OS requires it.
+// Windows: calls body() on the calling thread. macOS: must be called on the main thread; runs body on a
+// new thread while the main thread runs the event loop (NSApplication when `user_interface`, else a plain
+// CFRunLoop), and returns after body returns. An exception that leaves body is rethrown here.
+void runWithHostEventLoop(std::function<void()> body, bool user_interface);
+
+// Processes pending UI events on the calling thread without blocking (tests that own the main thread).
+// Windows: no-op (the window has its own thread).
+void pumpHostEvents();
+
 struct PresenterOptions {
-    // Called on the UI thread when the user closes the window. The window is not destroyed by it.
+    // Called on the UI thread when the user closes the window (on macOS also for Cmd+Q). The window is not
+    // destroyed by it.
     std::function<void()> on_close;
-    // The callbacks below run on the UI thread inside the window procedure: they must be cheap and must
-    // not block, or the window stops responding.
-    // Called first for every message; lets a client (the debug overlay) consume messages or keep key
+    // The callbacks below run on the UI thread inside the window procedure (macOS: inside the window's
+    // event dispatch): they must be cheap and must not block, or the window stops responding.
+    // Called first for every message or event; lets a client (the debug overlay) consume it or keep key
     // messages from on_key.
     std::function<MessageRoute(const WindowMessage&)> on_message;
     // Called for every key message, including repeats and Alt combinations, unless on_message withheld it.
@@ -80,7 +105,8 @@ struct PresenterOptions {
     // The client size in physical pixels the window opens with, fitted to the monitor's work area.
     WindowSizePreset window_size = WindowSizePreset::Size720p;
     bool fullscreen = false;  // start in borderless fullscreen
-    // Called on the UI thread after the user toggled fullscreen (Alt+Enter, F11); not for the start-up state.
+    // Called on the UI thread after the user toggled fullscreen (Windows: Alt+Enter, F11; macOS: Ctrl+Cmd+F,
+    // the green button); not for the start-up state.
     std::function<void(bool fullscreen)> on_fullscreen_changed;
     // Frame slots of the renderer: one acquire semaphore each.
     std::size_t frame_slots = 2;
@@ -103,7 +129,9 @@ public:
     };
 
     // Opens the window and creates the surface on `context`, which must have been created with
-    // VkContextOptions::window. Null with `error` set when a step fails.
+    // VkContextOptions::window. Null with `error` set when a step fails. On macOS the window belongs to the
+    // main thread: call this on the main thread or from the body of runWithHostEventLoop (it then waits
+    // for the main thread), and destroy the presenter the same way.
     static std::unique_ptr<Presenter> create(VkContext& context, PresenterOptions options, std::string& error);
     ~Presenter();
     Presenter(const Presenter&) = delete;
@@ -136,18 +164,41 @@ public:
     // reason (resize, out of date, releaseSwapchain); not for the presenter's own destruction.
     void setBeforeRecreate(std::function<void()> callback) { before_recreate_ = std::move(callback); }
 
-    // The window's HWND. Any thread; it is valid for the presenter's lifetime.
+    // The window's HWND, or the content NSView on macOS. Any thread; it is valid for the presenter's lifetime.
     void* nativeWindowHandle() const;
 
     // Any thread; read from atomics the UI thread keeps current.
     WindowStatus windowStatus() const;
 
-    // Any thread; posts to the UI thread, which resizes the window (immediately when windowed; when leaving
-    // fullscreen or when restored from minimised otherwise). Choosing the preset that is already set re-applies it.
+    // Any thread; hands the request to the UI thread, which resizes the window (immediately when windowed; when
+    // leaving fullscreen or when restored from minimised otherwise). Choosing the preset that is already set re-applies
+    // it.
     void requestWindowSize(WindowSizePreset preset);
 
 private:
-    class Window;
+    // The OS window. Its state is defined per platform (vk_window_win32.cpp, vk_window_macos.mm); the
+    // contract below is all the presenter relies on.
+    class Window {
+    public:
+        // Opens the window; null with `error` set when that fails.
+        static std::unique_ptr<Window> create(const PresenterOptions& options, std::string& error);
+        ~Window();
+        Window(const Window&) = delete;
+        Window& operator=(const Window&) = delete;
+
+        void* nativeHandle() const;                 // HWND / the content NSView*
+        bool minimized() const;                     // any thread
+        VkExtent2D clientSize() const;              // pixels, any thread
+        WindowStatus status() const;                // any thread
+        void requestSize(WindowSizePreset preset);  // any thread
+        // Any thread. `error` is set when the result is not VK_SUCCESS.
+        VkResult createSurface(const VkContext& context, VkSurfaceKHR* surface, std::string& error) const;
+
+    private:
+        class Impl;
+        explicit Window(std::unique_ptr<Impl> impl);
+        std::unique_ptr<Impl> impl_;
+    };
     struct Stats {
         std::uint64_t acquires = 0;
         std::uint64_t presents = 0;

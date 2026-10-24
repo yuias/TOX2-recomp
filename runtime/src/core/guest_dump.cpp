@@ -9,12 +9,7 @@
 #include "core/fatal.h"
 #include "core/guest_memory.h"
 #include "core/log.h"
-
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-
-#include <bcrypt.h>
+#include "crypto/host_crypto.h"
 
 namespace tox2 {
 namespace {
@@ -33,10 +28,8 @@ bool parseNumber(std::string_view text, std::uint64_t& value) {
 }
 
 std::string sha256Hex(const std::uint8_t* data, std::size_t size) {
-    std::array<std::uint8_t, 32> digest{};
-    const NTSTATUS status = BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0, const_cast<PUCHAR>(data),
-                                       static_cast<ULONG>(size), digest.data(), static_cast<ULONG>(digest.size()));
-    if (status < 0) return {};
+    crypto::Sha256Digest digest{};
+    if (!crypto::sha256({data, size}, digest)) return {};
     std::string hex;
     for (const std::uint8_t byte : digest) hex += std::format("{:02x}", byte);
     return hex;

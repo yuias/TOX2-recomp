@@ -8,12 +8,13 @@
 
 namespace tox2 {
 
-// Cycles per millisecond of QueryThreadCycleTime, calibrated against steady_clock on first use (function-local static,
-// so callers during static initialisation are safe). The unit of the cycle count is not documented as time.
+// Cycles per millisecond of currentThreadCycles, calibrated against steady_clock on first use (function-local static,
+// so callers during static initialisation are safe). On Windows the unit of the cycle count is not documented as time;
+// on macOS a "cycle" is a nanosecond of CPU time, so this is about 1e6.
 double hostCyclesPerMs();
 
-// Cycles the calling thread has run so far (QueryThreadCycleTime): CPU time at the time-stamp counter rate; time the
-// thread is not scheduled does not count.
+// Cycles the calling thread has run so far (QueryThreadCycleTime: CPU time at the time-stamp counter rate; macOS: CPU
+// nanoseconds); time the thread is not scheduled does not count.
 std::uint64_t currentThreadCycles();
 
 struct CycleStats {
@@ -37,8 +38,8 @@ struct HostThreadCpu {
 };
 // Every registered thread, in registration order (append-only, so an earlier snapshot is a prefix by index).
 std::vector<HostThreadCpu> hostThreadCpuSnapshot();
-// User + kernel time of the whole process in microseconds, from cycle counts (QueryProcessCycleTime) so that it has the
-// resolution of the per-thread figures.
+// User + kernel time of the whole process in microseconds, from cycle counts (QueryProcessCycleTime; macOS: the process
+// CPU clock) so that it has the resolution of the per-thread figures.
 std::uint64_t processCpuUs();
 
 inline constexpr std::uint64_t kCpuLineMinUs = 5000;  // threads below 5 ms in the interval are folded into `other`

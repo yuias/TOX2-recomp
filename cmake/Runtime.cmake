@@ -1,7 +1,13 @@
 include_guard(GLOBAL)
 
-option(TOX2_RSX_WRITE_WATCH
-  "Skip re-hashing RSX textures whose guest pages had no write (OS write watch on the guest reservation)" ON)
+if(WIN32)
+  option(TOX2_RSX_WRITE_WATCH
+    "Skip re-hashing RSX textures whose guest pages had no write (OS write watch on the guest reservation)" ON)
+else()
+  # The write watch is a Windows memory API (MEM_WRITE_WATCH); other hosts re-hash every texture.
+  set(TOX2_RSX_WRITE_WATCH OFF CACHE BOOL
+    "Skip re-hashing RSX textures whose guest pages had no write (Windows only)" FORCE)
+endif()
 
 # spdlog is built as a static library rather than header-only: its sources then compile with the
 # project's default flags (no -Werror) and keep <windows.h> out of runtime translation units.
@@ -74,8 +80,8 @@ function(tox2_runtime_add_yyjson)
 endfunction()
 
 # xxHash is used header-only: XXH_INLINE_ALL compiles its functions into each translation unit that includes
-# xxhash.h, with the unit's own flags, so XXH3 picks the AVX2 code path from -march=x86-64-v3. Nothing is built
-# or installed from the submodule; SYSTEM keeps its header out of our warnings.
+# xxhash.h, with the unit's own flags, so XXH3 picks its vector code path (AVX2 or NEON) from TOX2_ARCH_FLAGS.
+# Nothing is built or installed from the submodule; SYSTEM keeps its header out of our warnings.
 function(tox2_runtime_add_xxhash)
   if(NOT EXISTS ${CMAKE_SOURCE_DIR}/externals/xxHash/xxhash.h)
     message(FATAL_ERROR
@@ -86,9 +92,54 @@ function(tox2_runtime_add_xxhash)
   target_compile_definitions(xxhash INTERFACE XXH_INLINE_ALL)
 endfunction()
 
+# Host crypto (AES, AES-CMAC, HMAC-SHA1, SHA-256) on the OS's own library: CNG on Windows,
+# CommonCrypto (part of libSystem, nothing to link) on macOS. Independent of the runtime core.
+# Call after enable_testing().
+function(tox2_crypto_add)
+  if(WIN32)
+    set(crypto_provider runtime/src/crypto/host_crypto_bcrypt.cpp)
+  elseif(APPLE)
+    set(crypto_provider runtime/src/crypto/host_crypto_commoncrypto.cpp)
+  else()
+    message(FATAL_ERROR "TOX2: no host crypto provider for this platform")
+  endif()
+  add_library(tox2_crypto STATIC ${crypto_provider})
+  target_compile_options(tox2_crypto PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+  target_include_directories(tox2_crypto PUBLIC ${CMAKE_SOURCE_DIR}/runtime/src)
+  if(WIN32)
+    target_link_libraries(tox2_crypto PRIVATE bcrypt)
+  endif()
+
+  add_executable(tox2_crypto_tests runtime/tests/crypto_test.cpp)
+  target_compile_options(tox2_crypto_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+  target_link_libraries(tox2_crypto_tests PRIVATE tox2_crypto)
+
+  add_test(NAME crypto_core COMMAND tox2_crypto_tests)
+  set_tests_properties(crypto_core PROPERTIES
+    PASS_REGULAR_EXPRESSION "crypto tests: [0-9]+ passed, 0 failed")
+endfunction()
+
 # Runtime core: everything that does not reference generated symbols, so it builds and its tests
 # run without a generated tree. Call after enable_testing().
 function(tox2_runtime_add_core)
+  tox2_crypto_add()
+  if(WIN32)
+    set(host_memory_provider runtime/src/core/host_memory_win32.cpp)
+  elseif(APPLE)
+    set(host_memory_provider runtime/src/core/host_memory_posix.cpp)
+  else()
+    message(FATAL_ERROR "TOX2: no host memory provider for this platform")
+  endif()
+  if(WIN32)
+    set(host_file_provider runtime/src/core/host_file_win32.cpp)
+  else()
+    set(host_file_provider runtime/src/core/host_file_posix.cpp)
+  endif()
+  if(WIN32)
+    set(timer_resolution_provider runtime/src/core/timer_resolution.cpp)
+  else()
+    set(timer_resolution_provider runtime/src/core/timer_resolution_posix.cpp)
+  endif()
   tox2_runtime_add_spdlog()
   tox2_runtime_add_libpng()
   tox2_runtime_add_yyjson()
@@ -110,6 +161,8 @@ function(tox2_runtime_add_core)
     runtime/src/core/fatal.cpp
     runtime/src/core/guest_dump.cpp
     runtime/src/core/guest_memory.cpp
+    ${host_file_provider}
+    ${host_memory_provider}
     runtime/src/core/host_priority.cpp
     runtime/src/core/latency_stats.cpp
     runtime/src/core/log.cpp
@@ -119,7 +172,7 @@ function(tox2_runtime_add_core)
     runtime/src/core/reservation.cpp
     runtime/src/core/thread_cpu.cpp
     runtime/src/core/threads.cpp
-    runtime/src/core/timer_resolution.cpp
+    ${timer_resolution_provider}
     runtime/src/hle/cell_atrac.cpp
     runtime/src/hle/cell_atrac_stream.cpp
     runtime/src/hle/cell_audio.cpp
@@ -153,6 +206,7 @@ function(tox2_runtime_add_core)
     runtime/src/input/gamepad_probe.cpp
     runtime/src/input/gamepad_select.cpp
     runtime/src/input/keyboard_pad.cpp
+    runtime/src/input/mac_key_codes.cpp
     runtime/src/input/pad_buttons.cpp
     runtime/src/input/pad_script.cpp
     runtime/src/lv2/sys_event.cpp
@@ -187,15 +241,18 @@ function(tox2_runtime_add_core)
     runtime/src/spu/spu_dispatch.cpp
     runtime/src/spu/spu_mfc.cpp
     runtime/src/spu/spu_thread.cpp)
-  target_compile_options(tox2_runtime_core PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_runtime_core PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_include_directories(tox2_runtime_core PUBLIC
     ${CMAKE_SOURCE_DIR}/runtime/src
     ${CMAKE_SOURCE_DIR}/runtime/include)
-  target_link_libraries(tox2_runtime_core PUBLIC bcrypt)
-  # timeBeginPeriod (core/timer_resolution.cpp).
-  target_link_libraries(tox2_runtime_core PRIVATE winmm)
-  # WaitOnAddress / WakeByAddressAll (core/reservation.cpp).
-  target_link_libraries(tox2_runtime_core PRIVATE synchronization)
+  # PRIVATE: the ELF loader, guest dumps and the SPU image registry hash with it.
+  target_link_libraries(tox2_runtime_core PRIVATE tox2_crypto)
+  if(WIN32)
+    # timeBeginPeriod (core/timer_resolution.cpp).
+    target_link_libraries(tox2_runtime_core PRIVATE winmm)
+    # WaitOnAddress / WakeByAddressAll (core/reservation.cpp).
+    target_link_libraries(tox2_runtime_core PRIVATE synchronization)
+  endif()
   # PRIVATE: spdlog types stay out of core/log.h, so consumers never compile against its headers.
   target_link_libraries(tox2_runtime_core PRIVATE spdlog::spdlog)
   # PRIVATE as well: the PNG codec stays inside cell_png_dec.cpp.
@@ -210,7 +267,7 @@ function(tox2_runtime_add_core)
     TOX2_RSX_WRITE_WATCH=$<IF:$<BOOL:${TOX2_RSX_WRITE_WATCH}>,1,0>)
 
   add_executable(tox2_runtime_tests runtime/tests/runtime_core_test.cpp)
-  target_compile_options(tox2_runtime_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_runtime_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   # The tests build their PNG inputs with libpng's writer.
   target_link_libraries(tox2_runtime_tests PRIVATE tox2_runtime_core png_static)
 
@@ -220,7 +277,7 @@ function(tox2_runtime_add_core)
 
   # The movie pipeline's core needs no FFmpeg, so its tests link the core library only.
   add_executable(tox2_media_core_tests runtime/tests/media_core_test.cpp)
-  target_compile_options(tox2_media_core_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_media_core_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_media_core_tests PRIVATE tox2_runtime_core)
 
   add_test(NAME media_core COMMAND tox2_media_core_tests)
@@ -228,7 +285,7 @@ function(tox2_runtime_add_core)
     PASS_REGULAR_EXPRESSION "media core tests: [0-9]+ passed, 0 failed")
 
   add_executable(tox2_spu_runtime_tests runtime/tests/spu_runtime_test.cpp)
-  target_compile_options(tox2_spu_runtime_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_spu_runtime_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_spu_runtime_tests PRIVATE tox2_runtime_core)
 
   add_test(NAME spu_runtime COMMAND tox2_spu_runtime_tests)
@@ -236,7 +293,7 @@ function(tox2_runtime_add_core)
     PASS_REGULAR_EXPRESSION "spu runtime tests: [0-9]+ passed, 0 failed")
 
   add_executable(tox2_game_options_tests runtime/tests/game_options_test.cpp)
-  target_compile_options(tox2_game_options_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_game_options_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_game_options_tests PRIVATE tox2_runtime_core)
 
   add_test(NAME game_options COMMAND tox2_game_options_tests)
@@ -244,21 +301,24 @@ function(tox2_runtime_add_core)
     PASS_REGULAR_EXPRESSION "game options tests: [0-9]+ passed, 0 failed")
 
   add_executable(tox2_save_dialog_tests runtime/tests/save_dialog_test.cpp)
-  target_compile_options(tox2_save_dialog_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_save_dialog_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_save_dialog_tests PRIVATE tox2_runtime_core)
 
   add_test(NAME save_dialog COMMAND tox2_save_dialog_tests)
   set_tests_properties(save_dialog PROPERTIES
     PASS_REGULAR_EXPRESSION "save dialog tests: [0-9]+ passed, 0 failed")
 
-  # The OS checks call Win32 directly; the library is linked for the build configuration macro only.
+  # The OS checks call Win32 directly and run on Windows only; the library is linked for the build configuration
+  # macro only.
   add_executable(tox2_write_watch_tests runtime/tests/write_watch_test.cpp)
-  target_compile_options(tox2_write_watch_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_write_watch_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_write_watch_tests PRIVATE tox2_runtime_core)
 
-  add_test(NAME write_watch_os COMMAND tox2_write_watch_tests)
-  set_tests_properties(write_watch_os PROPERTIES
-    PASS_REGULAR_EXPRESSION "write watch tests: [0-9]+ passed, 0 failed")
+  if(WIN32)
+    add_test(NAME write_watch_os COMMAND tox2_write_watch_tests)
+    set_tests_properties(write_watch_os PROPERTIES
+      PASS_REGULAR_EXPRESSION "write watch tests: [0-9]+ passed, 0 failed")
+  endif()
 
   # The test binary reports the value it was compiled with, so a build directory configured the other way fails here.
   if(TOX2_RSX_WRITE_WATCH)

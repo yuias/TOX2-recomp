@@ -17,6 +17,15 @@
       }
     },
     {
+      "name": "macos-clang",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/macos-homebrew-llvm.cmake",
+      "cacheVariables": { "CMAKE_EXPORT_COMPILE_COMMANDS": "ON" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
+    },
+    {
       "name": "debug",
       "inherits": "clang-ninja",
       "displayName": "Debug",
@@ -45,18 +54,34 @@
       "inherits": "release",
       "displayName": "Release, RSX write watch off",
       "cacheVariables": { "TOX2_RSX_WRITE_WATCH": "OFF" }
+    },
+    {
+      "name": "macos-debug",
+      "inherits": "macos-clang",
+      "displayName": "macOS Debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "macos-release",
+      "inherits": "macos-clang",
+      "displayName": "macOS Release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "profile", "configurePreset": "profile" },
-    { "name": "release-wwoff", "configurePreset": "release-wwoff" }
+    { "name": "release-wwoff", "configurePreset": "release-wwoff" },
+    { "name": "macos-debug", "configurePreset": "macos-debug" },
+    { "name": "macos-release", "configurePreset": "macos-release" }
   ],
   "testPresets": [
     { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
     { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
     { "name": "profile", "configurePreset": "profile", "output": { "outputOnFailure": true } },
-    { "name": "release-wwoff", "configurePreset": "release-wwoff", "output": { "outputOnFailure": true } }
+    { "name": "release-wwoff", "configurePreset": "release-wwoff", "output": { "outputOnFailure": true } },
+    { "name": "macos-debug", "configurePreset": "macos-debug", "output": { "outputOnFailure": true } },
+    { "name": "macos-release", "configurePreset": "macos-release", "output": { "outputOnFailure": true } }
   ]
 }

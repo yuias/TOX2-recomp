@@ -1045,7 +1045,9 @@ void startRsxThread(std::uint8_t* base) {
     if (g_frame_builder_enabled) g_consumer->enableFrameBuilder();
     if (!g_capture_frames.empty()) g_consumer->enableCapture(g_capture_frames);
     if (!g_arg_census_file.empty() || g_frame_builder_enabled) setRsxStopWriter(&onStop);
-    std::thread(consumerLoop, g_consumer, base).detach();
+    // The renderer and shaderc/glslang run on this thread; the default POSIX thread stack is too small.
+    RsxConsumer* consumer = g_consumer;
+    startHostThread([consumer, base] { consumerLoop(consumer, base); }, 8u << 20);
 }
 
 }  // namespace tox2

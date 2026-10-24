@@ -6,9 +6,38 @@ include("${CMAKE_SOURCE_DIR}/cmake/ffmpeg.cmake")
 # Only its headers are used at build time; the DLLs are loaded at run time (see
 # runtime/src/media/ffmpeg_api.h), so no import library is linked. Needs a successful fetch, which
 # leaves a marker holding the SHA-256 of the pinned zip.
+#
+# On macOS FFmpeg comes from Homebrew (`brew install ffmpeg`) and is loaded in place from its lib
+# directory; there is no pin and nothing is copied.
 function(tox2_media_find_ffmpeg)
   set(TOX2_FFMPEG_DIR "" CACHE PATH
-    "Extracted FFmpeg build (default: generated/deps/ffmpeg/<pinned asset name>)")
+    "Extracted FFmpeg build (default: generated/deps/ffmpeg/<pinned asset name>; macOS: brew --prefix ffmpeg)")
+  if(APPLE)
+    set(ffmpeg_dir "${TOX2_FFMPEG_DIR}")
+    if("${ffmpeg_dir}" STREQUAL "")
+      execute_process(
+        COMMAND brew --prefix ffmpeg
+        OUTPUT_VARIABLE ffmpeg_dir
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE brew_result)
+      if(NOT brew_result EQUAL 0)
+        set(ffmpeg_dir "")
+      endif()
+    endif()
+    if("${ffmpeg_dir}" STREQUAL "" OR
+       NOT EXISTS "${ffmpeg_dir}/include/libavcodec/avcodec.h" OR
+       NOT IS_DIRECTORY "${ffmpeg_dir}/lib")
+      message(FATAL_ERROR
+        "TOX2: FFmpeg not found (prefix '${ffmpeg_dir}'). Install it with `brew install ffmpeg` or "
+        "set TOX2_FFMPEG_DIR to a directory that contains include/libavcodec/avcodec.h and lib/.")
+    endif()
+    set(TOX2_FFMPEG_RESOLVED_DIR "${ffmpeg_dir}" PARENT_SCOPE)
+    set(TOX2_FFMPEG_DLLS "" PARENT_SCOPE)
+    message(STATUS "TOX2: FFmpeg: ${ffmpeg_dir}")
+    return()
+  endif()
+
   if("${TOX2_FFMPEG_DIR}" STREQUAL "")
     string(REGEX REPLACE "\\.zip$" "" asset_stem "${TOX2_FFMPEG_ASSET}")
     set(ffmpeg_dir "${CMAKE_SOURCE_DIR}/generated/deps/ffmpeg/${asset_stem}")
@@ -60,43 +89,51 @@ function(tox2_media_add)
   tox2_media_find_ffmpeg()
 
   add_library(tox2_media STATIC runtime/src/media/ffmpeg_api.cpp runtime/src/media/ffmpeg_codecs.cpp)
-  target_compile_options(tox2_media PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_media PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_include_directories(tox2_media PUBLIC ${CMAKE_SOURCE_DIR}/runtime/src)
   # SYSTEM keeps the FFmpeg headers out of our warnings; nothing links against FFmpeg itself.
   target_include_directories(tox2_media SYSTEM PUBLIC "${TOX2_FFMPEG_RESOLVED_DIR}/include")
   target_link_libraries(tox2_media PUBLIC tox2_runtime_core)
+  if(APPLE)
+    target_compile_definitions(tox2_media PRIVATE TOX2_FFMPEG_LIBRARY_DIR="${TOX2_FFMPEG_RESOLVED_DIR}/lib")
+  endif()
 
-  # The runtime loads the DLLs from the directory of the executable. The licence text and the
-  # notice travel with them.
-  set(bin_dir "${CMAKE_BINARY_DIR}/bin")
-  set(licence_dir "${bin_dir}/licenses/ffmpeg")
-  set(copied "")
-  foreach(dll ${TOX2_FFMPEG_DLLS})
-    get_filename_component(dll_name "${dll}" NAME)
-    add_custom_command(OUTPUT "${bin_dir}/${dll_name}"
-      COMMAND ${CMAKE_COMMAND} -E make_directory "${bin_dir}"
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${dll}" "${bin_dir}/${dll_name}"
-      DEPENDS "${dll}"
+  if(WIN32)
+    # The runtime loads the DLLs from the directory of the executable. The licence text and the
+    # notice travel with them.
+    set(bin_dir "${CMAKE_BINARY_DIR}/bin")
+    set(licence_dir "${bin_dir}/licenses/ffmpeg")
+    set(copied "")
+    foreach(dll ${TOX2_FFMPEG_DLLS})
+      get_filename_component(dll_name "${dll}" NAME)
+      add_custom_command(OUTPUT "${bin_dir}/${dll_name}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${bin_dir}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${dll}" "${bin_dir}/${dll_name}"
+        DEPENDS "${dll}"
+        VERBATIM)
+      list(APPEND copied "${bin_dir}/${dll_name}")
+    endforeach()
+    add_custom_command(OUTPUT "${licence_dir}/LICENSE.txt"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${licence_dir}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${TOX2_FFMPEG_RESOLVED_DIR}/LICENSE.txt" "${licence_dir}/LICENSE.txt"
+      DEPENDS "${TOX2_FFMPEG_RESOLVED_DIR}/LICENSE.txt"
       VERBATIM)
-    list(APPEND copied "${bin_dir}/${dll_name}")
-  endforeach()
-  add_custom_command(OUTPUT "${licence_dir}/LICENSE.txt"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${licence_dir}"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${TOX2_FFMPEG_RESOLVED_DIR}/LICENSE.txt" "${licence_dir}/LICENSE.txt"
-    DEPENDS "${TOX2_FFMPEG_RESOLVED_DIR}/LICENSE.txt"
-    VERBATIM)
-  add_custom_command(OUTPUT "${licence_dir}/FFMPEG-NOTICE.txt"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${licence_dir}"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      "${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md" "${licence_dir}/FFMPEG-NOTICE.txt"
-    DEPENDS "${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
-    VERBATIM)
-  list(APPEND copied "${licence_dir}/LICENSE.txt" "${licence_dir}/FFMPEG-NOTICE.txt")
-  add_custom_target(tox2_ffmpeg_runtime ALL DEPENDS ${copied})
+    add_custom_command(OUTPUT "${licence_dir}/FFMPEG-NOTICE.txt"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${licence_dir}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md" "${licence_dir}/FFMPEG-NOTICE.txt"
+      DEPENDS "${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+      VERBATIM)
+    list(APPEND copied "${licence_dir}/LICENSE.txt" "${licence_dir}/FFMPEG-NOTICE.txt")
+    add_custom_target(tox2_ffmpeg_runtime ALL DEPENDS ${copied})
+  else()
+    # Homebrew's dylibs are loaded in place; the target stays so add_dependencies on it keep working.
+    add_custom_target(tox2_ffmpeg_runtime ALL)
+  endif()
 
   add_executable(tox2_media_ffmpeg_tests runtime/tests/media_ffmpeg_test.cpp)
-  target_compile_options(tox2_media_ffmpeg_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_media_ffmpeg_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_media_ffmpeg_tests PRIVATE tox2_media)
   add_dependencies(tox2_media_ffmpeg_tests tox2_ffmpeg_runtime)
 

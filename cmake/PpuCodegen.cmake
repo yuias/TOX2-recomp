@@ -12,7 +12,7 @@ function(tox2_ppu_codegen_options target)
   endif()
   target_compile_options(${target} PRIVATE
     ${opt_level}
-    -march=x86-64-v3
+    ${TOX2_ARCH_FLAGS}
     -ffp-contract=off
     -fpatchable-function-entry=8
     -Wall
@@ -37,7 +37,7 @@ function(tox2_ppu_add_overrides)
   add_executable(tox2_ppu_overrides_tests
     runtime/tests/ppu_overrides_test.cpp
     $<TARGET_OBJECTS:tox2_ppu_overrides>)
-  target_compile_options(tox2_ppu_overrides_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_ppu_overrides_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_ppu_overrides_tests PRIVATE tox2_runtime_core)
 
   add_test(NAME ppu_overrides COMMAND tox2_ppu_overrides_tests)
@@ -94,7 +94,7 @@ function(tox2_ppu_add_generated_tree)
   target_include_directories(tox2_ppu_generated PUBLIC "${generated_dir}" "${generated_dir}/libsre")
 
   add_executable(tox2_ppu_link_test runtime/tests/ppu_link_test.cpp)
-  target_compile_options(tox2_ppu_link_test PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_ppu_link_test PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   # The stub runtimes only supply the hooks of the generated code; the SPU library is defined by
   # tox2_spu_add_generated_tree, which runs after this function.
   target_link_libraries(tox2_ppu_link_test PRIVATE tox2_ppu_generated tox2_spu_generated tox2_ppu_stub tox2_spu_stub)
@@ -107,8 +107,11 @@ function(tox2_ppu_add_generated_tree)
   # Only game_main.cpp references the generated tables, so the runtime core builds without them.
   # The runtime core supplies every hook; neither stub may be linked here (duplicate symbols).
   add_executable(tox2_game runtime/src/game_main.cpp)
-  target_compile_options(tox2_game PRIVATE -march=x86-64-v3 -Wall -Wextra)
-  target_link_libraries(tox2_game PRIVATE tox2_ppu_generated tox2_spu_generated tox2_runtime_core tox2_audio_wasapi tox2_input_gameinput)
+  target_compile_options(tox2_game PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+  target_link_libraries(tox2_game PRIVATE tox2_ppu_generated tox2_spu_generated tox2_runtime_core)
+  if(WIN32)
+    target_link_libraries(tox2_game PRIVATE tox2_audio_wasapi tox2_input_gameinput)
+  endif()
   target_sources(tox2_game PRIVATE $<TARGET_OBJECTS:tox2_ppu_overrides>)
 
   # Pins how far the game gets; updated by whoever moves the milestone.

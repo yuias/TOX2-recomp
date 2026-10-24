@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -39,11 +40,32 @@
 #include "tox2/ppu_context.h"
 #include "tox2/spu_lower_stackfree.h"
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+extern char** environ;
+#endif
 
 namespace {
+
+unsigned long processId() {
+#ifdef _WIN32
+    return GetCurrentProcessId();
+#else
+    return static_cast<unsigned long>(getpid());
+#endif
+}
 
 int g_passed;
 int g_failed;
@@ -1876,7 +1898,7 @@ std::vector<std::uint8_t> makeCapGuest() {
 }
 
 std::filesystem::path capTestDir() {
-    return std::filesystem::temp_directory_path() / ("tox2_spu_capture_test_" + std::to_string(GetCurrentProcessId()));
+    return std::filesystem::temp_directory_path() / ("tox2_spu_capture_test_" + std::to_string(processId()));
 }
 
 // A thread with the capture images loaded, the GET source in guest memory and a recognisable register and LS state.
@@ -2430,16 +2452,18 @@ int runStopChild(std::string_view mode) {
 }
 
 struct ChildResult {
-    DWORD exit_code = 0xFFFFFFFF;
+    std::uint32_t exit_code = 0xFFFFFFFF;
     std::string output;
 };
 
+#ifdef _WIN32
 // Runs this executable again with `arg`, capturing stdout and stderr together.
-ChildResult runChild(const wchar_t* arg) {
+ChildResult runChild(const char* arg) {
     ChildResult result;
     wchar_t exe[MAX_PATH];
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    std::wstring command = std::wstring(L"\"") + exe + L"\" " + arg;
+    const std::string narrow_arg = arg;
+    std::wstring command = std::wstring(L"\"") + exe + L"\" " + std::wstring(narrow_arg.begin(), narrow_arg.end());
 
     SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
     HANDLE read_end = nullptr;
@@ -2467,27 +2491,103 @@ ChildResult runChild(const wchar_t* arg) {
         result.output.append(buffer, got);
     }
     WaitForSingleObject(pi.hProcess, 30000);
-    GetExitCodeProcess(pi.hProcess, &result.exit_code);
+    DWORD exit_code = 0xFFFFFFFF;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    result.exit_code = exit_code;
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     CloseHandle(read_end);
     return result;
 }
+#else
+std::string selfPath() {
+#ifdef __APPLE__
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);  // fails and reports the needed size
+    std::string path(size, '\0');
+    if (_NSGetExecutablePath(path.data(), &size) != 0) {
+        return {};
+    }
+    path.resize(std::strlen(path.c_str()));
+    return path;
+#else
+    return std::filesystem::read_symlink("/proc/self/exe").string();
+#endif
+}
+
+// Runs this executable again with `arg`, capturing stdout and stderr together. The exit code is
+// 0xFFFFFFFF when the child ends on a signal or cannot be started.
+ChildResult runChild(const char* arg) {
+    ChildResult result;
+    const std::string exe = selfPath();
+    int fds[2];
+    if (exe.empty() || pipe(fds) != 0) {
+        return result;
+    }
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], 1);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], 2);
+    std::string exe_arg = exe;
+    std::string mode_arg = arg;
+    char* const argv[] = {exe_arg.data(), mode_arg.data(), nullptr};
+    pid_t pid = 0;
+    const int spawned = posix_spawn(&pid, exe.c_str(), &actions, nullptr, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(fds[1]);
+    if (spawned != 0) {
+        close(fds[0]);
+        return result;
+    }
+
+    // A child that never ends is killed after 30 s, like the wait on Windows but without leaking it.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    char buffer[4096];
+    for (;;) {
+        const auto left =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        if (left.count() <= 0) {
+            kill(pid, SIGKILL);
+            break;
+        }
+        pollfd pfd{fds[0], POLLIN, 0};
+        const int ready = poll(&pfd, 1, static_cast<int>(left.count()));
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready <= 0) continue;  // timeout is handled by the deadline check above
+        const ssize_t got = read(fds[0], buffer, sizeof buffer);
+        if (got <= 0) break;
+        result.output.append(buffer, static_cast<std::size_t>(got));
+    }
+    close(fds[0]);
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    if (WIFEXITED(status)) {
+        result.exit_code = static_cast<std::uint32_t>(WEXITSTATUS(status));
+    }
+    return result;
+}
+#endif
 
 void testStopChildren() {
     struct Case {
-        const wchar_t* arg;
+        const char* arg;
         const char* line;
     };
     const Case cases[] = {
-            {L"--spu-untracked-child",
+            {"--spu-untracked-child",
              "tox2: stop: spu: unknown target ls 0x06000 from ls 0x03024 on thread 0x01000108 (untracked)"},
-            {L"--spu-non-entry-child",
+            {"--spu-non-entry-child",
              "tox2: stop: spu: unknown target ls 0x03004 from ls 0x03024 on thread 0x01000108 (synth)"},
-            {L"--spu-non-link-child", "loaded at a non-link address"},
-            {L"--spu-mismatch-child", "tox2: stop: spu: code mismatch at ls 0x03010 (synth) on thread 0x01000108"},
-            {L"--spu-halt-child", "tox2: stop: spu: halt at ls 0x03004 on thread 0x01000108"},
-            {L"--spu-unhandled-child", "tox2: stop: spu: unhandled word 0xdeadbeef at ls 0x03008 on thread 0x01000108"},
+            {"--spu-non-link-child", "loaded at a non-link address"},
+            {"--spu-mismatch-child", "tox2: stop: spu: code mismatch at ls 0x03010 (synth) on thread 0x01000108"},
+            {"--spu-halt-child", "tox2: stop: spu: halt at ls 0x03004 on thread 0x01000108"},
+            {"--spu-unhandled-child", "tox2: stop: spu: unhandled word 0xdeadbeef at ls 0x03008 on thread 0x01000108"},
     };
     for (const Case& c : cases) {
         const ChildResult r = runChild(c.arg);
@@ -2495,13 +2595,13 @@ void testStopChildren() {
         // The dump follows the stop line.
         const bool dump = r.output.find("trace (oldest first)") != std::string::npos &&
                           r.output.find("ls map:") != std::string::npos;
-        CHECK(r.exit_code == static_cast<DWORD>(tox2::ExitCode::Fatal));
+        CHECK(r.exit_code == static_cast<std::uint32_t>(tox2::ExitCode::Fatal));
         CHECK(found);
         CHECK(dump);
         if (!found || !dump) std::fprintf(stderr, "child output:\n%s\n", r.output.c_str());
     }
     // The tracked ranges appear in the dump of the non-link case.
-    const ChildResult r = runChild(L"--spu-non-link-child");
+    const ChildResult r = runChild("--spu-non-link-child");
     CHECK(r.output.find("ls 0x05000..0x05100 synth segment 0 delta 8192") != std::string::npos);
 }
 
@@ -2813,11 +2913,11 @@ int runMfcChild(std::string_view mode) {
 void testMfcStopChildren() {
     for (const MfcStopCase& c : kMfcStops) {
         const std::string narrow = c.arg;
-        const ChildResult r = runChild(std::wstring(narrow.begin(), narrow.end()).c_str());
+        const ChildResult r = runChild(narrow.c_str());
         const std::string expected = std::string("tox2: stop: spu: mfc ") + c.line;
         const bool found = r.output.find(expected) != std::string::npos;
         const bool dump = r.output.find("trace (oldest first)") != std::string::npos;
-        CHECK(r.exit_code == static_cast<DWORD>(tox2::ExitCode::Fatal));
+        CHECK(r.exit_code == static_cast<std::uint32_t>(tox2::ExitCode::Fatal));
         CHECK(found);
         CHECK(dump);
         if (!found || !dump) std::fprintf(stderr, "child %s output:\n%s\n", c.arg, r.output.c_str());
@@ -3470,11 +3570,11 @@ int runChanChild(std::string_view mode) {
 void testChanStopChildren() {
     for (const ChanStopCase& c : kChanStops) {
         const std::string narrow = c.arg;
-        const ChildResult r = runChild(std::wstring(narrow.begin(), narrow.end()).c_str());
+        const ChildResult r = runChild(narrow.c_str());
         const std::string expected = std::string("tox2: stop: spu: ") + c.line;
         const bool found = r.output.find(expected) != std::string::npos;
         const bool dump = r.output.find("trace (oldest first)") != std::string::npos;
-        CHECK(r.exit_code == static_cast<DWORD>(tox2::ExitCode::Fatal));
+        CHECK(r.exit_code == static_cast<std::uint32_t>(tox2::ExitCode::Fatal));
         CHECK(found);
         CHECK(dump);
         if (!found || !dump) std::fprintf(stderr, "child %s output:\n%s\n", c.arg, r.output.c_str());
@@ -4049,14 +4149,17 @@ void testLv2HostPriority() {
         std::lock_guard<tox2::GuestLock> lock(tox2::guestLock());
         return tox2::spuThreadById(thread)->hostPriority();
     };
-    CHECK(priorityOf(0, 16) == THREAD_PRIORITY_HIGHEST);
-    CHECK(priorityOf(0, 31) == THREAD_PRIORITY_HIGHEST);
-    CHECK(priorityOf(0, 100) == THREAD_PRIORITY_NORMAL);
+    const int raised = tox2::hostThreadPriorityOf(tox2::HostThreadRole::HighPrioritySpu);
+    int normal = -100;  // what a new host thread starts with
+    std::thread([&] { normal = tox2::currentHostThreadPriority(); }).join();
+    CHECK(priorityOf(0, 16) == raised);
+    CHECK(priorityOf(0, 31) == raised);
+    CHECK(priorityOf(0, 100) == normal);
     // No scheduler context: the priority number is not even range-checked.
-    CHECK(priorityOf(0x18, 16) == THREAD_PRIORITY_NORMAL);
+    CHECK(priorityOf(0x18, 16) == normal);
 
     tox2::setHostPrioritiesEnabled(false);
-    CHECK(priorityOf(0, 16) == THREAD_PRIORITY_NORMAL);
+    CHECK(priorityOf(0, 16) == normal);
     tox2::setHostPrioritiesEnabled(true);
 }
 
@@ -4465,21 +4568,20 @@ int runLv2Child(std::string_view mode) {
 
 void testLv2StopChildren() {
     struct Case {
-        const wchar_t* arg;
+        const char* arg;
         const char* line;
     };
     const Case cases[] = {
-            {L"--lv2-badstop-child",
-             "tox2: stop: spu: stop 0x1234 at ls 0x03704 on thread 0x01000100: not implemented"},
-            {L"--lv2-intr-empty-child",
+            {"--lv2-badstop-child", "tox2: stop: spu: stop 0x1234 at ls 0x03704 on thread 0x01000100: not implemented"},
+            {"--lv2-intr-empty-child",
              "tox2: stop: spu: WrOutIntrMbox 0x40000000 on thread 0x01000100 with an empty outbound mailbox"},
-            {L"--lv2-intr-code-child",
+            {"--lv2-intr-code-child",
              "tox2: stop: spu: WrOutIntrMbox 0x90000000 on thread 0x01000100: code 144 is not implemented"},
     };
     for (const Case& c : cases) {
         const ChildResult r = runChild(c.arg);
         const bool found = r.output.find(c.line) != std::string::npos;
-        CHECK(r.exit_code == static_cast<DWORD>(tox2::ExitCode::Fatal));
+        CHECK(r.exit_code == static_cast<std::uint32_t>(tox2::ExitCode::Fatal));
         CHECK(found);
         CHECK(r.output.find("trace (oldest first)") != std::string::npos);
         if (!found) std::fprintf(stderr, "child output:\n%s\n", r.output.c_str());
@@ -4523,9 +4625,9 @@ int runHostUnknownChild() {
 void testSpuFatalChildren() {
     // fatal() (not spuStop) on an SPU thread: the SPU dump, no PPU dump, the census with the SPU section.
     {
-        const ChildResult r = runChild(L"--lv2-fatal-child");
+        const ChildResult r = runChild("--lv2-fatal-child");
         const std::string& out = r.output;
-        CHECK(r.exit_code == static_cast<DWORD>(tox2::ExitCode::Fatal));
+        CHECK(r.exit_code == static_cast<std::uint32_t>(tox2::ExitCode::Fatal));
         CHECK(out.contains("[spu 01000100] tox2: stop: fatal guest fault: spu test fault"));
         CHECK(out.contains("spu thread 0x01000100 \"lvthread\": jump_target 0x03d00"));
         CHECK(out.contains("trace (oldest first): 03d00"));
@@ -4539,9 +4641,9 @@ void testSpuFatalChildren() {
     }
     // A guest fault inside an MFC transfer reaches fatal() from the fault handler on the same host thread.
     {
-        const ChildResult r = runChild(L"--lv2-fault-child");
+        const ChildResult r = runChild("--lv2-fault-child");
         const std::string& out = r.output;
-        CHECK(r.exit_code == static_cast<DWORD>(tox2::ExitCode::Fatal));
+        CHECK(r.exit_code == static_cast<std::uint32_t>(tox2::ExitCode::Fatal));
         CHECK(out.contains("[spu 01000100] tox2: stop: fatal guest fault: read from guest address 0x30000000"));
         CHECK(out.contains("spu thread 0x01000100 \"lvthread\": jump_target 0x03e00"));
         CHECK(out.contains("trace (oldest first): 03e00"));
@@ -4551,9 +4653,9 @@ void testSpuFatalChildren() {
     }
     // An unknown target counts in the census of the same stop.
     {
-        const ChildResult r = runChild(L"--spu-host-unknown-child");
+        const ChildResult r = runChild("--spu-host-unknown-child");
         const std::string& out = r.output;
-        CHECK(r.exit_code == static_cast<DWORD>(tox2::ExitCode::Fatal));
+        CHECK(r.exit_code == static_cast<std::uint32_t>(tox2::ExitCode::Fatal));
         CHECK(
                 out.contains("[spu 01000109] tox2: stop: spu: unknown target ls 0x06000 from ls 0x03024 on thread "
                              "0x01000109 (untracked)"));

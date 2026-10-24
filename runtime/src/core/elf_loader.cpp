@@ -10,12 +10,8 @@
 
 #include "core/guest_memory.h"
 #include "core/log.h"
+#include "crypto/host_crypto.h"
 #include "tox2/ppu_context.h"
-
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <bcrypt.h>
 
 namespace tox2 {
 namespace {
@@ -60,11 +56,8 @@ struct ProgramHeader {
 std::uint64_t alignUp(std::uint64_t value, std::uint64_t align) { return (value + align - 1) / align * align; }
 
 std::string sha256Hex(const std::vector<std::uint8_t>& data) {
-    std::array<std::uint8_t, 32> digest{};
-    const NTSTATUS status =
-            BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0, const_cast<PUCHAR>(data.data()),
-                       static_cast<ULONG>(data.size()), digest.data(), static_cast<ULONG>(digest.size()));
-    if (status < 0) {
+    crypto::Sha256Digest digest{};
+    if (!crypto::sha256(data, digest)) {
         return {};
     }
     std::string hex;

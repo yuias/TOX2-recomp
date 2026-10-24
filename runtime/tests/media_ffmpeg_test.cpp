@@ -14,6 +14,10 @@
 #include <system_error>
 #include <vector>
 
+extern "C" {
+#include <libswresample/version_major.h>
+}
+
 #include "core/log.h"
 #include "media/ffmpeg_api.h"
 #include "media/ffmpeg_codecs.h"
@@ -45,7 +49,8 @@ void testEmptyDirectory() {
     CHECK(!result.has_value());
     if (!result) {
         std::printf("empty directory: unavailable: %s\n", result.error().c_str());
-        CHECK(result.error().find("avcodec-") != std::string::npos);
+        CHECK(result.error().find(tox2::ffmpegLibraryFileName("avcodec", LIBAVCODEC_VERSION_MAJOR)) !=
+              std::string::npos);
     }
 
     const auto absent = tox2::loadFfmpeg(dir / "does_not_exist");
@@ -54,9 +59,9 @@ void testEmptyDirectory() {
 }
 
 // A load that fails after some libraries are mapped must unmap them again. Copies of the real
-// libraries sit in a temporary directory next to an avcodec that is not a valid DLL; if the loader
-// kept the copies mapped, Windows would refuse to delete them. Runs before testLoad for the same
-// reason as testEmptyDirectory.
+// libraries sit in a temporary directory next to an avcodec that is not a valid library; if the
+// loader kept the copies mapped, Windows would refuse to delete them. Runs before testLoad for the
+// same reason as testEmptyDirectory.
 void testPartialLoadIsUnmapped(const std::filesystem::path& real_dir) {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -64,21 +69,19 @@ void testPartialLoadIsUnmapped(const std::filesystem::path& real_dir) {
     fs::remove_all(dir, ec);
     fs::create_directories(dir, ec);
 
-    const std::string avcodec = "avcodec-" + std::to_string(LIBAVCODEC_VERSION_MAJOR) + ".dll";
+    const std::string avcodec = tox2::ffmpegLibraryFileName("avcodec", LIBAVCODEC_VERSION_MAJOR);
+    const std::string dependencies[] = {tox2::ffmpegLibraryFileName("avutil", LIBAVUTIL_VERSION_MAJOR),
+                                        tox2::ffmpegLibraryFileName("swresample", LIBSWRESAMPLE_VERSION_MAJOR),
+                                        tox2::ffmpegLibraryFileName("swscale", LIBSWSCALE_VERSION_MAJOR)};
     int copied = 0;
-    for (const char* stem : {"avutil-", "swresample-", "swscale-"}) {
-        for (const fs::directory_entry& entry : fs::directory_iterator(real_dir, ec)) {
-            const std::string name = entry.path().filename().string();
-            if (name.starts_with(stem) && name.ends_with(".dll")) {
-                fs::copy_file(entry.path(), dir / name, fs::copy_options::overwrite_existing, ec);
-                if (!ec) copied++;
-            }
-        }
+    for (const std::string& name : dependencies) {
+        fs::copy_file(real_dir / name, dir / name, fs::copy_options::overwrite_existing, ec);
+        if (!ec) copied++;
     }
     CHECK(copied == 3);
     {
         std::ofstream bogus(dir / avcodec, std::ios::binary);
-        bogus << "not a dll";
+        bogus << "not a library";
     }
 
     const auto result = tox2::loadFfmpeg(dir);
@@ -536,12 +539,9 @@ void testAtracFrameDecoder() {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main() {
     testEmptyDirectory();
-    if (argc > 0) {
-        std::error_code ec;
-        testPartialLoadIsUnmapped(std::filesystem::absolute(argv[0], ec).parent_path());
-    }
+    testPartialLoadIsUnmapped(tox2::defaultFfmpegDirectory());
     testLoad();
     testYuvToRgb();
     testVideoDecoderLifecycle();

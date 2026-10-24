@@ -3,6 +3,7 @@
 import contextlib
 import io
 import json
+import platform
 import re
 import shutil
 import subprocess
@@ -374,6 +375,10 @@ class OutputTest(unittest.TestCase):
         self.assertIn("ai $3,$4,1", result.records[0].text)
 
 
+# The CPU baseline of cmake/CompilerChecks.cmake for the host.
+ARCH_FLAG = "-mcpu=apple-m1" if platform.machine() in ("arm64", "aarch64") else "-march=x86-64-v3"
+
+
 @unittest.skipUnless(shutil.which("clang"), "clang is not installed")
 class GeneratedCodeCompilesTest(unittest.TestCase):
     def test_table_program_compiles_with_the_codegen_warnings_as_errors(self):
@@ -385,7 +390,7 @@ class GeneratedCodeCompilesTest(unittest.TestCase):
             for name in files:
                 if name.endswith(".c"):
                     proc = subprocess.run(
-                        ["clang", "-c", "-o", str(Path(tmp) / "out.o"), "-std=c23", "-O1", "-march=x86-64-v3",
+                        ["clang", "-c", "-o", str(Path(tmp) / "out.o"), "-std=c23", "-O1", ARCH_FLAG,
                          "-ffp-contract=off", "-fpatchable-function-entry=8", "-Wall", "-Wextra", "-Werror",
                          "-I", str(REPO_ROOT / "runtime" / "include"), "-I", tmp, str(Path(tmp) / name)],
                         capture_output=True, text=True)

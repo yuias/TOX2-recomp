@@ -3,8 +3,9 @@
 The pad on port 0 of the game's `cellPad` comes from the keyboard, from a gamepad, from both
 together, or from a pad script. This page covers gamepads: what a player needs, how the code is
 organised, how pads are selected, how a system dialog takes the pad from the game, the log lines, the diagnostic
-option `--pad-probe` and the tool `tox2_padtool`. The keyboard, the pad script and the `PadProvider` seam are in
-[Input](runtime.md#input) in the runtime internals, and the option defaults are in
+option `--pad-probe` and the tool `tox2_padtool`. The sections about GameInput, Steam and `tox2_padtool` describe Windows;
+[Gamepads on macOS](#gamepads-on-macos) describes the macOS backend. The keyboard, the pad script and
+the `PadProvider` seam are in [Input](runtime.md#input) in the runtime internals, and the option defaults are in
 [`tox2_game` options](runtime-options.md#window-input-and-sound).
 
 *Tales of Xillia 2* imports six `cellPad` functions (`cellPadInit`, `cellPadEnd`,
@@ -22,8 +23,8 @@ and runs of other builds, and have not been repeated one by one in this game.
 
 A run with the window reads every connected gamepad together with the keyboard. All pads and the
 keyboard drive port 0 at the same time; ports 1 to 6 stay empty, because the runtime provides one pad.
-Runs with `--no-window` never load GameInput, so unattended runs and the tests do not depend on a
-pad or on the GameInput runtime.
+Runs with `--no-window` never load GameInput (Windows) or GameController.framework (macOS), so
+unattended runs and the tests do not depend on a pad or on the GameInput runtime.
 
 ### Supported pads
 
@@ -142,6 +143,78 @@ The selection code (below) already handles a Steam virtual pad should one appear
 pad and ignores the physical pad behind it. That path is covered by unit tests with a path format
 taken from SDL's reading of Steam's device paths, not by a real Steam run.
 
+## Gamepads on macOS
+
+On macOS the gamepad backend is `tox2_input_gamecontroller` (`gamecontroller_backend.mm`, Objective-C++),
+which reads the controllers that GameController.framework reports. Nothing has to be installed. The
+mapping, the dead zones, the trigger threshold, the merging of several pads, the focus gate and the
+vibration conversion described above are core code behind the backend interface and work the same;
+this section lists what differs. It was written from the code: on the Mac where the port was run, `input_gamecontroller`
+skipped its device part because no controller was connected, so no gamepad has been checked on macOS.
+
+- **Pads.** A controller whose profile includes `extendedGamepad` has the gamepad kind and is read.
+  Any other controller is listed with the controller kind only; the hub logs it as `not a gamepad`
+  and ignores it. Which controllers macOS gives that profile is up to the system.
+- **No vendor or product id, no path.** The framework does not give them, so every device reports
+  `0000:0000` in the log and in `--pad-probe`, its path is empty and its name is the controller's
+  `vendorName`. Device ids increase with every arrival and are never reused, and the device
+  generation grows with every connect and disconnect. The `device +`, `device -` and `device <id> path`
+  lines are written by the GameInput backend only, so a run on macOS shows the hub's
+  `gamepad 0000:0000 used` lines but no `device +` lines.
+- **Buttons.** The framework's A, B, X and Y become the face buttons of the table above, the left and
+  right shoulders L1 and R1, `buttonMenu` Start and `buttonOptions` Select, then the stick clicks, the
+  d-pad, the sticks (with +y up) and the analog triggers. A pad without an options button simply never
+  presses Select.
+- **Steam.** Only the environment variables of the Steam line are read (`tox2: pad: steam overlay not
+  loaded[; ...]`); the overlay is never reported as loaded. Without a device path no Steam virtual pad
+  can be recognised, and the `SDL_GAMECONTROLLER_IGNORE_DEVICES` rule needs the overlay, so every
+  controller with the gamepad kind is used.
+- **Focus.** The gamepad hub counts the process as being in front while it is the active application
+  (`NSRunningApplication`). While another application is active the buttons are released and the
+  motors stop, as described under Focus above.
+- **Threads.** Controller connections and disconnections are reported on the main queue, which
+  `tox2_game` serves with its event loop on the main thread (see
+  [Building](building.md#running-and-debugging-on-a-mac)); the backend needs the main run loop to
+  learn about controllers. Each controller delivers its state on a private serial queue into a copy that
+  `read` returns under a mutex, so the gamepad thread never calls the framework while a handler runs.
+  Controllers that are connected when the backend is created are listed at once.
+- **Vibration.** Rumble goes through Core Haptics. A controller has rumble when the framework gives it
+  a haptics object. For each such controller the backend keeps two haptic engines, created when the
+  motor is first set to a non-zero strength. When the controller offers the left and the right handle
+  as haptic localities, the low-frequency motor drives the left handle and the high-frequency motor
+  the right one. Otherwise both use the default locality and differ only in sharpness (smooth for
+  the low-frequency motor, sharp for the high-frequency one). Each motor plays a continuous event of
+  30 s in a loop, and the game's strength is the event's intensity, changed while it plays; a strength
+  of zero stops it. An engine that the system stops or resets is created again at the next request.
+  A step that fails is logged once per motor as `tox2: pad: haptics: <step> failed: <reason>`, and the
+  game goes on. Trigger motors are not used.
+- **Log.** The start line is `tox2: pad: gameinput GameController.framework`: the prefix is shared
+  with Windows and the rest is the backend's description. If the framework is missing, the warning
+  `tox2: pad: gameinput unavailable: GameController.framework is not available; gamepads disabled`
+  appears and the keyboard keeps working.
+- **No `tox2_padtool`.** The tool is Windows only; `--pad-probe` reports devices and readings on macOS.
+  `input_gamecontroller` tests the backend with a real controller (see [Tests](tests.md)).
+
+### Keyboard and the overlay on macOS
+
+The keyboard is the same pad source as on Windows. The Cocoa window turns each key event into a PC/AT
+scan code from the key's macOS virtual key code (`runtime/src/input/mac_key_codes.*`), which is a
+physical position, so AZERTY and QWERTZ keyboards keep the layout of the README table. The modifier
+keys come from the flags-changed events, left and right apart. Keys that have no scan code (`Fn`,
+media keys, the Japanese `Eisu` and `Kana` keys) are not used.
+
+- **Cmd.** A key pressed together with `Cmd` is a system shortcut: AppKit takes the key-down
+  (`Cmd+Q` ends the run), and the pad never sees it. The key-up of such a key is still given to the
+  window, so a key pressed with `Cmd` does not stay down for the pad. The `Cmd` keys themselves are
+  not pad buttons.
+- **Other keys** are consumed by the window and not passed on, so macOS does not beep. The window has
+  no input method: key events never reach the text input system.
+- **Overlay.** The debug overlay takes the mouse and keys through Dear ImGui's macOS backend
+  (`imgui_impl_osx`), reached through the bridge `runtime/src/overlay/imgui_osx_bridge.mm`, which
+  compiles the backend source and lets the window pass events to it under the overlay's mutex instead
+  of the backend's own event monitor. `F1` and `Tab` work as on Windows. Typed text for the overlay's
+  text boxes is the key's characters, without an input method or the clipboard.
+
 ## System dialogs
 
 The save data list dialog (see [Save data dialog](runtime.md#save-data-dialog)) is operated with the same pad that
@@ -178,16 +251,18 @@ plays the game, so it takes the pad for as long as it is open.
 | Part | File | Library | Role |
 | --- | --- | --- | --- |
 | Backend interface | `runtime/src/input/gamepad_backend.h` | `tox2_runtime_core` | `GamepadReading` (buttons, sticks -1 to 1 with +y up, triggers 0 to 1), `GamepadDeviceInfo`, `SteamContext`, and `GamepadBackend` (the device list with a generation counter, `read`, `setRumble`); no Windows or GameInput types |
-| GameInput backend | `runtime/src/input/gameinput_backend.*` | `tox2_input_gameinput` | The only code that includes `GameInput.h` and `<windows.h>` for gamepads: loading, the device table, readings, rumble, the focus policy, `detectSteamContext` and `processOwnsForegroundWindow`; also `readRaw`, the generic controller layout used by `tox2_padtool watch --raw` |
+| GameInput backend (Windows) | `runtime/src/input/gameinput_backend.*` | `tox2_input_gameinput` | The only code that includes `GameInput.h` and `<windows.h>` for gamepads: loading, the device table, readings, rumble, the focus policy, `detectSteamContext` and `processOwnsForegroundWindow`; also `readRaw`, the generic controller layout used by `tox2_padtool watch --raw` |
+| GameController backend (macOS) | `runtime/src/input/gamecontroller_backend.*` | `tox2_input_gamecontroller` | The only code that includes the GameController, Core Haptics and AppKit headers: the device table from the connect and disconnect notifications, readings copied from the controllers' handlers, rumble through Core Haptics, `detectSteamContext` (environment variables only) and `processOwnsForegroundWindow` |
+| Key codes | `runtime/src/input/mac_key_codes.*` | `tox2_runtime_core` | Plain tables: macOS virtual key code to PC/AT scan code, and the modifier bit of each modifier key; built and tested on every system |
 | Mapping | `runtime/src/input/gamepad_map.*` | `tox2_runtime_core` | Button table, dead zone, trigger threshold, merging of several pads, motor conversion |
 | Selection | `runtime/src/input/gamepad_select.*` | `tox2_runtime_core` | Recognising Steam's virtual pad and the rule that picks the pads in use |
 | Hub | `runtime/src/input/gamepad_hub.*` | `tox2_runtime_core` | The gamepad thread: devices, selection, readings, focus gate and rumble, written to the shared state |
 | Probe and formatters | `runtime/src/input/gamepad_probe.*` | `tox2_runtime_core` | `--pad-probe`, and the text formats that the log and `tox2_padtool` share |
 | Shared state | `runtime/src/input/keyboard_pad.*`, `pad_buttons.*` | `tox2_runtime_core` | The `Gamepad` input source, the analog snapshot, the connection flag and the stored vibration; `pad_buttons.*` also holds `dialogButtons()`, the enter and back buttons of system dialogs |
-| Targets | `cmake/Input.cmake`, `cmake/gameinput.cmake`, `tools/fetch-gameinput.ps1` | | The package check, `tox2_input_gameinput`, `tox2_padtool`, the tests, and the pinned package |
+| Targets | `cmake/Input.cmake`, `cmake/gameinput.cmake`, `tools/fetch-gameinput.ps1` | | The package check, `tox2_input_gameinput`, `tox2_padtool` and `input_gameinput` (Windows), `tox2_input_gamecontroller` and `input_gamecontroller` (macOS), `input_core`, and the pinned package |
 
 Mapping, selection, the hub and the probe are core code behind `GamepadBackend`, so `input_core`
-tests them with a fake backend and no GameInput.
+tests them with a fake backend and no GameInput or GameController.
 
 ### The GameInput package
 
@@ -219,7 +294,7 @@ with the lock held again, never from the RSX thread.
 The gamepad thread (`startGamepadHub`) is a detached host thread that owns its `shared_ptr`s;
 nothing joins it, because the process ends with `std::_Exit`. It:
 
-1. creates the GameInput backend, which takes about a second and so stays off the boot path;
+1. creates the gamepad backend (GameInput or GameController), which can take about a second and so stays off the boot path;
 2. logs the start lines (below);
 3. runs the hub every 4 ms (`kGamepadPollInterval`), and, with `--pad-probe`, the probe every 50 ms
    (`kGamepadProbeInterval`), always from the same thread, because the backend allows one calling
@@ -272,12 +347,14 @@ All gamepad lines start with `tox2: pad:`. The start line of the pad itself is
 
 | Line | Level | Source |
 | --- | --- | --- |
+| `tox2: pad: gameinput GameController.framework` | info | macOS: after the backend is created. The `gameinput` prefix is shared with the Windows line below |
 | `tox2: pad: gameinput v3 from <module>` | info | after the backend is created; the module is the file name that provides GameInput (`gameoverlayrenderer64.dll` under Steam's hook) |
 | `tox2: pad: gameinput unavailable: <reason>; gamepads disabled` | warn | the backend could not be created; no hub and no probe |
 | `tox2: pad: steam overlay loaded\|not loaded[; <NAME>=<value> ...]` | info | right after the backend is created; lists the Steam variables that are set (`SteamGameId`, `SteamOverlayGameId`, `SteamAppId`, `EnableConfiguratorSupport`, `SteamVirtualGamepadInfo`, `SDL_GAMECONTROLLER_IGNORE_DEVICES`, `SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD`); `SteamVirtualGamepadInfo` prints as `set` |
-| `tox2: pad: device + <vid:pid> <kinds> rumble yes\|no "<name>"` | info | a device arrived; `<kinds>` is `gamepad`, `controller` or `gamepad+controller` |
-| `tox2: pad: device <id> path <pnp path>` | debug | the device's path, with the arrival |
-| `tox2: pad: device - <vid:pid>` | info | a device was removed |
+| `tox2: pad: device + <vid:pid> <kinds> rumble yes\|no "<name>"` | info | (GameInput backend only) a device arrived; `<kinds>` is `gamepad`, `controller` or `gamepad+controller` |
+| `tox2: pad: device <id> path <pnp path>` | debug | (GameInput backend only) the device's path, with the arrival |
+| `tox2: pad: device - <vid:pid>` | info | (GameInput backend only) a device was removed |
+| `tox2: pad: haptics: <step> failed: <reason>` | warn | macOS: a Core Haptics step failed for a motor; once per motor |
 | `tox2: pad: gamepad <vid:pid> <use>[ (steam slot <n>)]` | info | a device's use changed; `<use>` is `used`, `handled by steam`, `other process` or `not a gamepad` |
 | `tox2: pad: gamepad input paused (background)` and `tox2: pad: gamepad input resumed` | debug | the process lost or regained the foreground window |
 | `tox2: pad: probe ...` | info | only with `--pad-probe` (below) |
@@ -304,7 +381,7 @@ window is in the background. Add `--log-level debug --log FILE` to keep the devi
 
 ## `tox2_padtool`
 
-`build/release/bin/tox2_padtool.exe` uses the same backend without the game. It asks GameInput for
+`tox2_padtool` exists on Windows only. `build/release/bin/tox2_padtool.exe` uses the same backend without the game. It asks GameInput for
 background input, because its console window belongs to another process. That works for the Xbox pad
 but not for the DualShock 4, whose input arrives only while the console window is in the foreground. Output goes to stdout. Exit
 codes: 0 on success, 1 when GameInput is unavailable (the message names the reason, on stderr), 2 on

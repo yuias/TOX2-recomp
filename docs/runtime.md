@@ -119,7 +119,7 @@ Each class line gives its acquisitions per second, the wait statistics, the queu
 contended acquisition, the hold statistics and, as ms summed over the waiters, the holder classes its waits were
 spent behind (see [Threads](#threads)). A statistics group is `n <count> avg <x> p99 <x> max <x> ms >T <count>`:
 milliseconds, and the number of values above the threshold (1 ms for waits and holds, 0.1 ms for hand-offs). The
-`process cpu` line after the class lines is the CPU time of the whole process (`GetProcessTimes`).
+`process cpu` line after the class lines is the CPU time of the whole process (`GetProcessTimes` on Windows, `getrusage` on macOS).
 The `census: spu` section has the reservation-table and per-thread receive lines described under
 [SPU usage](spu.md#log-lines-and-census). The first call of each syscall and
 each import also logs `tox2: first sc <number> <name>` or `tox2: first hle <module>::<name>` while
@@ -131,7 +131,12 @@ the game runs; these lines are the progress markers that `game_boot` checks (see
 The guest space is one reservation of 4 GiB plus a guard area, big-endian, accessed only through
 the `tox2Read*` and `tox2Write*` helpers. Pages are committed on demand by the allocators below. An
 access to an uncommitted page raises a fault that the runtime turns into a fatal stop with the
-guest address and the access kind.
+guest address and the access kind. The operating system calls sit behind `runtime/src/core/host_memory.h`:
+on Windows the space is reserved and committed with `VirtualAlloc` and faults arrive through a
+vectored exception handler; on macOS it is `mmap` and `mprotect` with a `SIGSEGV` and `SIGBUS` handler
+that runs on an alternate stack. The guest keeps 4 KiB logical pages, but the host page of an Apple
+Silicon Mac is 16 KiB, so a host page stays accessible while any of its logical pages is committed
+(see "Page size and guard pages" under [Running and debugging on a Mac](building.md#running-and-debugging-on-a-mac)).
 
 | Range | Use |
 | --- | --- |
@@ -140,7 +145,7 @@ guest address and the access kind.
 | `0x20000000..0x30000000` | User memory with 1 MiB pages (`sys_memory_allocate` with flags 0x400 or 0). |
 | `0x30000000..0x40000000` | User memory with 64 KiB pages (`sys_memory_allocate` with flags 0x200). |
 | `0xC0000000..0xCF900000` | RSX local memory (video memory), committed when the game initializes GCM. |
-| `0xD0000000..0xE0000000` | Thread stacks, 4 KiB pages, with an uncommitted 4 KiB guard page on each side of every stack. |
+| `0xD0000000..0xE0000000` | Thread stacks, 4 KiB pages, with an uncommitted 4 KiB guard page on each side of every stack (on macOS a guard that shares a 16 KiB host page with a live allocation stays accessible). |
 
 The top 64 KiB, `0xFFFF0000..0xFFFFFFFF`, are never committed: they hold the entry keys of host
 functions, the function descriptors that the HLE layer hands to guest code (for example a callback
@@ -152,7 +157,8 @@ The primary stack size from the executable's process parameters is clamped as RP
 the stack. `sys_memory_get_user_memory_size` reports a 0xD500000 container, the default one: the
 primary stack, the executable's image and the libsre image (`0x40000` bytes) are charged to it at boot, `sys_memory_allocate` charges what it hands
 out, and a memory container (below) takes its whole size from it when it is created. The timebase
-runs at 79.8 MHz, scaled from the host performance counter.
+runs at 79.8 MHz, scaled from the host monotonic counter (`QueryPerformanceCounter` on Windows,
+`CLOCK_UPTIME_RAW` on macOS).
 
 ## Dispatch
 
@@ -171,7 +177,8 @@ census lists every such target.
 
 ## Threads
 
-Each guest thread is a host thread (16 MiB host stack) with its own context. `--ppu-threads legacy|1|2` (default `2`)
+Each guest thread is a host thread (16 MiB host stack; `_beginthreadex` on Windows, a detached
+pthread with a 64 KiB host guard region on macOS) with its own context. `--ppu-threads legacy|1|2` (default `2`)
 selects how guest code is serialised:
 
 | Mode | Guest code runs under | PPU guest threads in parallel | RSX, audio and SPU callbacks |
@@ -371,11 +378,13 @@ game neither issued the lv2 lwmutex system calls 95 to 99 nor contains a call si
 read-only `GETLLAR` of an SPU counter in the same 128-byte line as a lwmutex, whose `PUTLLC` writes only the
 counter's own 8-byte chunk (see [SPU usage](spu.md)).
 
-`tox2_game` holds a 1 ms system timer resolution for the whole run (`timeBeginPeriod`,
-`runtime/src/core/timer_resolution.*`). Timed waits (`sys_timer_usleep`, lock and queue time-outs)
+On Windows, `tox2_game` holds a 1 ms system timer resolution for the whole run (`timeBeginPeriod`,
+`runtime/src/core/timer_resolution.cpp`). Timed waits (`sys_timer_usleep`, lock and queue time-outs)
 are host condition variable waits, and Windows rounds them to its timer tick (15.6 ms by default),
 so a 1 ms guest sleep would take 15 ms. This game's main thread and a worker poll with `sys_timer_usleep` (about 21,000 calls in a 20 s run). The
-request ends with the process; a refusal is logged as a warning and the default tick stays. In `1` and `2` a
+request ends with the process; a refusal is logged as a warning and the default tick stays. macOS has no
+coarse tick to raise, so `timer_resolution_posix.cpp` holds nothing and the request counts as granted
+(see [Audio](audio.md#engine-and-block-clock)). In `1` and `2` a
 `sys_timer_usleep` or `sys_timer_sleep` call is a plain host sleep with the slot released: nothing can wake it early.
 
 SPU threads run in parallel with the PPU threads in every mode, which in `legacy` makes them the exception to "never
@@ -566,7 +575,7 @@ that does not abort or exit does not issue it.
 | Event flag | `sys_event_flag_create` (82), `_destroy` (83), `_wait` (85), `_set` (87), `_clear` (118), `_cancel` (132), `_get` (139) |
 | Event queue and port | `sys_event_queue_create` (128), `_destroy` (129), `_receive` (130), `_tryreceive` (131), `_drain` (133); `sys_event_port_create` (134), `_destroy` (135), `_connect_local` (136), `_disconnect` (137), `_send` (138). A queue created with a non-zero IPC key can be found by that key (the host looks it up and sends to it; the `cellAudio` notify uses this); a second live queue with the same key fails with `CELL_EEXIST`, key 0 makes a local queue, and destroying the queue forgets the key. IPC ports (`sys_event_port_connect_ipc`) are not supported. |
 | SPU | `sys_spu_initialize` (169); thread groups: `sys_spu_thread_group_create` (170), `_destroy` (171), `_start` (173), `_terminate` (177), `_join` (178), `_connect_event` (185), `_disconnect_event` (186), `_set_cooperative_victims` (250), `_connect_event_all_threads` (251), `_disconnect_event_all_threads` (252); threads: `sys_spu_thread_initialize` (172), `_write_ls` (181), `_read_ls` (182), `_write_spu_mb` (190), `_connect_event` (191), `_disconnect_event` (192), `_bind_queue` (193), `_unbind_queue` (194). A started group runs its threads as SPU host threads (see [SPU system calls](#spu-system-calls)). |
-| File system | `sys_fs_open` (801), `_read` (802), `_write` (803), `_close` (804), `_opendir` (805), `_readdir` (806), `_closedir` (807), `_stat` (808), `_fstat` (809), `_mkdir` (811), `_unlink` (814), `_lseek` (818); see [Virtual file system](virtual-file-system.md#virtual-file-system) |
+| File system | `sys_fs_open` (801), `_read` (802), `_write` (803), `_close` (804), `_opendir` (805), `_readdir` (806), `_closedir` (807), `_stat` (808), `_fstat` (809), `_mkdir` (811), `_unlink` (814), `_lseek` (818); host files are opened through `runtime/src/core/host_file.h` (`CreateFileW` on Windows, `open` on macOS; Windows opens with every share mode, so the guest can unlink or reopen a file it still holds open); see [Virtual file system](virtual-file-system.md#virtual-file-system) |
 | Thread | `_sys_ppu_thread_exit` (41), `sys_ppu_thread_yield` (43; `CELL_OK` only when a PPU thread of equal or higher priority ran, see [Threads](#threads)), `sys_ppu_thread_join` (44), `sys_ppu_thread_detach` (45; a thread that already exited without being joined is dropped, as in RPCS3), `sys_ppu_thread_set_priority` (47; stores the value), `sys_ppu_thread_get_priority` (48); the creation rule of `sys_ppu_thread_create` is under [Threads](#threads) |
 
 ### Process and page calls
@@ -903,8 +912,8 @@ selection, Steam, the GameInput runtime, log lines and tools) are described in [
 | Buttons | `runtime/src/input/pad_buttons.*` | The 16 buttons as a bit mask, `PadAnalog` (sticks and trigger pressure), `padStateFromButtons` and `padStateFromInput` (digital words, pressure words at 0xFF for pressed buttons or the analog trigger value, sticks, everything else as the neutral pad) and the button names used by scripts, and `dialogButtons()`, the enter and back buttons of system dialogs (circle and cross, see [Input](input.md#system-dialogs)) |
 | State and provider | `runtime/src/input/keyboard_pad.*` | The scan-code table, `KeyboardPadState` (the state of every host source: keyboard, script, gamepad) and the provider for port 0 (always connected, or connected only while a gamepad is in use with `--pad gamepad`; other ports empty) |
 | Script | `runtime/src/input/pad_script.*` | The script parser and the player thread |
-| Gamepad | `runtime/src/input/gamepad_*`, `gameinput_backend.*` | Backend interface, GameInput backend, mapping, selection, the gamepad thread and `--pad-probe`; see [Input](input.md#design) |
-| Window | `runtime/src/render/vk_window.*` | Key and focus messages from the window thread; turns the IME off for the window |
+| Gamepad | `runtime/src/input/gamepad_*`, `gameinput_backend.*`, `gamecontroller_backend.*` | Backend interface, GameInput backend (Windows), GameController backend (macOS), mapping, selection, the gamepad thread and `--pad-probe`; see [Input](input.md#design) |
+| Window | `runtime/src/render/vk_window.*`, `vk_window_win32.cpp`, `vk_window_macos.mm` | Key and focus messages from the window thread (on macOS, from the main thread's event loop); on Windows it turns the IME off for the window |
 | Overlay | `runtime/src/overlay/debug_overlay.*` | The `F1` toggle and the message hook that decides which key presses the [debug overlay](#debug-overlay) withholds from the pad |
 | Dialog interception | `runtime/src/hle/cell_pad.cpp` | `setPadIntercepted`, `padIntercepted` and `pollHostPad`, used by the [save data dialog](#save-data-dialog) |
 
@@ -926,27 +935,32 @@ nothing joins them, because the process ends with `std::_Exit`.
 
 ### Key handling
 
-- Keys are identified by scan code (PC/AT set 1 make code from `lParam` bits 16 to 23, plus `0xE000`
-  for an extended key), not by virtual key, so the mapping is a positional cluster on any layout
-  and works while an IME is open. A zero scan code (some injected input) falls back to
-  `MapVirtualKeyW`. Only the dedicated arrow keys map; the numpad does not.
+- Keys are identified by scan code (PC/AT set 1 make code), not by virtual key, so the mapping is a
+  positional cluster on any layout and works while an IME is open. On Windows the scan code is
+  `lParam` bits 16 to 23, plus `0xE000` for an extended key, and a zero scan code (some injected
+  input) falls back to `MapVirtualKeyW`. On macOS the Cocoa window turns the key's virtual key code
+  into the scan code (see [Input](input.md#keyboard-and-the-overlay-on-macos)). Only the dedicated
+  arrow keys map; the numpad does not.
 - Key repeats are dropped, so they do not refresh a press time.
 - A press stays in the reported state for at least `KeyboardPadState::kMinPressVisible` (60 ms)
   after it started, also when the key is already up. The game reads the pad about every 33 ms and
   `cellPadGetData` reports only changes, so a shorter tap could fall between two reads.
 - Both opposite D-pad directions held cancel each other. A held direction beats the 60 ms tail of a
   released opposite one; with two tails the later press wins.
-- `WM_KILLFOCUS` releases every `Keyboard` button at once (a key-up is not delivered to a window
-  without focus). Script buttons are a separate source and stay; the gamepad thread releases its own
-  source when the process loses the foreground window. `Alt` combinations still reach the
-  default window procedure, so `Alt+F4` closes the window.
-- `F11` and `Alt+Enter` switch the window between windowed and borderless fullscreen (a popup window
+- A loss of window focus (`WM_KILLFOCUS` on Windows, the window losing key status on macOS)
+  releases every `Keyboard` button at once (a key-up is not delivered to a window without focus).
+  Script buttons are a separate source and stay; the gamepad thread releases its own source when the
+  process loses the foreground window. On Windows, `Alt` combinations still reach the default window
+  procedure, so `Alt+F4` closes the window; on macOS `Cmd+Q` is handled by AppKit and ends the run.
+- On Windows, `F11` and `Alt+Enter` switch the window between windowed and borderless fullscreen (a popup window
   covering the monitor the window is on); the next press restores the earlier size and position. Neither key
   is in the pad map, and the window procedure handles them before the overlay and the pad see them.
-  The state is saved (see [Window](#window)).
+  The state is saved (see [Window](#window)). On macOS fullscreen is the system's: `Ctrl+Cmd+F`
+  (the View menu item "Toggle Full Screen") and the green window button. A key pressed with `Cmd` never reaches the
+  pad, and `F11` and `Alt+Enter` are not fullscreen keys there.
 - `F1` (scan code `0x3B`) is not in the pad map: it toggles the [debug overlay](#debug-overlay) and
   never reaches the pad, with any `--pad` value. While the overlay is shown and ImGui wants the
-  keyboard (a text box is active), key presses (`WM_KEYDOWN`, `WM_SYSKEYDOWN`) are withheld from the
+  keyboard (a text box is active), key presses (`WM_KEYDOWN`, `WM_SYSKEYDOWN` on Windows) are withheld from the
   pad. Key-ups are always delivered, so a key that went down before the overlay took the keyboard is
   still released.
 - The press mode that the game sets with `cellPadSetPortSetting` decides whether `cellPad` copies
@@ -1056,21 +1070,27 @@ by `render_core` (`testKeyMessages`).
 
 ## Window
 
-The window is created and run by one thread (the window thread), the only one that calls Win32 functions
-on it. Other threads ask it for something with `PostMessageW`, never with a call that waits.
+On Windows the window is created and run by one thread (the window thread), the only one that calls Win32 functions
+on it. Other threads ask it for something with `PostMessageW`, never with a call that waits. On macOS AppKit
+requires the process main thread: `tox2_game` runs the Cocoa event loop there (`runWithHostEventLoop` in
+`runtime/src/render/vk_window.h`) and the boot and the supervisor on a second thread; the window code is
+`vk_window_macos.mm`, and requests from other threads are queued to the main thread. The rest of this section
+describes Windows unless it says macOS.
 
 - *Size presets.* The client area is one of four presets, in physical pixels: `720p` (1280x720, the
   default), `1080p` (1920x1080), `1440p` (2560x1440) and `2160p` (3840x2160). `--window-size` sets the
   one at start-up and the overlay's `Window size` combo changes it while the game runs. DPI scaling does
   not change the sizes: at a display scale of 150 % the 720p window still has a 1280x720 client area, so
   the game's frame (1280x720 times the [resolution scale](rendering.md#resolution-scale)) maps one to one
-  onto the preset of the same size.
+  onto the preset of the same size. On macOS the presets are physical pixels too, so on a Retina screen
+  (backing scale 2) `720p` is a 640x360-point window.
 - *Fit.* When the preset plus the window frame (at the window's DPI) does not fit the work area of the
   monitor the window is on, the window gets the largest 16:9 client size that does (a width that is a
   multiple of 16). The preset itself stays selected and saved, so a larger monitor gets the full size at
   the next start. The invisible resize borders count as frame, so a reduced window is a few pixels
   smaller than the work area would allow. The window keeps its top left corner and is moved just far
-  enough to lie inside the work area; one larger than the work area is aligned to its top left.
+  enough to lie inside the work area; one larger than the work area is aligned to its top left. On macOS the
+  room is the screen's visible frame (without the menu bar and the Dock) minus the title bar.
 - *Choosing a preset.* Choosing the preset that is already set sizes the window again, which snaps a
   dragged window back. A maximised window is restored first. In fullscreen nothing changes until the
   window leaves fullscreen, and then the preset is applied. While the window is minimised it is applied
@@ -1078,9 +1098,12 @@ on it. Other threads ask it for something with `PostMessageW`, never with a call
   chosen; the overlay then shows the preset with the actual size, for example `1080p (window 1500x844)`.
 - *Fullscreen.* `Alt+Enter` and `F11` switch between windowed and borderless fullscreen. `--fullscreen on`
   starts in fullscreen: the preset is applied to the hidden window first and the window is shown
-  fullscreen, so no windowed frame appears, and leaving fullscreen returns to the preset.
+  fullscreen, so no windowed frame appears, and leaving fullscreen returns to the preset. On macOS it is
+  the system's native fullscreen (its own space): `Ctrl+Cmd+F`, the View menu item "Toggle Full Screen" and the
+  green window button switch it, `--fullscreen on` starts in it, and a preset chosen while in it applies
+  when the window returns to windowed. `Cmd+Q`, the application menu's Quit and the close button end the run.
 - *Saved state.* The preset (from the overlay) and the fullscreen state (from `Alt+Enter` and `F11`) are
-  saved to `config.json` as soon as the player changes them, and restored at the next start. The start-up
+  saved to `config.json` as soon as the player changes them (on macOS the fullscreen state comes from the native fullscreen transitions), and restored at the next start. The start-up
   state, whatever its source, and dragging the frame are never saved. See
   [Saved settings](runtime-options.md#saved-settings). The window position is not saved, and a move to a
   monitor with another display scale keeps the window rectangle.
@@ -1119,8 +1142,10 @@ Design notes:
   it. `overlay_model.*` holds the numbers (no ImGui), `overlay_panels.*` the ImGui window,
   `overlay_sources.*` the connections to the runtime (audio engine and `cellAudio` counters, the
   `rsx unimplemented` snapshot, the flip limiter, the capture request and status, the log level) and
-  `debug_overlay.*` the Vulkan and Win32 backends. The overlay only reads atomics and locked
-  snapshots and never touches guest memory.
+  `debug_overlay.*` the Vulkan backend and the keys. The calls into the window system sit behind
+  `overlay_platform.h`, implemented by `overlay_platform_win32.cpp` (Win32 backend) and
+  `overlay_platform_macos.mm` (`imgui_impl_osx`, reached through `imgui_osx_bridge.mm`).
+  The overlay only reads atomics and locked snapshots and never touches guest memory.
 - `tox2_overlay` does not know about the config file. When the player picks a value in the Settings
   section, the panel calls `OverlaySources::setting_changed` with the setting and the value in its
   command-line form, only when the pick differs from what the combo shows (for the window size, from the
@@ -1137,10 +1162,11 @@ Design notes:
   any overlay's context (this one and the save dialog's) takes the shared lock `imguiMutex()` in
   `runtime/src/overlay/imgui_context.h` and makes its context current for the scope (`ImGuiContextScope`). The window
   thread feeds the context the mouse and key
-  messages (the Win32 backend calls `SetCapture` and `GetKeyState`, which only work on the thread that
+  messages (on Windows, the Win32 backend calls `SetCapture` and `GetKeyState`, which only work on the thread that
   owns the window); the RSX thread holds the mutex while it builds and records a frame, and never
-  across a swapchain call. `ImGui_ImplWin32_NewFrame` is not used, because its key workaround reads
-  `GetKeyState` on the calling thread. Hiding the overlay sends ImGui a focus-lost event so that held
+  across a swapchain call. On Windows `ImGui_ImplWin32_NewFrame` is not used, because its key workaround reads
+  `GetKeyState` on the calling thread. On macOS the window passes each event to `imgui_impl_osx` under the
+  mutex instead of the backend's own event monitor, and a focus change reaches ImGui as an explicit focus event. Hiding the overlay sends ImGui a focus-lost event so that held
   keys and buttons are dropped, and showing it again sends a focus-gained event: ImGui 1.91.9b keeps
   clearing its input while it believes the application has no focus.
 - The overlay window has no `imgui.ini`, no docking, no gamepad navigation and does not change the

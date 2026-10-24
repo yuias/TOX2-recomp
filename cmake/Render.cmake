@@ -20,13 +20,48 @@ function(tox2_render_add_libraries)
     ${CMAKE_SOURCE_DIR}/externals/Vulkan-Headers/include)
   # No link against the Vulkan loader import library: volk loads it at run time.
   target_compile_definitions(volk PUBLIC VK_NO_PROTOTYPES)
-  target_compile_options(volk PRIVATE -march=x86-64-v3)
+  target_compile_options(volk PRIVATE ${TOX2_ARCH_FLAGS})
 endfunction()
 
 # The run-time shader compiler is the SDK's static shaderc, located through $VULKAN_SDK. The
 # debug variant (shaderc_combinedd.lib) is built against the debug CRT (/MDd) and must be used
 # with Debug only; every other configuration uses the release library (/MD).
+#
+# On macOS the SDK ships one libshaderc_combined.a for every configuration. $VULKAN_SDK (the SDK's
+# macOS directory) is tried first, then /usr/local, where the SDK's system-global install puts the
+# same files; the variable is often not exported in the shell that runs CMake.
 function(tox2_render_add_shaderc)
+  if(APPLE)
+    set(shaderc_prefix "")
+    set(shaderc_label "")
+    if(DEFINED ENV{VULKAN_SDK} AND NOT "$ENV{VULKAN_SDK}" STREQUAL "")
+      file(TO_CMAKE_PATH "$ENV{VULKAN_SDK}" sdk)
+      if(EXISTS "${sdk}/lib/libshaderc_combined.a" AND EXISTS "${sdk}/include/shaderc/shaderc.hpp")
+        set(shaderc_prefix "${sdk}")
+        set(shaderc_label "$VULKAN_SDK")
+      endif()
+    endif()
+    if(shaderc_prefix STREQUAL "" AND
+       EXISTS "/usr/local/lib/libshaderc_combined.a" AND
+       EXISTS "/usr/local/include/shaderc/shaderc.hpp")
+      set(shaderc_prefix "/usr/local")
+      set(shaderc_label "/usr/local")
+    endif()
+    if(shaderc_prefix STREQUAL "")
+      message(FATAL_ERROR
+        "TOX2: shaderc not found. Install the LunarG Vulkan SDK and export VULKAN_SDK (the SDK's "
+        "macOS directory) or install its system-global component; expected "
+        "lib/libshaderc_combined.a and include/shaderc/shaderc.hpp")
+    endif()
+
+    add_library(shaderc_combined STATIC IMPORTED GLOBAL)
+    set_target_properties(shaderc_combined PROPERTIES
+      IMPORTED_LOCATION "${shaderc_prefix}/lib/libshaderc_combined.a")
+    target_include_directories(shaderc_combined SYSTEM INTERFACE "${shaderc_prefix}/include")
+    message(STATUS "TOX2: shaderc: libshaderc_combined.a from ${shaderc_label}/lib")
+    return()
+  endif()
+
   if(NOT DEFINED ENV{VULKAN_SDK} OR "$ENV{VULKAN_SDK}" STREQUAL "")
     message(FATAL_ERROR
       "TOX2: VULKAN_SDK is not set; expected $VULKAN_SDK/Lib/shaderc_combined.lib "
@@ -71,6 +106,12 @@ function(tox2_render_find_streamline)
   set(enabled FALSE)
   if(mode STREQUAL "OFF")
     message(STATUS "TOX2: Streamline: off (TOX2_ENABLE_DLSS=OFF)")
+  elseif(NOT WIN32)
+    # The SDK ships Windows binaries only.
+    if(mode STREQUAL "ON")
+      message(FATAL_ERROR "TOX2: Streamline: TOX2_ENABLE_DLSS=ON needs a Windows build")
+    endif()
+    message(STATUS "TOX2: Streamline: off (Windows only)")
   else()
     set(sdk "${TOX2_STREAMLINE_DIR}")
     set(found TRUE)
@@ -180,7 +221,12 @@ function(tox2_render_add)
     runtime/src/render/vk_textures.cpp
     runtime/src/render/vk_window.cpp
     runtime/src/render/vp_translator.cpp)
-  target_compile_options(tox2_render PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  if(WIN32)
+    target_sources(tox2_render PRIVATE runtime/src/render/vk_window_win32.cpp)
+  elseif(APPLE)
+    target_sources(tox2_render PRIVATE runtime/src/render/vk_window_macos.mm)
+  endif()
+  target_compile_options(tox2_render PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_include_directories(tox2_render PUBLIC ${CMAKE_SOURCE_DIR}/runtime/src)
   target_include_directories(tox2_render SYSTEM PUBLIC
     ${CMAKE_SOURCE_DIR}/externals/VulkanMemoryAllocator/include)
@@ -192,8 +238,18 @@ function(tox2_render_add)
     VMA_VULKAN_VERSION=1003000)
   target_link_libraries(tox2_render PUBLIC volk tox2_runtime_core)
   target_link_libraries(tox2_render PRIVATE shaderc_combined)
-  # ImmAssociateContext turns the IME off for the game window.
-  target_link_libraries(tox2_render PRIVATE imm32)
+  if(WIN32)
+    # ImmAssociateContext turns the IME off for the game window.
+    target_link_libraries(tox2_render PRIVATE imm32)
+  elseif(APPLE)
+    # AppKit windows; QuartzCore for the CAMetalLayer that MoltenVK renders into.
+    target_link_libraries(tox2_render PRIVATE "-framework Cocoa" "-framework QuartzCore")
+  endif()
+  if(APPLE AND DEFINED ENV{VULKAN_SDK} AND NOT "$ENV{VULKAN_SDK}" STREQUAL "")
+    # The loader search in vk_context.cpp falls back to the SDK's copy when /usr/local/lib has none.
+    file(TO_CMAKE_PATH "$ENV{VULKAN_SDK}" sdk_root)
+    target_compile_definitions(tox2_render PRIVATE TOX2_VULKAN_SDK_LIB_DIR="${sdk_root}/lib")
+  endif()
   # PRIVATE: libpng types stay inside frame_dump.cpp.
   target_link_libraries(tox2_render PRIVATE png_static)
   if(TOX2_STREAMLINE_ENABLED)
@@ -206,7 +262,7 @@ function(tox2_render_add)
   endif()
 
   add_executable(tox2_render_tests runtime/tests/render_test.cpp)
-  target_compile_options(tox2_render_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_render_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_render_tests PRIVATE tox2_render)
 
   add_test(NAME render_core COMMAND tox2_render_tests)
@@ -214,9 +270,22 @@ function(tox2_render_add)
     PASS_REGULAR_EXPRESSION
       "render tests: [0-9]+ passed, 0 failed|render tests: skipped: no Vulkan device")
 
+  if(APPLE)
+    # Opens a window, so it needs a logged-in session and must not run next to other window tests. The
+    # test exits 77 (skipped) when the window server is not reachable.
+    add_executable(tox2_render_window_tests runtime/tests/render_window_test.cpp)
+    target_compile_options(tox2_render_window_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+    target_link_libraries(tox2_render_window_tests PRIVATE tox2_render)
+    add_test(NAME render_window COMMAND tox2_render_window_tests)
+    set_tests_properties(render_window PROPERTIES
+      PASS_REGULAR_EXPRESSION "render window tests: [0-9]+ passed, 0 failed"
+      SKIP_RETURN_CODE 77
+      RUN_SERIAL TRUE)
+  endif()
+
   # Needs no GPU. The dumped programs come from generated/rsx; the test skips them when absent.
   add_executable(tox2_vp_translator_tests runtime/tests/vp_translator_test.cpp)
-  target_compile_options(tox2_vp_translator_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_vp_translator_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_compile_definitions(tox2_vp_translator_tests PRIVATE
     TOX2_RSX_DUMP_DIR="${CMAKE_SOURCE_DIR}/generated/rsx")
   target_link_libraries(tox2_vp_translator_tests PRIVATE tox2_render)
@@ -225,7 +294,7 @@ function(tox2_render_add)
     PASS_REGULAR_EXPRESSION "vp translator tests: [0-9]+ passed, 0 failed")
 
   add_executable(tox2_fp_translator_tests runtime/tests/fp_translator_test.cpp)
-  target_compile_options(tox2_fp_translator_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_fp_translator_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_compile_definitions(tox2_fp_translator_tests PRIVATE
     TOX2_RSX_DUMP_DIR="${CMAKE_SOURCE_DIR}/generated/rsx")
   target_link_libraries(tox2_fp_translator_tests PRIVATE tox2_render)
@@ -235,7 +304,7 @@ function(tox2_render_add)
 
   # Header-only maths; needs no GPU.
   add_executable(tox2_frame_gen_tests runtime/tests/frame_gen_test.cpp)
-  target_compile_options(tox2_frame_gen_tests PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_frame_gen_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_frame_gen_tests PRIVATE tox2_render)
   add_test(NAME frame_gen COMMAND tox2_frame_gen_tests)
   set_tests_properties(frame_gen PROPERTIES
@@ -244,7 +313,7 @@ function(tox2_render_add)
   # Replays a capture without the game: prints the command list from the frame builder, renders it
   # headless and writes the displayed frame as a PNG.
   add_executable(tox2_rsxreplay tools/tox2_rsxreplay/main.cpp)
-  target_compile_options(tox2_rsxreplay PRIVATE -march=x86-64-v3 -Wall -Wextra)
+  target_compile_options(tox2_rsxreplay PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
   target_link_libraries(tox2_rsxreplay PRIVATE tox2_render)
 
   if(TOX2_STREAMLINE_ENABLED)

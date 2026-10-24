@@ -3,6 +3,10 @@
 #include "ppu_context.h"
 #include "ppu_int.h"
 
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
 // Vector helpers for generated code. Register layout: see "Vector registers" in ppu_context.h
 // (host lane i = big-endian element n-1-i, so the 128-bit value of a register has big-endian byte 0
 // in its most significant byte).
@@ -110,6 +114,10 @@ TOX2_FORCEINLINE Tox2Vr tox2Vperm(Tox2Vr a, Tox2Vr b, Tox2Vr c) {
     Tox2U8x16 pa = (Tox2U8x16)__builtin_ia32_pshufb128((Tox2S8x16)a.u8, (Tox2S8x16)idx);
     Tox2U8x16 pb = (Tox2U8x16)__builtin_ia32_pshufb128((Tox2S8x16)b.u8, (Tox2S8x16)idx);
     v.u8 = (pa & from_a) | (pb & ~from_a);
+#elif defined(__ARM_NEON)
+    // A two-register tbl reads byte idx of b || a directly; idx is at most 31.
+    const uint8x16x2_t ba = {{(uint8x16_t)b.u8, (uint8x16_t)a.u8}};
+    v.u8 = (Tox2U8x16)vqtbl2q_u8(ba, (uint8x16_t)idx);
 #else
     uint8_t ab[32];
     __builtin_memcpy(ab, &b, 16);

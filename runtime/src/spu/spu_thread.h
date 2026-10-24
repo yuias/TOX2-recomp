@@ -93,8 +93,8 @@ public:
 
     // Raises the host thread to HighPrioritySpu (core/host_priority.h) when it starts; call before start().
     void setRaiseHostPriority(bool raise) { raise_host_priority_ = raise; }
-    // The host thread's priority as it settled at the top of threadMain; THREAD_PRIORITY_NORMAL (0) until then
-    // and for a thread that was not raised.
+    // The host thread's priority as it settled at the top of threadMain, in currentHostThreadPriority's terms (a
+    // thread that was not raised keeps the one it started with); 0 until then.
     int hostPriority() const { return host_priority_.load(std::memory_order_acquire); }
 
     // Starts the host thread at `entry_ls`. False when it was started already.

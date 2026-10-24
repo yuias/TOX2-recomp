@@ -15,6 +15,39 @@ if(NOT CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
     "TOX2: clang GNU-style driver required, got frontend '${CMAKE_CXX_COMPILER_FRONTEND_VARIANT}'")
 endif()
 
+if(NOT WIN32 AND NOT APPLE)
+  message(FATAL_ERROR "TOX2: unsupported platform ${CMAKE_SYSTEM_NAME}")
+endif()
+
+# One CPU baseline for every target; the generated code is built with the same flag.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+  set(TOX2_ARCH_FLAGS "-march=x86-64-v3")
+elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+  set(TOX2_ARCH_FLAGS "-mcpu=apple-m1")
+else()
+  message(FATAL_ERROR "TOX2: unsupported processor '${CMAKE_SYSTEM_PROCESSOR}' on ${CMAKE_SYSTEM_NAME}")
+endif()
+message(STATUS "TOX2: arch flags: ${TOX2_ARCH_FLAGS}")
+
+# The sources use C++26 library features; a libc++ that lacks them (for example the one in the Apple
+# SDK) compiles the headers but fails here at link time.
+cmake_push_check_state()
+check_cxx_source_compiles([=[
+#include <expected>
+#include <format>
+#include <print>
+#include <string>
+int main() {
+  std::expected<std::string, int> e = std::format("{}", 42);
+  std::println("{}", e.value());
+  return 0;
+}
+]=] TOX2_HAVE_CXX_LIBRARY)
+cmake_pop_check_state()
+if(NOT TOX2_HAVE_CXX_LIBRARY)
+  message(FATAL_ERROR "TOX2: the C++ library cannot link C++26 code")
+endif()
+
 cmake_push_check_state()
 # Without -Werror an unknown attribute is only a warning and the check passes falsely.
 set(CMAKE_REQUIRED_FLAGS -Werror)

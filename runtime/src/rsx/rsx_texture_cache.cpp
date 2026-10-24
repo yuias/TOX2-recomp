@@ -7,9 +7,13 @@
 
 #include <xxhash.h>
 
-// The wide XXH3 path is chosen from the compile flags (-march=x86-64-v3); a build without AVX2 would still hash
-// correctly but several times slower, so it is refused here.
+// The wide XXH3 path is chosen from the compile flags (TOX2_ARCH_FLAGS); a build without it would still hash
+// correctly but several times slower, so it is refused here: AVX2 on x86-64, NEON on arm64.
+#if defined(__x86_64__) || defined(_M_X64)
 static_assert(XXH_VECTOR == XXH_AVX2, "rsx_texture_cache.cpp must be compiled with AVX2 for the XXH3 wide path");
+#elif defined(__aarch64__)
+static_assert(XXH_VECTOR == XXH_NEON, "rsx_texture_cache.cpp must be compiled with NEON for the XXH3 wide path");
+#endif
 
 namespace tox2 {
 namespace {

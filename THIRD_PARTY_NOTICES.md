@@ -2,8 +2,9 @@
 
 ## Microsoft GameInput
 
-Gamepads are read with Microsoft's GameInput API (version 3). The `Microsoft.GameInput` NuGet
-package is not part of this repository. `tools/fetch-gameinput.ps1` downloads the pinned package
+On Windows, gamepads are read with Microsoft's GameInput API (version 3). On macOS this package is
+not used: gamepads are read through Apple's GameController.framework, a system framework. The
+`Microsoft.GameInput` NuGet package is not part of this repository. `tools/fetch-gameinput.ps1` downloads the pinned package
 from <https://www.nuget.org/packages/Microsoft.GameInput> into `generated/deps/gameinput` and
 verifies its SHA-256 (`-From <nupkg>` takes a local copy and applies the same check); the pin is
 in `cmake/gameinput.cmake`. The build uses only the package's `GameInput.h` and `GameInput.lib`;
@@ -35,10 +36,10 @@ the gamepads are disabled; the keyboard keeps working.
 
 ## NVIDIA Streamline and DLSS
 
-The optional DLAA anti-aliasing mode (`--aa-mode dlaa`) runs NVIDIA DLSS through the NVIDIA Streamline
+On Windows, the optional DLAA anti-aliasing mode (`--aa-mode dlaa`) runs NVIDIA DLSS through the NVIDIA Streamline
 SDK, <https://github.com/NVIDIA-RTX/Streamline>, and the optional frame generation (`--frame-gen`) runs NVIDIA DLSS
-Frame Generation and NVIDIA Reflex through the same SDK. The SDK is not part of this repository: nothing from
-it is committed. `tools/fetch-streamline.ps1` downloads the pinned release into `externals/Streamline`
+Frame Generation and NVIDIA Reflex through the same SDK. The macOS build does not use Streamline. The
+SDK is not part of this repository: nothing from it is committed. `tools/fetch-streamline.ps1` downloads the pinned release into `externals/Streamline`
 (git-ignored) and verifies its SHA-256 (`-From <zip>` takes a local copy and applies the same check);
 the pin is in `cmake/streamline.cmake`. The build uses the SDK's headers at compile time and, when
 the SDK is present, copies four DLLs (eight with frame generation) and the licence texts next to the
@@ -130,11 +131,12 @@ in this repository or in any build output other than the decrypted files themsel
 The runtime decodes the movies (H.264 video and ATRAC3plus audio) and the game's ATRAC3plus sound
 (music and sound effects) with FFmpeg (`libavcodec`, `libavutil`, `libswscale`; `libavcodec`
 also imports `libswresample`, none of whose functions the runtime calls). FFmpeg is not part of
-this repository and no FFmpeg binary is tracked. `tools/fetch-ffmpeg.ps1` downloads a pinned,
-SHA-256 verified build into `generated/deps/ffmpeg` (`-From <zip>` takes a local copy of the
+this repository and no FFmpeg binary is tracked. On Windows, `tools/fetch-ffmpeg.ps1` downloads a
+pinned, SHA-256 verified build into `generated/deps/ffmpeg` (`-From <zip>` takes a local copy of the
 pinned zip and applies the same check); the pin is in `cmake/ffmpeg.cmake`. The build copies the
 four DLLs, the FFmpeg `LICENSE.txt` and this notice next to `tox2_game` (`bin/` of the build
-directory, the licence and notice under `bin/licenses/ffmpeg/`).
+directory, the licence and notice under `bin/licenses/ffmpeg/`). Unless it says macOS,
+this section describes that Windows distribution; "FFmpeg on macOS" at its end covers the Mac.
 
 | | |
 | --- | --- |
@@ -185,12 +187,26 @@ wideband), openh264, openjpeg, openmpt, schannel, SDL2, snappy, soxr, srt, svtav
 VA-API, VapourSynth, vvenc, zimg and zvbi. This project uses only the H.264 and ATRAC3plus decoders
 and the colour conversion of `libswscale`.
 
+### FFmpeg on macOS
+
+On macOS the build uses no pinned FFmpeg and downloads none. The runtime loads the user's own
+Homebrew FFmpeg (`brew install ffmpeg`) in place: `libavutil`, `libswresample`, `libswscale` and
+`libavcodec` as `lib<name>.<major>.dylib`, opened with `dlopen` by absolute path from the Homebrew
+`lib` directory that was compiled in. Nothing is linked, copied into the build output or
+redistributed. Homebrew's FFmpeg is a GPL-configured build (it includes x264 and x265), unlike the
+pinned LGPL build of the Windows distribution. This project loads it from the user's own
+installation and never copies, bundles or redistributes it. The runtime uses only the H.264 and
+ATRAC3plus decoders and the conversion functions of `libswscale`. See
+[Movies](docs/movies.md#ffmpeg-on-macos).
+
 ## Dear ImGui
 
 The in-window debug overlay (`F1`, see [Debug overlay](docs/runtime.md#debug-overlay)) is drawn with
 Dear ImGui, <https://github.com/ocornut/imgui>. It is a git submodule (`externals/imgui`) and is
 built from source as a static library into `tox2_game` and the overlay tests: the core files plus
-the Win32 and Vulkan backends, without the demo window. The Vulkan backend loads its entry points
+the Vulkan backend and, on Windows, the Win32 backend or, on macOS, the Cocoa backend
+(`imgui_impl_osx.mm`, compiled through `runtime/src/overlay/imgui_osx_bridge.mm`), without the
+demo window. The Vulkan backend loads its entry points
 through volk. The overlay uses ImGui's built-in default font, so no font file is involved.
 
 | | |

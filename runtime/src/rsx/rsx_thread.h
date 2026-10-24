@@ -155,7 +155,8 @@ public:
     // Keeps a register file and builds render commands from every completed write. Call before the first
     // write.
     void enableFrameBuilder();
-    bool frameBuilderEnabled() const { return builder_ != nullptr; }
+    // Any thread: reads the atomic flag, not builder_, which the consumer thread may reset.
+    bool frameBuilderEnabled() const { return builder_live_.load(std::memory_order_acquire); }
     // The builder's counters, or null while the frame builder is off. Read from the thread that pumps.
     const RsxBuilderStats* builderStats() const { return builder_ != nullptr ? &builder_->stats() : nullptr; }
     // True while a frame builder exists, so a capture can be requested. Any thread.

@@ -2,12 +2,23 @@ cmake_minimum_required(VERSION 3.29)
 
 project(Tox2Recomp VERSION 0.1.0 LANGUAGES C CXX)
 
+if(APPLE)
+  enable_language(OBJCXX)
+  set(CMAKE_OBJCXX_STANDARD 26)
+  set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+  set(CMAKE_OBJCXX_EXTENSIONS OFF)
+  add_compile_options($<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+endif()
+
 set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# No C++ modules are used. The module scan would otherwise preprocess every source of a target before
+# any of its objects builds, so one source that does not compile blocks the whole target.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 include(cmake/CompilerChecks.cmake)
 include(cmake/PpuCodegen.cmake)
@@ -28,15 +39,21 @@ enable_testing()
 
 add_executable(tox2_runtime runtime/src/main.cpp)
 target_compile_definitions(tox2_runtime PRIVATE TOX2_VERSION="${PROJECT_VERSION}")
-target_compile_options(tox2_runtime PRIVATE -march=x86-64-v3 -Wall -Wextra)
+target_compile_options(tox2_runtime PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
 target_include_directories(tox2_runtime PRIVATE runtime/include)
 
 add_library(tox2_ppu_stub STATIC runtime/src/ppu_stub_runtime.cpp)
-target_compile_options(tox2_ppu_stub PRIVATE -march=x86-64-v3 -Wall -Wextra)
+target_compile_options(tox2_ppu_stub PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
 target_include_directories(tox2_ppu_stub PUBLIC runtime/include)
+if(APPLE)
+  # The stub refers to the generated import table through weak references (see ppu_stub_runtime.cpp).
+  # ld64 rejects an undefined weak symbol unless it is declared allowed; dyld then binds it to null.
+  target_link_options(tox2_ppu_stub INTERFACE
+    LINKER:-U,_kTox2PpuImports LINKER:-U,_kTox2PpuImportCount)
+endif()
 
 add_library(tox2_spu_stub STATIC runtime/src/spu_stub_runtime.cpp)
-target_compile_options(tox2_spu_stub PRIVATE -march=x86-64-v3 -Wall -Wextra)
+target_compile_options(tox2_spu_stub PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
 target_include_directories(tox2_spu_stub PUBLIC runtime/include)
 
 set(TOX2_EBOOT_ELF "" CACHE FILEPATH "Decrypted EBOOT.elf for optional tests")

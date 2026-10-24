@@ -1,9 +1,14 @@
 // Self-checking tests for the config file reader and writer and for the command-line parser. No game data and no
 // player config file are read.
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include <array>
 #include <chrono>
@@ -25,6 +30,24 @@
 #include "core/log.h"
 
 namespace {
+
+unsigned long processId() {
+#if defined(_WIN32)
+    return GetCurrentProcessId();
+#else
+    return static_cast<unsigned long>(getpid());
+#endif
+}
+
+// Makes `path` a file that cannot be replaced, or replaceable again. Windows refuses to replace a read-only file;
+// POSIX renames over one, so the macOS side uses the immutable flag, which a rename onto the name respects.
+void setUnreplaceable(const std::filesystem::path& path, bool on) {
+#if defined(_WIN32)
+    SetFileAttributesW(path.c_str(), on ? FILE_ATTRIBUTE_READONLY : FILE_ATTRIBUTE_NORMAL);
+#else
+    chflags(path.c_str(), on ? UF_IMMUTABLE : 0);
+#endif
+}
 
 int g_passed;
 int g_failed;
@@ -409,7 +432,7 @@ void writeFile(const stdfs::path& path, std::string_view text) {
 void testWriteFileAtomic() {
     // One directory per process, so parallel test runs do not share files.
     const stdfs::path dir =
-            stdfs::temp_directory_path() / ("tox2_game_options_test_" + std::to_string(GetCurrentProcessId()));
+            stdfs::temp_directory_path() / ("tox2_game_options_test_" + std::to_string(processId()));
     std::error_code ec;
     stdfs::remove_all(dir, ec);
     stdfs::create_directories(dir);
@@ -424,8 +447,8 @@ void testWriteFileAtomic() {
     CHECK(readFile(target) == "second \xE3\x82\xB2\r\n");  // bytes are written as they are
     CHECK(!stdfs::exists(temp));
 
-    // A read-only target cannot be replaced: the old content stays and no temp file is left behind.
-    SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_READONLY);
+    // A target that cannot be replaced: the old content stays and no temp file is left behind.
+    setUnreplaceable(target, true);
     const auto blocked = tox2::writeFileAtomic(target, "third\n");
     CHECK(!blocked.has_value());
     if (!blocked) {
@@ -433,7 +456,7 @@ void testWriteFileAtomic() {
     }
     CHECK(readFile(target) == "second \xE3\x82\xB2\r\n");
     CHECK(!stdfs::exists(temp));
-    SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_NORMAL);
+    setUnreplaceable(target, false);
 
     // A directory that does not exist fails at the first step.
     const auto missing = tox2::writeFileAtomic(dir / "no_such_dir" / "config.json", "x");
@@ -454,7 +477,7 @@ void testWriteFileAtomic() {
 // Directories that do not exist, so that a line without --config never reads the player's config.json.
 tox2::ConfigSearch noConfigSearch() {
     static const stdfs::path root =
-            stdfs::temp_directory_path() / ("tox2_game_options_absent_" + std::to_string(GetCurrentProcessId()));
+            stdfs::temp_directory_path() / ("tox2_game_options_absent_" + std::to_string(processId()));
     return {root / "work", root / "exe"};
 }
 
@@ -549,7 +572,7 @@ void testDefaultLines() {
     if (windowed) {
         CHECK(windowed->game_dir == stdfs::path("g"));
         CHECK(windowed->window && windowed->render_vulkan && !windowed->no_window);
-        CHECK(windowed->pad == "keyboard+gamepad" && windowed->audio == "wasapi");
+        CHECK(windowed->pad == "keyboard+gamepad" && windowed->audio == tox2::kHostAudioOutput);
         CHECK(windowed->frame_limit == tox2::RsxFlipLimit::Vsync && windowed->resolution_scale == 1);
         CHECK(windowed->aa_mode == tox2::AaMode::Msaa && windowed->ppu_threads == tox2::PpuThreadsMode::Split2);
         CHECK(windowed->host_priorities && windowed->yield_backoff && windowed->lwmutex_fast_path);
@@ -578,9 +601,9 @@ void testDefaultLines() {
     const auto dumping = parseLine(std::vector<std::string>{"--game-dir", "g", "--no-window", "--dump-frames", "d"});
     CHECK(dumping && !dumping->window && dumping->render_vulkan && dumping->dump_frames == stdfs::path("d"));
     // An explicit pad and audio are kept.
-    const auto explicit_pad =
-            parseLine(std::vector<std::string>{"--game-dir", "g", "--no-window", "--pad", "none", "--audio", "wasapi"});
-    CHECK(explicit_pad && explicit_pad->pad == "none" && explicit_pad->audio == "wasapi");
+    const auto explicit_pad = parseLine(std::vector<std::string>{"--game-dir", "g", "--no-window", "--pad", "none",
+                                                                 "--audio", std::string(tox2::kHostAudioOutput)});
+    CHECK(explicit_pad && explicit_pad->pad == "none" && explicit_pad->audio == tox2::kHostAudioOutput);
 }
 
 void testValues() {
@@ -726,7 +749,8 @@ void testErrorMessages() {
     CHECK(rejectedLine({"--game-dir", "g", "--ui-font"}, "error: --ui-font needs a value\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--pad", "joystick"},
                        "error: --pad needs none, neutral, keyboard, gamepad or keyboard+gamepad\n"));
-    CHECK(rejectedLine({"--game-dir", "g", "--audio", "alsa"}, "error: --audio needs none or wasapi\n"));
+    CHECK(rejectedLine({"--game-dir", "g", "--audio", "alsa"},
+                       "error: --audio needs none or " + std::string(tox2::kHostAudioOutput) + "\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--render", "opengl"}, "error: --render needs none or vulkan\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--aa-mode", "none"}, "error: --aa-mode needs supersample|msaa|dlaa\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--aa-mode", "foo"}, "error: --aa-mode needs supersample|msaa|dlaa\n"));
@@ -769,7 +793,7 @@ void testCheckOrder() {
 void testPadScriptAndAudioDump() {
     std::error_code ec;
     const stdfs::path dir =
-            stdfs::temp_directory_path() / ("tox2_game_options_args_" + std::to_string(GetCurrentProcessId()));
+            stdfs::temp_directory_path() / ("tox2_game_options_args_" + std::to_string(processId()));
     stdfs::remove_all(dir, ec);
     stdfs::create_directories(dir);
     const stdfs::path good = dir / "ok.pad";
@@ -823,7 +847,7 @@ struct ConfigDirs {
     stdfs::path root, work, exe;
 
     explicit ConfigDirs(const char* name) {
-        root = stdfs::temp_directory_path() / (std::string(name) + std::to_string(GetCurrentProcessId()));
+        root = stdfs::temp_directory_path() / (std::string(name) + std::to_string(processId()));
         work = root / "work";
         exe = root / "exe";
         std::error_code ec;
@@ -1270,7 +1294,7 @@ struct StoreDir {
     stdfs::path file;
 
     explicit StoreDir(const std::string& name)
-        : dir(stdfs::temp_directory_path() / (name + std::to_string(GetCurrentProcessId()))),
+        : dir(stdfs::temp_directory_path() / (name + std::to_string(processId()))),
           file(dir / "config.json") {
         std::error_code ec;
         stdfs::remove_all(dir, ec);
@@ -1278,7 +1302,7 @@ struct StoreDir {
     }
     ~StoreDir() {
         std::error_code ec;
-        SetFileAttributesW(file.c_str(), FILE_ATTRIBUTE_NORMAL);
+        setUnreplaceable(file, false);
         stdfs::remove_all(dir, ec);
     }
 };
@@ -1403,7 +1427,7 @@ void testStoreReadOnlyFile() {
     tox2::SettingsStore store(dir.file, kSpecs, kSlowTiming);
     store.set("resolution_scale", "2");
 
-    SetFileAttributesW(dir.file.c_str(), FILE_ATTRIBUTE_READONLY);
+    setUnreplaceable(dir.file, true);
     CHECK(!store.flush(std::chrono::seconds(1)));
     CHECK(readFile(dir.file) == original);
     CHECK(!stdfs::exists(dir.file.string() + ".tmp"));
@@ -1414,7 +1438,7 @@ void testStoreReadOnlyFile() {
     CHECK(log.count("cannot save settings to ") == 1);
 
     // The change was kept.
-    SetFileAttributesW(dir.file.c_str(), FILE_ATTRIBUTE_NORMAL);
+    setUnreplaceable(dir.file, false);
     CHECK(store.flush(std::chrono::seconds(1)));
     CHECK(store.writes() == 1);
     CHECK(readFile(dir.file) == "{\n  \"my_note\": \"keep\",\n  \"resolution_scale\": 2\n}\n");

@@ -1,8 +1,8 @@
 # Audio
 
 This page covers the audio code in the runtime: the `cellAudio` and `cellAtrac` HLE, the audio
-engine and the WASAPI output. The tests use synthetic data. In a 120 s headless run of
-*Tales of Xillia 2* the game calls
+engine and the device outputs (WASAPI on Windows, CoreAudio on macOS). The tests use synthetic data.
+In a 120 s headless run of *Tales of Xillia 2* the game calls
 `cellAudioInit`, opens and starts a port and sets the notify queue, and creates two ATRAC decoders
 (both for sounds held in memory); the audio census counts 22,071 blocks, 4,017 of them non-silent,
 and the dump has non-silent audio from about 50 s on (see [Status](status.md)). Longer windowed runs create dozens of
@@ -49,11 +49,12 @@ three stretches (about 50 s to 52 s, 62 s to 79 s and 113 s to 118 s); what the 
 it is complete, has not been checked by listening.
 
 ```
-game mixer thread -> cellAudio port (guest memory) -> audio engine thread -> output ring -> WASAPI device thread
+game mixer thread -> cellAudio port (guest memory) -> audio engine thread -> output ring -> device thread (WASAPI or CoreAudio)
 game sound thread -> cellAtrac (FFmpeg ATRAC3plus) -> game mixer
 ```
 
-The code is in `runtime/src/audio/` (engine, outputs, WAV files), `runtime/src/hle/cell_audio*.cpp`,
+The code is in `runtime/src/audio/` (engine, outputs, WAV files; `stream_output.*` holds the device thread that both device outputs share,
+`wasapi_output.*` and `coreaudio_output.*` the two APIs), `runtime/src/hle/cell_audio*.cpp`,
 `runtime/src/hle/cell_atrac*.cpp` and `runtime/src/media/at3_file.*`, `atrac_decoder.h` and
 `ffmpeg_codecs.*` (the AT3 parser and the decoder). `tools/tox2_audiotool/` is the command-line
 tool.
@@ -62,7 +63,7 @@ tool.
 
 | Option | Meaning |
 | --- | --- |
-| `--audio none\|wasapi` | The output. `wasapi` plays through the default render device; `none` has no device but the clock and the game's mixer run the same, without the device-clock correction. Default: `wasapi` with the window, `none` with `--no-window`, so unattended runs and tests need no sound device. Any other value is a usage error. |
+| `--audio none\|wasapi` (Windows), `--audio none\|coreaudio` (macOS) | The output. `wasapi` and `coreaudio` play through the default render device (the default output device on macOS); `none` has no device but the clock and the game's mixer run the same, without the device-clock correction. Default: the system's device output (`wasapi` or `coreaudio`) with the window, `none` with `--no-window`, so unattended runs and tests need no sound device. Any other value, including the other system's output name, is a usage error. |
 | `--audio-dump FILE` | Write the mix to `FILE` as a WAV file (48 kHz, stereo, 32-bit float), with either output. The file is created while the arguments are handled, so a path that cannot be written is a usage error (exit code 2). |
 
 ## Architecture
@@ -135,6 +136,8 @@ The audio engine thread runs at `THREAD_PRIORITY_TIME_CRITICAL` and the host thr
 scheduler context and an lv2 priority of 31 or less (the game's sound engine `bnusCore`, priority 16; the SPURS
 kernels use 250) at `THREAD_PRIORITY_HIGHEST` (`runtime/src/core/host_priority.*`), so a saturated renderer cannot
 take their time slices. All of them sleep or block while they wait, so the raise cannot starve other threads.
+On macOS the same roles get QoS classes instead of thread priorities: the audio engine thread `QOS_CLASS_USER_INTERACTIVE` and the
+high-priority SPU threads `QOS_CLASS_USER_INITIATED`.
 PPU guest threads stay at normal priority: the lock or the PPU slots already order them by lv2 priority, and at most two
 run at once (one in `legacy`). The RSX thread stays at normal priority too. `--host-priorities off` (see [Options](runtime-options.md)) leaves every thread
 at normal priority. The first use of each role logs `tox2: host: <role> thread priority <n>` at debug level; a
@@ -148,7 +151,10 @@ Two more timing facts concern the sound threads:
   resolution for the whole run (`runtime/src/core/timer_resolution.*`, `timeBeginPeriod`); without it a short
   `sys_timer_usleep` lasts about 15 ms. This game's ATRAC decode thread waits on a condition variable instead of
   sleeping; the threads that poll with `sys_timer_usleep` are its main thread and a worker (see
-  [Runtime internals](runtime.md#threads)). Whether the sound of this game depends on the request has not been measured.
+  [Runtime internals](runtime.md#threads)). Whether the sound of this game depends on the request has not been measured. macOS has no coarse tick to raise, so
+  timed waits there already have the precision requested and the request counts as granted (the debug line says
+  `system period unknown`); the host event loop of `tox2_game` turns off App Nap and timer coalescing for the
+  process while it runs.
 - A guest thread created with a numerically lower priority than its creator runs before the
   creator continues (see [Runtime internals](runtime.md#threads)). In this game the main thread (priority 1001)
   creates `bnusCoreDecoderServerThread` and `bnusCoreUpdateThread` (priority 0) and `CnuSound2Thread` (499), and
@@ -169,8 +175,17 @@ thread only, never blocks), `description`, `stats` and `fillFrames`.
   float32 and the Windows audio engine converts it to the device's mix format
   (`AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`). The device buffer is 40 ms. The device thread runs with
   the "Pro Audio" multimedia scheduler class when that is available.
+- **coreaudio** (`coreaudio_output.cpp`, library `tox2_audio_coreaudio`, uses the C APIs of
+  AudioToolbox and CoreAudio) plays through the system's default output `AudioUnit`, which follows a
+  change of the default device. The stream format is 48 kHz stereo float32 and the unit converts it to
+  the device's. The render callback takes frames from a lock-free FIFO of 40 ms (1920 frames) that the
+  device thread fills, plays silence for what is missing and wakes the device thread; the callback does
+  not lock, allocate, log or touch guest memory. The device period is the device's buffer size. The unit
+  is started when the output is opened and plays silence until the device thread starts the stream, so
+  that CoreAudio's start-up time is spent before the engine's clock runs and not in its fill level.
 
-The engine thread and the device thread are joined by a lock-free ring of 32 blocks. The device
+The engine thread and the device thread are joined by a lock-free ring of 32 blocks; this and the
+device thread (`tox2_audio_stream`) are the same for both outputs. The device
 starts playing once 4 blocks are queued (`kPrimeBlocks`), and above 12 blocks (`kHighWaterBlocks`)
 `submit` drops the oldest block and counts it. When the device runs dry it plays silence and the
 missing frames are counted as underrun.
@@ -192,6 +207,12 @@ If the device is lost while running (`AUDCLNT_E_DEVICE_INVALIDATED` or another s
 output logs `tox2: audio: wasapi: device lost (<hresult>); retrying`, keeps draining its ring at the
 nominal rate so the engine does not notice, and tries to open the default device again at once and
 then every 2 seconds. A successful reopen logs `tox2: audio: wasapi: reopened <description>`.
+
+CoreAudio does the same with `coreaudio` in the lines. It counts the default output device changing
+or the device in use stopping being alive (both reported by CoreAudio property listeners) as a loss,
+so that the reopened stream reads the new device's rate and buffer size. A status that is a
+four-character code with printable characters is shown as that code in quotes, for example `'!dev'`,
+otherwise as a number.
 
 ### Dump file
 
@@ -284,7 +305,7 @@ decoder state is on the host.
   audio is the decoder output from sample `delay` for `count` samples. A loop is the first `smpl`
   loop, in decoder output positions.
 - **Decoder.** Frames are decoded by FFmpeg's `atrac3plus` decoder through the pinned LGPL DLLs
-  (see [Movies](movies.md)), one frame per packet, synchronously inside `cellAtracDecode` under the
+  (Homebrew's libraries on macOS; see [Movies](movies.md)), one frame per packet, synchronously inside `cellAtracDecode` under the
   guest lock (a frame takes tens of microseconds). The decoder is behind the
   `AtracFrameDecoder` interface (`media/atrac_decoder.h`), so the runtime core has no FFmpeg types.
 - **Two modes.** The mode follows the data, not the sizes. In memory mode (sound effects) every
@@ -368,11 +389,11 @@ Audio problems never stop the game: the game must not stall because of sound.
 
 | Case | Behaviour |
 | --- | --- |
-| WASAPI cannot be opened (no device, COM error, format rejected, no answer within 2 s) | One warning `tox2: audio: wasapi: <reason>; continuing without sound`, the engine switches to the null output and the clock keeps running. The census shows the output as `none (wasapi failed)`. |
+| The device output cannot be opened (WASAPI: no device, COM error, format rejected, no answer within 2 s; CoreAudio: no default output device or a failing call, with the status) | One warning `tox2: audio: <wasapi\|coreaudio>: <reason>; continuing without sound`, the engine switches to the null output and the clock keeps running. The census shows the output as `none (wasapi failed)` or `none (coreaudio failed)`. |
 | Device lost while running | `device lost` warning, silence, reopen attempts (see above). The clock keeps running. |
 | The engine wakes late | One block is produced; the missed periods are skipped as silence and counted. |
 | `--audio-dump` file cannot be created or written | A usage error before the run starts; a write error during the run logs one warning and stops the dump. |
-| FFmpeg DLLs missing or no `atrac3plus` decoder | One warning `tox2: atrac: no decoder: <reason>`. `Decode` outputs silence of the right length; the stream protocol is unchanged, and the census counts the frames as "without decoder". |
+| FFmpeg DLLs (libraries on macOS) missing or no `atrac3plus` decoder | One warning `tox2: atrac: no decoder: <reason>`. `Decode` outputs silence of the right length; the stream protocol is unchanged, and the census counts the frames as "without decoder". |
 | Unusable AT3 data | `SetDataAndGetMemSize` returns the error code; one warning per handle. |
 | A frame the decoder rejects | Silence for that frame, counted as an error; one warning per handle. |
 | Notify queue full or gone | Counted as a failed notify, never an error to the game. |
@@ -383,17 +404,17 @@ Lines start with `tox2: audio:`, `tox2: atrac:`, `tox2: timer:` or `tox2: thread
 
 | Line | Level | When |
 | --- | --- | --- |
-| `tox2: audio: output <name>[ (<description>)]` | info | The engine opened its output. WASAPI's description is `<device>, mix <rate> Hz <ch> ch, buffer <ms> ms, period <ms> ms`. |
+| `tox2: audio: output <name>[ (<description>)]` | info | The engine opened its output. The description of both device outputs is `<device>, mix <rate> Hz <ch> ch, buffer <ms> ms, period <ms> ms`; on macOS the mix is the device's nominal rate and output channel count, the buffer is the 40 ms FIFO and the period is the device's buffer size. |
 | `tox2: audio: dump <file name>` | info | The dump file was created. |
 | `tox2: audio: port <n> open: <ch> ch, <blocks> blocks, attr <hex>, level <f>` | info | `cellAudioPortOpen` |
 | `tox2: audio: notify queue key <hex> -> <queue id hex\|not found>` | info | `cellAudioSetNotifyEventQueue` |
 | `tox2: audio: input channel <n> carries signal; the stereo downmix drops it` | info | First non-zero sample on a dropped channel |
-| `tox2: audio: <output>: <reason>; continuing without sound` | warn | The output could not be opened |
+| `tox2: audio: <output>: <reason>; continuing without sound` | warn | The output could not be opened (`<output>` is `wasapi` or `coreaudio`) |
 | `tox2: audio: dump <file name>: <reason>; continuing without a dump`, `tox2: audio: writing the dump failed; the dump stops here` | warn | Dump problems |
-| `tox2: audio: wasapi: device lost (<hresult>); retrying` | warn | Device lost |
-| `tox2: audio: wasapi: reopened <description>` | info | The device came back |
-| `tox2: audio: wasapi: reopen failed: <reason>` | debug | A reopen attempt failed (retried every 2 s) |
-| `tox2: audio: wasapi: device thread failed[: <reason>]` | warn | The device thread stopped on an error |
+| `tox2: audio: wasapi: device lost (<hresult>); retrying` | warn | Device lost. On macOS the line says `coreaudio` and gives the status instead of an HRESULT |
+| `tox2: audio: wasapi: reopened <description>` | info | The device came back (`coreaudio` on macOS) |
+| `tox2: audio: wasapi: reopen failed: <reason>` | debug | A reopen attempt failed (retried every 2 s; `coreaudio` on macOS) |
+| `tox2: audio: wasapi: device thread failed[: <reason>]` | warn | The device thread stopped on an error (`coreaudio` on macOS) |
 | `tox2: audio: cannot start the engine thread: <reason>; continuing without sound` | warn | The engine thread could not be created |
 | `tox2: audio: clock <+-ppm> ppm, mean fill <n> frames (target <n>), dropped <n>, underrun <n> frames` | debug | Every 10 s |
 | `tox2: atrac: decoder <handle hex>: <ch> ch <rate> Hz, <frames> frames, loop <start>-<end>\|none, all on memory\|streaming` | info | `cellAtracCreateDecoder`, `cellAtracCreateDecoderExt` |
@@ -404,11 +425,11 @@ Lines start with `tox2: audio:`, `tox2: atrac:`, `tox2: timer:` or `tox2: thread
 | `tox2: atrac: stream info handle <hex>: write at <hex>, writable <hex>, read pos <hex>` | debug | `GetStreamDataInfo` (write at is the ring offset) |
 | `tox2: atrac: add stream data handle <hex>: <hex> bytes, result <hex>, buffered to <hex>` | debug | `AddStreamData` (buffered to is the stream position) |
 | `tox2: atrac: handle <hex>: frame <i> pass <k> file <hex> stream <hex> ring <hex>: <16-byte head hex>` | debug | The first frame decoded after `SetDataAndGetMemSize` and the first one after each loop-back. After a loop-back the file offset is `R`, and the head must equal the file bytes there |
-| `tox2: timer: requested <n> ms, system period <x> ms\|unknown` | debug | Start-up |
+| `tox2: timer: requested <n> ms, system period <x> ms\|unknown` | debug | Start-up (always `unknown` on macOS) |
 | `tox2: timer: the 1 ms resolution request was refused; timed waits use the default tick` | warn | Start-up |
 | `tox2: thread: <id> <name> prio <p> starts before creator <id> prio <q>` | debug | A thread was created with a lower priority number than its creator |
 | `tox2: thread: <id> <name> not queued within 5 ms; creator continues` | info | The new thread did not queue for the guest lock (a PPU slot in `--ppu-threads 1\|2`) in time |
-| `tox2: host: <audio engine\|high-priority SPU> thread priority <n>` | debug | First use of a host priority role (`<n>` is the Windows thread priority value); a refused change is a warning `tox2: host: cannot raise the <role> thread priority (error <n>)` |
+| `tox2: host: <audio engine\|high-priority SPU> thread priority <n>` | debug | First use of a host priority role (`<n>` is the Windows thread priority value or, on macOS, the QoS class value); a refused change is a warning `tox2: host: cannot raise the <role> thread priority (error <n>)` |
 | `tox2: perf: t <s> s: audio flips <n> periods <n> unwritten <n> (runs <n>)` | debug | Once per second from the first `cellAudioInit`: the deltas over the last second. `t` is the guest system time |
 | `tox2: perf: t <s> s: lock <class> n <n> avg <x> p99 <x> max <x> ms >1.00ms <n> hold p99 <x> max <x> \| <class> ...` | debug | Once per second, for each guest-lock class that took the lock in that second: its wait (count, mean, 99th percentile, maximum in ms and the number of waits above 1 ms), then its hold. The classes `audio`, `spu` and `ppu-high` add `ahead avg <n> behind <class> <ms> ... ms`: the mean queue length of the contended acquisitions and the time the waits were spent behind each holder class (sums over the waiters, so read them as ratios). Further fields follow, separated by `\|`, when they apply in that second: `yield calls <n> ok <n> host <n> kept <n> backoff <n>` (the outcomes of `sys_ppu_thread_yield`, see [Threads](runtime.md#threads)), `lwmutex wait <n> handoff <n> mutex wait <n> handoff <n>` (waits on a lightweight mutex or mutex and how many ended in an ownership hand-off), `long holds <n>` (guest-lock holds of 5 ms or more) and `fs read <n> <bytes> bytes max <x> ms write <n> <bytes> bytes max <x> ms` (the file system transfers of that second and the longest one). The last field is `lwmutex slow lock <n> unlock <n>` (with `misaligned <n>` when non-zero): the lightweight mutex calls that left the compare-and-swap path in that second (see [Threads](runtime.md#threads)) |
 | `tox2: guest lock long hold: <x> ms holder <class> thread <id> prio <p> (<name>) at release: <a> last in hold: <b> previous in hold: <c> cpu <t>` | warn | A guest-lock hold lasted 5 ms or more, at most 20 lines per second. The three labels are the syscall or imported function running at the release, the last one entered during the hold and the one before it; `cpu` is the holder thread's CPU time in the hold (PPU holders only, else `n/a`); a holder that is not a guest thread has no `thread ... (<name>)` part |
@@ -427,7 +448,7 @@ census: audio
   atrac 6 decoders, 7623 frames decoded (6120 non-silent), 0 errors, 0 without decoder
 ```
 
-(The numbers are examples.) The first line is the engine: the output name, blocks produced and how
+(The numbers are examples; the first line says `audio coreaudio` on macOS.) The first line is the engine: the output name, blocks produced and how
 many were non-silent, periods skipped, blocks dropped and frames of underrun at the output, notifies
 sent and failed, the longest producer call (it includes the wait for the guest lock; a few ms of
 it at start-up is normal) and the clock correction. `audio input` counts periods and the non-zero
@@ -448,17 +469,18 @@ fails and 2 on a usage error.
 | Subcommand | What it does |
 | --- | --- |
 | `wavstat FILE [--window S]` | Per window of `S` seconds (default 1) the RMS and peak level in dBFS and the number of non-silent frames, then `wavstat: <seconds> s, non-silent windows <k> of <m>`. Reads the dump file, PCM 16-bit or float32, mono or stereo. |
-| `devices` | Lists the active render devices with their mix format and device periods; the default one is marked. Exit code 1 when there is none. |
-| `tone [--output none\|wasapi] [--seconds N] [--hz F] [--db L]` | Plays a sine through an output (default `wasapi`, 2 s, 440 Hz, -18 dBFS) and prints the output statistics (submitted, dropped, underrun, played, device errors). |
-| `play FILE.wav [--output none\|wasapi]` | Plays a 48 kHz mono or stereo WAV file the same way. |
+| `devices` | Lists the active render devices with their mix format and device periods; the default one is marked. On macOS these are the output devices, with their nominal rate, channel count and buffer size. Exit code 1 when there is none. |
+| `tone [--output none\|wasapi] [--seconds N] [--hz F] [--db L]` | Plays a sine through an output (default `wasapi`, 2 s, 440 Hz, -18 dBFS) and prints the output statistics (submitted, dropped, underrun, played, device errors). On macOS the output is `none` or `coreaudio`, the default. |
+| `play FILE.wav [--output none\|wasapi]` | Plays a 48 kHz mono or stereo WAV file the same way (`coreaudio` instead of `wasapi` on macOS). |
 | `at3scan FILE` | Lists the ATRAC3plus RIFF entries of a file that holds them one after the other (offset, size, channels, rate, block size, samples, delay, loop) with summary lines. This game's sound containers have not been examined. |
-| `at3 FILE [--index N \| --offset N] [--wav OUT] [--hash] [--play] [--expect-frames N] [--expect-samples N] [--expect-pcm SHA256]` | Decodes one entry (the `N`-th of the `at3scan` list, default 0, or the one at a byte offset) through FFmpeg, cuts it to the valid samples, prints `at3: <frames> frames, <samples> samples[, pcm-sha256 <hash>], <us> us/frame` and `at3 ok`. `--hash` prints the SHA-256 of the interleaved little-endian float32 result, `--wav` writes it, `--play` plays it through WASAPI. The `--expect-*` options turn it into a check (exit code 1). It also fails when the sample count differs from the file's `fact` count. |
+| `at3 FILE [--index N \| --offset N] [--wav OUT] [--hash] [--play] [--expect-frames N] [--expect-samples N] [--expect-pcm SHA256]` | Decodes one entry (the `N`-th of the `at3scan` list, default 0, or the one at a byte offset) through FFmpeg, cuts it to the valid samples, prints `at3: <frames> frames, <samples> samples[, pcm-sha256 <hash>], <us> us/frame` and `at3 ok`. `--hash` prints the SHA-256 of the interleaved little-endian float32 result, `--wav` writes it, `--play` plays it through the system's device output (WASAPI or CoreAudio). The `--expect-*` options turn it into a check (exit code 1). It also fails when the sample count differs from the file's `fact` count. |
 
-`at3` needs the FFmpeg DLLs next to the executable, like `tox2_game`.
+`at3` needs the FFmpeg libraries like `tox2_game`: the DLLs next to the executable on Windows,
+Homebrew's libraries on macOS (see [Movies](movies.md#ffmpeg-on-macos)).
 
 ## Tests
 
-`audio_core`, `audio_wasapi` and `media_ffmpeg` are described in [Tests](tests.md). All of them use
+`audio_core`, `audio_wasapi` (Windows), `audio_coreaudio` (macOS) and `media_ffmpeg` are described in [Tests](tests.md). All of them use
 synthetic data; no test plays this game's sound.
 The creation rule for threads, the timer resolution and the event queue keys are covered by
 `runtime_core`.
@@ -476,9 +498,9 @@ The WASAPI output follows Microsoft's documentation.
 
 ## Not implemented
 
-- Output libraries other than WASAPI, exclusive mode, multichannel output (an 8-channel port
+- Output libraries other than WASAPI (Windows) and CoreAudio (macOS), exclusive mode, multichannel output (an 8-channel port
   is downmixed to stereo), a volume option and the choice of the output device (the default render
-  device is used).
+  or output device is used).
 - ATRAC3 (non-plus) data. No logged run of this game passed such data to `SetDataAndGetMemSize` (no `unusable data`
   warning), but its sound containers have not been scanned for it.
 - `cellAudio` functions that no examined game imports, `cellAtracMulti`, `cellAudioIn` and microphone

@@ -1,9 +1,12 @@
 // Checks the behaviour of the OS write watch (MEM_WRITE_WATCH) that the RSX texture hash skip relies on, in the layout
-// of the guest reservation. It links no runtime library: the guarantees come from Windows, not from this project.
+// of the guest reservation. It links no runtime library: the guarantees come from Windows, not from this project. Other
+// hosts have no write watch, so there the binary only reports the build configuration.
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <cstdint>
@@ -14,6 +17,7 @@
 
 #include "core/build_config.h"
 
+#if defined(_WIN32)
 namespace {
 
 int g_passed;
@@ -276,12 +280,15 @@ void testShortBuffer() {
 
 }  // namespace
 
+#endif
+
 int main(int argc, char** argv) {
     // Which configuration this build directory has; the write_watch_config test matches it against the option.
     std::printf("write watch config: %s\n", TOX2_RSX_WRITE_WATCH ? "on" : "off");
     if (argc > 1 && std::strcmp(argv[1], "--config") == 0) {
         return 0;
     }
+#if defined(_WIN32)
     g_window = nullptr;
     void* base = VirtualAlloc(nullptr, kReserveSize, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_NOACCESS);
     CHECK(base != nullptr);
@@ -307,4 +314,8 @@ int main(int argc, char** argv) {
     VirtualFree(base, 0, MEM_RELEASE);
     std::printf("write watch tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
+#else
+    std::printf("write watch tests: skipped (no OS write watch on this host)\n");
+    return 0;
+#endif
 }

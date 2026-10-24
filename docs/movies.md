@@ -71,21 +71,43 @@ stored but not acted on.
   frame-decoder interface that `cellAtrac` uses. Movies do not use them; they are described under
   [Audio](audio.md#cellatrac).
 
-FFmpeg is used as the LGPL DLLs of a pinned build, loaded at run time (no import libraries). For
+On Windows, FFmpeg is used as the LGPL DLLs of a pinned build, loaded at run time (no import
+libraries); on macOS it is Homebrew's installation (see [FFmpeg on macOS](#ffmpeg-on-macos)). For
 this game only the `cellAtrac` HLE uses it, once that code runs; the movie decoders are the unused
 part. See `THIRD_PARTY_NOTICES.md`. `tools/fetch-ffmpeg.ps1 [-From <zip>] [-Force]` downloads
 the build named in `cmake/ffmpeg.cmake`, checks its SHA-256, and extracts it to
 `generated/deps/ffmpeg/<asset name>/` with a `.verified-sha256` marker (exit codes: 0 success, 1
 failure, 2 usage error). Configuration fails with a hint to run the script while it is missing;
 the CMake cache variable `TOX2_FFMPEG_DIR` points at another extraction. The build copies the DLLs,
-the FFmpeg licence and the notice next to the executables.
+the FFmpeg licence and the notice next to the executables. `tools/fetch-ffmpeg.sh [--from <zip>]
+[--force]` does the same from a POSIX shell, with the same pin and checks; the macOS build does not
+use that build.
+
+### FFmpeg on macOS
+
+On macOS there is no pin and no download. FFmpeg comes from Homebrew (`brew install ffmpeg`):
+
+- **Finding it.** Configuration uses `TOX2_FFMPEG_DIR`, or `$(brew --prefix ffmpeg)` when that is
+  empty. The directory must hold `include/libavcodec/avcodec.h` and `lib/`; otherwise configuration
+  stops with that hint. It prints `TOX2: FFmpeg: <directory>`. Nothing is checked against a hash.
+- **Loading.** The libraries are `libavutil`, `libswresample`, `libswscale` and `libavcodec`, as
+  `lib<name>.<major>.dylib` with the major version from the headers the build used. `tox2_game` opens
+  them with `dlopen` by absolute path, from the `lib` directory that was compiled in, with the same
+  checks (missing file, missing function, wrong major version) and messages as for the DLLs, for
+  example `cannot load libavcodec.<major>.dylib from <directory>: <reason>`. They are loaded in place:
+  nothing is linked, copied or put next to the executables. After a Homebrew upgrade that changes a
+  major version, build again.
+- **Licence.** Homebrew's FFmpeg is a GPL-configured build (it includes x264 and x265), unlike the
+  pinned LGPL build of the Windows distribution. This project loads it from the user's own
+  installation and never copies, bundles or redistributes it. The runtime uses only the H.264 and
+  ATRAC3plus decoders and the conversion functions of `libswscale`.
 
 ### Failure policy
 
 Media problems are never fatal:
 
-- Without usable FFmpeg DLLs the runtime logs `tox2: sail: codecs unavailable: <reason>` once, and
-  each movie plays as black frames without sound for the duration of its stream. The same DLLs
+- Without usable FFmpeg DLLs (libraries on macOS) the runtime logs `tox2: sail: codecs unavailable: <reason>` once, and
+  each movie plays as black frames without sound for the duration of its stream. The same libraries
   decode `cellAtrac` sounds, so it also logs `tox2: atrac: no decoder: <reason>` and those sounds
   are silent (see [Audio](audio.md#cellatrac)).
 - A file that cannot be opened or parsed is logged (`tox2: sail: <path> cannot be played: ...`);
@@ -118,7 +140,7 @@ passed it. See [Audio](audio.md) for the engine and the options.
 | `tox2: sail: movie <path>: <w>x<h> <fps> fps, D decoded, N delivered, K dropped, audio S samples (U underruns), played X s of Y s` | The movie ended or was finalized |
 | `tox2: sail: movie window <path>: a .. b s (W s), F flips (R/s), Z skipped draws, G GetFrame calls (Q/s)` | Flips and `GetFrame` calls during the movie, for measuring the pacing |
 | `tox2: sail: movie <path> details: ...` | Debug level: decode and frame copy time per frame, audio counts |
-| `tox2: sail: codecs unavailable: <reason>` | The FFmpeg DLLs could not be loaded |
+| `tox2: sail: codecs unavailable: <reason>` | The FFmpeg DLLs (libraries on macOS) could not be loaded |
 
 On stop, `census: sail <n> movies` repeats the summary line of every movie played.
 

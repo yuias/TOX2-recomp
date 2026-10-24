@@ -54,9 +54,11 @@
 #include "tox2/spu_context.h"
 #include "tox2/spu_lower_stackfree.h"
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#endif
 
 namespace {
 
@@ -1580,6 +1582,7 @@ int runRsvIdle(const Case& self, const Options& options) {
     });
 }
 
+#if defined(_WIN32)
 // Layout of the rsx-write-watch case, mirroring the game: one reservation of the 32-bit space plus the guard, a main
 // window at offset 0 and a window of RSX local memory at its guest address.
 constexpr std::uint64_t kWatchReserveSize = (1ull << 32) + kTox2GuestGuardSize;
@@ -1794,6 +1797,7 @@ int runRsxWriteWatch(const Case& self, const Options& options) {
         return ok;
     });
 }
+#endif
 
 const std::vector<Case>& cases() {
     static const std::vector<Case> kCases = {
@@ -1877,6 +1881,7 @@ const std::vector<Case>& cases() {
              {"capture", "pollute-mb"},
              {"synthetic"},
              runRsxFifo},
+#if defined(_WIN32)
             {"rsx-write-watch",
              "OS write watch of the guest reservation: GetWriteWatch(RESET) calls (--mode query, --range-kib K, "
              "--dirty-pages N, --calls N) or the first store to each page after a reset (--mode first-write, "
@@ -1886,6 +1891,7 @@ const std::vector<Case>& cases() {
              {"mode", "range-kib", "dirty-pages", "calls", "pages", "region", "local-mib"},
              {},
              runRsxWriteWatch},
+#endif
     };
     return kCases;
 }
