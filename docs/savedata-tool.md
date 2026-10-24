@@ -16,7 +16,7 @@ python3 tools/tox2_savetool.py decrypt <save_dir> -o OUT_DIR [--keys DIR] [--sec
 python3 tools/tox2_savetool.py info <SAVE> [--json]
 python3 tools/tox2_savetool.py patch --patch FILE --list
 python3 tools/tox2_savetool.py patch <SAVE> [--patch FILE --code NAME [--code NAME ...]] [--raw CODE ...] (-o OUT | --in-place)
-python3 tools/tox2_savetool.py install <plain_dir> --hdd DIR [--slot N]
+python3 tools/tox2_savetool.py install <plain_dir> --hdd DIR [--slot N] [--names ja|en]
 ```
 
 The tool never writes into a source directory. Every command builds its whole output in memory and
@@ -115,11 +115,13 @@ known field is exit 3 for `info`.
 | AC | block + 0x3F | u8 |
 | SP | block + 0x40 | u32 |
 | Strength, intelligence, vitality, dexterity, agility, spirit | block + 0x46, 4 bytes apart | u16 each |
+| Display name, NUL-terminated, zeros after it up to block + 0x47F0 | block + 0x47AD | UTF-8 |
 
 The characters, in block order, are Alvin, Jude, Milla, Elize, Rowen, Leia, Gaius, Muzet and Ludger
 (`k` = 0 to 8). The order comes from the community codes that set all stats of each character. The
-section names do not follow this order. The tool does not repair any checksum, because none is known for
-this game.
+section names do not follow this order. The game writes the display name in its own language when it
+creates the save, and shows the stored name afterwards, so a US save shows English names in the Japanese
+build. The tool does not repair any checksum, because none is known for this game.
 
 ## patch
 
@@ -200,14 +202,26 @@ takes, as `DIR/dev_hdd0/home/00000001/savedata/BLJS10188_SAVE1_<NNN>`.
   source's value if it has one, otherwise 0 for `ICON0.PNG`, `ICON1.PAM`, `PIC1.PNG` and `SND0.AT3`
   (not secure) and 1 for the others, such as `SAVE`. The binary entries of a PS3 `PARAM.SFO` (`PARAMS`,
   `PARAMS2`) are dropped, because the runtime would read them as text and write them back damaged.
+- The game starts `SUB_TITLE` with the three-digit number of the slot it saved to, and the load list
+  shows that text. If `SUB_TITLE` starts with three digits and a space, the digits are replaced with the
+  number of the new slot, so that a save from another slot does not show a duplicate number. The other
+  text (`TITLE`, the rest of `SUB_TITLE`, `DETAIL`) stays in the language of the source until the game
+  saves to the slot again.
+- `--names ja` or `--names en` sets the display names of the nine characters in `SAVE` to the defaults of
+  the Japanese or the US game. Only a name that is the other language's default is replaced (the US
+  names are Alvin, Jude, Milla, Elize, Rowen, Leia, Gaius, Muzét and Ludger); any other name is kept.
+  Without `--names`, `SAVE` is copied unchanged. A `SAVE` too short for the name fields is exit 3.
 
 Output:
 
 ```
 slot:   BLJS10188_SAVE1_001
 files:  ICON0.PNG, PARAM.SFO, SAVE
+names:  <n> of 9 set to <ja|en>
 output: <hdd>/dev_hdd0/home/00000001/savedata/BLJS10188_SAVE1_001
 ```
+
+The `names:` line is printed only with `--names`.
 
 ## Using a US save in the Japanese build
 
@@ -215,14 +229,15 @@ output: <hdd>/dev_hdd0/home/00000001/savedata/BLJS10188_SAVE1_001
 python3 tools/tox2_savetool.py decrypt <us_save_dir> -o <tmp>/us_save
 python3 tools/tox2_savetool.py info <tmp>/us_save/SAVE
 python3 tools/tox2_savetool.py patch <tmp>/us_save/SAVE --raw "200002E8 00989680" --in-place   # optional
-python3 tools/tox2_savetool.py install <tmp>/us_save --hdd <hdd-dir>
+python3 tools/tox2_savetool.py install <tmp>/us_save --hdd <hdd-dir> --names ja
 tox2_game --hdd-dir <hdd-dir> ...
 ```
 
 The `info` and `patch` steps are optional. After the run starts, the log should show the save in the
 list and a `tox2: savedata: file op ... 'SAVE'` line with no `cannot read` error after it. The save data
 handlers are described in [Runtime](runtime.md). A decrypted US save installed this way loads in the
-Japanese build. The tool does not change the contents of `SAVE`.
+Japanese build. `--names ja` gives the characters their Japanese names; without it, the tool does not
+change the contents of `SAVE`.
 
 ## Tests
 

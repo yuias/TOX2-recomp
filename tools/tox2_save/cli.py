@@ -242,7 +242,8 @@ def _install(args: argparse.Namespace) -> int:
         if name not in present:
             raise CliError(EXIT_FORMAT, "%s has no %s" % (plain_dir, name))
     source_sfo = sfo.parse_sfo(_read(plain_dir / _SFO_FILE))
-    save.parse_save(_read(plain_dir / "SAVE"))
+    save_data = bytearray(save.parse_save(_read(plain_dir / "SAVE")).data)
+    renamed = save.localize_names(save_data, args.names) if args.names is not None else None
 
     if not hdd.is_dir():
         raise CliError(EXIT_IO, "%s is not a directory" % hdd)
@@ -270,7 +271,7 @@ def _install(args: argparse.Namespace) -> int:
             if not _SAFE_FILE_RE.fullmatch(path.name):
                 print("note: skipping %s: unsupported file name" % path.name, file=sys.stderr)
                 continue
-            files[path.name] = _read(path)
+            files[path.name] = bytes(save_data) if path.name == "SAVE" else _read(path)
     files[_SFO_FILE] = sfo.serialize_sfo(sfo.build_install_sfo(source_sfo, slot_name, files))
 
     slot_dir = save_root / slot_name
@@ -283,6 +284,8 @@ def _install(args: argparse.Namespace) -> int:
         _write(slot_dir / name, data)
     print("slot:   %s" % slot_name)
     print("files:  %s" % ", ".join(sorted(files)))
+    if renamed is not None:
+        print("names:  %d of %d set to %s" % (renamed, len(save.CHARACTERS), args.names))
     print("output: %s" % slot_dir)
     return 0
 
@@ -323,6 +326,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--hdd", type=Path, required=True, metavar="DIR", help="hdd directory given to tox2_game --hdd-dir")
     p.add_argument("--slot", type=int, metavar="N",
                    help="slot number 1..%d (default: the lowest free one)" % _MAX_SLOT)
+    p.add_argument("--names", choices=sorted(save.DEFAULT_NAMES),
+                   help="replace the other language's default character names with those of this language")
     p.set_defaults(func=_install)
     return parser
 

@@ -19,6 +19,13 @@ CHARACTERS = ("Alvin", "Jude", "Milla", "Elize", "Rowen", "Leia", "Gaius", "Muze
 HP, TP, EXP, AC, SP = 0x20, 0x24, 0x30, 0x3F, 0x40
 STATS, STAT_STRIDE = 0x46, 4  # six u16 values
 STAT_NAMES = ("strength", "intelligence", "vitality", "dexterity", "agility", "spirit")
+# NUL-terminated UTF-8 display name, written by the game in its own language; zeros follow up to 0x47F0.
+NAME, NAME_END = 0x47AD, 0x47F0
+# Names the US and JP games store, in block order (the US one has the accent on Muzét).
+DEFAULT_NAMES = {
+    "en": ("Alvin", "Jude", "Milla", "Elize", "Rowen", "Leia", "Gaius", "Muzét", "Ludger"),
+    "ja": ("アルヴィン", "ジュード", "ミラ", "エリーゼ", "ローエン", "レイア", "ガイアス", "ミュゼ", "ルドガー"),
+}
 
 _HEADER_SIZE = 0x10
 _ENTRY_SIZE = 16
@@ -73,6 +80,28 @@ def parse_save(data: bytes) -> SaveFile:
             raise _not_a_save("section %d: data reaches past the end of the file" % i)
         sections.append(Section(i, raw.decode("ascii"), offset, size))
     return SaveFile(data, total_size, tuple(sections))
+
+
+def localize_names(data: bytearray, lang: str) -> int:
+    """Replaces each default name of the other language with the default name in `lang`; returns the count.
+
+    A name that is not a known default is left as it is, so that nothing the tool does not recognize is lost.
+    """
+    if len(data) < CHARACTER_BASE + (len(CHARACTERS) - 1) * CHARACTER_STRIDE + NAME_END:
+        raise CliError(EXIT_FORMAT, "SAVE is %d bytes; too short for the character names" % len(data))
+    others = [names for other, names in DEFAULT_NAMES.items() if other != lang]
+    changed = 0
+    for k, new in enumerate(DEFAULT_NAMES[lang]):
+        start = CHARACTER_BASE + k * CHARACTER_STRIDE + NAME
+        end = CHARACTER_BASE + k * CHARACTER_STRIDE + NAME_END
+        field = data[start:end]
+        nul = field.find(b"\0")
+        if nul < 0 or not any(field[:nul] == names[k].encode("utf-8") for names in others):
+            continue
+        # Clearing the whole field keeps no tail of a longer old name.
+        data[start:end] = new.encode("utf-8").ljust(end - start, b"\0")
+        changed += 1
+    return changed
 
 
 def describe(save: SaveFile) -> dict:
