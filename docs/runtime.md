@@ -801,7 +801,10 @@ interface, so each module follows a documented policy that never blocks on a per
   logs its English text and shows an OK message with the Japanese text; the call returns
   `CELL_SAVEDATA_ERROR_CBRESULT` whatever the player does. `cellSaveDataDelete2` returns
   `CELL_CANCEL`. Secure files are stored in plain text. With a window the player answers the dialogs
-  instead of the Auto policy; see [Save data dialog](#save-data-dialog).
+  instead of the Auto policy; see [Save data dialog](#save-data-dialog). In `--ppu-threads 1|2` the
+  handlers read and write the save directory without the kernel lock and the PPU slot, as `sys_fs`
+  transfers do, so listing the saves does not hold up other guest threads (the game's sound mixer
+  among them); in `legacy` the one guest lock stays held.
 - **Trophies**: no trophy pack is installed from the network and no notification is shown. The
   pack is read for its trophy list, and the unlock state is kept as a text file in the trophy
   directory under `/dev_hdd0/home/00000001`. The registration status callbacks run inside
