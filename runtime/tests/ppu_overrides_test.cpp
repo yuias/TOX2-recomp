@@ -1,6 +1,7 @@
 // Self-checking tests for the hand-written replacements of recompiled guest functions. The overrides are linked
-// against fakes of the guest functions they call, so no generated tree is needed. Each case runs in Legacy and in
-// Split2, where every lv2 call the override makes must open its own kernel section.
+// against fakes of the guest functions they call, so no generated tree is needed. Each ATRAC case runs in Legacy and
+// in Split2, where every lv2 call the override makes must open its own kernel section; the save DLC check makes no lv2
+// call and runs once.
 
 #include <atomic>
 #include <chrono>
@@ -84,6 +85,18 @@ struct FakeState {
     int unexpected_import_calls = 0;
 };
 FakeState g_fake;
+
+// What the fakes called by the save DLC check (fn_00523fb8) saw and answer.
+struct DlcFakeState {
+    std::uint32_t items_begin = 0;  // guest address of the item id array the save's DLC set expands to
+    std::uint32_t items_end = 0;
+    std::uint32_t licensed_count = 2;  // fn_001da10c: number of installed DLC
+    std::uint32_t unlicensed_id = 0;   // fn_00522b44 answers "not found" (the count) for this id
+    int lookups = 0;
+    int frees = 0;
+    std::uint32_t freed = 0;
+};
+DlcFakeState g_dlc;
 
 // Runs a lv2 call as the guest would: number in r11, arguments in r3..r5.
 std::uint32_t guestSyscall(Tox2PpuContext* ctx, std::uint8_t* base, std::uint32_t number, std::uint64_t r3,
@@ -181,6 +194,41 @@ UNEXPECTED_IMPORT(imp_00c901e8)
 
 TOX2_PPU_FUNC(fn_00956a00);
 TOX2_PPU_FUNC(fn_00955f50);
+
+// Fakes of the guest functions the save DLC check calls.
+
+// fn_005333d8: the item manager.
+TOX2_PPU_FUNC(fn_005333d8) {
+    (void)base;
+    ctx->gpr[3] = 0x10;
+}
+
+// fn_0053c81c(mgr, vector, save): fills the vector (begin at +4, end at +8) with the ids of the save's DLC items.
+TOX2_PPU_FUNC(fn_0053c81c) {
+    const auto vec = static_cast<std::uint32_t>(ctx->gpr[4]);
+    tox2Write32(base, vec + 4, g_dlc.items_begin);
+    tox2Write32(base, vec + 8, g_dlc.items_end);
+}
+
+// fn_00522b44(out, id): the index of the installed DLC that owns the item, or the DLC count when none does.
+TOX2_PPU_FUNC(fn_00522b44) {
+    const auto out = static_cast<std::uint32_t>(ctx->gpr[3]);
+    const auto id = static_cast<std::uint32_t>(ctx->gpr[4]);
+    g_dlc.lookups++;
+    tox2Write32(base, out, id == g_dlc.unlicensed_id ? g_dlc.licensed_count : 0);
+}
+
+// fn_001da10c(out): the number of installed DLC.
+TOX2_PPU_FUNC(fn_001da10c) { tox2Write32(base, static_cast<std::uint32_t>(ctx->gpr[3]), g_dlc.licensed_count); }
+
+// fn_009b4088(ptr): frees the vector's storage.
+TOX2_PPU_FUNC(fn_009b4088) {
+    (void)base;
+    g_dlc.frees++;
+    g_dlc.freed = static_cast<std::uint32_t>(ctx->gpr[3]);
+}
+
+TOX2_PPU_FUNC(fn_00523fb8);
 
 }  // extern "C"
 
@@ -569,6 +617,51 @@ void decoderSetDataFailureNoFlag() {
     }
 }
 
+// Runs the save DLC check with `count` DLC item ids, the one at `unlicensed` (if below `count`) owned by no installed
+// DLC, and checks that it passes and frees the item vector.
+void dlcCheckCase(std::uint32_t count, std::uint32_t unlicensed) {
+    tox2::setLogSink([](std::string_view) {});
+    CHECK(tox2::process().memory.reserve());
+    std::uint8_t* base = tox2::process().memory.base();
+    const std::uint32_t scratch = tox2::process().main.allocate(0x10000, 0x10000);
+    CHECK(scratch != 0);
+    tox2::GuestThread thread(1001, tox2::GuestThreadParams{}, 0, 0);
+    Tox2PpuContext* ctx = &thread.context();
+
+    g_dlc = DlcFakeState{};
+    const std::uint32_t items = scratch + 0x100;
+    for (std::uint32_t i = 0; i < count; i++) tox2Write32(base, items + 4 * i, 0x06000000u + i);
+    g_dlc.items_begin = count != 0 ? items : 0;
+    g_dlc.items_end = count != 0 ? items + 4 * count : 0;
+    g_dlc.unlicensed_id = unlicensed < count ? 0x06000000u + unlicensed : 0;
+
+    ctx->gpr[1] = scratch + 0xf000;
+    ctx->gpr[3] = scratch + 0x8000;  // the save buffer; the fakes do not read it
+    ctx->lr = 0;
+    fn_00523fb8(ctx, base);
+
+    CHECK(ctx->gpr[3] == 1);
+    CHECK(ctx->gpr[1] == scratch + 0xf000);
+    CHECK(g_dlc.frees == (count != 0 ? 1 : 0));
+    if (count != 0) CHECK(g_dlc.freed == items);
+    // The original stops at the first unlicensed item.
+    CHECK(g_dlc.lookups == static_cast<int>(unlicensed < count ? unlicensed + 1 : count));
+
+    tox2::process().main.free(scratch);
+    tox2::setLogSink({});
+}
+
+// The save DLC check passes for an empty set, a fully licensed set and a set with an item of DLC that is not
+// installed (the original returns 0 there), for counts that take each of the unrolled loop's paths.
+void dlcCheckAlwaysPasses() {
+    dlcCheckCase(0, 0);
+    for (std::uint32_t count : {1u, 2u, 3u, 4u, 5u, 9u}) {
+        dlcCheckCase(count, count);      // all licensed
+        dlcCheckCase(count, 0);          // the first is not
+        dlcCheckCase(count, count - 1);  // the last is not
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -577,6 +670,7 @@ int main() {
     decoderSetDataUnderLock();
     decoderPushDuringSetData();
     decoderSetDataFailureNoFlag();
+    dlcCheckAlwaysPasses();
     std::printf("ppu overrides tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }

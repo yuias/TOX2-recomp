@@ -160,7 +160,15 @@ source without an entry (defined twice).
 
 ### Overrides in use
 
-Both overrides are in `runtime/src/ppu_overrides/atrac_stream.c` and close races on the stream object
+`runtime/src/ppu_overrides/dlc_check.c` replaces the save DLC check (`0x00523fb8`). After a save is read, the
+original expands the save's set of DLC items (section `SAVE_DATA_ID_ITEM_DATA_MANAGER`, offset `0x3000`) and returns
+0 when an item belongs to no installed DLC; the save task then drops the save and the game shows that the rights of
+the downloadable content could not be confirmed. Without the DLC installed, every save that used DLC fails this way.
+The one edit is the "not licensed" exit at `0x0052422c`, which returns 1 instead of 0, so the check always passes; the
+item vector is still freed. With a save that uses DLC items and no DLC installed, the game loads to the field and its
+item and equipment menus open.
+
+The two ATRAC overrides are in `runtime/src/ppu_overrides/atrac_stream.c` and close races on the stream object
 of the game's ATRAC player (`obj`). The loader pushes bytes into the ring buffer of `obj`; the decoder
 setup runs on the player's own thread and hands the ring to `cellAtrac` with `SetDataAndGetMemSize`.
 In the original code the loader could run between the setup's read of the ring byte count (`obj+0x234`)

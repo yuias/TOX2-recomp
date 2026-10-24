@@ -28,7 +28,9 @@ endfunction()
 # in an archive references them, and so that no archive order matters. The unit test links them against
 # fakes and needs no generated tree. Call after tox2_runtime_core is defined and before
 # tox2_ppu_add_generated_tree.
-set(TOX2_PPU_OVERRIDE_SOURCES runtime/src/ppu_overrides/atrac_stream.c)
+set(TOX2_PPU_OVERRIDE_SOURCES
+  runtime/src/ppu_overrides/atrac_stream.c
+  runtime/src/ppu_overrides/dlc_check.c)
 
 function(tox2_ppu_add_overrides)
   add_library(tox2_ppu_overrides OBJECT ${TOX2_PPU_OVERRIDE_SOURCES})
