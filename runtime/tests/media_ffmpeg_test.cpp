@@ -539,7 +539,7 @@ void testAtracFrameDecoder() {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main() {
     testEmptyDirectory();
     testPartialLoadIsUnmapped(tox2::defaultFfmpegDirectory());
     testLoad();
