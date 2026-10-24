@@ -53,3 +53,7 @@ __pycache__/
 
 # Streamline SDK (NVIDIA DLSS/DLAA) is unpacked from the upstream release archive, not vendored
 /externals/Streamline/
+
+# macOS
+.DS_Store
+
