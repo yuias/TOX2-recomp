@@ -5657,14 +5657,14 @@ void drawWithoutWrites(tox2::rsx_synthetic::SceneBuilder& scene, bool registers_
 // The rectangle scene of makeMsaaDepthCapture with stencil kMsInheritStencil in the 2-sample surface (omitted for the
 // second frame of the rescale case), then the rebinding and the read that `kind` says. The rebinding keeps the rows of
 // the 2W x H layout, pitch 2 x kAaSize x 4.
-std::vector<std::uint8_t> makeMsaaInheritCapture(MsaaInherit kind) {
+std::vector<std::uint8_t> makeMsaaInheritCapture(MsaaInherit kind, std::uint32_t stencil = kMsInheritStencil) {
     using namespace tox2::rsx_synthetic;
     SceneBuilder scene;
     const bool second_frame = kind == MsaaInherit::RescaleAa || kind == MsaaInherit::RescaleWide;
     if (!second_frame) {
         scene.setSurface(3, kAaSize, kAaOffset);
         scene.clear(0xFF000000);
-        setMsaaDepthState(scene, true, kMsInheritStencil);
+        setMsaaDepthState(scene, true, stencil);
         drawMsaaRect(scene);
         setMsaaDepthState(scene, false);
     }
@@ -5847,6 +5847,55 @@ void testRendererMsaaInherit(tox2::VkContext& ctx) {
             if (mismatches != 0) std::fprintf(stderr, "rescaled multisampled depth: %u texels differ\n", mismatches);
             CHECK(mismatches == 0);
         }
+    }
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
+// The stencil of a 2-sample depth target reaches its layout image bit for bit. Inherit uses 0xA5; 0x5A (bits 1, 3, 4
+// and 6) and 0xFF complete the coverage, so a layout pass that loses or invents any of the eight bits is caught.
+void testRendererMsaaLayoutStencilBits(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    if (!ctx.twoSampleSupportGap().empty()) {
+        std::printf("multisampled layout stencil: skipped (%s)\n", ctx.twoSampleSupportGap().c_str());
+        return;
+    }
+    if (ctx.deviceProperties().limits.standardSampleLocations == VK_FALSE) {
+        std::printf("multisampled layout stencil: skipped (no standard sample locations)\n");
+        return;
+    }
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    constexpr std::uint32_t kScale = 2;
+
+    for (const std::uint32_t stencil : {0xA5u, 0x5Au, 0xFFu, 0x01u, 0x80u}) {
+        // The words of a plain surface with the same rectangle, depth and stencil.
+        const ScaledFrame reference = renderAtScale(ctx, {makeMsaaDepthCapture(MsaaDepthRead::Reference, stencil)},
+                                                    kScale, 1, 0, tox2::AaMode::Msaa);
+        CHECK(reference.ok && reference.width == kAaSize * kScale);
+        if (!reference.ok) continue;
+        const std::uint32_t covered_word = pixelArgb(reference.bgra, reference.width, 10 * kScale, 8 * kScale);
+        const std::uint32_t uncovered_word = pixelArgb(reference.bgra, reference.width, 0, 0);
+        CHECK((covered_word & 0xFF) == stencil && (uncovered_word & 0xFF) == 0);
+
+        // A single-sample pass over the same memory as a plain 2W x H surface reads the layout copy of the depth.
+        const ScaledFrame frame = renderAtScale(ctx, {makeMsaaInheritCapture(MsaaInherit::PlainWide, stencil)}, kScale,
+                                                1, 0, tox2::AaMode::Msaa);
+        CHECK(frame.ok && frame.width == 2 * kAaSize * kScale && frame.height == kAaSize * kScale);
+        if (!frame.ok) continue;
+        std::uint32_t mismatches = 0, covered = 0;
+        for (std::uint32_t y = 0; y < frame.height; y++) {
+            for (std::uint32_t x = 0; x < frame.width; x++) {
+                const bool is_covered = msaaTexelCovered(x, y, kScale);
+                covered += is_covered;
+                if (pixelArgb(frame.bgra, frame.width, x, y) != (is_covered ? covered_word : uncovered_word)) {
+                    mismatches++;
+                }
+            }
+        }
+        if (mismatches != 0) std::fprintf(stderr, "layout stencil 0x%02X: %u texels differ\n", stencil, mismatches);
+        CHECK(mismatches == 0 && covered > 0);
+        CHECK(frame.stats.layout_copies >= 2 && frame.stats.draws_skipped == 0 && frame.notes.empty());
     }
     CHECK(ctx.validationErrorCount() == errors_before);
     tox2::rsxUnimplementedReset();
@@ -7305,6 +7354,7 @@ int main() {
     testRendererAaModeSwitch(*ctx);
     testRendererMsaaDepthAsArgb(*ctx);
     testRendererMsaaInherit(*ctx);
+    testRendererMsaaLayoutStencilBits(*ctx);
     testRendererDlaaSceneImage(*ctx);
     testRendererDlaaEvaluate(*ctx);
     testRendererFrameGenOptions(*ctx);

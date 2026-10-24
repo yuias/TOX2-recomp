@@ -113,6 +113,7 @@ struct Candidate {
     std::string driver_info;
     std::uint32_t graphics_family = 0;
     bool portability_subset = false;                        // the device advertises VK_KHR_portability_subset
+    bool stencil_export = false;                            // the device advertises VK_EXT_shader_stencil_export
     VkPhysicalDevicePortabilitySubsetFeaturesKHR subset{};  // what that extension reports as supported
     bool triangle_fans = true;
 };
@@ -160,6 +161,7 @@ std::string checkDevice(VkPhysicalDevice device, const VkContextOptions& options
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     out.subset.sType = kPortabilitySubsetFeaturesType;
     out.portability_subset = hasName(extensions, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+    out.stencil_export = hasName(extensions, VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
     features13.pNext = out.portability_subset ? &out.subset : nullptr;
     VkPhysicalDeviceFeatures2 features{};
     features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -848,6 +850,9 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
         if (options.window) device_exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
         // The spec requires a portability device to be created with this extension enabled.
         if (chosen.portability_subset) device_exts.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+        // Optional: the depth-stencil layout pass writes the stencil in one pass instead of eight bit passes.
+        ctx->has_stencil_export_ = chosen.stencil_export;
+        if (chosen.stencil_export) device_exts.push_back(VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
 
         VkPhysicalDeviceVulkan13Features features13{};
         features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;

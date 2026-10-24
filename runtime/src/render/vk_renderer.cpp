@@ -1063,8 +1063,9 @@ bool RsxRenderer::ensureSidecar(RenderTarget& target, VkSampleCountFlagBits samp
 // sidecar: both texels of a pixel take its one value, by a blit. Records outside any rendering instance. False only
 // on a Vulkan failure.
 //
-// A 2-sample depth target takes one instance: a pass that writes the depth through gl_FragDepth, then (Z24S8) eight
-// passes that rebuild the stencil one bit at a time, because a shader cannot write the stencil without an extension.
+// A 2-sample depth target takes one instance. With VK_EXT_shader_stencil_export one pass writes the depth through
+// gl_FragDepth and the stencil through gl_FragStencilRefARB. Without it (Z24S8 only) a depth pass is followed by
+// eight passes that rebuild the stencil one bit at a time, because a shader cannot write the stencil otherwise.
 bool RsxRenderer::syncLayout(RenderTarget& target) {
     if (!target.msaa || !target.layout_stale) return true;
     if (target.msaa->samples == VK_SAMPLE_COUNT_1_BIT) {
@@ -1088,6 +1089,7 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
     }
     if (!ensurePlaceholder() || !valid()) return false;
     const bool has_stencil = target.depth && formatHasStencil(target.format);
+    const bool stencil_export = has_stencil && context_.hasStencilExport();
     const VkPipeline pipeline = target.depth ? pipelines_->layoutDepthPipeline(target.format)
                                              : pipelines_->layoutColorPipeline(target.format);
     if (pipeline == VK_NULL_HANDLE) {
@@ -1105,7 +1107,7 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
     transitionSidecar(target, read_layout);
     transition(target, write_layout);
 
-    // Every texel is written; the stencil starts at 0 and gains the bits the stencil passes set.
+    // Every texel is written; without the export the stencil starts at 0 and gains the bits the stencil passes set.
     VkRenderingAttachmentInfo attachment{};
     attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     attachment.imageView = target.view;
@@ -1113,7 +1115,7 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
     attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     VkRenderingAttachmentInfo stencil_attachment = attachment;
-    stencil_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    stencil_attachment.loadOp = stencil_export ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_CLEAR;
     stencil_attachment.clearValue.depthStencil = {0.0f, 0};
     VkRenderingInfo rendering{};
     rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
@@ -1161,19 +1163,20 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
     vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_->layoutPassLayout(), 0,
                               has_stencil ? 2 : 1, writes);
     if (target.depth) {
-        // The depth pass: depth test ALWAYS with writes on, stencil test off. Stencil op, masks and reference are set
-        // here once for the bit passes, which only toggle the write mask.
+        // The depth pass: depth test ALWAYS with writes on, stencil test off (on for the export pass). Stencil op,
+        // masks and reference are set here once for the bit passes, which only toggle the write mask.
         vkCmdSetDepthTestEnable(cmd, VK_TRUE);
         vkCmdSetDepthWriteEnable(cmd, VK_TRUE);
         vkCmdSetDepthCompareOp(cmd, VK_COMPARE_OP_ALWAYS);
-        vkCmdSetStencilTestEnable(cmd, VK_FALSE);
+        // The exported value replaces the reference; REPLACE on pass stores it through the full write mask.
+        vkCmdSetStencilTestEnable(cmd, stencil_export ? VK_TRUE : VK_FALSE);
         vkCmdSetStencilOp(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE,
                           VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS);
         vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xFF);
         vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xFF);
         vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xFF);
         draw();
-        if (has_stencil) {
+        if (has_stencil && !stencil_export) {
             // Bit b: the shader discards the fragments whose stencil sample has the bit clear, the others write
             // reference 0xFF through the one-bit write mask.
             vkCmdSetDepthTestEnable(cmd, VK_FALSE);

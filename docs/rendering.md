@@ -664,9 +664,11 @@ drawn with one sample per pixel.
   its single-sample memory-layout image as well (its identity, size and every read path are as in `supersample`)
   and the multisampled image is a sidecar of it. Multisampled passes do not draw into the layout image; it is
   written from the sidecar by a full-target pass at the moment something reads it, and not before:
-  - a colour target is copied by a draw that fetches each layout texel from the sidecar; a depth target by a
-    depth pass plus, for Z24S8, eight passes that rebuild the stencil one bit at a time with a stencil-test
-    write mask (no extension is needed for either);
+  - a colour target is copied by a draw that fetches each layout texel from the sidecar; a depth target by one
+    pass that writes the depth through `gl_FragDepth` and, for Z24S8, the stencil through `gl_FragStencilRefARB`
+    (the device is created with `VK_EXT_shader_stencil_export` when it offers it; the stencil test is on with
+    op REPLACE, so the exported value is stored). A device without that extension takes a depth pass plus eight
+    passes that rebuild the stencil one bit at a time with a stencil-test write mask;
   - the readers are a texture that aliases the surface (including a draw that samples the surface it renders into:
     it reads the layout image and draws into the sidecar, so it needs no feedback copy), an inherit copy or a
     rescale blit from it, a flip of it, and a single-sample pass that is about to draw into the same memory (a plain

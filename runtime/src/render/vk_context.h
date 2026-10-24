@@ -63,6 +63,8 @@ public:
     bool hasLargePoints() const { return has_large_points_; }
     // True when the device was created with samplerAnisotropy.
     bool hasSamplerAnisotropy() const { return has_sampler_anisotropy_; }
+    // True when the device was created with VK_EXT_shader_stencil_export (gl_FragStencilRefARB).
+    bool hasStencilExport() const { return has_stencil_export_; }
     // 0 without the feature, else limits.maxSamplerAnisotropy.
     float maxSamplerAnisotropy() const {
         return has_sampler_anisotropy_ ? properties_.limits.maxSamplerAnisotropy : 0.0f;
@@ -120,6 +122,7 @@ private:
     bool has_clip_distance_ = false;
     bool has_large_points_ = false;
     bool has_sampler_anisotropy_ = false;
+    bool has_stencil_export_ = false;
     std::string two_sample_gap_;
     std::unique_ptr<Streamline> streamline_;
     std::string streamline_status_;
