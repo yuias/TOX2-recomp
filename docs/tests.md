@@ -120,7 +120,14 @@ executable are skipped unless `TOX2_EBOOT_ELF` points at it, and `test_real_libs
 of the committed `config/libsre_functions.json` from the relocated module) is skipped unless
 `TOX2_LIBSRE_ELF` points at `generated/inputs/libsre.reloc.elf`. The Ghidra comparison tests
 additionally need `TOX2_GHIDRA_JSON`, the path of an export written by `ghidra-export --cell`, and
-are skipped without it. The tests never run Ghidra themselves. The tests of `recover` and
+are skipped without it. The tests never run Ghidra themselves. The tests of the save data tool (`test_save_*.py`, see
+[Save data tool](savedata-tool.md)) use synthetic saves, encrypted with made-up keys, in temporary
+directories. `test_save_real.py` runs the tool on real saves and is skipped unless `TOX2_US_SAVE_DIR`
+(an encrypted US save directory, `BLUS31397_SAVE1_<NNN>`) and `TOX2_JP_SAVE_DIR` (a recomp save,
+`BLJS10188_SAVE1_<NNN>`) are set. The tests that decrypt also need `key_vault.h`, from
+`TOX2_SAVE_KEYS_DIR` or, when that is unset, from the build's `generated/deps/rpcs3/<commit>/`; they
+are skipped when it is absent. The tests only read the two save directories and check that they are
+unchanged. The tests of `recover` and
 `emit` that use the real executable also need `TOX2_EBOOT_ELF`; they read the committed
 `config/ghidra_summary.json` and `config/functions.json`. The `emit` tests assert the
 counts in [Emitting C](emitter.md) (29,196 functions, 173 import trampolines, 480 switches) and
@@ -131,10 +138,15 @@ found and that the switch at `0x0081a10c`, which belongs to the second TOC, is r
 python -m unittest discover -s tools/tests -t tools -v
 TOX2_EBOOT_ELF=game/EBOOT.elf python -m unittest discover -s tools/tests -t tools -v
 TOX2_EBOOT_ELF=game/EBOOT.elf TOX2_LIBSRE_ELF=generated/inputs/libsre.reloc.elf TOX2_GHIDRA_JSON=generated/ghidra/eboot_ghidra_cell.json python -m unittest discover -s tools/tests -t tools -v
+TOX2_US_SAVE_DIR=<us_save_dir> TOX2_JP_SAVE_DIR=<jp_save_dir> python -m unittest discover -s tools/tests -t tools -p test_save_real.py -v
 ```
 
-The suite has 1208 tests. Without the variables 90 are skipped; with `TOX2_EBOOT_ELF` alone 31 are,
-and with all three none are (that run takes a few minutes). When the pinned executable or the recovery
+CTest passes environment variables it inherits to the tests, so the two save variables also work with
+`ctest -R tools_unittest`.
+
+The suite has 1509 tests. Without the variables 107 are skipped; with `TOX2_EBOOT_ELF` alone 48 are,
+with the two save variables alone 90 are, and with all of the variables none are (that run takes a few
+minutes). The 17 tests of `test_save_real.py` account for the difference between 107 and 90. When the pinned executable or the recovery
 changes, update the values in `tools/tests/test_real_eboot.py` and the other real-executable tests
 from the tool output.
 

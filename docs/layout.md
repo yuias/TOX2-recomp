@@ -34,6 +34,8 @@
 | `cmake/Decrypt.cmake`, `cmake/rpcs3_keys.cmake` | The `tox2_decrypt` targets, the `tox2_inputs` target that writes `generated/inputs` and the tests `decrypt_core`, `decrypt_eboot`, `decrypt_libsre`, `decrypt_libsre_reloc`, `decrypt_font`; and the pin of the two RPCS3 key files and their download |
 | `tools/ps3tool.py` | Command-line entry point for the analysis tools |
 | `tools/ps3recomp/` | ELF/PRX parsing (module info of a relocated PRX), PPU decoder and formatter, probe, Ghidra export, diff and summary, function recovery (seeds, partition, jump tables, coverage, syscall resolution), name table generator |
+| `tools/tox2_savetool.py` | Command-line entry point for the save data tool; see [Save data tool](savedata-tool.md) |
+| `tools/tox2_save/` | The save data tool: AES-128 (`aes.py`), `PARAM.PFD` parsing and decryption with the key loader (`pfd.py`), the `SAVE` layout (`save.py`), Game Genie and savepatch parsing (`codes.py`), `PARAM.SFO` reading and writing (`sfo.py`) and the commands (`cli.py`) |
 | `tools/ghidra/` | Java `GhidraScript`s run by `ghidra-export` |
 | `tools/ps3recomp/emit*.py` | The `emit` command: function DB loader and census, per-instruction handlers by group, output writer and report |
 | `tools/ps3recomp/spu*.py` | The SPU commands: the image registry loader and extraction (`spu_images.py`), the decoder and formatter (`spu.py`, `spu_format.py`) and `spu-disasm` (`spu_disasm.py`), the objdump cross-check (`spu_objdump.py`, `spu_objdump_diff.py`), flow, jump tables and recovery (`spu_flow.py`, `spu_jumptab.py`, `spu_recover.py`), and the emitter with its lowering and one op-group module per group (`spu_emit*.py`, `spu_lower_stackfree.py`) |
