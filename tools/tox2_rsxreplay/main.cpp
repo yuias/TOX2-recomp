@@ -43,6 +43,7 @@ void printUsage() {
             "                      [--compare PNG [--compare-rect X,Y,W,H] [--max-diff N] [--max-mean X]\n"
             "                       [--max-differing P]]\n"
             "                      [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--no-validation]\n"
+            "                      [--vk-driver auto|moltenvk|kosmickrisp]\n"
             "                      [--dlaa-jitter on|off] [--dlaa-jitter-flip none|x|y|xy]\n"
             "                      [--dlaa-camera on|off|reset] [--dlaa-clip-flip-y on|off]\n"
             "                      [--dlaa-mv-invalid zero|unset]\n"
@@ -64,6 +65,8 @@ void printUsage() {
             "                      supersample (one sample per memory-layout pixel) or dlaa (NVIDIA DLAA through\n"
             "                      Streamline); dlaa falls back to msaa when it is unavailable, and msaa falls back\n"
             "                      to supersample on a device without 2-sample support\n"
+            "  --vk-driver D       Vulkan driver: auto (default; MoltenVK before KosmicKrisp), moltenvk or kosmickrisp;\n"
+            "                      a driver that is not installed leaves the replay without a device\n"
             "  --dlaa-jitter M     diagnostic, needs --aa-mode dlaa: on (default) or off (no sub-pixel jitter)\n"
             "  --dlaa-jitter-flip F  diagnostic, needs --aa-mode dlaa: negate the jitter offset reported to DLAA on\n"
             "                      the x axis, the y axis or both (none by default); the geometry does not change\n"
@@ -516,6 +519,12 @@ bool writeFramePng(const tox2::RgbImage& image, const ReplayFrame& frame, const 
     return true;
 }
 
+// The driver is named because one GPU can be listed by several (KosmicKrisp and MoltenVK on macOS).
+void printDevice(const tox2::VkContext& context) {
+    std::printf("render: vulkan device %s (driver %s)\n", std::string(context.deviceName()).c_str(),
+                std::string(context.driverName()).c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -531,6 +540,7 @@ int main(int argc, char** argv) {
     bool has_loop = false;
     std::uint32_t resolution_scale = 1;
     tox2::AaMode aa_mode = tox2::AaMode::Msaa;
+    tox2::VkDriverChoice vk_driver = tox2::VkDriverChoice::Auto;
     tox2::DlaaDebug dlaa_debug;
     bool has_dlaa_option = false;  // a --dlaa-* option was given, which needs --aa-mode dlaa
     tox2::FgDebug fg_debug;
@@ -596,6 +606,17 @@ int main(int argc, char** argv) {
                 return 2;
             }
             aa_mode = *mode;
+            i++;
+            continue;
+        }
+        if (arg == "--vk-driver") {
+            const std::optional<tox2::VkDriverChoice> choice =
+                    i + 1 < argc ? tox2::parseVkDriverChoice(argv[i + 1]) : std::nullopt;
+            if (!choice) {
+                std::fputs("error: --vk-driver takes auto|moltenvk|kosmickrisp\n", stderr);
+                return 2;
+            }
+            vk_driver = *choice;
             i++;
             continue;
         }
@@ -759,12 +780,14 @@ int main(int argc, char** argv) {
     if (repeat != 0) {
         tox2::VkContextOptions timed_context_options;
         timed_context_options.validation = validation;
+        timed_context_options.driver = vk_driver;
         timed_context_options.streamline = aa_mode == tox2::AaMode::Dlaa;
         std::unique_ptr<tox2::VkContext> timed_context = tox2::createVkContext(timed_context_options, error);
         if (!timed_context) {
             std::fprintf(stderr, "error: --repeat needs a Vulkan device: %s\n", error.c_str());
             return 1;
         }
+        printDevice(*timed_context);
         tox2::RenderOptions timed_options;
         timed_options.shader_cache = shader_cache;
         timed_options.resolution_scale = resolution_scale;
@@ -814,9 +837,14 @@ int main(int argc, char** argv) {
     // Without a Vulkan device the replay still prints the command list and counts every draw as skipped.
     tox2::VkContextOptions context_options;
     context_options.validation = validation;
+    context_options.driver = vk_driver;
     context_options.streamline = aa_mode == tox2::AaMode::Dlaa;
     std::unique_ptr<tox2::VkContext> context = tox2::createVkContext(context_options, error);
-    if (!context) std::printf("render: unavailable: %s\n", error.c_str());
+    if (context) {
+        printDevice(*context);
+    } else {
+        std::printf("render: unavailable: %s\n", error.c_str());
+    }
 
     int exit_code = 0;
     std::size_t skipped = draws;

@@ -33,6 +33,7 @@
 #include "render/render_scale.h"
 #include "render/shader_compiler.h"
 #include "render/vertex_convert.h"
+#include "render/vk_device_choice.h"
 #include "render/window_size.h"
 #include "render/vk_context.h"
 #include "render/vk_pipelines.h"
@@ -6531,6 +6532,58 @@ bool sameRect(const tox2::PixelRect& rect, std::int32_t x, std::int32_t y, std::
     return rect.x == x && rect.y == y && rect.width == width && rect.height == height;
 }
 
+// The device choice is a pure function of the device list and the driver preference.
+void testChooseVkDevice() {
+    using tox2::VkDeviceCandidate;
+    using tox2::VkDriverChoice;
+    using tox2::VkDriverKind;
+    const VkDeviceCandidate kosmic{"Apple M4 Pro", "KosmicKrisp", false, VkDriverKind::KosmicKrisp};
+    const VkDeviceCandidate molten{"Apple M4 Pro", "MoltenVK", false, VkDriverKind::MoltenVk};
+    const VkDeviceCandidate other{"Software", "llvmpipe", false, VkDriverKind::Other};
+    const VkDeviceCandidate discrete_other{"Discrete", "NVIDIA", true, VkDriverKind::Other};
+    const VkDeviceCandidate discrete_kosmic{"Discrete", "KosmicKrisp", true, VkDriverKind::KosmicKrisp};
+
+    const auto pick = [](std::vector<VkDeviceCandidate> devices, VkDriverChoice choice) {
+        const auto index = tox2::chooseVkDevice(devices, choice);
+        return index ? static_cast<int>(*index) : -1;
+    };
+    // Auto takes MoltenVK over KosmicKrisp in either listing order, and both over other drivers.
+    CHECK(pick({kosmic, molten}, VkDriverChoice::Auto) == 1);
+    CHECK(pick({molten, kosmic}, VkDriverChoice::Auto) == 0);
+    CHECK(pick({other, kosmic, molten}, VkDriverChoice::Auto) == 2);
+    CHECK(pick({other, kosmic}, VkDriverChoice::Auto) == 0);
+    // Without either, and among equals, the first device wins.
+    CHECK(pick({other, other}, VkDriverChoice::Auto) == 0);
+    CHECK(pick({molten, molten}, VkDriverChoice::Auto) == 0);
+    // A discrete GPU beats the type-independent driver preference.
+    CHECK(pick({molten, discrete_other}, VkDriverChoice::Auto) == 1);
+    CHECK(pick({molten, discrete_kosmic}, VkDriverChoice::Auto) == 1);
+
+    // A named driver makes only its devices eligible.
+    CHECK(pick({kosmic, molten}, VkDriverChoice::KosmicKrisp) == 0);
+    CHECK(pick({molten, kosmic}, VkDriverChoice::KosmicKrisp) == 1);
+    CHECK(pick({kosmic, molten}, VkDriverChoice::MoltenVk) == 1);
+    CHECK(pick({discrete_other, kosmic}, VkDriverChoice::KosmicKrisp) == 1);
+    CHECK(pick({kosmic, discrete_kosmic}, VkDriverChoice::KosmicKrisp) == 1);
+
+    const std::vector<VkDeviceCandidate> only_kosmic = {kosmic};
+    const auto missing = tox2::chooseVkDevice(only_kosmic, VkDriverChoice::MoltenVk);
+    CHECK(!missing && missing.error() == "no Vulkan device with driver MoltenVK (found: Apple M4 Pro (KosmicKrisp))");
+    const std::vector<VkDeviceCandidate> mixed = {other, molten};
+    const auto missing_kosmic = tox2::chooseVkDevice(mixed, VkDriverChoice::KosmicKrisp);
+    CHECK(!missing_kosmic && missing_kosmic.error() ==
+                                     "no Vulkan device with driver KosmicKrisp (found: Software (llvmpipe), Apple M4 "
+                                     "Pro (MoltenVK))");
+    CHECK(!tox2::chooseVkDevice({}, VkDriverChoice::Auto));
+
+    for (const VkDriverChoice choice : {VkDriverChoice::Auto, VkDriverChoice::MoltenVk, VkDriverChoice::KosmicKrisp}) {
+        const auto parsed = tox2::parseVkDriverChoice(tox2::vkDriverChoiceName(choice));
+        CHECK(parsed && *parsed == choice);
+    }
+    CHECK(!tox2::parseVkDriverChoice("MoltenVK") && !tox2::parseVkDriverChoice("") &&
+          !tox2::parseVkDriverChoice("mvk"));
+}
+
 void testLetterbox() {
     CHECK(sameRect(tox2::letterboxRect(1280, 720, 16, 9), 0, 0, 1280, 720));
     CHECK(sameRect(tox2::letterboxRect(1920, 1080, 16, 9), 0, 0, 1920, 1080));
@@ -7483,6 +7536,7 @@ void testFgWarpCheck(tox2::VkContext& ctx) {
 int main() {
     const bool layer = tox2::vkValidationLayerAvailable();
     std::printf("validation layer: %s\n", layer ? "installed" : "not installed");
+    testChooseVkDevice();
     testLetterbox();
     testChoosePresentMode();
 #if defined(_WIN32)

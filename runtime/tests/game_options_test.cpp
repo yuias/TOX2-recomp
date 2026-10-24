@@ -511,6 +511,9 @@ void testOptionTable() {
     CHECK((persisted == std::vector<std::string_view>{"frame-limit", "resolution-scale", "aa-mode",
                                                       "anisotropic-filter", "window-size", "fullscreen", "frame-gen"}));
     for (const OptionSpec& spec : specs) {
+        if (spec.name == "vk-driver") CHECK(spec.kind == OptionKind::String && !spec.persisted);
+    }
+    for (const OptionSpec& spec : specs) {
         if (spec.name == "frame-limit") CHECK(spec.kind == OptionKind::String && spec.needs == OptionNeeds::Nothing);
         if (spec.name == "resolution-scale") {
             CHECK(spec.kind == OptionKind::Unsigned && spec.needs == OptionNeeds::Renderer);
@@ -539,7 +542,7 @@ void testOptionTable() {
         const bool renderer = spec.name == "dump-frames" || spec.name == "dump-frames-every" ||
                               spec.name == "shader-cache" || spec.name == "vk-validation" ||
                               spec.name == "resolution-scale" || spec.name == "aa-mode" ||
-                              spec.name == "anisotropic-filter";
+                              spec.name == "anisotropic-filter" || spec.name == "vk-driver";
         const bool window = spec.name == "pad-probe" || spec.name == "window-size" || spec.name == "fullscreen" ||
                             spec.name == "frame-gen" || spec.name.starts_with("fg-");
         const OptionNeeds expected = renderer ? OptionNeeds::Renderer
@@ -550,6 +553,7 @@ void testOptionTable() {
     CHECK(tox2::gameOptionsUsage().starts_with("usage: tox2_game "));
     CHECK(tox2::gameOptionsUsage().find("--config FILE | --no-config") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--anisotropic-filter off|2|4|8|16]") != std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--vk-driver auto|moltenvk|kosmickrisp]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--window-size 720p|1080p|1440p|2160p]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--fullscreen on|off]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--frame-gen off|60|90|120|180|unlimited]") != std::string_view::npos);
@@ -731,7 +735,7 @@ void testErrorMessages() {
     CHECK(rejectedLine({"--hdd-dir", "h"}, "error: --game-dir or --vfs-config is required\n"));
     CHECK(rejectedLine({"--game-dir", "g", "--render", "none", "--aa-mode", "msaa"},
                        "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode, "
-                       "--anisotropic-filter and --vk-validation need --render vulkan\n"));
+                       "--anisotropic-filter, --vk-driver and --vk-validation need --render vulkan\n"));
     // The frame list reports its format after the missing value, as it always has.
     CHECK(rejectedLine({"--game-dir", "g", "--rsx-capture"},
                        "error: --rsx-capture needs a value\n"
@@ -777,7 +781,7 @@ void testCheckOrder() {
     // The first combined check in the fixed order wins.
     CHECK(rejectedLine({"--game-dir", "g", "--render", "none", "--aa-mode", "msaa", "--pad", "keyboard"},
                        "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode, "
-                       "--anisotropic-filter and --vk-validation need --render vulkan\n"));
+                       "--anisotropic-filter, --vk-driver and --vk-validation need --render vulkan\n"));
     // A bad option value is found before a combined check.
     CHECK(rejectedLine({"--game-dir", "g", "--render", "none", "--aa-mode", "bogus"},
                        "error: --aa-mode needs supersample|msaa|dlaa\n"));
@@ -1028,7 +1032,7 @@ void testConfigFileErrors() {
     writeFile(file, R"({"game_dir": "g"})");
     CHECK(dirs.error({"--no-window", "--resolution-scale", "2"}).message ==
           "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode, "
-          "--anisotropic-filter and --vk-validation need --render vulkan\n" +
+          "--anisotropic-filter, --vk-driver and --vk-validation need --render vulkan\n" +
                   note);
     // A check on a single option gets no note.
     writeFile(file, R"({"seconds": 1})");
@@ -1088,6 +1092,52 @@ void testConfigFileDroppedKeys() {
     CHECK(dirs.error({}).message == "error: " + file.string() + ": dump_frames_every needs a positive integer\n");
 }
 
+void testVkDriverOption() {
+    const auto none = parseLine({"--game-dir", "g"});
+    CHECK(none && none->vk_driver == tox2::VkDriverChoice::Auto);
+    for (const auto& [text, choice] : {std::pair<const char*, tox2::VkDriverChoice>{"auto", tox2::VkDriverChoice::Auto},
+                                       {"moltenvk", tox2::VkDriverChoice::MoltenVk},
+                                       {"kosmickrisp", tox2::VkDriverChoice::KosmicKrisp}}) {
+        const auto parsed = parseLine({"--game-dir", "g", "--vk-driver", text});
+        CHECK(parsed && parsed->vk_driver == choice);
+    }
+    const auto repeated = parseLine({"--game-dir", "g", "--vk-driver", "moltenvk", "--vk-driver", "kosmickrisp"});
+    CHECK(repeated && repeated->vk_driver == tox2::VkDriverChoice::KosmicKrisp);
+    for (const char* bad : {"mvk", "MoltenVK", "", "vulkan"}) {
+        CHECK(rejectedLine({"--game-dir", "g", "--vk-driver", bad},
+                           "error: --vk-driver needs auto, moltenvk or kosmickrisp\n"));
+    }
+    CHECK(rejectedLine({"--game-dir", "g", "--vk-driver"}, "error: --vk-driver needs a value\n"));
+    // A renderer option, even when it only restates the default.
+    const char* const need_vulkan =
+            "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode, "
+            "--anisotropic-filter, --vk-driver and --vk-validation need --render vulkan\n";
+    CHECK(rejectedLine({"--game-dir", "g", "--render", "none", "--vk-driver", "moltenvk"}, need_vulkan));
+    CHECK(rejectedLine({"--game-dir", "g", "--render", "none", "--vk-driver", "auto"}, need_vulkan));
+    CHECK(rejectedLine({"--game-dir", "g", "--no-window", "--vk-driver", "kosmickrisp"}, need_vulkan));
+    const auto dumping = parseLine({"--game-dir", "g", "--no-window", "--dump-frames", "d", "--vk-driver", "moltenvk"});
+    CHECK(dumping && dumping->vk_driver == tox2::VkDriverChoice::MoltenVk);
+
+    ConfigDirs dirs("tox2_game_options_cfg_vk_driver_");
+    const stdfs::path file = dirs.work / "config.json";
+    writeFile(file, R"({"game_dir": "g", "vk_driver": "kosmickrisp"})");
+    const auto configured = dirs.parse({});
+    CHECK(configured && configured->vk_driver == tox2::VkDriverChoice::KosmicKrisp &&
+          configured->config_ignored.empty());
+    // The command line replaces the file's value.
+    const auto overridden = dirs.parse({"--vk-driver", "moltenvk"});
+    CHECK(overridden && overridden->vk_driver == tox2::VkDriverChoice::MoltenVk);
+    // A run without a renderer leaves the key out instead of failing.
+    const auto headless = dirs.parse({"--render", "none"});
+    CHECK(headless && headless->vk_driver == tox2::VkDriverChoice::Auto);
+    if (headless)
+        CHECK((headless->config_ignored == std::vector<std::string>{"vk_driver ignored: the run has no renderer"}));
+    writeFile(file, R"({"game_dir": "g", "vk_driver": "metal"})");
+    const tox2::OptionsError bad = dirs.error({});
+    CHECK(bad.message == "error: " + file.string() + ": vk_driver needs auto, moltenvk or kosmickrisp\n" &&
+          !bad.print_usage);
+}
+
 void testWindowAndFilterOptions() {
     for (const auto& [text, level] :
          {std::pair<const char*, std::uint32_t>{"off", 1}, {"2", 2}, {"4", 4}, {"8", 8}, {"16", 16}}) {
@@ -1130,7 +1180,7 @@ void testWindowAndFilterOptions() {
     // The filter is a renderer option.
     CHECK(rejectedLine({"--game-dir", "g", "--anisotropic-filter", "16", "--no-window"},
                        "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode, "
-                       "--anisotropic-filter and --vk-validation need --render vulkan\n"));
+                       "--anisotropic-filter, --vk-driver and --vk-validation need --render vulkan\n"));
     const auto dumping =
             parseLine({"--game-dir", "g", "--no-window", "--dump-frames", "d", "--anisotropic-filter", "4"});
     CHECK(dumping && dumping->anisotropy == 4);
@@ -1538,6 +1588,7 @@ int main() {
     testConfigFileErrors();
     testConfigFileDroppedKeys();
     testWindowAndFilterOptions();
+    testVkDriverOption();
     testFrameGenOptions();
     testConfigApply();
     testSettingsStore();

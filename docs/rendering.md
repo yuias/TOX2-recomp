@@ -250,12 +250,22 @@ pixels, the content size in points times the backing scale of the screen. Withou
 session (an SSH login, for example) no window can be created: the RSX thread logs the reason and the
 game goes on without rendering, as for any other renderer failure.
 
-- **Drivers.** The LunarG Vulkan SDK installs two: KosmicKrisp and MoltenVK. macOS can list both, in no
-  fixed order, so `tox2_game` does not depend on the order: among the usable devices it takes a discrete
-  GPU first, then the device whose driver is KosmicKrisp (a full driver, without the portability subset),
-  then the first usable one. The log line `tox2: render: vulkan device ...` names the driver
-  (`driver <name>`). `vulkaninfo --summary` shows which drivers are installed.
-- **Choosing a driver yourself.** `tox2_game` has no option for it; use the Vulkan loader's variables.
+- **Drivers.** The LunarG Vulkan SDK installs two: MoltenVK and KosmicKrisp. macOS can list both, in no
+  fixed order, so `tox2_game` does not depend on the order. By default (`--vk-driver auto`) it takes,
+  among the usable devices, a discrete GPU first, then the device whose driver is MoltenVK, then the
+  first usable one. MoltenVK is the default because KosmicKrisp is slower on the same hardware: on an
+  Apple M4 Pro it costs about 6 to 8 microseconds more GPU time per draw and about 30% more per pixel.
+  Replaying `generated/rsx/captures/frame_4200.tox2cap` with `--resolution-scale 4 --aa-mode msaa` takes
+  about 36 to 40 ms of GPU time per frame on KosmicKrisp and 18 to 21 ms on MoltenVK. The log line
+  `tox2: render: vulkan device ...` names the driver (`driver <name>`). `vulkaninfo --summary` shows
+  which drivers are installed.
+- **Choosing a driver yourself.** `--vk-driver auto|moltenvk|kosmickrisp` on `tox2_game` and
+  `tox2_rsxreplay`, or the `vk_driver` key of `config.json` with the same values. `moltenvk` and
+  `kosmickrisp` accept only a device with that driver. When there is none, no renderer is created: the log
+  names the driver that was asked for and the devices found (`no Vulkan device with driver MoltenVK
+  (found: Apple M4 Pro (KosmicKrisp))`), and the game goes on without rendering. The device is created
+  once, so the debug overlay has no setting for it. The Vulkan loader's variables still work, and the loader
+  applies them before this choice: a driver they remove is not found by `--vk-driver`.
   `VK_LOADER_DRIVERS_SELECT` takes a comma-separated list of patterns for the driver manifest file
   names and uses only the matching drivers; the manifests are in `/usr/local/share/vulkan/icd.d`
   after the SDK's system-global install (`libkosmickrisp_icd.json`, `MoltenVK_icd.json`).
@@ -263,6 +273,7 @@ game goes on without rendering, as for any other renderer failure.
   adds files to the list and so does not restrict it.
 
   ```sh
+  build/macos-release/bin/tox2_game --game-dir <game-dir> --vk-driver kosmickrisp
   VK_LOADER_DRIVERS_SELECT='*MoltenVK*' build/macos-release/bin/tox2_game --game-dir <game-dir>
   VK_DRIVER_FILES=/usr/local/share/vulkan/icd.d/libkosmickrisp_icd.json build/macos-release/bin/tox2_game --game-dir <game-dir>
   ```
@@ -281,11 +292,13 @@ game goes on without rendering, as for any other renderer failure.
   and an indexed fan is expanded by its indices, split at the restart index when primitive restart is
   on. The list topology takes no restart. KosmicKrisp draws fans directly. The same log line shows
   `triangle fans yes` or `no`.
-- **Resolution scale and depth.** KosmicKrisp has no blit for `D32_SFLOAT_S8_UINT`. Changing the
-  internal resolution scale while the game runs therefore cannot rescale depth targets there: their
-  contents restart for that frame, and the census counts `state rescale of a depth target unavailable`
-  (see [Resolution scale](#resolution-scale)). The render tests skip the depth rescale checks where
-  depth cannot be blitted.
+- **Resolution scale and depth.** The renderer rescales a depth target with a blit when the device offers
+  one for the depth format (a format feature query on the chosen device). KosmicKrisp has no blit for
+  `D32_SFLOAT_S8_UINT`; MoltenVK has one. Changing the internal resolution scale while the game runs
+  therefore cannot rescale depth targets on KosmicKrisp: their contents restart for that frame, and the
+  census counts `state rescale of a depth target unavailable` (see [Resolution scale](#resolution-scale)).
+  On MoltenVK they are rescaled. The render tests skip the depth rescale checks where depth cannot be
+  blitted.
 - **Loader.** The loader is found at run time. If the normal search fails, the paths in
   [Building](building.md#vulkan-shaderc-and-ffmpeg) are tried.
 - **Windows-only features.** DLAA and frame generation need NVIDIA Streamline, which is built on
@@ -1297,6 +1310,7 @@ no renderer and no window. Captures are derived from the game, so they are git-i
 tox2_rsxreplay CAPTURE [CAPTURE...] [--loop N] [--out DIR]
                       [--compare PNG [--compare-rect X,Y,W,H] [--max-diff N] [--max-mean X] [--max-differing P]]
                       [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--no-validation] [--shader-cache DIR]
+                      [--vk-driver auto|moltenvk|kosmickrisp]
                       [--dlaa-jitter on|off] [--dlaa-jitter-flip none|x|y|xy] [--dlaa-camera on|off|reset]
                       [--dlaa-clip-flip-y on|off] [--dlaa-mv-invalid zero|unset]
                       [--fg-mv-check [--fg-mv-flip none|x|y|xy]]
@@ -1322,6 +1336,7 @@ tox2_rsxreplay CAPTURE [CAPTURE...] [--loop N] [--out DIR]
 | `--dlaa-mv-invalid zero\|unset` | Set `motionVectorsInvalidValue` to 0 (`zero`, default) or leave the SDK default (`unset`, which makes Streamline warn once per process). It does not change the picture. |
 | `--fg-mv-check` | Diagnostic for [frame generation](#frame-generation), needs `--aa-mode dlaa` (a usage error otherwise, and together with `--repeat`). Draws the camera motion vectors that frame generation would use and, from the second frame on, prints `fg mv: frame <i>, warp mean <w>, no-motion mean <z>, <n> pixels` (`, reset` when the history was dropped for that frame): the mean absolute difference (RGB, 0 to 255) between the current DLAA output and the previous one warped with the vectors, and between the two unwarped. A lower `warp mean` than `no-motion mean` means the vectors follow the camera. The displayed frame does not change. |
 | `--fg-mv-flip none\|x\|y\|xy` | Diagnostic, needs `--fg-mv-check`: negate the vectors on the given axes. Default `none`, the measured winner. |
+| `--vk-driver auto\|moltenvk\|kosmickrisp` | The Vulkan driver, as for `tox2_game` (default `auto`; see [Vulkan on macOS](#vulkan-on-macos)). The tool prints the device it used as `render: vulkan device <name> (driver <driver>)`. A driver that is not installed leaves the replay without a device (`render: unavailable: no Vulkan device with driver <driver> (found: ...)`; exit code 1 with `--repeat`). Any other value is a usage error. |
 | `--no-validation` | Do not enable the Vulkan validation layer, which is on by default. |
 | `--shader-cache DIR` | SPIR-V cache directory. Without it nothing is cached. |
 | `--repeat N` | Replay and render the capture `N` times (1 to 100000) and print the median time of each phase (see below). A usage error together with `--out`, `--compare`, more than one capture or `--loop`; exit code 1 without a Vulkan device. |
@@ -1330,7 +1345,8 @@ tox2_rsxreplay CAPTURE [CAPTURE...] [--loop N] [--out DIR]
 
 The thresholds are optional and unchecked unless given, and they need `--compare`. The tool prints
 the commands the frame builder produced (`clear`, `draw` with its colour and depth target (with `zt=`, `zw=` and
-`st=` for its depth test, depth write and stencil test) and, for each texture, the render target it aliases or the format and mip count of its bytes, `flip`), then a summary line
+`st=` for its depth test, depth write and stencil test) and, for each texture, the render target it aliases or the format and mip count of its bytes, `flip`), then, with a device, the line
+`render: vulkan device <name> (driver <driver>)`, then a summary line
 `replay: N commands, N draws, N skipped` (with the diff figures when comparing), the
 `rsx unimplemented` section (`census: rsx unimplemented 0 kinds` when it is empty), the path of
 the PNG, and `validation: active|inactive|disabled, N errors`. The exit code is 1 when a

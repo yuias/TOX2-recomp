@@ -140,8 +140,8 @@ Run the Python tools with `python3` 3.10 or newer; the `python3` that macOS prov
   (where the SDK's system-global install puts a copy) and prints `TOX2: shaderc: libshaderc_combined.a
   from $VULKAN_SDK/lib` or `... from /usr/local/lib`. There is one archive for every configuration.
 - **Drivers.** The SDK installs two Vulkan drivers on top of Metal, KosmicKrisp and MoltenVK.
-  `tox2_game` uses KosmicKrisp when both are present; MoltenVK works too. How to choose one yourself
-  is under [Rendering](rendering.md#vulkan-on-macos).
+  `tox2_game` uses MoltenVK when both are present (it is faster); `--vk-driver kosmickrisp` or the
+  `vk_driver` key selects KosmicKrisp. See [Rendering](rendering.md#vulkan-on-macos).
 - **FFmpeg.** The Homebrew installation in `TOX2_FFMPEG_DIR` (default `$(brew --prefix ffmpeg)`) must
   hold `include/libavcodec/avcodec.h` and `lib/`. Configuration prints `TOX2: FFmpeg: <directory>`.
   The headers are used at build time, and the directory of the libraries and the major version

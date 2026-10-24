@@ -6,9 +6,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <expected>
 #include <format>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -763,12 +765,11 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
         return nullptr;
     }
 
-    // A discrete GPU beats any other type; among devices of one type KosmicKrisp is preferred (macOS can list
-    // both KosmicKrisp and MoltenVK, in no fixed order, and KosmicKrisp is a full driver without the
-    // portability subset); otherwise the first usable device wins.
-    Candidate chosen;
-    int chosen_rank = -1;
-    bool have_choice = false;
+    // A discrete GPU beats any other type. Among devices of one type Auto takes MoltenVK first, because KosmicKrisp
+    // costs more GPU time per draw and per pixel on the same hardware (macOS can list both, in no fixed order);
+    // a named driver makes only its devices eligible. See chooseVkDevice.
+    std::vector<Candidate> usable;
+    std::vector<VkDeviceCandidate> infos;
     std::string rejected;
     for (VkPhysicalDevice device : devices) {
         Candidate candidate;
@@ -778,18 +779,27 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
             rejected += std::format("{}: {}", candidate.properties.deviceName, reason);
             continue;
         }
-        const int rank = (candidate.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 2 : 0) +
-                         (candidate.driver_id == VK_DRIVER_ID_MESA_KOSMICKRISP ? 1 : 0);
-        if (rank > chosen_rank) {
-            chosen = candidate;
-            chosen_rank = rank;
-            have_choice = true;
-        }
+        VkDeviceCandidate info;
+        info.name = candidate.properties.deviceName;
+        info.driver_name = candidate.driver_name;
+        info.discrete = candidate.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        info.driver = candidate.driver_id == VK_DRIVER_ID_MOLTENVK           ? VkDriverKind::MoltenVk
+                      : candidate.driver_id == VK_DRIVER_ID_MESA_KOSMICKRISP ? VkDriverKind::KosmicKrisp
+                                                                             : VkDriverKind::Other;
+        usable.push_back(std::move(candidate));
+        infos.push_back(std::move(info));
     }
-    if (!have_choice) {
+    if (usable.empty()) {
         error = "no suitable Vulkan device (" + rejected + ")";
         return nullptr;
     }
+    const std::expected<std::size_t, std::string> index = chooseVkDevice(infos, options.driver);
+    if (!index) {
+        error = index.error();
+        if (!rejected.empty()) error += "; not usable: " + rejected;
+        return nullptr;
+    }
+    Candidate& chosen = usable[*index];
     ctx->physical_device_ = chosen.device;
     ctx->properties_ = chosen.properties;
     ctx->graphics_family_ = chosen.graphics_family;

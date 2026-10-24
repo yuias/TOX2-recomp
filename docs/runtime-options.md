@@ -15,7 +15,7 @@ tox2_game [--game-dir DIR] [--vfs-config FILE] [--elf PATH] [--libsre PATH] [--h
          [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]
          [--dump-frames DIR] [--dump-frames-every K]
          [--shader-cache DIR] [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--anisotropic-filter off|2|4|8|16]
-         [--vk-validation] [--no-window] [--window-size 720p|1080p|1440p|2160p] [--fullscreen on|off]
+         [--vk-driver auto|moltenvk|kosmickrisp] [--vk-validation] [--no-window] [--window-size 720p|1080p|1440p|2160p] [--fullscreen on|off]
          [--frame-gen off|60|90|120|180|unlimited] [--fg-present-mode mailbox|immediate|fifo] [--fg-reflex on|off]
          [--fg-only-generated] [--fg-cycle SECONDS]
          [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off] [--ppu-threads legacy|1|2]
@@ -85,6 +85,7 @@ prefix (the census lines and the register dump of a fatal stop do not).
 | `--fg-only-generated` | Diagnostic, needs `--frame-gen` other than `off`: present only the generated frames, to look at them without the real frames in between. |
 | `--fg-cycle SECONDS` | Diagnostic, needs `--frame-gen` other than `off`: switch frame generation off and on again every `SECONDS` seconds (1 to 600). Each switch recreates the swapchain, as a window resize does. |
 | `--anisotropic-filter off\|2\|4\|8\|16` | Force anisotropic filtering at the given level on the mipmapped, linearly filtered samplers (default `off`, which leaves every sampler as the game set it). The level is limited to what the device supports, and the option has no effect on a device without anisotropic filtering. The debug overlay can change it while the game runs (`Anisotropic filtering` under Settings). Any other value is a usage error. See [Anisotropic filtering](rendering.md#anisotropic-filtering). |
+| `--vk-driver auto\|moltenvk\|kosmickrisp` | The Vulkan driver, for a system that lists several for one GPU (macOS with the Vulkan SDK lists MoltenVK and KosmicKrisp). `auto` (the default) takes a discrete GPU first, then a device whose driver is MoltenVK, then any other device. `moltenvk` and `kosmickrisp` accept only a device with that driver; if there is none, the renderer is not created and the log names the driver that was asked for and the devices found (`no Vulkan device with driver MoltenVK (found: Apple M4 Pro (KosmicKrisp))`). The game then goes on without rendering, as for any renderer failure. The option is accepted on Windows, where `auto` behaves as it always did and naming a macOS driver fails as above. The device is created once, so the overlay has no setting for it and nothing is saved. `VK_LOADER_DRIVERS_SELECT` and `VK_DRIVER_FILES` still work: the loader applies them before this choice. Any other value is a usage error. See [Vulkan on macOS](rendering.md#vulkan-on-macos). |
 | `--vk-validation` | Enable the Khronos validation layer. It comes with the Vulkan SDK; if it is not installed, `tox2_game` logs a warning and goes on without it. |
 | `--rsx-capture N[,M...]` | Record the given frames (1-based flip numbers) as `.tox2cap` files. See [Capture and replay](rendering.md#capture-and-replay). The overlay's `Capture next flip` button records one more frame into the same directory, `generated/rsx/captures`, with or without this option. |
 | `--rsx-census FILE` | Count the arguments the game writes to the RSX registers (surface and texture formats, vertex layouts, primitive types, draw sizes, render state, flip and vblank rates) and write them to `FILE` as JSON when the run stops. The fragment and vertex programs the game used are written next to it as `generated/rsx/fp_<hash>.bin` and `vp_<hash>.bin` (relative to the working directory). The directories are created; the file is truncated. |
@@ -92,9 +93,9 @@ prefix (the census lines and the register dump of a fatal stop do not).
 
 The renderer options are a usage error (exit code 2) when the renderer is off. The window and
 `--dump-frames` switch it on; `--dump-frames-every`, `--shader-cache`, `--resolution-scale`, `--aa-mode`,
-`--anisotropic-filter` and `--vk-validation` need one of them or `--render vulkan`; an explicit `--render none`
-conflicts with all of them (`error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale,
---aa-mode, --anisotropic-filter and --vk-validation need --render vulkan`). `--window-size` and `--fullscreen`
+`--anisotropic-filter`, `--vk-driver` and `--vk-validation` need one of them or `--render vulkan`; an explicit
+`--render none` conflicts with all of them (`error: --dump-frames, --dump-frames-every, --shader-cache,
+--resolution-scale, --aa-mode, --anisotropic-filter, --vk-driver and --vk-validation need --render vulkan`). `--window-size` and `--fullscreen`
 need the window (`error: --window-size and --fullscreen need the window`).
 `--rsx-capture`, `--rsx-census` and `--frame-limit` do not need the renderer. `--frame-gen` needs the window
 (`error: --frame-gen needs the window`), and the four `--fg-` options need `--frame-gen` other than `off` (`error:
@@ -111,8 +112,8 @@ The log says which Vulkan device was chosen and how long the device and renderer
 no device meets the requirements (Vulkan 1.3 with dynamic rendering, synchronization2 and shader
 demote-to-helper-invocation; a window also needs the platform's surface extension, Win32 or Metal,
 and the swapchain extension), or the window cannot be created, the RSX thread logs the reason and the
-game goes on without rendering. On macOS the Vulkan driver (KosmicKrisp or MoltenVK) is chosen with
-the loader's environment variables, not with an option; see
+game goes on without rendering. On macOS the Vulkan driver (MoltenVK or KosmicKrisp) is chosen with
+`--vk-driver`, and the loader's environment variables still apply; see
 [Vulkan on macOS](rendering.md#vulkan-on-macos).
 
 ### Diagnostics
@@ -185,7 +186,7 @@ written the way its kind of option needs it:
 | Kind | Keys | Value in the file |
 | --- | --- | --- |
 | Path | `game_dir`, `vfs_config`, `elf`, `libsre`, `hdd_dir`, `sdata_cache`, `log`, `png_dump`, `pad_script`, `audio_dump`, `rsx_census`, `ui_font`, `dump_frames`, `shader_cache`, `spu_capture_dir` | A non-empty string. A relative path is relative to the directory of the config file, not to the working directory (on the command line it is relative to the working directory). |
-| Text | `log_level`, `dialog_answer`, `save_dialog`, `pad`, `audio`, `render`, `ppu_threads`, `frame_limit`, `aa_mode`, `anisotropic_filter`, `window_size`, `frame_gen` | A string with the text the command line takes. A whole number is also accepted and read as its decimal text, so `"frame_limit": 60` and `"ppu_threads": 2` work. |
+| Text | `log_level`, `dialog_answer`, `save_dialog`, `pad`, `audio`, `render`, `ppu_threads`, `frame_limit`, `aa_mode`, `anisotropic_filter`, `vk_driver`, `window_size`, `frame_gen` | A string with the text the command line takes. A whole number is also accepted and read as its decimal text, so `"frame_limit": 60` and `"ppu_threads": 2` work. |
 | Number | `seconds`, `dump_frames_every`, `resolution_scale`, `spu_capture_after`, `spu_capture_count`, `spu_capture_every` | A non-negative whole number. |
 | Flag | `strict`, `quiet_hle`, `load_only`, `pad_probe`, `vk_validation`, `no_window`, `lwmutex_watch` | `true` sets the option. `false` is the same as leaving the key out. |
 | On or off | `host_priorities`, `yield_backoff`, `lwmutex_fast_path`, `fullscreen` | `true` or `false`, or the strings `"on"` or `"off"`. |
@@ -240,7 +241,7 @@ no renderer` (or `no window`), and is never an error. So a saved `resolution_sca
 
 | Needs | Keys |
 | --- | --- |
-| A renderer | `dump_frames`, `dump_frames_every`, `shader_cache`, `vk_validation`, `resolution_scale`, `aa_mode`, `anisotropic_filter` |
+| A renderer | `dump_frames`, `dump_frames_every`, `shader_cache`, `vk_validation`, `resolution_scale`, `aa_mode`, `anisotropic_filter`, `vk_driver` |
 | A window | `pad_probe`, `window_size`, `fullscreen`, `frame_gen` |
 
 `dump_frames` in the file switches the renderer on by itself, so it is ignored only together with an
