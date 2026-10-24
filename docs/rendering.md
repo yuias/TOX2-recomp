@@ -127,6 +127,14 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   Cull mode, depth state, viewport, scissor, topology, blend constants and the whole stencil state (test
   enable, ops, compare mask, write mask and reference, for both faces; see [Stencil](#stencil)) are dynamic
   state; pipelines are cached by what is baked into them.
+- **A draw binds the depth surface only when it uses it.** The game binds a depth surface to most post-processing
+  and UI draws. A draw with no depth test, no depth write and no stencil test (a stencil write needs the test, see
+  [Stencil](#stencil)) does not acquire the depth target and renders with a colour attachment alone, and its
+  pipeline has no depth format. This avoids resizing or copying a depth target the draw never touches (a depth
+  target at another layout size is otherwise made and filled from the old one). The colour target is always acquired, also for a
+  skipped draw. The one-sample (`dlaa`) scene pass is the exception: its colour target remembers the latest depth it
+  was drawn with, so its draws acquire the depth as before. A draw without a depth attachment cannot continue an
+  instance that has one (next item), so a depth clear followed by such a draw costs one more instance.
 - **Consecutive draws share a rendering instance.** A draw leaves its rendering instance open. The next draw
   with the same colour view, depth view, stencil use and render area records straight into it: no layout
   transition, no barrier and no `vkCmdBeginRendering`. Draws inside one instance are ordered by rasterization

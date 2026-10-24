@@ -2338,6 +2338,7 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
 //    sampled ones (GlslResult::texture_units);
 //  - depth test and write are only enabled together with a depth target, and a write without the test
 //    stays off (RPCS3 `VK/VKGSRender.cpp` `decode_rsx_state`);
+//  - a draw that neither tests depth, writes it nor tests stencil binds no depth attachment (see below);
 //  - the viewport covers the surface clip rectangle with a positive height: the vertex program already
 //    applies the RSX viewport transform and does not flip y (RPCS3 `VKGSRender::set_viewport` uses
 //    x 0, y 0 and the clip size); depth range is 0..1, the vertex program remaps depth with clip_min and
@@ -2362,15 +2363,20 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     // target rather than as a missing one.
     std::shared_ptr<RenderTarget> color;
     if (draw.surfaces.has_color) color = acquireColor(draw.surfaces.color, false);
-    std::shared_ptr<RenderTarget> depth = acquireDepth(draw.surfaces, false);
+    // The game binds a depth surface to most post-processing and UI draws that neither test, write nor use stencil.
+    // Such a draw runs without the attachment: acquiring it would resize or copy a depth target the draw never reads.
+    // The one-sample (DLAA) scene pass is kept as it was, because its colour target remembers the latest depth it was
+    // drawn with for the DLAA inputs.
+    const VkSampleCountFlags sidecar_samples = sidecarSamples(draw.surfaces.color);
+    const bool sidecar = sidecar_samples != 0;
+    const bool depth_used = draw.raster.depth_test || draw.raster.stencil_test ||
+                            rsxZetaWriteEnabled(draw.raster, draw.surfaces.depth_format);
+    std::shared_ptr<RenderTarget> depth;
+    if (depth_used || sidecar_samples == VK_SAMPLE_COUNT_1_BIT) depth = acquireDepth(draw.surfaces, false);
     if (!valid()) return;
     if (!color) return skip("state", "draw without color target");
-    // One viewport and scissor serve both attachments, so they must have been made at the same scale. The game
-    // binds a depth surface to most post-processing and UI draws that neither test, write nor use stencil;
-    // such a draw does not need it, so it runs without the attachment instead of being dropped.
+    // One viewport and scissor serve both attachments, so they must have been made at the same scale.
     if (depth && depth->scale != color->scale) {
-        const bool depth_used = draw.raster.depth_test || draw.raster.stencil_test ||
-                                rsxZetaWriteEnabled(draw.raster, draw.surfaces.depth_format);
         if (depth_used) return skip("state", "attachments at different resolution scales");
         depth.reset();
     }
@@ -2403,8 +2409,6 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     // The render area is the smaller of the attachments; the scissor is clipped to it, and an empty
     // rectangle draws nothing (counted in `draws`, not skipped).
     const RsxRasterState& raster = draw.raster;
-    const VkSampleCountFlags sidecar_samples = sidecarSamples(draw.surfaces.color);
-    const bool sidecar = sidecar_samples != 0;
     std::uint32_t area_width = color->passWidth(sidecar), area_height = color->passHeight(sidecar);
     if (depth) {
         area_width = std::min(area_width, depth->passWidth(sidecar));
@@ -2591,10 +2595,9 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         return;
     }
 
-    // The depth surface is used when the draw tests, writes or reads stencil; the writes are what leave the other
-    // image of a multisampled target behind.
+    // The writes are what leave the other image of a multisampled target behind. A bound depth surface that is not
+    // used (only the one-sample scene pass keeps one) takes no layout pass.
     const bool depth_written = depth && rsxZetaWriteEnabled(raster, draw.surfaces.depth_format);
-    const bool depth_used = depth && (raster.depth_test || raster.stencil_test || depth_written);
     const bool color_written = key.color_mask != 0;
     if (sidecar) {
         const auto samples = static_cast<VkSampleCountFlagBits>(sidecar_samples);
@@ -2602,7 +2605,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         if (samples == VK_SAMPLE_COUNT_1_BIT && color_written && depth) color->dlaa_depth = depth;
     } else {
         if (!beginLayoutPass(*color, color_written, false) ||
-            (depth_used && !beginLayoutPass(*depth, depth_written, false))) {
+            (depth && depth_used && !beginLayoutPass(*depth, depth_written, false))) {
             return;
         }
     }
@@ -2616,7 +2619,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     // must not count as this draw's write.
     if (sidecar) {
         beginSidecarPass(*color, color_written, false);
-        if (depth_used) beginSidecarPass(*depth, depth_written, false);
+        if (depth && depth_used) beginSidecarPass(*depth, depth_written, false);
     }
 
     // Uniform data: vertex constants, fragment constants, the per-draw block shared by both stages.
