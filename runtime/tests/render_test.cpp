@@ -5808,6 +5808,7 @@ std::vector<std::uint8_t> makeMsaaInheritCapture(MsaaInherit kind, std::uint32_t
     }
     if (kind == MsaaInherit::RescaleAa) {
         scene.setSurface(3, kAaSize, kAaOffset);
+        scene.write(tox2::kMethodNv4097SetDepthTestEnable, 1);  // an unused depth surface is not acquired
         drawMsaaRect(scene);
         return scene.finish();
     }
