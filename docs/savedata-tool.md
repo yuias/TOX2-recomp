@@ -200,6 +200,11 @@ takes, as `DIR/dev_hdd0/home/00000001/savedata/BLJS10188_SAVE1_<NNN>`.
   source's value if it has one, otherwise 0 for `ICON0.PNG`, `ICON1.PAM`, `PIC1.PNG` and `SND0.AT3`
   (not secure) and 1 for the others, such as `SAVE`. The binary entries of a PS3 `PARAM.SFO` (`PARAMS`,
   `PARAMS2`) are dropped, because the runtime would read them as text and write them back damaged.
+- The game starts `SUB_TITLE` with the three-digit number of the slot it saved to, and the load list
+  shows that text. If `SUB_TITLE` starts with three digits and a space, the digits are replaced with the
+  number of the new slot, so that a save from another slot does not show a duplicate number. The other
+  text (`TITLE`, the rest of `SUB_TITLE`, `DETAIL`) stays in the language of the source until the game
+  saves to the slot again.
 
 Output:
 

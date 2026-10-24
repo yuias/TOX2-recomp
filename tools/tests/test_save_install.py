@@ -18,7 +18,7 @@ def run_cli(*argv):
     return code, out.getvalue(), err.getvalue()
 
 
-def us_like_sfo() -> bytes:
+def us_like_sfo(sub_title: str = "000 Sub") -> bytes:
     # Mirrors the US save: no '*' keys, binary PARAMS/PARAMS2 and a foreign account id.
     return sfo.serialize_sfo(
         sfo.Sfo(
@@ -29,7 +29,7 @@ def us_like_sfo() -> bytes:
             strings={
                 "ACCOUNT_ID": "1234567890abcdef",
                 "TITLE": "Title",
-                "SUB_TITLE": "000 Sub",
+                "SUB_TITLE": sub_title,
                 "DETAIL": "Detail",
                 "SAVEDATA_LIST_PARAM": "list",
                 "SAVEDATA_DIRECTORY": "BLUS31397_SAVE1_000",
@@ -105,11 +105,28 @@ class InstallTest(unittest.TestCase):
                 "SAVEDATA_DIRECTORY": "BLJS10188_SAVE1_001",
                 "DETAIL": "Detail",
                 "SAVEDATA_LIST_PARAM": "list",
-                "SUB_TITLE": "000 Sub",
+                "SUB_TITLE": "001 Sub",
                 "TITLE": "Title",
             })
         self.assertEqual(parsed.ints, {"ATTRIBUTE": 5, "PARENTAL_LEVEL": 3, "*SAVE": 1, "*ICON0.PNG": 0})
         self.assertEqual(parsed.binary, {})
+
+    def installed_sfo(self, slot: str) -> sfo.Sfo:
+        return sfo.parse_sfo((self.root / ("BLJS10188_SAVE1_" + slot) / "PARAM.SFO").read_bytes())
+
+    def test_sub_title_takes_the_slot_number(self):
+        code, _, err = run_cli("install", self.plain, "--hdd", self.hdd, "--slot", "42")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.installed_sfo("042").strings["SUB_TITLE"], "042 Sub")
+
+    def test_sub_title_without_a_number_is_kept(self):
+        for sub_title in ("Sub", "12 Sub", "1234 Sub", "123Sub"):
+            with self.subTest(sub_title=sub_title):
+                (self.plain / "PARAM.SFO").write_bytes(us_like_sfo(sub_title))
+                code, out, err = run_cli("install", self.plain, "--hdd", self.hdd)
+                self.assertEqual(code, 0, err)
+                slot = out.splitlines()[0][-3:]
+                self.assertEqual(self.installed_sfo(slot).strings["SUB_TITLE"], sub_title)
 
     def test_encrypted_dir(self):
         (self.plain / "PARAM.PFD").write_bytes(b"x")

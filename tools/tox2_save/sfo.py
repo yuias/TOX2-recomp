@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import struct
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -22,6 +23,8 @@ SECURE_DEFAULT_ZERO = ("ICON0.PNG", "ICON1.PAM", "PIC1.PNG", "SND0.AT3")
 # Minimum capacities of text values, as in `textCapacity` of the runtime.
 _MIN_CAPACITY = {"TITLE": 128, "TITLE_ID": 16, "VERSION": 8, "CATEGORY": 4}
 _NOT_FILES = ("PARAM.SFO", "PARAM.PFD")
+# The game starts SUB_TITLE with the number of the slot it saved to, and its load list shows that text.
+_SUB_TITLE_SLOT_RE = re.compile(r"^\d{3}(?= )")
 
 
 @dataclass
@@ -118,6 +121,7 @@ def build_install_sfo(source: Sfo, dir_name: str, file_names: Iterable[str]) -> 
     sfo.strings["SAVEDATA_DIRECTORY"] = dir_name
     for key in ("DETAIL", "SAVEDATA_LIST_PARAM", "SUB_TITLE", "TITLE"):
         sfo.strings[key] = source.strings.get(key, "")
+    sfo.strings["SUB_TITLE"] = _SUB_TITLE_SLOT_RE.sub(dir_name[-3:], sfo.strings["SUB_TITLE"], count=1)
     for key in ("ATTRIBUTE", "PARENTAL_LEVEL"):
         sfo.ints[key] = source.ints.get(key, 0)
     for name in file_names:
