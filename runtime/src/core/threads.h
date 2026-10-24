@@ -380,6 +380,21 @@ private:
     bool released_;
 };
 
+// Split modes: gives up the kernel lock and, when the calling thread holds one, its PPU slot for the scope, so a slow
+// host call (file I/O) blocks neither other kernel sections nor a slot. At the end the slot comes back first and the
+// kernel lock last, the lock order. The scope must not touch state the kernel lock guards. Legacy: does nothing.
+class HostCallRegion {
+public:
+    HostCallRegion();
+    ~HostCallRegion();
+    HostCallRegion(const HostCallRegion&) = delete;
+    HostCallRegion& operator=(const HostCallRegion&) = delete;
+
+private:
+    KernelExit leave_kernel_;  // destroyed after the destructor's body, so the kernel lock is taken last
+    bool holds_slot_;
+};
+
 // The lockable blockingWait waits with. Legacy: forwards to guestLock(). Split modes: unlock() releases guestLock(),
 // then the caller's slot if it holds one (remembered in a thread-local flag until the matching lock()); lock() takes
 // that slot first, then guestLock(). So a woken thread gets a slot by the priority rules before it competes for the

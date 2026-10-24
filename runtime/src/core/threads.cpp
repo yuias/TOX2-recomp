@@ -936,6 +936,17 @@ bool KernelExit::releaseKernelLock() {
     return true;
 }
 
+HostCallRegion::HostCallRegion() : holds_slot_(splitPpuMode() && ppuSlots().heldByCurrentThread()) {
+    if (!holds_slot_) return;
+    // A release point like a yield: a creator waiting in startGuestThreadFirst may go on.
+    if (GuestThread* thread = currentThread()) thread->markFirstRelease();
+    ppuSlots().release();
+}
+
+HostCallRegion::~HostCallRegion() {
+    if (holds_slot_) ppuSlots().acquire();
+}
+
 void GuestWaitLock::lock() {
     if (!splitPpuMode()) {
         guestLock().lock();

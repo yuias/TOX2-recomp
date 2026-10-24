@@ -368,35 +368,18 @@ struct TransferCounters {
 };
 TransferCounters g_read_counters, g_write_counters;
 
-// Scope for the host calls of one fs operation. In split PPU modes it gives up the kernel lock and the PPU slot, so a
-// slow host call blocks neither other kernel sections nor a PPU slot, then takes the file's io_mutex. The slot and the
-// kernel lock come back in the order used elsewhere (slot first, kernel lock last), after io_mutex is released:
-// waiting for io_mutex while holding either could deadlock with the thread that owns it. In legacy mode the guest lock
-// stays held (KernelExit does nothing) and the mutex is only contended by host threads.
+// Scope for the host calls of one fs operation: a HostCallRegion, then the file's io_mutex. The mutex is released
+// before the slot and the kernel lock come back: waiting for io_mutex while holding either could deadlock with the
+// thread that owns it. In legacy mode the guest lock stays held and the mutex is only contended by host threads.
 class HostIoRegion {
 public:
-    explicit HostIoRegion(FsObject& file)
-        : holds_slot_(splitPpuMode() && ppuSlots().heldByCurrentThread()), io_lock_(file.io_mutex, std::defer_lock) {
-        if (holds_slot_) {
-            // A release point like a yield: a creator waiting in startGuestThreadFirst may go on.
-            if (GuestThread* thread = currentThread()) thread->markFirstRelease();
-            ppuSlots().release();
-        }
-        io_lock_.lock();
-    }
-    ~HostIoRegion() {
-        io_lock_.unlock();
-        if (holds_slot_) {
-            ppuSlots().acquire();
-        }
-        // leave_kernel_ is destroyed after this body, so the kernel lock is taken last.
-    }
+    explicit HostIoRegion(FsObject& file) : io_lock_(file.io_mutex) {}
     HostIoRegion(const HostIoRegion&) = delete;
     HostIoRegion& operator=(const HostIoRegion&) = delete;
 
 private:
-    KernelExit leave_kernel_;
-    const bool holds_slot_;
+    // Members are destroyed in reverse order, so io_lock_ is released before region_ takes the slot and the lock back.
+    HostCallRegion region_;
     std::unique_lock<std::mutex> io_lock_;
 };
 
