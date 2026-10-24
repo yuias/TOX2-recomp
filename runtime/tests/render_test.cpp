@@ -2909,7 +2909,8 @@ void testReadBarrierSkipped(tox2::VkContext& ctx) {
 
 // Consecutive draws with the same attachments share one rendering instance; anything recorded outside an instance
 // (another target, a clear, a texture upload, a copy of the target the draw samples) ends it first. The instance
-// counts are relative to runs with fewer draws, so they do not depend on how clears are recorded.
+// counts are relative to runs with fewer draws, so they do not depend on how clears are recorded (the clear before a
+// draw leaves its instance for the draw: testClearPassMerging).
 void testDrawPassMerging(tox2::VkContext& ctx) {
     using namespace tox2::rsx_synthetic;
     tox2::rsxUnimplementedReset();
@@ -2990,11 +2991,12 @@ void testDrawPassMerging(tox2::VkContext& ctx) {
         CHECK(switched.bgra == same.bgra && back.bgra == same.bgra);
     }
 
-    // A clear between two draws to the same target ends the instance.
+    // A clear between two draws to the same target ends the first instance and begins one for the second draw.
     {
         const Run split = run({clear_alias, clear_display, sampling_draw, clear_display, sampling_draw, flip});
         const Run merged = run({clear_alias, clear_display, sampling_draw, sampling_draw, flip});
-        CHECK(split.stats.rendering_instances == merged.stats.rendering_instances + 2);
+        // The clear before the second draw begins an instance that the draw then continues.
+        CHECK(split.stats.rendering_instances == merged.stats.rendering_instances + 1);
         CHECK(pixelArgb(split.bgra, split.width, 32, 32) == kAliasColor &&
               pixelArgb(split.bgra, split.width, 2, 2) == 0xFF000000);
     }
@@ -4086,6 +4088,139 @@ void testStencilWriteReachesDepthTexture(tox2::VkContext& ctx) {
     CHECK(render.stats.depth_conversions == 2);
     CHECK(render.stats.draws == 3 && render.stats.draws_skipped == 0);
     expectNoRendererNotes();
+}
+
+// renderStencilScene on a renderer that has already drawn once: the placeholder textures a renderer creates for its
+// first draw are recorded outside an instance and would end the one a clear left open. `stats.rendering_instances` is
+// the count of the scene alone.
+StencilRender renderStencilSceneWarm(tox2::VkContext& ctx, tox2::rsx_synthetic::SceneBuilder& scene) {
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+    CHECK(renderer.valid());
+    tox2::rsx_synthetic::SceneBuilder warm_up;
+    beginStencilScene(warm_up, 0);
+    stencilQuad(warm_up, stencilFace(kCmpAlways, 0, kOpKeep));
+    std::vector<tox2::RsxCommand> warm_commands = replaySynthetic(warm_up.finish());
+    renderer.execute(warm_commands);
+    const std::uint64_t instances_before = renderer.stats().rendering_instances;
+    std::vector<tox2::RsxCommand> commands = replaySynthetic(scene.finish());
+    tox2::rsxUnimplementedReset();
+    renderer.execute(commands);
+    CHECK(renderer.valid());
+    StencilRender result;
+    CHECK(renderer.readDisplay(result.bgra, result.width, result.height));
+    CHECK(result.width == 64 && result.height == 64 && result.bgra.size() == 64 * 64 * 4);
+    if (result.bgra.size() != 64 * 64 * 4) result.bgra.assign(64 * 64 * 4, 0);
+    result.stats = renderer.stats();
+    result.stats.rendering_instances -= instances_before;
+    return result;
+}
+
+// A clear over the whole render area clears through the attachments' load operations and leaves its instance open for
+// the draws that follow; a clear of a rectangle, or of only some aspects, keeps loading what it does not replace.
+// Instance counts are relative to the same scene without the draw, which does not add one.
+void testClearPassMerging(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    constexpr std::uint32_t kClearA = 0xFF102030;
+    constexpr std::uint32_t kClearB = 0xFF405060;
+    const auto fullScissor = [](SceneBuilder& scene) {
+        scene.write(tox2::kMethodNv4097SetScissorHorizontal, kSurfaceSize << 16);
+        scene.write(tox2::kMethodNv4097SetScissorVertical, kSurfaceSize << 16);
+    };
+    const StencilFaceWords always = stencilFace(kCmpAlways, 0, kOpKeep);
+
+    // A full clear of colour, depth and stencil, then a draw to the same target: one instance in all.
+    {
+        SceneBuilder with_draw;
+        beginStencilScene(with_draw, 0);
+        stencilQuad(with_draw, always);
+        SceneBuilder clear_only;
+        beginStencilScene(clear_only, 0);
+        const StencilRender merged = renderStencilSceneWarm(ctx, with_draw);
+        const StencilRender base = renderStencilSceneWarm(ctx, clear_only);
+        CHECK(merged.stats.rendering_instances == base.stats.rendering_instances);
+        expectStencilDrawn(merged, true);
+        CHECK(base.pixel(32, 32) == kBlack);
+        expectNoRendererNotes();
+    }
+
+    // A clear of a rectangle after a full one loads the target and clears the rectangle; the draw continues it.
+    {
+        const auto scene_of = [&](bool draw) {
+            SceneBuilder scene;
+            beginStencilScene(scene, 0);
+            scene.write(tox2::kMethodNv4097SetScissorHorizontal, 4u | (8u << 16));
+            scene.write(tox2::kMethodNv4097SetScissorVertical, 4u | (8u << 16));
+            scene.write(tox2::kMethodNv4097SetColorClearValue, kClearB);
+            scene.write(tox2::kMethodNv4097ClearSurface, 0xF3);
+            fullScissor(scene);
+            if (draw) stencilQuad(scene, always);
+            return scene;
+        };
+        SceneBuilder with_draw = scene_of(true);
+        SceneBuilder clear_only = scene_of(false);
+        const StencilRender merged = renderStencilSceneWarm(ctx, with_draw);
+        const StencilRender base = renderStencilSceneWarm(ctx, clear_only);
+        CHECK(merged.stats.rendering_instances == base.stats.rendering_instances);
+        CHECK(merged.pixel(6, 6) == kClearB && merged.pixel(2, 2) == kBlack && merged.pixel(12, 6) == kBlack);
+        CHECK(merged.pixel(32, 32) == kQuadRed);
+        CHECK(base.pixel(6, 6) == kClearB && base.pixel(32, 32) == kBlack);
+        expectNoRendererNotes();
+    }
+
+    // A full clear of the depth only keeps the stencil of a Z24S8 target (the stencil test passes where the old
+    // value is) and replaces the depth (a greater-than test against the cleared 0.25 passes where the old 1.0 would
+    // fail). The stencil-only clear is the same the other way round.
+    for (const bool depth_only : {true, false}) {
+        for (const bool expect_drawn : {true, false}) {
+            SceneBuilder scene;
+            beginStencilScene(scene, 0x5A);
+            scene.write(tox2::kMethodNv4097SetZstencilClearValue, depth_only ? 0x40000077u : 0x40000000u | 0x77u);
+            scene.write(tox2::kMethodNv4097ClearSurface, depth_only ? 0x01u : 0x02u);
+            scene.write(tox2::kMethodNv4097SetDepthTestEnable, 1);
+            // The quad is at depth 0.5. Depth cleared to 0.25: GREATER passes; depth kept at 1.0: LESS passes.
+            scene.write(tox2::kMethodNv4097SetDepthFunc, depth_only ? 0x204u : 0x201u);
+            const std::uint32_t kept_stencil = depth_only ? 0x5Au : 0x77u;
+            stencilQuad(scene, stencilFace(kCmpEqual, expect_drawn ? kept_stencil : kept_stencil ^ 1u, kOpKeep));
+            const StencilRender render = renderStencilSceneWarm(ctx, scene);
+            expectStencilDrawn(render, expect_drawn);
+            expectNoRendererNotes();
+        }
+    }
+
+    // A clear, then a draw to another target: the clear is stored, and the draw is an instance of its own.
+    {
+        const auto scene_of = [&](int draws) {
+            SceneBuilder scene;
+            beginStencilScene(scene, 0);
+            scene.write(tox2::kMethodNv4097SetColorClearValue, kClearA);
+            scene.write(tox2::kMethodNv4097ClearSurface, 0xF3);
+            if (draws >= 1) {
+                scene.setSurface(0, kSurfaceSize, 0x50000);  // another colour target (and depth target)
+                stencilQuad(scene, always);
+            }
+            if (draws >= 2) {
+                scene.setSurface();  // back to the display target
+                stencilQuad(scene, always);
+            }
+            return scene;
+        };
+        SceneBuilder none = scene_of(0), other = scene_of(1), back = scene_of(2);
+        const StencilRender base = renderStencilSceneWarm(ctx, none);
+        const StencilRender elsewhere = renderStencilSceneWarm(ctx, other);
+        const StencilRender returned = renderStencilSceneWarm(ctx, back);
+        CHECK(elsewhere.stats.rendering_instances == base.stats.rendering_instances + 1);
+        CHECK(returned.stats.rendering_instances == base.stats.rendering_instances + 2);
+        for (const StencilRender* r : {&base, &elsewhere}) {
+            CHECK(r->pixel(2, 2) == kClearA && r->pixel(32, 32) == kClearA && r->pixel(63, 63) == kClearA);
+        }
+        CHECK(returned.pixel(32, 32) == kQuadRed && returned.pixel(2, 2) == kClearA);
+        CHECK(returned.stats.draws_skipped == 0 && elsewhere.stats.draws_skipped == 0);
+        expectNoRendererNotes();
+    }
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
 }
 
 // The stencil test, its ops, masks, reference and two-sided mode on a Z24S8 target (D24S8 or D32S8 by device),
@@ -7335,6 +7470,7 @@ int main() {
     testRendererTextures(*ctx);
     testReadBarrierSkipped(*ctx);
     testDrawPassMerging(*ctx);
+    testClearPassMerging(*ctx);
     testRendererVolumeTextures(*ctx);
     testRendererFloatSurface(*ctx);
     testRendererDepthTexture(*ctx);

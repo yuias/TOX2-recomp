@@ -305,7 +305,9 @@ void printGpuTiming(tox2::RsxRenderer& renderer, const std::string& capture_name
         const tox2::GpuInstanceLabel& label = instance.label;
         std::printf("gpu top: #%zu %s %ux%u s%u %s%s", order[rank], tox2::gpuInstanceKindName(label.kind), label.width,
                     label.height, label.samples, colorFormatName(label.color_format), label.depth ? " depth" : "");
-        if (label.kind == tox2::GpuInstanceKind::Draw) std::printf(" draws %u", label.draws);
+        if (label.kind == tox2::GpuInstanceKind::Draw) {
+            std::printf(" draws %u%s", label.draws, label.began_with_clear ? " after clear" : "");
+        }
         std::printf(": %.2f ms\n", instance.ms);
     }
 }

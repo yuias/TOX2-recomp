@@ -2328,8 +2328,9 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
 
 // Draw path. Everything that records outside a rendering instance (target creation, the placeholder
 // texture, uploads) happens before the draw's own commands and ends the instance a previous draw left open
-// (outsideCmd). The instance is left open at the end of a draw: the next draw with the same attachments and render
-// area records into it, and the next command recorded outside one ends it. A draw that cannot be rendered is counted
+// (outsideCmd). The instance is left open at the end of a draw, and at the end of a clear that has a colour
+// attachment: the next draw with the same attachments and render area records into it, and the next command recorded
+// outside one ends it. A draw that cannot be rendered is counted
 // in draws_skipped and, where a reason exists, with rsxNoteUnimplemented.
 //
 // Facts used, with their sources:
@@ -2740,7 +2741,17 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         stats_.rendering_instances++;
         open_pass_ = pass;
     }
-    if (gpu_open_) slots_[current_slot_]->timed.back().label.draws++;
+    if (gpu_open_) {
+        // A clear left its instance open for this draw. The instance is timed as one and counted as a draw instance,
+        // marked with the clear it began with, so `draw` stays the cost of the pass and `clear` the clears no draw
+        // followed.
+        GpuInstanceLabel& label = slots_[current_slot_]->timed.back().label;
+        if (label.kind == GpuInstanceKind::Clear) {
+            label.kind = GpuInstanceKind::Draw;
+            label.began_with_clear = true;
+        }
+        label.draws++;
+    }
 
     // Dynamic state is command buffer state and outlives rendering instances, so a value is recorded only when the
     // buffer does not already hold it. Compared bitwise, which also covers floats.
@@ -2900,7 +2911,8 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
 }
 
 // Facts from RPCS3 `VK/VKGSRender.cpp` `VKGSRender::clear_surface`:
-//  - one vkCmdClearAttachments over the clipped scissor rectangle;
+//  - a clear is the clipped scissor rectangle: over the whole render area the attachment load operations clear (CLEAR
+//    for each aspect the clear touches, LOAD for the others), otherwise one vkCmdClearAttachments;
 //  - color clear values are each 8-bit channel / 255, with alpha in the top byte of the register
 //    (`rsx_decode.h` `registers_decoder<NV4097_SET_COLOR_CLEAR_VALUE>`);
 //  - the depth value is the register field divided by the format's maximum, 0xFFFF for 16-bit depth
@@ -2987,9 +2999,22 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
     const PixelScale pixel_scale = color ? pixelScaleOf(clear.surfaces.color, color->scale, sidecar)
                                          : pixelScaleOf(clear.surfaces.depth, depth->scale, sidecar);
 
+    // The builder clipped the rectangle to the clip size, which is also the target size; the clamp only
+    // guards the attachment bounds.
+    const ImageRect clear_rect = scaleRect(clear.scissor[0], clear.scissor[1], clear.scissor[2], clear.scissor[3],
+                                           pixel_scale, area_width, area_height);
+    // A rectangle over the whole render area lets every aspect the clear touches be cleared by the attachment's load
+    // operation, which a tile-based GPU does without reading the old contents or loading them into the tile. An aspect
+    // the clear leaves alone (the stencil of a depth-only clear) keeps LOAD. A smaller rectangle loads everything and
+    // clears it with vkCmdClearAttachments.
+    const bool full_area = clear_rect.x == 0 && clear_rect.y == 0 && clear_rect.width == area_width &&
+                           clear_rect.height == area_height;
+
     VkRenderingAttachmentInfo color_attachment{};
     VkRenderingAttachmentInfo depth_attachment{};
     VkRenderingAttachmentInfo stencil_attachment{};
+    VkClearAttachment attachments[2]{};
+    std::uint32_t attachment_count = 0;
     if (color) {
         if (sidecar) {
             transitionSidecar(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -3001,6 +3026,22 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
         color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+        const std::uint32_t argb = clear.color_argb;
+        VkClearValue value{};
+        value.color.float32[0] = static_cast<float>((argb >> 16) & 0xFF) / 255.0f;
+        value.color.float32[1] = static_cast<float>((argb >> 8) & 0xFF) / 255.0f;
+        value.color.float32[2] = static_cast<float>(argb & 0xFF) / 255.0f;
+        value.color.float32[3] = static_cast<float>(argb >> 24) / 255.0f;
+        if (full_area) {
+            color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            color_attachment.clearValue = value;
+        } else {
+            VkClearAttachment& a = attachments[attachment_count++];
+            a.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            a.colorAttachment = 0;
+            a.clearValue = value;
+        }
     }
     if (depth) {
         if (sidecar) {
@@ -3014,30 +3055,7 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
         depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         stencil_attachment = depth_attachment;
-    }
 
-    VkRenderingInfo rendering{};
-    rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-    rendering.renderArea = {{0, 0}, {area_width, area_height}};
-    rendering.layerCount = 1;
-    rendering.colorAttachmentCount = color ? 1 : 0;
-    rendering.pColorAttachments = color ? &color_attachment : nullptr;
-    rendering.pDepthAttachment = depth ? &depth_attachment : nullptr;
-    rendering.pStencilAttachment = depth && formatHasStencil(depth->format) ? &stencil_attachment : nullptr;
-
-    VkClearAttachment attachments[2]{};
-    std::uint32_t attachment_count = 0;
-    if (color) {
-        const std::uint32_t argb = clear.color_argb;
-        VkClearAttachment& a = attachments[attachment_count++];
-        a.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        a.colorAttachment = 0;
-        a.clearValue.color.float32[0] = static_cast<float>((argb >> 16) & 0xFF) / 255.0f;
-        a.clearValue.color.float32[1] = static_cast<float>((argb >> 8) & 0xFF) / 255.0f;
-        a.clearValue.color.float32[2] = static_cast<float>(argb & 0xFF) / 255.0f;
-        a.clearValue.color.float32[3] = static_cast<float>(argb >> 24) / 255.0f;
-    }
-    if (depth) {
         VkImageAspectFlags aspect = 0;
         VkClearDepthStencilValue value{};
         if ((clear.mask & kRsxClearDepth) != 0) {
@@ -3050,17 +3068,31 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
             aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
             value.stencil = clear.depth_stencil & 0xFF;
         }
-        if (aspect != 0) {
+        if (full_area) {
+            if ((aspect & VK_IMAGE_ASPECT_DEPTH_BIT) != 0) {
+                depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                depth_attachment.clearValue.depthStencil = value;
+            }
+            if ((aspect & VK_IMAGE_ASPECT_STENCIL_BIT) != 0) {
+                stencil_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                stencil_attachment.clearValue.depthStencil = value;
+            }
+        } else if (aspect != 0) {
             VkClearAttachment& a = attachments[attachment_count++];
             a.aspectMask = aspect;
             a.clearValue.depthStencil = value;
         }
     }
 
-    // The builder clipped the rectangle to the clip size, which is also the target size; the clamp only
-    // guards the attachment bounds.
-    const ImageRect clear_rect = scaleRect(clear.scissor[0], clear.scissor[1], clear.scissor[2], clear.scissor[3],
-                                           pixel_scale, area_width, area_height);
+    VkRenderingInfo rendering{};
+    rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    rendering.renderArea = {{0, 0}, {area_width, area_height}};
+    rendering.layerCount = 1;
+    rendering.colorAttachmentCount = color ? 1 : 0;
+    rendering.pColorAttachments = color ? &color_attachment : nullptr;
+    rendering.pDepthAttachment = depth ? &depth_attachment : nullptr;
+    rendering.pStencilAttachment = depth && formatHasStencil(depth->format) ? &stencil_attachment : nullptr;
+
     VkClearRect rect{};
     rect.rect.offset = {static_cast<std::int32_t>(clear_rect.x), static_cast<std::int32_t>(clear_rect.y)};
     rect.rect.extent = {clear_rect.width, clear_rect.height};
@@ -3072,6 +3104,21 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
     stats_.rendering_instances++;
     if (attachment_count != 0 && rect.rect.extent.width != 0 && rect.rect.extent.height != 0) {
         vkCmdClearAttachments(cmd, attachment_count, attachments, 1, &rect);
+    }
+
+    // A clear with a colour attachment binds what a draw to the same target binds, so the draws that follow record
+    // into this instance (recordDraw) and the target is not stored and loaded in between. Anything else recorded
+    // outside an instance ends it first (outsideCmd). A depth-only clear is not left open: a draw always has a colour
+    // attachment, so none could continue it.
+    if (color) {
+        OpenDrawPass pass;
+        pass.color_view = color_attachment.imageView;
+        pass.depth_view = depth ? depth_attachment.imageView : VK_NULL_HANDLE;
+        pass.stencil = depth && formatHasStencil(depth->format);
+        pass.width = area_width;
+        pass.height = area_height;
+        open_pass_ = pass;
+        return;
     }
     vkCmdEndRendering(cmd);
     gpuEndInstance(cmd);

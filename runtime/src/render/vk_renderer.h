@@ -114,8 +114,8 @@ struct RenderOptions {
 
 // The kinds of rendering instance the renderer records.
 enum class GpuInstanceKind : std::uint8_t {
-    Draw,         // the instance recordDraw keeps open across draws with the same attachments
-    Clear,        // a clear that covers whole channels
+    Draw,         // the instance recordDraw keeps open across draws with the same attachments; may begin with a clear
+    Clear,        // a clear that covers whole channels and that no draw continued
     MaskedClear,  // a clear through a colour write mask
     Layout,       // the pass that rewrites the memory layout of a 2-sample target from its sidecar
     DepthArgb,    // the A8R8G8B8 rewrite of a depth surface
@@ -130,6 +130,7 @@ struct GpuInstanceLabel {
     VkFormat color_format = VK_FORMAT_UNDEFINED;  // undefined: no colour attachment
     bool depth = false;                           // a depth attachment is bound
     std::uint32_t draws = 0;                      // Draw only: draws recorded into the instance
+    bool began_with_clear = false;                // Draw only: a clear opened the instance the draws continued
 };
 
 struct GpuTimingInstance {
@@ -539,10 +540,10 @@ private:
     };
     VpConstantUpload vp_constant_upload_;
 
-    // The rendering instance the last draw left open on the slot's command buffer. The next draw with the same
-    // attachments records into it. Nothing else records while it is open: every other site gets the command buffer
-    // from outsideCmd(), which ends it, so an open instance also means the attachments are still in their attachment
-    // layouts.
+    // The rendering instance the last draw, or the last clear with a colour attachment, left open on the slot's
+    // command buffer. The next draw with the same attachments records into it. Nothing else records while it is open:
+    // every other site gets the command buffer from outsideCmd(), which ends it, so an open instance also means the
+    // attachments are still in their attachment layouts.
     struct OpenDrawPass {
         VkImageView color_view = VK_NULL_HANDLE;
         VkImageView depth_view = VK_NULL_HANDLE;

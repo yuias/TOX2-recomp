@@ -130,13 +130,22 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
 - **Consecutive draws share a rendering instance.** A draw leaves its rendering instance open. The next draw
   with the same colour view, depth view, stencil use and render area records straight into it: no layout
   transition, no barrier and no `vkCmdBeginRendering`. Draws inside one instance are ordered by rasterization
-  order, which replaces the barrier between them. Every command recorded outside a draw's instance (clears, texture
+  order, which replaces the barrier between them. Every command recorded outside a draw's instance (texture
   uploads, the copy a draw makes to sample the target it renders to, target creation, resizing and layout syncs,
   the flip and readback commands) takes the frame's command buffer from one function, `outsideCmd`, which ends the
   open instance first. A draw with other attachments ends it before its own transitions, and the frame's submit ends
   it before `vkEndCommandBuffer`. An open instance therefore also means that nothing touched its attachments since
   the last draw, so they are still in their attachment layouts. `RendererStats::rendering_instances` counts the
   instances.
+- **Clears.** A clear is one rendering instance with the attachments it binds. When its rectangle covers the whole
+  render area, each aspect the clear touches (the colour, the depth, the stencil of a Z24S8 target) is cleared by the
+  attachment's load operation (`VK_ATTACHMENT_LOAD_OP_CLEAR`), so a tile-based GPU neither reads the old contents nor
+  loads them into the tile; an aspect the clear leaves alone (the stencil of a depth-only clear) keeps `LOAD`. A
+  smaller rectangle loads the attachments and clears the rectangle with `vkCmdClearAttachments`. A clear with a colour
+  attachment leaves its instance open like a draw does, so the draws that follow on the same attachments continue it
+  (one instance for the clear and its draws, and no store and reload of the target between them). A depth-only clear
+  ends its instance, because every draw has a colour attachment. A clear through a colour write mask is a draw of a
+  full-screen triangle (`masked-clear`) and ends its instance too.
 - **Barriers.** A layout transition records a full image barrier (all commands to all commands), except when the
   image is already in the requested layout and that layout is a read-only one: shader read, depth-stencil read or
   transfer source. A read after a read has no hazard, and every write to the image needs another layout, whose
@@ -1407,8 +1416,9 @@ The `gpu` line gives the median over the same counted iterations (the first is l
 
 - `frame`: the time from the first to the last command of the frame on the GPU.
 - `instances`: the time of all rendering instances added up, then the same split by kind. `draw` is the instance a run
-  of draws with the same attachments shares, `clear` a clear of whole channels, `masked-clear` a clear through a colour
-  write mask, `layout` the pass that rewrites the memory layout of a 2-sample target from its sidecar image, and
+  of draws with the same attachments shares, including the clear that began it (a clear leaves its instance open for
+  the draws after it, and the instance is timed as one, so the clear's own cost is not separate), `clear` a clear of
+  whole channels that no draw continued, `masked-clear` a clear through a colour write mask, `layout` the pass that rewrites the memory layout of a 2-sample target from its sidecar image, and
   `depth-argb` the pass that rewrites a depth surface as A8R8G8B8. An instance's time runs from the timestamp
   before its begin to the one after its end, so the barriers and copies recorded between instances are not in it.
 - `outside`: `frame` minus `instances`. It covers everything between instances: transfers and blits, clears
@@ -1417,8 +1427,8 @@ The `gpu` line gives the median over the same counted iterations (the first is l
 Each `gpu top` line is one of the up to 15 most expensive instances of the last counted iteration, longest first:
 `#<index>` is the instance's position in the frame (counting from 0), then its kind, render area in pixels, samples
 (`s1`, `s2`), colour format (`bgra8`, `r32f`, ... or `none`), `depth` when a depth attachment is bound, and, for
-`draw`, the number of draws recorded into the instance. A frame has room for about 2000 timed instances; later ones
-are not timed and a warning on standard error gives the count. When the device has no timestamp support the `gpu`
+`draw`, the number of draws recorded into the instance, followed by `after clear` when a clear began it. A frame has
+room for about 2000 timed instances; later ones are not timed and a warning on standard error gives the count. When the device has no timestamp support the `gpu`
 line says `unavailable` and why. The timestamps themselves cost some GPU time, so the `gpu wait` of the `timing` line
 can be higher with `--gpu-timing` than without it (17.6 ms against 14.1 ms for `frame_4300` at scale 4).
 
