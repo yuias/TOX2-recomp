@@ -1281,7 +1281,7 @@ tox2_rsxreplay CAPTURE [CAPTURE...] [--loop N] [--out DIR]
                       [--dlaa-jitter on|off] [--dlaa-jitter-flip none|x|y|xy] [--dlaa-camera on|off|reset]
                       [--dlaa-clip-flip-y on|off] [--dlaa-mv-invalid zero|unset]
                       [--fg-mv-check [--fg-mv-flip none|x|y|xy]]
-                      [--repeat N] [--quiet]
+                      [--repeat N [--gpu-timing]] [--quiet]
 ```
 
 | Option | Meaning |
@@ -1306,6 +1306,7 @@ tox2_rsxreplay CAPTURE [CAPTURE...] [--loop N] [--out DIR]
 | `--no-validation` | Do not enable the Vulkan validation layer, which is on by default. |
 | `--shader-cache DIR` | SPIR-V cache directory. Without it nothing is cached. |
 | `--repeat N` | Replay and render the capture `N` times (1 to 100000) and print the median time of each phase (see below). A usage error together with `--out`, `--compare`, more than one capture or `--loop`; exit code 1 without a Vulkan device. |
+| `--gpu-timing` | Needs `--repeat` (a usage error otherwise). Time every rendering instance on the GPU with timestamp queries and print the `gpu` and `gpu top` lines (see below). Off, the renderer creates no query pool and records no extra command. |
 | `--quiet` | Do not print the per-command lines (`clear`, `draw`, `flip`); everything else is printed. |
 
 The thresholds are optional and unchecked unless given, and they need `--compare`. The tool prints
@@ -1387,6 +1388,37 @@ that uploads go to (`device-local`, `host-visible`, `host-coherent`, `host-cache
 memory is write-combined, where reads are slow and single-byte stores are slower than whole-element stores.
 Run-to-run spread on one machine was a few percent for `buildDraw` and `total` and up to 7 % for `recordDraw`, so
 a difference smaller than that is noise; compare interleaved runs of the two binaries.
+
+With `--gpu-timing` the renderer also times the GPU. Each frame's command buffer records a timestamp at its first and
+last command, and one before every rendering instance begins and one after it ends. Timestamps are never written
+inside an instance, because a tile-based GPU (Apple, through MoltenVK) cannot sample in the middle of a pass. The
+results are read when the frame slot's fence has been waited for, and the frames still in flight are collected at the
+end of the run. After the four lines above come:
+
+```
+gpu: frame_4300, 10 iterations (first excluded), median ms per iteration: frame 34.52, instances 32.21 (draw 22.15, clear 2.15, masked-clear 0.00, layout 5.75, depth-argb 2.10), outside 2.34
+gpu top: #27 layout 10240x2880 s1 none depth: 4.70 ms
+gpu top: #16 draw 5120x2880 s2 bgra8 depth draws 844: 4.55 ms
+```
+
+The `gpu` line gives the median over the same counted iterations (the first is left out when `N` is 2 or more):
+
+- `frame`: the time from the first to the last command of the frame on the GPU.
+- `instances`: the time of all rendering instances added up, then the same split by kind. `draw` is the instance a run
+  of draws with the same attachments shares, `clear` a clear of whole channels, `masked-clear` a clear through a colour
+  write mask, `layout` the pass that rewrites the memory layout of a 2-sample target from its sidecar image, and
+  `depth-argb` the pass that rewrites a depth surface as A8R8G8B8. An instance's time runs from the timestamp
+  before its begin to the one after its end, so the barriers and copies recorded between instances are not in it.
+- `outside`: `frame` minus `instances`. It covers everything between instances: transfers and blits, clears
+  outside an instance, uploads, texture work, and the present blit.
+
+Each `gpu top` line is one of the up to 15 most expensive instances of the last counted iteration, longest first:
+`#<index>` is the instance's position in the frame (counting from 0), then its kind, render area in pixels, samples
+(`s1`, `s2`), colour format (`bgra8`, `r32f`, ... or `none`), `depth` when a depth attachment is bound, and, for
+`draw`, the number of draws recorded into the instance. A frame has room for about 2000 timed instances; later ones
+are not timed and a warning on standard error gives the count. When the device has no timestamp support the `gpu`
+line says `unavailable` and why. The timestamps themselves cost some GPU time, so the `gpu wait` of the `timing` line
+can be higher with `--gpu-timing` than without it (17.6 ms against 14.1 ms for `frame_4300` at scale 4).
 
 The CTest entry `rsx_replay_repeat` runs `tox2_rsxreplay generated/rsx/captures/frame_9400_room.tox2cap --repeat 3
 --quiet --no-validation` (the capture is named in `cmake/rsx_replay.cmake`) and passes when the `cycles` line is

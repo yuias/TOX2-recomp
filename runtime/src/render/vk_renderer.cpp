@@ -278,7 +278,20 @@ struct RsxRenderer::FrameSlot {
     VmaAllocation readback_allocation = nullptr;
     void* readback_mapped = nullptr;
     VkDeviceSize readback_size = 0;
+    // GPU timing (RenderOptions::gpu_timing). Queries 0 and 1 are the frame's first and last command; each timed
+    // instance takes two more.
+    struct TimedInstance {
+        GpuInstanceLabel label;
+        std::uint32_t begin_query = 0;
+    };
+    VkQueryPool queries = VK_NULL_HANDLE;
+    std::vector<TimedInstance> timed;
+    std::uint32_t queries_used = 0;
+    std::uint32_t untimed = 0;  // instances that found the pool full
+    bool timed_submitted = false;
 };
+
+constexpr std::uint32_t kGpuQueryCapacity = 4096;
 
 // Empty when DLAA can run; else the Streamline status or the first image format the pass cannot use. The blit
 // formats are the scene image's layout copy, the storage and sampled ones are DLSS's output and motion vectors.
@@ -352,9 +365,39 @@ RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(c
     setAnisotropy(options_.anisotropy);
     if (anisotropy_ > 1) logInfo("tox2: render: anisotropic filtering {}x", anisotropy_);
     const VkDevice device = context_.device();
+    if (options_.gpu_timing) {
+        std::uint32_t family_count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(context_.physicalDevice(), &family_count, nullptr);
+        std::vector<VkQueueFamilyProperties> families(family_count);
+        vkGetPhysicalDeviceQueueFamilyProperties(context_.physicalDevice(), &family_count, families.data());
+        const std::uint32_t valid_bits = context_.graphicsQueueFamily() < family_count
+                                                 ? families[context_.graphicsQueueFamily()].timestampValidBits
+                                                 : 0;
+        const float period = context_.deviceProperties().limits.timestampPeriod;
+        if (valid_bits == 0) {
+            gpu_timing_gap_ = "the graphics queue family has no timestamp support (timestampValidBits is 0)";
+        } else if (period <= 0.0f) {
+            gpu_timing_gap_ = "the device reports a timestampPeriod of 0";
+        } else {
+            gpu_timing_ = true;
+            timestamp_period_ns_ = period;
+            timestamp_mask_ = valid_bits >= 64 ? ~std::uint64_t{0} : (std::uint64_t{1} << valid_bits) - 1;
+        }
+        if (!gpu_timing_) logWarn("tox2: render: GPU timing unavailable ({})", gpu_timing_gap_);
+    }
     for (std::unique_ptr<FrameSlot>& slot_ptr : slots_) {
         slot_ptr = std::make_unique<FrameSlot>();
         FrameSlot& slot = *slot_ptr;
+        if (gpu_timing_) {
+            VkQueryPoolCreateInfo query_info{};
+            query_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+            query_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            query_info.queryCount = kGpuQueryCapacity;
+            if (vkCreateQueryPool(device, &query_info, nullptr, &slot.queries) != VK_SUCCESS) {
+                fail("vkCreateQueryPool failed");
+                return;
+            }
+        }
 
         VkCommandPoolCreateInfo pool_info{};
         pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -399,6 +442,7 @@ RsxRenderer::~RsxRenderer() {
         }
         if (slot->readback != VK_NULL_HANDLE)
             vmaDestroyBuffer(context_.allocator(), slot->readback, slot->readback_allocation);
+        if (slot->queries != VK_NULL_HANDLE) vkDestroyQueryPool(device, slot->queries, nullptr);
         if (slot->fence != VK_NULL_HANDLE) vkDestroyFence(device, slot->fence, nullptr);
         if (slot->pool != VK_NULL_HANDLE) vkDestroyCommandPool(device, slot->pool, nullptr);
     }
@@ -511,7 +555,76 @@ bool RsxRenderer::waitSlot(FrameSlot& slot) {
     slot.in_use.clear();
     slot.texture_refs.clear();
     slot.keep_alive.clear();
+    gpuReadSlot(slot);
     return true;
+}
+
+void RsxRenderer::drainGpuTiming() {
+    if (!gpu_timing_) return;
+    for (std::unique_ptr<FrameSlot>& slot : slots_) {
+        if (slot) waitSlot(*slot);
+    }
+}
+
+const char* gpuInstanceKindName(GpuInstanceKind kind) {
+    switch (kind) {
+        case GpuInstanceKind::Draw: return "draw";
+        case GpuInstanceKind::Clear: return "clear";
+        case GpuInstanceKind::MaskedClear: return "masked-clear";
+        case GpuInstanceKind::Layout: return "layout";
+        case GpuInstanceKind::DepthArgb: return "depth-argb";
+    }
+    return "?";
+}
+
+void RsxRenderer::gpuBeginInstance(VkCommandBuffer cmd, GpuInstanceKind kind, std::uint32_t width, std::uint32_t height,
+                                   std::uint32_t samples, VkFormat color_format, bool depth) {
+    if (!gpu_timing_) return;
+    FrameSlot& slot = *slots_[current_slot_];
+    gpu_open_ = false;
+    if (slot.queries_used + 2 > kGpuQueryCapacity) {
+        slot.untimed++;
+        return;
+    }
+    FrameSlot::TimedInstance& instance = slot.timed.emplace_back();
+    instance.label = {kind, width, height, samples, color_format, depth, 0};
+    instance.begin_query = slot.queries_used;
+    slot.queries_used += 2;
+    vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.queries, instance.begin_query);
+    gpu_open_ = true;
+}
+
+void RsxRenderer::gpuEndInstance(VkCommandBuffer cmd) {
+    if (!gpu_open_) return;
+    gpu_open_ = false;
+    const FrameSlot& slot = *slots_[current_slot_];
+    vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.queries, slot.timed.back().begin_query + 1);
+}
+
+// Called once the slot's fence has signaled, so every query of the frame is available.
+void RsxRenderer::gpuReadSlot(FrameSlot& slot) {
+    if (!gpu_timing_ || !slot.timed_submitted) return;
+    slot.timed_submitted = false;
+    std::vector<std::uint64_t> ticks(slot.queries_used);
+    if (vkGetQueryPoolResults(context_.device(), slot.queries, 0, slot.queries_used,
+                              ticks.size() * sizeof(std::uint64_t), ticks.data(), sizeof(std::uint64_t),
+                              VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
+        return;
+    }
+    const auto ms = [&](std::uint32_t begin, std::uint32_t end) {
+        return static_cast<double>((ticks[end] - ticks[begin]) & timestamp_mask_) * timestamp_period_ns_ / 1e6;
+    };
+    GpuTimingFrame frame;
+    frame.frame_ms = ms(0, 1);
+    double instances_ms = 0;
+    for (const FrameSlot::TimedInstance& instance : slot.timed) {
+        const double instance_ms = ms(instance.begin_query, instance.begin_query + 1);
+        frame.instances.push_back({instance.label, instance_ms});
+        instances_ms += instance_ms;
+    }
+    frame.outside_ms = frame.frame_ms - instances_ms;
+    frame.untimed_instances = slot.untimed;
+    gpu_frames_.push_back(std::move(frame));
 }
 
 bool RsxRenderer::beginFrame() {
@@ -534,6 +647,14 @@ bool RsxRenderer::beginFrame() {
         fail("vkBeginCommandBuffer failed");
         return false;
     }
+    if (gpu_timing_) {
+        slot.timed.clear();
+        slot.untimed = 0;
+        slot.queries_used = 2;
+        gpu_open_ = false;
+        vkCmdResetQueryPool(slot.cmd, slot.queries, 0, kGpuQueryCapacity);
+        vkCmdWriteTimestamp2(slot.cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.queries, 0);
+    }
     recording_ = true;
     frame_index_ = static_cast<std::uint32_t>(stats_.flips) + 1;
     if (frame_gen_) frame_gen_->beginFrame(frame_index_);
@@ -546,6 +667,7 @@ VkCommandBuffer RsxRenderer::outsideCmd() {
     const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
     if (open_pass_) {
         vkCmdEndRendering(cmd);
+        gpuEndInstance(cmd);
         open_pass_.reset();
     }
     return cmd;
@@ -557,6 +679,7 @@ bool RsxRenderer::submitFrame() {
         if (block.used != 0) vmaFlushAllocation(context_.allocator(), block.allocation, 0, block.used);
     }
     const VkCommandBuffer cmd = outsideCmd();
+    if (gpu_timing_) vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.queries, 1);
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         fail("vkEndCommandBuffer failed");
         return false;
@@ -588,6 +711,7 @@ bool RsxRenderer::submitFrame() {
         return false;
     }
     slot.pending = true;
+    slot.timed_submitted = gpu_timing_;
     recording_ = false;
     display_slot_ = current_slot_;
     current_slot_ = (current_slot_ + 1) % kFramesInFlight;
@@ -1027,6 +1151,8 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
         vkCmdDraw(cmd, 3, 1, 0, 0);
     };
 
+    gpuBeginInstance(cmd, GpuInstanceKind::Layout, target.image_width, target.image_height, 1,
+                     target.depth ? VK_FORMAT_UNDEFINED : target.format, target.depth);
     vkCmdBeginRendering(cmd, &rendering);
     stats_.rendering_instances++;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -1063,6 +1189,7 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
         draw();
     }
     vkCmdEndRendering(cmd);
+    gpuEndInstance(cmd);
 
     target.layout_stale = false;
     target.layout_written = true;
@@ -1924,6 +2051,8 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
         writes[i].pImageInfo = &infos[i];
     }
 
+    gpuBeginInstance(cmd, GpuInstanceKind::DepthArgb, depth.image_width, depth.image_height, 1,
+                     VK_FORMAT_B8G8R8A8_UNORM, false);
     vkCmdBeginRendering(cmd, &rendering);
     stats_.rendering_instances++;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -1934,6 +2063,7 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
                        &constants);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
+    gpuEndInstance(cmd);
     colorBarrier(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     depth.argb->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -2601,10 +2731,13 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         rendering.pColorAttachments = &color_attachment;
         rendering.pDepthAttachment = depth ? &depth_attachment : nullptr;
         rendering.pStencilAttachment = pass.stencil ? &depth_attachment : nullptr;
+        gpuBeginInstance(cmd, GpuInstanceKind::Draw, area_width, area_height, sidecar ? sidecar_samples : 1,
+                         color->format, depth != nullptr);
         vkCmdBeginRendering(cmd, &rendering);
         stats_.rendering_instances++;
         open_pass_ = pass;
     }
+    if (gpu_open_) slots_[current_slot_]->timed.back().label.draws++;
 
     // Dynamic state is command buffer state and outlives rendering instances, so a value is recorded only when the
     // buffer does not already hold it. Compared bitwise, which also covers floats.
@@ -2930,12 +3063,15 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
     rect.rect.extent = {clear_rect.width, clear_rect.height};
     rect.layerCount = 1;
 
+    gpuBeginInstance(cmd, GpuInstanceKind::Clear, area_width, area_height, sidecar ? sidecar_samples : 1,
+                     color ? color->format : VK_FORMAT_UNDEFINED, depth != nullptr);
     vkCmdBeginRendering(cmd, &rendering);
     stats_.rendering_instances++;
     if (attachment_count != 0 && rect.rect.extent.width != 0 && rect.rect.extent.height != 0) {
         vkCmdClearAttachments(cmd, attachment_count, attachments, 1, &rect);
     }
     vkCmdEndRendering(cmd);
+    gpuEndInstance(cmd);
 }
 
 // A clear that touches only some color channels: a full-target triangle clipped to the clear rectangle,
@@ -2996,6 +3132,8 @@ void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& co
     const VkRect2D scissor = {{static_cast<std::int32_t>(clear_rect.x), static_cast<std::int32_t>(clear_rect.y)},
                               {clear_rect.width, clear_rect.height}};
 
+    gpuBeginInstance(cmd, GpuInstanceKind::MaskedClear, width, height, sidecar ? sidecar_samples : 1, color.format,
+                     false);
     vkCmdBeginRendering(cmd, &rendering);
     stats_.rendering_instances++;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -3004,6 +3142,7 @@ void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& co
     vkCmdPushConstants(cmd, pipelines_->clearLayout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(value), value);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
+    gpuEndInstance(cmd);
 }
 
 bool RsxRenderer::ensureReadback(FrameSlot& slot, VkDeviceSize size) {
