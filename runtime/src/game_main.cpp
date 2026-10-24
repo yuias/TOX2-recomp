@@ -261,6 +261,7 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions&
     tox2::VkContextOptions context_options;
     context_options.validation = opt.vk_validation;
     context_options.window = opt.window;
+    context_options.driver = opt.vk_driver;
     // Always loaded: availability is fixed at context creation and the overlay can switch to DLAA later.
     context_options.streamline = true;
     // Frame generation is a property of presentation: without a window nothing is presented.

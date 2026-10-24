@@ -107,6 +107,46 @@ struct RenderOptions {
     // Forced anisotropic filtering level: 1 (off), 2, 4, 8 or 16; anything else makes the renderer invalid. A device
     // without the samplerAnisotropy feature keeps 1; a lower device maximum clamps the level (see anisotropy()).
     std::uint32_t anisotropy = 1;
+    // Time every rendering instance on the GPU with timestamp queries (see GpuTimingFrame). Off creates no query
+    // pool and records no extra command. Costs two timestamp commands per instance, so it is a diagnostic.
+    bool gpu_timing = false;
+};
+
+// The kinds of rendering instance the renderer records.
+enum class GpuInstanceKind : std::uint8_t {
+    Draw,         // the instance recordDraw keeps open across draws with the same attachments; may begin with a clear
+    Clear,        // a clear that covers whole channels and that no draw continued
+    MaskedClear,  // a clear through a colour write mask
+    Layout,       // the pass that rewrites the memory layout of a 2-sample target from its sidecar
+    DepthArgb,    // the A8R8G8B8 rewrite of a depth surface
+};
+
+const char* gpuInstanceKindName(GpuInstanceKind kind);
+
+struct GpuInstanceLabel {
+    GpuInstanceKind kind = GpuInstanceKind::Draw;
+    std::uint32_t width = 0, height = 0;  // render area
+    std::uint32_t samples = 1;
+    VkFormat color_format = VK_FORMAT_UNDEFINED;  // undefined: no colour attachment
+    bool depth = false;                           // a depth attachment is bound
+    std::uint32_t draws = 0;                      // Draw only: draws recorded into the instance
+    bool began_with_clear = false;                // Draw only: a clear opened the instance the draws continued
+};
+
+struct GpuTimingInstance {
+    GpuInstanceLabel label;
+    double ms = 0;
+};
+
+// One submitted frame as the GPU ran it, from the first command to the last. Timestamps are written between
+// rendering instances only, so an instance's time includes the barriers recorded just before it ends, and `outside_ms`
+// (frame minus the instances) is everything else: transfers, uploads, texture work, the present blit and the wait
+// for the swapchain image.
+struct GpuTimingFrame {
+    double frame_ms = 0;
+    std::vector<GpuTimingInstance> instances;  // in recording order
+    double outside_ms = 0;
+    std::uint32_t untimed_instances = 0;  // instances beyond the slot's query pool capacity
 };
 
 // What a created GPU image or upload block was for (see RendererStats::images_created).
@@ -229,6 +269,16 @@ public:
     // use them. False and no change for a level not in kAnisotropyLevels. Renderer thread, between commands.
     bool setAnisotropy(std::uint32_t level);
 
+    // GpuTimingFrames of the frames whose fences have been waited for since the last call, oldest first; empty
+    // unless RenderOptions::gpu_timing is set and available. Call drainGpuTiming() first to get the frames still in
+    // flight. Renderer thread.
+    std::vector<GpuTimingFrame> takeGpuTiming() { return std::move(gpu_frames_); }
+    // Waits for the frames in flight and collects their timings. Renderer thread, between commands.
+    void drainGpuTiming();
+    // False when RenderOptions::gpu_timing was set but the device cannot time the queue; gpuTimingGap() says why.
+    bool gpuTimingActive() const { return gpu_timing_; }
+    const std::string& gpuTimingGap() const { return gpu_timing_gap_; }
+
     // Frames written, failed or dropped by the dump worker so far (dump_dir and requested dumps). Any thread.
     DumpCounts dumpCounts() const;
     // Waits until the dumps queued so far are written, at most `timeout`; returns how many are still
@@ -319,6 +369,14 @@ private:
     // reach it besides beginFrame and the in-instance part of recordDraw). Ends the draw instance left open by the
     // last draw, if any.
     VkCommandBuffer outsideCmd();
+
+    // GPU timing. Every rendering instance is bracketed by a timestamp before its vkCmdBeginRendering and one after
+    // its vkCmdEndRendering, never inside it (a tile-based GPU cannot sample mid-pass). No-ops while gpu_timing_ is
+    // off.
+    void gpuBeginInstance(VkCommandBuffer cmd, GpuInstanceKind kind, std::uint32_t width, std::uint32_t height,
+                          std::uint32_t samples, VkFormat color_format, bool depth);
+    void gpuEndInstance(VkCommandBuffer cmd);
+    void gpuReadSlot(FrameSlot& slot);
 
     std::shared_ptr<RenderTarget> acquireColor(const RsxSurface& surface, bool overwrites_all);
     std::shared_ptr<RenderTarget> acquireDepth(const RsxSurfaceState& surfaces, bool overwrites_all);
@@ -464,6 +522,12 @@ private:
     bool placeholder_ready_ = false;
 
     std::array<std::unique_ptr<FrameSlot>, kFramesInFlight> slots_;
+    bool gpu_timing_ = false;
+    bool gpu_open_ = false;  // the instance being recorded has timestamps, so its end gets one too
+    double timestamp_period_ns_ = 0;
+    std::uint64_t timestamp_mask_ = 0;
+    std::string gpu_timing_gap_;
+    std::vector<GpuTimingFrame> gpu_frames_;
     std::size_t current_slot_ = 0;
     bool recording_ = false;
     // Index of the guest frame being recorded (flips completed + 1), fixed when its recording starts: recordFlip
@@ -476,10 +540,10 @@ private:
     };
     VpConstantUpload vp_constant_upload_;
 
-    // The rendering instance the last draw left open on the slot's command buffer. The next draw with the same
-    // attachments records into it. Nothing else records while it is open: every other site gets the command buffer
-    // from outsideCmd(), which ends it, so an open instance also means the attachments are still in their attachment
-    // layouts.
+    // The rendering instance the last draw, or the last clear with a colour attachment, left open on the slot's
+    // command buffer. The next draw with the same attachments records into it. Nothing else records while it is open:
+    // every other site gets the command buffer from outsideCmd(), which ends it, so an open instance also means the
+    // attachments are still in their attachment layouts.
     struct OpenDrawPass {
         VkImageView color_view = VK_NULL_HANDLE;
         VkImageView depth_view = VK_NULL_HANDLE;

@@ -12,6 +12,7 @@
 #include <vk_mem_alloc.h>
 
 #include "render/streamline.h"
+#include "render/vk_device_choice.h"
 
 namespace tox2 {
 
@@ -25,6 +26,9 @@ struct VkContextOptions {
     // Needs `streamline` and a window to be useful. Failing is not an error and never turns DLAA off:
     // frameGenerationStatus() says why.
     bool frame_generation = false;
+    // Which driver to take when the loader lists several (macOS can list MoltenVK and KosmicKrisp for one GPU).
+    // The loader's own filters (VK_LOADER_DRIVERS_SELECT, VK_DRIVER_FILES) apply before this choice.
+    VkDriverChoice driver = VkDriverChoice::Auto;
 };
 
 // Instance, physical device, logical device whose graphics queue 0 is the renderer's (Streamline may add more),
@@ -63,6 +67,8 @@ public:
     bool hasLargePoints() const { return has_large_points_; }
     // True when the device was created with samplerAnisotropy.
     bool hasSamplerAnisotropy() const { return has_sampler_anisotropy_; }
+    // True when the device was created with VK_EXT_shader_stencil_export (gl_FragStencilRefARB).
+    bool hasStencilExport() const { return has_stencil_export_; }
     // 0 without the feature, else limits.maxSamplerAnisotropy.
     float maxSamplerAnisotropy() const {
         return has_sampler_anisotropy_ ? properties_.limits.maxSamplerAnisotropy : 0.0f;
@@ -120,6 +126,7 @@ private:
     bool has_clip_distance_ = false;
     bool has_large_points_ = false;
     bool has_sampler_anisotropy_ = false;
+    bool has_stencil_export_ = false;
     std::string two_sample_gap_;
     std::unique_ptr<Streamline> streamline_;
     std::string streamline_status_;

@@ -43,11 +43,12 @@ void printUsage() {
             "                      [--compare PNG [--compare-rect X,Y,W,H] [--max-diff N] [--max-mean X]\n"
             "                       [--max-differing P]]\n"
             "                      [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--no-validation]\n"
+            "                      [--vk-driver auto|moltenvk|kosmickrisp]\n"
             "                      [--dlaa-jitter on|off] [--dlaa-jitter-flip none|x|y|xy]\n"
             "                      [--dlaa-camera on|off|reset] [--dlaa-clip-flip-y on|off]\n"
             "                      [--dlaa-mv-invalid zero|unset]\n"
             "                      [--fg-mv-check [--fg-mv-flip none|x|y|xy]]\n"
-            "                      [--shader-cache DIR] [--repeat N] [--quiet]\n"
+            "                      [--shader-cache DIR] [--repeat N [--gpu-timing]] [--quiet]\n"
             "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture; several captures are replayed in\n"
             "           order through one renderer, each one a frame that must end with a flip\n"
             "  --loop N            play the list of captures N times in order (1..1000, default 1)\n"
@@ -64,6 +65,8 @@ void printUsage() {
             "                      supersample (one sample per memory-layout pixel) or dlaa (NVIDIA DLAA through\n"
             "                      Streamline); dlaa falls back to msaa when it is unavailable, and msaa falls back\n"
             "                      to supersample on a device without 2-sample support\n"
+            "  --vk-driver D       Vulkan driver: auto (default; MoltenVK before KosmicKrisp), moltenvk or kosmickrisp;\n"
+            "                      a driver that is not installed leaves the replay without a device\n"
             "  --dlaa-jitter M     diagnostic, needs --aa-mode dlaa: on (default) or off (no sub-pixel jitter)\n"
             "  --dlaa-jitter-flip F  diagnostic, needs --aa-mode dlaa: negate the jitter offset reported to DLAA on\n"
             "                      the x axis, the y axis or both (none by default); the geometry does not change\n"
@@ -84,6 +87,8 @@ void printUsage() {
             "  --repeat N          replay and render the capture N times (N >= 1) with one memory view, builder and\n"
             "                      renderer, and print the median time per phase (the first iteration is warm-up and\n"
             "                      left out when N >= 2); one capture only; not with --out, --compare or --loop\n"
+            "  --gpu-timing        needs --repeat: time every rendering instance on the GPU and print the median\n"
+            "                      frame, instance and outside times and the most expensive instances\n"
             "  --quiet             do not print the per-command lines\n",
             stderr);
 }
@@ -232,6 +237,83 @@ std::uint64_t medianCycles(const std::vector<IterationSample>& samples, std::uin
 double toMs(std::uint64_t ns) { return static_cast<double>(ns) / 1e6; }
 
 unsigned long long toUll(std::uint64_t value) { return static_cast<unsigned long long>(value); }
+
+const char* colorFormatName(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_UNDEFINED: return "none";
+        case VK_FORMAT_B8G8R8A8_UNORM: return "bgra8";
+        case VK_FORMAT_R8G8B8A8_UNORM: return "rgba8";
+        case VK_FORMAT_R32_SFLOAT: return "r32f";
+        case VK_FORMAT_R16G16_SFLOAT: return "rg16f";
+        case VK_FORMAT_R32G32B32A32_SFLOAT: return "rgba32f";
+        default: return "other";
+    }
+}
+
+double medianOf(std::vector<double> values) {
+    std::sort(values.begin(), values.end());
+    return values[values.size() / 2];
+}
+
+// The "gpu:" and "gpu top:" lines of --gpu-timing. `frames` holds one entry per iteration; like "timing:" the median
+// leaves the first one out when there are two or more.
+void printGpuTiming(tox2::RsxRenderer& renderer, const std::string& capture_name, std::uint32_t repeat) {
+    if (!renderer.gpuTimingActive()) {
+        std::printf("gpu: unavailable: %s\n", renderer.gpuTimingGap().c_str());
+        return;
+    }
+    renderer.drainGpuTiming();
+    std::vector<tox2::GpuTimingFrame> frames = renderer.takeGpuTiming();
+    if (frames.size() != repeat) {
+        std::fprintf(stderr, "error: --gpu-timing expected %u frames, the renderer submitted %zu\n", repeat,
+                     frames.size());
+        return;
+    }
+    if (repeat > 1) frames.erase(frames.begin());
+    constexpr std::size_t kKindCount = 5;
+    std::vector<double> frame_ms, instances_ms, outside_ms, kind_ms[kKindCount];
+    std::uint32_t untimed = 0;
+    for (const tox2::GpuTimingFrame& frame : frames) {
+        double kind_sum[kKindCount] = {};
+        double sum = 0;
+        for (const tox2::GpuTimingInstance& instance : frame.instances) {
+            kind_sum[static_cast<std::size_t>(instance.label.kind)] += instance.ms;
+            sum += instance.ms;
+        }
+        frame_ms.push_back(frame.frame_ms);
+        instances_ms.push_back(sum);
+        outside_ms.push_back(frame.outside_ms);
+        for (std::size_t kind = 0; kind < kKindCount; kind++) kind_ms[kind].push_back(kind_sum[kind]);
+        untimed += frame.untimed_instances;
+    }
+    std::printf(
+            "gpu: %s, %u iteration%s (%s), median ms per iteration: frame %.2f, instances %.2f (draw %.2f, clear %.2f, "
+            "masked-clear %.2f, layout %.2f, depth-argb %.2f), outside %.2f\n",
+            capture_name.c_str(), repeat, repeat == 1 ? "" : "s", repeat == 1 ? "none excluded" : "first excluded",
+            medianOf(frame_ms), medianOf(instances_ms), medianOf(kind_ms[0]), medianOf(kind_ms[1]),
+            medianOf(kind_ms[2]), medianOf(kind_ms[3]), medianOf(kind_ms[4]), medianOf(outside_ms));
+    if (untimed != 0) {
+        std::fprintf(stderr, "warning: %u rendering instances found the timestamp pool full and are not timed\n",
+                     untimed);
+    }
+
+    const tox2::GpuTimingFrame& last = frames.back();
+    std::vector<std::size_t> order(last.instances.size());
+    for (std::size_t i = 0; i < order.size(); i++) order[i] = i;
+    std::sort(order.begin(), order.end(),
+              [&](std::size_t a, std::size_t b) { return last.instances[a].ms > last.instances[b].ms; });
+    constexpr std::size_t kTopCount = 15;
+    for (std::size_t rank = 0; rank < std::min(order.size(), kTopCount); rank++) {
+        const tox2::GpuTimingInstance& instance = last.instances[order[rank]];
+        const tox2::GpuInstanceLabel& label = instance.label;
+        std::printf("gpu top: #%zu %s %ux%u s%u %s%s", order[rank], tox2::gpuInstanceKindName(label.kind), label.width,
+                    label.height, label.samples, colorFormatName(label.color_format), label.depth ? " depth" : "");
+        if (label.kind == tox2::GpuInstanceKind::Draw) {
+            std::printf(" draws %u%s", label.draws, label.began_with_clear ? " after clear" : "");
+        }
+        std::printf(": %.2f ms\n", instance.ms);
+    }
+}
 
 std::string memoryFlagNames(VkMemoryPropertyFlags flags) {
     std::string text = std::format("{:#x}", static_cast<std::uint32_t>(flags));
@@ -382,6 +464,7 @@ bool runTimedReplay(const tox2::RsxCaptureReader& reader, const std::string& cap
             toUll(median(samples, &IterationSample::tex_bind_hits)),
             toUll(median(samples, &IterationSample::tex_bind_misses)),
             memoryFlagNames(renderer.stats().upload_memory_flags).c_str());
+    if (render_options.gpu_timing) printGpuTiming(renderer, capture_name, repeat);
     result.dlaa_text = dlaaStatsText(renderer);
     return true;
 }
@@ -436,6 +519,12 @@ bool writeFramePng(const tox2::RgbImage& image, const ReplayFrame& frame, const 
     return true;
 }
 
+// The driver is named because one GPU can be listed by several (KosmicKrisp and MoltenVK on macOS).
+void printDevice(const tox2::VkContext& context) {
+    std::printf("render: vulkan device %s (driver %s)\n", std::string(context.deviceName()).c_str(),
+                std::string(context.driverName()).c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -445,11 +534,13 @@ int main(int argc, char** argv) {
     std::string shader_cache;
     bool validation = true;
     bool quiet = false;
+    bool gpu_timing = false;
     std::uint32_t repeat = 0;  // --repeat: 0 means a single replay with the usual output
     std::uint32_t loop = 1;    // --loop: how many times the list of captures is played
     bool has_loop = false;
     std::uint32_t resolution_scale = 1;
     tox2::AaMode aa_mode = tox2::AaMode::Msaa;
+    tox2::VkDriverChoice vk_driver = tox2::VkDriverChoice::Auto;
     tox2::DlaaDebug dlaa_debug;
     bool has_dlaa_option = false;  // a --dlaa-* option was given, which needs --aa-mode dlaa
     tox2::FgDebug fg_debug;
@@ -462,6 +553,10 @@ int main(int argc, char** argv) {
         const std::string_view arg = argv[i];
         if (arg == "--no-validation") {
             validation = false;
+            continue;
+        }
+        if (arg == "--gpu-timing") {
+            gpu_timing = true;
             continue;
         }
         if (arg == "--quiet") {
@@ -511,6 +606,17 @@ int main(int argc, char** argv) {
                 return 2;
             }
             aa_mode = *mode;
+            i++;
+            continue;
+        }
+        if (arg == "--vk-driver") {
+            const std::optional<tox2::VkDriverChoice> choice =
+                    i + 1 < argc ? tox2::parseVkDriverChoice(argv[i + 1]) : std::nullopt;
+            if (!choice) {
+                std::fputs("error: --vk-driver takes auto|moltenvk|kosmickrisp\n", stderr);
+                return 2;
+            }
+            vk_driver = *choice;
             i++;
             continue;
         }
@@ -640,6 +746,10 @@ int main(int argc, char** argv) {
         std::fputs("error: --fg-mv-check needs --aa-mode dlaa\n", stderr);
         return 2;
     }
+    if (gpu_timing && repeat == 0) {
+        std::fputs("error: --gpu-timing needs --repeat\n", stderr);
+        return 2;
+    }
     if (repeat != 0 && fg_debug.mv_check) {
         std::fputs("error: --repeat cannot be combined with --fg-mv-check\n", stderr);
         return 2;
@@ -670,17 +780,20 @@ int main(int argc, char** argv) {
     if (repeat != 0) {
         tox2::VkContextOptions timed_context_options;
         timed_context_options.validation = validation;
+        timed_context_options.driver = vk_driver;
         timed_context_options.streamline = aa_mode == tox2::AaMode::Dlaa;
         std::unique_ptr<tox2::VkContext> timed_context = tox2::createVkContext(timed_context_options, error);
         if (!timed_context) {
             std::fprintf(stderr, "error: --repeat needs a Vulkan device: %s\n", error.c_str());
             return 1;
         }
+        printDevice(*timed_context);
         tox2::RenderOptions timed_options;
         timed_options.shader_cache = shader_cache;
         timed_options.resolution_scale = resolution_scale;
         timed_options.aa_mode = aa_mode;
         timed_options.dlaa_debug = dlaa_debug;
+        timed_options.gpu_timing = gpu_timing;
         TimedResult timed;
         const bool ok = runTimedReplay(frames.front()->reader, frames.front()->name, repeat, *timed_context,
                                        timed_options, timed);
@@ -724,9 +837,14 @@ int main(int argc, char** argv) {
     // Without a Vulkan device the replay still prints the command list and counts every draw as skipped.
     tox2::VkContextOptions context_options;
     context_options.validation = validation;
+    context_options.driver = vk_driver;
     context_options.streamline = aa_mode == tox2::AaMode::Dlaa;
     std::unique_ptr<tox2::VkContext> context = tox2::createVkContext(context_options, error);
-    if (!context) std::printf("render: unavailable: %s\n", error.c_str());
+    if (context) {
+        printDevice(*context);
+    } else {
+        std::printf("render: unavailable: %s\n", error.c_str());
+    }
 
     int exit_code = 0;
     std::size_t skipped = draws;

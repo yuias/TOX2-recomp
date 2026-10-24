@@ -50,6 +50,9 @@ struct PipelineKey {
     // (0: one element shared by every vertex).
     std::array<VkFormat, kPipelineVertexSlots> vertex_formats{};
     std::array<std::uint8_t, kPipelineVertexSlots> vertex_strides{};
+    // The fragment stage runs the alpha test (kFpAlphaTestConstantId). Off, the pipeline has no alpha-test
+    // discard, which keeps hidden surface removal on Apple GPUs.
+    bool alpha_test = false;
     bool blend = false;
     VkBlendFactor src_color = VK_BLEND_FACTOR_ZERO, dst_color = VK_BLEND_FACTOR_ZERO;
     VkBlendFactor src_alpha = VK_BLEND_FACTOR_ZERO, dst_alpha = VK_BLEND_FACTOR_ZERO;
@@ -116,7 +119,9 @@ public:
 
     // Copy a 2-sample image into a single-sample image in the memory layout (render_scale.h layoutSource).
     // The colour pass writes B8G8R8A8_UNORM or R32_SFLOAT texels. The depth pass has no colour attachment; it writes
-    // gl_FragDepth, and for a format with stencil also the stencil bits, one bit per draw (see LayoutPassConstants).
+    // gl_FragDepth, and for a format with stencil also the stencil: with the stencil export extension the same shader
+    // writes it through gl_FragStencilRefARB, else the stencil bits are rebuilt one bit per draw (see
+    // LayoutPassConstants).
     VkPipeline layoutColorPipeline(VkFormat color_format);
     VkPipeline layoutDepthPipeline(VkFormat depth_format);
 
@@ -139,7 +144,8 @@ private:
         DepthConvertMs,
         LayoutColor,
         LayoutDepth,
-        LayoutDepthStencil
+        LayoutDepthStencil,
+        LayoutDepthStencilExport
     };
     bool createLayoutPassObjects();
     VkShaderModule layoutShader(LayoutShader which);
@@ -161,7 +167,7 @@ private:
     VkShaderModule clear_fragment_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout layout_pass_set_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout layout_pass_layout_ = VK_NULL_HANDLE;
-    std::array<VkShaderModule, 5> layout_shaders_{};       // LayoutShader, created on first use
+    std::array<VkShaderModule, 6> layout_shaders_{};       // LayoutShader, created on first use
     std::array<VkPipeline, 2> depth_convert_pipelines_{};  // single-sample, multisampled
 
     std::map<std::uint64_t, std::unique_ptr<Program>> vertex_programs_;

@@ -127,16 +127,33 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   Cull mode, depth state, viewport, scissor, topology, blend constants and the whole stencil state (test
   enable, ops, compare mask, write mask and reference, for both faces; see [Stencil](#stencil)) are dynamic
   state; pipelines are cached by what is baked into them.
+- **A draw binds the depth surface only when it uses it.** The game binds a depth surface to most post-processing
+  and UI draws. A draw with no depth test, no depth write and no stencil test (a stencil write needs the test, see
+  [Stencil](#stencil)) does not acquire the depth target and renders with a colour attachment alone, and its
+  pipeline has no depth format. This avoids resizing or copying a depth target the draw never touches (a depth
+  target at another layout size is otherwise made and filled from the old one). The colour target is always acquired, also for a
+  skipped draw. The one-sample (`dlaa`) scene pass is the exception: its colour target remembers the latest depth it
+  was drawn with, so its draws acquire the depth as before. A draw without a depth attachment cannot continue an
+  instance that has one (next item), so a depth clear followed by such a draw costs one more instance.
 - **Consecutive draws share a rendering instance.** A draw leaves its rendering instance open. The next draw
   with the same colour view, depth view, stencil use and render area records straight into it: no layout
   transition, no barrier and no `vkCmdBeginRendering`. Draws inside one instance are ordered by rasterization
-  order, which replaces the barrier between them. Every command recorded outside a draw's instance (clears, texture
+  order, which replaces the barrier between them. Every command recorded outside a draw's instance (texture
   uploads, the copy a draw makes to sample the target it renders to, target creation, resizing and layout syncs,
   the flip and readback commands) takes the frame's command buffer from one function, `outsideCmd`, which ends the
   open instance first. A draw with other attachments ends it before its own transitions, and the frame's submit ends
   it before `vkEndCommandBuffer`. An open instance therefore also means that nothing touched its attachments since
   the last draw, so they are still in their attachment layouts. `RendererStats::rendering_instances` counts the
   instances.
+- **Clears.** A clear is one rendering instance with the attachments it binds. When its rectangle covers the whole
+  render area, each aspect the clear touches (the colour, the depth, the stencil of a Z24S8 target) is cleared by the
+  attachment's load operation (`VK_ATTACHMENT_LOAD_OP_CLEAR`), so a tile-based GPU neither reads the old contents nor
+  loads them into the tile; an aspect the clear leaves alone (the stencil of a depth-only clear) keeps `LOAD`. A
+  smaller rectangle loads the attachments and clears the rectangle with `vkCmdClearAttachments`. A clear with a colour
+  attachment leaves its instance open like a draw does, so the draws that follow on the same attachments continue it
+  (one instance for the clear and its draws, and no store and reload of the target between them). A depth-only clear
+  ends its instance, because every draw has a colour attachment. A clear through a colour write mask is a draw of a
+  full-screen triangle (`masked-clear`) and ends its instance too.
 - **Barriers.** A layout transition records a full image barrier (all commands to all commands), except when the
   image is already in the requested layout and that layout is a read-only one: shader read, depth-stencil read or
   transfer source. A read after a read has no hazard, and every write to the image needs another layout, whose
@@ -187,7 +204,13 @@ code is in `runtime/src/rsx` (the frame builder) and `runtime/src/render` (the r
   cube texture (see [Sampler types](#sampler-types)). RCP, EX2 and LG2 read the x lane of source 0 and replicate the result;
   DIV and DIVSQ divide the whole of source 0 by the x lane of source 1 (DIVSQ leaves a zero
   numerator at zero and ignores the sign of the divisor). KIL discards the fragment when any lane
-  selected by its condition passes. Other opcodes (for example RSQ, DP2, LIT, the pack and
+  selected by its condition passes. The alpha test (the `alpha_func` and `alpha_ref` members of the draw
+  uniforms) runs only while the specialization constant `kAlphaTest` (id `kFpAlphaTestConstantId`) is true.
+  `PipelineKey::alpha_test` sets it, and it is false for a draw whose function is 7 (test disabled, or a
+  float target); function 0 ("never") is a test. A pipeline without the test has no alpha-test discard, because
+  Apple GPUs lose hidden surface removal for a shader that can discard, even when the draw never takes the
+  discard. A program with KIL keeps that discard in both variants. The same SPIR-V module serves both
+  pipeline variants, so a program that is drawn with and without the test costs one more pipeline only. Other opcodes (for example RSQ, DP2, LIT, the pack and
   unpack group and the flow-control opcodes), the WPOS, FOGC and SSA inputs, and the texture
   expand bit are not translated.
 - **Flips and vsync.** A flip is done when the command executes, once the flip limit allows it: with the default
@@ -233,12 +256,22 @@ pixels, the content size in points times the backing scale of the screen. Withou
 session (an SSH login, for example) no window can be created: the RSX thread logs the reason and the
 game goes on without rendering, as for any other renderer failure.
 
-- **Drivers.** The LunarG Vulkan SDK installs two: KosmicKrisp and MoltenVK. macOS can list both, in no
-  fixed order, so `tox2_game` does not depend on the order: among the usable devices it takes a discrete
-  GPU first, then the device whose driver is KosmicKrisp (a full driver, without the portability subset),
-  then the first usable one. The log line `tox2: render: vulkan device ...` names the driver
-  (`driver <name>`). `vulkaninfo --summary` shows which drivers are installed.
-- **Choosing a driver yourself.** `tox2_game` has no option for it; use the Vulkan loader's variables.
+- **Drivers.** The LunarG Vulkan SDK installs two: MoltenVK and KosmicKrisp. macOS can list both, in no
+  fixed order, so `tox2_game` does not depend on the order. By default (`--vk-driver auto`) it takes,
+  among the usable devices, a discrete GPU first, then the device whose driver is MoltenVK, then the
+  first usable one. MoltenVK is the default because KosmicKrisp is slower on the same hardware: on an
+  Apple M4 Pro it costs about 6 to 8 microseconds more GPU time per draw and about 30% more per pixel.
+  Replaying `generated/rsx/captures/frame_4200.tox2cap` with `--resolution-scale 4 --aa-mode msaa` takes
+  about 36 to 40 ms of GPU time per frame on KosmicKrisp and 18 to 21 ms on MoltenVK. The log line
+  `tox2: render: vulkan device ...` names the driver (`driver <name>`). `vulkaninfo --summary` shows
+  which drivers are installed.
+- **Choosing a driver yourself.** `--vk-driver auto|moltenvk|kosmickrisp` on `tox2_game` and
+  `tox2_rsxreplay`, or the `vk_driver` key of `config.json` with the same values. `moltenvk` and
+  `kosmickrisp` accept only a device with that driver. When there is none, no renderer is created: the log
+  names the driver that was asked for and the devices found (`no Vulkan device with driver MoltenVK
+  (found: Apple M4 Pro (KosmicKrisp))`), and the game goes on without rendering. The device is created
+  once, so the debug overlay has no setting for it. The Vulkan loader's variables still work, and the loader
+  applies them before this choice: a driver they remove is not found by `--vk-driver`.
   `VK_LOADER_DRIVERS_SELECT` takes a comma-separated list of patterns for the driver manifest file
   names and uses only the matching drivers; the manifests are in `/usr/local/share/vulkan/icd.d`
   after the SDK's system-global install (`libkosmickrisp_icd.json`, `MoltenVK_icd.json`).
@@ -246,6 +279,7 @@ game goes on without rendering, as for any other renderer failure.
   adds files to the list and so does not restrict it.
 
   ```sh
+  build/macos-release/bin/tox2_game --game-dir <game-dir> --vk-driver kosmickrisp
   VK_LOADER_DRIVERS_SELECT='*MoltenVK*' build/macos-release/bin/tox2_game --game-dir <game-dir>
   VK_DRIVER_FILES=/usr/local/share/vulkan/icd.d/libkosmickrisp_icd.json build/macos-release/bin/tox2_game --game-dir <game-dir>
   ```
@@ -264,11 +298,13 @@ game goes on without rendering, as for any other renderer failure.
   and an indexed fan is expanded by its indices, split at the restart index when primitive restart is
   on. The list topology takes no restart. KosmicKrisp draws fans directly. The same log line shows
   `triangle fans yes` or `no`.
-- **Resolution scale and depth.** KosmicKrisp has no blit for `D32_SFLOAT_S8_UINT`. Changing the
-  internal resolution scale while the game runs therefore cannot rescale depth targets there: their
-  contents restart for that frame, and the census counts `state rescale of a depth target unavailable`
-  (see [Resolution scale](#resolution-scale)). The render tests skip the depth rescale checks where
-  depth cannot be blitted.
+- **Resolution scale and depth.** The renderer rescales a depth target with a blit when the device offers
+  one for the depth format (a format feature query on the chosen device). KosmicKrisp has no blit for
+  `D32_SFLOAT_S8_UINT`; MoltenVK has one. Changing the internal resolution scale while the game runs
+  therefore cannot rescale depth targets on KosmicKrisp: their contents restart for that frame, and the
+  census counts `state rescale of a depth target unavailable` (see [Resolution scale](#resolution-scale)).
+  On MoltenVK they are rescaled. The render tests skip the depth rescale checks where depth cannot be
+  blitted.
 - **Loader.** The loader is found at run time. If the normal search fails, the paths in
   [Building](building.md#vulkan-shaderc-and-ffmpeg) are tried.
 - **Windows-only features.** DLAA and frame generation need NVIDIA Streamline, which is built on
@@ -476,7 +512,8 @@ come from RPCS3 (`VKGSRender.cpp` `get_compatible_surface_format`, `rsx_methods.
 - The fragment program writes its usual four-component colour and the attachment keeps the red channel.
   RPCS3 applies no output swizzle to a float surface (the swizzle word is only set for the integer formats).
 - A float surface has no 8-bit quantisation of the output and no alpha test, so the draw uniform block gets
-  neither `kFpFlagRound8Bit` nor the alpha function. The fragment GLSL does not change.
+  neither `kFpFlagRound8Bit` nor the alpha function, and its pipeline is the variant without the alpha test.
+  The fragment GLSL does not change.
 - A colour clear of an F_X32 surface does nothing, as in RPCS3 `clear_surface`; the depth and stencil bits of
   the same clear still apply.
 - Blending into `R32_SFLOAT` is optional in Vulkan: the draw is made without blending, and counted
@@ -664,9 +701,11 @@ drawn with one sample per pixel.
   its single-sample memory-layout image as well (its identity, size and every read path are as in `supersample`)
   and the multisampled image is a sidecar of it. Multisampled passes do not draw into the layout image; it is
   written from the sidecar by a full-target pass at the moment something reads it, and not before:
-  - a colour target is copied by a draw that fetches each layout texel from the sidecar; a depth target by a
-    depth pass plus, for Z24S8, eight passes that rebuild the stencil one bit at a time with a stencil-test
-    write mask (no extension is needed for either);
+  - a colour target is copied by a draw that fetches each layout texel from the sidecar; a depth target by one
+    pass that writes the depth through `gl_FragDepth` and, for Z24S8, the stencil through `gl_FragStencilRefARB`
+    (the device is created with `VK_EXT_shader_stencil_export` when it offers it; the stencil test is on with
+    op REPLACE, so the exported value is stored). A device without that extension takes a depth pass plus eight
+    passes that rebuild the stencil one bit at a time with a stencil-test write mask;
   - the readers are a texture that aliases the surface (including a draw that samples the surface it renders into:
     it reads the layout image and draws into the sidecar, so it needs no feedback copy), an inherit copy or a
     rescale blit from it, a flip of it, and a single-sample pass that is about to draw into the same memory (a plain
@@ -1278,10 +1317,11 @@ no renderer and no window. Captures are derived from the game, so they are git-i
 tox2_rsxreplay CAPTURE [CAPTURE...] [--loop N] [--out DIR]
                       [--compare PNG [--compare-rect X,Y,W,H] [--max-diff N] [--max-mean X] [--max-differing P]]
                       [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--no-validation] [--shader-cache DIR]
+                      [--vk-driver auto|moltenvk|kosmickrisp]
                       [--dlaa-jitter on|off] [--dlaa-jitter-flip none|x|y|xy] [--dlaa-camera on|off|reset]
                       [--dlaa-clip-flip-y on|off] [--dlaa-mv-invalid zero|unset]
                       [--fg-mv-check [--fg-mv-flip none|x|y|xy]]
-                      [--repeat N] [--quiet]
+                      [--repeat N [--gpu-timing]] [--quiet]
 ```
 
 | Option | Meaning |
@@ -1303,14 +1343,17 @@ tox2_rsxreplay CAPTURE [CAPTURE...] [--loop N] [--out DIR]
 | `--dlaa-mv-invalid zero\|unset` | Set `motionVectorsInvalidValue` to 0 (`zero`, default) or leave the SDK default (`unset`, which makes Streamline warn once per process). It does not change the picture. |
 | `--fg-mv-check` | Diagnostic for [frame generation](#frame-generation), needs `--aa-mode dlaa` (a usage error otherwise, and together with `--repeat`). Draws the camera motion vectors that frame generation would use and, from the second frame on, prints `fg mv: frame <i>, warp mean <w>, no-motion mean <z>, <n> pixels` (`, reset` when the history was dropped for that frame): the mean absolute difference (RGB, 0 to 255) between the current DLAA output and the previous one warped with the vectors, and between the two unwarped. A lower `warp mean` than `no-motion mean` means the vectors follow the camera. The displayed frame does not change. |
 | `--fg-mv-flip none\|x\|y\|xy` | Diagnostic, needs `--fg-mv-check`: negate the vectors on the given axes. Default `none`, the measured winner. |
+| `--vk-driver auto\|moltenvk\|kosmickrisp` | The Vulkan driver, as for `tox2_game` (default `auto`; see [Vulkan on macOS](#vulkan-on-macos)). The tool prints the device it used as `render: vulkan device <name> (driver <driver>)`. A driver that is not installed leaves the replay without a device (`render: unavailable: no Vulkan device with driver <driver> (found: ...)`; exit code 1 with `--repeat`). Any other value is a usage error. |
 | `--no-validation` | Do not enable the Vulkan validation layer, which is on by default. |
 | `--shader-cache DIR` | SPIR-V cache directory. Without it nothing is cached. |
 | `--repeat N` | Replay and render the capture `N` times (1 to 100000) and print the median time of each phase (see below). A usage error together with `--out`, `--compare`, more than one capture or `--loop`; exit code 1 without a Vulkan device. |
+| `--gpu-timing` | Needs `--repeat` (a usage error otherwise). Time every rendering instance on the GPU with timestamp queries and print the `gpu` and `gpu top` lines (see below). Off, the renderer creates no query pool and records no extra command. |
 | `--quiet` | Do not print the per-command lines (`clear`, `draw`, `flip`); everything else is printed. |
 
 The thresholds are optional and unchecked unless given, and they need `--compare`. The tool prints
 the commands the frame builder produced (`clear`, `draw` with its colour and depth target (with `zt=`, `zw=` and
-`st=` for its depth test, depth write and stencil test) and, for each texture, the render target it aliases or the format and mip count of its bytes, `flip`), then a summary line
+`st=` for its depth test, depth write and stencil test) and, for each texture, the render target it aliases or the format and mip count of its bytes, `flip`), then, with a device, the line
+`render: vulkan device <name> (driver <driver>)`, then a summary line
 `replay: N commands, N draws, N skipped` (with the diff figures when comparing), the
 `rsx unimplemented` section (`census: rsx unimplemented 0 kinds` when it is empty), the path of
 the PNG, and `validation: active|inactive|disabled, N errors`. The exit code is 1 when a
@@ -1387,6 +1430,38 @@ that uploads go to (`device-local`, `host-visible`, `host-coherent`, `host-cache
 memory is write-combined, where reads are slow and single-byte stores are slower than whole-element stores.
 Run-to-run spread on one machine was a few percent for `buildDraw` and `total` and up to 7 % for `recordDraw`, so
 a difference smaller than that is noise; compare interleaved runs of the two binaries.
+
+With `--gpu-timing` the renderer also times the GPU. Each frame's command buffer records a timestamp at its first and
+last command, and one before every rendering instance begins and one after it ends. Timestamps are never written
+inside an instance, because a tile-based GPU (Apple, through MoltenVK) cannot sample in the middle of a pass. The
+results are read when the frame slot's fence has been waited for, and the frames still in flight are collected at the
+end of the run. After the four lines above come:
+
+```
+gpu: frame_4300, 10 iterations (first excluded), median ms per iteration: frame 34.52, instances 32.21 (draw 22.15, clear 2.15, masked-clear 0.00, layout 5.75, depth-argb 2.10), outside 2.34
+gpu top: #27 layout 10240x2880 s1 none depth: 4.70 ms
+gpu top: #16 draw 5120x2880 s2 bgra8 depth draws 844: 4.55 ms
+```
+
+The `gpu` line gives the median over the same counted iterations (the first is left out when `N` is 2 or more):
+
+- `frame`: the time from the first to the last command of the frame on the GPU.
+- `instances`: the time of all rendering instances added up, then the same split by kind. `draw` is the instance a run
+  of draws with the same attachments shares, including the clear that began it (a clear leaves its instance open for
+  the draws after it, and the instance is timed as one, so the clear's own cost is not separate), `clear` a clear of
+  whole channels that no draw continued, `masked-clear` a clear through a colour write mask, `layout` the pass that rewrites the memory layout of a 2-sample target from its sidecar image, and
+  `depth-argb` the pass that rewrites a depth surface as A8R8G8B8. An instance's time runs from the timestamp
+  before its begin to the one after its end, so the barriers and copies recorded between instances are not in it.
+- `outside`: `frame` minus `instances`. It covers everything between instances: transfers and blits, clears
+  outside an instance, uploads, texture work, and the present blit.
+
+Each `gpu top` line is one of the up to 15 most expensive instances of the last counted iteration, longest first:
+`#<index>` is the instance's position in the frame (counting from 0), then its kind, render area in pixels, samples
+(`s1`, `s2`), colour format (`bgra8`, `r32f`, ... or `none`), `depth` when a depth attachment is bound, and, for
+`draw`, the number of draws recorded into the instance, followed by `after clear` when a clear began it. A frame has
+room for about 2000 timed instances; later ones are not timed and a warning on standard error gives the count. When the device has no timestamp support the `gpu`
+line says `unavailable` and why. The timestamps themselves cost some GPU time, so the `gpu wait` of the `timing` line
+can be higher with `--gpu-timing` than without it (17.6 ms against 14.1 ms for `frame_4300` at scale 4).
 
 The CTest entry `rsx_replay_repeat` runs `tox2_rsxreplay generated/rsx/captures/frame_9400_room.tox2cap --repeat 3
 --quiet --no-validation` (the capture is named in `cmake/rsx_replay.cmake`) and passes when the `cycles` line is

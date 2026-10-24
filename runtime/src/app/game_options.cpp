@@ -30,7 +30,8 @@ const std::string kUsage = std::format(
         "                [--render none|vulkan] [--rsx-capture N[,M...]] [--rsx-census FILE]\n"
         "                [--dump-frames DIR] [--dump-frames-every K] [--shader-cache DIR]\n"
         "                [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--vk-validation] [--no-window]\n"
-        "                [--anisotropic-filter off|2|4|8|16] [--window-size 720p|1080p|1440p|2160p]\n"
+        "                [--anisotropic-filter off|2|4|8|16] [--vk-driver auto|moltenvk|kosmickrisp]\n"
+        "                [--window-size 720p|1080p|1440p|2160p]\n"
         "                [--fullscreen on|off] [--frame-gen off|60|90|120|180|unlimited]\n"
         "                [--fg-present-mode mailbox|immediate|fifo] [--fg-reflex on|off] [--fg-only-generated]\n"
         "                [--fg-cycle SECONDS] (frame generation defaults: mailbox, reflex on)\n"
@@ -66,6 +67,7 @@ struct ParseState {
     bool resolution_scale_given = false;
     bool aa_mode_given = false;
     bool anisotropy_given = false;
+    bool vk_driver_given = false;
     bool window_option_given = false;  // --window-size or --fullscreen
     bool frame_gen_given = false;
     bool fg_option_given = false;  // any of the --fg-* diagnostics
@@ -340,6 +342,14 @@ bool setAnisotropicFilter(ParseState& state, std::string_view label, const RawIt
     return true;
 }
 
+bool setVkDriver(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
+    const std::optional<VkDriverChoice> choice = parseVkDriverChoice(item.text);
+    if (!choice) return fail(error, std::format("error: {} needs auto, moltenvk or kosmickrisp\n", label));
+    state.options.vk_driver = *choice;
+    state.vk_driver_given = true;
+    return true;
+}
+
 bool setWindowSize(ParseState& state, std::string_view label, const RawItem& item, std::string& error) {
     const std::optional<WindowSizePreset> preset = parseWindowSize(item.text);
     if (!preset) return fail(error, std::format("error: {} needs 720p, 1080p, 1440p or 2160p\n", label));
@@ -445,6 +455,7 @@ constexpr auto kEntries = std::to_array<OptionEntry>({
         {{"resolution-scale", OptionKind::Unsigned, true, OptionNeeds::Renderer}, setResolutionScale},
         {{"aa-mode", OptionKind::String, true, OptionNeeds::Renderer}, setAaMode},
         {{"anisotropic-filter", OptionKind::String, true, OptionNeeds::Renderer}, setAnisotropicFilter},
+        {{"vk-driver", OptionKind::String, false, OptionNeeds::Renderer}, setVkDriver},
         {{"window-size", OptionKind::String, true, OptionNeeds::Window}, setWindowSize},
         {{"fullscreen", OptionKind::Switch, true, OptionNeeds::Window}, setFullscreen},
         {{"frame-gen", OptionKind::String, true, OptionNeeds::Window}, setFrameGen},
@@ -664,11 +675,11 @@ std::optional<OptionsError> settle(ParseState& state, const std::string& file_no
     opt.render_vulkan = shape.render_vulkan;
     const bool render_option = !opt.dump_frames.empty() || state.dump_every_given || !opt.shader_cache.empty() ||
                                opt.vk_validation || state.resolution_scale_given || state.aa_mode_given ||
-                               state.anisotropy_given;
+                               state.anisotropy_given || state.vk_driver_given;
     if (render_option && !opt.render_vulkan) {
         return combined(
                 "error: --dump-frames, --dump-frames-every, --shader-cache, --resolution-scale, --aa-mode, "
-                "--anisotropic-filter and --vk-validation need --render vulkan\n");
+                "--anisotropic-filter, --vk-driver and --vk-validation need --render vulkan\n");
     }
     if (!opt.spu_captures.empty() && opt.spu_capture.dir.empty()) {
         return combined("error: --spu-capture needs --spu-capture-dir\n");

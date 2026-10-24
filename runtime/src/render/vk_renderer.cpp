@@ -278,7 +278,20 @@ struct RsxRenderer::FrameSlot {
     VmaAllocation readback_allocation = nullptr;
     void* readback_mapped = nullptr;
     VkDeviceSize readback_size = 0;
+    // GPU timing (RenderOptions::gpu_timing). Queries 0 and 1 are the frame's first and last command; each timed
+    // instance takes two more.
+    struct TimedInstance {
+        GpuInstanceLabel label;
+        std::uint32_t begin_query = 0;
+    };
+    VkQueryPool queries = VK_NULL_HANDLE;
+    std::vector<TimedInstance> timed;
+    std::uint32_t queries_used = 0;
+    std::uint32_t untimed = 0;  // instances that found the pool full
+    bool timed_submitted = false;
 };
+
+constexpr std::uint32_t kGpuQueryCapacity = 4096;
 
 // Empty when DLAA can run; else the Streamline status or the first image format the pass cannot use. The blit
 // formats are the scene image's layout copy, the storage and sampled ones are DLSS's output and motion vectors.
@@ -352,9 +365,39 @@ RsxRenderer::RsxRenderer(VkContext& context, RenderOptions options) : context_(c
     setAnisotropy(options_.anisotropy);
     if (anisotropy_ > 1) logInfo("tox2: render: anisotropic filtering {}x", anisotropy_);
     const VkDevice device = context_.device();
+    if (options_.gpu_timing) {
+        std::uint32_t family_count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(context_.physicalDevice(), &family_count, nullptr);
+        std::vector<VkQueueFamilyProperties> families(family_count);
+        vkGetPhysicalDeviceQueueFamilyProperties(context_.physicalDevice(), &family_count, families.data());
+        const std::uint32_t valid_bits = context_.graphicsQueueFamily() < family_count
+                                                 ? families[context_.graphicsQueueFamily()].timestampValidBits
+                                                 : 0;
+        const float period = context_.deviceProperties().limits.timestampPeriod;
+        if (valid_bits == 0) {
+            gpu_timing_gap_ = "the graphics queue family has no timestamp support (timestampValidBits is 0)";
+        } else if (period <= 0.0f) {
+            gpu_timing_gap_ = "the device reports a timestampPeriod of 0";
+        } else {
+            gpu_timing_ = true;
+            timestamp_period_ns_ = period;
+            timestamp_mask_ = valid_bits >= 64 ? ~std::uint64_t{0} : (std::uint64_t{1} << valid_bits) - 1;
+        }
+        if (!gpu_timing_) logWarn("tox2: render: GPU timing unavailable ({})", gpu_timing_gap_);
+    }
     for (std::unique_ptr<FrameSlot>& slot_ptr : slots_) {
         slot_ptr = std::make_unique<FrameSlot>();
         FrameSlot& slot = *slot_ptr;
+        if (gpu_timing_) {
+            VkQueryPoolCreateInfo query_info{};
+            query_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+            query_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            query_info.queryCount = kGpuQueryCapacity;
+            if (vkCreateQueryPool(device, &query_info, nullptr, &slot.queries) != VK_SUCCESS) {
+                fail("vkCreateQueryPool failed");
+                return;
+            }
+        }
 
         VkCommandPoolCreateInfo pool_info{};
         pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -399,6 +442,7 @@ RsxRenderer::~RsxRenderer() {
         }
         if (slot->readback != VK_NULL_HANDLE)
             vmaDestroyBuffer(context_.allocator(), slot->readback, slot->readback_allocation);
+        if (slot->queries != VK_NULL_HANDLE) vkDestroyQueryPool(device, slot->queries, nullptr);
         if (slot->fence != VK_NULL_HANDLE) vkDestroyFence(device, slot->fence, nullptr);
         if (slot->pool != VK_NULL_HANDLE) vkDestroyCommandPool(device, slot->pool, nullptr);
     }
@@ -511,7 +555,76 @@ bool RsxRenderer::waitSlot(FrameSlot& slot) {
     slot.in_use.clear();
     slot.texture_refs.clear();
     slot.keep_alive.clear();
+    gpuReadSlot(slot);
     return true;
+}
+
+void RsxRenderer::drainGpuTiming() {
+    if (!gpu_timing_) return;
+    for (std::unique_ptr<FrameSlot>& slot : slots_) {
+        if (slot) waitSlot(*slot);
+    }
+}
+
+const char* gpuInstanceKindName(GpuInstanceKind kind) {
+    switch (kind) {
+        case GpuInstanceKind::Draw: return "draw";
+        case GpuInstanceKind::Clear: return "clear";
+        case GpuInstanceKind::MaskedClear: return "masked-clear";
+        case GpuInstanceKind::Layout: return "layout";
+        case GpuInstanceKind::DepthArgb: return "depth-argb";
+    }
+    return "?";
+}
+
+void RsxRenderer::gpuBeginInstance(VkCommandBuffer cmd, GpuInstanceKind kind, std::uint32_t width, std::uint32_t height,
+                                   std::uint32_t samples, VkFormat color_format, bool depth) {
+    if (!gpu_timing_) return;
+    FrameSlot& slot = *slots_[current_slot_];
+    gpu_open_ = false;
+    if (slot.queries_used + 2 > kGpuQueryCapacity) {
+        slot.untimed++;
+        return;
+    }
+    FrameSlot::TimedInstance& instance = slot.timed.emplace_back();
+    instance.label = {kind, width, height, samples, color_format, depth, 0};
+    instance.begin_query = slot.queries_used;
+    slot.queries_used += 2;
+    vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.queries, instance.begin_query);
+    gpu_open_ = true;
+}
+
+void RsxRenderer::gpuEndInstance(VkCommandBuffer cmd) {
+    if (!gpu_open_) return;
+    gpu_open_ = false;
+    const FrameSlot& slot = *slots_[current_slot_];
+    vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.queries, slot.timed.back().begin_query + 1);
+}
+
+// Called once the slot's fence has signaled, so every query of the frame is available.
+void RsxRenderer::gpuReadSlot(FrameSlot& slot) {
+    if (!gpu_timing_ || !slot.timed_submitted) return;
+    slot.timed_submitted = false;
+    std::vector<std::uint64_t> ticks(slot.queries_used);
+    if (vkGetQueryPoolResults(context_.device(), slot.queries, 0, slot.queries_used,
+                              ticks.size() * sizeof(std::uint64_t), ticks.data(), sizeof(std::uint64_t),
+                              VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
+        return;
+    }
+    const auto ms = [&](std::uint32_t begin, std::uint32_t end) {
+        return static_cast<double>((ticks[end] - ticks[begin]) & timestamp_mask_) * timestamp_period_ns_ / 1e6;
+    };
+    GpuTimingFrame frame;
+    frame.frame_ms = ms(0, 1);
+    double instances_ms = 0;
+    for (const FrameSlot::TimedInstance& instance : slot.timed) {
+        const double instance_ms = ms(instance.begin_query, instance.begin_query + 1);
+        frame.instances.push_back({instance.label, instance_ms});
+        instances_ms += instance_ms;
+    }
+    frame.outside_ms = frame.frame_ms - instances_ms;
+    frame.untimed_instances = slot.untimed;
+    gpu_frames_.push_back(std::move(frame));
 }
 
 bool RsxRenderer::beginFrame() {
@@ -534,6 +647,14 @@ bool RsxRenderer::beginFrame() {
         fail("vkBeginCommandBuffer failed");
         return false;
     }
+    if (gpu_timing_) {
+        slot.timed.clear();
+        slot.untimed = 0;
+        slot.queries_used = 2;
+        gpu_open_ = false;
+        vkCmdResetQueryPool(slot.cmd, slot.queries, 0, kGpuQueryCapacity);
+        vkCmdWriteTimestamp2(slot.cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.queries, 0);
+    }
     recording_ = true;
     frame_index_ = static_cast<std::uint32_t>(stats_.flips) + 1;
     if (frame_gen_) frame_gen_->beginFrame(frame_index_);
@@ -546,6 +667,7 @@ VkCommandBuffer RsxRenderer::outsideCmd() {
     const VkCommandBuffer cmd = slots_[current_slot_]->cmd;
     if (open_pass_) {
         vkCmdEndRendering(cmd);
+        gpuEndInstance(cmd);
         open_pass_.reset();
     }
     return cmd;
@@ -557,6 +679,7 @@ bool RsxRenderer::submitFrame() {
         if (block.used != 0) vmaFlushAllocation(context_.allocator(), block.allocation, 0, block.used);
     }
     const VkCommandBuffer cmd = outsideCmd();
+    if (gpu_timing_) vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.queries, 1);
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         fail("vkEndCommandBuffer failed");
         return false;
@@ -588,6 +711,7 @@ bool RsxRenderer::submitFrame() {
         return false;
     }
     slot.pending = true;
+    slot.timed_submitted = gpu_timing_;
     recording_ = false;
     display_slot_ = current_slot_;
     current_slot_ = (current_slot_ + 1) % kFramesInFlight;
@@ -939,8 +1063,9 @@ bool RsxRenderer::ensureSidecar(RenderTarget& target, VkSampleCountFlagBits samp
 // sidecar: both texels of a pixel take its one value, by a blit. Records outside any rendering instance. False only
 // on a Vulkan failure.
 //
-// A 2-sample depth target takes one instance: a pass that writes the depth through gl_FragDepth, then (Z24S8) eight
-// passes that rebuild the stencil one bit at a time, because a shader cannot write the stencil without an extension.
+// A 2-sample depth target takes one instance. With VK_EXT_shader_stencil_export one pass writes the depth through
+// gl_FragDepth and the stencil through gl_FragStencilRefARB. Without it (Z24S8 only) a depth pass is followed by
+// eight passes that rebuild the stencil one bit at a time, because a shader cannot write the stencil otherwise.
 bool RsxRenderer::syncLayout(RenderTarget& target) {
     if (!target.msaa || !target.layout_stale) return true;
     if (target.msaa->samples == VK_SAMPLE_COUNT_1_BIT) {
@@ -964,6 +1089,7 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
     }
     if (!ensurePlaceholder() || !valid()) return false;
     const bool has_stencil = target.depth && formatHasStencil(target.format);
+    const bool stencil_export = has_stencil && context_.hasStencilExport();
     const VkPipeline pipeline = target.depth ? pipelines_->layoutDepthPipeline(target.format)
                                              : pipelines_->layoutColorPipeline(target.format);
     if (pipeline == VK_NULL_HANDLE) {
@@ -981,7 +1107,7 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
     transitionSidecar(target, read_layout);
     transition(target, write_layout);
 
-    // Every texel is written; the stencil starts at 0 and gains the bits the stencil passes set.
+    // Every texel is written; without the export the stencil starts at 0 and gains the bits the stencil passes set.
     VkRenderingAttachmentInfo attachment{};
     attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     attachment.imageView = target.view;
@@ -989,7 +1115,7 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
     attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     VkRenderingAttachmentInfo stencil_attachment = attachment;
-    stencil_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    stencil_attachment.loadOp = stencil_export ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_CLEAR;
     stencil_attachment.clearValue.depthStencil = {0.0f, 0};
     VkRenderingInfo rendering{};
     rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
@@ -1027,6 +1153,8 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
         vkCmdDraw(cmd, 3, 1, 0, 0);
     };
 
+    gpuBeginInstance(cmd, GpuInstanceKind::Layout, target.image_width, target.image_height, 1,
+                     target.depth ? VK_FORMAT_UNDEFINED : target.format, target.depth);
     vkCmdBeginRendering(cmd, &rendering);
     stats_.rendering_instances++;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -1035,19 +1163,20 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
     vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_->layoutPassLayout(), 0,
                               has_stencil ? 2 : 1, writes);
     if (target.depth) {
-        // The depth pass: depth test ALWAYS with writes on, stencil test off. Stencil op, masks and reference are set
-        // here once for the bit passes, which only toggle the write mask.
+        // The depth pass: depth test ALWAYS with writes on, stencil test off (on for the export pass). Stencil op,
+        // masks and reference are set here once for the bit passes, which only toggle the write mask.
         vkCmdSetDepthTestEnable(cmd, VK_TRUE);
         vkCmdSetDepthWriteEnable(cmd, VK_TRUE);
         vkCmdSetDepthCompareOp(cmd, VK_COMPARE_OP_ALWAYS);
-        vkCmdSetStencilTestEnable(cmd, VK_FALSE);
+        // The exported value replaces the reference; REPLACE on pass stores it through the full write mask.
+        vkCmdSetStencilTestEnable(cmd, stencil_export ? VK_TRUE : VK_FALSE);
         vkCmdSetStencilOp(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE,
                           VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS);
         vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xFF);
         vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xFF);
         vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xFF);
         draw();
-        if (has_stencil) {
+        if (has_stencil && !stencil_export) {
             // Bit b: the shader discards the fragments whose stencil sample has the bit clear, the others write
             // reference 0xFF through the one-bit write mask.
             vkCmdSetDepthTestEnable(cmd, VK_FALSE);
@@ -1063,6 +1192,7 @@ bool RsxRenderer::syncLayout(RenderTarget& target) {
         draw();
     }
     vkCmdEndRendering(cmd);
+    gpuEndInstance(cmd);
 
     target.layout_stale = false;
     target.layout_written = true;
@@ -1924,6 +2054,8 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
         writes[i].pImageInfo = &infos[i];
     }
 
+    gpuBeginInstance(cmd, GpuInstanceKind::DepthArgb, depth.image_width, depth.image_height, 1,
+                     VK_FORMAT_B8G8R8A8_UNORM, false);
     vkCmdBeginRendering(cmd, &rendering);
     stats_.rendering_instances++;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -1934,6 +2066,7 @@ std::shared_ptr<TextureImage> RsxRenderer::depthAsArgb(RenderTarget& depth) {
                        &constants);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
+    gpuEndInstance(cmd);
     colorBarrier(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     depth.argb->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -2195,8 +2328,9 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
 
 // Draw path. Everything that records outside a rendering instance (target creation, the placeholder
 // texture, uploads) happens before the draw's own commands and ends the instance a previous draw left open
-// (outsideCmd). The instance is left open at the end of a draw: the next draw with the same attachments and render
-// area records into it, and the next command recorded outside one ends it. A draw that cannot be rendered is counted
+// (outsideCmd). The instance is left open at the end of a draw, and at the end of a clear that has a colour
+// attachment: the next draw with the same attachments and render area records into it, and the next command recorded
+// outside one ends it. A draw that cannot be rendered is counted
 // in draws_skipped and, where a reason exists, with rsxNoteUnimplemented.
 //
 // Facts used, with their sources:
@@ -2204,6 +2338,7 @@ bool RsxRenderer::prepareTextures(const RsxDraw& draw, const DrawShaders& shader
 //    sampled ones (GlslResult::texture_units);
 //  - depth test and write are only enabled together with a depth target, and a write without the test
 //    stays off (RPCS3 `VK/VKGSRender.cpp` `decode_rsx_state`);
+//  - a draw that neither tests depth, writes it nor tests stencil binds no depth attachment (see below);
 //  - the viewport covers the surface clip rectangle with a positive height: the vertex program already
 //    applies the RSX viewport transform and does not flip y (RPCS3 `VKGSRender::set_viewport` uses
 //    x 0, y 0 and the clip size); depth range is 0..1, the vertex program remaps depth with clip_min and
@@ -2228,15 +2363,20 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     // target rather than as a missing one.
     std::shared_ptr<RenderTarget> color;
     if (draw.surfaces.has_color) color = acquireColor(draw.surfaces.color, false);
-    std::shared_ptr<RenderTarget> depth = acquireDepth(draw.surfaces, false);
+    // The game binds a depth surface to most post-processing and UI draws that neither test, write nor use stencil.
+    // Such a draw runs without the attachment: acquiring it would resize or copy a depth target the draw never reads.
+    // The one-sample (DLAA) scene pass is kept as it was, because its colour target remembers the latest depth it was
+    // drawn with for the DLAA inputs.
+    const VkSampleCountFlags sidecar_samples = sidecarSamples(draw.surfaces.color);
+    const bool sidecar = sidecar_samples != 0;
+    const bool depth_used = draw.raster.depth_test || draw.raster.stencil_test ||
+                            rsxZetaWriteEnabled(draw.raster, draw.surfaces.depth_format);
+    std::shared_ptr<RenderTarget> depth;
+    if (depth_used || sidecar_samples == VK_SAMPLE_COUNT_1_BIT) depth = acquireDepth(draw.surfaces, false);
     if (!valid()) return;
     if (!color) return skip("state", "draw without color target");
-    // One viewport and scissor serve both attachments, so they must have been made at the same scale. The game
-    // binds a depth surface to most post-processing and UI draws that neither test, write nor use stencil;
-    // such a draw does not need it, so it runs without the attachment instead of being dropped.
+    // One viewport and scissor serve both attachments, so they must have been made at the same scale.
     if (depth && depth->scale != color->scale) {
-        const bool depth_used = draw.raster.depth_test || draw.raster.stencil_test ||
-                                rsxZetaWriteEnabled(draw.raster, draw.surfaces.depth_format);
         if (depth_used) return skip("state", "attachments at different resolution scales");
         depth.reset();
     }
@@ -2269,8 +2409,6 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     // The render area is the smaller of the attachments; the scissor is clipped to it, and an empty
     // rectangle draws nothing (counted in `draws`, not skipped).
     const RsxRasterState& raster = draw.raster;
-    const VkSampleCountFlags sidecar_samples = sidecarSamples(draw.surfaces.color);
-    const bool sidecar = sidecar_samples != 0;
     std::uint32_t area_width = color->passWidth(sidecar), area_height = color->passHeight(sidecar);
     if (depth) {
         area_width = std::min(area_width, depth->passWidth(sidecar));
@@ -2438,6 +2576,14 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         std::memcpy(indices.data, list.data(), index_bytes);
     }
 
+    // A 32-bit float target has no alpha test and no 8-bit rounding (RPCS3 `rsx_methods.h`
+    // `alpha_test_enabled`, `RSXThread.cpp` RSX_SHADER_CONTROL_8BIT_FRAMEBUFFER).
+    const bool float_target = color->format == VK_FORMAT_R32_SFLOAT;
+    const std::uint32_t alpha_func = raster.alpha_test && !float_target ? (raster.alpha_func & 7u) : 7u;
+    // Func 7 (always) is the same as no test; "never" (0) is a test. The pipeline without the test has no
+    // alpha discard, which keeps hidden surface removal on Apple GPUs.
+    key.alpha_test = alpha_func != 7u;
+
     // Fixed-function state baked into the pipeline.
     key.color_mask = colorWriteMask(raster.color_mask);
     if (raster.blend && !blendSupported(color->format)) {
@@ -2457,10 +2603,9 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         return;
     }
 
-    // The depth surface is used when the draw tests, writes or reads stencil; the writes are what leave the other
-    // image of a multisampled target behind.
+    // The writes are what leave the other image of a multisampled target behind. A bound depth surface that is not
+    // used (only the one-sample scene pass keeps one) takes no layout pass.
     const bool depth_written = depth && rsxZetaWriteEnabled(raster, draw.surfaces.depth_format);
-    const bool depth_used = depth && (raster.depth_test || raster.stencil_test || depth_written);
     const bool color_written = key.color_mask != 0;
     if (sidecar) {
         const auto samples = static_cast<VkSampleCountFlagBits>(sidecar_samples);
@@ -2468,7 +2613,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         if (samples == VK_SAMPLE_COUNT_1_BIT && color_written && depth) color->dlaa_depth = depth;
     } else {
         if (!beginLayoutPass(*color, color_written, false) ||
-            (depth_used && !beginLayoutPass(*depth, depth_written, false))) {
+            (depth && depth_used && !beginLayoutPass(*depth, depth_written, false))) {
             return;
         }
     }
@@ -2482,7 +2627,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     // must not count as this draw's write.
     if (sidecar) {
         beginSidecarPass(*color, color_written, false);
-        if (depth_used) beginSidecarPass(*depth, depth_written, false);
+        if (depth && depth_used) beginSidecarPass(*depth, depth_written, false);
     }
 
     // Uniform data: vertex constants, fragment constants, the per-draw block shared by both stages.
@@ -2545,11 +2690,8 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         }
     }
 
-    // A 32-bit float target has no alpha test and no 8-bit rounding (RPCS3 `rsx_methods.h`
-    // `alpha_test_enabled`, `RSXThread.cpp` RSX_SHADER_CONTROL_8BIT_FRAMEBUFFER).
-    const bool float_target = color->format == VK_FORMAT_R32_SFLOAT;
     FpDrawUniforms fp{};
-    fp.alpha_func = raster.alpha_test && !float_target ? (raster.alpha_func & 7u) : 7u;
+    fp.alpha_func = alpha_func;
     fp.alpha_ref = static_cast<float>(raster.alpha_ref) / 255.0f;
     fp.flags = (float_target ? 0u : kFpFlagRound8Bit) | (raster.two_sided_lighting ? kFpFlagTwoSided : 0u);
     std::memcpy(fp.texture_scale, texture_scale, sizeof(texture_scale));
@@ -2601,9 +2743,22 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         rendering.pColorAttachments = &color_attachment;
         rendering.pDepthAttachment = depth ? &depth_attachment : nullptr;
         rendering.pStencilAttachment = pass.stencil ? &depth_attachment : nullptr;
+        gpuBeginInstance(cmd, GpuInstanceKind::Draw, area_width, area_height, sidecar ? sidecar_samples : 1,
+                         color->format, depth != nullptr);
         vkCmdBeginRendering(cmd, &rendering);
         stats_.rendering_instances++;
         open_pass_ = pass;
+    }
+    if (gpu_open_) {
+        // A clear left its instance open for this draw. The instance is timed as one and counted as a draw instance,
+        // marked with the clear it began with, so `draw` stays the cost of the pass and `clear` the clears no draw
+        // followed.
+        GpuInstanceLabel& label = slots_[current_slot_]->timed.back().label;
+        if (label.kind == GpuInstanceKind::Clear) {
+            label.kind = GpuInstanceKind::Draw;
+            label.began_with_clear = true;
+        }
+        label.draws++;
     }
 
     // Dynamic state is command buffer state and outlives rendering instances, so a value is recorded only when the
@@ -2764,7 +2919,8 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
 }
 
 // Facts from RPCS3 `VK/VKGSRender.cpp` `VKGSRender::clear_surface`:
-//  - one vkCmdClearAttachments over the clipped scissor rectangle;
+//  - a clear is the clipped scissor rectangle: over the whole render area the attachment load operations clear (CLEAR
+//    for each aspect the clear touches, LOAD for the others), otherwise one vkCmdClearAttachments;
 //  - color clear values are each 8-bit channel / 255, with alpha in the top byte of the register
 //    (`rsx_decode.h` `registers_decoder<NV4097_SET_COLOR_CLEAR_VALUE>`);
 //  - the depth value is the register field divided by the format's maximum, 0xFFFF for 16-bit depth
@@ -2851,9 +3007,22 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
     const PixelScale pixel_scale = color ? pixelScaleOf(clear.surfaces.color, color->scale, sidecar)
                                          : pixelScaleOf(clear.surfaces.depth, depth->scale, sidecar);
 
+    // The builder clipped the rectangle to the clip size, which is also the target size; the clamp only
+    // guards the attachment bounds.
+    const ImageRect clear_rect = scaleRect(clear.scissor[0], clear.scissor[1], clear.scissor[2], clear.scissor[3],
+                                           pixel_scale, area_width, area_height);
+    // A rectangle over the whole render area lets every aspect the clear touches be cleared by the attachment's load
+    // operation, which a tile-based GPU does without reading the old contents or loading them into the tile. An aspect
+    // the clear leaves alone (the stencil of a depth-only clear) keeps LOAD. A smaller rectangle loads everything and
+    // clears it with vkCmdClearAttachments.
+    const bool full_area = clear_rect.x == 0 && clear_rect.y == 0 && clear_rect.width == area_width &&
+                           clear_rect.height == area_height;
+
     VkRenderingAttachmentInfo color_attachment{};
     VkRenderingAttachmentInfo depth_attachment{};
     VkRenderingAttachmentInfo stencil_attachment{};
+    VkClearAttachment attachments[2]{};
+    std::uint32_t attachment_count = 0;
     if (color) {
         if (sidecar) {
             transitionSidecar(*color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -2865,6 +3034,22 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
         color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+        const std::uint32_t argb = clear.color_argb;
+        VkClearValue value{};
+        value.color.float32[0] = static_cast<float>((argb >> 16) & 0xFF) / 255.0f;
+        value.color.float32[1] = static_cast<float>((argb >> 8) & 0xFF) / 255.0f;
+        value.color.float32[2] = static_cast<float>(argb & 0xFF) / 255.0f;
+        value.color.float32[3] = static_cast<float>(argb >> 24) / 255.0f;
+        if (full_area) {
+            color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            color_attachment.clearValue = value;
+        } else {
+            VkClearAttachment& a = attachments[attachment_count++];
+            a.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            a.colorAttachment = 0;
+            a.clearValue = value;
+        }
     }
     if (depth) {
         if (sidecar) {
@@ -2878,30 +3063,7 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
         depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         stencil_attachment = depth_attachment;
-    }
 
-    VkRenderingInfo rendering{};
-    rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-    rendering.renderArea = {{0, 0}, {area_width, area_height}};
-    rendering.layerCount = 1;
-    rendering.colorAttachmentCount = color ? 1 : 0;
-    rendering.pColorAttachments = color ? &color_attachment : nullptr;
-    rendering.pDepthAttachment = depth ? &depth_attachment : nullptr;
-    rendering.pStencilAttachment = depth && formatHasStencil(depth->format) ? &stencil_attachment : nullptr;
-
-    VkClearAttachment attachments[2]{};
-    std::uint32_t attachment_count = 0;
-    if (color) {
-        const std::uint32_t argb = clear.color_argb;
-        VkClearAttachment& a = attachments[attachment_count++];
-        a.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        a.colorAttachment = 0;
-        a.clearValue.color.float32[0] = static_cast<float>((argb >> 16) & 0xFF) / 255.0f;
-        a.clearValue.color.float32[1] = static_cast<float>((argb >> 8) & 0xFF) / 255.0f;
-        a.clearValue.color.float32[2] = static_cast<float>(argb & 0xFF) / 255.0f;
-        a.clearValue.color.float32[3] = static_cast<float>(argb >> 24) / 255.0f;
-    }
-    if (depth) {
         VkImageAspectFlags aspect = 0;
         VkClearDepthStencilValue value{};
         if ((clear.mask & kRsxClearDepth) != 0) {
@@ -2914,28 +3076,60 @@ void RsxRenderer::recordClear(const RsxClear& clear) {
             aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
             value.stencil = clear.depth_stencil & 0xFF;
         }
-        if (aspect != 0) {
+        if (full_area) {
+            if ((aspect & VK_IMAGE_ASPECT_DEPTH_BIT) != 0) {
+                depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                depth_attachment.clearValue.depthStencil = value;
+            }
+            if ((aspect & VK_IMAGE_ASPECT_STENCIL_BIT) != 0) {
+                stencil_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                stencil_attachment.clearValue.depthStencil = value;
+            }
+        } else if (aspect != 0) {
             VkClearAttachment& a = attachments[attachment_count++];
             a.aspectMask = aspect;
             a.clearValue.depthStencil = value;
         }
     }
 
-    // The builder clipped the rectangle to the clip size, which is also the target size; the clamp only
-    // guards the attachment bounds.
-    const ImageRect clear_rect = scaleRect(clear.scissor[0], clear.scissor[1], clear.scissor[2], clear.scissor[3],
-                                           pixel_scale, area_width, area_height);
+    VkRenderingInfo rendering{};
+    rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    rendering.renderArea = {{0, 0}, {area_width, area_height}};
+    rendering.layerCount = 1;
+    rendering.colorAttachmentCount = color ? 1 : 0;
+    rendering.pColorAttachments = color ? &color_attachment : nullptr;
+    rendering.pDepthAttachment = depth ? &depth_attachment : nullptr;
+    rendering.pStencilAttachment = depth && formatHasStencil(depth->format) ? &stencil_attachment : nullptr;
+
     VkClearRect rect{};
     rect.rect.offset = {static_cast<std::int32_t>(clear_rect.x), static_cast<std::int32_t>(clear_rect.y)};
     rect.rect.extent = {clear_rect.width, clear_rect.height};
     rect.layerCount = 1;
 
+    gpuBeginInstance(cmd, GpuInstanceKind::Clear, area_width, area_height, sidecar ? sidecar_samples : 1,
+                     color ? color->format : VK_FORMAT_UNDEFINED, depth != nullptr);
     vkCmdBeginRendering(cmd, &rendering);
     stats_.rendering_instances++;
     if (attachment_count != 0 && rect.rect.extent.width != 0 && rect.rect.extent.height != 0) {
         vkCmdClearAttachments(cmd, attachment_count, attachments, 1, &rect);
     }
+
+    // A clear with a colour attachment binds what a draw to the same target binds, so the draws that follow record
+    // into this instance (recordDraw) and the target is not stored and loaded in between. Anything else recorded
+    // outside an instance ends it first (outsideCmd). A depth-only clear is not left open: a draw always has a colour
+    // attachment, so none could continue it.
+    if (color) {
+        OpenDrawPass pass;
+        pass.color_view = color_attachment.imageView;
+        pass.depth_view = depth ? depth_attachment.imageView : VK_NULL_HANDLE;
+        pass.stencil = depth && formatHasStencil(depth->format);
+        pass.width = area_width;
+        pass.height = area_height;
+        open_pass_ = pass;
+        return;
+    }
     vkCmdEndRendering(cmd);
+    gpuEndInstance(cmd);
 }
 
 // A clear that touches only some color channels: a full-target triangle clipped to the clear rectangle,
@@ -2996,6 +3190,8 @@ void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& co
     const VkRect2D scissor = {{static_cast<std::int32_t>(clear_rect.x), static_cast<std::int32_t>(clear_rect.y)},
                               {clear_rect.width, clear_rect.height}};
 
+    gpuBeginInstance(cmd, GpuInstanceKind::MaskedClear, width, height, sidecar ? sidecar_samples : 1, color.format,
+                     false);
     vkCmdBeginRendering(cmd, &rendering);
     stats_.rendering_instances++;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -3004,6 +3200,7 @@ void RsxRenderer::recordMaskedColorClear(const RsxClear& clear, RenderTarget& co
     vkCmdPushConstants(cmd, pipelines_->clearLayout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(value), value);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
+    gpuEndInstance(cmd);
 }
 
 bool RsxRenderer::ensureReadback(FrameSlot& slot, VkDeviceSize size) {

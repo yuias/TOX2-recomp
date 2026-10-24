@@ -29,6 +29,12 @@ inline constexpr std::uint32_t kFpTextureType3D = 1;
 inline constexpr std::uint32_t kFpTextureTypeCube = 2;
 constexpr std::uint32_t fpTextureType(std::uint32_t types, std::uint32_t unit) { return (types >> (unit * 2)) & 3; }
 
+// Specialization constant of the fragment stage: the alpha test (the draw uniforms' alpha_func/alpha_ref)
+// runs only while the bool constant with this id is true; the default is true. The renderer sets it false
+// for a draw whose alpha_func is 7, so that pipeline has no alpha-test discard. Apple GPUs lose hidden
+// surface removal (early depth) for a shader that can discard, even for draws that never take the discard.
+inline constexpr std::uint32_t kFpAlphaTestConstantId = 0;
+
 // Fragment-stage per-draw values, stored in binding 2 from byte kFpDrawBlockOffset (std140; the
 // vertex stage declares only the first 64 bytes). The bound range must be at least
 // kFpDrawBlockOffset + sizeof(FpDrawUniforms) bytes.
@@ -36,7 +42,9 @@ constexpr std::uint32_t fpTextureType(std::uint32_t types, std::uint32_t unit) {
 //                                 4 greater, 5 notequal, 6 gequal, 7 always). Write 7 when
 //                                 ALPHA_TEST_ENABLE (0x0304) is 0; the ALPHA_FUNC register (0x0308)
 //                                 keeps its old value after the test is disabled, so do not copy it
-//                                 blindly.
+//                                 blindly. The shader only reads it while the alpha test constant
+//                                 (kFpAlphaTestConstantId) is true; a draw with 7 uses the variant
+//                                 without the test.
 //   offset  4  float alpha_ref    reference value already decoded for the surface format
 //                                 (unorm8: ref / 255)
 //   offset  8  uint  flags        kFpFlag* bits

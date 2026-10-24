@@ -33,6 +33,7 @@
 #include "render/render_scale.h"
 #include "render/shader_compiler.h"
 #include "render/vertex_convert.h"
+#include "render/vk_device_choice.h"
 #include "render/window_size.h"
 #include "render/vk_context.h"
 #include "render/vk_pipelines.h"
@@ -1878,6 +1879,8 @@ struct QuadOptions {
     // Color comes from slot 5, which has no array: -1 leaves the default register unwritten, 0 writes four
     // zeros, 1 writes (1, 0, 0, 1).
     int default_color = -2;  // -2: color comes from the array in slot 3
+    int alpha_func = -1;     // -1: alpha test disabled; otherwise the GCM compare enum (0x200 never .. 0x207 always)
+    std::uint32_t alpha_ref = 0;
 };
 
 constexpr float kQuadCorners[4][3] = {
@@ -1913,6 +1916,11 @@ std::vector<std::uint8_t> makeRenderedQuadCapture(const QuadOptions& options) {
     scene.write(tox2::kMethodNv4097SetCullFaceEnable, options.cull ? 1 : 0);
     scene.write(tox2::kMethodNv4097SetCullFace, options.cull_face);
     scene.write(tox2::kMethodNv4097SetFrontFace, options.front_face);
+    if (options.alpha_func >= 0) {
+        scene.write(tox2::kMethodNv4097SetAlphaTestEnable, 1);
+        scene.write(tox2::kMethodNv4097SetAlphaFunc, static_cast<std::uint32_t>(options.alpha_func));
+        scene.write(tox2::kMethodNv4097SetAlphaRef, options.alpha_ref);
+    }
     if (options.blend) {
         scene.write(tox2::kMethodNv4097SetBlendEnable, 1);
         scene.write(tox2::kMethodNv4097SetBlendFuncSfactor, 0x302 | (0x302u << 16));  // SRC_ALPHA
@@ -2091,6 +2099,83 @@ void testRendererQuad(tox2::VkContext& ctx) {
     CHECK(pixelArgb(bgra, width, 2, 2) == 0xFF404040);
 
     CHECK(renderer.valid());
+    tox2::rsxUnimplementedReset();
+}
+
+// The alpha test is a specialization constant of the fragment stage, so a draw with the test off and one with it
+// on use two pipelines of one shader module. The quad's alpha is 0x80; the 8-bit rounding makes the compare against
+// the reference exact.
+void testRendererAlphaTest(tox2::VkContext& ctx) {
+    tox2::rsxUnimplementedReset();
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+    CHECK(renderer.valid());
+    constexpr std::uint32_t kQuadColor = 0x80FFFFFF;
+    constexpr std::uint32_t kDrawn = 0x80FFFFFF;  // alpha comes through unblended
+    constexpr std::uint32_t kBackground = 0xFF004000;
+
+    const auto render = [&](int alpha_func, std::uint32_t alpha_ref) {
+        QuadOptions options;
+        options.clear = kBackground;
+        options.uniform_color = kQuadColor;
+        options.alpha_func = alpha_func;
+        options.alpha_ref = alpha_ref;
+        std::vector<tox2::RsxCommand> commands = replaySynthetic(makeRenderedQuadCapture(options));
+        tox2::rsxUnimplementedReset();
+        const std::uint64_t created = renderer.pipelineCacheStats().created;
+        renderer.execute(commands);
+        CHECK(renderer.valid());
+        std::vector<std::uint8_t> bgra;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        CHECK(renderer.readDisplay(bgra, width, height));
+        CHECK(width == 64 && height == 64 && bgra.size() == 64 * 64 * 4);
+        if (bgra.size() != 64 * 64 * 4) bgra.assign(64 * 64 * 4, 0);
+        CHECK(pixelArgb(bgra, width, 2, 2) == kBackground);
+        CHECK(tox2::rsxUnimplementedSnapshot().empty());
+        struct Result {
+            bool drawn;
+            std::uint64_t pipelines;
+        };
+        const std::uint32_t center = pixelArgb(bgra, width, 32, 32);
+        CHECK(center == kDrawn || center == kBackground);
+        return Result{center == kDrawn, renderer.pipelineCacheStats().created - created};
+    };
+
+    // The first scene also creates the pipelines shared by all scenes; later ones add only what differs.
+    CHECK(render(-1, 0).drawn);
+    CHECK(render(-1, 0).pipelines == 0);
+    // "Always" is no test, whatever the enable register says: same pipeline, quad drawn.
+    const auto always = render(0x207, 0);
+    CHECK(always.drawn && always.pipelines == 0);
+
+    const struct {
+        std::uint32_t func, ref;
+        bool drawn;
+    } kCases[] = {
+            {0x200, 0x00, false},                                             // never
+            {0x200, 0x80, false}, {0x201, 0x81, true},                        // less
+            {0x201, 0x80, false}, {0x201, 0x40, false}, {0x202, 0x80, true},  // equal
+            {0x202, 0x7F, false}, {0x203, 0x80, true},                        // lequal
+            {0x203, 0x7F, false}, {0x204, 0x7F, true},                        // greater
+            {0x204, 0x80, false}, {0x205, 0x7F, true},                        // notequal
+            {0x205, 0x80, false}, {0x206, 0x80, true},                        // gequal
+            {0x206, 0x81, false}, {0x207, 0xFF, true},                        // always
+    };
+    bool first_test = true;
+    for (const auto& test : kCases) {
+        const auto result = render(static_cast<int>(test.func), test.ref);
+        CHECK(result.drawn == test.drawn);
+        if (result.drawn != test.drawn) {
+            std::fprintf(stderr, "alpha test func %#x ref %#x\n", test.func, test.ref);
+        }
+        // The first draw with the test on adds the pipeline of that variant; every other function shares it.
+        if (test.func != 0x207) {
+            CHECK(result.pipelines == (first_test ? 1u : 0u));
+            first_test = false;
+        }
+    }
+    // Back to the test off: its pipeline is still there.
+    CHECK(render(-1, 0).pipelines == 0);
     tox2::rsxUnimplementedReset();
 }
 
@@ -2909,7 +2994,8 @@ void testReadBarrierSkipped(tox2::VkContext& ctx) {
 
 // Consecutive draws with the same attachments share one rendering instance; anything recorded outside an instance
 // (another target, a clear, a texture upload, a copy of the target the draw samples) ends it first. The instance
-// counts are relative to runs with fewer draws, so they do not depend on how clears are recorded.
+// counts are relative to runs with fewer draws, so they do not depend on how clears are recorded (the clear before a
+// draw leaves its instance for the draw: testClearPassMerging).
 void testDrawPassMerging(tox2::VkContext& ctx) {
     using namespace tox2::rsx_synthetic;
     tox2::rsxUnimplementedReset();
@@ -2990,10 +3076,12 @@ void testDrawPassMerging(tox2::VkContext& ctx) {
         CHECK(switched.bgra == same.bgra && back.bgra == same.bgra);
     }
 
-    // A clear between two draws to the same target ends the instance.
+    // A clear between two draws to the same target ends the first instance and begins one for the second draw.
     {
         const Run split = run({clear_alias, clear_display, sampling_draw, clear_display, sampling_draw, flip});
         const Run merged = run({clear_alias, clear_display, sampling_draw, sampling_draw, flip});
+        // The clear before the second draw begins an instance with the depth attached. The draw tests no depth and
+        // binds none, so it begins an instance of its own: two more than without the clear.
         CHECK(split.stats.rendering_instances == merged.stats.rendering_instances + 2);
         CHECK(pixelArgb(split.bgra, split.width, 32, 32) == kAliasColor &&
               pixelArgb(split.bgra, split.width, 2, 2) == 0xFF000000);
@@ -4088,6 +4176,139 @@ void testStencilWriteReachesDepthTexture(tox2::VkContext& ctx) {
     expectNoRendererNotes();
 }
 
+// renderStencilScene on a renderer that has already drawn once: the placeholder textures a renderer creates for its
+// first draw are recorded outside an instance and would end the one a clear left open. `stats.rendering_instances` is
+// the count of the scene alone.
+StencilRender renderStencilSceneWarm(tox2::VkContext& ctx, tox2::rsx_synthetic::SceneBuilder& scene) {
+    tox2::RsxRenderer renderer(ctx, readbackAllOptions());
+    CHECK(renderer.valid());
+    tox2::rsx_synthetic::SceneBuilder warm_up;
+    beginStencilScene(warm_up, 0);
+    stencilQuad(warm_up, stencilFace(kCmpAlways, 0, kOpKeep));
+    std::vector<tox2::RsxCommand> warm_commands = replaySynthetic(warm_up.finish());
+    renderer.execute(warm_commands);
+    const std::uint64_t instances_before = renderer.stats().rendering_instances;
+    std::vector<tox2::RsxCommand> commands = replaySynthetic(scene.finish());
+    tox2::rsxUnimplementedReset();
+    renderer.execute(commands);
+    CHECK(renderer.valid());
+    StencilRender result;
+    CHECK(renderer.readDisplay(result.bgra, result.width, result.height));
+    CHECK(result.width == 64 && result.height == 64 && result.bgra.size() == 64 * 64 * 4);
+    if (result.bgra.size() != 64 * 64 * 4) result.bgra.assign(64 * 64 * 4, 0);
+    result.stats = renderer.stats();
+    result.stats.rendering_instances -= instances_before;
+    return result;
+}
+
+// A clear over the whole render area clears through the attachments' load operations and leaves its instance open for
+// the draws that follow; a clear of a rectangle, or of only some aspects, keeps loading what it does not replace.
+// Instance counts are relative to the same scene without the draw, which does not add one.
+void testClearPassMerging(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    constexpr std::uint32_t kClearA = 0xFF102030;
+    constexpr std::uint32_t kClearB = 0xFF405060;
+    const auto fullScissor = [](SceneBuilder& scene) {
+        scene.write(tox2::kMethodNv4097SetScissorHorizontal, kSurfaceSize << 16);
+        scene.write(tox2::kMethodNv4097SetScissorVertical, kSurfaceSize << 16);
+    };
+    const StencilFaceWords always = stencilFace(kCmpAlways, 0, kOpKeep);
+
+    // A full clear of colour, depth and stencil, then a draw to the same target: one instance in all.
+    {
+        SceneBuilder with_draw;
+        beginStencilScene(with_draw, 0);
+        stencilQuad(with_draw, always);
+        SceneBuilder clear_only;
+        beginStencilScene(clear_only, 0);
+        const StencilRender merged = renderStencilSceneWarm(ctx, with_draw);
+        const StencilRender base = renderStencilSceneWarm(ctx, clear_only);
+        CHECK(merged.stats.rendering_instances == base.stats.rendering_instances);
+        expectStencilDrawn(merged, true);
+        CHECK(base.pixel(32, 32) == kBlack);
+        expectNoRendererNotes();
+    }
+
+    // A clear of a rectangle after a full one loads the target and clears the rectangle; the draw continues it.
+    {
+        const auto scene_of = [&](bool draw) {
+            SceneBuilder scene;
+            beginStencilScene(scene, 0);
+            scene.write(tox2::kMethodNv4097SetScissorHorizontal, 4u | (8u << 16));
+            scene.write(tox2::kMethodNv4097SetScissorVertical, 4u | (8u << 16));
+            scene.write(tox2::kMethodNv4097SetColorClearValue, kClearB);
+            scene.write(tox2::kMethodNv4097ClearSurface, 0xF3);
+            fullScissor(scene);
+            if (draw) stencilQuad(scene, always);
+            return scene;
+        };
+        SceneBuilder with_draw = scene_of(true);
+        SceneBuilder clear_only = scene_of(false);
+        const StencilRender merged = renderStencilSceneWarm(ctx, with_draw);
+        const StencilRender base = renderStencilSceneWarm(ctx, clear_only);
+        CHECK(merged.stats.rendering_instances == base.stats.rendering_instances);
+        CHECK(merged.pixel(6, 6) == kClearB && merged.pixel(2, 2) == kBlack && merged.pixel(12, 6) == kBlack);
+        CHECK(merged.pixel(32, 32) == kQuadRed);
+        CHECK(base.pixel(6, 6) == kClearB && base.pixel(32, 32) == kBlack);
+        expectNoRendererNotes();
+    }
+
+    // A full clear of the depth only keeps the stencil of a Z24S8 target (the stencil test passes where the old
+    // value is) and replaces the depth (a greater-than test against the cleared 0.25 passes where the old 1.0 would
+    // fail). The stencil-only clear is the same the other way round.
+    for (const bool depth_only : {true, false}) {
+        for (const bool expect_drawn : {true, false}) {
+            SceneBuilder scene;
+            beginStencilScene(scene, 0x5A);
+            scene.write(tox2::kMethodNv4097SetZstencilClearValue, depth_only ? 0x40000077u : 0x40000000u | 0x77u);
+            scene.write(tox2::kMethodNv4097ClearSurface, depth_only ? 0x01u : 0x02u);
+            scene.write(tox2::kMethodNv4097SetDepthTestEnable, 1);
+            // The quad is at depth 0.5. Depth cleared to 0.25: GREATER passes; depth kept at 1.0: LESS passes.
+            scene.write(tox2::kMethodNv4097SetDepthFunc, depth_only ? 0x204u : 0x201u);
+            const std::uint32_t kept_stencil = depth_only ? 0x5Au : 0x77u;
+            stencilQuad(scene, stencilFace(kCmpEqual, expect_drawn ? kept_stencil : kept_stencil ^ 1u, kOpKeep));
+            const StencilRender render = renderStencilSceneWarm(ctx, scene);
+            expectStencilDrawn(render, expect_drawn);
+            expectNoRendererNotes();
+        }
+    }
+
+    // A clear, then a draw to another target: the clear is stored, and the draw is an instance of its own.
+    {
+        const auto scene_of = [&](int draws) {
+            SceneBuilder scene;
+            beginStencilScene(scene, 0);
+            scene.write(tox2::kMethodNv4097SetColorClearValue, kClearA);
+            scene.write(tox2::kMethodNv4097ClearSurface, 0xF3);
+            if (draws >= 1) {
+                scene.setSurface(0, kSurfaceSize, 0x50000);  // another colour target (and depth target)
+                stencilQuad(scene, always);
+            }
+            if (draws >= 2) {
+                scene.setSurface();  // back to the display target
+                stencilQuad(scene, always);
+            }
+            return scene;
+        };
+        SceneBuilder none = scene_of(0), other = scene_of(1), back = scene_of(2);
+        const StencilRender base = renderStencilSceneWarm(ctx, none);
+        const StencilRender elsewhere = renderStencilSceneWarm(ctx, other);
+        const StencilRender returned = renderStencilSceneWarm(ctx, back);
+        CHECK(elsewhere.stats.rendering_instances == base.stats.rendering_instances + 1);
+        CHECK(returned.stats.rendering_instances == base.stats.rendering_instances + 2);
+        for (const StencilRender* r : {&base, &elsewhere}) {
+            CHECK(r->pixel(2, 2) == kClearA && r->pixel(32, 32) == kClearA && r->pixel(63, 63) == kClearA);
+        }
+        CHECK(returned.pixel(32, 32) == kQuadRed && returned.pixel(2, 2) == kClearA);
+        CHECK(returned.stats.draws_skipped == 0 && elsewhere.stats.draws_skipped == 0);
+        expectNoRendererNotes();
+    }
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
 // The stencil test, its ops, masks, reference and two-sided mode on a Z24S8 target (D24S8 or D32S8 by device),
 // and the draw without a stencil aspect.
 void testRendererStencil(tox2::VkContext& ctx) {
@@ -4401,7 +4622,8 @@ void rebindSurface(tox2::rsx_synthetic::SceneBuilder& scene, std::uint32_t size,
     scene.write(tox2::kMethodNv4097SetSurfacePitchA, pitch);
 }
 
-// A draw that writes nothing: the renderer still acquires the targets the draw binds.
+// A draw that writes nothing: the renderer still acquires the colour target the draw binds, and the depth target when
+// the draw tests depth.
 void bindingDraw(tox2::rsx_synthetic::SceneBuilder& scene) {
     scene.write(tox2::kMethodNv4097SetColorMask, 0);
     putSurfaceQuad(scene, 16, 48);
@@ -4533,6 +4755,7 @@ void testRendererSurfaceResize(tox2::VkContext& ctx, std::uint32_t scale = 1) {
         SceneBuilder scene;
         beginResizeScene(scene, 2);
         scene.write(tox2::kMethodNv4097SetSurfaceFormat, 8u | (1u << 5) | (1u << 8));
+        scene.write(tox2::kMethodNv4097SetDepthTestEnable, 1);  // an unused depth surface is not acquired
         bindingDraw(scene);
         const StencilRender render = renderResizeScene(ctx, scene, scale);
         CHECK(render.stats.surface_inherits == 0 && render.stats.draws_skipped == 0);
@@ -5657,19 +5880,20 @@ void drawWithoutWrites(tox2::rsx_synthetic::SceneBuilder& scene, bool registers_
 // The rectangle scene of makeMsaaDepthCapture with stencil kMsInheritStencil in the 2-sample surface (omitted for the
 // second frame of the rescale case), then the rebinding and the read that `kind` says. The rebinding keeps the rows of
 // the 2W x H layout, pitch 2 x kAaSize x 4.
-std::vector<std::uint8_t> makeMsaaInheritCapture(MsaaInherit kind) {
+std::vector<std::uint8_t> makeMsaaInheritCapture(MsaaInherit kind, std::uint32_t stencil = kMsInheritStencil) {
     using namespace tox2::rsx_synthetic;
     SceneBuilder scene;
     const bool second_frame = kind == MsaaInherit::RescaleAa || kind == MsaaInherit::RescaleWide;
     if (!second_frame) {
         scene.setSurface(3, kAaSize, kAaOffset);
         scene.clear(0xFF000000);
-        setMsaaDepthState(scene, true, kMsInheritStencil);
+        setMsaaDepthState(scene, true, stencil);
         drawMsaaRect(scene);
         setMsaaDepthState(scene, false);
     }
     if (kind == MsaaInherit::RescaleAa) {
         scene.setSurface(3, kAaSize, kAaOffset);
+        scene.write(tox2::kMethodNv4097SetDepthTestEnable, 1);  // an unused depth surface is not acquired
         drawMsaaRect(scene);
         return scene.finish();
     }
@@ -5684,6 +5908,42 @@ std::vector<std::uint8_t> makeMsaaInheritCapture(MsaaInherit kind) {
     setViewportHalfSize(scene, read_width / 2.0f, kAaSize / 2.0f);
     putTexturedFullQuad(scene, 0.0f, 1.0f);
     setUpTexturedDraw(scene, 1, kind == MsaaInherit::PlainSquareColor ? kAaOffset : kMsDepthOffset, read_width);
+    scene.drawStrip(4);
+    return scene.finish();
+}
+
+// The rectangle scene of makeMsaaDepthCapture with stencil kMsInheritStencil in the 2-sample surface, then the same
+// rectangle drawn into a separate plain 32x32 colour surface that binds the pair's depth address as a 32x32 surface
+// with the depth test, the depth write and the stencil all off. That draw does not use the depth, so it must not
+// resize or copy the 2-sample target. The read then is the colour of the plain surface (`read_depth` false) or, after
+// a draw that does test the depth through a plain 64x32 binding of the same memory, the depth as 64x32 (as
+// MsaaInherit::PlainWide).
+constexpr std::uint32_t kMsUnusedColorOffset = 0x80000;
+
+std::vector<std::uint8_t> makeMsaaUnusedDepthCapture(bool read_depth) {
+    using namespace tox2::rsx_synthetic;
+    SceneBuilder scene;
+    scene.setSurface(3, kAaSize, kAaOffset);
+    scene.clear(0xFF000000);
+    setMsaaDepthState(scene, true, kMsInheritStencil);
+    drawMsaaRect(scene);
+    setMsaaDepthState(scene, false);
+
+    scene.setSurface(0, kAaSize, kMsUnusedColorOffset);
+    scene.write(tox2::kMethodNv4097SetSurfaceZetaOffset, kMsDepthOffset);
+    scene.write(tox2::kMethodNv4097SetSurfacePitchZ, kAaSize * 2 * 4);
+    drawMsaaRect(scene);
+
+    if (read_depth) {
+        scene.setSurface(0, kAaSize * 2, kAaOffset, kAaSize, kAaSize * 2 * 4);
+        drawWithoutWrites(scene);
+    }
+    const std::uint32_t read_width = read_depth ? kAaSize * 2 : kAaSize;
+    scene.setSurface(0, read_width, kSurfaceOffset, kAaSize);
+    scene.clear(0xFF000000);
+    setViewportHalfSize(scene, read_width / 2.0f, kAaSize / 2.0f);
+    putTexturedFullQuad(scene, 0.0f, 1.0f);
+    setUpTexturedDraw(scene, 1, read_depth ? kMsDepthOffset : kMsUnusedColorOffset, read_width);
     scene.drawStrip(4);
     return scene.finish();
 }
@@ -5788,6 +6048,53 @@ void testRendererMsaaInherit(tox2::VkContext& ctx) {
             CHECK(frame.stats.surface_inherits == 0 && frame.stats.layout_copies >= 2);
             CHECK(frame.stats.draws_skipped == 0 && frame.notes.empty());
         }
+
+        // A draw that neither tests, writes nor uses stencil leaves the depth binding alone: no 32x32 depth target is
+        // made, so the 2-sample target is neither synced nor copied, and a later draw that tests the depth finds it as
+        // it was.
+        {
+            const ScaledFrame control = renderAtScale(ctx, {makeMsaaInheritCapture(MsaaInherit::PlainWide)}, scale, 1,
+                                                      0, tox2::AaMode::Msaa);
+            const ScaledFrame frame =
+                    renderAtScale(ctx, {makeMsaaUnusedDepthCapture(true)}, scale, 1, 0, tox2::AaMode::Msaa);
+            CHECK(control.ok && frame.ok && frame.width == 2 * kAaSize * scale && frame.height == kAaSize * scale);
+            if (!control.ok || !frame.ok) continue;
+            std::uint32_t mismatches = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    if (pixelArgb(frame.bgra, frame.width, x, y) != expectedWord(x, y)) mismatches++;
+                }
+            }
+            if (mismatches != 0)
+                std::fprintf(stderr, "multisampled depth after an unused-depth draw at scale %u: %u texels differ\n",
+                             scale, mismatches);
+            CHECK(mismatches == 0);
+            CHECK(frame.stats.surface_inherits == control.stats.surface_inherits);
+            CHECK(frame.stats.layout_copies == control.stats.layout_copies);
+            CHECK(frame.stats.draws_skipped == 0 && frame.notes.empty());
+        }
+        {
+            const ScaledFrame frame =
+                    renderAtScale(ctx, {makeMsaaUnusedDepthCapture(false)}, scale, 1, 0, tox2::AaMode::Msaa);
+            CHECK(frame.ok && frame.width == kAaSize * scale && frame.height == kAaSize * scale);
+            if (!frame.ok) continue;
+            std::uint32_t mismatches = 0;
+            for (std::uint32_t y = 0; y < frame.height; y++) {
+                for (std::uint32_t x = 0; x < frame.width; x++) {
+                    const bool inside = (x + 0.5f) / static_cast<float>(scale) >= kMsRectLeft &&
+                                        (x + 0.5f) / static_cast<float>(scale) < kMsRectRight &&
+                                        (y + 0.5f) / static_cast<float>(scale) >= kMsRectTop &&
+                                        (y + 0.5f) / static_cast<float>(scale) < kMsRectBottom;
+                    const std::uint32_t argb = pixelArgb(frame.bgra, frame.width, x, y);
+                    // The plain surface is cleared by nothing, so only the rectangle is drawn; texels outside it
+                    // are the new target's initial contents.
+                    if (inside && argb != kRed) mismatches++;
+                }
+            }
+            CHECK(mismatches == 0);
+            CHECK(frame.stats.surface_inherits == 0 && frame.stats.layout_copies == 0);
+            CHECK(frame.stats.draws_skipped == 0 && frame.notes.empty());
+        }
     }
 
     // Rescale: the scale changes between the frames, and binding the targets again copies the sidecars into the
@@ -5847,6 +6154,55 @@ void testRendererMsaaInherit(tox2::VkContext& ctx) {
             if (mismatches != 0) std::fprintf(stderr, "rescaled multisampled depth: %u texels differ\n", mismatches);
             CHECK(mismatches == 0);
         }
+    }
+    CHECK(ctx.validationErrorCount() == errors_before);
+    tox2::rsxUnimplementedReset();
+}
+
+// The stencil of a 2-sample depth target reaches its layout image bit for bit. Inherit uses 0xA5; 0x5A (bits 1, 3, 4
+// and 6) and 0xFF complete the coverage, so a layout pass that loses or invents any of the eight bits is caught.
+void testRendererMsaaLayoutStencilBits(tox2::VkContext& ctx) {
+    using namespace tox2::rsx_synthetic;
+    if (!ctx.twoSampleSupportGap().empty()) {
+        std::printf("multisampled layout stencil: skipped (%s)\n", ctx.twoSampleSupportGap().c_str());
+        return;
+    }
+    if (ctx.deviceProperties().limits.standardSampleLocations == VK_FALSE) {
+        std::printf("multisampled layout stencil: skipped (no standard sample locations)\n");
+        return;
+    }
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    constexpr std::uint32_t kScale = 2;
+
+    for (const std::uint32_t stencil : {0xA5u, 0x5Au, 0xFFu, 0x01u, 0x80u}) {
+        // The words of a plain surface with the same rectangle, depth and stencil.
+        const ScaledFrame reference = renderAtScale(ctx, {makeMsaaDepthCapture(MsaaDepthRead::Reference, stencil)},
+                                                    kScale, 1, 0, tox2::AaMode::Msaa);
+        CHECK(reference.ok && reference.width == kAaSize * kScale);
+        if (!reference.ok) continue;
+        const std::uint32_t covered_word = pixelArgb(reference.bgra, reference.width, 10 * kScale, 8 * kScale);
+        const std::uint32_t uncovered_word = pixelArgb(reference.bgra, reference.width, 0, 0);
+        CHECK((covered_word & 0xFF) == stencil && (uncovered_word & 0xFF) == 0);
+
+        // A single-sample pass over the same memory as a plain 2W x H surface reads the layout copy of the depth.
+        const ScaledFrame frame = renderAtScale(ctx, {makeMsaaInheritCapture(MsaaInherit::PlainWide, stencil)}, kScale,
+                                                1, 0, tox2::AaMode::Msaa);
+        CHECK(frame.ok && frame.width == 2 * kAaSize * kScale && frame.height == kAaSize * kScale);
+        if (!frame.ok) continue;
+        std::uint32_t mismatches = 0, covered = 0;
+        for (std::uint32_t y = 0; y < frame.height; y++) {
+            for (std::uint32_t x = 0; x < frame.width; x++) {
+                const bool is_covered = msaaTexelCovered(x, y, kScale);
+                covered += is_covered;
+                if (pixelArgb(frame.bgra, frame.width, x, y) != (is_covered ? covered_word : uncovered_word)) {
+                    mismatches++;
+                }
+            }
+        }
+        if (mismatches != 0) std::fprintf(stderr, "layout stencil 0x%02X: %u texels differ\n", stencil, mismatches);
+        CHECK(mismatches == 0 && covered > 0);
+        CHECK(frame.stats.layout_copies >= 2 && frame.stats.draws_skipped == 0 && frame.notes.empty());
     }
     CHECK(ctx.validationErrorCount() == errors_before);
     tox2::rsxUnimplementedReset();
@@ -6258,6 +6614,58 @@ void testRendererAnisotropy(tox2::VkContext& ctx) {
 
 bool sameRect(const tox2::PixelRect& rect, std::int32_t x, std::int32_t y, std::uint32_t width, std::uint32_t height) {
     return rect.x == x && rect.y == y && rect.width == width && rect.height == height;
+}
+
+// The device choice is a pure function of the device list and the driver preference.
+void testChooseVkDevice() {
+    using tox2::VkDeviceCandidate;
+    using tox2::VkDriverChoice;
+    using tox2::VkDriverKind;
+    const VkDeviceCandidate kosmic{"Apple M4 Pro", "KosmicKrisp", false, VkDriverKind::KosmicKrisp};
+    const VkDeviceCandidate molten{"Apple M4 Pro", "MoltenVK", false, VkDriverKind::MoltenVk};
+    const VkDeviceCandidate other{"Software", "llvmpipe", false, VkDriverKind::Other};
+    const VkDeviceCandidate discrete_other{"Discrete", "NVIDIA", true, VkDriverKind::Other};
+    const VkDeviceCandidate discrete_kosmic{"Discrete", "KosmicKrisp", true, VkDriverKind::KosmicKrisp};
+
+    const auto pick = [](std::vector<VkDeviceCandidate> devices, VkDriverChoice choice) {
+        const auto index = tox2::chooseVkDevice(devices, choice);
+        return index ? static_cast<int>(*index) : -1;
+    };
+    // Auto takes MoltenVK over KosmicKrisp in either listing order, and both over other drivers.
+    CHECK(pick({kosmic, molten}, VkDriverChoice::Auto) == 1);
+    CHECK(pick({molten, kosmic}, VkDriverChoice::Auto) == 0);
+    CHECK(pick({other, kosmic, molten}, VkDriverChoice::Auto) == 2);
+    CHECK(pick({other, kosmic}, VkDriverChoice::Auto) == 0);
+    // Without either, and among equals, the first device wins.
+    CHECK(pick({other, other}, VkDriverChoice::Auto) == 0);
+    CHECK(pick({molten, molten}, VkDriverChoice::Auto) == 0);
+    // A discrete GPU beats the type-independent driver preference.
+    CHECK(pick({molten, discrete_other}, VkDriverChoice::Auto) == 1);
+    CHECK(pick({molten, discrete_kosmic}, VkDriverChoice::Auto) == 1);
+
+    // A named driver makes only its devices eligible.
+    CHECK(pick({kosmic, molten}, VkDriverChoice::KosmicKrisp) == 0);
+    CHECK(pick({molten, kosmic}, VkDriverChoice::KosmicKrisp) == 1);
+    CHECK(pick({kosmic, molten}, VkDriverChoice::MoltenVk) == 1);
+    CHECK(pick({discrete_other, kosmic}, VkDriverChoice::KosmicKrisp) == 1);
+    CHECK(pick({kosmic, discrete_kosmic}, VkDriverChoice::KosmicKrisp) == 1);
+
+    const std::vector<VkDeviceCandidate> only_kosmic = {kosmic};
+    const auto missing = tox2::chooseVkDevice(only_kosmic, VkDriverChoice::MoltenVk);
+    CHECK(!missing && missing.error() == "no Vulkan device with driver MoltenVK (found: Apple M4 Pro (KosmicKrisp))");
+    const std::vector<VkDeviceCandidate> mixed = {other, molten};
+    const auto missing_kosmic = tox2::chooseVkDevice(mixed, VkDriverChoice::KosmicKrisp);
+    CHECK(!missing_kosmic && missing_kosmic.error() ==
+                                     "no Vulkan device with driver KosmicKrisp (found: Software (llvmpipe), Apple M4 "
+                                     "Pro (MoltenVK))");
+    CHECK(!tox2::chooseVkDevice({}, VkDriverChoice::Auto));
+
+    for (const VkDriverChoice choice : {VkDriverChoice::Auto, VkDriverChoice::MoltenVk, VkDriverChoice::KosmicKrisp}) {
+        const auto parsed = tox2::parseVkDriverChoice(tox2::vkDriverChoiceName(choice));
+        CHECK(parsed && *parsed == choice);
+    }
+    CHECK(!tox2::parseVkDriverChoice("MoltenVK") && !tox2::parseVkDriverChoice("") &&
+          !tox2::parseVkDriverChoice("mvk"));
 }
 
 void testLetterbox() {
@@ -7212,6 +7620,7 @@ void testFgWarpCheck(tox2::VkContext& ctx) {
 int main() {
     const bool layer = tox2::vkValidationLayerAvailable();
     std::printf("validation layer: %s\n", layer ? "installed" : "not installed");
+    testChooseVkDevice();
     testLetterbox();
     testChoosePresentMode();
 #if defined(_WIN32)
@@ -7280,12 +7689,14 @@ int main() {
     testPresentIdleNeedsPresenter(*ctx);
     testRendererScissorAndMask(*ctx);
     testRendererQuad(*ctx);
+    testRendererAlphaTest(*ctx);
     testIndexOutsideRange(*ctx);
     testRendererBranchBits(*ctx);
     testVertexConstantUploadReuse(*ctx);
     testRendererTextures(*ctx);
     testReadBarrierSkipped(*ctx);
     testDrawPassMerging(*ctx);
+    testClearPassMerging(*ctx);
     testRendererVolumeTextures(*ctx);
     testRendererFloatSurface(*ctx);
     testRendererDepthTexture(*ctx);
@@ -7305,6 +7716,7 @@ int main() {
     testRendererAaModeSwitch(*ctx);
     testRendererMsaaDepthAsArgb(*ctx);
     testRendererMsaaInherit(*ctx);
+    testRendererMsaaLayoutStencilBits(*ctx);
     testRendererDlaaSceneImage(*ctx);
     testRendererDlaaEvaluate(*ctx);
     testRendererFrameGenOptions(*ctx);
