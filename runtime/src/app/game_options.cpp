@@ -32,7 +32,7 @@ const std::string kUsage = std::format(
         "                [--resolution-scale N] [--aa-mode supersample|msaa|dlaa] [--vk-validation] [--no-window]\n"
         "                [--anisotropic-filter off|2|4|8|16] [--vk-driver auto|moltenvk|kosmickrisp]\n"
         "                [--window-size 720p|1080p|1440p|2160p]\n"
-        "                [--fullscreen on|off] [--frame-gen off|60|90|120|180|unlimited]\n"
+        "                [--object-motion on|off] [--fullscreen on|off] [--frame-gen off|60|90|120|180|unlimited]\n"
         "                [--fg-present-mode mailbox|immediate|fifo] [--fg-reflex on|off] [--fg-only-generated]\n"
         "                [--fg-cycle SECONDS] (frame generation defaults: mailbox, reflex on)\n"
         "                [--frame-limit vsync|60|off] [--host-priorities on|off] [--yield-backoff on|off]\n"
@@ -454,6 +454,7 @@ constexpr auto kEntries = std::to_array<OptionEntry>({
         {{"frame-limit", OptionKind::String, true, OptionNeeds::Nothing}, setFrameLimit},
         {{"resolution-scale", OptionKind::Unsigned, true, OptionNeeds::Renderer}, setResolutionScale},
         {{"aa-mode", OptionKind::String, true, OptionNeeds::Renderer}, setAaMode},
+        {{"object-motion", OptionKind::Switch, true, OptionNeeds::Renderer}, setSwitch<&GameOptions::object_motion>},
         {{"anisotropic-filter", OptionKind::String, true, OptionNeeds::Renderer}, setAnisotropicFilter},
         {{"vk-driver", OptionKind::String, false, OptionNeeds::Renderer}, setVkDriver},
         {{"window-size", OptionKind::String, true, OptionNeeds::Window}, setWindowSize},

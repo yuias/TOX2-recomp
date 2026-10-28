@@ -262,6 +262,14 @@ public:
         return aa_mode_ == AaMode::Dlaa && options_.dlaa_evaluate &&
                options_.dlaa_debug.motion != DlaaMotion::Matrices && context_.objectMotionSupported();
     }
+    // True when the device can write object motion (VkContext::objectMotionSupported()).
+    bool objectMotionSupported() const { return context_.objectMotionSupported(); }
+    // True while the requested motion is DlaaMotion::Object, whether or not the device supports it.
+    bool objectMotion() const { return options_.dlaa_debug.motion == DlaaMotion::Object; }
+    // Switches between DlaaMotion::Object and DlaaMotion::Matrices; false and no change for `true` while the device
+    // lacks support. Clears the object motion history and makes the next DLAA evaluation a reset, because the motion
+    // vectors change meaning. Renderer thread, between frames.
+    bool setObjectMotion(bool on);
     // Diagnostic: waits for the device and reads the object image of the latest frame that had candidate draws (two
     // 32-bit words per pixel, row by row: the packed half-float vector and the depth bits or kObjectMotionNone). False
     // when there is none. Valid only while no later pass moved the image out of COLOR_ATTACHMENT_OPTIMAL. Renderer
@@ -500,7 +508,7 @@ private:
     std::unique_ptr<DlaaPass> dlaa_;
     const RenderTarget* dlaa_output_owner_ = nullptr;  // the scene target whose evaluation the widened image holds
     std::optional<std::uint64_t> dlaa_last_flip_;      // stats_.flips when the last evaluation was recorded
-    bool dlaa_switched_ = false;                       // the mode was set to Dlaa since the last evaluation
+    bool dlaa_switched_ = false;                       // the mode or the motion was set since the last evaluation
     // stats_.flips of the latest draw that was shifted by the jitter; the evaluation reports the offset only for a
     // frame that has one.
     std::optional<std::uint64_t> dlaa_jitter_frame_;

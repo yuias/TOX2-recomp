@@ -47,6 +47,8 @@ struct PresentFrameInfo {
     bool frame_gen_supported = false;           // the device and the presenter can run frame generation
     FrameGenTarget frame_gen_target = FrameGenTarget::Off;  // the requested target, which may not be active
     FrameGenStatus frame_gen;
+    bool object_motion_supported = false;  // the device can write per-object motion vectors
+    bool object_motion = false;            // object motion vectors are requested (they are used only with DLAA)
 };
 
 struct PresentOverlayRequests {
@@ -63,6 +65,8 @@ struct PresentOverlayRequests {
     std::optional<WindowSizePreset> window_size;
     // New frame generation target; unset = no change. Applied after the flip is submitted, like the AA mode.
     std::optional<FrameGenTarget> frame_gen;
+    // Object motion vectors on or off; unset = no change. Applied after the flip is submitted, like the AA mode.
+    std::optional<bool> object_motion;
 };
 
 // Drawn over the presented swapchain image only. Never called without a presenter, so it cannot reach

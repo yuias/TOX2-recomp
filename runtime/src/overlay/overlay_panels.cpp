@@ -186,6 +186,23 @@ void drawFrameGen(OverlayState& state, const OverlaySources& sources) {
     if (!status.empty()) ImGui::TextWrapped("%s", status.c_str());
 }
 
+// Listed only where the device can write object motion. Disabled without DLAA, keeping its value.
+void drawObjectMotion(OverlayState& state, const OverlaySources& sources) {
+    if (!state.object_motion_supported) return;
+    const bool selectable = objectMotionSelectable(state);
+    bool shown = state.object_motion_request ? *state.object_motion_request : state.object_motion;
+    ImGui::BeginDisabled(!selectable);
+    if (ImGui::Checkbox("Object motion vectors", &shown)) {
+        state.object_motion_request = shown;
+        if (sources.setting_changed) sources.setting_changed(OverlaySetting::ObjectMotion, shown ? "on" : "off");
+    }
+    ImGui::EndDisabled();
+    if (!selectable) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", std::string(frameGenDisabledNote(state)).c_str());
+    }
+}
+
 const char* anisotropyLabel(std::uint32_t level) {
     switch (level) {
         case 1: return "Off";
@@ -283,6 +300,7 @@ void drawSettings(OverlayState& state, const OverlaySources& sources) {
     drawResolutionScale(state, sources);
     drawAntiAliasing(state, sources);
     drawFrameGen(state, sources);
+    drawObjectMotion(state, sources);
     drawAnisotropy(state, sources);
     drawWindowSize(state, sources);
 

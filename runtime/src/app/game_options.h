@@ -69,6 +69,7 @@ struct GameOptions {
     WindowSizePreset window_size = WindowSizePreset::Size720p;
     bool fullscreen = false;
     FrameGenTarget frame_gen = FrameGenTarget::Off;
+    bool object_motion = true;  // per-object motion vectors for DLAA and frame generation; only used with AaMode::Dlaa
     // Frame generation diagnostics; each needs frame_gen other than Off. Mailbox is the default because DLSS-G requires
     // vsync off; Fifo is only a diagnostic.
     FgPresentMode fg_present_mode = FgPresentMode::Mailbox;

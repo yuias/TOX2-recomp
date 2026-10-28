@@ -65,7 +65,15 @@ struct OverlayLockRate {
 };
 
 // A Settings choice the user made. The value is the option's command-line form.
-enum class OverlaySetting : std::uint8_t { FrameLimit, ResolutionScale, AaMode, Anisotropy, WindowSize, FrameGen };
+enum class OverlaySetting : std::uint8_t {
+    FrameLimit,
+    ResolutionScale,
+    AaMode,
+    Anisotropy,
+    WindowSize,
+    FrameGen,
+    ObjectMotion
+};
 
 // Every member may be empty: the panel then shows "n/a" or disables the control. The providers are
 // called on the renderer's thread and must be safe from any thread.
@@ -157,6 +165,9 @@ struct OverlayState {
     // The last status that was active, kept for the status line while the overlay itself suspends generation.
     std::optional<FrameGenStatus> frame_gen_last_active;
     std::optional<FrameGenTarget> frame_gen_request;  // set by the panel, taken by DebugOverlay::onFlip
+    bool object_motion_supported = false;             // last value the renderer reported; the checkbox is listed
+    bool object_motion = false;                       // last requested value the renderer reported
+    std::optional<bool> object_motion_request;        // set by the panel, taken by DebugOverlay::onFlip
 
     // Stores what the renderer reported for frame generation and keeps frame_gen_last_active.
     void setFrameGen(bool supported, FrameGenTarget target, const FrameGenStatus& status);
@@ -197,6 +208,10 @@ bool frameGenSelectable(const OverlayState& state);
 
 // Why the combo cannot be changed; empty while it can.
 std::string_view frameGenDisabledNote(const OverlayState& state);
+
+// Object motion vectors reach the output only through DLAA, so the checkbox is usable only while the effective mode (a
+// pending request counts) is DLAA, as for the frame generation combo. Its note is the combo's.
+inline bool objectMotionSelectable(const OverlayState& state) { return frameGenSelectable(state); }
 
 // The status line under the combo, e.g. "4x: 30 -> 120 fps, measured 119.6". Empty while the target is off, and while
 // the combo is not selectable, where frameGenDisabledNote already gives the reason.

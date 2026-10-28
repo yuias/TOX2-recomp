@@ -845,6 +845,16 @@ bool RsxRenderer::setAaMode(AaMode mode) {
     return true;
 }
 
+bool RsxRenderer::setObjectMotion(bool on) {
+    if (on && !context_.objectMotionSupported()) return false;
+    const DlaaMotion motion = on ? DlaaMotion::Object : DlaaMotion::Matrices;
+    if (motion == options_.dlaa_debug.motion) return true;
+    options_.dlaa_debug.motion = motion;
+    dlaa_switched_ = true;
+    if (history_) history_->clear();
+    return true;
+}
+
 std::string RsxRenderer::frameGenUnsupportedReason() const {
     if (presenter_ == nullptr) return "no window";
     if (context_.frameGenerationSupported()) return {};
@@ -3404,6 +3414,7 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     std::uint32_t requested_scale = 0;
     std::optional<AaMode> requested_aa_mode;
     std::optional<FrameGenTarget> requested_frame_gen;
+    std::optional<bool> requested_object_motion;
     std::uint32_t requested_anisotropy = 0;
     if (presenter_ != nullptr && overlay_ != nullptr) {
         const PresentOverlayRequests requests = overlay_->onFlip(PresentFrameInfo{
@@ -3422,12 +3433,15 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
                 .frame_gen = frame_gen_ ? frame_gen_->status()
                                         : FrameGenStatus{.inactive_reason = {},
                                                          .max_multiplier = context_.frameGenerationMaxMultiplier()},
+                .object_motion_supported = objectMotionSupported(),
+                .object_motion = objectMotion(),
         });
         if (requests.dump_display) dump_this_flip_ = true;
         requested_scale = requests.resolution_scale;
         requested_aa_mode = requests.aa_mode;
         requested_anisotropy = requests.anisotropy;
         requested_frame_gen = requests.frame_gen;
+        requested_object_motion = requests.object_motion;
         // The window is not part of the frame being recorded, so the request needs no deferral.
         if (requests.window_size) presenter_->requestWindowSize(*requests.window_size);
     }
@@ -3506,6 +3520,7 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
     // recorded in both. The anisotropy level follows the same rule; only samplers created afterwards use it.
     if (requested_scale != 0 && valid()) setResolutionScale(requested_scale);
     if (requested_aa_mode && valid()) setAaMode(*requested_aa_mode);
+    if (requested_object_motion && valid()) setObjectMotion(*requested_object_motion);
     if (requested_anisotropy != 0 && valid()) setAnisotropy(requested_anisotropy);
     if (requested_frame_gen && valid()) setFrameGenTarget(*requested_frame_gen);
     if (frame_gen_ && valid()) frame_gen_->tick();

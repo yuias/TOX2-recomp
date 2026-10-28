@@ -219,12 +219,14 @@ PresentOverlayRequests takePresentRequests(OverlayState& state) {
     requests.anisotropy = state.anisotropy_request;
     requests.window_size = state.window_size_request;
     requests.frame_gen = state.frame_gen_request;
+    requests.object_motion = state.object_motion_request;
     state.dump_requested = false;
     state.resolution_scale_request = 0;
     state.aa_mode_request.reset();
     state.anisotropy_request = 0;
     state.window_size_request.reset();
     state.frame_gen_request.reset();
+    state.object_motion_request.reset();
     return requests;
 }
 
