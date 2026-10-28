@@ -49,7 +49,7 @@ void printUsage() {
             "                      [--vk-driver auto|moltenvk|kosmickrisp]\n"
             "                      [--dlaa-jitter on|off] [--dlaa-jitter-flip none|x|y|xy]\n"
             "                      [--dlaa-camera on|off|reset] [--dlaa-clip-flip-y on|off]\n"
-            "                      [--dlaa-mv-invalid zero|unset]\n"
+            "                      [--dlaa-mv-invalid zero|unset] [--dlaa-motion matrices|camera|object]\n"
             "                      [--fg-mv-check [--fg-mv-flip none|x|y|xy]] [--motion-report [draws]]\n"
             "                      [--shader-cache DIR] [--repeat N [--gpu-timing]] [--quiet]\n"
             "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture; several captures are replayed in\n"
@@ -80,6 +80,10 @@ void printUsage() {
             "                      clip-to-clip matrices are mirrored in y for Streamline's y-up clip space\n"
             "  --dlaa-mv-invalid V  diagnostic, needs --aa-mode dlaa: motionVectorsInvalidValue 0 (zero, default) or the\n"
             "                      SDK default (unset, which makes Streamline warn once per process)\n"
+            "  --dlaa-motion M     diagnostic, needs --aa-mode dlaa: how motion reaches DLAA: matrices (default, camera\n"
+            "                      matrices only), camera (candidate draws also record their previous inputs, but the\n"
+            "                      object motion they write is not used) or object (previous inputs are bound and the\n"
+            "                      scene pass writes per-object motion); prints an object motion line\n"
             "  --fg-mv-check       diagnostic, needs --aa-mode dlaa: draw the camera motion vectors that frame generation\n"
             "                      will use and, from the second frame on, print how well they warp the previous DLAA\n"
             "                      output onto the current one (the displayed frame does not change)\n"
@@ -335,8 +339,14 @@ std::string memoryFlagNames(VkMemoryPropertyFlags flags) {
 std::string dlaaStatsText(const tox2::RsxRenderer& renderer) {
     if (renderer.aaMode() != tox2::AaMode::Dlaa) return {};
     const tox2::RendererStats& stats = renderer.stats();
-    return std::format("dlaa: {} evaluations, {} resets, {} failures", stats.dlaa_evaluations, stats.dlaa_resets,
-                       stats.dlaa_failures);
+    std::string text = std::format("dlaa: {} evaluations, {} resets, {} failures", stats.dlaa_evaluations,
+                                   stats.dlaa_resets, stats.dlaa_failures);
+    if (renderer.objectMotionActive()) {
+        text += std::format("\nobject motion: {} candidates, {} matched, {} history bytes",
+                            stats.object_motion_candidates, stats.object_motion_matched,
+                            stats.object_motion_history_bytes);
+    }
+    return text;
 }
 
 // What the closing lines need from a --repeat run (the last iteration's figures).
@@ -835,6 +845,19 @@ int main(int argc, char** argv) {
             i++;
             continue;
         }
+        if (arg == "--dlaa-motion") {
+            const std::string_view value = i + 1 < argc ? std::string_view(argv[i + 1]) : std::string_view();
+            if (value != "matrices" && value != "camera" && value != "object") {
+                std::fputs("error: --dlaa-motion takes matrices|camera|object\n", stderr);
+                return 2;
+            }
+            dlaa_debug.motion = value == "matrices" ? tox2::DlaaMotion::Matrices
+                                : value == "camera" ? tox2::DlaaMotion::Camera
+                                                    : tox2::DlaaMotion::Object;
+            has_dlaa_option = true;
+            i++;
+            continue;
+        }
         if (arg == "--fg-mv-check") {
             fg_debug.mv_check = true;
             continue;
@@ -1049,6 +1072,8 @@ int main(int argc, char** argv) {
             std::uint32_t width = 0;
             std::uint32_t height = 0;
             std::uint64_t fg_mv_printed = 0;
+            // Object motion draws of the latest frame paired with the previous one.
+            std::uint64_t last_frame_matched = 0;
             for (std::uint32_t pass = 0; pass < loop && renderer.valid(); pass++) {
                 for (std::size_t index = 0; index < frames.size() && renderer.valid(); index++) {
                     ReplayFrame& frame = *frames[index];
@@ -1063,9 +1088,11 @@ int main(int argc, char** argv) {
                     for (const tox2::RsxCommand& command : commands) {
                         if (std::holds_alternative<tox2::RsxDraw>(command)) executed_draws++;
                     }
+                    const std::uint64_t matched_before = renderer.stats().object_motion_matched;
                     renderer.execute(commands);
                     frame.builder.recycle(std::move(commands));
                     const tox2::RendererStats& stats = renderer.stats();
+                    last_frame_matched = stats.object_motion_matched - matched_before;
                     if (stats.fg_mv_checks != fg_mv_printed) {
                         fg_mv_printed = stats.fg_mv_checks;
                         std::printf("fg mv: frame %zu, warp mean %.3f, no-motion mean %.3f, %u pixels%s\n",
@@ -1090,6 +1117,27 @@ int main(int argc, char** argv) {
             draws = executed_draws;
             skipped = renderer.stats().draws_skipped;
             dlaa_text = dlaaStatsText(renderer);
+            if (renderer.valid() && renderer.objectMotionActive() && dlaa_debug.motion == tox2::DlaaMotion::Object) {
+                // A matched draw of the latest frame writes the depth of its fragments to the second attachment, so a
+                // read-back with no such pixel means the variant draws did not write it.
+                std::vector<std::uint32_t> object_words;
+                std::uint32_t object_width = 0, object_height = 0;
+                if (renderer.readObjectMotion(object_words, object_width, object_height)) {
+                    std::size_t written = 0, moving = 0;
+                    for (std::size_t texel = 0; texel + 1 < object_words.size(); texel += 2) {
+                        if (object_words[texel + 1] == tox2::kObjectMotionNone) continue;
+                        written++;
+                        // Ignore the sign bits so -0.0 halves do not count as a vector.
+                        if ((object_words[texel] & 0x7FFF7FFFu) != 0) moving++;
+                    }
+                    dlaa_text += std::format("\nobject image: {}x{}, {} pixels written, {} with a vector", object_width,
+                                             object_height, written, moving);
+                    if (last_frame_matched != 0 && written == 0) {
+                        std::fputs("error: the object motion draws wrote nothing to the object image\n", stderr);
+                        exit_code = 1;
+                    }
+                }
+            }
 
             if (renderer.valid() && renderer.readDisplay(bgra, width, height)) {
                 const tox2::RgbImage image = tox2::rgbFromBgra(bgra, width, height);

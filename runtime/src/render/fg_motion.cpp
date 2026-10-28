@@ -486,6 +486,10 @@ VkImage FgMotionPass::objectImage() const { return resources_ ? resources_->obje
 
 VkImageView FgMotionPass::objectView() const { return resources_ ? resources_->object.view : VK_NULL_HANDLE; }
 
+VkImageLayout FgMotionPass::objectLayout() const {
+    return resources_ ? resources_->object_layout : VK_IMAGE_LAYOUT_UNDEFINED;
+}
+
 void FgMotionPass::beginObjectWrites(VkCommandBuffer cmd, std::uint64_t frame) {
     Resources& resources = *resources_;
     const VkImage image = resources.object.image;

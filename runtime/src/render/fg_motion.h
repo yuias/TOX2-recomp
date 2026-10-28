@@ -56,6 +56,8 @@ public:
     // prepare().
     VkImage objectImage() const;
     VkImageView objectView() const;
+    // The layout the object image is in; UNDEFINED until the first beginObjectWrites().
+    VkImageLayout objectLayout() const;
     // Before the first candidate instance of `frame`: clears the object image once per frame to (0, kObjectMotionNone),
     // then makes it a colour attachment. Called again in the same frame (a scene written again after the tap) it keeps
     // the contents. Outside rendering; needs prepare(). The image is in COLOR_ATTACHMENT_OPTIMAL afterwards; a caller

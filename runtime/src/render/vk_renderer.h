@@ -32,9 +32,18 @@
 
 namespace tox2 {
 
+class ObjectMotionHistory;
+
 // On: camera matrices from the scene draws' projections; Off: identity matrices; Reset: identity matrices and a reset
 // at every evaluation (no history at all).
 enum class DlaaCamera : std::uint8_t { On, Off, Reset };
+
+// How motion reaches DLAA and frame generation. Matrices: today's path (DLAA gets a zero image and the camera
+// matrices, frame generation the camera vectors). Camera: object motion is recorded but not used; both viewports get
+// the camera vectors with cameraMotionIncluded. Object: object motion where a matched draw wrote it, camera motion
+// elsewhere, cameraMotionIncluded. Camera and Object need VkContext::objectMotionSupported(); without it they behave
+// as Matrices.
+enum class DlaaMotion : std::uint8_t { Matrices, Camera, Object };
 
 // Switches for the DLAA A/B checks (tox2_rsxreplay); the defaults are the measured settings.
 struct DlaaDebug {
@@ -53,6 +62,7 @@ struct DlaaDebug {
     // motionVectorsInvalidValue 0. The value does not change the output; left unset, Streamline warns once per
     // process.
     bool mvec_invalid_zero = true;
+    DlaaMotion motion = DlaaMotion::Matrices;  // Object from the default switch on
 };
 
 // Frame generation diagnostics; the defaults are the measured settings.
@@ -172,6 +182,11 @@ struct RendererStats {
     std::uint64_t dlaa_evaluations = 0;   // DLAA evaluations recorded
     std::uint64_t dlaa_resets = 0;        // ... that started a new history
     std::uint64_t dlaa_failures = 0;      // scene reads that fell back to the layout image after a failed evaluation
+    // Object motion (DlaaMotion::Camera and Object): candidate draws recorded, those paired with the previous frame's,
+    // and the bytes the latest history copy held (vertex arrays plus each distinct constants set once).
+    std::uint64_t object_motion_candidates = 0;
+    std::uint64_t object_motion_matched = 0;
+    std::uint64_t object_motion_history_bytes = 0;
     // FgDebug::mv_check results: completed warp checks, and the figures of the latest one.
     std::uint64_t fg_mv_checks = 0;
     FgWarpStats fg_mv_last;
@@ -235,6 +250,17 @@ public:
     bool dlaaAvailable() const { return dlaa_gap_.empty(); }
     // Why dlaaAvailable() is false: the context's Streamline status or the first missing format feature.
     const std::string& dlaaUnavailableReason() const { return dlaa_gap_; }
+    // True when the scene pass writes object motion: Dlaa mode with evaluation, a DlaaMotion other than Matrices and a
+    // device that supports it.
+    bool objectMotionActive() const {
+        return aa_mode_ == AaMode::Dlaa && options_.dlaa_evaluate &&
+               options_.dlaa_debug.motion != DlaaMotion::Matrices && context_.objectMotionSupported();
+    }
+    // Diagnostic: waits for the device and reads the object image of the latest frame that had candidate draws (two
+    // 32-bit words per pixel, row by row: the packed half-float vector and the depth bits or kObjectMotionNone). False
+    // when there is none. Valid only while no later pass moved the image out of COLOR_ATTACHMENT_OPTIMAL. Renderer
+    // thread, between commands.
+    bool readObjectMotion(std::vector<std::uint32_t>& words, std::uint32_t& width, std::uint32_t& height);
 
     // True when the device was created for frame generation and a presenter is set. The presenter is set after
     // construction, so this can change once.
@@ -469,8 +495,16 @@ private:
     std::optional<std::uint64_t> dlaa_jitter_frame_;
     // The perspective scene draws of the frame being recorded, which exist before the first evaluation creates dlaa_.
     DlaaCameraTracker dlaa_camera_;
-    // FgDebug::mv_check state, created by the first check.
+    // FgDebug::mv_check state, created by the first check or by the first object motion candidate.
     std::unique_ptr<FgMotionPass> fg_motion_;
+    // Object motion (DlaaMotion::Camera and Object), created by the first candidate draw.
+    std::unique_ptr<ObjectMotionHistory> history_;
+    // The frame the history and the object image were started for, and their scene size; width 0 when starting failed,
+    // which draws the rest of the frame without object motion.
+    struct ObjectMotionFrame {
+        std::uint32_t frame = 0;  // frame_index_; 0 = none yet
+        std::uint32_t width = 0, height = 0;
+    } object_motion_frame_;
     bool fg_mv_pending_ = false;  // a warp check was recorded and its frame has not been submitted and read yet
     bool fg_mv_reset_ = false;    // the DLAA evaluation of that frame reset its history
     // Per frame slot: the depth frame generation reads, which no later pass of the frame may write.
@@ -547,6 +581,7 @@ private:
     struct OpenDrawPass {
         VkImageView color_view = VK_NULL_HANDLE;
         VkImageView depth_view = VK_NULL_HANDLE;
+        VkImageView object_view = VK_NULL_HANDLE;  // object motion candidates write a second attachment
         bool stencil = false;
         std::uint32_t width = 0, height = 0;  // render area
         bool operator==(const OpenDrawPass&) const = default;
@@ -571,7 +606,7 @@ private:
             std::uint32_t compare_mask = 0, write_mask = 0, reference = 0;
         } faces[2];
         float blend_constants[4] = {};
-        float jitter_ndc[2] = {};  // push constant of the draw layout
+        float push[4] = {};  // push constants of the draw layout: jitter_ndc, motion_scale
     };
     // Empty: the command buffer's state is unknown and the next draw records all of it. Cleared by beginFrame and by
     // every other site that binds a pipeline or sets state, since a pipeline that does not declare a state as dynamic

@@ -21,6 +21,8 @@
 #include "render/dlaa_pass.h"
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
+#include "render/object_motion.h"
+#include "render/object_motion_history.h"
 #include "render/render_scale.h"
 #include "render/shader_compiler.h"
 #include "render/vertex_convert.h"
@@ -430,6 +432,7 @@ RsxRenderer::~RsxRenderer() {
     const VkDevice device = context_.device();
     vkDeviceWaitIdle(device);
     fg_motion_.reset();
+    history_.reset();
     for (std::shared_ptr<FgDepthCopy>& copy : fg_depth_) copy.reset();
     dlaa_.reset();  // frees the DLSS viewport; the device is idle
     for (std::unique_ptr<FrameSlot>& slot : slots_) {
@@ -800,6 +803,7 @@ PixelScale pixelScaleOf(const RsxSurface& surface, std::uint32_t scale, bool sid
 bool RsxRenderer::setResolutionScale(std::uint32_t scale) {
     if (scale < 1 || scale > kMaxResolutionScale) return false;
     resolution_scale_ = scale;
+    if (history_) history_->clear();
     return true;
 }
 
@@ -807,6 +811,7 @@ bool RsxRenderer::setAaMode(AaMode mode) {
     if (mode == AaMode::Msaa && !msaaAvailable()) return false;
     if (mode == AaMode::Dlaa && !dlaaAvailable()) return false;
     if (mode == AaMode::Dlaa && aa_mode_ != AaMode::Dlaa) dlaa_switched_ = true;
+    if (history_ && mode != aa_mode_) history_->clear();
     aa_mode_ = mode;
     return true;
 }
@@ -2395,10 +2400,47 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     const bool expand_fan = draw.primitive == RsxPrimitive::TriangleFan && !context_.triangleFans();
     if (expand_fan) topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
+    // Object motion: a perspective depth-writing draw of the one-sample scene pass keeps its inputs for the next frame
+    // and writes a second attachment. The first candidate of a frame starts the frame's history and images; a later
+    // one of another scene size is drawn as a plain draw.
+    bool object_motion = false;
+    if (sidecar_samples == VK_SAMPLE_COUNT_1_BIT && options_.dlaa_evaluate &&
+        options_.dlaa_debug.motion != DlaaMotion::Matrices) {
+        if (!context_.objectMotionSupported()) {
+            logOnce(LogLevel::Info, "render-object-motion-unavailable",
+                    "tox2: render: object motion vectors unavailable ({})", context_.objectMotionGap());
+        } else if (depth && objectMotionCandidate(draw)) {
+            const std::uint32_t scene_width = color->passWidth(true), scene_height = color->passHeight(true);
+            if (object_motion_frame_.frame != frame_index_) {
+                object_motion_frame_ = {frame_index_, 0, 0};
+                if (!fg_motion_) fg_motion_ = std::make_unique<FgMotionPass>(context_);
+                std::shared_ptr<void> retired;
+                bool recreated = false;
+                std::string error;
+                if (fg_motion_->prepare(scene_width, scene_height, retired, recreated, error)) {
+                    // Frames in flight may still read the previous images.
+                    if (retired) slots_[current_slot_]->keep_alive.push_back(std::move(retired));
+                    if (!history_) history_ = std::make_unique<ObjectMotionHistory>(context_);
+                    history_->beginFrame(frame_index_, scene_width, scene_height, kDefaultMotionMatchRule);
+                    object_motion_frame_.width = scene_width;
+                    object_motion_frame_.height = scene_height;
+                } else {
+                    logOnce(LogLevel::Warn, "render-object-motion-failed",
+                            "tox2: render: object motion vectors not recorded ({})", error);
+                }
+            }
+            object_motion = object_motion_frame_.width == scene_width && object_motion_frame_.height == scene_height;
+        }
+    }
+
     DrawShaders shaders;
-    if (!pipelines_->shaders(draw, shaders)) {
-        if (!pipelines_->valid()) fail(pipelines_->error());
-        return skip({}, {});  // the reasons were counted by the pipeline store
+    // A program that has no variant is drawn as it is without one.
+    if (!(object_motion && pipelines_->shaders(draw, shaders, true))) {
+        object_motion = false;
+        if (!pipelines_->shaders(draw, shaders)) {
+            if (!pipelines_->valid()) fail(pipelines_->error());
+            return skip({}, {});  // the reasons were counted by the pipeline store
+        }
     }
 
     for (std::uint32_t unit = 0; unit < kFpTextureUnitCount; unit++) {
@@ -2479,8 +2521,11 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     key.depth_format = depth ? depth->format : VK_FORMAT_UNDEFINED;
     key.topology_class = topology_class;
     key.samples = sidecar ? static_cast<VkSampleCountFlagBits>(sidecar_samples) : VK_SAMPLE_COUNT_1_BIT;
+    key.object_motion = object_motion;
     VkBuffer vertex_buffers[kPipelineVertexSlots] = {};
     VkDeviceSize vertex_offsets[kPipelineVertexSlots] = {};
+    // The converted arrays of this draw, which the history copies for the next frame (size 0: a default slot).
+    std::array<ObjectMotionHistory::Range, kPipelineVertexSlots> slot_uploads{};
 
     UploadRef defaults;
     bool have_defaults = false;
@@ -2522,6 +2567,7 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
             key.vertex_strides[slot] = static_cast<std::uint8_t>(stride == 0 ? 0 : format->host_size);
             vertex_buffers[slot] = ref.buffer;
             vertex_offsets[slot] = ref.offset;
+            slot_uploads[slot] = {ref.buffer, ref.offset, static_cast<VkDeviceSize>(needed) * format->host_size};
             continue;
         }
 
@@ -2702,11 +2748,27 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
     std::memcpy(draw_block.data, &vp, sizeof(vp));
     std::memcpy(draw_block.data + kFpDrawBlockOffset, &fp, sizeof(fp));
 
+    // Previous inputs of an object motion candidate. Matching waits until no skip is left, so a matched draw is one
+    // that is drawn. Camera mode matches and records too but binds the current inputs.
+    std::optional<ObjectMotionHistory::Previous> previous;
+    UploadRef previous_draw_block;
+    if (object_motion) {
+        const MotionDrawSignature signature = motionDrawSignature(draw);
+        const ObjectMotionHistory::Previous* matched = history_->match(signature);
+        history_->record(signature, {vp_constants.buffer, vp_constants.offset, kVpConstantBytes}, vp, slot_uploads);
+        if (matched != nullptr && options_.dlaa_debug.motion == DlaaMotion::Object) {
+            previous = *matched;
+            if (!allocUpload(sizeof(VpDrawUniforms), previous_draw_block)) return;
+            std::memcpy(previous_draw_block.data, &previous->draw, sizeof(VpDrawUniforms));
+        }
+    }
+
     if (depth_written) depth->write_serial++;
 
     OpenDrawPass pass;
     pass.color_view = sidecar ? color->msaa->view : color->view;
     pass.depth_view = depth ? (sidecar ? depth->msaa->view : depth->view) : VK_NULL_HANDLE;
+    pass.object_view = object_motion ? fg_motion_->objectView() : VK_NULL_HANDLE;
     pass.stencil = depth && formatHasStencil(depth->format);
     pass.width = area_width;
     pass.height = area_height;
@@ -2725,12 +2787,23 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
             if (depth) transition(*depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         }
 
-        VkRenderingAttachmentInfo color_attachment{};
+        VkRenderingAttachmentInfo color_attachments[2]{};
+        VkRenderingAttachmentInfo& color_attachment = color_attachments[0];
         color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
         color_attachment.imageView = pass.color_view;
         color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        if (object_motion) {
+            // Cleared once per frame and kept by every later candidate instance.
+            fg_motion_->beginObjectWrites(cmd, frame_index_);
+            VkRenderingAttachmentInfo& object_attachment = color_attachments[1];
+            object_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            object_attachment.imageView = pass.object_view;
+            object_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            object_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            object_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        }
         VkRenderingAttachmentInfo depth_attachment{};
         if (depth) {
             depth_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -2743,8 +2816,8 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
         rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
         rendering.renderArea = {{0, 0}, {area_width, area_height}};
         rendering.layerCount = 1;
-        rendering.colorAttachmentCount = 1;
-        rendering.pColorAttachments = &color_attachment;
+        rendering.colorAttachmentCount = object_motion ? 2 : 1;
+        rendering.pColorAttachments = color_attachments;
         rendering.pDepthAttachment = depth ? &depth_attachment : nullptr;
         rendering.pStencilAttachment = pass.stencil ? &depth_attachment : nullptr;
         gpuBeginInstance(cmd, GpuInstanceKind::Draw, area_width, area_height, sidecar ? sidecar_samples : 1,
@@ -2876,25 +2949,47 @@ void RsxRenderer::recordDraw(const RsxDraw& draw) {
             dlaa_jitter_frame_ = stats_.flips;
         }
     }
-    if (set(shadow.jitter_ndc, jitter_ndc)) {
-        vkCmdPushConstants(cmd, pipelines_->drawLayout(), VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(jitter_ndc),
-                           jitter_ndc);
+    // motion_scale turns the variant's NDC difference into pixels: half the viewport the draw covers. Zero tells the
+    // variant that the draw has no previous inputs. While the path is active every draw pushes all 16 bytes, so the
+    // block a variant draw reads is always fully set; the plain programs declare the first 8.
+    const float push[4] = {jitter_ndc[0], jitter_ndc[1], previous ? 0.5f * viewport.width : 0.0f,
+                           previous ? 0.5f * viewport.height : 0.0f};
+    if (set(shadow.push, push)) {
+        vkCmdPushConstants(cmd, pipelines_->drawLayout(), VK_SHADER_STAGE_VERTEX_BIT, 0,
+                           objectMotionActive() ? sizeof(push) : 2 * sizeof(float), push);
     }
 
     for (std::uint32_t slot = 0; slot < kPipelineVertexSlots; slot++) {
-        if (vertex_buffers[slot] != VK_NULL_HANDLE)
-            vkCmdBindVertexBuffers(cmd, slot, 1, &vertex_buffers[slot], &vertex_offsets[slot]);
+        if (vertex_buffers[slot] == VK_NULL_HANDLE) continue;
+        vkCmdBindVertexBuffers(cmd, slot, 1, &vertex_buffers[slot], &vertex_offsets[slot]);
+        if (!object_motion) continue;
+        // The variant reads the previous frame's array of the slot, or the current default block of a default slot.
+        const ObjectMotionHistory::Range* history = previous ? &previous->slots[slot] : nullptr;
+        const VkBuffer buffer = history && history->size != 0 ? history->buffer : vertex_buffers[slot];
+        const VkDeviceSize offset = history && history->size != 0 ? history->offset : vertex_offsets[slot];
+        vkCmdBindVertexBuffers(cmd, kVpPrevInputLocationBase + slot, 1, &buffer, &offset);
     }
 
-    VkDescriptorBufferInfo buffer_infos[3] = {{vp_constants.buffer, vp_constants.offset, kVpConstantBytes},
+    VkDescriptorBufferInfo buffer_infos[5] = {{vp_constants.buffer, vp_constants.offset, kVpConstantBytes},
                                               {fp_constants.buffer, fp_constants.offset, fp_entries * 16},
                                               {draw_block.buffer, draw_block.offset, kDrawBlockBytes}};
-    VkWriteDescriptorSet writes[3 + kFpTextureUnitCount]{};
+    if (object_motion) {
+        // Bindings 19 and 20: the previous frame's constants (in the history buffer) and draw values, else the current
+        // ones.
+        buffer_infos[3] = previous ? VkDescriptorBufferInfo{previous->constants.buffer, previous->constants.offset,
+                                                            kVpConstantBytes}
+                                   : buffer_infos[0];
+        buffer_infos[4] =
+                previous ? VkDescriptorBufferInfo{previous_draw_block.buffer, previous_draw_block.offset,
+                                                  sizeof(VpDrawUniforms)}
+                         : VkDescriptorBufferInfo{draw_block.buffer, draw_block.offset, sizeof(VpDrawUniforms)};
+    }
+    VkWriteDescriptorSet writes[5 + kFpTextureUnitCount]{};
     std::uint32_t write_count = 0;
-    for (std::uint32_t i = 0; i < 3; i++) {
+    for (std::uint32_t i = 0; i < (object_motion ? 5u : 3u); i++) {
         VkWriteDescriptorSet& write = writes[write_count++];
         write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstBinding = i;
+        write.dstBinding = i < 3 ? i : kVpPrevConstantsBinding + (i - 3);
         write.descriptorCount = 1;
         write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         write.pBufferInfo = &buffer_infos[i];
@@ -3323,6 +3418,21 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
         }
     }
     if (!valid()) return;
+    if (history_) {
+        // Copies the frame's candidate inputs for the next frame; the history buffer a larger frame replaces stays
+        // alive until this slot's fence. A fresh pointer each flip: a reused one would chain every retired buffer.
+        std::shared_ptr<void> retired;
+        std::string history_error;
+        if (!history_->recordCopy(outsideCmd(), retired, history_error)) {
+            logOnce(LogLevel::Warn, "render-object-motion-history-failed",
+                    "tox2: render: object motion history not kept ({})", history_error);
+        }
+        if (retired) slot.keep_alive.push_back(std::move(retired));
+        const ObjectMotionHistory::Stats history_stats = history_->stats();
+        stats_.object_motion_candidates += history_stats.candidates;
+        stats_.object_motion_matched += history_stats.matched;
+        stats_.object_motion_history_bytes = history_stats.history_bytes;
+    }
     if (presenter_ != nullptr) {
         recordPresentBlit(display_black_ ? nullptr : it->second.get());
         if (frame_gen_ && present_pending_) recordFrameGenPresent();
@@ -3526,6 +3636,104 @@ bool RsxRenderer::savePipelineCache() { return pipelines_ && pipelines_->savePip
 
 PipelineCacheStats RsxRenderer::pipelineCacheStats() const {
     return pipelines_ ? pipelines_->pipelineCacheStats() : PipelineCacheStats{};
+}
+
+bool RsxRenderer::readObjectMotion(std::vector<std::uint32_t>& words, std::uint32_t& width, std::uint32_t& height) {
+    if (!valid() || !fg_motion_ || object_motion_frame_.width == 0) return false;
+    const VkImage image = fg_motion_->objectImage();
+    const VkImageLayout layout = fg_motion_->objectLayout();
+    if (image == VK_NULL_HANDLE || layout == VK_IMAGE_LAYOUT_UNDEFINED) return false;
+    width = object_motion_frame_.width;
+    height = object_motion_frame_.height;
+    const VkDevice device = context_.device();
+    vkDeviceWaitIdle(device);
+
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 8;
+    VkBufferCreateInfo buffer_info{};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = bytes;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationCreateInfo alloc_info{};
+    alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+    alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    VmaAllocationInfo allocated{};
+    if (vmaCreateBuffer(context_.allocator(), &buffer_info, &alloc_info, &buffer, &allocation, &allocated) !=
+        VK_SUCCESS) {
+        return false;
+    }
+    VkCommandPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pool_info.queueFamilyIndex = context_.graphicsQueueFamily();
+    VkCommandPool pool = VK_NULL_HANDLE;
+    bool ok = vkCreateCommandPool(device, &pool_info, nullptr, &pool) == VK_SUCCESS;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (ok) {
+        VkCommandBufferAllocateInfo cmd_info{};
+        cmd_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cmd_info.commandPool = pool;
+        cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmd_info.commandBufferCount = 1;
+        ok = vkAllocateCommandBuffers(device, &cmd_info, &cmd) == VK_SUCCESS;
+    }
+    if (ok) {
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        ok = vkBeginCommandBuffer(cmd, &begin) == VK_SUCCESS;
+    }
+    if (ok) {
+        // To the transfer layout and back to the one FgMotionPass tracks for the image.
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        barrier.oldLayout = layout;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VkDependencyInfo dependency{};
+        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.imageMemoryBarrierCount = 1;
+        dependency.pImageMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(cmd, &dependency);
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {width, height, 1};
+        vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &region);
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.newLayout = layout;
+        vkCmdPipelineBarrier2(cmd, &dependency);
+        ok = vkEndCommandBuffer(cmd) == VK_SUCCESS;
+    }
+    if (ok) {
+        VkCommandBufferSubmitInfo cmd_submit{};
+        cmd_submit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        cmd_submit.commandBuffer = cmd;
+        VkSubmitInfo2 submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submit.commandBufferInfoCount = 1;
+        submit.pCommandBufferInfos = &cmd_submit;
+        ok = vkQueueSubmit2(context_.graphicsQueue(), 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS;
+        if (ok) vkDeviceWaitIdle(device);
+    }
+    if (ok) {
+        vmaInvalidateAllocation(context_.allocator(), allocation, 0, VK_WHOLE_SIZE);
+        words.resize(static_cast<std::size_t>(width) * height * 2);
+        std::memcpy(words.data(), allocated.pMappedData, words.size() * sizeof(std::uint32_t));
+    }
+    if (pool != VK_NULL_HANDLE) vkDestroyCommandPool(device, pool, nullptr);
+    vmaDestroyBuffer(context_.allocator(), buffer, allocation);
+    return ok;
 }
 
 bool RsxRenderer::readDisplay(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height) {
