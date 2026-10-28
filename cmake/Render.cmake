@@ -310,6 +310,14 @@ function(tox2_render_add)
   set_tests_properties(frame_gen PROPERTIES
     PASS_REGULAR_EXPRESSION "frame gen tests: [0-9]+ passed, 0 failed")
 
+  # Header-only candidate predicate, signatures and matcher; needs no GPU.
+  add_executable(tox2_object_motion_tests runtime/tests/object_motion_test.cpp)
+  target_compile_options(tox2_object_motion_tests PRIVATE ${TOX2_ARCH_FLAGS} -Wall -Wextra)
+  target_link_libraries(tox2_object_motion_tests PRIVATE tox2_render)
+  add_test(NAME object_motion COMMAND tox2_object_motion_tests)
+  set_tests_properties(object_motion PROPERTIES
+    PASS_REGULAR_EXPRESSION "object motion tests: [0-9]+ passed, 0 failed")
+
   # Replays a capture without the game: prints the command list from the frame builder, renders it
   # headless and writes the displayed frame as a PNG.
   add_executable(tox2_rsxreplay tools/tox2_rsxreplay/main.cpp)
