@@ -1405,6 +1405,26 @@ void testLatencyStats() {
     CHECK(c.over > 0);
 }
 
+// An ignored method is logged as a warning on its first hit only, with or without the frame builder.
+void testRsxIgnoredMethodWarning() {
+    std::vector<std::string> lines;
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetLogOnce();
+    tox2::RsxConsumer headless(nullptr);  // the written methods touch no guest memory
+    CHECK(headless.write(0xC40C, 0));
+    CHECK(headless.write(0xC40C, 0));
+    CHECK(headless.write(0x1E40, 0x3F800000));  // decoded float form: no warning
+    tox2::RsxConsumer drawing(nullptr);
+    drawing.enableFrameBuilder();
+    CHECK(drawing.write(0x1944, 0x01020304));
+    CHECK(drawing.write(0xC40C, 0));
+    tox2::setLogSink({});
+
+    CHECK(lines.size() == 2);
+    CHECK(lines.size() == 2 && lines[0].find("NV3089_IMAGE_IN (0xC40C)") != std::string::npos);
+    CHECK(lines.size() == 2 && lines[1].find("NV4097_SET_VERTEX_DATA4UB_M (0x1944)") != std::string::npos);
+}
+
 void testDisableFrameBuilder() {
     tox2::RsxConsumer plain(nullptr);  // the base is only dereferenced when commands are parsed
     CHECK(!plain.frameBuilderEnabled());
@@ -19590,6 +19610,7 @@ int main(int argc, char** argv) {
     testCensusRenderSuffix();
     testLatencyStats();
     testDisableFrameBuilder();
+    testRsxIgnoredMethodWarning();
     testSyscalls();
     testHle();
     testHleGuestExports();
