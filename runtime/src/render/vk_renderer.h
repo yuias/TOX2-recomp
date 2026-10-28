@@ -62,7 +62,7 @@ struct DlaaDebug {
     // motionVectorsInvalidValue 0. The value does not change the output; left unset, Streamline warns once per
     // process.
     bool mvec_invalid_zero = true;
-    DlaaMotion motion = DlaaMotion::Matrices;  // Object from the default switch on
+    DlaaMotion motion = DlaaMotion::Object;
 };
 
 // Frame generation diagnostics; the defaults are the measured settings.
