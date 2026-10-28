@@ -86,6 +86,7 @@ struct SpuCapture {
 
     std::vector<SpuCaptureTagRun> tag_runs;
 };
+static_assert(alignof(decltype(SpuCapture::post_gpr)) == 16);
 
 // Total size of a file with `tag_runs` tag runs.
 std::uint64_t spuCaptureFileSize(std::uint32_t tag_runs);

@@ -59,7 +59,9 @@ typedef int32_t Tox2S32x4 __attribute__((vector_size(16)));
 typedef uint64_t Tox2U64x2 __attribute__((vector_size(16)));
 typedef float Tox2F32x4 __attribute__((vector_size(16)));
 
-typedef union Tox2Vr {
+// The explicit alignment keeps 16 inside the MSVC STL's #pragma pack(8) templates (std::array, std::optional, ...);
+// a bare vector_size type is capped to 8 there, and the vector loads on its elements then fault.
+typedef union __attribute__((aligned(16))) Tox2Vr {
     Tox2U8x16 u8;
     Tox2S8x16 s8;
     Tox2U16x8 u16;
