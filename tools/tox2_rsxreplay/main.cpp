@@ -12,8 +12,10 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -25,6 +27,7 @@
 #include "core/census.h"
 #include "core/thread_cpu.h"
 #include "render/frame_dump.h"
+#include "render/object_motion.h"
 #include "render/render_scale.h"
 #include "render/vk_context.h"
 #include "render/vk_renderer.h"
@@ -47,7 +50,7 @@ void printUsage() {
             "                      [--dlaa-jitter on|off] [--dlaa-jitter-flip none|x|y|xy]\n"
             "                      [--dlaa-camera on|off|reset] [--dlaa-clip-flip-y on|off]\n"
             "                      [--dlaa-mv-invalid zero|unset]\n"
-            "                      [--fg-mv-check [--fg-mv-flip none|x|y|xy]]\n"
+            "                      [--fg-mv-check [--fg-mv-flip none|x|y|xy]] [--motion-report [draws]]\n"
             "                      [--shader-cache DIR] [--repeat N [--gpu-timing]] [--quiet]\n"
             "  CAPTURE  a .tox2cap file written by tox2_game --rsx-capture; several captures are replayed in\n"
             "           order through one renderer, each one a frame that must end with a flip\n"
@@ -82,6 +85,10 @@ void printUsage() {
             "                      output onto the current one (the displayed frame does not change)\n"
             "  --fg-mv-flip F      diagnostic, needs --fg-mv-check: negate the motion vectors on the x axis, the y axis or\n"
             "                      both (none by default)\n"
+            "  --motion-report [draws]  diagnostic, CPU only: for every frame of the first pass print how many of its\n"
+            "                      perspective scene draws are object motion candidates and how many of them each\n"
+            "                      matching rule pairs with the previous capture's; with draws, also one line per\n"
+            "                      perspective scene draw. The rendering does not change; not with --repeat\n"
             "  --no-validation     do not enable the Vulkan validation layer\n"
             "  --shader-cache DIR  directory of the on-disk SPIR-V cache\n"
             "  --repeat N          replay and render the capture N times (N >= 1) with one memory view, builder and\n"
@@ -525,6 +532,155 @@ void printDevice(const tox2::VkContext& context) {
                 std::string(context.driverName()).c_str());
 }
 
+// A perspective draw into an anti-aliased colour surface, which is what DLAA treats as the scene, as --motion-report
+// sees it. Candidates are the ones that also write depth.
+struct MotionReportDraw {
+    std::size_t draw_index = 0;  // among all draws of the frame
+    bool candidate = false;
+    tox2::MotionDrawSignature signature;
+    std::uint64_t content = 0;  // FNV-1a over the draw's vertex bytes
+    std::size_t bytes = 0;
+    std::uint64_t constants_key = 0;
+    bool blend = false, zeta_write = false;
+    std::uint32_t depth_func = 0, color_mask = 0;
+};
+
+std::vector<MotionReportDraw> collectMotionDraws(std::span<const tox2::RsxCommand> commands) {
+    std::vector<MotionReportDraw> result;
+    std::size_t draw_index = 0;
+    for (const tox2::RsxCommand& command : commands) {
+        const auto* draw = std::get_if<tox2::RsxDraw>(&command);
+        if (!draw) continue;
+        const std::size_t index = draw_index++;
+        const tox2::RsxSurface& color = draw->surfaces.color;
+        if (!draw->surfaces.has_color || color.samples_x * color.samples_y <= 1 || !draw->vp_constants ||
+            !tox2::dlaaPerspective(*draw->vp_constants)) {
+            continue;
+        }
+        MotionReportDraw& entry = result.emplace_back();
+        entry.draw_index = index;
+        entry.candidate = tox2::objectMotionCandidate(*draw);
+        entry.signature = tox2::motionDrawSignature(*draw);
+        entry.content = 0xCBF29CE484222325ull;
+        for (const std::uint8_t byte : draw->vertex_data) entry.content = (entry.content ^ byte) * 0x100000001B3ull;
+        entry.bytes = draw->vertex_data.size();
+        // An unnamed snapshot (id 0) is told apart by its address.
+        entry.constants_key = draw->vp_constants_id != 0 ? draw->vp_constants_id
+                                                         : reinterpret_cast<std::uintptr_t>(draw->vp_constants.get());
+        entry.blend = draw->raster.blend;
+        entry.zeta_write = tox2::rsxZetaWriteEnabled(draw->raster, draw->surfaces.depth_format);
+        entry.depth_func = draw->raster.depth_func;
+        entry.color_mask = draw->raster.color_mask;
+    }
+    return result;
+}
+
+constexpr tox2::MotionMatchRule kMotionRules[] = {
+        tox2::MotionMatchRule::Ordered, tox2::MotionMatchRule::AddressThenOrdered, tox2::MotionMatchRule::AddressOnly};
+
+// Match of every candidate of `current` (in draw order) against the candidates of `previous` under `rule`.
+std::vector<std::optional<std::uint32_t>> matchMotionDraws(std::span<const tox2::MotionDrawSignature> previous,
+                                                           std::span<const tox2::MotionDrawSignature> current,
+                                                           tox2::MotionMatchRule rule) {
+    tox2::MotionDrawMatcher matcher;
+    matcher.beginFrame(previous, rule);
+    std::vector<std::optional<std::uint32_t>> matches;
+    for (const tox2::MotionDrawSignature& signature : current) matches.push_back(matcher.match(signature));
+    return matches;
+}
+
+// Prints the "motion report:" line (and the "motion draw:" lines with `per_draw`) of every frame, each against the
+// frame before it in the list; the first frame has no previous one.
+void printMotionReport(std::span<const std::unique_ptr<ReplayFrame>> frames,
+                       std::span<const std::vector<tox2::RsxCommand>> commands, bool per_draw) {
+    std::vector<MotionReportDraw> previous;
+    for (std::size_t frame = 0; frame < frames.size(); frame++) {
+        const std::vector<MotionReportDraw> draws = collectMotionDraws(commands[frame]);
+        std::vector<const MotionReportDraw*> candidates, previous_candidates;
+        std::vector<tox2::MotionDrawSignature> signatures, previous_signatures;
+        for (const MotionReportDraw& draw : draws) {
+            if (draw.candidate) {
+                candidates.push_back(&draw);
+                signatures.push_back(draw.signature);
+            }
+        }
+        for (const MotionReportDraw& draw : previous) {
+            if (draw.candidate) {
+                previous_candidates.push_back(&draw);
+                previous_signatures.push_back(draw.signature);
+            }
+        }
+        std::vector<std::optional<std::uint32_t>> matches[std::size(kMotionRules)];
+        for (std::size_t rule = 0; rule < std::size(kMotionRules); rule++) {
+            matches[rule] = matchMotionDraws(previous_signatures, signatures, kMotionRules[rule]);
+        }
+
+        std::map<std::uint64_t, std::size_t> layouts;
+        std::set<std::uint64_t> constant_sets;
+        std::size_t vertex_bytes = 0, transitions = 0;
+        for (const MotionReportDraw* draw : candidates) {
+            layouts[draw->signature.layout]++;
+            constant_sets.insert(draw->constants_key);
+            vertex_bytes += draw->bytes;
+        }
+        for (std::size_t i = 1; i < draws.size(); i++) transitions += draws[i].candidate != draws[i - 1].candidate;
+        std::size_t repeated = 0;
+        for (const auto& [layout, count] : layouts) repeated += count > 1;
+
+        // Address and content are compared on the default rule's matches.
+        constexpr std::size_t kDefaultRule = 1;
+        static_assert(kMotionRules[kDefaultRule] == tox2::MotionMatchRule::AddressThenOrdered);
+        std::size_t matched[std::size(kMotionRules)] = {};
+        std::size_t same_address = 0, changed_address = 0, content_same_address = 0, content_changed_address = 0;
+        for (std::size_t rule = 0; rule < std::size(kMotionRules); rule++) {
+            for (const std::optional<std::uint32_t>& match : matches[rule]) matched[rule] += match.has_value();
+        }
+        for (std::size_t i = 0; i < candidates.size(); i++) {
+            const std::optional<std::uint32_t>& match = matches[kDefaultRule][i];
+            if (!match) continue;
+            const MotionReportDraw& before = *previous_candidates[*match];
+            const bool same = before.signature.address == candidates[i]->signature.address;
+            const bool changed = before.content != candidates[i]->content;
+            (same ? same_address : changed_address)++;
+            (same ? content_same_address : content_changed_address) += changed;
+        }
+
+        std::printf(
+                "motion report: frame %zu (%s), perspective scene draws %zu, candidates %zu, layouts %zu (%zu "
+                "repeated), matched ordered %zu, address-then-ordered %zu, address %zu, addresses same %zu changed "
+                "%zu, content changed same address %zu changed address %zu, vertex bytes %zu, constant sets %zu, "
+                "candidate transitions %zu\n",
+                frame + 1, frames[frame]->name.c_str(), draws.size(), candidates.size(), layouts.size(), repeated,
+                matched[0], matched[1], matched[2], same_address, changed_address, content_same_address,
+                content_changed_address, vertex_bytes, constant_sets.size(), transitions);
+
+        if (per_draw) {
+            std::size_t candidate = 0;
+            for (const MotionReportDraw& draw : draws) {
+                std::printf(
+                        "motion draw: frame %zu #%zu candidate %d layout %016llx address %016llx content %016llx "
+                        "bytes %zu blend %d zw %d zf %x cmask %x",
+                        frame + 1, draw.draw_index, draw.candidate ? 1 : 0,
+                        static_cast<unsigned long long>(draw.signature.layout),
+                        static_cast<unsigned long long>(draw.signature.address),
+                        static_cast<unsigned long long>(draw.content), draw.bytes, draw.blend ? 1 : 0,
+                        draw.zeta_write ? 1 : 0, draw.depth_func, draw.color_mask);
+                static constexpr const char* kNames[] = {"ordered", "address-then-ordered", "address"};
+                for (std::size_t rule = 0; rule < std::size(kMotionRules); rule++) {
+                    if (draw.candidate && matches[rule][candidate]) {
+                        std::printf(" %s %u", kNames[rule], *matches[rule][candidate]);
+                    } else {
+                        std::printf(" %s -", kNames[rule]);
+                    }
+                }
+                std::printf("\n");
+                candidate += draw.candidate;
+            }
+        }
+        previous = draws;
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -545,7 +701,8 @@ int main(int argc, char** argv) {
     bool has_dlaa_option = false;  // a --dlaa-* option was given, which needs --aa-mode dlaa
     tox2::FgDebug fg_debug;
     bool has_fg_mv_flip = false;  // --fg-mv-flip was given, which needs --fg-mv-check
-    std::uint32_t rect[4] = {};   // --compare-rect: x, y, width, height
+    bool motion_report = false, motion_report_draws = false;
+    std::uint32_t rect[4] = {};  // --compare-rect: x, y, width, height
     bool has_rect = false;
     // Thresholds of --compare; a NaN limit is not checked.
     double max_diff = std::nan(""), max_mean = std::nan(""), max_differing = std::nan("");
@@ -694,6 +851,20 @@ int main(int argc, char** argv) {
             i++;
             continue;
         }
+        if (arg == "--motion-report") {
+            motion_report = true;
+            // The value is optional and a capture may follow, so only "draws" and a name that is not a capture are
+            // taken as the value.
+            if (i + 1 < argc && std::string_view(argv[i + 1]) == "draws") {
+                motion_report_draws = true;
+                i++;
+            } else if (i + 1 < argc && !std::string_view(argv[i + 1]).starts_with("--") &&
+                       !std::string_view(argv[i + 1]).ends_with(".tox2cap")) {
+                std::fputs("error: --motion-report takes no value or draws\n", stderr);
+                return 2;
+            }
+            continue;
+        }
         if (arg == "--compare-rect") {
             if (i + 1 >= argc || !parseRect(argv[i + 1], rect)) {
                 std::fputs("error: --compare-rect takes X,Y,W,H, four whole numbers with W and H above 0\n", stderr);
@@ -752,6 +923,10 @@ int main(int argc, char** argv) {
     }
     if (repeat != 0 && fg_debug.mv_check) {
         std::fputs("error: --repeat cannot be combined with --fg-mv-check\n", stderr);
+        return 2;
+    }
+    if (repeat != 0 && motion_report) {
+        std::fputs("error: --repeat cannot be combined with --motion-report\n", stderr);
         return 2;
     }
     if (repeat != 0 && (!out_dir.empty() || !compare_path.empty())) {
@@ -831,6 +1006,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    if (motion_report) printMotionReport(frames, first_pass, motion_report_draws);
     std::size_t commands_total = first_pass_commands * loop;
     std::size_t draws = first_pass_draws * loop;
 
