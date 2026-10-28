@@ -725,7 +725,7 @@ bool Streamline::evaluateDlaa(VkCommandBuffer cmd, const DlaaFrame& frame, std::
         constants.cameraAspectRatio = static_cast<float>(width) / static_cast<float>(height);
         if (frame.mvec_invalid_value) constants.motionVectorsInvalidValue = *frame.mvec_invalid_value;
         constants.depthInverted = sl::Boolean::eFalse;
-        constants.cameraMotionIncluded = sl::Boolean::eFalse;
+        constants.cameraMotionIncluded = frame.camera_motion_included ? sl::Boolean::eTrue : sl::Boolean::eFalse;
         constants.motionVectors3D = sl::Boolean::eFalse;
         constants.reset = frame.reset ? sl::Boolean::eTrue : sl::Boolean::eFalse;
         constants.orthographicProjection = sl::Boolean::eFalse;

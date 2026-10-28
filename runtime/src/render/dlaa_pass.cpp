@@ -111,7 +111,8 @@ bool DlaaPass::evaluate(VkCommandBuffer cmd, const Inputs& inputs, std::string& 
     frame.frame_index = inputs.frame_index;
     frame.color_in = inputs.color_in;
     frame.depth = inputs.depth;
-    frame.motion = describe(resources_->motion);
+    frame.motion = inputs.motion ? *inputs.motion : describe(resources_->motion);
+    frame.camera_motion_included = inputs.motion.has_value();
     frame.color_out = describe(resources_->output);
     frame.jitter_px[0] = inputs.jitter_px[0];
     frame.jitter_px[1] = inputs.jitter_px[1];

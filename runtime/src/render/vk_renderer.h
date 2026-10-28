@@ -505,9 +505,10 @@ private:
         std::uint32_t frame = 0;  // frame_index_; 0 = none yet
         std::uint32_t width = 0, height = 0;
     } object_motion_frame_;
-    bool fg_motion_object_ = false;  // recordFgMotion combined the object image, so the camera-only image is valid
-    bool fg_mv_pending_ = false;     // a warp check was recorded and its frame has not been submitted and read yet
-    bool fg_mv_reset_ = false;       // the DLAA evaluation of that frame reset its history
+    bool fg_motion_object_ = false;      // recordFgMotion combined the object image, so the camera-only image is valid
+    std::uint32_t fg_motion_frame_ = 0;  // the frame_index_ whose DLAA tap recorded the motion image in Camera/Object
+    bool fg_mv_pending_ = false;         // a warp check was recorded and its frame has not been submitted and read yet
+    bool fg_mv_reset_ = false;           // the DLAA evaluation of that frame reset its history
     // Per frame slot: the depth frame generation reads, which no later pass of the frame may write.
     std::array<std::shared_ptr<FgDepthCopy>, kFramesInFlight> fg_depth_;
     // What the DLAA tap handed to frame generation for the frame being recorded.

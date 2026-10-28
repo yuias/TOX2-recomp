@@ -1296,7 +1296,28 @@ VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
             image.usage = target.msaa->usage;
             return image;
         };
+        const auto record_motion = [&]() {
+            std::string motion_error;
+            const bool recorded = recordFgMotion(res, *depth, camera, motion_error);
+            if (!recorded) {
+                logOnce(LogLevel::Warn, "render-fg-motion-failed", "tox2: render: motion vectors not recorded ({})",
+                        motion_error);
+            }
+            return recorded;
+        };
+        // The vectors have to exist before the evaluation for DLAA to take them; frame generation and the warp check
+        // below reuse them. A scene written again after the tap reuses the frame's vectors.
+        bool motion_ready = false;
+        if (objectMotionActive()) {
+            motion_ready = fg_motion_frame_ == frame_index_;
+            if (!motion_ready && record_motion()) {
+                fg_motion_frame_ = frame_index_;
+                motion_ready = true;
+            }
+        }
+
         DlaaPass::Inputs inputs;
+        if (motion_ready) inputs.motion = fg_motion_->motionImage();
         inputs.color_in = describe(scene, scene.msaa->view, scene.msaa->layout);
         inputs.depth = describe(*depth,
                                 depth->msaa->depth_view != VK_NULL_HANDLE ? depth->msaa->depth_view : depth->msaa->view,
@@ -1331,11 +1352,7 @@ VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
         if (fg_inputs || mv_check) {
             // Failures leave the scene read as it is.
             std::string check_error;
-            bool recorded = recordFgMotion(res, *depth, camera, check_error);
-            if (!recorded) {
-                logOnce(LogLevel::Warn, "render-fg-motion-failed", "tox2: render: motion vectors not recorded ({})",
-                        check_error);
-            }
+            const bool recorded = objectMotionActive() ? motion_ready : record_motion();
             if (fg_inputs) {
                 fg_tapped_ = {frame_index_, FrameGenInputs::Failed, width, height, inputs.depth.format};
                 std::string tag_error;
@@ -1393,8 +1410,9 @@ VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
     return view;
 }
 
-// The depth that went into the DLAA evaluation is still in SHADER_READ_ONLY_OPTIMAL and the DLAA output is in GENERAL,
-// which is where frame generation will read them. The pass only reads those images, so the scene is unchanged.
+// The depth that went into the DLAA evaluation is in SHADER_READ_ONLY_OPTIMAL, which is where frame generation will
+// read it. The pass only reads it, so the scene is unchanged. Called before the evaluation in the object motion modes
+// (DLAA takes the image) and after it otherwise.
 bool RsxRenderer::recordFgMotion(const DlaaPass::Resources& dlaa, const RenderTarget& depth,
                                  const DlaaCameraTracker::Result& camera, std::string& error) {
     if (!fg_motion_) fg_motion_ = std::make_unique<FgMotionPass>(context_);
