@@ -1414,15 +1414,18 @@ void testRsxIgnoredMethodWarning() {
     CHECK(headless.write(0xC40C, 0));
     CHECK(headless.write(0xC40C, 0));
     CHECK(headless.write(0x1E40, 0x3F800000));  // decoded float form: no warning
+    CHECK(headless.write(0x1944, 0x01020304));  // decoded integer form: no warning
+    tox2::resetLogOnce();
     tox2::RsxConsumer drawing(nullptr);
     drawing.enableFrameBuilder();
     CHECK(drawing.write(0x1944, 0x01020304));
+    CHECK(drawing.write(0xC40C, 0));
     CHECK(drawing.write(0xC40C, 0));
     tox2::setLogSink({});
 
     CHECK(lines.size() == 2);
     CHECK(lines.size() == 2 && lines[0].find("NV3089_IMAGE_IN (0xC40C)") != std::string::npos);
-    CHECK(lines.size() == 2 && lines[1].find("NV4097_SET_VERTEX_DATA4UB_M (0x1944)") != std::string::npos);
+    CHECK(lines.size() == 2 && lines[1].find("NV3089_IMAGE_IN (0xC40C)") != std::string::npos);
 }
 
 void testDisableFrameBuilder() {
@@ -8824,8 +8827,9 @@ void testRsxDecode() {
     CHECK(clear.surfaces.clip_w == 1280);
 
     // Written methods with render semantics that the builder ignores.
-    CHECK(std::string_view(tox2::rsxIgnoredMethodName(0x1940)) == "NV4097_SET_VERTEX_DATA4UB_M");
-    CHECK(tox2::rsxIgnoredMethodName(0x197C) != nullptr && tox2::rsxIgnoredMethodName(0x1900) != nullptr);
+    CHECK(tox2::rsxIgnoredMethodName(0x1940) == nullptr);  // the integer forms are decoded into the defaults
+    CHECK(tox2::rsxIgnoredMethodName(0x197C) == nullptr && tox2::rsxIgnoredMethodName(0x1900) == nullptr);
+    CHECK(tox2::rsxIgnoredMethodName(0x0A80) == nullptr);
     CHECK(tox2::rsxIgnoredMethodName(0x1500) == nullptr);  // the float forms are decoded into the defaults
     CHECK(tox2::rsxIgnoredMethodName(0x1C00) == nullptr && tox2::rsxIgnoredMethodName(0x1814) == nullptr);
     CHECK(tox2::rsxIgnoredMethodName(0x1818) != nullptr && tox2::rsxIgnoredMethodName(0xC40C) != nullptr);
@@ -8838,13 +8842,9 @@ void testRsxDecode() {
             const char* name;
         };
         const Range ranges[] = {
-                {tox2::kMethodNv4097SetVertexDataScaled4sM, 32, "NV4097_SET_VERTEX_DATA_SCALED4S_M"},
                 {tox2::kMethodNv4097ArrayElement16, 1, "NV4097_ARRAY_ELEMENT16"},
                 {tox2::kMethodNv4097ArrayElement32, 1, "NV4097_ARRAY_ELEMENT32"},
                 {tox2::kMethodNv4097InlineArray, 1, "NV4097_INLINE_ARRAY"},
-                {tox2::kMethodNv4097SetVertexData2sM, 16, "NV4097_SET_VERTEX_DATA2S_M"},
-                {tox2::kMethodNv4097SetVertexData4ubM, 16, "NV4097_SET_VERTEX_DATA4UB_M"},
-                {tox2::kMethodNv4097SetVertexData4sM, 32, "NV4097_SET_VERTEX_DATA4S_M"},
                 {tox2::kMethodNv3089ImageIn, 1, "NV3089_IMAGE_IN"},
         };
         std::size_t ignored = 0;
@@ -8861,7 +8861,7 @@ void testRsxDecode() {
             if (actual != nullptr && expected != nullptr) CHECK(std::string_view(actual) == expected);
             ignored += actual != nullptr;
         }
-        CHECK(ignored == (32 + 1 + 1 + 1 + 16 + 16 + 32 + 1) * 4);
+        CHECK(ignored == (1 + 1 + 1 + 1) * 4);
         CHECK(tox2::rsxIgnoredMethodName(0xFFFFFFFC) == nullptr);
     }
 

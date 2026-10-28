@@ -177,8 +177,7 @@ bool decodePrimitive(std::uint32_t value, RsxPrimitive& out);
 // builder clips it to the surface and trims the mask.
 RsxClear decodeClear(const RsxRegisters& regs, std::uint32_t mask);
 
-// Group name of a written method that has render semantics the frame builder ignores (immediate
-// vertex data other than 4F, element and inline arrays, blit triggers); nullptr otherwise.
+// Group name of a written method in `kIgnoredMethods` (`rsx_decode.cpp`); nullptr otherwise.
 const char* rsxIgnoredMethodName(std::uint32_t method);
 
 }  // namespace tox2
