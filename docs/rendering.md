@@ -832,16 +832,68 @@ Streamline, so `dlaa` falls back to `msaa` there.
   no y flip, so a positive offset moves the content right and down, which is the direction DLSS expects in its
   motion-vector space (origin at the top left). All four sign combinations were measured against 4x renders (see
   below) and the unflipped offset scored best.
-- **Camera motion.** With `--dlaa-motion matrices` there is no per-object motion vector image: it is all zero and
-  `cameraMotionIncluded` is false, so DLSS reprojects the history from the clip-to-previous-clip matrix alone. The
-  default `--dlaa-motion object` writes per-object motion and marks it as including the camera motion. Every gated
-  draw reports its transform (`c0` to `c3`, the viewport scale and offset, the clip size and the depth range) to a
-  per-frame table of at most 16 distinct cameras. The camera of most draws is the frame's camera (the first seen on a tie), and only the draws
-  before the resolve count, because those are what the evaluation sees. The renderer builds from it the matrix that
-  maps a guest vertex to the clip space whose depth is stored in the buffer (the transform, the translator's
-  viewport mapping and the depth range remap), and passes Streamline the clip matrices and the clip-to-previous-clip
-  matrix and its inverse. The guest rows are used as they are: Streamline's matrices are row-major with row
-  vectors, like the guest's.
+- **Camera motion.** Every gated draw reports its transform (`c0` to `c3`, the viewport scale and offset, the clip
+  size and the depth range) to a per-frame table of at most 16 distinct cameras. The camera of most draws is the
+  frame's camera (the first seen on a tie), and only the draws before the resolve count, because those are what the
+  evaluation sees. The renderer builds from it the matrix that maps a guest vertex to the clip space whose depth is
+  stored in the buffer (the transform, the translator's viewport mapping and the depth range remap), and passes
+  Streamline the clip matrices and the clip-to-previous-clip matrix and its inverse. The guest rows are used as they
+  are: Streamline's matrices are row-major with row vectors, like the guest's. With `--dlaa-motion matrices` the
+  motion vector image is all zero and `cameraMotionIncluded` is false, so DLSS reprojects the history from the
+  matrices alone. With `camera` and `object` (the default) the renderer fills the image itself, the same R16G16 image
+  that [frame generation](#frame-generation) gets: a fragment pass computes from the depth, for every pixel, where it
+  was in the previous frame under the camera motion, and the image is marked as including the camera motion. With
+  `object`, the pixels covered by a matched draw take that draw's own vector instead.
+- **Object motion.** The camera vector is right for static geometry only. The scene pass therefore also writes the
+  motion of the objects themselves, for the draws that can be paired with a draw of the previous frame. The game
+  setting is `--object-motion on|off` and the overlay's `Object motion vectors` checkbox (see
+  [`tox2_game` options](runtime-options.md#rendering) and [Debug overlay](runtime.md#debug-overlay)); `off` gives
+  `--dlaa-motion matrices`.
+  - *Which draws.* A candidate is a perspective draw (the jitter gate above) of the one-sample `dlaa` scene pass that
+    writes depth, blended or not. It gets a layout signature (vertex and fragment program hashes, primitive, index
+    count, vertex count, per attribute slot the type, size and stride, and per texture the unit, location, offset
+    and format) that does not contain addresses, and an address signature (the guest addresses of the attribute
+    arrays, `first` and the lowest index). The draw is paired with a candidate of the previous frame that has the same
+    layout: the unused one with the same address if there is one, else the next unused one in draw order, so a draw
+    that appears or disappears does not shift the pairs after it. On every capture pair that was tried all candidates
+    were paired (325 of 325 on the dungeon pairs, 380 of 380 on the cutscene pair, 52 of 52 on the effects pair and 974
+    of 974 on the room), while pairing by address alone paired fewer on some of them.
+  - *The vector.* A matched draw runs a vertex program variant that evaluates the program a second time with the
+    previous frame's vertex arrays, vertex constants and draw uniforms, and so computes the unjittered position of
+    each vertex in both frames (the jitter would otherwise show up as motion). The fragment program variant
+    writes the difference in pixels, as two half floats, and the bits of the depth the fragment wrote into a second
+    colour attachment, the R32G32_UINT object image of the scene size. Only candidate draws have the second
+    attachment; every other draw is drawn as before. Colour blending stays on for the colour attachment and the object
+    image is written without blending, which needs `independentBlend`.
+  - *The depth check.* A draw that is not a candidate does not write the object image, so a pixel that it covered
+    later (a blended draw without depth write, a particle, a screen-space effect) still holds the vector of the
+    surface underneath. A combine pass after the scene compares the depth stored with each vector with the depth
+    sidecar of the pixel, and takes the object vector only if they differ by at most one 24-bit step
+    (1 / 16777215); everywhere else it takes the camera vector. The object image is cleared once per frame to
+    "no vector", at the first candidate draw.
+  - *What keeps the camera vector.* Draws that are not candidates (orthographic and screen-space draws, blended
+    draws that do not write depth, particles), candidates with no partner (a mesh that was not drawn the previous
+    frame, or whose textures or layout changed), and every candidate in the first frame after a gap: the previous
+    frame's data is used only when this frame is the flip right after it and the scene size is the same, and it is
+    dropped when the anti-aliasing mode, the scene size or the render options change.
+    Scrolling textures move without moving a vertex, so they have no vector either.
+  - *Alternating vertex buffers.* The vertex arrays of animated meshes (written by SPU tasks) alternate between two
+    main-memory halves, 0x400000 bytes apart, chosen by the flip parity, and are never rewritten in place. The
+    previous frame's vertices are therefore not at the address the same mesh uses now, and the converted copies sit
+    in per-frame upload memory that is reused and, being write-combined, is not read back. So the previous frame's
+    converted vertex arrays and its 7488-byte vertex constant sets are copied on the GPU, at the end of that frame's own command buffer, into a device-local history buffer (one of two,
+    by the parity of the frame), and the next frame binds them as the previous inputs. The address signature is only a
+    preference, so a mesh that moved between the two halves still pairs. A constant set shared by several draws is
+    copied once. The copy merges neighbouring ranges of one source buffer, which made it 2 regions and 0.051 ms on
+    `frame_9400_room` (1502 regions and 1.158 ms when every range was copied on its own; 543 regions and 0.433 ms on
+    `frame_3761`). The copies hold about 5.0 MB on `frame_3761` and 8.1 MB on `frame_9400_room`; the object and the
+    camera-only images take 11.1 MB at resolution scale 1 and 177 MB at scale 4.
+  - *Device requirements.* 32 vertex input attributes and 32 vertex input bindings (the previous frame's array of
+    slot n is bound at binding and location 16 + n), 84 vertex output and 72 fragment input components, 2 colour
+    attachments and `independentBlend`, which the device then enables (no existing pipeline changes). Where one is
+    missing, the log line `tox2: render: object motion vectors unavailable (<limit>)` names it and the renderer
+    behaves as with `matrices`. MoltenVK has fewer vertex input bindings, so it is such a device; macOS has no DLAA
+    anyway.
 - **The y mirror.** Streamline's motion-vector shader builds a y-up clip position, while the renderer's clip space is
   y-down (the viewport height is positive and the vertex epilogue does not flip). The two clip-to-clip matrices are
   therefore mirrored in y (`F * C * F` with `F = diag(1, -1, 1, 1)`). The jitter is in pixels and needs no mirror.
@@ -858,8 +910,10 @@ Streamline, so `dlaa` falls back to `msaa` there.
   fires for the effects pair 9100 then 9101 although the content is continuous, and not for 9101 then 9100. Keeping
   the history over that step ghosts the screen-space effects, so the rule is kept as it is.
 - **Known limits.** One scene target per frame: there is one DLSS viewport and one output per renderer, and a second
-  anti-aliased scene target would fail the evaluation (the game has one). Only camera motion is described, so moving
-  objects, skinned meshes, scrolling textures and screen-space effects that move on their own can ghost. The camera
+  anti-aliased scene target would fail the evaluation (the game has one). Objects that have no vector of their own
+  (see Object motion above: blended draws without depth write, particles, screen-space effects, unpaired draws,
+  scrolling textures and the first frame after a gap) take the camera's, so those that move on their own can ghost.
+  No capture shows the player walking relative to the world, so that case was not measured. The camera
   table keeps 16 distinct cameras per frame, and a dominant one first seen after 16 others would be missed (no
   capture has so many). In `dlaa` mode the edge effect, which reads the anti-aliased depth as a 2560-wide texture and
   compares the two samples of a pixel, sees equal samples, so it loses the half-intensity steps that `msaa` gives:
@@ -876,11 +930,16 @@ Streamline, so `dlaa` falls back to `msaa` there.
   scores 1.040 on the room and the 1x `supersample` one 0.761, so on that capture DLAA is closer to the 4x render than
   `msaa` and farther than `supersample`. For the camera, the
   cutscene pair 8700 then 8701 was replayed 8 times and its last frame compared: 3.538 with the camera off, 1.072
-  with a reset at every frame, 3.325 with the camera on, and 0.967 with the camera on and the y mirror, which is the
-  default.
-- **Not done.** Per-object motion vectors (matching the draws of two frames, the previous frame's vertex data,
-  skinned meshes, scrolling textures) would remove the ghosting named under the known limits, and are future work.
-  DLSS upscaling, a render scale per phase and HDR colour are not used.
+  with a reset at every frame, 3.325 with the camera on, and 0.967 with the camera on and the y mirror (the
+  `matrices` mode). The same replay with `--dlaa-motion object` scored 0.950 against 0.967 with `matrices`. On the
+  dungeon pairs the object vectors stay within 1 % of the camera-only ones in the frame generation warp check,
+  because the character moves with the world there (see [Frame generation](#frame-generation)). Cost, as the median of
+  interleaved pairs of `--repeat 30 --no-validation --aa-mode dlaa --gpu-timing` runs with `matrices` and `object`:
+  the `record` cycles are x1.018 on `frame_3761` and x1.140 on `frame_9400_room`, and the GPU frame time x1.096
+  (1.04 to 1.14 ms) and x1.112 (0.89 to 0.99 ms).
+- **Not done.** Object vectors for draws that do not write depth (translucent effects, particles), for screen-space
+  effects and for scrolling textures, and for a mesh that has no partner in the previous frame. DLSS upscaling, a
+  render scale per phase and HDR colour are not used.
 
 #### Frame generation
 
@@ -932,9 +991,11 @@ build never has it.
   intervals (for example `--frame-limit off`), is presented as it is. An interval over 100 ms (a load) drops the
   history. The title and menus run at 60 fps and the dungeon at 30 fps, so the multiplier changes when the game does.
 - **Inputs.** DLSS-G is given, for every guest frame, the depth and motion vectors of the DLAA frame and the camera.
-  The depth is the DLAA depth sidecar, copied once per frame slot. The motion vectors are camera motion only: a
+  The depth is the DLAA depth sidecar, copied once per frame slot. The motion vectors start as camera motion: a
   fragment pass computes, for every pixel, where its depth projects in the previous frame from the
-  clip-to-previous-clip matrix of the DLAA camera (the unmirrored one), as an R16G16 image of the scene size. Both
+  clip-to-previous-clip matrix of the DLAA camera (the unmirrored one), as an R16G16 image of the scene size. With
+  object motion on (the default, see Object motion under [DLAA](#dlaa)), the same pass takes the vector a matched draw wrote
+  where it passes the depth check, and the camera vector elsewhere; DLAA gets the same image. Both
   are valid until the present; the vector image is shared by all frames, which is safe because Streamline's default
   blocks the presenting queue until DLSS-G has read it. The black bars of the letterbox are described as a
   sub-rectangle of the backbuffer, so only the picture is interpolated. The history is reset on the first generated
@@ -945,11 +1006,17 @@ build never has it.
   The effects pair 9100 then 9101 is therefore not a cut for frame generation, although it is one for DLAA. The
   convention was measured headless with `tox2_rsxreplay --fg-mv-check`, which warps the
   previous DLAA output with the vectors and compares it with the current one (mean absolute difference over RGB, 0 to
-  255): the vectors cut the difference by 66 % on the cutscene pair 8700 to 8701 and by 87 to 88 % on four dungeon pairs
+  255): with `--dlaa-motion matrices`, the camera vectors cut the difference by 66 % on the cutscene pair 8700 to 8701 and by 87 to 88 % on four dungeon pairs
   (walking forward, and turning the camera), where the warp scored 1.6 to 2.7 against 12.5 to 20.6 without motion; of the four
-  sign combinations, the unflipped one was lowest on every motion pair.
-- **Limits of the inputs.** Moving objects, characters, particles and screen-space effects have no vectors of their own
-  (DLSS-G's optical flow is all that covers them). No HUD-less colour and no UI colour or alpha is tagged: the game
+  sign combinations, the unflipped one was lowest on every motion pair. With the default `object`, which also changes the
+  DLAA images the check compares, it scored 1.911 on 8700 to 8701 against 3.611 with the camera vectors alone, and 2.174 on 8701 to 8700 against 3.745; on the
+  178188 pixels of the first pair whose vector differs from the camera's by more than half a pixel it was 2.177
+  against 10.797. The dungeon pairs are within 1 % of the camera-only figure, because the character moves with the
+  world there.
+- **Limits of the inputs.** Draws without an object vector have only the camera's: blended draws that do not write
+  depth, particles, screen-space effects, draws with no partner in the previous frame, scrolling textures and every
+  draw of the first frame after a gap (DLSS-G's optical flow is all that covers them). On a device without the limits
+  of the object motion path the vectors are the camera's everywhere (see Object motion under [DLAA](#dlaa)). No HUD-less colour and no UI colour or alpha is tagged: the game
   draws its HUD and text into the same buffer as the scene, so during camera motion they take the scene's motion and
   can ghost or warp. The debug overlay and the save data dialog would be interpolated the same way, so generation is
   suspended while either is shown (`overlay open`) and resumes when it is closed. Whether the generated frames look right was not judged by these
@@ -1005,7 +1072,7 @@ build never has it.
   Streamline's warning `slDLSSGGetState must be synchronized with the present thread` is logged once per process. The
   generated frames add about one game frame of latency by their nature; it was not measured. Display behaviour
   (variable refresh rate, the NVIDIA indicator text, the look of the generated frames) was not checked.
-- **Not done.** Per-object motion vectors, HUD-less colour and UI colour or alpha tags (which would remove the HUD
+- **Not done.** Object vectors for the draws named under the limits of the inputs, HUD-less colour and UI colour or alpha tags (which would remove the HUD
   ghosting), tagging the overlay as UI so that it need not suspend generation, a frame rate readout in the window
   title, dynamic multi frame generation (D3D12 only) and frame generation in the `msaa` and `supersample` modes
   (which have no depth image of the scene and no camera tracker).
