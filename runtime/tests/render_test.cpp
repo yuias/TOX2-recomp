@@ -7843,6 +7843,189 @@ void testFgMotionObjectImage(tox2::VkContext& ctx) {
     CHECK(ctx.validationErrorCount() == errors_before);
 }
 
+// The combine pass over a constant depth: pixels whose object image entry is a vector and the depth the draw wrote get
+// that vector, a depth off by two 24-bit steps or no entry gets the camera vector (zero for the identity matrix).
+void testFgMotionObjectCombine(tox2::VkContext& ctx) {
+    if (!ctx.hasD24S8()) {
+        std::printf("fg motion object combine: skipped: no D24S8\n");
+        return;
+    }
+    constexpr std::uint32_t kWidth = 64, kHeight = 36;
+    constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
+    constexpr VkImageAspectFlags kColor = VK_IMAGE_ASPECT_COLOR_BIT;
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+
+    constexpr std::uint32_t kDepthWord = 8388608;  // depth 0.5 as the 24-bit value the image stores
+    const float depth_value = static_cast<float>(kDepthWord) / 16777215.0f;
+    const auto depthBits = [](std::uint32_t word) {
+        return std::bit_cast<std::uint32_t>(static_cast<float>(word) / 16777215.0f);
+    };
+    // packHalf2x16(3, -2): x in the low half. 3.0 is 0x4200 and -2.0 is 0xC000 as half floats.
+    constexpr std::uint32_t kPackedVector = 0x4200u | (0xC000u << 16);
+    struct Rect {
+        std::uint32_t x, y, w, h, vector, depth;
+    };
+    // A valid entry, and an entry whose depth is off by two steps (a later draw changed the pixel).
+    const Rect rects[2] = {{4, 4, 16, 8, kPackedVector, depthBits(kDepthWord)},
+                           {30, 4, 16, 8, kPackedVector, depthBits(kDepthWord + 2)}};
+    const auto inRect = [&](const Rect& rect, std::uint32_t x, std::uint32_t y) {
+        return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+    };
+
+    SlTestImage depth;
+    FgHostBuffer upload, readback;
+    bool ok = createSlTestImage(ctx, ctx.depthStencilFormat(),
+                                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                VK_IMAGE_ASPECT_DEPTH_BIT, kWidth, kHeight, depth) &&
+              createFgHostBuffer(ctx, kPixels * 4, upload) && createFgHostBuffer(ctx, kPixels * 4, readback);
+    CHECK(ok);
+    auto pass = std::make_unique<tox2::FgMotionPass>(ctx);
+    std::shared_ptr<void> retired;
+    bool recreated = false;
+    std::string error;
+    ok = ok && pass->prepare(kWidth, kHeight, retired, recreated, error);
+    CHECK(ok);
+    if (!ok) {
+        std::printf("fg motion object combine: %s\n", error.c_str());
+    } else {
+        auto* words = static_cast<std::uint32_t*>(upload.mapped);
+        for (std::size_t i = 0; i < kPixels; i++) words[i] = kDepthWord;
+        vmaFlushAllocation(ctx.allocator(), upload.allocation, 0, VK_WHOLE_SIZE);
+        const VkImageAspectFlags both = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            slTestBarrier(cmd, depth.image, both, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                          VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+            copy.imageExtent = {kWidth, kHeight, 1};
+            vkCmdCopyBufferToImage(cmd, upload.buffer, depth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            slTestBarrier(cmd, depth.image, both, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                          VK_ACCESS_2_SHADER_READ_BIT);
+        }));
+
+        // The object image of frame 1: the two rectangles on a cleared (no entry) image, as a scene pass leaves it.
+        CHECK(!pass->hasObjectWrites(1));
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            pass->beginObjectWrites(cmd, 1);
+            VkRenderingAttachmentInfo attachment{};
+            attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            attachment.imageView = pass->objectView();
+            attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderingInfo rendering{};
+            rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+            rendering.renderArea = {{0, 0}, {kWidth, kHeight}};
+            rendering.layerCount = 1;
+            rendering.colorAttachmentCount = 1;
+            rendering.pColorAttachments = &attachment;
+            vkCmdBeginRendering(cmd, &rendering);
+            for (const Rect& rect : rects) {
+                VkClearAttachment clear{};
+                clear.aspectMask = kColor;
+                clear.colorAttachment = 0;
+                clear.clearValue.color.uint32[0] = rect.vector;
+                clear.clearValue.color.uint32[1] = rect.depth;
+                const VkClearRect area = {
+                        {{static_cast<std::int32_t>(rect.x), static_cast<std::int32_t>(rect.y)}, {rect.w, rect.h}},
+                        0,
+                        1};
+                vkCmdClearAttachments(cmd, 1, &clear, 1, &area);
+            }
+            vkCmdEndRendering(cmd);
+        }));
+        CHECK(pass->hasObjectWrites(1) && !pass->hasObjectWrites(2));
+
+        // Runs the combine pass and returns the final vectors (x, y per pixel).
+        const auto run = [&](const tox2::Mat4& matrix) {
+            std::vector<float> vectors(kPixels * 2, 1000.0f);
+            tox2::FgMotionInputs inputs;
+            inputs.depth = depth.view;
+            inputs.clip_to_prev_clip = matrix;
+            inputs.object = true;
+            std::string run_error;
+            const bool done = fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+                CHECK(pass->recordMotion(cmd, inputs, run_error));
+                const tox2::SlImage motion = pass->motionImage();
+                slTestBarrier(cmd, motion.image, kColor, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_NONE, VK_ACCESS_2_TRANSFER_READ_BIT);
+                VkBufferImageCopy copy{};
+                copy.imageSubresource = {kColor, 0, 0, 1};
+                copy.imageExtent = {kWidth, kHeight, 1};
+                vkCmdCopyImageToBuffer(cmd, motion.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1,
+                                       &copy);
+                fgHostBarrier(cmd);
+            });
+            CHECK(done);
+            if (!run_error.empty()) std::printf("fg motion object combine: %s\n", run_error.c_str());
+            if (done) {
+                vmaInvalidateAllocation(ctx.allocator(), readback.allocation, 0, VK_WHOLE_SIZE);
+                const auto* halves = static_cast<const std::uint16_t*>(readback.mapped);
+                for (std::size_t i = 0; i < kPixels * 2; i++) vectors[i] = halfToFloat(halves[i]);
+            }
+            return vectors;
+        };
+
+        // The identity matrix has no camera motion: the object vector inside the valid rectangle, zero elsewhere.
+        const std::vector<float> still = run(tox2::mat4Identity());
+        CHECK(pass->objectLayout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        std::size_t object_pixels = 0, stale_pixels = 0, wrong = 0;
+        for (std::uint32_t y = 0; y < kHeight; y++) {
+            for (std::uint32_t x = 0; x < kWidth; x++) {
+                const std::size_t at = (static_cast<std::size_t>(y) * kWidth + x) * 2;
+                const bool valid = inRect(rects[0], x, y);
+                const float want_x = valid ? 3.0f : 0.0f, want_y = valid ? -2.0f : 0.0f;
+                if (std::abs(still[at] - want_x) > 0.01f || std::abs(still[at + 1] - want_y) > 0.01f) wrong++;
+                object_pixels += valid ? 1 : 0;
+                stale_pixels += inRect(rects[1], x, y) ? 1 : 0;
+            }
+        }
+        std::printf("fg motion object combine: %zu object pixels, %zu stale pixels, %zu wrong\n", object_pixels,
+                    stale_pixels, wrong);
+        CHECK(object_pixels == 16 * 8 && stale_pixels == 16 * 8);
+        CHECK(wrong == 0);
+
+        // A moving camera: outside the valid rectangle the vector is the camera's, on the depth plane of the test.
+        const tox2::Mat4 current = fgTestWorldToClip(0.4f, 0.15f, 0.0f, 2.0f);
+        const tox2::Mat4 previous = fgTestWorldToClip(0.0f, 0.0f, 0.0f, 0.0f);
+        tox2::Mat4 current_inverse{};
+        CHECK(tox2::mat4Inverse(current, current_inverse));
+        const tox2::Mat4 clip_to_prev_clip = tox2::mat4Multiply(current_inverse, previous);
+        const std::vector<float> moved = run(clip_to_prev_clip);
+        float worst = 0.0f, largest = 0.0f;
+        for (std::uint32_t i = 0; i < 40; i++) {
+            const std::uint32_t x = (i * 7 + 3) % kWidth;
+            const std::uint32_t y = (i * 5 + 2) % kHeight;
+            const std::size_t at = (static_cast<std::size_t>(y) * kWidth + x) * 2;
+            if (inRect(rects[0], x, y)) {
+                worst = std::max({worst, std::abs(moved[at] - 3.0f), std::abs(moved[at + 1] + 2.0f)});
+                continue;
+            }
+            const float px = static_cast<float>(x) + 0.5f, py = static_cast<float>(y) + 0.5f;
+            const std::array<float, 4> clip = {px / kWidth * 2.0f - 1.0f, py / kHeight * 2.0f - 1.0f, depth_value,
+                                               1.0f};
+            const std::array<float, 4> q = tox2::mat4Transform(clip, clip_to_prev_clip);
+            CHECK(q[3] > 0.0f);
+            const float mv_x = (q[0] / q[3] + 1.0f) * 0.5f * kWidth - px;
+            const float mv_y = (q[1] / q[3] + 1.0f) * 0.5f * kHeight - py;
+            worst = std::max({worst, std::abs(moved[at] - mv_x), std::abs(moved[at + 1] - mv_y)});
+            largest = std::max({largest, std::abs(mv_x), std::abs(mv_y)});
+        }
+        std::printf("fg motion object combine: camera largest %.2f px, worst error %.4f px\n", largest, worst);
+        CHECK(largest > 1.0f);
+        CHECK(worst < 0.01f);
+    }
+
+    pass.reset();
+    vkDeviceWaitIdle(ctx.device());
+    destroyFgHostBuffer(ctx, readback);
+    destroyFgHostBuffer(ctx, upload);
+    destroySlTestImage(ctx, depth);
+    CHECK(ctx.validationErrorCount() == errors_before);
+}
+
 // The history buffer: frame 1's vertex arrays and constant blocks, recorded from an upload-like buffer, come back byte
 // for byte from the ranges frame 2's matches return; draws sharing a constants range share its copy; a frame that does
 // not follow on, or a scene of another size, matches nothing; a larger frame replaces the buffer of its parity.
@@ -8162,6 +8345,7 @@ int main() {
     testFgMotionVectors(*ctx);
     testFgWarpCheck(*ctx);
     testFgMotionObjectImage(*ctx);
+    testFgMotionObjectCombine(*ctx);
     testObjectMotionHistory(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 

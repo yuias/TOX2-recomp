@@ -1405,6 +1405,9 @@ bool RsxRenderer::recordFgMotion(const DlaaPass::Resources& dlaa, const RenderTa
     if (retired) slots_[current_slot_]->keep_alive.push_back(std::move(retired));
 
     FgMotionInputs inputs;
+    // The scene pass wrote the object image for this frame only when a candidate draw reached an instance.
+    fg_motion_object_ = options_.dlaa_debug.motion == DlaaMotion::Object && fg_motion_->hasObjectWrites(frame_index_);
+    inputs.object = fg_motion_object_;
     inputs.depth = depth.msaa->depth_view != VK_NULL_HANDLE ? depth.msaa->depth_view : depth.msaa->view;
     // The camera pair gives the same clip-to-clip transform as the DLAA matrices, without their y flip.
     Mat4 inverse{};
@@ -1433,7 +1436,7 @@ bool RsxRenderer::recordFgMotion(const DlaaPass::Resources& dlaa, const RenderTa
 
 bool RsxRenderer::recordFgMvCheck(const DlaaPass::Resources& dlaa, bool reset, std::string& error) {
     if (!fg_motion_->recordWarpCheck(outsideCmd(), dlaa.output.view, VK_IMAGE_LAYOUT_GENERAL, fg_motion_->motionView(),
-                                     error)) {
+                                     error, fg_motion_object_ ? fg_motion_->cameraView() : VK_NULL_HANDLE)) {
         return false;
     }
     fg_mv_pending_ = true;

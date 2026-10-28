@@ -433,8 +433,8 @@ private:
     // widened to the 2W layout columns the game's resolve expects, with the texture remap applied. Null after a counted
     // failure; the caller then reads the layout image instead.
     VkImageView dlaaView(RenderTarget& scene, std::uint32_t remap);
-    // Records the motion vector pass at the DLAA tap, from the depth that went into the evaluation. False with `error`
-    // on failure.
+    // Records the motion vector pass at the DLAA tap, from the depth that went into the evaluation; in Object mode with
+    // the object image when the frame's scene pass wrote it. False with `error` on failure.
     bool recordFgMotion(const DlaaPass::Resources& dlaa, const RenderTarget& depth,
                         const DlaaCameraTracker::Result& camera, std::string& error);
     // FgDebug::mv_check: records the warp check of the DLAA output against the motion vectors recordFgMotion wrote,
@@ -505,8 +505,9 @@ private:
         std::uint32_t frame = 0;  // frame_index_; 0 = none yet
         std::uint32_t width = 0, height = 0;
     } object_motion_frame_;
-    bool fg_mv_pending_ = false;  // a warp check was recorded and its frame has not been submitted and read yet
-    bool fg_mv_reset_ = false;    // the DLAA evaluation of that frame reset its history
+    bool fg_motion_object_ = false;  // recordFgMotion combined the object image, so the camera-only image is valid
+    bool fg_mv_pending_ = false;     // a warp check was recorded and its frame has not been submitted and read yet
+    bool fg_mv_reset_ = false;       // the DLAA evaluation of that frame reset its history
     // Per frame slot: the depth frame generation reads, which no later pass of the frame may write.
     std::array<std::shared_ptr<FgDepthCopy>, kFramesInFlight> fg_depth_;
     // What the DLAA tap handed to frame generation for the frame being recorded.

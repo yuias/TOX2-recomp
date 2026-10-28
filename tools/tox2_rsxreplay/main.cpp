@@ -1095,10 +1095,13 @@ int main(int argc, char** argv) {
                     last_frame_matched = stats.object_motion_matched - matched_before;
                     if (stats.fg_mv_checks != fg_mv_printed) {
                         fg_mv_printed = stats.fg_mv_checks;
-                        std::printf("fg mv: frame %zu, warp mean %.3f, no-motion mean %.3f, %u pixels%s\n",
-                                    pass * frames.size() + index + 1, stats.fg_mv_last.warp_mean,
-                                    stats.fg_mv_last.no_motion_mean, stats.fg_mv_last.pixels,
-                                    stats.fg_mv_last_reset ? ", reset" : "");
+                        const tox2::FgWarpStats& warp = stats.fg_mv_last;
+                        std::printf(
+                                "fg mv: frame %zu, warp mean %.3f, no-motion mean %.3f, %u pixels, camera warp mean "
+                                "%.3f, object pixels %u, object warp mean %.3f, object camera warp mean %.3f%s\n",
+                                pass * frames.size() + index + 1, warp.warp_mean, warp.no_motion_mean, warp.pixels,
+                                warp.camera_warp_mean, warp.object_pixels, warp.object_warp_mean,
+                                warp.object_camera_warp_mean, stats.fg_mv_last_reset ? ", reset" : "");
                     }
                     const bool last_frame = pass + 1 == loop && index + 1 == frames.size();
                     if (!last_frame && !out_dir.empty() && renderer.valid()) {
