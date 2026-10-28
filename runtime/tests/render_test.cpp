@@ -718,22 +718,40 @@ void testDlaaMatrices() {
 
 // Needs no Vulkan device.
 void testDlaaCameraCut() {
-    CHECK(!tox2::dlaaCameraCut(tox2::mat4Identity()));
+    CHECK(!tox2::dlaaCameraCut(tox2::mat4Identity(), tox2::kDlaaCameraCutProbeZ));
     // The centre moves by 0.6 NDC: a cut. By 0.3: the history is still usable.
-    CHECK(tox2::dlaaCameraCut(translationMatrix(0.6f, 0.0f, 0.0f)));
-    CHECK(tox2::dlaaCameraCut(translationMatrix(0.0f, -0.6f, 0.0f)));
-    CHECK(!tox2::dlaaCameraCut(translationMatrix(0.3f, 0.0f, 0.0f)));
-    CHECK(!tox2::dlaaCameraCut(translationMatrix(0.0f, 0.2f, 0.2f)));
+    CHECK(tox2::dlaaCameraCut(translationMatrix(0.6f, 0.0f, 0.0f), tox2::kDlaaCameraCutProbeZ));
+    CHECK(tox2::dlaaCameraCut(translationMatrix(0.0f, -0.6f, 0.0f), tox2::kDlaaCameraCutProbeZ));
+    CHECK(!tox2::dlaaCameraCut(translationMatrix(0.3f, 0.0f, 0.0f), tox2::kDlaaCameraCutProbeZ));
+    CHECK(!tox2::dlaaCameraCut(translationMatrix(0.0f, 0.2f, 0.2f), tox2::kDlaaCameraCutProbeZ));
     // A matrix that sends the test points behind the camera (w <= 0).
     tox2::Mat4 behind = tox2::mat4Identity();
     behind[15] = -1.0f;
-    CHECK(tox2::dlaaCameraCut(behind));
+    CHECK(tox2::dlaaCameraCut(behind, tox2::kDlaaCameraCutProbeZ));
     tox2::Mat4 at_camera = tox2::mat4Identity();
     at_camera[15] = 0.0f;
-    CHECK(tox2::dlaaCameraCut(at_camera));
+    CHECK(tox2::dlaaCameraCut(at_camera, tox2::kDlaaCameraCutProbeZ));
     tox2::Mat4 not_a_number = tox2::mat4Identity();
     not_a_number[0] = std::numeric_limits<float>::quiet_NaN();
-    CHECK(tox2::dlaaCameraCut(not_a_number));
+    CHECK(tox2::dlaaCameraCut(not_a_number, tox2::kDlaaCameraCutProbeZ));
+
+    // A camera that walks 8 near-plane distances forward in one frame: the DLAA test points (about 2 near-plane
+    // distances away) jump, the frame generation ones (about 100 away) barely move.
+    const tox2::Mat4 projection = perspectiveMatrix(1.2f, 2.1f, 0.5f, 1000.0f);
+    const tox2::Mat4 walked = tox2::mat4Multiply(translationMatrix(0.0f, 0.0f, -4.0f), projection);
+    tox2::Mat4 walked_inverse{};
+    CHECK(tox2::mat4Inverse(walked, walked_inverse));
+    const tox2::Mat4 walk = tox2::mat4Multiply(walked_inverse, projection);
+    CHECK(tox2::dlaaCameraCut(walk, tox2::kDlaaCameraCutProbeZ));
+    CHECK(!tox2::dlaaCameraCut(walk, tox2::kFgCameraCutProbeZ));
+    // A quarter turn is a cut at every depth.
+    const tox2::Mat4 quarter_turn = {0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1};
+    const tox2::Mat4 turned = tox2::mat4Multiply(quarter_turn, projection);
+    tox2::Mat4 turned_inverse{};
+    CHECK(tox2::mat4Inverse(turned, turned_inverse));
+    const tox2::Mat4 turn = tox2::mat4Multiply(turned_inverse, projection);
+    CHECK(tox2::dlaaCameraCut(turn, tox2::kDlaaCameraCutProbeZ));
+    CHECK(tox2::dlaaCameraCut(turn, tox2::kFgCameraCutProbeZ));
 }
 
 // A camera that differs from the others by `shift`: a perspective projection behind a translation.

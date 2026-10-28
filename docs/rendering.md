@@ -938,7 +938,11 @@ build never has it.
   blocks the presenting queue until DLSS-G has read it. The black bars of the letterbox are described as a
   sub-rectangle of the backbuffer, so only the picture is interpolated. The history is reset on the first generated
   frame after a frame without generation, when the camera appears, disappears or cuts, and when the game rate class
-  or the scene size changes. The convention was measured headless with `tox2_rsxreplay --fg-mv-check`, which warps the
+  or the scene size changes. The cut is the DLAA one with its nine probe points moved to clip depth 0.99, about 100
+  near-plane distances from the eye instead of about 2: a camera walking through the dungeon moved the DLAA probes by
+  up to 0.735 NDC per frame (3760 to 3761), so every walking frame was a cut, while at depth 0.99 they move by 0.074.
+  The effects pair 9100 then 9101 is therefore not a cut for frame generation, although it is one for DLAA. The
+  convention was measured headless with `tox2_rsxreplay --fg-mv-check`, which warps the
   previous DLAA output with the vectors and compares it with the current one (mean absolute difference over RGB, 0 to
   255): the vectors cut the difference by 66 % on the cutscene pair 8700 to 8701 and by 87 to 88 % on four dungeon pairs
   (walking forward, and turning the camera), where the warp scored 1.6 to 2.7 against 12.5 to 20.6 without motion; of the four

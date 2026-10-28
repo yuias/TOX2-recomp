@@ -34,6 +34,8 @@ public:
     struct Result {
         DlaaMatrices matrices;
         bool reset = true;
+        // The same test with the frame generation probe depth (kFgCameraCutProbeZ).
+        bool fg_reset = true;
         // The unflipped view-to-clip transforms of the two cameras (current and previous frame), set whenever both
         // frames have an invertible camera. Motion vectors need the unflipped clip-to-clip transform regardless of
         // the y flip that `matrices` carries for Streamline.

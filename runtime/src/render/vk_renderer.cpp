@@ -1249,11 +1249,15 @@ VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
         // Without per-object motion vectors the history is reprojected by the camera alone, from the projections of
         // the frame's scene draws; Off and Reset describe no camera motion.
         DlaaCameraTracker::Result camera;
+        // Frame generation takes a camera cut only where the scene itself jumps (see kFgCameraCutProbeZ).
+        bool fg_reset = reset;
         if (options_.dlaa_debug.camera == DlaaCamera::On) {
             camera = dlaa_camera_.resolve(options_.dlaa_debug.flip_clip_y);
             reset = reset || camera.reset;
+            fg_reset = fg_reset || camera.fg_reset;
         } else {
             reset = reset || options_.dlaa_debug.camera == DlaaCamera::Reset;
+            fg_reset = reset;
         }
 
         if (!res.motion_cleared) {
@@ -1332,14 +1336,14 @@ VkImageView RsxRenderer::dlaaView(RenderTarget& scene, std::uint32_t remap) {
                 std::string tag_error;
                 SlImage depth_copy;
                 if (recorded && copyFgDepth(*depth, depth_copy, tag_error) &&
-                    tagFgInputs(depth_copy, inputs, camera, width, height, reset, outsideCmd(), tag_error)) {
+                    tagFgInputs(depth_copy, inputs, camera, width, height, fg_reset, outsideCmd(), tag_error)) {
                     fg_tapped_.inputs = FrameGenInputs::Tagged;
                 } else if (recorded) {
                     logOnce(LogLevel::Warn, "render-fg-tag-failed",
                             "tox2: render: frame generation inputs not tagged ({})", tag_error);
                 }
             }
-            if (recorded && mv_check && !recordFgMvCheck(res, reset, check_error)) {
+            if (recorded && mv_check && !recordFgMvCheck(res, fg_reset, check_error)) {
                 logOnce(LogLevel::Warn, "render-fg-mv-failed", "tox2: render: motion vector check failed ({})",
                         check_error);
             }
