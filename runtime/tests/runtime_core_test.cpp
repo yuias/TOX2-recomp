@@ -1405,6 +1405,29 @@ void testLatencyStats() {
     CHECK(c.over > 0);
 }
 
+// An ignored method is logged as a warning on its first hit only, with or without the frame builder.
+void testRsxIgnoredMethodWarning() {
+    std::vector<std::string> lines;
+    tox2::setLogSink([&](std::string_view line) { lines.emplace_back(line); });
+    tox2::resetLogOnce();
+    tox2::RsxConsumer headless(nullptr);  // the written methods touch no guest memory
+    CHECK(headless.write(0xC40C, 0));
+    CHECK(headless.write(0xC40C, 0));
+    CHECK(headless.write(0x1E40, 0x3F800000));  // decoded float form: no warning
+    CHECK(headless.write(0x1944, 0x01020304));  // decoded integer form: no warning
+    tox2::resetLogOnce();
+    tox2::RsxConsumer drawing(nullptr);
+    drawing.enableFrameBuilder();
+    CHECK(drawing.write(0x1944, 0x01020304));
+    CHECK(drawing.write(0xC40C, 0));
+    CHECK(drawing.write(0xC40C, 0));
+    tox2::setLogSink({});
+
+    CHECK(lines.size() == 2);
+    CHECK(lines.size() == 2 && lines[0].find("NV3089_IMAGE_IN (0xC40C)") != std::string::npos);
+    CHECK(lines.size() == 2 && lines[1].find("NV3089_IMAGE_IN (0xC40C)") != std::string::npos);
+}
+
 void testDisableFrameBuilder() {
     tox2::RsxConsumer plain(nullptr);  // the base is only dereferenced when commands are parsed
     CHECK(!plain.frameBuilderEnabled());
@@ -8465,6 +8488,60 @@ void testRsxRegisters() {
     CHECK(static_cast<int>(tox2::RsxPrimitive::Points) == 1 && static_cast<int>(tox2::RsxPrimitive::Polygon) == 10);
 }
 
+void testRsxImmediateIntegerForms() {
+    auto regs = std::make_unique<tox2::RsxRegisters>();
+    regs->reset();
+    const auto expectSlot = [](const tox2::RsxRegisters& source, std::uint32_t slot, const float (&expected)[4]) {
+        const auto attribs = tox2::decodeDefaultAttribs(source);
+        for (std::uint32_t c = 0; c < 4; c++) {
+            if (std::abs(attribs[slot * 4 + c] - expected[c]) > 1e-6f) return false;
+        }
+        return true;
+    };
+    const auto written = [&](std::uint32_t slot) { return (regs->vertex_default_written & (1u << slot)) != 0; };
+
+    // 2S_M: one register per slot, the first component in the low half, the others (0, 1).
+    regs->apply(tox2::kMethodNv4097SetVertexData2sM + 1 * 4, 0xFFFE0003);
+    CHECK(expectSlot(*regs, 1, {3.0f, -2.0f, 0.0f, 1.0f}) && written(1));
+
+    // 4UB_M: byte i is component i, normalized by 255.
+    regs->apply(tox2::kMethodNv4097SetVertexData4ubM + 2 * 4, 0x04030201);
+    CHECK(expectSlot(*regs, 2, {1.0f / 255.0f, 2.0f / 255.0f, 3.0f / 255.0f, 4.0f / 255.0f}) && written(2));
+
+    // 4S_M: two registers per slot, signed 16-bit values converted without scaling.
+    regs->apply(tox2::kMethodNv4097SetVertexData4sM + 3 * 8, 0x00020001);
+    regs->apply(tox2::kMethodNv4097SetVertexData4sM + 3 * 8 + 4, 0x8000FFFF);
+    CHECK(expectSlot(*regs, 3, {1.0f, 2.0f, -1.0f, -32768.0f}) && written(3));
+
+    // SCALED4S_M: (v + 0.5) / 32767.5 like RPCS3's s1 fetch.
+    regs->apply(tox2::kMethodNv4097SetVertexDataScaled4sM + 4 * 8, 0x80007FFF);
+    regs->apply(tox2::kMethodNv4097SetVertexDataScaled4sM + 4 * 8 + 4, 0x00000000);
+    CHECK(expectSlot(*regs, 4, {1.0f, -1.0f, 1.0f / 65535.0f, 1.0f / 65535.0f}) && written(4));
+
+    // One word of a two-word form keeps the components of the other word.
+    const float previous[4] = {0.25f, 0.5f, 0.75f, 2.0f};
+    for (std::uint32_t i = 0; i < 4; i++)
+        regs->apply(tox2::kMethodNv4097SetVertexData4fM + 6 * 16 + i * 4, std::bit_cast<std::uint32_t>(previous[i]));
+    regs->apply(tox2::kMethodNv4097SetVertexData4sM + 6 * 8 + 4, 0xFFFF0007);
+    CHECK(expectSlot(*regs, 6, {0.25f, 0.5f, 7.0f, -1.0f}) && written(6));
+
+    // The fourth register of a 3F slot carries nothing: no change and no written bit.
+    regs->apply(tox2::kMethodNv4097SetVertexData3fM + 8 * 16 + 12, std::bit_cast<std::uint32_t>(5.0f));
+    CHECK(expectSlot(*regs, 8, {0.0f, 0.0f, 0.0f, 0.0f}) && !written(8));
+    CHECK(regs->reg(tox2::kMethodNv4097SetVertexData3fM + 8 * 16 + 12) == std::bit_cast<std::uint32_t>(5.0f));
+    regs->apply(tox2::kMethodNv4097SetVertexData3fM + 1 * 16 + 12, std::bit_cast<std::uint32_t>(5.0f));
+    CHECK(expectSlot(*regs, 1, {3.0f, -2.0f, 0.0f, 1.0f}));
+    CHECK(!written(0) && !written(5) && !written(7) && regs->vertex_default_written == 0x5E);
+
+    // A capture keeps the converted slots and the written mask.
+    tox2::RsxCaptureWriter writer(0, *regs, {});
+    tox2::RsxCaptureReader reader;
+    std::string error;
+    CHECK(reader.parse(writer.finish({}, 0).flatten(), error));
+    CHECK(reader.startRegisters().vertex_default_written == regs->vertex_default_written);
+    CHECK(tox2::decodeDefaultAttribs(reader.startRegisters()) == tox2::decodeDefaultAttribs(*regs));
+}
+
 void testRsxRegisterGenerations() {
     auto regs = std::make_unique<tox2::RsxRegisters>();
     regs->reset();
@@ -8750,11 +8827,13 @@ void testRsxDecode() {
     CHECK(clear.surfaces.clip_w == 1280);
 
     // Written methods with render semantics that the builder ignores.
-    CHECK(std::string_view(tox2::rsxIgnoredMethodName(0x1940)) == "NV4097_SET_VERTEX_DATA4UB_M");
-    CHECK(tox2::rsxIgnoredMethodName(0x197C) != nullptr && tox2::rsxIgnoredMethodName(0x1900) != nullptr);
+    CHECK(tox2::rsxIgnoredMethodName(0x1940) == nullptr);  // the integer forms are decoded into the defaults
+    CHECK(tox2::rsxIgnoredMethodName(0x197C) == nullptr && tox2::rsxIgnoredMethodName(0x1900) == nullptr);
+    CHECK(tox2::rsxIgnoredMethodName(0x0A80) == nullptr);
     CHECK(tox2::rsxIgnoredMethodName(0x1500) == nullptr);  // the float forms are decoded into the defaults
     CHECK(tox2::rsxIgnoredMethodName(0x1C00) == nullptr && tox2::rsxIgnoredMethodName(0x1814) == nullptr);
-    CHECK(tox2::rsxIgnoredMethodName(0x1818) != nullptr && tox2::rsxIgnoredMethodName(0xC40C) != nullptr);
+    CHECK(tox2::rsxIgnoredMethodName(0x1818) == nullptr);  // the inline array becomes a draw
+    CHECK(tox2::rsxIgnoredMethodName(0xC40C) != nullptr);
 
     // The lookup is a bitmap built from the ranges; it must agree with the plain range scan for every offset,
     // unaligned ones and the whole 16-bit method space and beyond included.
@@ -8764,13 +8843,6 @@ void testRsxDecode() {
             const char* name;
         };
         const Range ranges[] = {
-                {tox2::kMethodNv4097SetVertexDataScaled4sM, 32, "NV4097_SET_VERTEX_DATA_SCALED4S_M"},
-                {tox2::kMethodNv4097ArrayElement16, 1, "NV4097_ARRAY_ELEMENT16"},
-                {tox2::kMethodNv4097ArrayElement32, 1, "NV4097_ARRAY_ELEMENT32"},
-                {tox2::kMethodNv4097InlineArray, 1, "NV4097_INLINE_ARRAY"},
-                {tox2::kMethodNv4097SetVertexData2sM, 16, "NV4097_SET_VERTEX_DATA2S_M"},
-                {tox2::kMethodNv4097SetVertexData4ubM, 16, "NV4097_SET_VERTEX_DATA4UB_M"},
-                {tox2::kMethodNv4097SetVertexData4sM, 32, "NV4097_SET_VERTEX_DATA4S_M"},
                 {tox2::kMethodNv3089ImageIn, 1, "NV3089_IMAGE_IN"},
         };
         std::size_t ignored = 0;
@@ -8787,7 +8859,7 @@ void testRsxDecode() {
             if (actual != nullptr && expected != nullptr) CHECK(std::string_view(actual) == expected);
             ignored += actual != nullptr;
         }
-        CHECK(ignored == (32 + 1 + 1 + 1 + 16 + 16 + 32 + 1) * 4);
+        CHECK(ignored == 1 * 4);
         CHECK(tox2::rsxIgnoredMethodName(0xFFFFFFFC) == nullptr);
     }
 
@@ -9519,7 +9591,7 @@ void testRsxFrameBuilder() {
           first_program.fp_ucode[8] == 0x00010000);
     CHECK(second_program.fp_constants[0] == 0x40000000 && first_program.fp_hash == second_program.fp_hash);
 
-    // Flips carry the display buffer; ignored methods are counted.
+    // Flips carry the display buffer; an inline array word outside a clause is counted and dropped.
     write(0x1818, 0x12345678);
     tox2::RsxDisplayBuffer display;
     display.offset = 0x400000;
@@ -9533,7 +9605,7 @@ void testRsxFrameBuilder() {
     CHECK(std::get<tox2::RsxFlip>(commands[1]).flip_index == 1 && std::get<tox2::RsxFlip>(commands[1]).buffer == 2);
     CHECK(std::get<tox2::RsxFlip>(commands[1]).offset == 0x400000 &&
           std::get<tox2::RsxFlip>(commands[1]).height == 720);
-    CHECK(unimplementedCount("method NV4097_INLINE_ARRAY") == 1);
+    CHECK(unimplementedCount("state inline array outside a clause") == 1);
     CHECK(std::get<tox2::RsxFlip>(commands[0]).completed_us == 0);  // no time passed: replays leave 0
 
     // The completion time given by the RSX thread rides on the flip command.
@@ -9601,6 +9673,221 @@ std::uint64_t hashBigEndian(const std::vector<std::uint32_t>& words) {
         for (int shift = 24; shift >= 0; shift -= 8) bytes.push_back(static_cast<std::uint8_t>(word >> shift));
     }
     return tox2::rsxHash64(bytes.data(), bytes.size());
+}
+
+// ARRAY_ELEMENT16/32 inside a clause: indices from the FIFO, vertices from the arrays in memory.
+void testRsxArrayElementDraws() {
+    tox2::rsxUnimplementedReset();
+    FakeRsxMemory memory;
+    for (std::uint32_t i = 0; i < 256; i++) memory.main[0x1000 + i] = static_cast<std::uint8_t>(i);
+    FragmentRig rig(memory);
+    rig.write(0x08E4, 0x2000 | 1);
+    memory.putWord(0, 0x2000, 0x00010000);
+    CHECK(tox2::rsxIgnoredMethodName(0x180C) == nullptr && tox2::rsxIgnoredMethodName(0x1810) == nullptr);
+
+    const auto elementClause = [&] {
+        rig.write(0x1808, 6);  // triangle strip
+        rig.write(0x180C, (11u << 16) | 10u);
+        rig.write(0x1810, 12);
+        rig.write(0x1810, 13);
+        rig.write(0x1808, 0);
+    };
+    elementClause();
+    std::vector<tox2::RsxCommand> commands = rig.builder.takeCommands();
+    CHECK(commands.size() == 1 && std::holds_alternative<tox2::RsxDraw>(commands[0]));
+    if (commands.size() != 1 || !std::holds_alternative<tox2::RsxDraw>(commands[0])) return;
+    const tox2::RsxDraw immediate = std::get<tox2::RsxDraw>(commands[0]);
+    CHECK(immediate.indexed && immediate.index_type == tox2::kRsxIndexTypeU32 && immediate.count == 4);
+    CHECK((immediate.index_data == std::vector<std::uint8_t>{0, 0, 0, 10, 0, 0, 0, 11, 0, 0, 0, 12, 0, 0, 0, 13}));
+    CHECK(immediate.min_index == 10 && immediate.max_index == 13 && !immediate.restart_used);
+    // Elements 10..13 of the 12-byte array start 120 bytes in.
+    CHECK(immediate.attribs.size() == 1 && immediate.attribs[0].has_data && immediate.attribs[0].data_offset == 0);
+    CHECK(immediate.vertex_data.size() == 48 && immediate.vertex_data[0] == 120 && immediate.vertex_data[47] == 167);
+
+    // Deferred mode builds the same draw from the indices kept in the builder.
+    rig.builder.setDeferDrawEnd(true);
+    elementClause();
+    CHECK(rig.builder.drawPending());
+    rig.builder.finishDraw(*rig.regs);
+    rig.builder.setDeferDrawEnd(false);
+    commands = rig.builder.takeCommands();
+    CHECK(commands.size() == 1 && std::holds_alternative<tox2::RsxDraw>(commands[0]));
+    if (commands.size() == 1 && std::holds_alternative<tox2::RsxDraw>(commands[0])) {
+        const tox2::RsxDraw& deferred = std::get<tox2::RsxDraw>(commands[0]);
+        CHECK(deferred.indexed && deferred.index_type == immediate.index_type && deferred.count == immediate.count);
+        CHECK(deferred.index_data == immediate.index_data && deferred.vertex_data == immediate.vertex_data);
+        CHECK(deferred.min_index == immediate.min_index && deferred.max_index == immediate.max_index);
+        CHECK(deferred.attribs.size() == 1 && deferred.attribs[0].data_offset == immediate.attribs[0].data_offset);
+    }
+
+    // An element outside a clause is counted and dropped.
+    tox2::rsxUnimplementedReset();
+    rig.write(0x1810, 5);
+    CHECK(unimplementedCount("state array element outside a clause") == 1);
+    CHECK(rig.builder.takeCommands().empty());
+
+    // Two kinds of draw command in one clause drop the clause, whichever comes first.
+    rig.write(0x1808, 6);
+    rig.write(0x1814, 3u << 24);
+    rig.write(0x1810, 1);
+    rig.write(0x1808, 0);
+    CHECK(unimplementedCount("state mixed draw commands in one clause") == 1);
+    CHECK(rig.builder.takeCommands().empty());
+    rig.write(0x1808, 6);
+    rig.write(0x1810, 1);
+    rig.write(0x1814, 3u << 24);
+    rig.write(0x1808, 0);
+    CHECK(unimplementedCount("state mixed draw commands in one clause") == 2);
+    CHECK(rig.builder.takeCommands().empty());
+
+    // The restart index is skipped when the range is scanned.
+    rig.write(tox2::kMethodNv4097SetRestartIndexEnable, 1);
+    rig.write(tox2::kMethodNv4097SetRestartIndex, 0xFFFFFFFF);
+    rig.write(0x1808, 6);
+    for (const std::uint32_t index : {0u, 1u, 2u, 0xFFFFFFFFu, 1u, 3u, 2u}) rig.write(0x1810, index);
+    rig.write(0x1808, 0);
+    commands = rig.builder.takeCommands();
+    CHECK(commands.size() == 1 && std::holds_alternative<tox2::RsxDraw>(commands[0]));
+    if (commands.size() == 1 && std::holds_alternative<tox2::RsxDraw>(commands[0])) {
+        const tox2::RsxDraw& restart = std::get<tox2::RsxDraw>(commands[0]);
+        CHECK(restart.count == 7 && restart.restart_used && restart.min_index == 0 && restart.max_index == 3);
+        CHECK(restart.vertex_data.size() == 48);
+    }
+}
+
+// INLINE_ARRAY inside a clause: the vertex data comes from the FIFO as one interleaved block.
+void testRsxInlineArrayDraws() {
+    tox2::rsxUnimplementedReset();
+    FakeRsxMemory memory;
+    FragmentRig rig(memory);
+    rig.write(0x08E4, 0x2000 | 1);
+    memory.putWord(0, 0x2000, 0x00010000);
+    CHECK(tox2::rsxIgnoredMethodName(0x1818) == nullptr);
+
+    const auto makeWords = [](std::size_t count) {
+        std::vector<std::uint32_t> words(count);
+        for (std::size_t i = 0; i < count; i++) words[i] = 0x01020304u + static_cast<std::uint32_t>(i) * 0x04040404u;
+        return words;
+    };
+    const auto bigEndian = [](const std::vector<std::uint32_t>& words) {
+        std::vector<std::uint8_t> bytes;
+        for (const std::uint32_t word : words) {
+            for (int shift = 24; shift >= 0; shift -= 8) bytes.push_back(static_cast<std::uint8_t>(word >> shift));
+        }
+        return bytes;
+    };
+    const auto inlineClause = [&](const std::vector<std::uint32_t>& words) {
+        rig.write(0x1808, 6);  // triangle strip
+        for (const std::uint32_t word : words) rig.write(0x1818, word);
+        rig.write(0x1808, 0);
+    };
+    const auto takeDraw = [&](tox2::RsxDraw& draw) {
+        const std::vector<tox2::RsxCommand> commands = rig.builder.takeCommands();
+        CHECK(commands.size() == 1 && std::holds_alternative<tox2::RsxDraw>(commands[0]));
+        if (commands.size() != 1 || !std::holds_alternative<tox2::RsxDraw>(commands[0])) return false;
+        draw = std::get<tox2::RsxDraw>(commands[0]);
+        return true;
+    };
+
+    // (a) Slot 0 float3 and slot 3 ub4, each with a register stride that is not the layout's.
+    rig.write(0x1740, 2u | (3u << 4) | (99u << 8));
+    rig.write(0x174C, 4u | (4u << 4) | (7u << 8));
+    rig.write(0x168C, 0x80001100);
+    const std::vector<std::uint32_t> words = makeWords(16);
+    inlineClause(words);
+    tox2::RsxDraw immediate;
+    if (!takeDraw(immediate)) return;
+    CHECK(!immediate.indexed && immediate.count == 4 && immediate.first == 0);
+    CHECK(immediate.min_index == 0 && immediate.max_index == 3);
+    CHECK(immediate.attribs.size() == 2 && immediate.attribs[0].slot == 0 && immediate.attribs[1].slot == 3);
+    if (immediate.attribs.size() == 2) {
+        CHECK(immediate.attribs[0].stride == 16 && immediate.attribs[1].stride == 16);
+        CHECK(immediate.attribs[0].has_data && immediate.attribs[1].has_data);
+        CHECK(immediate.attribs[0].data_offset == 0 && immediate.attribs[1].data_offset == 12);
+    }
+    CHECK(immediate.vertex_data == bigEndian(words) && immediate.vertex_data.size() == 64);
+
+    // (c) Deferred mode builds the same draw from the words kept in the builder.
+    rig.builder.setDeferDrawEnd(true);
+    inlineClause(words);
+    CHECK(rig.builder.drawPending());
+    rig.builder.finishDraw(*rig.regs);
+    rig.builder.setDeferDrawEnd(false);
+    tox2::RsxDraw deferred;
+    if (takeDraw(deferred)) {
+        CHECK(!deferred.indexed && deferred.count == immediate.count && deferred.max_index == immediate.max_index);
+        CHECK(deferred.vertex_data == immediate.vertex_data && deferred.attribs.size() == immediate.attribs.size());
+    }
+
+    // Less than one vertex of data draws nothing and is not counted.
+    tox2::rsxUnimplementedReset();
+    inlineClause(makeWords(3));
+    CHECK(rig.builder.takeCommands().empty() && tox2::rsxUnimplementedSnapshot().empty());
+
+    // (b) Slot 0 float2 and slot 1 s1 size 3: the s1 vector is padded to 8 bytes, so the stride is 16 and the
+    // tenth word is a leftover.
+    rig.write(0x174C, 0);
+    rig.write(0x1740, 2u | (2u << 4));
+    rig.write(0x1744, 1u | (3u << 4));
+    rig.write(0x1684, 0x80001200);
+    const std::vector<std::uint32_t> short_words = makeWords(10);
+    inlineClause(short_words);
+    tox2::RsxDraw padded;
+    if (takeDraw(padded)) {
+        CHECK(padded.count == 2 && padded.max_index == 1);
+        CHECK(padded.attribs.size() == 2 && padded.attribs[0].stride == 16 && padded.attribs[1].stride == 16);
+        CHECK(padded.attribs.size() == 2 && padded.attribs[0].data_offset == 0 && padded.attribs[1].data_offset == 8);
+        CHECK(padded.vertex_data == bigEndian(short_words));
+    }
+
+    // (d) No enabled array: nothing to lay the words out by.
+    tox2::rsxUnimplementedReset();
+    rig.write(0x1740, 0);
+    rig.write(0x1744, 0);
+    inlineClause(words);
+    CHECK(unimplementedCount("state inline array without vertex arrays") == 1);
+    CHECK(rig.builder.takeCommands().empty());
+
+    // (e) Either order of inline and range commands drops the clause.
+    rig.write(0x1740, 2u | (3u << 4) | (12u << 8));
+    rig.write(0x1808, 6);
+    rig.write(0x1818, 1);
+    rig.write(0x1814, 3u << 24);
+    rig.write(0x1808, 0);
+    CHECK(unimplementedCount("state mixed draw commands in one clause") == 1);
+    CHECK(rig.builder.takeCommands().empty());
+    rig.write(0x1808, 6);
+    rig.write(0x1814, 3u << 24);
+    rig.write(0x1818, 1);
+    rig.write(0x1808, 0);
+    CHECK(unimplementedCount("state mixed draw commands in one clause") == 2);
+    CHECK(rig.builder.takeCommands().empty());
+}
+
+// Per-vertex immediate writes inside a clause are not modelled; the census makes them visible.
+void testRsxImmediateVertexInClause() {
+    tox2::rsxUnimplementedReset();
+    FakeRsxMemory memory;
+    FragmentRig rig(memory);
+    const auto writeVertexData = [&] {
+        rig.write(tox2::kMethodNv4097SetVertexData4ubM + 2 * 4, 0x04030201);
+        rig.write(tox2::kMethodNv4097SetVertexData1fM + 3 * 4, 0x3F800000);
+    };
+
+    writeVertexData();
+    CHECK(unimplementedCount("state vertex data inside a clause") == 0);
+    rig.write(0x1808, 5);
+    writeVertexData();
+    CHECK(unimplementedCount("state vertex data inside a clause") == 2);
+    rig.write(0x1808, 0);
+    writeVertexData();
+    CHECK(unimplementedCount("state vertex data inside a clause") == 2);
+    CHECK(rig.builder.takeCommands().empty());
+
+    CHECK(tox2::rsxImmediateVertexMethod(0x1C00) && tox2::rsxImmediateVertexMethod(0x0A80) &&
+          tox2::rsxImmediateVertexMethod(0x197C));
+    CHECK(!tox2::rsxImmediateVertexMethod(0x1818) && !tox2::rsxImmediateVertexMethod(0x1740));
+    tox2::rsxUnimplementedReset();
 }
 
 void testFragmentProgramCache() {
@@ -19590,6 +19877,7 @@ int main(int argc, char** argv) {
     testCensusRenderSuffix();
     testLatencyStats();
     testDisableFrameBuilder();
+    testRsxIgnoredMethodWarning();
     testSyscalls();
     testHle();
     testHleGuestExports();
@@ -19638,10 +19926,14 @@ int main(int argc, char** argv) {
     testFifoParser();
     testRsxArgCensus();
     testRsxRegisters();
+    testRsxImmediateIntegerForms();
     testRsxRegisterGenerations();
     testRsxDecode();
     testRsxTextureLayout();
     testRsxFrameBuilder();
+    testRsxArrayElementDraws();
+    testRsxInlineArrayDraws();
+    testRsxImmediateVertexInClause();
     testFragmentProgramCache();
     testVertexProgramCache();
     testSharedVertexConstants();

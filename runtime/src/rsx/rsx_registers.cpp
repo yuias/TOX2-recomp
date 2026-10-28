@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
+#include <cstdint>
 
 #include "rsx/fifo_parser.h"
 
@@ -419,23 +421,38 @@ void RsxRegisters::contextReset() {
 
 namespace {
 
+enum class ImmediateVertexType : std::uint8_t { Float, Sint16, Snorm16, Unorm8 };  // f, s32k, s1, ub
+
 struct ImmediateVertexForm {
     std::uint32_t first;       // first method of the block
     std::uint32_t registers;   // registers in the block
     std::uint32_t per_slot;    // registers per attribute slot
     std::uint32_t components;  // components the form carries (3F pads its fourth register)
+    ImmediateVertexType type;
 };
 
 // RPCS3 `NV47/HW/nv4097.h` set_vertex_data_impl: attribute = index / registers per attribute,
-// component = index % registers per attribute.
+// word = index % registers per attribute.
 constexpr ImmediateVertexForm kImmediateVertexForms[] = {
-        {kMethodNv4097SetVertexData3fM, 64, 4, 3},
-        {kMethodNv4097SetVertexData2fM, 32, 2, 2},
-        {kMethodNv4097SetVertexData4fM, 64, 4, 4},
-        {kMethodNv4097SetVertexData1fM, 16, 1, 1},
+        {kMethodNv4097SetVertexData3fM, 64, 4, 3, ImmediateVertexType::Float},
+        {kMethodNv4097SetVertexData2fM, 32, 2, 2, ImmediateVertexType::Float},
+        {kMethodNv4097SetVertexData4fM, 64, 4, 4, ImmediateVertexType::Float},
+        {kMethodNv4097SetVertexData1fM, 16, 1, 1, ImmediateVertexType::Float},
+        {kMethodNv4097SetVertexData2sM, 16, 1, 2, ImmediateVertexType::Sint16},
+        {kMethodNv4097SetVertexData4ubM, 16, 1, 4, ImmediateVertexType::Unorm8},
+        {kMethodNv4097SetVertexData4sM, 32, 2, 4, ImmediateVertexType::Sint16},
+        {kMethodNv4097SetVertexDataScaled4sM, 32, 2, 4, ImmediateVertexType::Snorm16},
 };
 
 }  // namespace
+
+bool rsxImmediateVertexMethod(std::uint32_t method) {
+    method &= 0xFFFC;
+    for (const ImmediateVertexForm& form : kImmediateVertexForms) {
+        if (method >= form.first && method < form.first + form.registers * 4) return true;
+    }
+    return false;
+}
 
 void RsxRegisters::apply(std::uint32_t method, std::uint32_t value) {
     method &= 0xFFFC;
@@ -444,11 +461,35 @@ void RsxRegisters::apply(std::uint32_t method, std::uint32_t value) {
     for (const ImmediateVertexForm& form : kImmediateVertexForms) {
         if (method < form.first || method >= form.first + form.registers * 4) continue;
         const std::uint32_t index = (method - form.first) >> 2;
-        const std::uint32_t slot = index / form.per_slot, component = index % form.per_slot;
-        if (component >= form.components) return;
+        const std::uint32_t slot = index / form.per_slot, word = index % form.per_slot;
+        // Components per register word; per_slot cannot give it because 3F has an unused fourth register.
+        const std::uint32_t per_word = form.type == ImmediateVertexType::Float    ? 1
+                                       : form.type == ImmediateVertexType::Unorm8 ? 4
+                                                                                  : 2;
+        const std::uint32_t first = word * per_word;
+        if (first >= form.components) return;
         constexpr std::uint32_t kOne = 0x3F800000;
         const std::uint32_t base = (kMethodNv4097SetVertexData4fM >> 2) + slot * 4;
-        regs[base + component] = value;
+        // The 4F block holds floats, so the packed forms are converted here (RPCS3 converts at fetch time).
+        // The first component is in the low bits of the word for every packed type.
+        for (std::uint32_t i = 0; i < per_word; i++) {
+            float converted = 0.0f;
+            switch (form.type) {
+                case ImmediateVertexType::Float: regs[base + first + i] = value; continue;
+                case ImmediateVertexType::Sint16:
+                    converted = static_cast<float>(static_cast<std::int16_t>(value >> (16 * i)));
+                    break;
+                case ImmediateVertexType::Snorm16:
+                    // RPCS3 s1 fetch: (v + 0.5) / 32767.5.
+                    converted =
+                            (2.0f * static_cast<float>(static_cast<std::int16_t>(value >> (16 * i))) + 1.0f) / 65535.0f;
+                    break;
+                case ImmediateVertexType::Unorm8:
+                    converted = static_cast<float>((value >> (8 * i)) & 0xFF) / 255.0f;
+                    break;
+            }
+            regs[base + first + i] = std::bit_cast<std::uint32_t>(converted);
+        }
         for (std::uint32_t c = form.components; c < 4; c++) regs[base + c] = c == 3 ? kOne : 0;
         vertex_default_written |= 1u << slot;
         return;

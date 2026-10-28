@@ -29,10 +29,10 @@ struct RsxRegisters {
     // Applies one completed write. TRANSFORM_PROGRAM words land at vp_load * 4 + (slot % 4) and vp_load
     // advances after each fourth word. TRANSFORM_CONSTANT words land at
     // (constant_load + slot / 4) * 4 + slot % 4; constant_load itself never advances (RPCS3 only ever
-    // changes it through a write). Writes past the end of either store are dropped. The 1F, 2F, 3F and 4F
-    // immediate vertex data forms all land in the 4F register block (the first components written, the
-    // others (0, 0, 0, 1) as RPCS3's register_vertex_info defaults) and set the written bit of the slot;
-    // the integer forms are not decoded and leave the slot alone.
+    // changes it through a write). Writes past the end of either store are dropped. All SET_VERTEX_DATA*_M
+    // immediate forms (1F, 2F, 3F, 4F, 2S, 4UB, 4S, SCALED4S) land in the 4F register block as floats (the
+    // components written, the others (0, 0, 0, 1) as RPCS3's register_vertex_info defaults) and set the written
+    // bit of the slot. The integer forms are converted with RPCS3's fetch scaling.
     void apply(std::uint32_t method, std::uint32_t value);
     std::uint32_t reg(std::uint32_t method) const { return regs[(method >> 2) & 0x3FFF]; }
     void reset();  // RPCS3 `rsx_state::init` defaults
@@ -57,5 +57,8 @@ struct RsxRegisters {
     std::uint64_t vp_constants_base = 0;
     std::uint32_t vp_constants_dirty_begin = 0, vp_constants_dirty_end = 0;
 };
+
+// True for a method of one of the SET_VERTEX_DATA*_M blocks that apply() decodes into the 4F registers.
+bool rsxImmediateVertexMethod(std::uint32_t method);
 
 }  // namespace tox2

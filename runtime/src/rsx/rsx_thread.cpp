@@ -172,6 +172,11 @@ bool RsxConsumer::write(std::uint32_t method, std::uint32_t value) {
     std::atomic<std::uint64_t>& count = method_counts_[(method >> 2) & (kMethodCount - 1)];
     count.store(count.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
     if (arg_census_ != nullptr) arg_census_->onWrite(method, value);
+    // Here rather than in the frame builder so headless runs report it too; the census lists it only at the end.
+    if (const char* name = rsxIgnoredMethodName(method)) {
+        logOnce(LogLevel::Warn, std::format("rsx-ignored-method:{}", name), "rsx: ignored method {} (0x{:04X}) reached",
+                name, method & 0xFFFC);
+    }
     if (builder_ != nullptr) {
         regs_->apply(method, value);
         builder_->onWrite(*regs_, method, value);
