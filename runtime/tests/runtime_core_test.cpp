@@ -8485,6 +8485,60 @@ void testRsxRegisters() {
     CHECK(static_cast<int>(tox2::RsxPrimitive::Points) == 1 && static_cast<int>(tox2::RsxPrimitive::Polygon) == 10);
 }
 
+void testRsxImmediateIntegerForms() {
+    auto regs = std::make_unique<tox2::RsxRegisters>();
+    regs->reset();
+    const auto expectSlot = [](const tox2::RsxRegisters& source, std::uint32_t slot, const float (&expected)[4]) {
+        const auto attribs = tox2::decodeDefaultAttribs(source);
+        for (std::uint32_t c = 0; c < 4; c++) {
+            if (std::abs(attribs[slot * 4 + c] - expected[c]) > 1e-6f) return false;
+        }
+        return true;
+    };
+    const auto written = [&](std::uint32_t slot) { return (regs->vertex_default_written & (1u << slot)) != 0; };
+
+    // 2S_M: one register per slot, the first component in the low half, the others (0, 1).
+    regs->apply(tox2::kMethodNv4097SetVertexData2sM + 1 * 4, 0xFFFE0003);
+    CHECK(expectSlot(*regs, 1, {3.0f, -2.0f, 0.0f, 1.0f}) && written(1));
+
+    // 4UB_M: byte i is component i, normalized by 255.
+    regs->apply(tox2::kMethodNv4097SetVertexData4ubM + 2 * 4, 0x04030201);
+    CHECK(expectSlot(*regs, 2, {1.0f / 255.0f, 2.0f / 255.0f, 3.0f / 255.0f, 4.0f / 255.0f}) && written(2));
+
+    // 4S_M: two registers per slot, signed 16-bit values converted without scaling.
+    regs->apply(tox2::kMethodNv4097SetVertexData4sM + 3 * 8, 0x00020001);
+    regs->apply(tox2::kMethodNv4097SetVertexData4sM + 3 * 8 + 4, 0x8000FFFF);
+    CHECK(expectSlot(*regs, 3, {1.0f, 2.0f, -1.0f, -32768.0f}) && written(3));
+
+    // SCALED4S_M: (v + 0.5) / 32767.5 like RPCS3's s1 fetch.
+    regs->apply(tox2::kMethodNv4097SetVertexDataScaled4sM + 4 * 8, 0x80007FFF);
+    regs->apply(tox2::kMethodNv4097SetVertexDataScaled4sM + 4 * 8 + 4, 0x00000000);
+    CHECK(expectSlot(*regs, 4, {1.0f, -1.0f, 1.0f / 65535.0f, 1.0f / 65535.0f}) && written(4));
+
+    // One word of a two-word form keeps the components of the other word.
+    const float previous[4] = {0.25f, 0.5f, 0.75f, 2.0f};
+    for (std::uint32_t i = 0; i < 4; i++)
+        regs->apply(tox2::kMethodNv4097SetVertexData4fM + 6 * 16 + i * 4, std::bit_cast<std::uint32_t>(previous[i]));
+    regs->apply(tox2::kMethodNv4097SetVertexData4sM + 6 * 8 + 4, 0xFFFF0007);
+    CHECK(expectSlot(*regs, 6, {0.25f, 0.5f, 7.0f, -1.0f}) && written(6));
+
+    // The fourth register of a 3F slot carries nothing: no change and no written bit.
+    regs->apply(tox2::kMethodNv4097SetVertexData3fM + 8 * 16 + 12, std::bit_cast<std::uint32_t>(5.0f));
+    CHECK(expectSlot(*regs, 8, {0.0f, 0.0f, 0.0f, 0.0f}) && !written(8));
+    CHECK(regs->reg(tox2::kMethodNv4097SetVertexData3fM + 8 * 16 + 12) == std::bit_cast<std::uint32_t>(5.0f));
+    regs->apply(tox2::kMethodNv4097SetVertexData3fM + 1 * 16 + 12, std::bit_cast<std::uint32_t>(5.0f));
+    CHECK(expectSlot(*regs, 1, {3.0f, -2.0f, 0.0f, 1.0f}));
+    CHECK(!written(0) && !written(5) && !written(7) && regs->vertex_default_written == 0x5E);
+
+    // A capture keeps the converted slots and the written mask.
+    tox2::RsxCaptureWriter writer(0, *regs, {});
+    tox2::RsxCaptureReader reader;
+    std::string error;
+    CHECK(reader.parse(writer.finish({}, 0).flatten(), error));
+    CHECK(reader.startRegisters().vertex_default_written == regs->vertex_default_written);
+    CHECK(tox2::decodeDefaultAttribs(reader.startRegisters()) == tox2::decodeDefaultAttribs(*regs));
+}
+
 void testRsxRegisterGenerations() {
     auto regs = std::make_unique<tox2::RsxRegisters>();
     regs->reset();
@@ -19659,6 +19713,7 @@ int main(int argc, char** argv) {
     testFifoParser();
     testRsxArgCensus();
     testRsxRegisters();
+    testRsxImmediateIntegerForms();
     testRsxRegisterGenerations();
     testRsxDecode();
     testRsxTextureLayout();

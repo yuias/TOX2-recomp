@@ -1877,7 +1877,7 @@ struct QuadOptions {
     bool blend = false;
     std::uint32_t uniform_color = 0;  // nonzero: every vertex carries this word (A, R, G, B in memory)
     // Color comes from slot 5, which has no array: -1 leaves the default register unwritten, 0 writes four
-    // zeros, 1 writes (1, 0, 0, 1).
+    // zeros, 1 writes (1, 0, 0, 1), 2 writes 4UB_M, 3 writes 2S_M, 4 writes SCALED4S_M.
     int default_color = -2;  // -2: color comes from the array in slot 3
     int alpha_func = -1;     // -1: alpha test disabled; otherwise the GCM compare enum (0x200 never .. 0x207 always)
     std::uint32_t alpha_ref = 0;
@@ -1903,7 +1903,14 @@ std::vector<std::uint8_t> makeRenderedQuadCapture(const QuadOptions& options) {
         for (const auto& instruction : {vpMove(0, 0, "xyzw", false), vpMove(1, 5, "xyzw", true)}) {
             programs.vertex.insert(programs.vertex.end(), instruction.begin(), instruction.end());
         }
-        if (options.default_color >= 0) {
+        if (options.default_color == 2) {
+            scene.write(tox2::kMethodNv4097SetVertexData4ubM + 5 * 4, 0xFF0080FF);
+        } else if (options.default_color == 3) {
+            scene.write(tox2::kMethodNv4097SetVertexData2sM + 5 * 4, 0x00000001);
+        } else if (options.default_color == 4) {
+            scene.write(tox2::kMethodNv4097SetVertexDataScaled4sM + 5 * 8, 0x80007FFF);
+            scene.write(tox2::kMethodNv4097SetVertexDataScaled4sM + 5 * 8 + 4, 0x7FFF0000);
+        } else if (options.default_color >= 0) {
             const float value[4] = {options.default_color == 1 ? 1.0f : 0.0f, 0.0f, 0.0f,
                                     options.default_color == 1 ? 1.0f : 0.0f};
             for (std::uint32_t i = 0; i < 4; i++) {
@@ -2097,6 +2104,16 @@ void testRendererQuad(tox2::VkContext& ctx) {
     render(defaults);
     CHECK(pixelArgb(bgra, width, 32, 32) == 0xFFFF0000);
     CHECK(pixelArgb(bgra, width, 2, 2) == 0xFF404040);
+    // The integer forms: the first component sits in the low bits of the word.
+    defaults.default_color = 2;
+    render(defaults);
+    CHECK(pixelArgb(bgra, width, 32, 32) == 0xFFFF8000);
+    defaults.default_color = 3;
+    render(defaults);
+    CHECK(pixelArgb(bgra, width, 32, 32) == 0xFFFF0000);
+    defaults.default_color = 4;
+    render(defaults);
+    CHECK(pixelArgb(bgra, width, 32, 32) == 0xFFFF0000);
 
     CHECK(renderer.valid());
     tox2::rsxUnimplementedReset();
