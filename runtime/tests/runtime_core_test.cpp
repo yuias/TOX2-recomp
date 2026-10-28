@@ -8832,7 +8832,8 @@ void testRsxDecode() {
     CHECK(tox2::rsxIgnoredMethodName(0x0A80) == nullptr);
     CHECK(tox2::rsxIgnoredMethodName(0x1500) == nullptr);  // the float forms are decoded into the defaults
     CHECK(tox2::rsxIgnoredMethodName(0x1C00) == nullptr && tox2::rsxIgnoredMethodName(0x1814) == nullptr);
-    CHECK(tox2::rsxIgnoredMethodName(0x1818) != nullptr && tox2::rsxIgnoredMethodName(0xC40C) != nullptr);
+    CHECK(tox2::rsxIgnoredMethodName(0x1818) == nullptr);  // the inline array becomes a draw
+    CHECK(tox2::rsxIgnoredMethodName(0xC40C) != nullptr);
 
     // The lookup is a bitmap built from the ranges; it must agree with the plain range scan for every offset,
     // unaligned ones and the whole 16-bit method space and beyond included.
@@ -8842,7 +8843,6 @@ void testRsxDecode() {
             const char* name;
         };
         const Range ranges[] = {
-                {tox2::kMethodNv4097InlineArray, 1, "NV4097_INLINE_ARRAY"},
                 {tox2::kMethodNv3089ImageIn, 1, "NV3089_IMAGE_IN"},
         };
         std::size_t ignored = 0;
@@ -8859,7 +8859,7 @@ void testRsxDecode() {
             if (actual != nullptr && expected != nullptr) CHECK(std::string_view(actual) == expected);
             ignored += actual != nullptr;
         }
-        CHECK(ignored == (1 + 1) * 4);
+        CHECK(ignored == 1 * 4);
         CHECK(tox2::rsxIgnoredMethodName(0xFFFFFFFC) == nullptr);
     }
 
@@ -9591,7 +9591,7 @@ void testRsxFrameBuilder() {
           first_program.fp_ucode[8] == 0x00010000);
     CHECK(second_program.fp_constants[0] == 0x40000000 && first_program.fp_hash == second_program.fp_hash);
 
-    // Flips carry the display buffer; ignored methods are counted.
+    // Flips carry the display buffer; an inline array word outside a clause is counted and dropped.
     write(0x1818, 0x12345678);
     tox2::RsxDisplayBuffer display;
     display.offset = 0x400000;
@@ -9605,7 +9605,7 @@ void testRsxFrameBuilder() {
     CHECK(std::get<tox2::RsxFlip>(commands[1]).flip_index == 1 && std::get<tox2::RsxFlip>(commands[1]).buffer == 2);
     CHECK(std::get<tox2::RsxFlip>(commands[1]).offset == 0x400000 &&
           std::get<tox2::RsxFlip>(commands[1]).height == 720);
-    CHECK(unimplementedCount("method NV4097_INLINE_ARRAY") == 1);
+    CHECK(unimplementedCount("state inline array outside a clause") == 1);
     CHECK(std::get<tox2::RsxFlip>(commands[0]).completed_us == 0);  // no time passed: replays leave 0
 
     // The completion time given by the RSX thread rides on the flip command.
@@ -9753,6 +9753,115 @@ void testRsxArrayElementDraws() {
         CHECK(restart.count == 7 && restart.restart_used && restart.min_index == 0 && restart.max_index == 3);
         CHECK(restart.vertex_data.size() == 48);
     }
+}
+
+// INLINE_ARRAY inside a clause: the vertex data comes from the FIFO as one interleaved block.
+void testRsxInlineArrayDraws() {
+    tox2::rsxUnimplementedReset();
+    FakeRsxMemory memory;
+    FragmentRig rig(memory);
+    rig.write(0x08E4, 0x2000 | 1);
+    memory.putWord(0, 0x2000, 0x00010000);
+    CHECK(tox2::rsxIgnoredMethodName(0x1818) == nullptr);
+
+    const auto makeWords = [](std::size_t count) {
+        std::vector<std::uint32_t> words(count);
+        for (std::size_t i = 0; i < count; i++) words[i] = 0x01020304u + static_cast<std::uint32_t>(i) * 0x04040404u;
+        return words;
+    };
+    const auto bigEndian = [](const std::vector<std::uint32_t>& words) {
+        std::vector<std::uint8_t> bytes;
+        for (const std::uint32_t word : words) {
+            for (int shift = 24; shift >= 0; shift -= 8) bytes.push_back(static_cast<std::uint8_t>(word >> shift));
+        }
+        return bytes;
+    };
+    const auto inlineClause = [&](const std::vector<std::uint32_t>& words) {
+        rig.write(0x1808, 6);  // triangle strip
+        for (const std::uint32_t word : words) rig.write(0x1818, word);
+        rig.write(0x1808, 0);
+    };
+    const auto takeDraw = [&](tox2::RsxDraw& draw) {
+        const std::vector<tox2::RsxCommand> commands = rig.builder.takeCommands();
+        CHECK(commands.size() == 1 && std::holds_alternative<tox2::RsxDraw>(commands[0]));
+        if (commands.size() != 1 || !std::holds_alternative<tox2::RsxDraw>(commands[0])) return false;
+        draw = std::get<tox2::RsxDraw>(commands[0]);
+        return true;
+    };
+
+    // (a) Slot 0 float3 and slot 3 ub4, each with a register stride that is not the layout's.
+    rig.write(0x1740, 2u | (3u << 4) | (99u << 8));
+    rig.write(0x174C, 4u | (4u << 4) | (7u << 8));
+    rig.write(0x168C, 0x80001100);
+    const std::vector<std::uint32_t> words = makeWords(16);
+    inlineClause(words);
+    tox2::RsxDraw immediate;
+    if (!takeDraw(immediate)) return;
+    CHECK(!immediate.indexed && immediate.count == 4 && immediate.first == 0);
+    CHECK(immediate.min_index == 0 && immediate.max_index == 3);
+    CHECK(immediate.attribs.size() == 2 && immediate.attribs[0].slot == 0 && immediate.attribs[1].slot == 3);
+    if (immediate.attribs.size() == 2) {
+        CHECK(immediate.attribs[0].stride == 16 && immediate.attribs[1].stride == 16);
+        CHECK(immediate.attribs[0].has_data && immediate.attribs[1].has_data);
+        CHECK(immediate.attribs[0].data_offset == 0 && immediate.attribs[1].data_offset == 12);
+    }
+    CHECK(immediate.vertex_data == bigEndian(words) && immediate.vertex_data.size() == 64);
+
+    // (c) Deferred mode builds the same draw from the words kept in the builder.
+    rig.builder.setDeferDrawEnd(true);
+    inlineClause(words);
+    CHECK(rig.builder.drawPending());
+    rig.builder.finishDraw(*rig.regs);
+    rig.builder.setDeferDrawEnd(false);
+    tox2::RsxDraw deferred;
+    if (takeDraw(deferred)) {
+        CHECK(!deferred.indexed && deferred.count == immediate.count && deferred.max_index == immediate.max_index);
+        CHECK(deferred.vertex_data == immediate.vertex_data && deferred.attribs.size() == immediate.attribs.size());
+    }
+
+    // Less than one vertex of data draws nothing and is not counted.
+    tox2::rsxUnimplementedReset();
+    inlineClause(makeWords(3));
+    CHECK(rig.builder.takeCommands().empty() && tox2::rsxUnimplementedSnapshot().empty());
+
+    // (b) Slot 0 float2 and slot 1 s1 size 3: the s1 vector is padded to 8 bytes, so the stride is 16 and the
+    // tenth word is a leftover.
+    rig.write(0x174C, 0);
+    rig.write(0x1740, 2u | (2u << 4));
+    rig.write(0x1744, 1u | (3u << 4));
+    rig.write(0x1684, 0x80001200);
+    const std::vector<std::uint32_t> short_words = makeWords(10);
+    inlineClause(short_words);
+    tox2::RsxDraw padded;
+    if (takeDraw(padded)) {
+        CHECK(padded.count == 2 && padded.max_index == 1);
+        CHECK(padded.attribs.size() == 2 && padded.attribs[0].stride == 16 && padded.attribs[1].stride == 16);
+        CHECK(padded.attribs.size() == 2 && padded.attribs[0].data_offset == 0 && padded.attribs[1].data_offset == 8);
+        CHECK(padded.vertex_data == bigEndian(short_words));
+    }
+
+    // (d) No enabled array: nothing to lay the words out by.
+    tox2::rsxUnimplementedReset();
+    rig.write(0x1740, 0);
+    rig.write(0x1744, 0);
+    inlineClause(words);
+    CHECK(unimplementedCount("state inline array without vertex arrays") == 1);
+    CHECK(rig.builder.takeCommands().empty());
+
+    // (e) Either order of inline and range commands drops the clause.
+    rig.write(0x1740, 2u | (3u << 4) | (12u << 8));
+    rig.write(0x1808, 6);
+    rig.write(0x1818, 1);
+    rig.write(0x1814, 3u << 24);
+    rig.write(0x1808, 0);
+    CHECK(unimplementedCount("state mixed draw commands in one clause") == 1);
+    CHECK(rig.builder.takeCommands().empty());
+    rig.write(0x1808, 6);
+    rig.write(0x1814, 3u << 24);
+    rig.write(0x1818, 1);
+    rig.write(0x1808, 0);
+    CHECK(unimplementedCount("state mixed draw commands in one clause") == 2);
+    CHECK(rig.builder.takeCommands().empty());
 }
 
 void testFragmentProgramCache() {
@@ -19797,6 +19906,7 @@ int main(int argc, char** argv) {
     testRsxTextureLayout();
     testRsxFrameBuilder();
     testRsxArrayElementDraws();
+    testRsxInlineArrayDraws();
     testFragmentProgramCache();
     testVertexProgramCache();
     testSharedVertexConstants();

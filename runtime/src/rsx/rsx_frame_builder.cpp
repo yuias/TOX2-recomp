@@ -60,6 +60,12 @@ std::uint32_t elementBytes(std::uint32_t type, std::uint32_t size) {
     }
 }
 
+// Bytes per element in the interleaved block of an inline array. RPCS3 `get_vertex_type_size_on_host` pads
+// 3-component 16-bit and 8-bit vectors to four, and the block stride is the sum of these sizes.
+std::uint32_t inlineElementBytes(std::uint32_t type, std::uint32_t size) {
+    return elementBytes(type, size == 3 && type != 2 /* f */ ? 4 : size);
+}
+
 std::uint32_t readBe32(const std::uint8_t* p) {
     return (static_cast<std::uint32_t>(p[0]) << 24) | (static_cast<std::uint32_t>(p[1]) << 16) |
            (static_cast<std::uint32_t>(p[2]) << 8) | p[3];
@@ -245,6 +251,7 @@ void RsxFrameBuilder::onWrite(const RsxRegisters& regs, std::uint32_t method, st
         case kMethodNv4097DrawIndexArray: addRange(true, value); break;
         case kMethodNv4097ArrayElement16:
         case kMethodNv4097ArrayElement32: addArrayElements(method, value); break;
+        case kMethodNv4097InlineArray: addInlineWord(value); break;
         case kMethodNv4097ClearSurface: clear(regs, value); break;
         // Points where the guest learns how far the RSX has got, or the RSX changes memory outside a draw: the
         // guest may rewrite texture memory after them (see rsx_texture_cache.h).
@@ -322,6 +329,7 @@ void RsxFrameBuilder::beginDraw(std::uint32_t primitive) {
     clause_mixed_ = false;
     indexed_ = false;
     array_elements_.clear();
+    inline_words_.clear();
     // An invalid primitive still opens a clause in RPCS3 (it leaves the previous draw state in place and
     // sets in_begin_end); nothing sensible can be drawn from it.
     skip_draw_ = !decodePrimitive(primitive, primitive_);
@@ -334,7 +342,7 @@ void RsxFrameBuilder::addRange(bool indexed, std::uint32_t value) {
         noteState("draw range outside a clause");
         return;
     }
-    if (clause_ == ClauseKind::Elements) {
+    if (clause_ != ClauseKind::Empty && clause_ != ClauseKind::Ranges) {
         noteState("mixed draw commands in one clause");
         clause_mixed_ = true;
         return;
@@ -361,7 +369,7 @@ void RsxFrameBuilder::addArrayElements(std::uint32_t method, std::uint32_t value
         noteState("array element outside a clause");
         return;
     }
-    if (clause_ == ClauseKind::Ranges) {
+    if (clause_ != ClauseKind::Empty && clause_ != ClauseKind::Elements) {
         noteState("mixed draw commands in one clause");
         clause_mixed_ = true;
         return;
@@ -374,6 +382,21 @@ void RsxFrameBuilder::addArrayElements(std::uint32_t method, std::uint32_t value
     } else {
         array_elements_.push_back(value);
     }
+}
+
+// RPCS3 `draw_inline_array`: the words are the vertex data, appended in FIFO order.
+void RsxFrameBuilder::addInlineWord(std::uint32_t value) {
+    if (!in_draw_) {
+        noteState("inline array outside a clause");
+        return;
+    }
+    if (clause_ != ClauseKind::Empty && clause_ != ClauseKind::Inline) {
+        noteState("mixed draw commands in one clause");
+        clause_mixed_ = true;
+        return;
+    }
+    clause_ = ClauseKind::Inline;
+    inline_words_.push_back(value);
 }
 
 std::int32_t RsxFrameBuilder::findSurface(std::uint32_t location, std::uint32_t offset) const {
@@ -591,6 +614,50 @@ bool RsxFrameBuilder::fillVertices(const RsxRegisters& regs, RsxDraw& draw, std:
         noteState(failure);
         return false;
     }
+    draw.default_attribs = decodeDefaultAttribs(regs);
+    draw.default_written = regs.vertex_default_written;
+    return true;
+}
+
+// RPCS3 `analyse_inputs_interleaved` and the `draw_inlined_array` visitor: every enabled array joins one interleaved
+// block in slot order, whatever its stride register says, and the vertex count is the inline bytes over the block
+// stride, rounded down. Slots without an array read their default register as in any other draw.
+bool RsxFrameBuilder::fillInlineVertices(const RsxRegisters& regs, RsxDraw& draw) {
+    decodeVertexAttribs(regs, draw.attribs);
+    if (draw.attribs.empty()) {
+        noteState("inline array without vertex arrays");
+        return false;
+    }
+    const std::uint64_t base = (static_cast<std::uint64_t>(draw.vertex_data.size()) + 3) & ~std::uint64_t{3};
+    std::uint32_t stride = 0;
+    for (RsxVertexAttrib& attrib : draw.attribs) {
+        const std::uint32_t bytes = inlineElementBytes(attrib.type, attrib.size);
+        if (bytes == 0) {
+            noteState("inline array vertex type");
+            return false;
+        }
+        attrib.data_offset = static_cast<std::uint32_t>(base + stride);
+        stride += bytes;
+    }
+    const std::uint64_t data_bytes = static_cast<std::uint64_t>(inline_words_.size()) * 4;
+    if (base + data_bytes > kRsxMaxVertexBytes) {
+        noteState("vertex data too large");
+        return false;
+    }
+    const std::uint32_t vertex_count = static_cast<std::uint32_t>(data_bytes / stride);
+    if (vertex_count == 0) return false;
+    for (RsxVertexAttrib& attrib : draw.attribs) {
+        attrib.stride = static_cast<std::uint16_t>(stride);
+        attrib.has_data = true;
+    }
+    // The FIFO's own byte order; a trailing partial vertex is copied too and never read.
+    draw.vertex_data.resize(static_cast<std::size_t>(base + data_bytes), 0);
+    std::uint8_t* out = draw.vertex_data.data() + base;
+    for (const std::uint32_t word : inline_words_) {
+        for (int shift = 24; shift >= 0; shift -= 8) *out++ = static_cast<std::uint8_t>(word >> shift);
+    }
+    draw.count = vertex_count;
+    draw.max_index = vertex_count - 1;
     draw.default_attribs = decodeDefaultAttribs(regs);
     draw.default_written = regs.vertex_default_written;
     return true;
@@ -1044,8 +1111,12 @@ void RsxFrameBuilder::buildDraw(const RsxRegisters& regs) {
         noteState("index data too large");
         return;
     }
-    const std::uint32_t first = elements ? 0 : range_.first;
-    const std::uint32_t count = elements ? static_cast<std::uint32_t>(array_elements_.size()) : range_.count;
+    // An inline clause is an array draw from element 0; fillInlineVertices sets its count.
+    const bool inline_array = clause_ == ClauseKind::Inline;
+    const std::uint32_t first = elements || inline_array ? 0 : range_.first;
+    const std::uint32_t count = inline_array ? 0
+                                : elements   ? static_cast<std::uint32_t>(array_elements_.size())
+                                             : range_.count;
     draw.primitive = primitive_;
     draw.indexed = indexed_;
     draw.first = first;
@@ -1121,7 +1192,7 @@ void RsxFrameBuilder::buildDraw(const RsxRegisters& regs) {
     draw.surfaces = decodeSurfaceState(regs);
     draw.raster = decodeRasterState(regs);
 
-    if (!fillVertices(regs, draw, vertex_base, vertex_count)) return;
+    if (inline_array ? !fillInlineVertices(regs, draw) : !fillVertices(regs, draw, vertex_base, vertex_count)) return;
     // Registered only for a draw that is kept, and before the textures so that sampling the target being
     // drawn to is seen as an alias. A depth surface counts once the draw can write it, by depth or by
     // stencil (rsxZetaWriteEnabled), so the unused depth binding of a pass that only needs a color target

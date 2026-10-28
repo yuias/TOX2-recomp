@@ -1867,6 +1867,7 @@ enum class QuadDraw {
     IndexedU32Restart,  // strip with the all-ones restart index between two triangles, minimum index 0
     ListRestart,        // the same indices as a triangle list: a restart the renderer cannot express
     ArrayElement,       // the elements of IndexedU16, but with the indices written through the FIFO
+    Inline,             // array draw whose vertices (position floats, then the color word) come through the FIFO
 };
 
 struct QuadOptions {
@@ -1983,6 +1984,17 @@ std::vector<std::uint8_t> makeRenderedQuadCapture(const QuadOptions& options) {
             scene.write(tox2::kMethodNv4097SetBeginEnd, 0);
             break;
         }
+        case QuadDraw::Inline:
+            beginDraw(tox2::RsxPrimitive::TriangleStrip);
+            for (std::uint32_t v = 0; v < 4; v++) {
+                for (std::uint32_t c = 0; c < 3; c++) {
+                    scene.write(tox2::kMethodNv4097InlineArray, std::bit_cast<std::uint32_t>(kQuadCorners[v][c]));
+                }
+                scene.write(tox2::kMethodNv4097InlineArray,
+                            options.uniform_color != 0 ? options.uniform_color : kQuadColors[v]);
+            }
+            scene.write(tox2::kMethodNv4097SetBeginEnd, 0);
+            break;
         case QuadDraw::IndexedU32Restart:
         case QuadDraw::ListRestart: {
             for (std::uint32_t v = 0; v < 4; v++) putVertex(v, kQuadCorners[v], kQuadColors[v]);
@@ -2053,8 +2065,8 @@ void testRendererQuad(tox2::VkContext& ctx) {
         CHECK(tox2::rsxUnimplementedSnapshot().empty());
     };
 
-    for (const QuadDraw draw :
-         {QuadDraw::Strip, QuadDraw::IndexedU16, QuadDraw::Fan, QuadDraw::IndexedU32Restart, QuadDraw::ArrayElement}) {
+    for (const QuadDraw draw : {QuadDraw::Strip, QuadDraw::IndexedU16, QuadDraw::Fan, QuadDraw::IndexedU32Restart,
+                                QuadDraw::ArrayElement, QuadDraw::Inline}) {
         QuadOptions options;
         options.draw = draw;
         render(options);
@@ -2064,7 +2076,7 @@ void testRendererQuad(tox2::VkContext& ctx) {
         CHECK(renderer.stats().draws_skipped == 0);
         expectNoNotes();
     }
-    CHECK(renderer.stats().draws == 5);
+    CHECK(renderer.stats().draws == 6);
 
     // A restart index in a triangle list cannot be expressed: the draw is skipped, nothing is drawn.
     QuadOptions list_restart;
