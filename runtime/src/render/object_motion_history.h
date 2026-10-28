@@ -83,9 +83,16 @@ private:
         VmaAllocation allocation = nullptr;
         VkDeviceSize size = 0;
     };
-    struct SourceCopy {
-        VkBuffer buffer = VK_NULL_HANDLE;
-        std::vector<VkBufferCopy> regions;
+    // One source range to copy; `id` names it after the sort that groups the entries by source.
+    struct Entry {
+        VkBuffer buffer;
+        VkDeviceSize offset, size, alignment;
+        std::uint32_t id;
+    };
+    // The regions [first, first + count) read one source buffer.
+    struct Group {
+        VkBuffer buffer;
+        std::size_t first, count;
     };
     struct ConstantsKey {
         VkBuffer buffer;
@@ -100,9 +107,6 @@ private:
         }
     };
 
-    // Reserves `size` bytes of the history buffer for a copy of source[offset, offset + size) and returns the
-    // destination offset.
-    VkDeviceSize place(VkBuffer source, VkDeviceSize offset, VkDeviceSize size, VkDeviceSize alignment);
     bool ensureCapacity(Buffer& buffer, VkDeviceSize needed, std::shared_ptr<void>& retired, std::string& error);
 
     VkContext& context_;
@@ -116,13 +120,13 @@ private:
     Stats stats_;
 
     // Scratch of recordCopy, kept for its capacity.
-    std::vector<SourceCopy> sources_;
-    std::size_t source_count_ = 0;
-    std::size_t last_source_ = 0;  // the source of the most recently added region
-    bool have_region_ = false;
-    VkDeviceSize bump_ = 0;
-    std::uint64_t copied_bytes_ = 0;
-    std::unordered_map<ConstantsKey, VkDeviceSize, ConstantsKeyHash> constants_;
+    std::vector<Entry> entries_;
+    std::vector<std::uint32_t> item_constants_;  // per item: the id of its constants entry
+    std::vector<std::uint32_t> slot_entries_;    // per used slot, in item and slot order: its entry id
+    std::vector<VkDeviceSize> destinations_;     // per entry id
+    std::vector<VkBufferCopy> regions_;
+    std::vector<Group> groups_;
+    std::unordered_map<ConstantsKey, std::uint32_t, ConstantsKeyHash> constants_;
 };
 
 }  // namespace tox2

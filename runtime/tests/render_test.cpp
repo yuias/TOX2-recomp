@@ -8034,7 +8034,7 @@ void testObjectMotionHistory(tox2::VkContext& ctx) {
     constexpr std::uint32_t kWidth = 64, kHeight = 36;
     constexpr VkDeviceSize kConstantBytes = tox2::kRsxVpConstantCount * 16;
     constexpr VkDeviceSize kBigBytes = 1536 * 1024;
-    constexpr VkDeviceSize kUploadBytes = 64 * 1024;
+    constexpr VkDeviceSize kUploadBytes = 256 * 1024;
     const std::uint32_t errors_before = ctx.validationErrorCount();
     const VkDeviceSize uniform_alignment = ctx.deviceProperties().limits.minUniformBufferOffsetAlignment;
 
@@ -8049,13 +8049,13 @@ void testObjectMotionHistory(tox2::VkContext& ctx) {
         return;
     }
 
-    // Two constant blocks and the vertex arrays of three candidates, 256-aligned like the renderer's uploads. The
-    // first candidate's arrays are close enough to be copied as one region.
+    // Two constant blocks and the vertex arrays of three candidates, 256-aligned like the renderer's uploads. All but
+    // the last array lie close enough to be copied as one region; that one is far away and gets a region of its own.
     constexpr VkDeviceSize kConstantsA = 0, kConstantsB = 8192;
     const ObjectMotionHistory::Range arrays[3][2] = {
             {{upload.buffer, 16384, 48}, {upload.buffer, 16384 + 256, 64}},
             {{upload.buffer, 17408, 96}, {}},
-            {{upload.buffer, 18432, 32}, {upload.buffer, 18432 + 1024, 20}},
+            {{upload.buffer, 18432, 32}, {upload.buffer, 18432 + 128 * 1024, 20}},
     };
     const std::uint32_t slots[3][2] = {{0, 2}, {1, 0}, {0, 5}};
     const auto pattern = [](std::uint32_t seed, VkDeviceSize index) {
@@ -8148,6 +8148,7 @@ void testObjectMotionHistory(tox2::VkContext& ctx) {
         const ObjectMotionHistory::Stats stats = history.stats();
         CHECK(stats.candidates == 3 && stats.matched == 0);
         CHECK(stats.history_bytes == 48 + 64 + 96 + 32 + 20 + 2 * kConstantBytes);
+        CHECK(stats.regions == 2);
     }
 
     // Frame 2 matches all three, in the history buffer.
@@ -8207,6 +8208,7 @@ void testObjectMotionHistory(tox2::VkContext& ctx) {
         CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) { CHECK(history.recordCopy(cmd, retired, error)); }));
         CHECK(retired != nullptr);
         CHECK(history.stats().history_bytes == kBigBytes + kConstantBytes);
+        CHECK(history.stats().regions == 2);
         retired.reset();
 
         history.beginFrame(8, kWidth + 1, kHeight, tox2::MotionMatchRule::AddressThenOrdered);

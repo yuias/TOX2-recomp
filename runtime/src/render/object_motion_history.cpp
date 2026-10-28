@@ -5,11 +5,12 @@
 namespace tox2 {
 namespace {
 
-// Source ranges closer than this are copied as one region: the uploads are aligned to 256 bytes, so the arrays of one
-// draw sit back to back with only alignment padding between them, and one region per draw is much cheaper to record
-// than one per array.
-constexpr VkDeviceSize kMergeGap = 256;
+// Source ranges of one buffer closer than this are copied as one region, gap bytes included. The GPU spends about
+// 0.8 us per region and about 0.05 ms on 8 MB, so a few hundred regions cost far more than the gaps they would save;
+// the draws' arrays and constants sit within a few uploaded blocks, which this merges into a handful of regions.
+constexpr VkDeviceSize kMergeGap = 64 * 1024;
 constexpr VkDeviceSize kVertexAlignment = 16;
+constexpr VkDeviceSize kRegionAlignment = 256;
 constexpr VkDeviceSize kMinimumCapacity = 64 * 1024;
 
 // Keeps a replaced history buffer alive until the commands that bind it have finished.
@@ -73,41 +74,6 @@ void ObjectMotionHistory::record(const MotionDrawSignature& signature, const Ran
     item.slots = uploads;
 }
 
-VkDeviceSize ObjectMotionHistory::place(VkBuffer source, VkDeviceSize offset, VkDeviceSize size,
-                                        VkDeviceSize alignment) {
-    copied_bytes_ += size;
-    std::size_t index = last_source_;
-    if (!have_region_ || sources_[index].buffer != source) {
-        index = 0;
-        while (index < source_count_ && sources_[index].buffer != source) index++;
-        if (index == source_count_) {
-            if (source_count_ == sources_.size()) sources_.emplace_back();
-            sources_[source_count_].buffer = source;
-            sources_[source_count_].regions.clear();
-            source_count_++;
-        }
-    }
-    std::vector<VkBufferCopy>& regions = sources_[index].regions;
-    if (have_region_ && last_source_ == index) {
-        VkBufferCopy& last = regions.back();
-        const VkDeviceSize last_end = last.srcOffset + last.size;
-        if (offset >= last_end && offset - last_end < kMergeGap) {
-            const VkDeviceSize destination = last.dstOffset + (offset - last.srcOffset);
-            if (destination % alignment == 0) {
-                last.size = offset + size - last.srcOffset;
-                bump_ = last.dstOffset + last.size;
-                return destination;
-            }
-        }
-    }
-    const VkDeviceSize destination = roundUp(bump_, alignment);
-    regions.push_back({offset, destination, size});
-    bump_ = destination + size;
-    last_source_ = index;
-    have_region_ = true;
-    return destination;
-}
-
 bool ObjectMotionHistory::ensureCapacity(Buffer& buffer, VkDeviceSize needed, std::shared_ptr<void>& retired,
                                          std::string& error) {
     if (buffer.size >= needed) return true;
@@ -147,32 +113,87 @@ bool ObjectMotionHistory::recordCopy(VkCommandBuffer cmd, std::shared_ptr<void>&
 
     const VkDeviceSize constants_alignment =
             std::max<VkDeviceSize>(context_.deviceProperties().limits.minUniformBufferOffsetAlignment, 16);
-    source_count_ = 0;
-    have_region_ = false;
-    bump_ = 0;
-    copied_bytes_ = 0;
+    entries_.clear();
+    item_constants_.clear();
+    slot_entries_.clear();
     constants_.clear();
 
     ConstantsKey last_key{VK_NULL_HANDLE, 0};
-    VkDeviceSize last_offset = 0;
-    for (Previous& item : current_.items) {
+    std::uint32_t last_entry = 0;
+    for (const Previous& item : current_.items) {
         const ConstantsKey key{item.constants.buffer, item.constants.offset};
         // Draws that share a set are usually consecutive.
         if (key != last_key) {
             auto [it, inserted] = constants_.try_emplace(key, 0);
-            if (inserted) it->second = place(key.buffer, key.offset, item.constants.size, constants_alignment);
+            if (inserted) {
+                it->second = static_cast<std::uint32_t>(entries_.size());
+                entries_.push_back({key.buffer, key.offset, item.constants.size, constants_alignment, it->second});
+            }
             last_key = key;
-            last_offset = it->second;
+            last_entry = it->second;
         }
-        item.constants.offset = last_offset;
-        for (Range& slot : item.slots) {
+        item_constants_.push_back(last_entry);
+        for (const Range& slot : item.slots) {
             if (slot.size == 0) continue;
-            slot.offset = place(slot.buffer, slot.offset, slot.size, kVertexAlignment);
+            const auto id = static_cast<std::uint32_t>(entries_.size());
+            entries_.push_back({slot.buffer, slot.offset, slot.size, kVertexAlignment, id});
+            slot_entries_.push_back(id);
+        }
+    }
+
+    // Placing the entries in source order lets neighbours of one source buffer share a region however the draws
+    // interleaved them; a region costs the GPU much more than the bytes in a gap.
+    std::sort(entries_.begin(), entries_.end(), [](const Entry& a, const Entry& b) {
+        return std::bit_cast<std::uint64_t>(a.buffer) != std::bit_cast<std::uint64_t>(b.buffer)
+                       ? std::bit_cast<std::uint64_t>(a.buffer) < std::bit_cast<std::uint64_t>(b.buffer)
+                       : a.offset < b.offset;
+    });
+    destinations_.resize(entries_.size());
+    regions_.clear();
+    groups_.clear();
+    VkDeviceSize bump = 0;
+    VkDeviceSize used_bytes = 0;
+    bool open = false;  // the last region belongs to the current group and can still grow
+    for (const Entry& entry : entries_) {
+        used_bytes += entry.size;
+        if (groups_.empty() || groups_.back().buffer != entry.buffer) {
+            groups_.push_back({entry.buffer, regions_.size(), 0});
+            open = false;
+        }
+        if (open) {
+            VkBufferCopy& region = regions_.back();
+            const VkDeviceSize end = region.srcOffset + region.size;
+            const VkDeviceSize destination = region.dstOffset + (entry.offset - region.srcOffset);
+            if (entry.offset <= end + kMergeGap && destination % entry.alignment == 0) {
+                region.size = std::max(end, entry.offset + entry.size) - region.srcOffset;
+                destinations_[entry.id] = destination;
+                bump = region.dstOffset + region.size;
+                continue;
+            }
+        }
+        // Keeping the destination congruent to the source modulo the region alignment lets the entries that join the
+        // region later keep the alignment their source has.
+        VkDeviceSize destination = roundUp(bump, kRegionAlignment) + entry.offset % kRegionAlignment;
+        if (destination % entry.alignment != 0) destination = roundUp(bump, entry.alignment);
+        regions_.push_back({entry.offset, destination, entry.size});
+        groups_.back().count++;
+        destinations_[entry.id] = destination;
+        bump = destination + entry.size;
+        open = true;
+    }
+
+    // The sorted order is gone from here on; entries are looked up by id.
+    std::size_t next_slot = 0;
+    for (std::size_t i = 0; i < current_.items.size(); i++) {
+        Previous& item = current_.items[i];
+        item.constants.offset = destinations_[item_constants_[i]];
+        for (Range& slot : item.slots) {
+            if (slot.size != 0) slot.offset = destinations_[slot_entries_[next_slot++]];
         }
     }
 
     Buffer& target = buffers_[frame_ % 2];
-    if (!ensureCapacity(target, bump_, retired, error)) {
+    if (!ensureCapacity(target, bump, retired, error)) {
         current_.clear();
         previous_.clear();
         has_previous_ = false;
@@ -202,12 +223,11 @@ bool ObjectMotionHistory::recordCopy(VkCommandBuffer cmd, std::shared_ptr<void>&
     barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
     vkCmdPipelineBarrier2(cmd, &dependency);
 
-    for (std::size_t i = 0; i < source_count_; i++) {
-        const SourceCopy& source = sources_[i];
-        vkCmdCopyBuffer(cmd, source.buffer, target.buffer, static_cast<std::uint32_t>(source.regions.size()),
-                        source.regions.data());
-        stats_.regions += source.regions.size();
+    for (const Group& group : groups_) {
+        vkCmdCopyBuffer(cmd, group.buffer, target.buffer, static_cast<std::uint32_t>(group.count),
+                        &regions_[group.first]);
     }
+    stats_.regions = regions_.size();
 
     barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
     barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
@@ -220,7 +240,7 @@ bool ObjectMotionHistory::recordCopy(VkCommandBuffer cmd, std::shared_ptr<void>&
     previous_frame_ = frame_;
     previous_width_ = width_;
     previous_height_ = height_;
-    stats_.history_bytes = copied_bytes_;
+    stats_.history_bytes = used_bytes;
     return true;
 }
 
