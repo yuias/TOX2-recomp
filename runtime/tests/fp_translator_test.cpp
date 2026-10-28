@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <span>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -35,6 +36,8 @@ int g_failed;
     } while (0)
 
 bool contains(const std::string& text, const std::string& part) { return text.find(part) != std::string::npos; }
+
+std::size_t position(const std::string& text, const std::string& part) { return text.find(part); }
 
 bool hasReport(const tox2::GlslResult& result, const std::string& part) {
     return std::any_of(result.unimplemented.begin(), result.unimplemented.end(),
@@ -901,6 +904,174 @@ void testLayout() {
     CHECK(contains(ok.glsl, "layout(std140, set = 0, binding = 2) uniform FpDraw {\n  vec4 vertex_part[4];\n"));
 }
 
+// ---- Object motion variant ----
+
+std::vector<std::string> splitLines(const std::string& text) {
+    std::vector<std::string> lines;
+    std::size_t start = 0;
+    while (start < text.size()) {
+        const std::size_t end = text.find('\n', start);
+        lines.push_back(text.substr(start, end == std::string::npos ? std::string::npos : end - start));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return lines;
+}
+
+// True when every line of `plain` occurs in `variant`, in the same order (the variant only adds lines).
+bool linesInOrder(const std::string& plain, const std::string& variant) {
+    const std::vector<std::string> variant_lines = splitLines(variant);
+    std::size_t next = 0;
+    for (const std::string& line : splitLines(plain)) {
+        while (next < variant_lines.size() && variant_lines[next] != line) next++;
+        if (next == variant_lines.size()) return false;
+        next++;
+    }
+    return true;
+}
+
+// The variant of a program the plain translation accepts: it translates, compiles, adds lines only, and writes the
+// second output after everything that can discard.
+void checkVariant(std::span<const std::uint32_t> words, std::uint32_t control, std::uint32_t texcoord_control,
+                  std::uint32_t texture_types, std::uint64_t key) {
+    const tox2::GlslResult plain = tox2::translateFragmentProgram(words, control, texcoord_control, texture_types);
+    const tox2::GlslResult variant =
+            tox2::translateFragmentProgram(words, control, texcoord_control, texture_types, true);
+    CHECK(variant.ok == plain.ok);
+    CHECK(variant.unimplemented == plain.unimplemented);
+    if (!plain.ok || !variant.ok) return;
+
+    CHECK(variant.texture_units == plain.texture_units);
+    CHECK(linesInOrder(plain.glsl, variant.glsl));
+    CHECK(!contains(plain.glsl, "motion"));
+    CHECK(contains(variant.glsl, "layout(location = 15) in vec4 var_motion_cur;\n"));
+    CHECK(contains(variant.glsl, "layout(location = 16) in vec4 var_motion_prev;\n"));
+    CHECK(contains(variant.glsl, "layout(location = 17) flat in uint var_motion_valid;\n"));
+    CHECK(contains(variant.glsl,
+                   "layout(location = 0) out vec4 out_color0;\nlayout(location = 1) out uvec2 out_object_motion;\n"));
+    CHECK(contains(variant.glsl, "has_motion ? floatBitsToUint(motion_depth) : 4294967295u);\n}\n"));
+    CHECK(tox2::kObjectMotionNone == 0xFFFFFFFFu);
+
+    // The depth the fragment wrote: the exported value when the program exports one.
+    const bool depth_export = (control & tox2::kFpControlDepthExport) != 0;
+    CHECK(contains(variant.glsl, depth_export ? "  float motion_depth = gl_FragDepth;\n"
+                                              : "  float motion_depth = gl_FragCoord.z;\n"));
+    CHECK(position(variant.glsl, "  out_color0 = ") < position(variant.glsl, "  float motion_depth"));
+    CHECK(position(variant.glsl, "  gl_FragDepth = ") < position(variant.glsl, "  float motion_depth") ||
+          !depth_export);
+    const std::size_t last_discard = variant.glsl.rfind("discard;");
+    CHECK(last_discard == std::string::npos || last_discard < variant.glsl.find("  float motion_depth"));
+
+    auto spirv = tox2::compileGlsl(tox2::ShaderStage::Fragment, variant.glsl, key);
+    if (!spirv) std::fprintf(stderr, "%s\n%s\n", spirv.error().c_str(), variant.glsl.c_str());
+    CHECK(spirv.has_value());
+}
+
+void testObjectMotionVariant() {
+    std::uint64_t key = 0xf8000;
+
+    // Plain text is kept character for character: the whole shader of the smallest program.
+    Asm nop;
+    nop.op = 0;
+    nop.end = true;
+    const tox2::GlslResult golden = translate({nop}, 0x40);
+    CHECK(golden.ok);
+    CHECK(golden.glsl ==
+          "#version 450\n"
+          "\n"
+          "layout(constant_id = 0) const bool kAlphaTest = true;\n"
+          "\n"
+          "layout(std140, set = 0, binding = 2) uniform FpDraw {\n"
+          "  vec4 vertex_part[4];\n"
+          "  uint alpha_func;\n"
+          "  float alpha_ref;\n"
+          "  uint flags;\n"
+          "  uint reserved;\n"
+          "  vec4 texture_scale[16];\n"
+          "} draw;\n"
+          "\n"
+          "layout(location = 0) out vec4 out_color0;\n"
+          "\n"
+          "void main() {\n"
+          "  vec4 r_0 = vec4(0.0);\n"
+          "\n"
+          "  if ((draw.flags & 2u) != 0u) r_0 = floor(max(r_0, 0.0) * 255.0 + 0.5) / 255.0;\n"
+          "  if (kAlphaTest) {\n"
+          "    bool alpha_passes = true;\n"
+          "    switch (draw.alpha_func) {\n"
+          "      case 0u: alpha_passes = false; break;\n"
+          "      case 1u: alpha_passes = r_0.a < draw.alpha_ref; break;\n"
+          "      case 2u: alpha_passes = r_0.a == draw.alpha_ref; break;\n"
+          "      case 3u: alpha_passes = r_0.a <= draw.alpha_ref; break;\n"
+          "      case 4u: alpha_passes = r_0.a > draw.alpha_ref; break;\n"
+          "      case 5u: alpha_passes = r_0.a != draw.alpha_ref; break;\n"
+          "      case 6u: alpha_passes = r_0.a >= draw.alpha_ref; break;\n"
+          "      default: break;\n"
+          "    }\n"
+          "    if (!alpha_passes) discard;\n"
+          "  }\n"
+          "  out_color0 = r_0;\n"
+          "}\n");
+
+    // Hand-made programs, each with and without depth export and with fp32 and fp16 colour.
+    Asm mov;
+    mov.op = 1;
+    mov.end = true;
+    Asm tex;
+    tex.op = 0x17;
+    tex.dest_half = true;
+    tex.input = 4;
+    Asm mul;
+    mul.op = 2;
+    mul.src0 = temp(0, true);
+    mul.src1 = inputSrc();
+    mul.end = true;
+    Asm kil;
+    kil.op = 0x12;
+    kil.cond = 1;
+    kil.cc_read = 1;
+    Asm with_constant;
+    with_constant.op = 2;
+    with_constant.src0 = inputSrc();
+    with_constant.src1 = constant();
+    with_constant.end = true;
+    Asm set_cond;
+    set_cond.op = 1;
+    set_cond.cc_update = true;
+    set_cond.cond = 7;
+    const std::vector<std::vector<Asm>> programs = {{nop},      {mov},           {tex, mul},
+                                                    {kil, mov}, {with_constant}, {set_cond, mov}};
+    for (const std::vector<Asm>& instructions : programs) {
+        for (const std::uint32_t control : {0x40u, 0x0u, 0x40u | 0x2u, 0x2u}) {
+            // Texture coordinate 0 as 2D, so the coordinates come from var_tex0.
+            checkVariant(program(instructions), control, 1, 0, key++);
+        }
+    }
+
+    // A depth export with a discard: the second output still comes last.
+    const tox2::GlslResult depth_kil = tox2::translateFragmentProgram(program({kil, mov}), 0x42, 0, 0, true);
+    CHECK(depth_kil.ok);
+    CHECK(position(depth_kil.glsl, "  if (any(lessThan(cc1, vec4(0.0)))) discard;\n") <
+          position(depth_kil.glsl, "  float motion_depth = gl_FragDepth;\n"));
+
+    // The dumped programs.
+    const std::vector<Dump> dumps = loadDumps();
+    if (dumps.empty()) {
+        std::printf("fp translator: no dumps in generated/rsx, variant dump tests skipped\n");
+        return;
+    }
+    int checked = 0;
+    for (const Dump& dump : dumps) {
+        const bool text_program = dump.name.starts_with("fp_c5a1c19123aa52bb");
+        const std::uint32_t control = text_program ? 0x40u : controlFor(dump.name);
+        const std::uint32_t texcoord_control = text_program ? 1u : texcoordControlFor(dump.name);
+        checkVariant(dump.words, control, texcoord_control, 0, key++);
+        checkVariant(dump.words, control | 0x2u, texcoord_control, 0, key++);
+        checked++;
+    }
+    std::printf("fp translator: object motion variant checked on %d dumps\n", checked);
+}
+
 }  // namespace
 
 int main() {
@@ -918,6 +1089,7 @@ int main() {
     testScalarAndDivide();
     testKillAndFences();
     testLayout();
+    testObjectMotionVariant();
     testTextProgram();
     testDumps();
     std::printf("fp translator tests: %d passed, %d failed\n", g_passed, g_failed);
