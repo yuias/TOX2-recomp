@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <format>
+#include <string_view>
 
 #include "rsx/rsx_census.h"
 #include "rsx/rsx_registers.h"
@@ -99,6 +100,28 @@ std::string maskLanes(std::uint32_t mask_x, std::uint32_t mask_y, std::uint32_t 
     return lanes;
 }
 
+// The GLSL names the translated body reads: the object motion variant translates the program a second time with
+// the previous frame's resources.
+struct ResourceNames {
+    std::string constants = "vp_consts";
+    std::string input_prefix = "attr_";
+    std::string draw = "draw";
+};
+
+// Viewport transform of a clip position into clip space normalised to the surface clip size, without a y flip.
+std::string viewportMapping(std::string_view pos, std::string_view draw, std::string_view half_clip) {
+    return std::format(
+            "  vec2 {2} = 0.5 * {1}.clip_params.xy;\n"
+            "  {0} = vec4(\n"
+            "      {0}.x * ({1}.viewport_scale.x / {2}.x) +\n"
+            "          {0}.w * (({1}.viewport_offset.x - {2}.x) / {2}.x),\n"
+            "      {0}.y * ({1}.viewport_scale.y / {2}.y) +\n"
+            "          {0}.w * (({1}.viewport_offset.y - {2}.y) / {2}.y),\n"
+            "      {0}.z * {1}.viewport_scale.z + {0}.w * {1}.viewport_offset.z,\n"
+            "      {0}.w);\n",
+            pos, draw, half_clip);
+}
+
 class Translator {
 public:
     GlslResult run(std::span<const std::uint32_t> ucode, const VpTranslateOptions& options);
@@ -123,9 +146,12 @@ private:
     void emitWrite(const std::vector<std::string>& destinations, const Expr& value, const std::string& lanes,
                    const std::string& select);
     std::string exported(std::uint32_t slot, std::uint32_t mask, const char* member = "") const;
-    std::string assemble() const;
+    void translateProgram(std::span<const std::uint32_t> ucode);
+    std::string localDeclarations(const char* indent) const;
+    std::string assemble(const Translator* previous) const;
     bool clipPlanesEmitted() const { return clip_distances_ && (slots_written_ & ((1u << 5) | (1u << 6))) != 0; }
 
+    ResourceNames names_;
     std::vector<std::string> unimplemented_;
     std::span<const std::uint32_t> ucode_;
     RsxVpFlow flow_;
@@ -158,14 +184,14 @@ std::string Translator::operand(const Instruction& in, int index) {
         case 2: {
             const std::uint32_t input = bits(in.w[1], 8, 4);
             inputs_used_ |= 1u << input;
-            text = std::format("attr_{}", input);
+            text = std::format("{}{}", names_.input_prefix, input);
             break;
         }
         case 3: {
             const std::uint32_t constant = bits(in.w[1], 12, 10);
             if (bits(in.w[3], 1, 1) != 0) note("vp relative constant addressing");
             if (constant >= kRsxVpConstantCount) note(std::format("vp constant index {}", constant));
-            text = std::format("vp_consts.c[{}]", constant);
+            text = std::format("{}.c[{}]", names_.constants, constant);
             break;
         }
         default:
@@ -454,7 +480,8 @@ Translator::Condition Translator::branchCondition(const Instruction& in) {
 // BRB and CLB test bit `index` of the branch bits register and ignore the condition field.
 std::string Translator::booleanCondition(const Instruction& in) const {
     const bool taken_when_set = bits(in.w[3], 28, 1) != 0;
-    return std::format("(draw.branch_bits & (1u << {})) {} 0u", bits(in.w[3], 23, 5), taken_when_set ? "!=" : "==");
+    return std::format("({}.branch_bits & (1u << {})) {} 0u", names_.draw, bits(in.w[3], 23, 5),
+                       taken_when_set ? "!=" : "==");
 }
 
 // Jump-position level of the block that starts at `target`; level 0 is the block at the program start.
@@ -592,7 +619,36 @@ std::string Translator::exported(std::uint32_t slot, std::uint32_t mask, const c
     return std::format("(draw.output_mask & {}u) != 0u ? {} : vec4(0.0, 0.0, 0.0, 1.0)", mask, value);
 }
 
-std::string Translator::assemble() const {
+// The temporaries, written output slots and condition registers the body uses, declared at the start of a scope.
+std::string Translator::localDeclarations(const char* indent) const {
+    std::string glsl;
+    for (std::uint32_t temp = 0; temp < 64; temp++) {
+        if ((temps_used_ & (1ull << temp)) != 0) glsl += std::format("{}vec4 r_{} = vec4(0.0);\n", indent, temp);
+    }
+    for (std::uint32_t slot = 0; slot < kOutputSlotCount; slot++) {
+        if ((slots_written_ & (1u << slot)) != 0) {
+            glsl += std::format("{}vec4 out_{} = vec4(0.0, 0.0, 0.0, 1.0);\n", indent, slot);
+        }
+    }
+    // Both condition registers start at zero when a program begins.
+    for (std::uint32_t reg = 0; reg < 2; reg++) {
+        if ((cc_used_ & (1u << reg)) != 0) glsl += std::format("{}vec4 cc_{} = vec4(0.0);\n", indent, reg);
+    }
+    return glsl;
+}
+
+// `previous` is the same program translated with the previous frame's resource names (object motion variant), or null.
+std::string Translator::assemble(const Translator* previous) const {
+    const bool motion = previous != nullptr;
+    // The previous frame's draw block has the same layout as the current one.
+    const char* const draw_members =
+            "  vec4 viewport_scale;\n"
+            "  vec4 viewport_offset;\n"
+            "  vec4 clip_params;  // clip width, clip height, depth clip min, depth clip max\n"
+            "  uint output_mask;\n"
+            "  float point_size;\n"
+            "  uint branch_bits;\n"
+            "  uint user_clip;\n";
     std::string glsl =
             "#version 450\n"
             "\n"
@@ -602,24 +658,41 @@ std::string Translator::assemble() const {
             "];\n"
             "} vp_consts;\n"
             "\n"
-            "layout(std140, set = 0, binding = 2) uniform VpDraw {\n"
-            "  vec4 viewport_scale;\n"
-            "  vec4 viewport_offset;\n"
-            "  vec4 clip_params;  // clip width, clip height, depth clip min, depth clip max\n"
-            "  uint output_mask;\n"
-            "  float point_size;\n"
-            "  uint branch_bits;\n"
-            "  uint user_clip;\n"
+            "layout(std140, set = 0, binding = 2) uniform VpDraw {\n" +
+            draw_members +
             "} draw;\n"
-            "\n"
-            "layout(push_constant) uniform VpPush {\n"
-            "  vec2 jitter_ndc;  // sub-pixel offset of a DLAA scene pass in clip space, 0 for every other draw\n"
-            "} vp_push;\n"
+            "\n";
+    if (motion) {
+        glsl += std::format(
+                "layout(std140, set = 0, binding = {}) uniform VpPrevConstants {{\n"
+                "  vec4 c[{}];\n"
+                "}} vp_prev_consts;\n"
+                "\n"
+                "layout(std140, set = 0, binding = {}) uniform VpPrevDraw {{\n"
+                "{}"
+                "}} draw_prev;\n"
+                "\n",
+                kVpPrevConstantsBinding, kRsxVpConstantCount, kVpPrevDrawBinding, draw_members);
+    }
+    glsl += "layout(push_constant) uniform VpPush {\n"
+            "  vec2 jitter_ndc;  // sub-pixel offset of a DLAA scene pass in clip space, 0 for every other draw\n";
+    if (motion) {
+        glsl += "  vec2 motion_scale;  // half the scene size in pixels; 0 when the draw has no previous inputs\n";
+    }
+    glsl += "} vp_push;\n"
             "\n";
 
     for (std::uint32_t input = 0; input < 16; input++) {
         if ((inputs_used_ & (1u << input)) != 0) {
             glsl += std::format("layout(location = {}) in vec4 attr_{};\n", input, input);
+        }
+    }
+    if (motion) {
+        for (std::uint32_t input = 0; input < 16; input++) {
+            if ((inputs_used_ & (1u << input)) != 0) {
+                glsl += std::format("layout(location = {}) in vec4 prev_attr_{};\n", kVpPrevInputLocationBase + input,
+                                    input);
+            }
         }
     }
     glsl += "\n";
@@ -633,6 +706,13 @@ std::string Translator::assemble() const {
             "layout(location = {}) out vec4 var_back_specular;\n"
             "layout(location = {}) out vec4 var_fog;\n",
             kVaryingFrontDiffuse, kVaryingBackDiffuse, kVaryingFrontSpecular, kVaryingBackSpecular, kVaryingFog);
+    if (motion) {
+        glsl += std::format(
+                "layout(location = {}) out vec4 var_motion_cur;\n"
+                "layout(location = {}) out vec4 var_motion_prev;\n"
+                "layout(location = {}) flat out uint var_motion_valid;\n",
+                kVaryingMotionCur, kVaryingMotionPrev, kVaryingMotionValid);
+    }
     glsl += "\ninvariant gl_Position;\n";
     // Without a written slot 5 or 6 no plane has a source, so the array is not declared at all.
     if (clipPlanesEmitted()) glsl += "out float gl_ClipDistance[6];\n";
@@ -646,18 +726,7 @@ std::string Translator::assemble() const {
     }
 
     glsl += "void main() {\n";
-    for (std::uint32_t temp = 0; temp < 64; temp++) {
-        if ((temps_used_ & (1ull << temp)) != 0) glsl += std::format("  vec4 r_{} = vec4(0.0);\n", temp);
-    }
-    for (std::uint32_t slot = 0; slot < kOutputSlotCount; slot++) {
-        if ((slots_written_ & (1u << slot)) != 0) {
-            glsl += std::format("  vec4 out_{} = vec4(0.0, 0.0, 0.0, 1.0);\n", slot);
-        }
-    }
-    // Both condition registers start at zero when a program begins.
-    for (std::uint32_t reg = 0; reg < 2; reg++) {
-        if ((cc_used_ & (1u << reg)) != 0) glsl += std::format("  vec4 cc_{} = vec4(0.0);\n", reg);
-    }
+    glsl += localDeclarations("  ");
     glsl += body_;
 
     // Epilogue. Outputs the program did not write, or the output mask disables, are (0, 0, 0, 1).
@@ -711,18 +780,12 @@ std::string Translator::assemble() const {
     glsl += std::string(
                     "\n"
                     "  vec4 pos = ") +
-            ((slots_written_ & 1u) != 0 ? "out_0" : std::string(kDefault)) +
-            ";\n"
-            "  vec2 half_clip = 0.5 * draw.clip_params.xy;\n"
-            "  pos = vec4(\n"
-            "      pos.x * (draw.viewport_scale.x / half_clip.x) +\n"
-            "          pos.w * ((draw.viewport_offset.x - half_clip.x) / half_clip.x),\n"
-            "      pos.y * (draw.viewport_scale.y / half_clip.y) +\n"
-            "          pos.w * ((draw.viewport_offset.y - half_clip.y) / half_clip.y),\n"
-            "      pos.z * draw.viewport_scale.z + pos.w * draw.viewport_offset.z,\n"
-            "      pos.w);\n"
-            // Scaled by w so the shift is a constant offset in screen space after the perspective divide.
-            "  pos.xy += vp_push.jitter_ndc * pos.w;\n"
+            ((slots_written_ & 1u) != 0 ? "out_0" : std::string(kDefault)) + ";\n" +
+            viewportMapping("pos", "draw", "half_clip");
+    // The motion vector is taken between unjittered positions, so the jitter does not show up as object motion.
+    if (motion) glsl += "  vec4 motion_cur = pos;\n";
+    // Scaled by w so the shift is a constant offset in screen space after the perspective divide.
+    glsl += "  pos.xy += vp_push.jitter_ndc * pos.w;\n"
             // The identity range (the common case) keeps z exact instead of going through the grid.
             "  bool identity_depth = draw.clip_params.z == 0.0 && draw.clip_params.w == 1.0;\n"
             "  if (pos.w != 0.0 && !identity_depth) {\n"
@@ -737,8 +800,21 @@ std::string Translator::assemble() const {
             "    }\n"
             "    pos.z = d * pos.w;\n"
             "  }\n"
-            "  gl_Position = pos;\n"
-            "}\n";
+            "  gl_Position = pos;\n";
+    if (motion) {
+        // The inner scope re-declares the locals, so the second copy of the body shadows the first and stays
+        // independent of it. The previous position gets the same viewport mapping, without jitter or depth remap.
+        glsl += "\n  vec4 prev_pos = vec4(0.0, 0.0, 0.0, 1.0);\n  {\n";
+        glsl += previous->localDeclarations("    ");
+        glsl += previous->body_;
+        if ((previous->slots_written_ & 1u) != 0) glsl += "    prev_pos = out_0;\n";
+        glsl += "  }\n";
+        glsl += viewportMapping("prev_pos", previous->names_.draw, "prev_half_clip");
+        glsl += "  var_motion_cur = vec4(motion_cur.xy * vp_push.motion_scale, 0.0, motion_cur.w);\n"
+                "  var_motion_prev = vec4(prev_pos.xy * vp_push.motion_scale, 0.0, prev_pos.w);\n"
+                "  var_motion_valid = vp_push.motion_scale.x > 0.0 ? 1u : 0u;\n";
+    }
+    glsl += "}\n";
     return glsl;
 }
 
@@ -749,6 +825,23 @@ GlslResult Translator::run(std::span<const std::uint32_t> ucode, const VpTransla
         result.unimplemented.push_back("vp malformed ucode size");
         return result;
     }
+    translateProgram(ucode);
+
+    result.unimplemented = std::move(unimplemented_);
+    if (result.unimplemented.empty()) {
+        Translator previous;
+        if (options.object_motion) {
+            previous.names_ = {"vp_prev_consts", "prev_attr_", "draw_prev"};
+            previous.translateProgram(ucode);
+        }
+        result.glsl = assemble(options.object_motion ? &previous : nullptr);
+        result.inputs_used = inputs_used_;
+        result.ok = true;
+    }
+    return result;
+}
+
+void Translator::translateProgram(std::span<const std::uint32_t> ucode) {
     ucode_ = ucode;
     flow_ = analyzeVertexProgramFlow(ucode.data(), static_cast<std::uint32_t>(ucode.size() / 4), 0);
     if (flow_.bad_target) note("vp branch target out of range");
@@ -767,14 +860,6 @@ GlslResult Translator::run(std::span<const std::uint32_t> ucode, const VpTransla
         cc_used_ = 0;
         uses_lit_ = false;
     }
-
-    result.unimplemented = std::move(unimplemented_);
-    if (result.unimplemented.empty()) {
-        result.glsl = assemble();
-        result.inputs_used = inputs_used_;
-        result.ok = true;
-    }
-    return result;
 }
 
 }  // namespace

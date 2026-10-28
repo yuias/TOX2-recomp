@@ -137,6 +137,8 @@ tox2::GlslResult translate(const std::vector<Asm>& instructions) {
     return tox2::translateVertexProgram(words, 0);
 }
 
+void checkVariant(const std::vector<std::uint32_t>& words, std::uint64_t key, bool clip_distances = false);
+
 // ---- Dumps ----
 
 struct Dump {
@@ -269,6 +271,7 @@ void testDumps() {
             std::fprintf(stderr, "%s: %s\n", dump.name.c_str(), spirv.error().c_str());
             std::fprintf(stderr, "%s\n", result.glsl.c_str());
         }
+        checkVariant(dump.words, 0xd0d4);
         if (!printed && dump.name.starts_with("vp_30e29a531ca34b4e")) {
             std::printf("translated %s:\n%s\n", dump.name.c_str(), result.glsl.c_str());
             printed = true;
@@ -1004,6 +1007,242 @@ void testUserClipPlanes() {
     CHECK(!contains(result.glsl, "gl_ClipDistance"));
 }
 
+// ---- Object motion variant ----
+
+std::vector<std::string> splitLines(const std::string& text) {
+    std::vector<std::string> lines;
+    std::size_t start = 0;
+    while (start < text.size()) {
+        const std::size_t end = text.find('\n', start);
+        lines.push_back(text.substr(start, end == std::string::npos ? std::string::npos : end - start));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return lines;
+}
+
+// True when every line of `plain` occurs in `variant`, in the same order (the variant only adds lines).
+bool linesInOrder(const std::string& plain, const std::string& variant) {
+    const std::vector<std::string> variant_lines = splitLines(variant);
+    std::size_t next = 0;
+    for (const std::string& line : splitLines(plain)) {
+        while (next < variant_lines.size() && variant_lines[next] != line) next++;
+        if (next == variant_lines.size()) return false;
+        next++;
+    }
+    return true;
+}
+
+// The previous body and the previous position mapping read the previous frame's resources only.
+bool previousBodyIsIsolated(const std::string& glsl) {
+    const std::size_t begin = glsl.find("  vec4 prev_pos = vec4(0.0, 0.0, 0.0, 1.0);\n");
+    const std::size_t end = glsl.find("  var_motion_cur = ");
+    if (begin == std::string::npos || end == std::string::npos || begin > end) return false;
+    const std::string block = glsl.substr(begin, end - begin);
+    if (contains(block, "vp_consts") || contains(block, "draw.")) return false;
+    // The jitter and the depth remap apply to the current position only.
+    if (contains(block, "jitter_ndc") || contains(block, "identity_depth") || contains(block, "depth_near")) {
+        return false;
+    }
+    for (std::size_t at = block.find("attr_"); at != std::string::npos; at = block.find("attr_", at + 1)) {
+        if (at < 5 || block.compare(at - 5, 5, "prev_") != 0) return false;
+    }
+    return true;
+}
+
+// The variant of a program the plain translation accepts: it translates, compiles, adds lines only, keeps the
+// plain inputs, and its second body stays on the previous frame's resources.
+void checkVariant(const std::vector<std::uint32_t>& words, std::uint64_t key, bool clip_distances) {
+    tox2::VpTranslateOptions plain_options;
+    plain_options.clip_distances = clip_distances;
+    tox2::VpTranslateOptions variant_options = plain_options;
+    variant_options.object_motion = true;
+    const tox2::GlslResult plain = tox2::translateVertexProgram(words, 0, plain_options);
+    const tox2::GlslResult variant = tox2::translateVertexProgram(words, 0, variant_options);
+    CHECK(variant.ok == plain.ok);
+    CHECK(variant.unimplemented == plain.unimplemented);
+    if (!plain.ok || !variant.ok) return;
+
+    CHECK(variant.inputs_used == plain.inputs_used);
+    CHECK(linesInOrder(plain.glsl, variant.glsl));
+    CHECK(previousBodyIsIsolated(variant.glsl));
+    CHECK(contains(variant.glsl, "binding = 19) uniform VpPrevConstants"));
+    CHECK(contains(variant.glsl, "binding = 20) uniform VpPrevDraw"));
+    CHECK(contains(variant.glsl, "  vec2 motion_scale;"));
+    CHECK(contains(variant.glsl, "layout(location = 15) out vec4 var_motion_cur;\n"));
+    CHECK(contains(variant.glsl, "layout(location = 16) out vec4 var_motion_prev;\n"));
+    CHECK(contains(variant.glsl, "layout(location = 17) flat out uint var_motion_valid;\n"));
+    for (std::uint32_t slot = 0; slot < 16; slot++) {
+        const std::string declaration = "layout(location = " + std::to_string(16 + slot) + ") in vec4 prev_attr_" +
+                                        std::to_string(slot) + ";\n";
+        CHECK(contains(variant.glsl, declaration) == ((plain.inputs_used & (1u << slot)) != 0));
+    }
+    // The motion position is the one before the jitter; the plain jitter line and the final write are unchanged.
+    CHECK(position(variant.glsl, "  vec4 motion_cur = pos;\n") <
+          position(variant.glsl, "  pos.xy += vp_push.jitter_ndc * pos.w;\n"));
+
+    auto spirv = tox2::compileGlsl(tox2::ShaderStage::Vertex, variant.glsl, key);
+    CHECK(spirv.has_value());
+    if (!spirv) std::fprintf(stderr, "%s\n%s\n", spirv.error().c_str(), variant.glsl.c_str());
+}
+
+void testObjectMotionVariant() {
+    std::uint64_t key = 0xd2000;
+    const auto check = [&](const std::vector<Asm>& instructions, bool clip_distances = false) {
+        checkVariant(program(instructions), key++, clip_distances);
+    };
+
+    // Straight line with a constant, a temp and an input.
+    Asm mad;
+    mad.vec_op = 4;
+    mad.slot = 0;
+    mad.src0 = input("wwww");
+    mad.constant_index = 3;
+    mad.src1 = constant();
+    mad.src2 = temp(0);
+    mad.end = true;
+    check({movTo(0, true)});
+    check({mad});
+    const tox2::GlslResult variant = [&] {
+        tox2::VpTranslateOptions options;
+        options.object_motion = true;
+        return tox2::translateVertexProgram(program({mad}), 0, options);
+    }();
+    CHECK(variant.ok);
+    CHECK(contains(variant.glsl, "  out_0 = fma(prev_attr_0.wwww, vp_prev_consts.c[3], r_0);\n"));
+    CHECK(contains(variant.glsl, "  out_0 = fma(attr_0.wwww, vp_consts.c[3], r_0);\n"));
+
+    // Flow control: branch on a boolean constant, a backward branch, past the first end bit, calls.
+    check({movTo(0), flowOp(0x11, 3, 5, false), movTo(1), movTo(2), movTo(3, true)});
+    check({movTo(0), flowOp(0x11, 2, 31, true), movTo(1), movTo(2, true)});
+    check({movTo(0), flowOp(0x11, 3, 1, true), movTo(1, true), movTo(2), movTo(3, true)});
+    check({movTo(0), movTo(1), flowOp(0x11, 1, 2, true), movTo(3, true)});
+    check({movTo(0), flowOp(0x09, 3), movTo(1), movTo(2, true), movTo(3, true)});
+    check({movTo(0), flowOp(0x0a, 4), movTo(1), movTo(3, true), movTo(2), flowOp(0x0c, 0)});
+    check({movTo(0), flowOp(0x12, 3, 6, true), movTo(3, true), movTo(2), flowOp(0x0c, 0)});
+    check({movTo(0), flowOp(0x0a, 4), movTo(3, true), movTo(3), movTo(2), flowOp(0x0a, 7), flowOp(0x0c, 0), movTo(1),
+           flowOp(0x0c, 0)});
+
+    // The previous body takes the branch bits from the previous draw's block.
+    tox2::VpTranslateOptions options;
+    options.object_motion = true;
+    const tox2::GlslResult branching = tox2::translateVertexProgram(
+            program({movTo(0), flowOp(0x11, 3, 5, false), movTo(1), movTo(2), movTo(3, true)}), 0, options);
+    CHECK(branching.ok);
+    CHECK(contains(branching.glsl, "if ((draw.branch_bits & (1u << 5)) == 0u) {"));
+    CHECK(contains(branching.glsl, "if ((draw_prev.branch_bits & (1u << 5)) == 0u) {"));
+
+    // User clip planes and a program without a position write (disabled whole, previous position stays default).
+    check({movTo(0), movTo(5), movTo(6, true)}, true);
+    check({movTo(5, true)});
+    const tox2::GlslResult disabled = tox2::translateVertexProgram(program({movTo(5, true)}), 0, options);
+    CHECK(disabled.ok);
+    CHECK(!contains(disabled.glsl, "prev_pos = out_0;"));
+
+    // Reports are the plain translation's reports.
+    Asm bra = movTo(0, true);
+    bra.sca_op = 0x08;
+    checkVariant(program({bra}), key++);
+    checkVariant(program({movTo(0), flowOp(0x0a, 3), movTo(3, true), flowOp(0x0a, 3)}), key++);
+}
+
+// Full text of the plain program for a single MOV o[0], v[0]. The object motion variant must not change it.
+const char* const kGoldenMov =
+        R"GLSL(#version 450
+
+layout(std140, set = 0, binding = 0) uniform VpConstants {
+  vec4 c[468];
+} vp_consts;
+
+layout(std140, set = 0, binding = 2) uniform VpDraw {
+  vec4 viewport_scale;
+  vec4 viewport_offset;
+  vec4 clip_params;  // clip width, clip height, depth clip min, depth clip max
+  uint output_mask;
+  float point_size;
+  uint branch_bits;
+  uint user_clip;
+} draw;
+
+layout(push_constant) uniform VpPush {
+  vec2 jitter_ndc;  // sub-pixel offset of a DLAA scene pass in clip space, 0 for every other draw
+} vp_push;
+
+layout(location = 0) in vec4 attr_0;
+
+layout(location = 0) out vec4 var_tex0;
+layout(location = 1) out vec4 var_tex1;
+layout(location = 2) out vec4 var_tex2;
+layout(location = 3) out vec4 var_tex3;
+layout(location = 4) out vec4 var_tex4;
+layout(location = 5) out vec4 var_tex5;
+layout(location = 6) out vec4 var_tex6;
+layout(location = 7) out vec4 var_tex7;
+layout(location = 8) out vec4 var_tex8;
+layout(location = 9) out vec4 var_tex9;
+layout(location = 10) out vec4 var_front_diffuse;
+layout(location = 11) out vec4 var_back_diffuse;
+layout(location = 12) out vec4 var_front_specular;
+layout(location = 13) out vec4 var_back_specular;
+layout(location = 14) out vec4 var_fog;
+
+invariant gl_Position;
+
+void main() {
+  vec4 out_0 = vec4(0.0, 0.0, 0.0, 1.0);
+  out_0 = attr_0;
+
+  var_tex0 = vec4(0.0, 0.0, 0.0, 1.0);
+  var_tex1 = vec4(0.0, 0.0, 0.0, 1.0);
+  var_tex2 = vec4(0.0, 0.0, 0.0, 1.0);
+  var_tex3 = vec4(0.0, 0.0, 0.0, 1.0);
+  var_tex4 = vec4(0.0, 0.0, 0.0, 1.0);
+  var_tex5 = vec4(0.0, 0.0, 0.0, 1.0);
+  var_tex6 = vec4(0.0, 0.0, 0.0, 1.0);
+  var_tex7 = vec4(0.0, 0.0, 0.0, 1.0);
+  var_tex8 = vec4(0.0, 0.0, 0.0, 1.0);
+  var_tex9 = vec4(0.0, 0.0, 0.0, 1.0);
+  var_front_diffuse = vec4(0.0, 0.0, 0.0, 1.0);
+  var_front_specular = vec4(0.0, 0.0, 0.0, 1.0);
+  var_back_diffuse = vec4(0.0, 0.0, 0.0, 1.0);
+  var_back_specular = vec4(0.0, 0.0, 0.0, 1.0);
+  var_fog = vec4(0.0, 0.0, 0.0, 1.0);
+  gl_PointSize = draw.point_size * draw.viewport_scale.w;
+
+  vec4 pos = out_0;
+  vec2 half_clip = 0.5 * draw.clip_params.xy;
+  pos = vec4(
+      pos.x * (draw.viewport_scale.x / half_clip.x) +
+          pos.w * ((draw.viewport_offset.x - half_clip.x) / half_clip.x),
+      pos.y * (draw.viewport_scale.y / half_clip.y) +
+          pos.w * ((draw.viewport_offset.y - half_clip.y) / half_clip.y),
+      pos.z * draw.viewport_scale.z + pos.w * draw.viewport_offset.z,
+      pos.w);
+  pos.xy += vp_push.jitter_ndc * pos.w;
+  bool identity_depth = draw.clip_params.z == 0.0 && draw.clip_params.w == 1.0;
+  if (pos.w != 0.0 && !identity_depth) {
+    float depth_near = min(draw.clip_params.z, draw.clip_params.w);
+    float depth_far = max(draw.clip_params.z, draw.clip_params.w);
+    float range = depth_far - depth_near;
+    float d = 0.0;
+    if (range > 1e-6) {
+      d = (pos.z - depth_near * pos.w) / (range * pos.w);
+      float nearest = floor(d + 0.5);
+      if (abs(d - nearest) < 1.0 / (range * 16777215.0)) d = nearest;
+    }
+    pos.z = d * pos.w;
+  }
+  gl_Position = pos;
+}
+)GLSL";
+
+void testPlainGolden() {
+    const tox2::GlslResult result = translate({movTo(0, true)});
+    CHECK(result.ok);
+    CHECK(result.glsl == kGoldenMov);
+    if (result.glsl != kGoldenMov) std::fprintf(stderr, "%s\n", result.glsl.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -1025,6 +1264,8 @@ int main() {
     testConditionCodeOrder();
     testLocations();
     testUserClipPlanes();
+    testPlainGolden();
+    testObjectMotionVariant();
     testDumps();
     std::printf("vp translator tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
