@@ -31,6 +31,8 @@ constexpr std::uint64_t kLayoutColorFragmentKey = 0x4C41594F434Full;
 constexpr std::uint64_t kLayoutDepthFragmentKey = 0x4C4159444550ull;
 constexpr std::uint64_t kLayoutDepthStencilFragmentKey = 0x4C4159445354ull;
 constexpr std::uint64_t kLayoutDepthStencilExportFragmentKey = 0x4C4159445345ull;
+// Mixed into the cache key of the object motion variants of a translated program.
+constexpr std::uint32_t kObjectMotionKeyMix = 0x4D4F5456u;
 
 constexpr const char* kClearVertexGlsl = R"(#version 450
 void main() {
@@ -179,7 +181,7 @@ DrawPipelines::DrawPipelines(VkContext& context, std::filesystem::path cache_fil
     const VkDevice device = context_.device();
     loadPipelineCache();
 
-    VkDescriptorSetLayoutBinding bindings[3 + kFpTextureUnitCount]{};
+    VkDescriptorSetLayoutBinding bindings[3 + kFpTextureUnitCount + 2]{};
     for (std::uint32_t i = 0; i < 3; i++) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -193,6 +195,11 @@ DrawPipelines::DrawPipelines(VkContext& context, std::filesystem::path cache_fil
         b.descriptorCount = 1;
         b.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     }
+    // The object motion variant's previous constants and draw values.
+    bindings[3 + kFpTextureUnitCount] = {kVpPrevConstantsBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+                                         VK_SHADER_STAGE_VERTEX_BIT, nullptr};
+    bindings[3 + kFpTextureUnitCount + 1] = {kVpPrevDrawBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+                                             VK_SHADER_STAGE_VERTEX_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo set_info{};
     set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     set_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
@@ -208,10 +215,11 @@ DrawPipelines::DrawPipelines(VkContext& context, std::filesystem::path cache_fil
     layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layout_info.setLayoutCount = 1;
     layout_info.pSetLayouts = &set_layout_;
-    // The vertex jitter offset (VpPush in the vertex program translator).
+    // VpPush in the vertex program translator: the jitter offset, and for the object motion variant the scale of the
+    // motion varyings. A plain program declares the first 8 bytes only.
     VkPushConstantRange jitter_push{};
     jitter_push.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-    jitter_push.size = 2 * sizeof(float);
+    jitter_push.size = 4 * sizeof(float);
     layout_info.pushConstantRangeCount = 1;
     layout_info.pPushConstantRanges = &jitter_push;
     if (vkCreatePipelineLayout(device, &layout_info, nullptr, &draw_layout_) != VK_SUCCESS) {
@@ -341,18 +349,20 @@ VkResult DrawPipelines::createPipeline(const VkGraphicsPipelineCreateInfo& info,
     return result;
 }
 
-const DrawPipelines::Program* DrawPipelines::vertexProgram(const RsxDraw& draw) {
-    auto it = vertex_programs_.find(draw.vp_hash);
+const DrawPipelines::Program* DrawPipelines::vertexProgram(const RsxDraw& draw, bool object_motion) {
+    const VertexKey key{draw.vp_hash, object_motion};
+    auto it = vertex_programs_.find(key);
     if (it == vertex_programs_.end()) {
         auto program = std::make_unique<Program>();
         if (draw.vp_ucode.empty()) {
             program->notes.push_back("draw without vertex program");
         } else {
             GlslResult glsl = translateVertexProgram(draw.vp_ucode, draw.vp_input_mask,
-                                                     VpTranslateOptions{context_.hasClipDistance()});
+                                                     VpTranslateOptions{context_.hasClipDistance(), object_motion});
             program->notes = std::move(glsl.unimplemented);
             if (glsl.ok) {
-                auto spirv = compileGlsl(ShaderStage::Vertex, glsl.glsl, draw.vp_hash);
+                auto spirv = compileGlsl(ShaderStage::Vertex, glsl.glsl,
+                                         object_motion ? mixKey(draw.vp_hash, kObjectMotionKeyMix, 0) : draw.vp_hash);
                 if (spirv) {
                     program->module = createModule(context_.device(), *spirv);
                     program->ok = program->module != VK_NULL_HANDLE;
@@ -365,7 +375,7 @@ const DrawPipelines::Program* DrawPipelines::vertexProgram(const RsxDraw& draw) 
                 }
             }
         }
-        it = vertex_programs_.emplace(draw.vp_hash, std::move(program)).first;
+        it = vertex_programs_.emplace(key, std::move(program)).first;
     }
     return it->second.get();
 }
@@ -383,21 +393,22 @@ std::uint32_t drawTextureTypes(const RsxDraw& draw) {
     return types;
 }
 
-const DrawPipelines::Program* DrawPipelines::fragmentProgram(const RsxDraw& draw, std::uint32_t texture_types) {
-    const FragmentKey key{draw.fp_hash, draw.fp_control, draw.texcoord_control, texture_types};
+const DrawPipelines::Program* DrawPipelines::fragmentProgram(const RsxDraw& draw, std::uint32_t texture_types,
+                                                             bool object_motion) {
+    const FragmentKey key{draw.fp_hash, draw.fp_control, draw.texcoord_control, texture_types, object_motion};
     auto it = fragment_programs_.find(key);
     if (it == fragment_programs_.end()) {
         auto program = std::make_unique<Program>();
         if (draw.fp_ucode.empty()) {
             program->notes.push_back("draw without fragment program");
         } else {
-            GlslResult glsl =
-                    translateFragmentProgram(draw.fp_ucode, draw.fp_control, draw.texcoord_control, texture_types);
+            GlslResult glsl = translateFragmentProgram(draw.fp_ucode, draw.fp_control, draw.texcoord_control,
+                                                       texture_types, object_motion);
             program->notes = std::move(glsl.unimplemented);
             if (glsl.ok) {
-                auto spirv = compileGlsl(
-                        ShaderStage::Fragment, glsl.glsl,
-                        mixKey(mixKey(draw.fp_hash, draw.fp_control, draw.texcoord_control), texture_types, 0));
+                auto spirv = compileGlsl(ShaderStage::Fragment, glsl.glsl,
+                                         mixKey(mixKey(draw.fp_hash, draw.fp_control, draw.texcoord_control),
+                                                texture_types, object_motion ? kObjectMotionKeyMix : 0));
                 if (spirv) {
                     program->module = createModule(context_.device(), *spirv);
                     program->ok = program->module != VK_NULL_HANDLE;
@@ -415,20 +426,20 @@ const DrawPipelines::Program* DrawPipelines::fragmentProgram(const RsxDraw& draw
     return it->second.get();
 }
 
-bool DrawPipelines::shaders(const RsxDraw& draw, DrawShaders& out) {
-    const Program* vertex = vertexProgram(draw);
+bool DrawPipelines::shaders(const RsxDraw& draw, DrawShaders& out, bool object_motion) {
+    const Program* vertex = vertexProgram(draw, object_motion);
     // The program text depends on the types of the units it samples only. The sampled units are known after
     // the first translation, so a draw with a 3D or cube texture on some unit first gets the all-2D program,
     // then the variant restricted to the types of its sampled units (the same program when none is 3D or cube).
     std::uint32_t texture_types = drawTextureTypes(draw);
-    const Program* fragment = fragmentProgram(draw, 0);
+    const Program* fragment = fragmentProgram(draw, 0, object_motion);
     if (texture_types != 0 && fragment->ok) {
         std::uint32_t sampled = 0;
         for (std::uint32_t unit = 0; unit < kFpTextureUnitCount; unit++) {
             if ((fragment->texture_units & (1u << unit)) != 0) sampled |= 3u << (unit * 2);
         }
         texture_types &= sampled;
-        if (texture_types != 0) fragment = fragmentProgram(draw, texture_types);
+        if (texture_types != 0) fragment = fragmentProgram(draw, texture_types, object_motion);
     } else {
         texture_types = 0;
     }
@@ -468,14 +479,20 @@ VkPipeline DrawPipelines::pipeline(const PipelineKey& key, const DrawShaders& sh
     specialization.pData = &alpha_test;
     stages[1].pSpecializationInfo = &specialization;
 
-    VkVertexInputBindingDescription bindings[kPipelineVertexSlots]{};
-    VkVertexInputAttributeDescription attributes[kPipelineVertexSlots]{};
+    VkVertexInputBindingDescription bindings[2 * kPipelineVertexSlots]{};
+    VkVertexInputAttributeDescription attributes[2 * kPipelineVertexSlots]{};
     std::uint32_t input_count = 0;
     for (std::uint32_t slot = 0; slot < kPipelineVertexSlots; slot++) {
         if (key.vertex_formats[slot] == VK_FORMAT_UNDEFINED) continue;
         bindings[input_count] = {slot, key.vertex_strides[slot], VK_VERTEX_INPUT_RATE_VERTEX};
         attributes[input_count] = {slot, slot, key.vertex_formats[slot], 0};
         input_count++;
+        if (key.object_motion) {
+            const std::uint32_t prev = kVpPrevInputLocationBase + slot;
+            bindings[input_count] = {prev, key.vertex_strides[slot], VK_VERTEX_INPUT_RATE_VERTEX};
+            attributes[input_count] = {prev, prev, key.vertex_formats[slot], 0};
+            input_count++;
+        }
     }
     VkPipelineVertexInputStateCreateInfo vertex_input{};
     vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -517,10 +534,16 @@ VkPipeline DrawPipelines::pipeline(const PipelineKey& key, const DrawShaders& sh
     attachment.dstAlphaBlendFactor = key.dst_alpha;
     attachment.alphaBlendOp = key.alpha_op;
     attachment.colorWriteMask = key.color_mask;
+    // Attachment 1 of the motion variant takes the fragment's two words as they are.
+    VkPipelineColorBlendAttachmentState attachments[2]{};
+    attachments[0] = attachment;
+    attachments[1].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT;
+    const VkFormat color_formats[2] = {key.color_format, kObjectMotionFormat};
+    const std::uint32_t color_count = key.object_motion ? 2 : 1;
     VkPipelineColorBlendStateCreateInfo blend{};
     blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    blend.attachmentCount = 1;
-    blend.pAttachments = &attachment;
+    blend.attachmentCount = color_count;
+    blend.pAttachments = attachments;
 
     constexpr VkDynamicState kDynamic[] = {VK_DYNAMIC_STATE_VIEWPORT,
                                            VK_DYNAMIC_STATE_SCISSOR,
@@ -546,8 +569,8 @@ VkPipeline DrawPipelines::pipeline(const PipelineKey& key, const DrawShaders& sh
             key.depth_format == VK_FORMAT_D24_UNORM_S8_UINT || key.depth_format == VK_FORMAT_D32_SFLOAT_S8_UINT;
     VkPipelineRenderingCreateInfo rendering{};
     rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    rendering.colorAttachmentCount = 1;
-    rendering.pColorAttachmentFormats = &key.color_format;
+    rendering.colorAttachmentCount = color_count;
+    rendering.pColorAttachmentFormats = color_formats;
     rendering.depthAttachmentFormat = key.depth_format;
     rendering.stencilAttachmentFormat = has_stencil ? key.depth_format : VK_FORMAT_UNDEFINED;
 

@@ -14,6 +14,7 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <utility>
 
 #include "render/vk_context.h"
 #include "rsx/rsx_frame.h"
@@ -21,6 +22,9 @@
 namespace tox2 {
 
 inline constexpr std::uint32_t kPipelineVertexSlots = 16;
+
+// Format of the object image the motion variant writes at colour attachment 1 (fp_translator.h kObjectMotionNone).
+inline constexpr VkFormat kObjectMotionFormat = VK_FORMAT_R32G32_UINT;
 
 // Translated and compiled programs of a draw. Valid until the DrawPipelines object is destroyed.
 struct DrawShaders {
@@ -60,6 +64,10 @@ struct PipelineKey {
     VkColorComponentFlags color_mask = 0xF;
     // rasterizationSamples; every attachment of the pass has this sample count.
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+    // The object motion variant (DrawShaders from shaders(..., true)): a second colour attachment of
+    // kObjectMotionFormat written without blending, and the previous inputs of vertex slot n at binding and
+    // location kVpPrevInputLocationBase + n with the format and stride of slot n.
+    bool object_motion = false;
 
     auto operator<=>(const PipelineKey&) const = default;
 };
@@ -91,12 +99,15 @@ public:
     bool valid() const { return error_.empty(); }
     const std::string& error() const { return error_; }
 
-    // One push-descriptor set: bindings 0..2 uniform buffers, 3..18 combined image samplers.
+    // One push-descriptor set: bindings 0..2 uniform buffers, 3..18 combined image samplers, 19 and 20 the object
+    // motion variant's previous constants and draw values (vertex stage). The push range is 16 bytes of the vertex
+    // stage (jitter_ndc, motion_scale); the plain vertex programs declare the first 8.
     VkPipelineLayout drawLayout() const { return draw_layout_; }
 
     // Translates and compiles the draw's programs on first use. False when a translator or the compiler
-    // rejects one of them; the reason is counted with rsxNoteUnimplemented.
-    bool shaders(const RsxDraw& draw, DrawShaders& out);
+    // rejects one of them; the reason is counted with rsxNoteUnimplemented. `object_motion` selects the variants
+    // for PipelineKey::object_motion; the caller checks VkContext::objectMotionSupported() first.
+    bool shaders(const RsxDraw& draw, DrawShaders& out, bool object_motion = false);
 
     // Null on a Vulkan failure (error() is set).
     VkPipeline pipeline(const PipelineKey& key, const DrawShaders& shaders);
@@ -134,10 +145,11 @@ public:
 
 private:
     struct Program;
-    using FragmentKey = std::tuple<std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t>;
+    using VertexKey = std::pair<std::uint64_t, bool>;  // vp_hash, object motion variant
+    using FragmentKey = std::tuple<std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, bool>;
 
-    const Program* vertexProgram(const RsxDraw& draw);
-    const Program* fragmentProgram(const RsxDraw& draw, std::uint32_t texture_types);
+    const Program* vertexProgram(const RsxDraw& draw, bool object_motion);
+    const Program* fragmentProgram(const RsxDraw& draw, std::uint32_t texture_types, bool object_motion);
     bool createClearShaders();
     enum class LayoutShader : std::uint32_t {
         DepthConvert,
@@ -170,7 +182,7 @@ private:
     std::array<VkShaderModule, 6> layout_shaders_{};       // LayoutShader, created on first use
     std::array<VkPipeline, 2> depth_convert_pipelines_{};  // single-sample, multisampled
 
-    std::map<std::uint64_t, std::unique_ptr<Program>> vertex_programs_;
+    std::map<VertexKey, std::unique_ptr<Program>> vertex_programs_;
     std::map<FragmentKey, std::unique_ptr<Program>> fragment_programs_;
     std::map<PipelineKey, VkPipeline> pipelines_;
     std::map<std::tuple<VkFormat, VkColorComponentFlags, VkSampleCountFlagBits>, VkPipeline> clear_pipelines_;

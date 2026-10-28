@@ -1114,6 +1114,69 @@ void testLayoutPassPipelines(tox2::VkContext& ctx) {
     CHECK(ctx.validationErrorCount() == errors_before);
 }
 
+// The object motion variant of a draw's shaders and pipeline build without validation errors and differ from the plain
+// ones. Skipped on a device that lacks a limit or independentBlend.
+void testObjectMotionPipeline(tox2::VkContext& ctx) {
+    const VkPhysicalDeviceLimits& limits = ctx.deviceProperties().limits;
+    const bool limits_fit = limits.maxVertexInputAttributes >= 32 && limits.maxVertexInputBindings >= 32 &&
+                            limits.maxVertexOutputComponents >= 84 && limits.maxFragmentInputComponents >= 72 &&
+                            limits.maxColorAttachments >= 2;
+    CHECK(ctx.objectMotionSupported() == ctx.objectMotionGap().empty());
+    CHECK(!ctx.objectMotionSupported() || limits_fit);
+    if (!ctx.objectMotionSupported()) {
+        std::printf("object motion pipeline: skipped (%s)\n", ctx.objectMotionGap().c_str());
+        return;
+    }
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    tox2::DrawPipelines pipelines(ctx);
+    CHECK(pipelines.valid());
+
+    std::vector<tox2::RsxCommand> commands = replaySynthetic(tox2::rsx_synthetic::makeQuadCapture());
+    const tox2::RsxDraw* draw = nullptr;
+    for (const tox2::RsxCommand& command : commands) {
+        if (const auto* candidate = std::get_if<tox2::RsxDraw>(&command)) {
+            draw = candidate;
+            break;
+        }
+    }
+    CHECK(draw != nullptr);
+    if (draw == nullptr) return;
+
+    tox2::DrawShaders plain, motion;
+    CHECK(pipelines.shaders(*draw, plain));
+    CHECK(pipelines.shaders(*draw, motion, true));
+    CHECK(motion.vertex != plain.vertex && motion.fragment != plain.fragment);
+    CHECK(motion.inputs_used == plain.inputs_used && motion.texture_units == plain.texture_units);
+    tox2::DrawShaders again;
+    CHECK(pipelines.shaders(*draw, again, true));
+    CHECK(again.vertex == motion.vertex && again.fragment == motion.fragment);
+
+    tox2::PipelineKey key;
+    key.vp_hash = draw->vp_hash;
+    key.fp_hash = draw->fp_hash;
+    key.fp_control = draw->fp_control;
+    key.texcoord_control = draw->texcoord_control;
+    key.color_format = VK_FORMAT_B8G8R8A8_UNORM;
+    key.depth_format = ctx.depthStencilFormat();
+    key.blend = true;
+    key.src_color = key.src_alpha = VK_BLEND_FACTOR_SRC_ALPHA;
+    key.dst_color = key.dst_alpha = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    for (std::uint32_t slot = 0; slot < tox2::kPipelineVertexSlots; slot++) {
+        if ((plain.inputs_used & (1u << slot)) == 0) continue;
+        key.vertex_formats[slot] = VK_FORMAT_R32G32B32A32_SFLOAT;
+        key.vertex_strides[slot] = 16;
+    }
+    const VkPipeline plain_pipeline = pipelines.pipeline(key, plain);
+    key.object_motion = true;
+    const VkPipeline motion_pipeline = pipelines.pipeline(key, motion);
+    CHECK(plain_pipeline != VK_NULL_HANDLE && motion_pipeline != VK_NULL_HANDLE);
+    CHECK(plain_pipeline != motion_pipeline && pipelines.pipeline(key, motion) == motion_pipeline);
+
+    CHECK(pipelines.valid());
+    CHECK(ctx.validationErrorCount() == errors_before);
+}
+
 tox2::RenderOptions readbackAllOptions(std::uint32_t resolution_scale = 1, tox2::AaMode aa_mode = tox2::AaMode::Msaa) {
     tox2::RenderOptions options;
     options.readback_all = true;
@@ -7740,6 +7803,7 @@ int main() {
     testTwoSampleSupport(*ctx);
     testRendererAaMode(*ctx);
     testLayoutPassPipelines(*ctx);
+    testObjectMotionPipeline(*ctx);
     testRendererClear(*ctx);
     testRendererReadbackGate(*ctx);
     testRendererRequestedDump(*ctx);
