@@ -399,6 +399,7 @@ std::string Translator::assemble() const {
         glsl += std::format("layout(std140, set = 0, binding = {}) uniform FpConstants {{\n  vec4 fc[{}];\n}};\n\n",
                             kFpConstantsBinding, constant_extent_);
     }
+    glsl += std::format("layout(constant_id = {}) const bool kAlphaTest = true;\n\n", kFpAlphaTestConstantId);
     // The first 64 bytes belong to the vertex stage.
     glsl += std::format(
             "layout(std140, set = 0, binding = {}) uniform FpDraw {{\n"
@@ -493,22 +494,25 @@ std::string Translator::assemble() const {
     glsl += body_;
 
     const char* color = color_is_full ? "r_0" : "h_0";
-    // 8-bit render targets quantise the colour before the alpha test.
+    // 8-bit render targets quantise the colour before the alpha test. The test sits under a specialization
+    // constant so a pipeline with the test off has no discard from it (see kFpAlphaTestConstantId).
     glsl += std::format(
             "\n"
             "  if ((draw.flags & {1}u) != 0u) {0} = floor(max({0}, 0.0) * 255.0 + 0.5) / 255.0;\n"
-            "  bool alpha_passes = true;\n"
-            "  switch (draw.alpha_func) {{\n"
-            "    case 0u: alpha_passes = false; break;\n"
-            "    case 1u: alpha_passes = {0}.a < draw.alpha_ref; break;\n"
-            "    case 2u: alpha_passes = {0}.a == draw.alpha_ref; break;\n"
-            "    case 3u: alpha_passes = {0}.a <= draw.alpha_ref; break;\n"
-            "    case 4u: alpha_passes = {0}.a > draw.alpha_ref; break;\n"
-            "    case 5u: alpha_passes = {0}.a != draw.alpha_ref; break;\n"
-            "    case 6u: alpha_passes = {0}.a >= draw.alpha_ref; break;\n"
-            "    default: break;\n"
+            "  if (kAlphaTest) {{\n"
+            "    bool alpha_passes = true;\n"
+            "    switch (draw.alpha_func) {{\n"
+            "      case 0u: alpha_passes = false; break;\n"
+            "      case 1u: alpha_passes = {0}.a < draw.alpha_ref; break;\n"
+            "      case 2u: alpha_passes = {0}.a == draw.alpha_ref; break;\n"
+            "      case 3u: alpha_passes = {0}.a <= draw.alpha_ref; break;\n"
+            "      case 4u: alpha_passes = {0}.a > draw.alpha_ref; break;\n"
+            "      case 5u: alpha_passes = {0}.a != draw.alpha_ref; break;\n"
+            "      case 6u: alpha_passes = {0}.a >= draw.alpha_ref; break;\n"
+            "      default: break;\n"
+            "    }}\n"
+            "    if (!alpha_passes) discard;\n"
             "  }}\n"
-            "  if (!alpha_passes) discard;\n"
             "  out_color0 = {0};\n",
             color, kFpFlagRound8Bit);
     if (depth_export) glsl += "  gl_FragDepth = fp_clamp(r_1, 0.0, 1.0).z;\n";

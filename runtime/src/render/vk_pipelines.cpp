@@ -30,6 +30,7 @@ constexpr std::uint64_t kDepthConvertMsFragmentKey = 0x4445505443534Dull;
 constexpr std::uint64_t kLayoutColorFragmentKey = 0x4C41594F434Full;
 constexpr std::uint64_t kLayoutDepthFragmentKey = 0x4C4159444550ull;
 constexpr std::uint64_t kLayoutDepthStencilFragmentKey = 0x4C4159445354ull;
+constexpr std::uint64_t kLayoutDepthStencilExportFragmentKey = 0x4C4159445345ull;
 
 constexpr const char* kClearVertexGlsl = R"(#version 450
 void main() {
@@ -64,8 +65,9 @@ void main() {
 // The copy passes from a 2-sample image into the memory layout share this prologue: fragment (x, y) of the layout
 // image reads pixel (x >> 1, y), sample column_sample[x & 1] (render_scale.h layoutSource). No resolution scale
 // enters: the 2-sample image is half as wide as the layout image at every scale.
-constexpr const char* kLayoutPassPrologue = R"(#version 450
-layout(push_constant) uniform Layout { int column_sample[2]; int stencil_bit; int unused; } pc;
+constexpr const char* kLayoutPassVersion = "#version 450\n";
+constexpr const char* kLayoutPassPrologue =
+        R"(layout(push_constant) uniform Layout { int column_sample[2]; int stencil_bit; int unused; } pc;
 )";
 
 constexpr const char* kLayoutPassSource = R"(  ivec2 p = ivec2(gl_FragCoord.xy);
@@ -115,8 +117,17 @@ constexpr const char* kLayoutDepthStencilEnd = R"(  gl_FragDepth = texelFetch(de
 }
 )";
 
-std::string layoutPassGlsl(const char* body, const char* end) {
-    return std::string(kLayoutPassPrologue) + body + kLayoutPassSource + end;
+// `extensions` is placed right after the version line: #extension must precede every other token.
+// Writes depth and stencil together where the device exports the stencil reference from the fragment shader. The
+// exported value replaces the pipeline's stencil reference, so a REPLACE pass op stores it.
+constexpr const char* kLayoutDepthStencilExportExtensions = "#extension GL_ARB_shader_stencil_export : require\n";
+constexpr const char* kLayoutDepthStencilExportEnd = R"(  gl_FragDepth = texelFetch(depth_tex, src, sample_index).r;
+  gl_FragStencilRefARB = int(texelFetch(stencil_tex, src, sample_index).r);
+}
+)";
+
+std::string layoutPassGlsl(const char* body, const char* end, const char* extensions = "") {
+    return std::string(kLayoutPassVersion) + extensions + kLayoutPassPrologue + body + kLayoutPassSource + end;
 }
 
 std::uint64_t mixKey(std::uint64_t hash, std::uint32_t a, std::uint32_t b) {
@@ -447,6 +458,15 @@ VkPipeline DrawPipelines::pipeline(const PipelineKey& key, const DrawShaders& sh
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     stages[1].module = shaders.fragment;
     stages[1].pName = "main";
+    // VkBool32 data for the one constant of the fragment stage.
+    const std::uint32_t alpha_test = key.alpha_test ? VK_TRUE : VK_FALSE;
+    const VkSpecializationMapEntry alpha_test_entry{kFpAlphaTestConstantId, 0, sizeof(alpha_test)};
+    VkSpecializationInfo specialization{};
+    specialization.mapEntryCount = 1;
+    specialization.pMapEntries = &alpha_test_entry;
+    specialization.dataSize = sizeof(alpha_test);
+    specialization.pData = &alpha_test;
+    stages[1].pSpecializationInfo = &specialization;
 
     VkVertexInputBindingDescription bindings[kPipelineVertexSlots]{};
     VkVertexInputAttributeDescription attributes[kPipelineVertexSlots]{};
@@ -711,6 +731,11 @@ VkShaderModule DrawPipelines::layoutShader(LayoutShader which) {
             glsl = layoutPassGlsl(kLayoutDepthStencilBody, kLayoutDepthStencilEnd);
             key = kLayoutDepthStencilFragmentKey;
             break;
+        case LayoutShader::LayoutDepthStencilExport:
+            glsl = layoutPassGlsl(kLayoutDepthStencilBody, kLayoutDepthStencilExportEnd,
+                                  kLayoutDepthStencilExportExtensions);
+            key = kLayoutDepthStencilExportFragmentKey;
+            break;
     }
     auto fragment = compileGlsl(ShaderStage::Fragment, glsl, key);
     if (!fragment) {
@@ -842,8 +867,11 @@ VkPipeline DrawPipelines::layoutDepthPipeline(VkFormat depth_format) {
     if (!createLayoutPassObjects()) return VK_NULL_HANDLE;
     const bool has_stencil =
             depth_format == VK_FORMAT_D24_UNORM_S8_UINT || depth_format == VK_FORMAT_D32_SFLOAT_S8_UINT;
-    const VkShaderModule fragment =
-            layoutShader(has_stencil ? LayoutShader::LayoutDepthStencil : LayoutShader::LayoutDepth);
+    LayoutShader which = LayoutShader::LayoutDepth;
+    if (has_stencil) {
+        which = context_.hasStencilExport() ? LayoutShader::LayoutDepthStencilExport : LayoutShader::LayoutDepthStencil;
+    }
+    const VkShaderModule fragment = layoutShader(which);
     if (fragment == VK_NULL_HANDLE) return VK_NULL_HANDLE;
     const VkPipeline pipeline = createFullTargetPipeline(fragment, VK_FORMAT_UNDEFINED, depth_format);
     if (pipeline != VK_NULL_HANDLE) layout_depth_pipelines_.emplace(depth_format, pipeline);

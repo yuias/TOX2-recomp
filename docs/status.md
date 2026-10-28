@@ -15,13 +15,13 @@ The code was taken over from an earlier recompilation project of another game an
 at *Tales of Xillia 2* (BLJS10188); the parts that this game has not reached have never run against
 its executable.
 
-On macOS (Apple Silicon) the same code runs: a Cocoa window, Vulkan on Metal through KosmicKrisp or MoltenVK, sound
+On macOS (Apple Silicon) the same code runs: a Cocoa window, Vulkan on Metal through MoltenVK (the default) or KosmicKrisp (`--vk-driver`), sound
 through CoreAudio and gamepads through GameController.framework (see [Building on macOS](building.md#building-on-macos)).
 There the game has been run from boot through the title screen, NEW GAME and the config screen into the opening scenes, with
 picture and sound. Differences from Windows: DLAA and frame generation are not available (the macOS build has no
 Streamline), the RSX write watch is off so textures are re-hashed, and changing the internal resolution scale while the game
-runs cannot rescale depth targets (KosmicKrisp has no blit for `D32_SFLOAT_S8_UINT`; the contents of those targets restart for that
-frame). No gamepad has been checked on macOS: `input_gamecontroller` skipped its device part there
+runs cannot rescale depth targets on KosmicKrisp (it has no blit for `D32_SFLOAT_S8_UINT`; MoltenVK has one; on KosmicKrisp the
+contents of those targets restart for that frame). No gamepad has been checked on macOS: `input_gamecontroller` skipped its device part there
 because no controller was connected.
 
 ## What the current run does
