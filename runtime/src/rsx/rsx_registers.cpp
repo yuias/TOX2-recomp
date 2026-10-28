@@ -446,6 +446,14 @@ constexpr ImmediateVertexForm kImmediateVertexForms[] = {
 
 }  // namespace
 
+bool rsxImmediateVertexMethod(std::uint32_t method) {
+    method &= 0xFFFC;
+    for (const ImmediateVertexForm& form : kImmediateVertexForms) {
+        if (method >= form.first && method < form.first + form.registers * 4) return true;
+    }
+    return false;
+}
+
 void RsxRegisters::apply(std::uint32_t method, std::uint32_t value) {
     method &= 0xFFFC;
     regs[method >> 2] = value;

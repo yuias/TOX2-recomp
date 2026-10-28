@@ -58,4 +58,7 @@ struct RsxRegisters {
     std::uint32_t vp_constants_dirty_begin = 0, vp_constants_dirty_end = 0;
 };
 
+// True for a method of one of the SET_VERTEX_DATA*_M blocks that apply() decodes into the 4F registers.
+bool rsxImmediateVertexMethod(std::uint32_t method);
+
 }  // namespace tox2

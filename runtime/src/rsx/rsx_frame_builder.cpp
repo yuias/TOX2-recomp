@@ -268,6 +268,8 @@ void RsxFrameBuilder::onWrite(const RsxRegisters& regs, std::uint32_t method, st
             }
             if (in_draw_ && clause_ != ClauseKind::Empty && isDrawParameter(method))
                 noteState("draw parameter change inside a clause");
+            // RPCS3 collects these into per-vertex push buffers inside a clause; that path is not modelled.
+            if (in_draw_ && rsxImmediateVertexMethod(method)) noteState("vertex data inside a clause");
             break;
     }
 }

@@ -9864,6 +9864,32 @@ void testRsxInlineArrayDraws() {
     CHECK(rig.builder.takeCommands().empty());
 }
 
+// Per-vertex immediate writes inside a clause are not modelled; the census makes them visible.
+void testRsxImmediateVertexInClause() {
+    tox2::rsxUnimplementedReset();
+    FakeRsxMemory memory;
+    FragmentRig rig(memory);
+    const auto writeVertexData = [&] {
+        rig.write(tox2::kMethodNv4097SetVertexData4ubM + 2 * 4, 0x04030201);
+        rig.write(tox2::kMethodNv4097SetVertexData1fM + 3 * 4, 0x3F800000);
+    };
+
+    writeVertexData();
+    CHECK(unimplementedCount("state vertex data inside a clause") == 0);
+    rig.write(0x1808, 5);
+    writeVertexData();
+    CHECK(unimplementedCount("state vertex data inside a clause") == 2);
+    rig.write(0x1808, 0);
+    writeVertexData();
+    CHECK(unimplementedCount("state vertex data inside a clause") == 2);
+    CHECK(rig.builder.takeCommands().empty());
+
+    CHECK(tox2::rsxImmediateVertexMethod(0x1C00) && tox2::rsxImmediateVertexMethod(0x0A80) &&
+          tox2::rsxImmediateVertexMethod(0x197C));
+    CHECK(!tox2::rsxImmediateVertexMethod(0x1818) && !tox2::rsxImmediateVertexMethod(0x1740));
+    tox2::rsxUnimplementedReset();
+}
+
 void testFragmentProgramCache() {
     tox2::rsxUnimplementedReset();
     FakeRsxMemory memory;
@@ -19907,6 +19933,7 @@ int main(int argc, char** argv) {
     testRsxFrameBuilder();
     testRsxArrayElementDraws();
     testRsxInlineArrayDraws();
+    testRsxImmediateVertexInClause();
     testFragmentProgramCache();
     testVertexProgramCache();
     testSharedVertexConstants();
