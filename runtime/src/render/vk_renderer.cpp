@@ -290,10 +290,15 @@ struct RsxRenderer::FrameSlot {
     std::vector<TimedInstance> timed;
     std::uint32_t queries_used = 0;
     std::uint32_t untimed = 0;  // instances that found the pool full
+    // First query of each span timed outside the instances (see gpuBeginSpan): the object motion history copy and the
+    // motion/combine pass. The span's end is the next query.
+    std::vector<std::uint32_t> motion_copy_spans;
+    std::vector<std::uint32_t> motion_pass_spans;
     bool timed_submitted = false;
 };
 
 constexpr std::uint32_t kGpuQueryCapacity = 4096;
+constexpr std::uint32_t kNoQuery = ~std::uint32_t{0};
 
 // Empty when DLAA can run; else the Streamline status or the first image format the pass cannot use. The blit
 // formats are the scene image's layout copy, the storage and sampled ones are DLSS's output and motion vectors.
@@ -604,6 +609,22 @@ void RsxRenderer::gpuEndInstance(VkCommandBuffer cmd) {
     vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.queries, slot.timed.back().begin_query + 1);
 }
 
+std::uint32_t RsxRenderer::gpuBeginSpan(VkCommandBuffer cmd) {
+    if (!gpu_timing_) return kNoQuery;
+    FrameSlot& slot = *slots_[current_slot_];
+    if (slot.queries_used + 2 > kGpuQueryCapacity) return kNoQuery;
+    const std::uint32_t begin_query = slot.queries_used;
+    slot.queries_used += 2;
+    vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.queries, begin_query);
+    return begin_query;
+}
+
+void RsxRenderer::gpuEndSpan(VkCommandBuffer cmd, std::uint32_t begin_query, std::vector<std::uint32_t>& spans) {
+    if (begin_query == kNoQuery) return;
+    vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slots_[current_slot_]->queries, begin_query + 1);
+    spans.push_back(begin_query);
+}
+
 // Called once the slot's fence has signaled, so every query of the frame is available.
 void RsxRenderer::gpuReadSlot(FrameSlot& slot) {
     if (!gpu_timing_ || !slot.timed_submitted) return;
@@ -627,6 +648,12 @@ void RsxRenderer::gpuReadSlot(FrameSlot& slot) {
     }
     frame.outside_ms = frame.frame_ms - instances_ms;
     frame.untimed_instances = slot.untimed;
+    for (const std::uint32_t begin_query : slot.motion_copy_spans)
+        frame.motion_copy_ms += ms(begin_query, begin_query + 1);
+    for (const std::uint32_t begin_query : slot.motion_pass_spans)
+        frame.motion_pass_ms += ms(begin_query, begin_query + 1);
+    frame.motion_copy_spans = static_cast<std::uint32_t>(slot.motion_copy_spans.size());
+    frame.motion_pass_spans = static_cast<std::uint32_t>(slot.motion_pass_spans.size());
     gpu_frames_.push_back(std::move(frame));
 }
 
@@ -653,6 +680,8 @@ bool RsxRenderer::beginFrame() {
     if (gpu_timing_) {
         slot.timed.clear();
         slot.untimed = 0;
+        slot.motion_copy_spans.clear();
+        slot.motion_pass_spans.clear();
         slot.queries_used = 2;
         gpu_open_ = false;
         vkCmdResetQueryPool(slot.cmd, slot.queries, 0, kGpuQueryCapacity);
@@ -1436,6 +1465,7 @@ bool RsxRenderer::recordFgMotion(const DlaaPass::Resources& dlaa, const RenderTa
     inputs.flip[1] = options_.fg_debug.mv_flip_y ? -1.0f : 1.0f;
 
     const VkCommandBuffer cmd = outsideCmd();
+    const std::uint32_t span_query = gpuBeginSpan(cmd);
     // Streamline's writes to the output are not ordered against fragment reads by anything it records.
     VkMemoryBarrier2 barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
@@ -1449,7 +1479,9 @@ bool RsxRenderer::recordFgMotion(const DlaaPass::Resources& dlaa, const RenderTa
     dependency.pMemoryBarriers = &barrier;
     vkCmdPipelineBarrier2(cmd, &dependency);
 
-    return fg_motion_->recordMotion(cmd, inputs, error);
+    const bool recorded = fg_motion_->recordMotion(cmd, inputs, error);
+    gpuEndSpan(cmd, span_query, slots_[current_slot_]->motion_pass_spans);
+    return recorded;
 }
 
 bool RsxRenderer::recordFgMvCheck(const DlaaPass::Resources& dlaa, bool reset, std::string& error) {
@@ -3444,15 +3476,21 @@ void RsxRenderer::recordFlip(const RsxFlip& flip) {
         // alive until this slot's fence. A fresh pointer each flip: a reused one would chain every retired buffer.
         std::shared_ptr<void> retired;
         std::string history_error;
-        if (!history_->recordCopy(outsideCmd(), retired, history_error)) {
+        const VkCommandBuffer copy_cmd = outsideCmd();
+        const std::uint32_t copy_query = gpuBeginSpan(copy_cmd);
+        if (!history_->recordCopy(copy_cmd, retired, history_error)) {
             logOnce(LogLevel::Warn, "render-object-motion-history-failed",
                     "tox2: render: object motion history not kept ({})", history_error);
         }
         if (retired) slot.keep_alive.push_back(std::move(retired));
         const ObjectMotionHistory::Stats history_stats = history_->stats();
+        gpuEndSpan(copy_cmd, copy_query, slot.motion_copy_spans);
+        // A flip that copied nothing leaves an empty pair of timestamps; it is not a copy to report.
+        if (copy_query != kNoQuery && history_stats.regions == 0) slot.motion_copy_spans.pop_back();
         stats_.object_motion_candidates += history_stats.candidates;
         stats_.object_motion_matched += history_stats.matched;
         stats_.object_motion_history_bytes = history_stats.history_bytes;
+        stats_.object_motion_history_regions = history_stats.regions;
     }
     if (presenter_ != nullptr) {
         recordPresentBlit(display_black_ ? nullptr : it->second.get());

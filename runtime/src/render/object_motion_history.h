@@ -46,6 +46,7 @@ public:
     struct Stats {
         std::uint64_t candidates = 0, matched = 0;  // this frame
         std::uint64_t history_bytes = 0;            // the last copy: vertex bytes plus each distinct constants set once
+        std::uint64_t regions = 0;                  // VkBufferCopy regions recorded by the last recordCopy(); 0 if none
     };
 
     // Frame `frame` (the flip number) of a scene of this size starts. The previous frame's records stay usable only

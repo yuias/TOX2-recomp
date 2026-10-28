@@ -284,6 +284,7 @@ void printGpuTiming(tox2::RsxRenderer& renderer, const std::string& capture_name
     if (repeat > 1) frames.erase(frames.begin());
     constexpr std::size_t kKindCount = 5;
     std::vector<double> frame_ms, instances_ms, outside_ms, kind_ms[kKindCount];
+    std::vector<double> motion_copy_ms, motion_pass_ms;
     std::uint32_t untimed = 0;
     for (const tox2::GpuTimingFrame& frame : frames) {
         double kind_sum[kKindCount] = {};
@@ -297,13 +298,20 @@ void printGpuTiming(tox2::RsxRenderer& renderer, const std::string& capture_name
         outside_ms.push_back(frame.outside_ms);
         for (std::size_t kind = 0; kind < kKindCount; kind++) kind_ms[kind].push_back(kind_sum[kind]);
         untimed += frame.untimed_instances;
+        // Only frames that recorded the span: a frame without one would pull the median toward 0.
+        if (frame.motion_copy_spans != 0) motion_copy_ms.push_back(frame.motion_copy_ms);
+        if (frame.motion_pass_spans != 0) motion_pass_ms.push_back(frame.motion_pass_ms);
     }
+    std::string motion_text;
+    if (!motion_copy_ms.empty()) motion_text += std::format(", motion copy {:.3f}", medianOf(motion_copy_ms));
+    if (!motion_pass_ms.empty()) motion_text += std::format(", motion pass {:.3f}", medianOf(motion_pass_ms));
     std::printf(
             "gpu: %s, %u iteration%s (%s), median ms per iteration: frame %.2f, instances %.2f (draw %.2f, clear %.2f, "
-            "masked-clear %.2f, layout %.2f, depth-argb %.2f), outside %.2f\n",
+            "masked-clear %.2f, layout %.2f, depth-argb %.2f), outside %.2f%s\n",
             capture_name.c_str(), repeat, repeat == 1 ? "" : "s", repeat == 1 ? "none excluded" : "first excluded",
             medianOf(frame_ms), medianOf(instances_ms), medianOf(kind_ms[0]), medianOf(kind_ms[1]),
-            medianOf(kind_ms[2]), medianOf(kind_ms[3]), medianOf(kind_ms[4]), medianOf(outside_ms));
+            medianOf(kind_ms[2]), medianOf(kind_ms[3]), medianOf(kind_ms[4]), medianOf(outside_ms),
+            motion_text.c_str());
     if (untimed != 0) {
         std::fprintf(stderr, "warning: %u rendering instances found the timestamp pool full and are not timed\n",
                      untimed);
@@ -343,9 +351,9 @@ std::string dlaaStatsText(const tox2::RsxRenderer& renderer) {
     std::string text = std::format("dlaa: {} evaluations, {} resets, {} failures", stats.dlaa_evaluations,
                                    stats.dlaa_resets, stats.dlaa_failures);
     if (renderer.objectMotionActive()) {
-        text += std::format("\nobject motion: {} candidates, {} matched, {} history bytes",
+        text += std::format("\nobject motion: {} candidates, {} matched, {} history bytes, {} regions",
                             stats.object_motion_candidates, stats.object_motion_matched,
-                            stats.object_motion_history_bytes);
+                            stats.object_motion_history_bytes, stats.object_motion_history_regions);
     }
     return text;
 }

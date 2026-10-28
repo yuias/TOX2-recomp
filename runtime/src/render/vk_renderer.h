@@ -157,6 +157,10 @@ struct GpuTimingFrame {
     std::vector<GpuTimingInstance> instances;  // in recording order
     double outside_ms = 0;
     std::uint32_t untimed_instances = 0;  // instances beyond the slot's query pool capacity
+    // Parts of `outside_ms` timed on their own: the object motion history copy and the motion/combine pass. The count
+    // is how many spans the frame recorded, so a frame without one is told from a span that took no time.
+    double motion_copy_ms = 0, motion_pass_ms = 0;
+    std::uint32_t motion_copy_spans = 0, motion_pass_spans = 0;
 };
 
 // What a created GPU image or upload block was for (see RendererStats::images_created).
@@ -183,10 +187,12 @@ struct RendererStats {
     std::uint64_t dlaa_resets = 0;        // ... that started a new history
     std::uint64_t dlaa_failures = 0;      // scene reads that fell back to the layout image after a failed evaluation
     // Object motion (DlaaMotion::Camera and Object): candidate draws recorded, those paired with the previous frame's,
-    // and the bytes the latest history copy held (vertex arrays plus each distinct constants set once).
+    // and the bytes and VkBufferCopy regions the latest history copy held (vertex arrays plus each distinct constants
+    // set once).
     std::uint64_t object_motion_candidates = 0;
     std::uint64_t object_motion_matched = 0;
     std::uint64_t object_motion_history_bytes = 0;
+    std::uint64_t object_motion_history_regions = 0;
     // FgDebug::mv_check results: completed warp checks, and the figures of the latest one.
     std::uint64_t fg_mv_checks = 0;
     FgWarpStats fg_mv_last;
@@ -402,6 +408,11 @@ private:
     void gpuBeginInstance(VkCommandBuffer cmd, GpuInstanceKind kind, std::uint32_t width, std::uint32_t height,
                           std::uint32_t samples, VkFormat color_format, bool depth);
     void gpuEndInstance(VkCommandBuffer cmd);
+    // A timed span outside the rendering instances: begin writes the first timestamp and returns the query index (or
+    // kNoQuery when timing is off or the pool is full), end writes the second and keeps the span in `spans`.
+    // `cmd` must come from outsideCmd().
+    std::uint32_t gpuBeginSpan(VkCommandBuffer cmd);
+    void gpuEndSpan(VkCommandBuffer cmd, std::uint32_t begin_query, std::vector<std::uint32_t>& spans);
     void gpuReadSlot(FrameSlot& slot);
 
     std::shared_ptr<RenderTarget> acquireColor(const RsxSurface& surface, bool overwrites_all);

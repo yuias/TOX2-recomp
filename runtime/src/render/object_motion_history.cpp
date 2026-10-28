@@ -135,6 +135,7 @@ bool ObjectMotionHistory::ensureCapacity(Buffer& buffer, VkDeviceSize needed, st
 }
 
 bool ObjectMotionHistory::recordCopy(VkCommandBuffer cmd, std::shared_ptr<void>& retired, std::string& error) {
+    stats_.regions = 0;
     if (!active_) {
         // A flip without candidates must not report the last frame's counts again.
         stats_.candidates = stats_.matched = 0;
@@ -205,6 +206,7 @@ bool ObjectMotionHistory::recordCopy(VkCommandBuffer cmd, std::shared_ptr<void>&
         const SourceCopy& source = sources_[i];
         vkCmdCopyBuffer(cmd, source.buffer, target.buffer, static_cast<std::uint32_t>(source.regions.size()),
                         source.regions.data());
+        stats_.regions += source.regions.size();
     }
 
     barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
