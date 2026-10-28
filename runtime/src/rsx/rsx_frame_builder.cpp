@@ -243,6 +243,8 @@ void RsxFrameBuilder::onWrite(const RsxRegisters& regs, std::uint32_t method, st
             break;
         case kMethodNv4097DrawArrays: addRange(false, value); break;
         case kMethodNv4097DrawIndexArray: addRange(true, value); break;
+        case kMethodNv4097ArrayElement16:
+        case kMethodNv4097ArrayElement32: addArrayElements(method, value); break;
         case kMethodNv4097ClearSurface: clear(regs, value); break;
         // Points where the guest learns how far the RSX has got, or the RSX changes memory outside a draw: the
         // guest may rewrite texture memory after them (see rsx_texture_cache.h).
@@ -257,7 +259,8 @@ void RsxFrameBuilder::onWrite(const RsxRegisters& regs, std::uint32_t method, st
                 textures_.beginEpoch();
                 break;
             }
-            if (in_draw_ && have_range_ && isDrawParameter(method)) noteState("draw parameter change inside a clause");
+            if (in_draw_ && clause_ != ClauseKind::Empty && isDrawParameter(method))
+                noteState("draw parameter change inside a clause");
             break;
     }
 }
@@ -315,8 +318,10 @@ void RsxFrameBuilder::recycle(std::vector<RsxCommand>&& commands) {
 
 void RsxFrameBuilder::beginDraw(std::uint32_t primitive) {
     in_draw_ = true;
-    have_range_ = false;
+    clause_ = ClauseKind::Empty;
+    clause_mixed_ = false;
     indexed_ = false;
+    array_elements_.clear();
     // An invalid primitive still opens a clause in RPCS3 (it leaves the previous draw state in place and
     // sets in_begin_end); nothing sensible can be drawn from it.
     skip_draw_ = !decodePrimitive(primitive, primitive_);
@@ -329,9 +334,14 @@ void RsxFrameBuilder::addRange(bool indexed, std::uint32_t value) {
         noteState("draw range outside a clause");
         return;
     }
+    if (clause_ == ClauseKind::Elements) {
+        noteState("mixed draw commands in one clause");
+        clause_mixed_ = true;
+        return;
+    }
     const RsxDrawRange range = decodeDrawRange(value);
-    if (!have_range_) {
-        have_range_ = true;
+    if (clause_ == ClauseKind::Empty) {
+        clause_ = ClauseKind::Ranges;
         indexed_ = indexed;
         range_ = {range.first, range.count};
         return;
@@ -342,6 +352,27 @@ void RsxFrameBuilder::addRange(bool indexed, std::uint32_t value) {
         range_.count += range.count;
     } else {
         noteState("multiple ranges");
+    }
+}
+
+// RPCS3 `set_array_element16/32`: a 16-bit write carries two indices, the low half first.
+void RsxFrameBuilder::addArrayElements(std::uint32_t method, std::uint32_t value) {
+    if (!in_draw_) {
+        noteState("array element outside a clause");
+        return;
+    }
+    if (clause_ == ClauseKind::Ranges) {
+        noteState("mixed draw commands in one clause");
+        clause_mixed_ = true;
+        return;
+    }
+    clause_ = ClauseKind::Elements;
+    indexed_ = true;
+    if (method == kMethodNv4097ArrayElement16) {
+        array_elements_.push_back(value & 0xFFFF);
+        array_elements_.push_back(value >> 16);
+    } else {
+        array_elements_.push_back(value);
     }
 }
 
@@ -963,7 +994,7 @@ void RsxFrameBuilder::fillVertexProgram(const RsxRegisters& regs, RsxDraw& draw)
 void RsxFrameBuilder::endDraw(const RsxRegisters& regs) {
     if (!in_draw_) return;
     in_draw_ = false;
-    if (skip_draw_ || !have_range_) return;
+    if (skip_draw_ || clause_ == ClauseKind::Empty || clause_mixed_) return;
     if (defer_draw_end_) {
         draw_pending_ = true;
         return;
@@ -1007,39 +1038,60 @@ void RsxFrameBuilder::buildDraw(const RsxRegisters& regs) {
         draw.fp_constants = std::move(spare.fp_constants);
         spare_draws_.pop_back();
     }
+    // The indices of an element clause came through the FIFO and are always u32 (RPCS3 `get_vertex_range`).
+    const bool elements = clause_ == ClauseKind::Elements;
+    if (elements && array_elements_.size() > kRsxMaxIndexCount) {
+        noteState("index data too large");
+        return;
+    }
+    const std::uint32_t first = elements ? 0 : range_.first;
+    const std::uint32_t count = elements ? static_cast<std::uint32_t>(array_elements_.size()) : range_.count;
     draw.primitive = primitive_;
     draw.indexed = indexed_;
-    draw.first = range_.first;
-    draw.count = range_.count;
+    draw.first = first;
+    draw.count = count;
 
-    std::uint32_t vertex_base = range_.first, vertex_count = range_.count;
+    std::uint32_t vertex_base = first, vertex_count = count;
     if (indexed_) {
-        // RPCS3 `get_raw_index_array`: the address is aligned down to the index size, the range starts
-        // `first` indices in.
-        const RsxIndexArray array = decodeIndexArray(regs);
-        draw.index_type = array.type;
-        const std::uint32_t type_size = array.type == kRsxIndexTypeU16 ? 2 : 4;
-        if (range_.count > kRsxMaxIndexCount) {
-            noteState("index data too large");
-            return;
-        }
-        draw.index_data.resize(static_cast<std::size_t>(range_.count) * type_size);
-        const std::uint64_t address =
-                (array.offset & ~(type_size - 1)) + static_cast<std::uint64_t>(range_.first) * type_size;
-        if (address > 0xFFFFFFFFull ||
-            !memory_.read(array.location, static_cast<std::uint32_t>(address), draw.index_data)) {
-            noteState("unreadable index memory");
-            return;
+        std::uint32_t type_size = 4;
+        if (elements) {
+            draw.index_type = kRsxIndexTypeU32;
+            draw.index_data.resize(static_cast<std::size_t>(count) * type_size);
+            for (std::uint32_t i = 0; i < count; i++) {
+                const std::uint32_t index = array_elements_[i];
+                for (std::uint32_t b = 0; b < 4; b++) {
+                    draw.index_data[static_cast<std::size_t>(i) * 4 + b] =
+                            static_cast<std::uint8_t>(index >> (24 - 8 * b));
+                }
+            }
+        } else {
+            // RPCS3 `get_raw_index_array`: the address is aligned down to the index size, the range starts
+            // `first` indices in.
+            const RsxIndexArray array = decodeIndexArray(regs);
+            draw.index_type = array.type;
+            type_size = array.type == kRsxIndexTypeU16 ? 2 : 4;
+            if (count > kRsxMaxIndexCount) {
+                noteState("index data too large");
+                return;
+            }
+            draw.index_data.resize(static_cast<std::size_t>(count) * type_size);
+            const std::uint64_t address =
+                    (array.offset & ~(type_size - 1)) + static_cast<std::uint64_t>(first) * type_size;
+            if (address > 0xFFFFFFFFull ||
+                !memory_.read(array.location, static_cast<std::uint32_t>(address), draw.index_data)) {
+                noteState("unreadable index memory");
+                return;
+            }
         }
 
         const bool restart = regs.reg(kMethodNv4097SetRestartIndexEnable) != 0;
         const std::uint32_t restart_index = regs.reg(kMethodNv4097SetRestartIndex);
         std::uint32_t min_index = 0xFFFFFFFF, max_index = 0;
         if (type_size == 2) {
-            scanIndices<2>(draw.index_data.data(), range_.count, restart, restart_index, min_index, max_index,
+            scanIndices<2>(draw.index_data.data(), count, restart, restart_index, min_index, max_index,
                            draw.restart_used);
         } else {
-            scanIndices<4>(draw.index_data.data(), range_.count, restart, restart_index, min_index, max_index,
+            scanIndices<4>(draw.index_data.data(), count, restart, restart_index, min_index, max_index,
                            draw.restart_used);
         }
         draw.restart_index = restart_index;
@@ -1062,8 +1114,8 @@ void RsxFrameBuilder::buildDraw(const RsxRegisters& regs) {
         vertex_base = (min_index + regs.reg(kMethodNv4097SetVertexDataBaseIndex)) & 0xFFFFF;
         vertex_count = max_index - min_index + 1;
     } else {
-        draw.min_index = range_.first;
-        draw.max_index = range_.first + range_.count - 1;
+        draw.min_index = first;
+        draw.max_index = first + count - 1;
     }
 
     draw.surfaces = decodeSurfaceState(regs);

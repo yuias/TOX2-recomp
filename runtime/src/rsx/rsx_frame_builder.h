@@ -169,6 +169,7 @@ private:
 
     void beginDraw(std::uint32_t value);
     void addRange(bool indexed, std::uint32_t value);
+    void addArrayElements(std::uint32_t method, std::uint32_t value);
     void endDraw(const RsxRegisters& regs);
     void buildDraw(const RsxRegisters& regs);
     void clear(const RsxRegisters& regs, std::uint32_t mask);
@@ -259,9 +260,16 @@ private:
     // The open draw clause between SET_BEGIN_END(prim) and SET_BEGIN_END(0).
     bool in_draw_ = false;
     bool skip_draw_ = false;  // BEGIN with a primitive RPCS3 rejects: the clause is ignored up to END
-    bool have_range_ = false, indexed_ = false;
+    // What the clause's first draw command was; a command of another kind drops the clause (RPCS3's own priority
+    // between them is not modelled).
+    enum class ClauseKind : std::uint8_t { Empty, Ranges, Elements };
+    ClauseKind clause_ = ClauseKind::Empty;
+    bool clause_mixed_ = false;
+    bool indexed_ = false;
     RsxPrimitive primitive_ = RsxPrimitive::Triangles;
     Range range_;
+    // ARRAY_ELEMENT16/32 indices in FIFO order. Kept in the builder so that they survive from endDraw to finishDraw.
+    std::vector<std::uint32_t> array_elements_;
     bool defer_draw_end_ = false;
     bool draw_pending_ = false;  // the clause ended and buildDraw() has not run yet
 };

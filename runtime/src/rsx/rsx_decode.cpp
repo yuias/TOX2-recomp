@@ -102,12 +102,10 @@ struct MethodRange {
     const char* name;
 };
 
-// Methods the frame builder does not turn into commands: element and inline arrays, and the data-moving trigger
-// of the NV3089 blit engine. Counts are registers. NV308A_COLOR and NV0039_BUFFER_NOTIFY are not listed: the
+// Methods the frame builder does not turn into commands: the inline array and the data-moving trigger of the
+// NV3089 blit engine. Counts are registers. NV308A_COLOR and NV0039_BUFFER_NOTIFY are not listed: the
 // consumer writes them into guest memory and counts only the formats and ranges it cannot copy.
 constexpr MethodRange kIgnoredMethods[] = {
-        {kMethodNv4097ArrayElement16, 1, "NV4097_ARRAY_ELEMENT16"},
-        {kMethodNv4097ArrayElement32, 1, "NV4097_ARRAY_ELEMENT32"},
         {kMethodNv4097InlineArray, 1, "NV4097_INLINE_ARRAY"},
         {kMethodNv3089ImageIn, 1, "NV3089_IMAGE_IN"},
 };

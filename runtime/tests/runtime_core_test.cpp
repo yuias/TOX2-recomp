@@ -8842,8 +8842,6 @@ void testRsxDecode() {
             const char* name;
         };
         const Range ranges[] = {
-                {tox2::kMethodNv4097ArrayElement16, 1, "NV4097_ARRAY_ELEMENT16"},
-                {tox2::kMethodNv4097ArrayElement32, 1, "NV4097_ARRAY_ELEMENT32"},
                 {tox2::kMethodNv4097InlineArray, 1, "NV4097_INLINE_ARRAY"},
                 {tox2::kMethodNv3089ImageIn, 1, "NV3089_IMAGE_IN"},
         };
@@ -8861,7 +8859,7 @@ void testRsxDecode() {
             if (actual != nullptr && expected != nullptr) CHECK(std::string_view(actual) == expected);
             ignored += actual != nullptr;
         }
-        CHECK(ignored == (1 + 1 + 1 + 1) * 4);
+        CHECK(ignored == (1 + 1) * 4);
         CHECK(tox2::rsxIgnoredMethodName(0xFFFFFFFC) == nullptr);
     }
 
@@ -9675,6 +9673,86 @@ std::uint64_t hashBigEndian(const std::vector<std::uint32_t>& words) {
         for (int shift = 24; shift >= 0; shift -= 8) bytes.push_back(static_cast<std::uint8_t>(word >> shift));
     }
     return tox2::rsxHash64(bytes.data(), bytes.size());
+}
+
+// ARRAY_ELEMENT16/32 inside a clause: indices from the FIFO, vertices from the arrays in memory.
+void testRsxArrayElementDraws() {
+    tox2::rsxUnimplementedReset();
+    FakeRsxMemory memory;
+    for (std::uint32_t i = 0; i < 256; i++) memory.main[0x1000 + i] = static_cast<std::uint8_t>(i);
+    FragmentRig rig(memory);
+    rig.write(0x08E4, 0x2000 | 1);
+    memory.putWord(0, 0x2000, 0x00010000);
+    CHECK(tox2::rsxIgnoredMethodName(0x180C) == nullptr && tox2::rsxIgnoredMethodName(0x1810) == nullptr);
+
+    const auto elementClause = [&] {
+        rig.write(0x1808, 6);  // triangle strip
+        rig.write(0x180C, (11u << 16) | 10u);
+        rig.write(0x1810, 12);
+        rig.write(0x1810, 13);
+        rig.write(0x1808, 0);
+    };
+    elementClause();
+    std::vector<tox2::RsxCommand> commands = rig.builder.takeCommands();
+    CHECK(commands.size() == 1 && std::holds_alternative<tox2::RsxDraw>(commands[0]));
+    if (commands.size() != 1 || !std::holds_alternative<tox2::RsxDraw>(commands[0])) return;
+    const tox2::RsxDraw immediate = std::get<tox2::RsxDraw>(commands[0]);
+    CHECK(immediate.indexed && immediate.index_type == tox2::kRsxIndexTypeU32 && immediate.count == 4);
+    CHECK((immediate.index_data == std::vector<std::uint8_t>{0, 0, 0, 10, 0, 0, 0, 11, 0, 0, 0, 12, 0, 0, 0, 13}));
+    CHECK(immediate.min_index == 10 && immediate.max_index == 13 && !immediate.restart_used);
+    // Elements 10..13 of the 12-byte array start 120 bytes in.
+    CHECK(immediate.attribs.size() == 1 && immediate.attribs[0].has_data && immediate.attribs[0].data_offset == 0);
+    CHECK(immediate.vertex_data.size() == 48 && immediate.vertex_data[0] == 120 && immediate.vertex_data[47] == 167);
+
+    // Deferred mode builds the same draw from the indices kept in the builder.
+    rig.builder.setDeferDrawEnd(true);
+    elementClause();
+    CHECK(rig.builder.drawPending());
+    rig.builder.finishDraw(*rig.regs);
+    rig.builder.setDeferDrawEnd(false);
+    commands = rig.builder.takeCommands();
+    CHECK(commands.size() == 1 && std::holds_alternative<tox2::RsxDraw>(commands[0]));
+    if (commands.size() == 1 && std::holds_alternative<tox2::RsxDraw>(commands[0])) {
+        const tox2::RsxDraw& deferred = std::get<tox2::RsxDraw>(commands[0]);
+        CHECK(deferred.indexed && deferred.index_type == immediate.index_type && deferred.count == immediate.count);
+        CHECK(deferred.index_data == immediate.index_data && deferred.vertex_data == immediate.vertex_data);
+        CHECK(deferred.min_index == immediate.min_index && deferred.max_index == immediate.max_index);
+        CHECK(deferred.attribs.size() == 1 && deferred.attribs[0].data_offset == immediate.attribs[0].data_offset);
+    }
+
+    // An element outside a clause is counted and dropped.
+    tox2::rsxUnimplementedReset();
+    rig.write(0x1810, 5);
+    CHECK(unimplementedCount("state array element outside a clause") == 1);
+    CHECK(rig.builder.takeCommands().empty());
+
+    // Two kinds of draw command in one clause drop the clause, whichever comes first.
+    rig.write(0x1808, 6);
+    rig.write(0x1814, 3u << 24);
+    rig.write(0x1810, 1);
+    rig.write(0x1808, 0);
+    CHECK(unimplementedCount("state mixed draw commands in one clause") == 1);
+    CHECK(rig.builder.takeCommands().empty());
+    rig.write(0x1808, 6);
+    rig.write(0x1810, 1);
+    rig.write(0x1814, 3u << 24);
+    rig.write(0x1808, 0);
+    CHECK(unimplementedCount("state mixed draw commands in one clause") == 2);
+    CHECK(rig.builder.takeCommands().empty());
+
+    // The restart index is skipped when the range is scanned.
+    rig.write(tox2::kMethodNv4097SetRestartIndexEnable, 1);
+    rig.write(tox2::kMethodNv4097SetRestartIndex, 0xFFFFFFFF);
+    rig.write(0x1808, 6);
+    for (const std::uint32_t index : {0u, 1u, 2u, 0xFFFFFFFFu, 1u, 3u, 2u}) rig.write(0x1810, index);
+    rig.write(0x1808, 0);
+    commands = rig.builder.takeCommands();
+    CHECK(commands.size() == 1 && std::holds_alternative<tox2::RsxDraw>(commands[0]));
+    if (commands.size() == 1 && std::holds_alternative<tox2::RsxDraw>(commands[0])) {
+        const tox2::RsxDraw& restart = std::get<tox2::RsxDraw>(commands[0]);
+        CHECK(restart.count == 7 && restart.restart_used && restart.min_index == 0 && restart.max_index == 3);
+        CHECK(restart.vertex_data.size() == 48);
+    }
 }
 
 void testFragmentProgramCache() {
@@ -19718,6 +19796,7 @@ int main(int argc, char** argv) {
     testRsxDecode();
     testRsxTextureLayout();
     testRsxFrameBuilder();
+    testRsxArrayElementDraws();
     testFragmentProgramCache();
     testVertexProgramCache();
     testSharedVertexConstants();
