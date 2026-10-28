@@ -213,6 +213,7 @@ function(tox2_render_add)
     runtime/src/render/frame_dump.cpp
     runtime/src/render/frame_gen_runtime.cpp
     runtime/src/render/image_pool.cpp
+    runtime/src/render/object_motion_history.cpp
     runtime/src/render/shader_compiler.cpp
     runtime/src/render/vertex_convert.cpp
     runtime/src/render/vk_context.cpp

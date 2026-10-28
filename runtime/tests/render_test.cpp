@@ -30,6 +30,7 @@
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
 #include "render/image_pool.h"
+#include "render/object_motion_history.h"
 #include "render/render_scale.h"
 #include "render/shader_compiler.h"
 #include "render/vertex_convert.h"
@@ -7737,6 +7738,213 @@ void testFgWarpCheck(tox2::VkContext& ctx) {
     CHECK(ctx.validationErrorCount() == errors_before);
 }
 
+// The history buffer: frame 1's vertex arrays and constant blocks, recorded from an upload-like buffer, come back byte
+// for byte from the ranges frame 2's matches return; draws sharing a constants range share its copy; a frame that does
+// not follow on, or a scene of another size, matches nothing; a larger frame replaces the buffer of its parity.
+void testObjectMotionHistory(tox2::VkContext& ctx) {
+    using tox2::ObjectMotionHistory;
+    constexpr std::uint32_t kWidth = 64, kHeight = 36;
+    constexpr VkDeviceSize kConstantBytes = tox2::kRsxVpConstantCount * 16;
+    constexpr VkDeviceSize kBigBytes = 1536 * 1024;
+    constexpr VkDeviceSize kUploadBytes = 64 * 1024;
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    const VkDeviceSize uniform_alignment = ctx.deviceProperties().limits.minUniformBufferOffsetAlignment;
+
+    FgHostBuffer upload, big, readback;
+    CHECK(createFgHostBuffer(ctx, kUploadBytes, upload));
+    CHECK(createFgHostBuffer(ctx, 2 * kBigBytes, big));
+    CHECK(createFgHostBuffer(ctx, 2 * kBigBytes, readback));
+    if (upload.mapped == nullptr || big.mapped == nullptr || readback.mapped == nullptr) {
+        destroyFgHostBuffer(ctx, upload);
+        destroyFgHostBuffer(ctx, big);
+        destroyFgHostBuffer(ctx, readback);
+        return;
+    }
+
+    // Two constant blocks and the vertex arrays of three candidates, 256-aligned like the renderer's uploads. The
+    // first candidate's arrays are close enough to be copied as one region.
+    constexpr VkDeviceSize kConstantsA = 0, kConstantsB = 8192;
+    const ObjectMotionHistory::Range arrays[3][2] = {
+            {{upload.buffer, 16384, 48}, {upload.buffer, 16384 + 256, 64}},
+            {{upload.buffer, 17408, 96}, {}},
+            {{upload.buffer, 18432, 32}, {upload.buffer, 18432 + 1024, 20}},
+    };
+    const std::uint32_t slots[3][2] = {{0, 2}, {1, 0}, {0, 5}};
+    const auto pattern = [](std::uint32_t seed, VkDeviceSize index) {
+        return static_cast<std::uint8_t>(seed + index * 7 + (index >> 8));
+    };
+    {
+        auto* bytes = static_cast<std::uint8_t*>(upload.mapped);
+        std::memset(bytes, 0xEE, kUploadBytes);
+        for (VkDeviceSize i = 0; i < kConstantBytes; i++) {
+            bytes[kConstantsA + i] = pattern(1, i);
+            bytes[kConstantsB + i] = pattern(2, i);
+        }
+        for (std::uint32_t c = 0; c < 3; c++) {
+            for (const ObjectMotionHistory::Range& range : arrays[c]) {
+                for (VkDeviceSize i = 0; i < range.size; i++) bytes[range.offset + i] = pattern(10 + c, i);
+            }
+        }
+        auto* big_bytes = static_cast<std::uint8_t*>(big.mapped);
+        for (VkDeviceSize i = 0; i < kBigBytes; i++) big_bytes[i] = pattern(99, i);
+        vmaFlushAllocation(ctx.allocator(), upload.allocation, 0, VK_WHOLE_SIZE);
+        vmaFlushAllocation(ctx.allocator(), big.allocation, 0, VK_WHOLE_SIZE);
+    }
+
+    const tox2::MotionDrawSignature signatures[3] = {{101, 1}, {102, 2}, {103, 3}};
+    const auto candidateUniforms = [](std::uint32_t c) {
+        tox2::VpDrawUniforms draw{};
+        draw.clip_width = static_cast<float>(c + 1);
+        draw.branch_bits = 0x100 + c;
+        return draw;
+    };
+    const ObjectMotionHistory::Range constants_a = {upload.buffer, kConstantsA, kConstantBytes};
+    const ObjectMotionHistory::Range constants_b = {upload.buffer, kConstantsB, kConstantBytes};
+    const ObjectMotionHistory::Range constants_of[3] = {constants_a, constants_a, constants_b};
+    const auto uploadsOf = [&](std::uint32_t c) {
+        std::array<ObjectMotionHistory::Range, tox2::kPipelineVertexSlots> uploads{};
+        for (std::uint32_t i = 0; i < 2; i++) {
+            if (arrays[c][i].size != 0) uploads[slots[c][i]] = arrays[c][i];
+        }
+        return uploads;
+    };
+
+    ObjectMotionHistory history(ctx);
+    std::shared_ptr<void> retired;
+    std::string error;
+    // One frame of the three candidates: the matches (copied out) and the number of them.
+    const auto runFrame = [&](std::uint64_t frame, std::uint32_t width) {
+        history.beginFrame(frame, width, kHeight, tox2::MotionMatchRule::AddressThenOrdered);
+        std::vector<ObjectMotionHistory::Previous> matches;
+        std::uint32_t matched = 0;
+        for (std::uint32_t c = 0; c < 3; c++) {
+            const ObjectMotionHistory::Previous* previous = history.match(signatures[c]);
+            matched += previous != nullptr;
+            matches.push_back(previous != nullptr ? *previous : ObjectMotionHistory::Previous{});
+            history.record(signatures[c], constants_of[c], candidateUniforms(c), uploadsOf(c));
+        }
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) { CHECK(history.recordCopy(cmd, retired, error)); }));
+        return std::pair{matched, matches};
+    };
+    const auto read = [&](const ObjectMotionHistory::Range& range, std::vector<std::uint8_t>& out) {
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            VkMemoryBarrier2 barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+            barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+            barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+            barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+            VkDependencyInfo dependency{};
+            dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            dependency.memoryBarrierCount = 1;
+            dependency.pMemoryBarriers = &barrier;
+            vkCmdPipelineBarrier2(cmd, &dependency);
+            const VkBufferCopy region = {range.offset, 0, range.size};
+            vkCmdCopyBuffer(cmd, range.buffer, readback.buffer, 1, &region);
+            fgHostBarrier(cmd);
+        }));
+        vmaInvalidateAllocation(ctx.allocator(), readback.allocation, 0, VK_WHOLE_SIZE);
+        const auto* bytes = static_cast<const std::uint8_t*>(readback.mapped);
+        out.assign(bytes, bytes + range.size);
+    };
+    const auto sourceBytes = [&](const ObjectMotionHistory::Range& range) {
+        const auto* bytes = static_cast<const std::uint8_t*>(range.buffer == big.buffer ? big.mapped : upload.mapped);
+        return std::vector<std::uint8_t>(bytes + range.offset, bytes + range.offset + range.size);
+    };
+
+    // Frame 1 has nothing to match; the set the first two candidates share is copied once.
+    {
+        const auto [matched, matches] = runFrame(1, kWidth);
+        CHECK(matched == 0);
+        CHECK(retired == nullptr);
+        const ObjectMotionHistory::Stats stats = history.stats();
+        CHECK(stats.candidates == 3 && stats.matched == 0);
+        CHECK(stats.history_bytes == 48 + 64 + 96 + 32 + 20 + 2 * kConstantBytes);
+    }
+
+    // Frame 2 matches all three, in the history buffer.
+    std::vector<ObjectMotionHistory::Previous> frame1;
+    {
+        auto [matched, matches] = runFrame(2, kWidth);
+        CHECK(matched == 3);
+        CHECK(retired == nullptr);
+        CHECK(history.stats().candidates == 3 && history.stats().matched == 3);
+        frame1 = std::move(matches);
+    }
+    if (frame1.size() == 3 && frame1[0].constants.buffer != VK_NULL_HANDLE) {
+        CHECK(frame1[0].constants.buffer == frame1[1].constants.buffer);
+        CHECK(frame1[0].constants.offset == frame1[1].constants.offset);
+        CHECK(frame1[2].constants.offset != frame1[0].constants.offset);
+        for (const ObjectMotionHistory::Previous& previous : frame1) {
+            CHECK(previous.constants.size == kConstantBytes);
+            CHECK(previous.constants.offset % uniform_alignment == 0);
+            CHECK(previous.constants.buffer != upload.buffer);
+        }
+        std::vector<std::uint8_t> bytes;
+        for (std::uint32_t c = 0; c < 3; c++) {
+            const ObjectMotionHistory::Previous& previous = frame1[c];
+            CHECK(previous.draw.branch_bits == 0x100 + c && previous.draw.clip_width == static_cast<float>(c + 1));
+            read(previous.constants, bytes);
+            CHECK(bytes == sourceBytes(constants_of[c]));
+            std::uint32_t used = 0;
+            for (std::uint32_t slot = 0; slot < tox2::kPipelineVertexSlots; slot++) {
+                const ObjectMotionHistory::Range& range = previous.slots[slot];
+                if (range.size == 0) continue;
+                used++;
+                CHECK(range.buffer == previous.constants.buffer && range.offset % 16 == 0);
+                const ObjectMotionHistory::Range& expected = arrays[c][slots[c][0] == slot ? 0 : 1];
+                CHECK(range.size == expected.size);
+                read(range, bytes);
+                CHECK(bytes == sourceBytes(expected));
+            }
+            CHECK(used == (arrays[c][1].size != 0 ? 2u : 1u));
+        }
+    } else {
+        CHECK(false);
+    }
+
+    // Frame 4 does not follow frame 2; frame 5 follows frame 4; frame 6 changes the scene size.
+    CHECK(runFrame(4, kWidth).first == 0);
+    CHECK(runFrame(5, kWidth).first == 3);
+    CHECK(runFrame(6, kWidth + 1).first == 0);
+    CHECK(retired == nullptr);
+
+    // Frame 7 shares frame 5's buffer and is far larger: the buffer is replaced and the old one handed back.
+    {
+        history.beginFrame(7, kWidth + 1, kHeight, tox2::MotionMatchRule::AddressThenOrdered);
+        CHECK(history.match(signatures[0]) != nullptr);
+        std::array<ObjectMotionHistory::Range, tox2::kPipelineVertexSlots> uploads{};
+        uploads[0] = {big.buffer, 0, kBigBytes};
+        history.record(signatures[0], constants_a, candidateUniforms(0), uploads);
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) { CHECK(history.recordCopy(cmd, retired, error)); }));
+        CHECK(retired != nullptr);
+        CHECK(history.stats().history_bytes == kBigBytes + kConstantBytes);
+        retired.reset();
+
+        history.beginFrame(8, kWidth + 1, kHeight, tox2::MotionMatchRule::AddressThenOrdered);
+        const ObjectMotionHistory::Previous* previous = history.match(signatures[0]);
+        CHECK(previous != nullptr);
+        if (previous != nullptr) {
+            std::vector<std::uint8_t> bytes;
+            read(previous->slots[0], bytes);
+            CHECK(bytes == sourceBytes(uploads[0]));
+            read(previous->constants, bytes);
+            CHECK(bytes == sourceBytes(constants_a));
+        }
+        // Frame 8 recorded nothing and copied nothing, so frame 9 finds nothing to match.
+        history.beginFrame(9, kWidth + 1, kHeight, tox2::MotionMatchRule::AddressThenOrdered);
+        CHECK(history.match(signatures[0]) == nullptr);
+        history.clear();
+    }
+
+    vkDeviceWaitIdle(ctx.device());
+    destroyFgHostBuffer(ctx, upload);
+    destroyFgHostBuffer(ctx, big);
+    destroyFgHostBuffer(ctx, readback);
+    CHECK(error.empty());
+    CHECK(ctx.validationErrorCount() == errors_before);
+}
+
 }  // namespace
 
 int main() {
@@ -7848,6 +8056,7 @@ int main() {
     testRendererAnisotropy(*ctx);
     testFgMotionVectors(*ctx);
     testFgWarpCheck(*ctx);
+    testObjectMotionHistory(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
     ctx.reset();
