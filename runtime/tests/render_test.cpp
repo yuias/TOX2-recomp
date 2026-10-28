@@ -7738,6 +7738,111 @@ void testFgWarpCheck(tox2::VkContext& ctx) {
     CHECK(ctx.validationErrorCount() == errors_before);
 }
 
+// The object image: cleared once per frame to (0, kObjectMotionNone) by the first beginObjectWrites, kept by a second
+// call in the same frame (a rectangle written in between survives) and cleared again by the next frame.
+void testFgMotionObjectImage(tox2::VkContext& ctx) {
+    constexpr std::uint32_t kWidth = 64, kHeight = 36;
+    constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
+    constexpr VkImageAspectFlags kColor = VK_IMAGE_ASPECT_COLOR_BIT;
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+
+    FgHostBuffer readback;
+    CHECK(createFgHostBuffer(ctx, kPixels * 8, readback));
+    auto pass = std::make_unique<tox2::FgMotionPass>(ctx);
+    std::shared_ptr<void> retired;
+    bool recreated = false;
+    std::string error;
+    const bool ok = readback.mapped != nullptr && pass->prepare(kWidth, kHeight, retired, recreated, error);
+    CHECK(ok);
+    if (!ok) {
+        std::printf("fg motion object image: %s\n", error.c_str());
+    } else {
+        CHECK(pass->objectImage() != VK_NULL_HANDLE && pass->objectView() != VK_NULL_HANDLE);
+        constexpr std::uint32_t kRectX = 8, kRectY = 4, kRectW = 16, kRectH = 8;
+
+        // Copies the object image to the host buffer and puts it back in the layout the pass leaves it in.
+        const auto readBack = [&](VkCommandBuffer cmd) {
+            slTestBarrier(cmd, pass->objectImage(), kColor, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                          VK_ACCESS_2_TRANSFER_READ_BIT);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = {kColor, 0, 0, 1};
+            copy.imageExtent = {kWidth, kHeight, 1};
+            vkCmdCopyImageToBuffer(cmd, pass->objectImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1,
+                                   &copy);
+            fgHostBarrier(cmd);
+            slTestBarrier(cmd, pass->objectImage(), kColor, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT,
+                          VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        };
+        // Counts the pixels equal to `value` inside and outside the rectangle.
+        const auto countPixels = [&](std::uint32_t x_value, std::uint32_t y_value, std::size_t& inside,
+                                     std::size_t& outside) {
+            vmaInvalidateAllocation(ctx.allocator(), readback.allocation, 0, VK_WHOLE_SIZE);
+            const auto* words = static_cast<const std::uint32_t*>(readback.mapped);
+            inside = outside = 0;
+            for (std::uint32_t y = 0; y < kHeight; y++) {
+                for (std::uint32_t x = 0; x < kWidth; x++) {
+                    const std::size_t at = (static_cast<std::size_t>(y) * kWidth + x) * 2;
+                    if (words[at] != x_value || words[at + 1] != y_value) continue;
+                    const bool in_rect = x >= kRectX && x < kRectX + kRectW && y >= kRectY && y < kRectY + kRectH;
+                    (in_rect ? inside : outside)++;
+                }
+            }
+        };
+
+        std::size_t inside = 0, outside = 0;
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            pass->beginObjectWrites(cmd, 1);
+            readBack(cmd);
+        }));
+        countPixels(0, tox2::kObjectMotionNone, inside, outside);
+        CHECK(inside + outside == kPixels);
+
+        // A rectangle written inside a rendering instance on the view, then the same frame's second call.
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            VkRenderingAttachmentInfo attachment{};
+            attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            attachment.imageView = pass->objectView();
+            attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderingInfo rendering{};
+            rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+            rendering.renderArea = {{0, 0}, {kWidth, kHeight}};
+            rendering.layerCount = 1;
+            rendering.colorAttachmentCount = 1;
+            rendering.pColorAttachments = &attachment;
+            vkCmdBeginRendering(cmd, &rendering);
+            VkClearAttachment clear{};
+            clear.aspectMask = kColor;
+            clear.colorAttachment = 0;
+            clear.clearValue.color.uint32[0] = 1;
+            clear.clearValue.color.uint32[1] = 2;
+            const VkClearRect rect = {{{kRectX, kRectY}, {kRectW, kRectH}}, 0, 1};
+            vkCmdClearAttachments(cmd, 1, &clear, 1, &rect);
+            vkCmdEndRendering(cmd);
+            pass->beginObjectWrites(cmd, 1);
+            readBack(cmd);
+        }));
+        countPixels(1, 2, inside, outside);
+        std::printf("fg motion object image: same frame keeps %zu rectangle pixels\n", inside);
+        CHECK(inside == static_cast<std::size_t>(kRectW) * kRectH && outside == 0);
+
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            pass->beginObjectWrites(cmd, 2);
+            readBack(cmd);
+        }));
+        countPixels(0, tox2::kObjectMotionNone, inside, outside);
+        CHECK(inside + outside == kPixels);
+    }
+
+    pass.reset();
+    vkDeviceWaitIdle(ctx.device());
+    destroyFgHostBuffer(ctx, readback);
+    CHECK(ctx.validationErrorCount() == errors_before);
+}
+
 // The history buffer: frame 1's vertex arrays and constant blocks, recorded from an upload-like buffer, come back byte
 // for byte from the ranges frame 2's matches return; draws sharing a constants range share its copy; a frame that does
 // not follow on, or a scene of another size, matches nothing; a larger frame replaces the buffer of its parity.
@@ -8056,6 +8161,7 @@ int main() {
     testRendererAnisotropy(*ctx);
     testFgMotionVectors(*ctx);
     testFgWarpCheck(*ctx);
+    testFgMotionObjectImage(*ctx);
     testObjectMotionHistory(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 

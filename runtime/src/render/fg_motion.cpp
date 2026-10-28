@@ -5,7 +5,9 @@
 #include <utility>
 #include <vector>
 
+#include "render/fp_translator.h"
 #include "render/shader_compiler.h"
+#include "render/vk_pipelines.h"
 
 namespace tox2 {
 namespace {
@@ -240,6 +242,12 @@ struct FgMotionPass::Resources {
     VkContext* context = nullptr;
     std::uint32_t width = 0, height = 0;
     Image motion;
+    // The scene pass writes object motion here (kObjectMotionFormat); `camera` is the camera-only vectors the combine
+    // pass will keep beside the final ones.
+    Image object, camera;
+    VkImageLayout object_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bool object_cleared = false;
+    std::uint64_t object_frame = 0;
     // The warp check, created on first use. `previous[read]` holds the last call's colour once `has_history`.
     std::array<Image, 2> previous;
     std::size_t read = 0;
@@ -445,6 +453,12 @@ bool FgMotionPass::prepare(std::uint32_t width, std::uint32_t height, std::share
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     // Streamline is told the device memory of this image, so it owns a whole allocation.
     if (!createImage(context_, kMotionFormat, kMotionUsage, width, height, true, created->motion, error)) return false;
+    constexpr VkImageUsageFlags kObjectUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                               VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (!createImage(context_, kObjectMotionFormat, kObjectUsage, width, height, false, created->object, error) ||
+        !createImage(context_, kMotionFormat, kMotionUsage, width, height, false, created->camera, error)) {
+        return false;
+    }
     retired = std::move(resources_);
     resources_ = std::move(created);
     recreated = true;
@@ -467,6 +481,39 @@ SlImage FgMotionPass::motionImage() const {
 }
 
 VkImageView FgMotionPass::motionView() const { return resources_ ? resources_->motion.view : VK_NULL_HANDLE; }
+
+VkImage FgMotionPass::objectImage() const { return resources_ ? resources_->object.image : VK_NULL_HANDLE; }
+
+VkImageView FgMotionPass::objectView() const { return resources_ ? resources_->object.view : VK_NULL_HANDLE; }
+
+void FgMotionPass::beginObjectWrites(VkCommandBuffer cmd, std::uint64_t frame) {
+    Resources& resources = *resources_;
+    const VkImage image = resources.object.image;
+    if (!resources.object_cleared || resources.object_frame != frame) {
+        // Earlier readers and writers of the previous frame finish first; their contents are dropped.
+        imageBarrier(cmd, image, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkClearColorValue none{};
+        none.uint32[0] = 0;
+        none.uint32[1] = kObjectMotionNone;
+        const VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &none, 1, &range);
+        imageBarrier(cmd, image, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        resources.object_cleared = true;
+        resources.object_frame = frame;
+    } else {
+        // The contents are kept: only the layout (if another pass moved it) and write-after-write ordering.
+        imageBarrier(cmd, image, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     resources.object_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
+    resources.object_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+}
 
 bool FgMotionPass::recordMotion(VkCommandBuffer cmd, const FgMotionInputs& inputs, std::string& error) {
     if (!resources_) {

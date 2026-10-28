@@ -51,6 +51,17 @@ public:
     SlImage motionImage() const;
     VkImageView motionView() const;
 
+    // The R32G32_UINT object image of the scene's size (x = the two half floats of the vector, y = the bits of the
+    // depth the fragment wrote, or kObjectMotionNone) and its view for the scene pass to attach; empty before
+    // prepare().
+    VkImage objectImage() const;
+    VkImageView objectView() const;
+    // Before the first candidate instance of `frame`: clears the object image once per frame to (0, kObjectMotionNone),
+    // then makes it a colour attachment. Called again in the same frame (a scene written again after the tap) it keeps
+    // the contents. Outside rendering; needs prepare(). The image is in COLOR_ATTACHMENT_OPTIMAL afterwards; a caller
+    // that moves it elsewhere moves it back before the next call.
+    void beginObjectWrites(VkCommandBuffer cmd, std::uint64_t frame);
+
     // Records the motion vector pass: for each pixel p (centre), the previous position of the surface it shows minus
     // p, in pixels with y down. All of the image is written. Outside rendering; the bound pipeline, descriptors and
     // push constants are invalid afterwards.
