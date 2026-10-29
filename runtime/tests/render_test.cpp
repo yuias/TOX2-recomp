@@ -30,6 +30,7 @@
 #include "render/fp_translator.h"
 #include "render/frame_dump.h"
 #include "render/image_pool.h"
+#include "render/object_motion_history.h"
 #include "render/render_scale.h"
 #include "render/shader_compiler.h"
 #include "render/vertex_convert.h"
@@ -718,22 +719,40 @@ void testDlaaMatrices() {
 
 // Needs no Vulkan device.
 void testDlaaCameraCut() {
-    CHECK(!tox2::dlaaCameraCut(tox2::mat4Identity()));
+    CHECK(!tox2::dlaaCameraCut(tox2::mat4Identity(), tox2::kDlaaCameraCutProbeZ));
     // The centre moves by 0.6 NDC: a cut. By 0.3: the history is still usable.
-    CHECK(tox2::dlaaCameraCut(translationMatrix(0.6f, 0.0f, 0.0f)));
-    CHECK(tox2::dlaaCameraCut(translationMatrix(0.0f, -0.6f, 0.0f)));
-    CHECK(!tox2::dlaaCameraCut(translationMatrix(0.3f, 0.0f, 0.0f)));
-    CHECK(!tox2::dlaaCameraCut(translationMatrix(0.0f, 0.2f, 0.2f)));
+    CHECK(tox2::dlaaCameraCut(translationMatrix(0.6f, 0.0f, 0.0f), tox2::kDlaaCameraCutProbeZ));
+    CHECK(tox2::dlaaCameraCut(translationMatrix(0.0f, -0.6f, 0.0f), tox2::kDlaaCameraCutProbeZ));
+    CHECK(!tox2::dlaaCameraCut(translationMatrix(0.3f, 0.0f, 0.0f), tox2::kDlaaCameraCutProbeZ));
+    CHECK(!tox2::dlaaCameraCut(translationMatrix(0.0f, 0.2f, 0.2f), tox2::kDlaaCameraCutProbeZ));
     // A matrix that sends the test points behind the camera (w <= 0).
     tox2::Mat4 behind = tox2::mat4Identity();
     behind[15] = -1.0f;
-    CHECK(tox2::dlaaCameraCut(behind));
+    CHECK(tox2::dlaaCameraCut(behind, tox2::kDlaaCameraCutProbeZ));
     tox2::Mat4 at_camera = tox2::mat4Identity();
     at_camera[15] = 0.0f;
-    CHECK(tox2::dlaaCameraCut(at_camera));
+    CHECK(tox2::dlaaCameraCut(at_camera, tox2::kDlaaCameraCutProbeZ));
     tox2::Mat4 not_a_number = tox2::mat4Identity();
     not_a_number[0] = std::numeric_limits<float>::quiet_NaN();
-    CHECK(tox2::dlaaCameraCut(not_a_number));
+    CHECK(tox2::dlaaCameraCut(not_a_number, tox2::kDlaaCameraCutProbeZ));
+
+    // A camera that walks 8 near-plane distances forward in one frame: the DLAA test points (about 2 near-plane
+    // distances away) jump, the frame generation ones (about 100 away) barely move.
+    const tox2::Mat4 projection = perspectiveMatrix(1.2f, 2.1f, 0.5f, 1000.0f);
+    const tox2::Mat4 walked = tox2::mat4Multiply(translationMatrix(0.0f, 0.0f, -4.0f), projection);
+    tox2::Mat4 walked_inverse{};
+    CHECK(tox2::mat4Inverse(walked, walked_inverse));
+    const tox2::Mat4 walk = tox2::mat4Multiply(walked_inverse, projection);
+    CHECK(tox2::dlaaCameraCut(walk, tox2::kDlaaCameraCutProbeZ));
+    CHECK(!tox2::dlaaCameraCut(walk, tox2::kFgCameraCutProbeZ));
+    // A quarter turn is a cut at every depth.
+    const tox2::Mat4 quarter_turn = {0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1};
+    const tox2::Mat4 turned = tox2::mat4Multiply(quarter_turn, projection);
+    tox2::Mat4 turned_inverse{};
+    CHECK(tox2::mat4Inverse(turned, turned_inverse));
+    const tox2::Mat4 turn = tox2::mat4Multiply(turned_inverse, projection);
+    CHECK(tox2::dlaaCameraCut(turn, tox2::kDlaaCameraCutProbeZ));
+    CHECK(tox2::dlaaCameraCut(turn, tox2::kFgCameraCutProbeZ));
 }
 
 // A camera that differs from the others by `shift`: a perspective projection behind a translation.
@@ -1091,6 +1110,69 @@ void testLayoutPassPipelines(tox2::VkContext& ctx) {
     const VkPipeline clear_multi = pipelines.maskedClearPipeline(
             VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT, VK_SAMPLE_COUNT_2_BIT);
     CHECK(clear_single != VK_NULL_HANDLE && clear_multi != VK_NULL_HANDLE && clear_single != clear_multi);
+
+    CHECK(pipelines.valid());
+    CHECK(ctx.validationErrorCount() == errors_before);
+}
+
+// The object motion variant of a draw's shaders and pipeline build without validation errors and differ from the plain
+// ones. Skipped on a device that lacks a limit or independentBlend.
+void testObjectMotionPipeline(tox2::VkContext& ctx) {
+    const VkPhysicalDeviceLimits& limits = ctx.deviceProperties().limits;
+    const bool limits_fit = limits.maxVertexInputAttributes >= 32 && limits.maxVertexInputBindings >= 32 &&
+                            limits.maxVertexOutputComponents >= 84 && limits.maxFragmentInputComponents >= 72 &&
+                            limits.maxColorAttachments >= 2;
+    CHECK(ctx.objectMotionSupported() == ctx.objectMotionGap().empty());
+    CHECK(!ctx.objectMotionSupported() || limits_fit);
+    if (!ctx.objectMotionSupported()) {
+        std::printf("object motion pipeline: skipped (%s)\n", ctx.objectMotionGap().c_str());
+        return;
+    }
+    tox2::rsxUnimplementedReset();
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    tox2::DrawPipelines pipelines(ctx);
+    CHECK(pipelines.valid());
+
+    std::vector<tox2::RsxCommand> commands = replaySynthetic(tox2::rsx_synthetic::makeQuadCapture());
+    const tox2::RsxDraw* draw = nullptr;
+    for (const tox2::RsxCommand& command : commands) {
+        if (const auto* candidate = std::get_if<tox2::RsxDraw>(&command)) {
+            draw = candidate;
+            break;
+        }
+    }
+    CHECK(draw != nullptr);
+    if (draw == nullptr) return;
+
+    tox2::DrawShaders plain, motion;
+    CHECK(pipelines.shaders(*draw, plain));
+    CHECK(pipelines.shaders(*draw, motion, true));
+    CHECK(motion.vertex != plain.vertex && motion.fragment != plain.fragment);
+    CHECK(motion.inputs_used == plain.inputs_used && motion.texture_units == plain.texture_units);
+    tox2::DrawShaders again;
+    CHECK(pipelines.shaders(*draw, again, true));
+    CHECK(again.vertex == motion.vertex && again.fragment == motion.fragment);
+
+    tox2::PipelineKey key;
+    key.vp_hash = draw->vp_hash;
+    key.fp_hash = draw->fp_hash;
+    key.fp_control = draw->fp_control;
+    key.texcoord_control = draw->texcoord_control;
+    key.color_format = VK_FORMAT_B8G8R8A8_UNORM;
+    key.depth_format = ctx.depthStencilFormat();
+    key.blend = true;
+    key.src_color = key.src_alpha = VK_BLEND_FACTOR_SRC_ALPHA;
+    key.dst_color = key.dst_alpha = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    for (std::uint32_t slot = 0; slot < tox2::kPipelineVertexSlots; slot++) {
+        if ((plain.inputs_used & (1u << slot)) == 0) continue;
+        key.vertex_formats[slot] = VK_FORMAT_R32G32B32A32_SFLOAT;
+        key.vertex_strides[slot] = 16;
+    }
+    const VkPipeline plain_pipeline = pipelines.pipeline(key, plain);
+    key.object_motion = true;
+    const VkPipeline motion_pipeline = pipelines.pipeline(key, motion);
+    CHECK(plain_pipeline != VK_NULL_HANDLE && motion_pipeline != VK_NULL_HANDLE);
+    CHECK(plain_pipeline != motion_pipeline && pipelines.pipeline(key, motion) == motion_pipeline);
 
     CHECK(pipelines.valid());
     CHECK(ctx.validationErrorCount() == errors_before);
@@ -7656,6 +7738,503 @@ void testFgWarpCheck(tox2::VkContext& ctx) {
     CHECK(ctx.validationErrorCount() == errors_before);
 }
 
+// The object image: cleared once per frame to (0, kObjectMotionNone) by the first beginObjectWrites, kept by a second
+// call in the same frame (a rectangle written in between survives) and cleared again by the next frame.
+void testFgMotionObjectImage(tox2::VkContext& ctx) {
+    constexpr std::uint32_t kWidth = 64, kHeight = 36;
+    constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
+    constexpr VkImageAspectFlags kColor = VK_IMAGE_ASPECT_COLOR_BIT;
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+
+    FgHostBuffer readback;
+    CHECK(createFgHostBuffer(ctx, kPixels * 8, readback));
+    auto pass = std::make_unique<tox2::FgMotionPass>(ctx);
+    std::shared_ptr<void> retired;
+    bool recreated = false;
+    std::string error;
+    const bool ok = readback.mapped != nullptr && pass->prepare(kWidth, kHeight, retired, recreated, error);
+    CHECK(ok);
+    if (!ok) {
+        std::printf("fg motion object image: %s\n", error.c_str());
+    } else {
+        CHECK(pass->objectImage() != VK_NULL_HANDLE && pass->objectView() != VK_NULL_HANDLE);
+        constexpr std::uint32_t kRectX = 8, kRectY = 4, kRectW = 16, kRectH = 8;
+
+        // Copies the object image to the host buffer and puts it back in the layout the pass leaves it in.
+        const auto readBack = [&](VkCommandBuffer cmd) {
+            slTestBarrier(cmd, pass->objectImage(), kColor, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                          VK_ACCESS_2_TRANSFER_READ_BIT);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = {kColor, 0, 0, 1};
+            copy.imageExtent = {kWidth, kHeight, 1};
+            vkCmdCopyImageToBuffer(cmd, pass->objectImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1,
+                                   &copy);
+            fgHostBarrier(cmd);
+            slTestBarrier(cmd, pass->objectImage(), kColor, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_2_TRANSFER_READ_BIT,
+                          VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        };
+        // Counts the pixels equal to `value` inside and outside the rectangle.
+        const auto countPixels = [&](std::uint32_t x_value, std::uint32_t y_value, std::size_t& inside,
+                                     std::size_t& outside) {
+            vmaInvalidateAllocation(ctx.allocator(), readback.allocation, 0, VK_WHOLE_SIZE);
+            const auto* words = static_cast<const std::uint32_t*>(readback.mapped);
+            inside = outside = 0;
+            for (std::uint32_t y = 0; y < kHeight; y++) {
+                for (std::uint32_t x = 0; x < kWidth; x++) {
+                    const std::size_t at = (static_cast<std::size_t>(y) * kWidth + x) * 2;
+                    if (words[at] != x_value || words[at + 1] != y_value) continue;
+                    const bool in_rect = x >= kRectX && x < kRectX + kRectW && y >= kRectY && y < kRectY + kRectH;
+                    (in_rect ? inside : outside)++;
+                }
+            }
+        };
+
+        std::size_t inside = 0, outside = 0;
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            pass->beginObjectWrites(cmd, 1);
+            readBack(cmd);
+        }));
+        countPixels(0, tox2::kObjectMotionNone, inside, outside);
+        CHECK(inside + outside == kPixels);
+
+        // A rectangle written inside a rendering instance on the view, then the same frame's second call.
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            VkRenderingAttachmentInfo attachment{};
+            attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            attachment.imageView = pass->objectView();
+            attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderingInfo rendering{};
+            rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+            rendering.renderArea = {{0, 0}, {kWidth, kHeight}};
+            rendering.layerCount = 1;
+            rendering.colorAttachmentCount = 1;
+            rendering.pColorAttachments = &attachment;
+            vkCmdBeginRendering(cmd, &rendering);
+            VkClearAttachment clear{};
+            clear.aspectMask = kColor;
+            clear.colorAttachment = 0;
+            clear.clearValue.color.uint32[0] = 1;
+            clear.clearValue.color.uint32[1] = 2;
+            const VkClearRect rect = {{{kRectX, kRectY}, {kRectW, kRectH}}, 0, 1};
+            vkCmdClearAttachments(cmd, 1, &clear, 1, &rect);
+            vkCmdEndRendering(cmd);
+            pass->beginObjectWrites(cmd, 1);
+            readBack(cmd);
+        }));
+        countPixels(1, 2, inside, outside);
+        std::printf("fg motion object image: same frame keeps %zu rectangle pixels\n", inside);
+        CHECK(inside == static_cast<std::size_t>(kRectW) * kRectH && outside == 0);
+
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            pass->beginObjectWrites(cmd, 2);
+            readBack(cmd);
+        }));
+        countPixels(0, tox2::kObjectMotionNone, inside, outside);
+        CHECK(inside + outside == kPixels);
+    }
+
+    pass.reset();
+    vkDeviceWaitIdle(ctx.device());
+    destroyFgHostBuffer(ctx, readback);
+    CHECK(ctx.validationErrorCount() == errors_before);
+}
+
+// The combine pass over a constant depth: pixels whose object image entry is a vector and the depth the draw wrote get
+// that vector, a depth off by two 24-bit steps or no entry gets the camera vector (zero for the identity matrix).
+void testFgMotionObjectCombine(tox2::VkContext& ctx) {
+    if (!ctx.hasD24S8()) {
+        std::printf("fg motion object combine: skipped: no D24S8\n");
+        return;
+    }
+    constexpr std::uint32_t kWidth = 64, kHeight = 36;
+    constexpr std::size_t kPixels = static_cast<std::size_t>(kWidth) * kHeight;
+    constexpr VkImageAspectFlags kColor = VK_IMAGE_ASPECT_COLOR_BIT;
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+
+    constexpr std::uint32_t kDepthWord = 8388608;  // depth 0.5 as the 24-bit value the image stores
+    const float depth_value = static_cast<float>(kDepthWord) / 16777215.0f;
+    const auto depthBits = [](std::uint32_t word) {
+        return std::bit_cast<std::uint32_t>(static_cast<float>(word) / 16777215.0f);
+    };
+    // packHalf2x16(3, -2): x in the low half. 3.0 is 0x4200 and -2.0 is 0xC000 as half floats.
+    constexpr std::uint32_t kPackedVector = 0x4200u | (0xC000u << 16);
+    struct Rect {
+        std::uint32_t x, y, w, h, vector, depth;
+    };
+    // A valid entry, and an entry whose depth is off by two steps (a later draw changed the pixel).
+    const Rect rects[2] = {{4, 4, 16, 8, kPackedVector, depthBits(kDepthWord)},
+                           {30, 4, 16, 8, kPackedVector, depthBits(kDepthWord + 2)}};
+    const auto inRect = [&](const Rect& rect, std::uint32_t x, std::uint32_t y) {
+        return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+    };
+
+    SlTestImage depth;
+    FgHostBuffer upload, readback;
+    bool ok = createSlTestImage(ctx, ctx.depthStencilFormat(),
+                                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                VK_IMAGE_ASPECT_DEPTH_BIT, kWidth, kHeight, depth) &&
+              createFgHostBuffer(ctx, kPixels * 4, upload) && createFgHostBuffer(ctx, kPixels * 4, readback);
+    CHECK(ok);
+    auto pass = std::make_unique<tox2::FgMotionPass>(ctx);
+    std::shared_ptr<void> retired;
+    bool recreated = false;
+    std::string error;
+    ok = ok && pass->prepare(kWidth, kHeight, retired, recreated, error);
+    CHECK(ok);
+    if (!ok) {
+        std::printf("fg motion object combine: %s\n", error.c_str());
+    } else {
+        auto* words = static_cast<std::uint32_t*>(upload.mapped);
+        for (std::size_t i = 0; i < kPixels; i++) words[i] = kDepthWord;
+        vmaFlushAllocation(ctx.allocator(), upload.allocation, 0, VK_WHOLE_SIZE);
+        const VkImageAspectFlags both = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            slTestBarrier(cmd, depth.image, both, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                          VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+            copy.imageExtent = {kWidth, kHeight, 1};
+            vkCmdCopyBufferToImage(cmd, upload.buffer, depth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            slTestBarrier(cmd, depth.image, both, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                          VK_ACCESS_2_SHADER_READ_BIT);
+        }));
+
+        // The object image of frame 1: the two rectangles on a cleared (no entry) image, as a scene pass leaves it.
+        CHECK(!pass->hasObjectWrites(1));
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            pass->beginObjectWrites(cmd, 1);
+            VkRenderingAttachmentInfo attachment{};
+            attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            attachment.imageView = pass->objectView();
+            attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderingInfo rendering{};
+            rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+            rendering.renderArea = {{0, 0}, {kWidth, kHeight}};
+            rendering.layerCount = 1;
+            rendering.colorAttachmentCount = 1;
+            rendering.pColorAttachments = &attachment;
+            vkCmdBeginRendering(cmd, &rendering);
+            for (const Rect& rect : rects) {
+                VkClearAttachment clear{};
+                clear.aspectMask = kColor;
+                clear.colorAttachment = 0;
+                clear.clearValue.color.uint32[0] = rect.vector;
+                clear.clearValue.color.uint32[1] = rect.depth;
+                const VkClearRect area = {
+                        {{static_cast<std::int32_t>(rect.x), static_cast<std::int32_t>(rect.y)}, {rect.w, rect.h}},
+                        0,
+                        1};
+                vkCmdClearAttachments(cmd, 1, &clear, 1, &area);
+            }
+            vkCmdEndRendering(cmd);
+        }));
+        CHECK(pass->hasObjectWrites(1) && !pass->hasObjectWrites(2));
+
+        // Runs the combine pass and returns the final vectors (x, y per pixel).
+        const auto run = [&](const tox2::Mat4& matrix) {
+            std::vector<float> vectors(kPixels * 2, 1000.0f);
+            tox2::FgMotionInputs inputs;
+            inputs.depth = depth.view;
+            inputs.clip_to_prev_clip = matrix;
+            inputs.object = true;
+            std::string run_error;
+            const bool done = fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+                CHECK(pass->recordMotion(cmd, inputs, run_error));
+                const tox2::SlImage motion = pass->motionImage();
+                slTestBarrier(cmd, motion.image, kColor, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_2_NONE, VK_ACCESS_2_TRANSFER_READ_BIT);
+                VkBufferImageCopy copy{};
+                copy.imageSubresource = {kColor, 0, 0, 1};
+                copy.imageExtent = {kWidth, kHeight, 1};
+                vkCmdCopyImageToBuffer(cmd, motion.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1,
+                                       &copy);
+                fgHostBarrier(cmd);
+            });
+            CHECK(done);
+            if (!run_error.empty()) std::printf("fg motion object combine: %s\n", run_error.c_str());
+            if (done) {
+                vmaInvalidateAllocation(ctx.allocator(), readback.allocation, 0, VK_WHOLE_SIZE);
+                const auto* halves = static_cast<const std::uint16_t*>(readback.mapped);
+                for (std::size_t i = 0; i < kPixels * 2; i++) vectors[i] = halfToFloat(halves[i]);
+            }
+            return vectors;
+        };
+
+        // The identity matrix has no camera motion: the object vector inside the valid rectangle, zero elsewhere.
+        const std::vector<float> still = run(tox2::mat4Identity());
+        CHECK(pass->objectLayout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        std::size_t object_pixels = 0, stale_pixels = 0, wrong = 0;
+        for (std::uint32_t y = 0; y < kHeight; y++) {
+            for (std::uint32_t x = 0; x < kWidth; x++) {
+                const std::size_t at = (static_cast<std::size_t>(y) * kWidth + x) * 2;
+                const bool valid = inRect(rects[0], x, y);
+                const float want_x = valid ? 3.0f : 0.0f, want_y = valid ? -2.0f : 0.0f;
+                if (std::abs(still[at] - want_x) > 0.01f || std::abs(still[at + 1] - want_y) > 0.01f) wrong++;
+                object_pixels += valid ? 1 : 0;
+                stale_pixels += inRect(rects[1], x, y) ? 1 : 0;
+            }
+        }
+        std::printf("fg motion object combine: %zu object pixels, %zu stale pixels, %zu wrong\n", object_pixels,
+                    stale_pixels, wrong);
+        CHECK(object_pixels == 16 * 8 && stale_pixels == 16 * 8);
+        CHECK(wrong == 0);
+
+        // A moving camera: outside the valid rectangle the vector is the camera's, on the depth plane of the test.
+        const tox2::Mat4 current = fgTestWorldToClip(0.4f, 0.15f, 0.0f, 2.0f);
+        const tox2::Mat4 previous = fgTestWorldToClip(0.0f, 0.0f, 0.0f, 0.0f);
+        tox2::Mat4 current_inverse{};
+        CHECK(tox2::mat4Inverse(current, current_inverse));
+        const tox2::Mat4 clip_to_prev_clip = tox2::mat4Multiply(current_inverse, previous);
+        const std::vector<float> moved = run(clip_to_prev_clip);
+        float worst = 0.0f, largest = 0.0f;
+        for (std::uint32_t i = 0; i < 40; i++) {
+            const std::uint32_t x = (i * 7 + 3) % kWidth;
+            const std::uint32_t y = (i * 5 + 2) % kHeight;
+            const std::size_t at = (static_cast<std::size_t>(y) * kWidth + x) * 2;
+            if (inRect(rects[0], x, y)) {
+                worst = std::max({worst, std::abs(moved[at] - 3.0f), std::abs(moved[at + 1] + 2.0f)});
+                continue;
+            }
+            const float px = static_cast<float>(x) + 0.5f, py = static_cast<float>(y) + 0.5f;
+            const std::array<float, 4> clip = {px / kWidth * 2.0f - 1.0f, py / kHeight * 2.0f - 1.0f, depth_value,
+                                               1.0f};
+            const std::array<float, 4> q = tox2::mat4Transform(clip, clip_to_prev_clip);
+            CHECK(q[3] > 0.0f);
+            const float mv_x = (q[0] / q[3] + 1.0f) * 0.5f * kWidth - px;
+            const float mv_y = (q[1] / q[3] + 1.0f) * 0.5f * kHeight - py;
+            worst = std::max({worst, std::abs(moved[at] - mv_x), std::abs(moved[at + 1] - mv_y)});
+            largest = std::max({largest, std::abs(mv_x), std::abs(mv_y)});
+        }
+        std::printf("fg motion object combine: camera largest %.2f px, worst error %.4f px\n", largest, worst);
+        CHECK(largest > 1.0f);
+        CHECK(worst < 0.01f);
+    }
+
+    pass.reset();
+    vkDeviceWaitIdle(ctx.device());
+    destroyFgHostBuffer(ctx, readback);
+    destroyFgHostBuffer(ctx, upload);
+    destroySlTestImage(ctx, depth);
+    CHECK(ctx.validationErrorCount() == errors_before);
+}
+
+// The history buffer: frame 1's vertex arrays and constant blocks, recorded from an upload-like buffer, come back byte
+// for byte from the ranges frame 2's matches return; draws sharing a constants range share its copy; a frame that does
+// not follow on, or a scene of another size, matches nothing; a larger frame replaces the buffer of its parity.
+void testObjectMotionHistory(tox2::VkContext& ctx) {
+    using tox2::ObjectMotionHistory;
+    constexpr std::uint32_t kWidth = 64, kHeight = 36;
+    constexpr VkDeviceSize kConstantBytes = tox2::kRsxVpConstantCount * 16;
+    constexpr VkDeviceSize kBigBytes = 1536 * 1024;
+    constexpr VkDeviceSize kUploadBytes = 256 * 1024;
+    const std::uint32_t errors_before = ctx.validationErrorCount();
+    const VkDeviceSize uniform_alignment = ctx.deviceProperties().limits.minUniformBufferOffsetAlignment;
+
+    FgHostBuffer upload, big, readback;
+    CHECK(createFgHostBuffer(ctx, kUploadBytes, upload));
+    CHECK(createFgHostBuffer(ctx, 2 * kBigBytes, big));
+    CHECK(createFgHostBuffer(ctx, 2 * kBigBytes, readback));
+    if (upload.mapped == nullptr || big.mapped == nullptr || readback.mapped == nullptr) {
+        destroyFgHostBuffer(ctx, upload);
+        destroyFgHostBuffer(ctx, big);
+        destroyFgHostBuffer(ctx, readback);
+        return;
+    }
+
+    // Two constant blocks and the vertex arrays of three candidates, 256-aligned like the renderer's uploads. All but
+    // the last array lie close enough to be copied as one region; that one is far away and gets a region of its own.
+    constexpr VkDeviceSize kConstantsA = 0, kConstantsB = 8192;
+    const ObjectMotionHistory::Range arrays[3][2] = {
+            {{upload.buffer, 16384, 48}, {upload.buffer, 16384 + 256, 64}},
+            {{upload.buffer, 17408, 96}, {}},
+            {{upload.buffer, 18432, 32}, {upload.buffer, 18432 + 128 * 1024, 20}},
+    };
+    const std::uint32_t slots[3][2] = {{0, 2}, {1, 0}, {0, 5}};
+    const auto pattern = [](std::uint32_t seed, VkDeviceSize index) {
+        return static_cast<std::uint8_t>(seed + index * 7 + (index >> 8));
+    };
+    {
+        auto* bytes = static_cast<std::uint8_t*>(upload.mapped);
+        std::memset(bytes, 0xEE, kUploadBytes);
+        for (VkDeviceSize i = 0; i < kConstantBytes; i++) {
+            bytes[kConstantsA + i] = pattern(1, i);
+            bytes[kConstantsB + i] = pattern(2, i);
+        }
+        for (std::uint32_t c = 0; c < 3; c++) {
+            for (const ObjectMotionHistory::Range& range : arrays[c]) {
+                for (VkDeviceSize i = 0; i < range.size; i++) bytes[range.offset + i] = pattern(10 + c, i);
+            }
+        }
+        auto* big_bytes = static_cast<std::uint8_t*>(big.mapped);
+        for (VkDeviceSize i = 0; i < kBigBytes; i++) big_bytes[i] = pattern(99, i);
+        vmaFlushAllocation(ctx.allocator(), upload.allocation, 0, VK_WHOLE_SIZE);
+        vmaFlushAllocation(ctx.allocator(), big.allocation, 0, VK_WHOLE_SIZE);
+    }
+
+    const tox2::MotionDrawSignature signatures[3] = {{101, 1}, {102, 2}, {103, 3}};
+    const auto candidateUniforms = [](std::uint32_t c) {
+        tox2::VpDrawUniforms draw{};
+        draw.clip_width = static_cast<float>(c + 1);
+        draw.branch_bits = 0x100 + c;
+        return draw;
+    };
+    const ObjectMotionHistory::Range constants_a = {upload.buffer, kConstantsA, kConstantBytes};
+    const ObjectMotionHistory::Range constants_b = {upload.buffer, kConstantsB, kConstantBytes};
+    const ObjectMotionHistory::Range constants_of[3] = {constants_a, constants_a, constants_b};
+    const auto uploadsOf = [&](std::uint32_t c) {
+        std::array<ObjectMotionHistory::Range, tox2::kPipelineVertexSlots> uploads{};
+        for (std::uint32_t i = 0; i < 2; i++) {
+            if (arrays[c][i].size != 0) uploads[slots[c][i]] = arrays[c][i];
+        }
+        return uploads;
+    };
+
+    ObjectMotionHistory history(ctx);
+    std::shared_ptr<void> retired;
+    std::string error;
+    // One frame of the three candidates: the matches (copied out) and the number of them.
+    const auto runFrame = [&](std::uint64_t frame, std::uint32_t width) {
+        history.beginFrame(frame, width, kHeight, tox2::MotionMatchRule::AddressThenOrdered);
+        std::vector<ObjectMotionHistory::Previous> matches;
+        std::uint32_t matched = 0;
+        for (std::uint32_t c = 0; c < 3; c++) {
+            const ObjectMotionHistory::Previous* previous = history.match(signatures[c]);
+            matched += previous != nullptr;
+            matches.push_back(previous != nullptr ? *previous : ObjectMotionHistory::Previous{});
+            history.record(signatures[c], constants_of[c], candidateUniforms(c), uploadsOf(c));
+        }
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) { CHECK(history.recordCopy(cmd, retired, error)); }));
+        return std::pair{matched, matches};
+    };
+    const auto read = [&](const ObjectMotionHistory::Range& range, std::vector<std::uint8_t>& out) {
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) {
+            VkMemoryBarrier2 barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+            barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+            barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+            barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+            VkDependencyInfo dependency{};
+            dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            dependency.memoryBarrierCount = 1;
+            dependency.pMemoryBarriers = &barrier;
+            vkCmdPipelineBarrier2(cmd, &dependency);
+            const VkBufferCopy region = {range.offset, 0, range.size};
+            vkCmdCopyBuffer(cmd, range.buffer, readback.buffer, 1, &region);
+            fgHostBarrier(cmd);
+        }));
+        vmaInvalidateAllocation(ctx.allocator(), readback.allocation, 0, VK_WHOLE_SIZE);
+        const auto* bytes = static_cast<const std::uint8_t*>(readback.mapped);
+        out.assign(bytes, bytes + range.size);
+    };
+    const auto sourceBytes = [&](const ObjectMotionHistory::Range& range) {
+        const auto* bytes = static_cast<const std::uint8_t*>(range.buffer == big.buffer ? big.mapped : upload.mapped);
+        return std::vector<std::uint8_t>(bytes + range.offset, bytes + range.offset + range.size);
+    };
+
+    // Frame 1 has nothing to match; the set the first two candidates share is copied once.
+    {
+        const auto [matched, matches] = runFrame(1, kWidth);
+        CHECK(matched == 0);
+        CHECK(retired == nullptr);
+        const ObjectMotionHistory::Stats stats = history.stats();
+        CHECK(stats.candidates == 3 && stats.matched == 0);
+        CHECK(stats.history_bytes == 48 + 64 + 96 + 32 + 20 + 2 * kConstantBytes);
+        CHECK(stats.regions == 2);
+    }
+
+    // Frame 2 matches all three, in the history buffer.
+    std::vector<ObjectMotionHistory::Previous> frame1;
+    {
+        auto [matched, matches] = runFrame(2, kWidth);
+        CHECK(matched == 3);
+        CHECK(retired == nullptr);
+        CHECK(history.stats().candidates == 3 && history.stats().matched == 3);
+        frame1 = std::move(matches);
+    }
+    if (frame1.size() == 3 && frame1[0].constants.buffer != VK_NULL_HANDLE) {
+        CHECK(frame1[0].constants.buffer == frame1[1].constants.buffer);
+        CHECK(frame1[0].constants.offset == frame1[1].constants.offset);
+        CHECK(frame1[2].constants.offset != frame1[0].constants.offset);
+        for (const ObjectMotionHistory::Previous& previous : frame1) {
+            CHECK(previous.constants.size == kConstantBytes);
+            CHECK(previous.constants.offset % uniform_alignment == 0);
+            CHECK(previous.constants.buffer != upload.buffer);
+        }
+        std::vector<std::uint8_t> bytes;
+        for (std::uint32_t c = 0; c < 3; c++) {
+            const ObjectMotionHistory::Previous& previous = frame1[c];
+            CHECK(previous.draw.branch_bits == 0x100 + c && previous.draw.clip_width == static_cast<float>(c + 1));
+            read(previous.constants, bytes);
+            CHECK(bytes == sourceBytes(constants_of[c]));
+            std::uint32_t used = 0;
+            for (std::uint32_t slot = 0; slot < tox2::kPipelineVertexSlots; slot++) {
+                const ObjectMotionHistory::Range& range = previous.slots[slot];
+                if (range.size == 0) continue;
+                used++;
+                CHECK(range.buffer == previous.constants.buffer && range.offset % 16 == 0);
+                const ObjectMotionHistory::Range& expected = arrays[c][slots[c][0] == slot ? 0 : 1];
+                CHECK(range.size == expected.size);
+                read(range, bytes);
+                CHECK(bytes == sourceBytes(expected));
+            }
+            CHECK(used == (arrays[c][1].size != 0 ? 2u : 1u));
+        }
+    } else {
+        CHECK(false);
+    }
+
+    // Frame 4 does not follow frame 2; frame 5 follows frame 4; frame 6 changes the scene size.
+    CHECK(runFrame(4, kWidth).first == 0);
+    CHECK(runFrame(5, kWidth).first == 3);
+    CHECK(runFrame(6, kWidth + 1).first == 0);
+    CHECK(retired == nullptr);
+
+    // Frame 7 shares frame 5's buffer and is far larger: the buffer is replaced and the old one handed back.
+    {
+        history.beginFrame(7, kWidth + 1, kHeight, tox2::MotionMatchRule::AddressThenOrdered);
+        CHECK(history.match(signatures[0]) != nullptr);
+        std::array<ObjectMotionHistory::Range, tox2::kPipelineVertexSlots> uploads{};
+        uploads[0] = {big.buffer, 0, kBigBytes};
+        history.record(signatures[0], constants_a, candidateUniforms(0), uploads);
+        CHECK(fgTestSubmit(ctx, [&](VkCommandBuffer cmd) { CHECK(history.recordCopy(cmd, retired, error)); }));
+        CHECK(retired != nullptr);
+        CHECK(history.stats().history_bytes == kBigBytes + kConstantBytes);
+        CHECK(history.stats().regions == 2);
+        retired.reset();
+
+        history.beginFrame(8, kWidth + 1, kHeight, tox2::MotionMatchRule::AddressThenOrdered);
+        const ObjectMotionHistory::Previous* previous = history.match(signatures[0]);
+        CHECK(previous != nullptr);
+        if (previous != nullptr) {
+            std::vector<std::uint8_t> bytes;
+            read(previous->slots[0], bytes);
+            CHECK(bytes == sourceBytes(uploads[0]));
+            read(previous->constants, bytes);
+            CHECK(bytes == sourceBytes(constants_a));
+        }
+        // Frame 8 recorded nothing and copied nothing, so frame 9 finds nothing to match.
+        history.beginFrame(9, kWidth + 1, kHeight, tox2::MotionMatchRule::AddressThenOrdered);
+        CHECK(history.match(signatures[0]) == nullptr);
+        history.clear();
+    }
+
+    vkDeviceWaitIdle(ctx.device());
+    destroyFgHostBuffer(ctx, upload);
+    destroyFgHostBuffer(ctx, big);
+    destroyFgHostBuffer(ctx, readback);
+    CHECK(error.empty());
+    CHECK(ctx.validationErrorCount() == errors_before);
+}
+
 }  // namespace
 
 int main() {
@@ -7722,6 +8301,7 @@ int main() {
     testTwoSampleSupport(*ctx);
     testRendererAaMode(*ctx);
     testLayoutPassPipelines(*ctx);
+    testObjectMotionPipeline(*ctx);
     testRendererClear(*ctx);
     testRendererReadbackGate(*ctx);
     testRendererRequestedDump(*ctx);
@@ -7766,6 +8346,9 @@ int main() {
     testRendererAnisotropy(*ctx);
     testFgMotionVectors(*ctx);
     testFgWarpCheck(*ctx);
+    testFgMotionObjectImage(*ctx);
+    testFgMotionObjectCombine(*ctx);
+    testObjectMotionHistory(*ctx);
     CHECK(ctx->validationErrorCount() == 0);
 
     ctx.reset();

@@ -83,6 +83,11 @@ public:
     // capability (for example "framebufferStencilSampleCounts lacks 2"). 2 samples is not a guaranteed count.
     const std::string& twoSampleSupportGap() const { return two_sample_gap_; }
 
+    // Empty when the object motion pipelines (object_motion.h) fit the device, which was then created with
+    // independentBlend; otherwise the first missing capability (for example "maxVertexInputBindings 16 < 32").
+    const std::string& objectMotionGap() const { return object_motion_gap_; }
+    bool objectMotionSupported() const { return object_motion_gap_.empty(); }
+
     // True when the validation layer was requested, installed and its messenger is active.
     bool validationEnabled() const { return messenger_ != VK_NULL_HANDLE; }
     std::uint32_t validationErrorCount() const { return validation_errors_.load(std::memory_order_relaxed); }
@@ -128,6 +133,7 @@ private:
     bool has_sampler_anisotropy_ = false;
     bool has_stencil_export_ = false;
     std::string two_sample_gap_;
+    std::string object_motion_gap_;
     std::unique_ptr<Streamline> streamline_;
     std::string streamline_status_;
     bool frame_generation_supported_ = false;

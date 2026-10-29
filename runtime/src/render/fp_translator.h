@@ -80,6 +80,11 @@ static_assert(offsetof(FpDrawUniforms, texture_scale) == 16);
 inline constexpr std::uint32_t kFpControlDepthExport = 0xe;   // any bit: gl_FragDepth = clamp(R1.z, 0, 1)
 inline constexpr std::uint32_t kFpControl32BitExport = 0x40;  // colour from R0 (set) or H0 (clear)
 
+// Second fragment output of the object motion variant (R32G32_UINT): x = the two half floats of the motion vector
+// (previous minus current position, pixels, y down), y = the bits of the depth the fragment wrote, or this value when
+// the draw has no previous inputs.
+inline constexpr std::uint32_t kObjectMotionNone = 0xFFFFFFFFu;
+
 // Program words are stored with their 16-bit halves swapped. RsxDraw::fp_ucode and ::fp_constants
 // keep that form; the translator undoes it for the instructions, and whoever uploads `fc[]` must
 // apply this to every constant word before treating it as a float.
@@ -94,7 +99,11 @@ constexpr std::uint32_t fpFixupWord(std::uint32_t stored) { return std::rotl(sto
 // cube unit; TXP divides them by w. Inputs use the vertex translator's varying
 // locations. Inline constants read `fc[i]` in program order; the array covers the entries the
 // program reads (at most RsxDraw::fp_constants.size() / 4), so bind at least that many.
+// `object_motion` adds, to the plain text and nothing else, the vertex program variant's three motion varyings
+// (kVaryingMotionCur/Prev/Valid) as inputs and `layout(location = 1) out uvec2 out_object_motion`, written after the
+// colour (and the exported depth) so a discarded fragment writes neither.
 GlslResult translateFragmentProgram(std::span<const std::uint32_t> ucode, std::uint32_t control,
-                                    std::uint32_t texcoord_control, std::uint32_t texture_types = 0);
+                                    std::uint32_t texcoord_control, std::uint32_t texture_types = 0,
+                                    bool object_motion = false);
 
 }  // namespace tox2

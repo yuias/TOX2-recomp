@@ -838,6 +838,59 @@ void testFrameGenPanel() {
     }
 }
 
+void testObjectMotionPanel() {
+    SettingCalls recorded;
+    tox2::OverlaySources sources = makeFakeSources();
+    recorded.attach(sources);
+    constexpr float kProbeX = 60.0f;
+    constexpr float kWindowBottom = 720.0f;
+
+    {
+        // Not supported by the device: the row is not drawn.
+        tox2::OverlayState unsupported;
+        unsupported.aa_mode = tox2::AaMode::Dlaa;
+        SettingsProbe probe(unsupported, sources);
+        if (probe.window() == nullptr) return;
+        CHECK(!probe.findHovered(probe.window()->GetID("Object motion vectors"), kProbeX, 10.0f, kWindowBottom));
+    }
+
+    // Without DLAA the checkbox is disabled and keeps its value: no click reaches a request or a saved setting.
+    for (const tox2::AaMode mode : {tox2::AaMode::Msaa, tox2::AaMode::Supersample}) {
+        tox2::OverlayState state;
+        state.aa_mode = mode;
+        state.object_motion_supported = true;
+        state.object_motion = true;
+        SettingsProbe probe(state, sources);
+        if (probe.window() == nullptr) continue;
+        CHECK(!probe.findHovered(probe.window()->GetID("Object motion vectors"), kProbeX, 10.0f, kWindowBottom));
+        CHECK(!state.object_motion_request && state.object_motion && recorded.calls.empty());
+        CHECK(!tox2::objectMotionSelectable(state));
+        CHECK(tox2::frameGenDisabledNote(state) == "needs DLAA anti-aliasing");
+    }
+
+    // With DLAA a click toggles it, requests the new value and reports it for saving.
+    for (const bool before : {true, false}) {
+        recorded.calls.clear();
+        tox2::OverlayState state;
+        state.aa_mode = tox2::AaMode::Dlaa;
+        state.object_motion_supported = true;
+        state.object_motion = before;
+        SettingsProbe probe(state, sources);
+        if (probe.window() == nullptr) return;
+        const std::optional<ImVec2> box =
+                probe.findHovered(probe.window()->GetID("Object motion vectors"), kProbeX, 10.0f, kWindowBottom);
+        CHECK(box.has_value());
+        if (!box) return;
+        probe.click(*box);
+        CHECK(state.object_motion_request == !before);
+        CHECK(recorded.calls.size() == 1);
+        if (recorded.calls.size() == 1) {
+            CHECK(recorded.calls[0].first == tox2::OverlaySetting::ObjectMotion);
+            CHECK(recorded.calls[0].second == (before ? "off" : "on"));
+        }
+    }
+}
+
 // The saved target is the renderer's, so the AA combo cannot lose it: Dlaa -> Msaa -> Dlaa leaves target, request and
 // saved settings alone, and the combo is usable again at the end.
 void testFrameGenDlaaRoundTrip() {
@@ -1067,7 +1120,10 @@ void testPresentRequests() {
     state.anisotropy_request = 4;
     state.window_size_request = tox2::WindowSizePreset::Size1440p;
     state.frame_gen_request = tox2::FrameGenTarget::Fps180;
+    state.object_motion_request = false;
     tox2::PresentOverlayRequests requests = tox2::takePresentRequests(state);
+    CHECK(requests.object_motion == false);
+    CHECK(!state.object_motion_request);
     CHECK(requests.dump_display);
     CHECK(requests.resolution_scale == 3);
     CHECK(requests.aa_mode == tox2::AaMode::Supersample);
@@ -1088,6 +1144,7 @@ void testPresentRequests() {
     CHECK(requests.anisotropy == 0);
     CHECK(!requests.window_size);
     CHECK(!requests.frame_gen);
+    CHECK(!requests.object_motion);
 
     // A DLAA request is delivered once.
     state.aa_mode_request = tox2::AaMode::Dlaa;
@@ -1219,6 +1276,7 @@ void testOverlayStack() {
     high.dump_display = true;
     high.resolution_scale = 3;
     high.frame_gen = tox2::FrameGenTarget::Fps120;
+    high.object_motion = false;
     FakeOverlay first(1, log, false, low);
     FakeOverlay second(2, log, true, high);
     FakeOverlay third(3, log, false);
@@ -1236,6 +1294,7 @@ void testOverlayStack() {
     CHECK(merged.aa_mode == tox2::AaMode::Msaa);
     CHECK(merged.window_size == tox2::WindowSizePreset::Size720p);
     CHECK(merged.frame_gen == tox2::FrameGenTarget::Fps120);
+    CHECK(merged.object_motion == false);
 
     // wantsDraw is true when any child wants; record runs only the children that do.
     CHECK(stack.wantsDraw());
@@ -2288,6 +2347,7 @@ int main() {
     testFrameGenStatusLine();
     testFrameGenSelectable();
     testFrameGenPanel();
+    testObjectMotionPanel();
     testFrameGenDlaaRoundTrip();
     testAnisotropyPanel();
     testWindowSizeLabels();

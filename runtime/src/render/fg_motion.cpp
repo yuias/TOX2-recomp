@@ -5,17 +5,20 @@
 #include <utility>
 #include <vector>
 
+#include "render/fp_translator.h"
 #include "render/shader_compiler.h"
+#include "render/vk_pipelines.h"
 
 namespace tox2 {
 namespace {
 
 constexpr std::uint64_t kVertexKey = 0x46474D4F5456ull;
 constexpr std::uint64_t kMotionFragmentKey = 0x46474D4F5446ull;
+constexpr std::uint64_t kCombineFragmentKey = 0x46474D434246ull;
 constexpr std::uint64_t kWarpFragmentKey = 0x46474D575246ull;
 
 constexpr VkFormat kMotionFormat = VK_FORMAT_R16G16_SFLOAT;
-constexpr VkFormat kWarpFormat = VK_FORMAT_R32G32_SFLOAT;
+constexpr VkFormat kWarpFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
 constexpr VkFormat kColorCopyFormat = VK_FORMAT_R8G8B8A8_UNORM;
 
 // Fragment push constants. The layout holds the larger block; the warp pass pushes only its 12 bytes.
@@ -58,28 +61,64 @@ void main() {
 }
 )";
 
-// Writes the two differences, or (-1, -1) where there is nothing to compare: no previous colour, or p + mv outside the
-// image. The current colour is also copied out, to be the previous colour of the next call (a second target, since the
-// previous colour is sampled in this pass).
+// The motion pass with the object image: the object vector where a fragment wrote one that is still the surface the
+// depth image shows (a later draw that did not write the object image changed the depth by more than the 24-bit
+// rounding of the stored value), the camera vector elsewhere. The camera vector is also kept on its own.
+constexpr const char* kCombineFragmentGlsl = R"(#version 450
+layout(push_constant) uniform Motion { mat4 clip_to_prev_clip; vec2 size; vec2 flip; } pc;
+layout(set = 0, binding = 0) uniform sampler2D depth_tex;
+layout(set = 0, binding = 1) uniform usampler2D object_tex;
+layout(location = 0) out vec2 out_mv;
+layout(location = 1) out vec2 out_camera;
+void main() {
+  ivec2 ip = ivec2(gl_FragCoord.xy);
+  vec2 p = gl_FragCoord.xy;
+  vec2 ndc = p / pc.size * 2.0 - 1.0;
+  float depth = texelFetch(depth_tex, ip, 0).r;
+  vec4 q = pc.clip_to_prev_clip * vec4(ndc, depth, 1.0);
+  vec2 camera = vec2(0.0);
+  if (q.w > 0.0) camera = (q.xy / q.w + 1.0) * 0.5 * pc.size - p;
+  camera *= pc.flip;
+  out_camera = camera;
+  vec2 mv = camera;
+  uvec2 object = texelFetch(object_tex, ip, 0).rg;
+  if (object.y != 0xFFFFFFFFu && abs(uintBitsToFloat(object.y) - depth) <= 1.0 / 16777215.0) {
+    mv = unpackHalf2x16(object.x) * pc.flip;
+  }
+  out_mv = mv;
+}
+)";
+
+// Writes (warp, no-motion, camera warp, object flag), or -1 in the first channel where there is nothing to compare: no
+// previous colour, or p + mv or p + camera outside the image (so all figures cover the same pixels). The flag is 1
+// where the vector differs from the camera's by more than half a pixel. The current colour is also copied out, to be
+// the previous colour of the next call (a second target, since the previous colour is sampled in this pass).
 constexpr const char* kWarpFragmentGlsl = R"(#version 450
 layout(push_constant) uniform Warp { vec2 size; int has_previous; } pc;
 layout(set = 0, binding = 0) uniform sampler2D cur_tex;
 layout(set = 0, binding = 1) uniform sampler2D prev_tex;
 layout(set = 0, binding = 2) uniform sampler2D motion_tex;
-layout(location = 0) out vec2 out_diff;
+layout(set = 0, binding = 3) uniform sampler2D camera_tex;
+layout(location = 0) out vec4 out_diff;
 layout(location = 1) out vec4 out_copy;
 float meanOf(vec3 v) { return (v.x + v.y + v.z) * (1.0 / 3.0); }
+bool outside(vec2 q) { return q.x < 0.0 || q.y < 0.0 || q.x >= pc.size.x || q.y >= pc.size.y; }
 void main() {
   ivec2 ip = ivec2(gl_FragCoord.xy);
   vec4 cur = texelFetch(cur_tex, ip, 0);
   out_copy = cur;
-  out_diff = vec2(-1.0);
+  out_diff = vec4(-1.0);
   if (pc.has_previous == 0) return;
-  vec2 q = gl_FragCoord.xy + texelFetch(motion_tex, ip, 0).rg;
-  if (q.x < 0.0 || q.y < 0.0 || q.x >= pc.size.x || q.y >= pc.size.y) return;
+  vec2 mv = texelFetch(motion_tex, ip, 0).rg;
+  vec2 camera = texelFetch(camera_tex, ip, 0).rg;
+  vec2 q = gl_FragCoord.xy + mv;
+  vec2 qc = gl_FragCoord.xy + camera;
+  if (outside(q) || outside(qc)) return;
   vec3 warped = textureLod(prev_tex, q / pc.size, 0.0).rgb;
+  vec3 camera_warped = textureLod(prev_tex, qc / pc.size, 0.0).rgb;
   vec3 still = texelFetch(prev_tex, ip, 0).rgb;
-  out_diff = vec2(meanOf(abs(cur.rgb - warped)), meanOf(abs(cur.rgb - still))) * 255.0;
+  out_diff = vec4(meanOf(abs(cur.rgb - warped)) * 255.0, meanOf(abs(cur.rgb - still)) * 255.0,
+                  meanOf(abs(cur.rgb - camera_warped)) * 255.0, length(mv - camera) > 0.5 ? 1.0 : 0.0);
 }
 )";
 
@@ -240,6 +279,12 @@ struct FgMotionPass::Resources {
     VkContext* context = nullptr;
     std::uint32_t width = 0, height = 0;
     Image motion;
+    // The scene pass writes object motion here (kObjectMotionFormat); `camera` is the camera-only vectors the combine
+    // pass keeps beside the final ones.
+    Image object, camera;
+    VkImageLayout object_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bool object_cleared = false;
+    std::uint64_t object_frame = 0;
     // The warp check, created on first use. `previous[read]` holds the last call's colour once `has_history`.
     std::array<Image, 2> previous;
     std::size_t read = 0;
@@ -264,11 +309,13 @@ FgMotionPass::FgMotionPass(VkContext& context) : context_(context) {}
 FgMotionPass::~FgMotionPass() {
     resources_.reset();
     VkDevice device = context_.device();
-    if (motion_pipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device, motion_pipeline_, nullptr);
-    if (warp_pipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device, warp_pipeline_, nullptr);
+    for (const VkPipeline pipeline : pipelines_) {
+        if (pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, pipeline, nullptr);
+    }
     if (vertex_ != VK_NULL_HANDLE) vkDestroyShaderModule(device, vertex_, nullptr);
-    if (motion_fragment_ != VK_NULL_HANDLE) vkDestroyShaderModule(device, motion_fragment_, nullptr);
-    if (warp_fragment_ != VK_NULL_HANDLE) vkDestroyShaderModule(device, warp_fragment_, nullptr);
+    for (const VkShaderModule fragment : fragments_) {
+        if (fragment != VK_NULL_HANDLE) vkDestroyShaderModule(device, fragment, nullptr);
+    }
     if (pipeline_layout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, pipeline_layout_, nullptr);
     if (set_layout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, set_layout_, nullptr);
     if (nearest_ != VK_NULL_HANDLE) vkDestroySampler(device, nearest_, nullptr);
@@ -290,8 +337,8 @@ bool FgMotionPass::createObjects(std::string& error) {
     }
 
     if (set_layout_ == VK_NULL_HANDLE) {
-        VkDescriptorSetLayoutBinding bindings[3]{};
-        for (std::uint32_t i = 0; i < 3; i++) {
+        VkDescriptorSetLayoutBinding bindings[4]{};
+        for (std::uint32_t i = 0; i < 4; i++) {
             bindings[i].binding = i;
             bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             bindings[i].descriptorCount = 1;
@@ -300,7 +347,7 @@ bool FgMotionPass::createObjects(std::string& error) {
         VkDescriptorSetLayoutCreateInfo set_info{};
         set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
         set_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-        set_info.bindingCount = 3;
+        set_info.bindingCount = 4;
         set_info.pBindings = bindings;
         if (vkCreateDescriptorSetLayout(device, &set_info, nullptr, &set_layout_) != VK_SUCCESS) {
             set_layout_ = VK_NULL_HANDLE;
@@ -340,15 +387,17 @@ bool FgMotionPass::createObjects(std::string& error) {
     return true;
 }
 
-bool FgMotionPass::createPipeline(bool warp, std::string& error) {
-    VkPipeline& pipeline = warp ? warp_pipeline_ : motion_pipeline_;
+bool FgMotionPass::createPipeline(Pass pass, std::string& error) {
+    const auto index = static_cast<std::size_t>(pass);
+    VkPipeline& pipeline = pipelines_[index];
     if (pipeline != VK_NULL_HANDLE) return true;
     if (!createObjects(error)) return false;
 
-    VkShaderModule& fragment = warp ? warp_fragment_ : motion_fragment_;
+    constexpr const char* kSources[] = {kMotionFragmentGlsl, kCombineFragmentGlsl, kWarpFragmentGlsl};
+    constexpr std::uint64_t kKeys[] = {kMotionFragmentKey, kCombineFragmentKey, kWarpFragmentKey};
+    VkShaderModule& fragment = fragments_[index];
     if (fragment == VK_NULL_HANDLE) {
-        auto compiled = compileGlsl(ShaderStage::Fragment, warp ? kWarpFragmentGlsl : kMotionFragmentGlsl,
-                                    warp ? kWarpFragmentKey : kMotionFragmentKey);
+        auto compiled = compileGlsl(ShaderStage::Fragment, kSources[index], kKeys[index]);
         if (!compiled) {
             error = "a motion vector shader did not compile: " + compiled.error();
             return false;
@@ -394,17 +443,19 @@ bool FgMotionPass::createPipeline(bool warp, std::string& error) {
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     VkPipelineColorBlendStateCreateInfo blend{};
     blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    blend.attachmentCount = warp ? 2 : 1;
+    const std::uint32_t attachment_count = pass == Pass::Motion ? 1 : 2;
+    blend.attachmentCount = attachment_count;
     blend.pAttachments = attachments;
     constexpr VkDynamicState kDynamic[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamic{};
     dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
     dynamic.dynamicStateCount = static_cast<std::uint32_t>(std::size(kDynamic));
     dynamic.pDynamicStates = kDynamic;
-    const VkFormat formats[2] = {warp ? kWarpFormat : kMotionFormat, kColorCopyFormat};
+    const VkFormat formats[2] = {pass == Pass::Warp ? kWarpFormat : kMotionFormat,
+                                 pass == Pass::Warp ? kColorCopyFormat : kMotionFormat};
     VkPipelineRenderingCreateInfo rendering{};
     rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    rendering.colorAttachmentCount = warp ? 2 : 1;
+    rendering.colorAttachmentCount = attachment_count;
     rendering.pColorAttachmentFormats = formats;
 
     VkGraphicsPipelineCreateInfo info{};
@@ -445,6 +496,12 @@ bool FgMotionPass::prepare(std::uint32_t width, std::uint32_t height, std::share
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     // Streamline is told the device memory of this image, so it owns a whole allocation.
     if (!createImage(context_, kMotionFormat, kMotionUsage, width, height, true, created->motion, error)) return false;
+    constexpr VkImageUsageFlags kObjectUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                               VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (!createImage(context_, kObjectMotionFormat, kObjectUsage, width, height, false, created->object, error) ||
+        !createImage(context_, kMotionFormat, kMotionUsage, width, height, false, created->camera, error)) {
+        return false;
+    }
     retired = std::move(resources_);
     resources_ = std::move(created);
     recreated = true;
@@ -468,13 +525,61 @@ SlImage FgMotionPass::motionImage() const {
 
 VkImageView FgMotionPass::motionView() const { return resources_ ? resources_->motion.view : VK_NULL_HANDLE; }
 
+VkImageView FgMotionPass::cameraView() const { return resources_ ? resources_->camera.view : VK_NULL_HANDLE; }
+
+VkImage FgMotionPass::objectImage() const { return resources_ ? resources_->object.image : VK_NULL_HANDLE; }
+
+VkImageView FgMotionPass::objectView() const { return resources_ ? resources_->object.view : VK_NULL_HANDLE; }
+
+VkImageLayout FgMotionPass::objectLayout() const {
+    return resources_ ? resources_->object_layout : VK_IMAGE_LAYOUT_UNDEFINED;
+}
+
+void FgMotionPass::beginObjectWrites(VkCommandBuffer cmd, std::uint64_t frame) {
+    Resources& resources = *resources_;
+    const VkImage image = resources.object.image;
+    if (!resources.object_cleared || resources.object_frame != frame) {
+        // Earlier readers and writers of the previous frame finish first; their contents are dropped.
+        imageBarrier(cmd, image, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkClearColorValue none{};
+        none.uint32[0] = 0;
+        none.uint32[1] = kObjectMotionNone;
+        const VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &none, 1, &range);
+        imageBarrier(cmd, image, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        resources.object_cleared = true;
+        resources.object_frame = frame;
+    } else {
+        // The contents are kept: only the layout (if another pass moved it) and write-after-write ordering.
+        imageBarrier(cmd, image, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     resources.object_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
+    resources.object_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+}
+
+bool FgMotionPass::hasObjectWrites(std::uint64_t frame) const {
+    return resources_ && resources_->object_cleared && resources_->object_frame == frame;
+}
+
 bool FgMotionPass::recordMotion(VkCommandBuffer cmd, const FgMotionInputs& inputs, std::string& error) {
     if (!resources_) {
         error = "the motion vector pass has no images";
         return false;
     }
-    if (!createPipeline(false, error)) return false;
     Resources& resources = *resources_;
+    if (inputs.object && !resources.object_cleared) {
+        error = "the object image has not been written";
+        return false;
+    }
+    const Pass pass = inputs.object ? Pass::Combine : Pass::Motion;
+    if (!createPipeline(pass, error)) return false;
 
     // The image is overwritten whole, so the old contents are dropped. The source stage waits for earlier readers
     // (Streamline's copy, the warp check); nothing is written to it before this pass.
@@ -482,20 +587,36 @@ bool FgMotionPass::recordMotion(VkCommandBuffer cmd, const FgMotionInputs& input
                  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
-    VkRenderingAttachmentInfo attachment = overwriteAttachment(resources.motion.view);
+    if (inputs.object) {
+        // The camera-only image is overwritten too. The object image is read, so the scene pass's writes are made
+        // visible to the fragment stage; beginObjectWrites() moves it back to an attachment for the next frame.
+        imageBarrier(cmd, resources.camera.image, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        imageBarrier(cmd, resources.object.image, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                     resources.object_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        resources.object_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    VkRenderingAttachmentInfo attachments[2] = {overwriteAttachment(resources.motion.view),
+                                                overwriteAttachment(resources.camera.view)};
     VkRenderingInfo rendering{};
     rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     rendering.renderArea = {{0, 0}, {resources.width, resources.height}};
     rendering.layerCount = 1;
-    rendering.colorAttachmentCount = 1;
-    rendering.pColorAttachments = &attachment;
+    rendering.colorAttachmentCount = inputs.object ? 2 : 1;
+    rendering.pColorAttachments = attachments;
     vkCmdBeginRendering(cmd, &rendering);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, motion_pipeline_);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_[static_cast<std::size_t>(pass)]);
     setFullViewport(cmd, resources.width, resources.height);
 
-    const VkDescriptorImageInfo depth = imageInfo(nearest_, inputs.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    const VkWriteDescriptorSet write = sampledWrite(0, depth);
-    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 0, 1, &write);
+    const VkDescriptorImageInfo infos[2] = {
+            imageInfo(nearest_, inputs.depth, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+            imageInfo(nearest_, resources.object.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+    };
+    const VkWriteDescriptorSet writes[2] = {sampledWrite(0, infos[0]), sampledWrite(1, infos[1])};
+    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 0, inputs.object ? 2 : 1, writes);
     MotionConstants constants{};
     constants.clip_to_prev_clip = inputs.clip_to_prev_clip;
     constants.size[0] = static_cast<float>(resources.width);
@@ -511,6 +632,12 @@ bool FgMotionPass::recordMotion(VkCommandBuffer cmd, const FgMotionInputs& input
                  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                  VK_ACCESS_2_MEMORY_READ_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (inputs.object) {
+        imageBarrier(cmd, resources.camera.image, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                     VK_ACCESS_2_MEMORY_READ_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
     return true;
 }
 
@@ -536,7 +663,7 @@ bool FgMotionPass::createWarpResources(std::string& error) {
     }
     VkBufferCreateInfo buffer_info{};
     buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    buffer_info.size = static_cast<VkDeviceSize>(resources.width) * resources.height * 2 * sizeof(float);
+    buffer_info.size = static_cast<VkDeviceSize>(resources.width) * resources.height * 4 * sizeof(float);
     buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     VmaAllocationCreateInfo alloc_info{};
     alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
@@ -560,7 +687,7 @@ bool FgMotionPass::createWarpResources(std::string& error) {
 }
 
 bool FgMotionPass::recordWarpCheck(VkCommandBuffer cmd, VkImageView color, VkImageLayout color_layout,
-                                   VkImageView motion, std::string& error) {
+                                   VkImageView motion, std::string& error, VkImageView camera_motion) {
     if (!resources_) {
         error = "the motion vector pass has no images";
         return false;
@@ -570,7 +697,7 @@ bool FgMotionPass::recordWarpCheck(VkCommandBuffer cmd, VkImageView color, VkIma
         error = "the previous warp check has not been collected";
         return false;
     }
-    if (!createPipeline(true, error) || !createWarpResources(error)) return false;
+    if (!createPipeline(Pass::Warp, error) || !createWarpResources(error)) return false;
     Resources& resources = *resources_;
     Image& source = resources.previous[resources.read];
     Image& target = resources.previous[1 - resources.read];
@@ -600,17 +727,19 @@ bool FgMotionPass::recordWarpCheck(VkCommandBuffer cmd, VkImageView color, VkIma
     rendering.colorAttachmentCount = 2;
     rendering.pColorAttachments = attachments;
     vkCmdBeginRendering(cmd, &rendering);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, warp_pipeline_);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines_[static_cast<std::size_t>(Pass::Warp)]);
     setFullViewport(cmd, resources.width, resources.height);
 
-    const VkDescriptorImageInfo infos[3] = {
+    const VkDescriptorImageInfo infos[4] = {
             imageInfo(nearest_, color, color_layout),
             imageInfo(linear_, source.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
             imageInfo(nearest_, motion, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
+            imageInfo(nearest_, camera_motion != VK_NULL_HANDLE ? camera_motion : motion,
+                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
     };
-    const VkWriteDescriptorSet writes[3] = {sampledWrite(0, infos[0]), sampledWrite(1, infos[1]),
-                                            sampledWrite(2, infos[2])};
-    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 0, 3, writes);
+    const VkWriteDescriptorSet writes[4] = {sampledWrite(0, infos[0]), sampledWrite(1, infos[1]),
+                                            sampledWrite(2, infos[2]), sampledWrite(3, infos[3])};
+    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 0, 4, writes);
     WarpConstants constants{};
     constants.size[0] = static_cast<float>(resources.width);
     constants.size[1] = static_cast<float>(resources.height);
@@ -659,15 +788,26 @@ bool FgMotionPass::collectWarpStats(FgWarpStats& out) {
     const std::size_t count = static_cast<std::size_t>(resources.width) * resources.height;
     // The shader marks pixels without a comparison with a negative first value.
     for (std::size_t i = 0; i < count; i++) {
-        const float warp = resources.mapped[i * 2];
-        if (warp < 0.0f) continue;
-        out.warp_mean += warp;
-        out.no_motion_mean += resources.mapped[i * 2 + 1];
+        const float* pixel = resources.mapped + i * 4;
+        if (pixel[0] < 0.0f) continue;
+        out.warp_mean += pixel[0];
+        out.no_motion_mean += pixel[1];
+        out.camera_warp_mean += pixel[2];
         out.pixels++;
+        if (pixel[3] > 0.5f) {
+            out.object_warp_mean += pixel[0];
+            out.object_camera_warp_mean += pixel[2];
+            out.object_pixels++;
+        }
     }
     if (out.pixels > 0) {
         out.warp_mean /= out.pixels;
         out.no_motion_mean /= out.pixels;
+        out.camera_warp_mean /= out.pixels;
+    }
+    if (out.object_pixels > 0) {
+        out.object_warp_mean /= out.object_pixels;
+        out.object_camera_warp_mean /= out.object_pixels;
     }
     return true;
 }

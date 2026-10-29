@@ -27,6 +27,7 @@ public:
             if (requests.anisotropy != 0) merged.anisotropy = requests.anisotropy;
             if (requests.window_size) merged.window_size = requests.window_size;
             if (requests.frame_gen) merged.frame_gen = requests.frame_gen;
+            if (requests.object_motion) merged.object_motion = requests.object_motion;
         }
         return merged;
     }

@@ -23,6 +23,9 @@ struct GlslResult {
 // Descriptor set 0 bindings used by the vertex stage.
 inline constexpr std::uint32_t kVpConstantsBinding = 0;  // UBO: vec4 c[kRsxVpConstantCount], std140
 inline constexpr std::uint32_t kVpDrawBinding = 2;       // UBO: VpDrawUniforms, std140
+// Object motion variant only: the previous frame's vertex constants and per-draw values.
+inline constexpr std::uint32_t kVpPrevConstantsBinding = 19;  // UBO: vec4 c[kRsxVpConstantCount], std140
+inline constexpr std::uint32_t kVpPrevDrawBinding = 20;       // UBO: VpDrawUniforms, std140
 
 // Per-draw values read by the vertex stage (std140; mirrored in the GLSL block `VpDraw`).
 //   offset  0  vec4  viewport_scale   raw RSX viewport scale (x, y, z); w is the point size scale
@@ -66,6 +69,13 @@ inline constexpr std::uint32_t kVaryingFrontSpecular = 12;
 inline constexpr std::uint32_t kVaryingBackSpecular = 13;
 inline constexpr std::uint32_t kVaryingFog = 14;
 inline constexpr std::uint32_t kVaryingTexCoordCount = 10;  // locations 0..9
+// Object motion variant only: the current and previous position (x, y scaled to pixels, w) and a flat flag that is 1
+// when the draw has previous inputs.
+inline constexpr std::uint32_t kVaryingMotionCur = 15;
+inline constexpr std::uint32_t kVaryingMotionPrev = 16;
+inline constexpr std::uint32_t kVaryingMotionValid = 17;
+// Object motion variant only: input n of the previous body is `layout(location = kVpPrevInputLocationBase + n)`.
+inline constexpr std::uint32_t kVpPrevInputLocationBase = 16;
 
 constexpr int vpOutputSlotLocation(std::uint32_t slot) {
     switch (slot) {
@@ -83,6 +93,11 @@ struct VpTranslateOptions {
     // The device has shaderClipDistance: the program writes gl_ClipDistance[6]. The flag is constant for a
     // device, so programs are still keyed by the ucode hash alone.
     bool clip_distances = false;
+    // Also evaluate the program a second time with the previous frame's inputs (vp_prev_consts, prev_attr_n,
+    // draw_prev) and export the screen-space positions of both evaluations for the motion vector. The text of the
+    // plain program is kept line for line, so the variant is the plain GLSL plus extra lines. The push block gains
+    // `vec2 motion_scale` (half the scene size in pixels, 0 when the draw has no previous inputs).
+    bool object_motion = false;
 };
 
 // `ucode` holds the program words in host order (RsxDraw::vp_ucode), starting at the first

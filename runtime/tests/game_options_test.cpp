@@ -508,7 +508,7 @@ void testOptionTable() {
     for (const OptionSpec& spec : specs) {
         if (spec.persisted) persisted.push_back(spec.name);
     }
-    CHECK((persisted == std::vector<std::string_view>{"frame-limit", "resolution-scale", "aa-mode",
+    CHECK((persisted == std::vector<std::string_view>{"frame-limit", "resolution-scale", "aa-mode", "object-motion",
                                                       "anisotropic-filter", "window-size", "fullscreen", "frame-gen"}));
     for (const OptionSpec& spec : specs) {
         if (spec.name == "vk-driver") CHECK(spec.kind == OptionKind::String && !spec.persisted);
@@ -519,6 +519,9 @@ void testOptionTable() {
             CHECK(spec.kind == OptionKind::Unsigned && spec.needs == OptionNeeds::Renderer);
         }
         if (spec.name == "aa-mode") CHECK(spec.kind == OptionKind::String && spec.needs == OptionNeeds::Renderer);
+        if (spec.name == "object-motion") {
+            CHECK(spec.kind == OptionKind::Switch && spec.needs == OptionNeeds::Renderer);
+        }
         if (spec.name == "anisotropic-filter") {
             CHECK(spec.kind == OptionKind::String && spec.needs == OptionNeeds::Renderer);
         }
@@ -539,10 +542,10 @@ void testOptionTable() {
     }
     // Options a file value can not use without a renderer or a window are left out of such runs.
     for (const OptionSpec& spec : specs) {
-        const bool renderer = spec.name == "dump-frames" || spec.name == "dump-frames-every" ||
-                              spec.name == "shader-cache" || spec.name == "vk-validation" ||
-                              spec.name == "resolution-scale" || spec.name == "aa-mode" ||
-                              spec.name == "anisotropic-filter" || spec.name == "vk-driver";
+        const bool renderer =
+                spec.name == "dump-frames" || spec.name == "dump-frames-every" || spec.name == "shader-cache" ||
+                spec.name == "vk-validation" || spec.name == "resolution-scale" || spec.name == "aa-mode" ||
+                spec.name == "object-motion" || spec.name == "anisotropic-filter" || spec.name == "vk-driver";
         const bool window = spec.name == "pad-probe" || spec.name == "window-size" || spec.name == "fullscreen" ||
                             spec.name == "frame-gen" || spec.name.starts_with("fg-");
         const OptionNeeds expected = renderer ? OptionNeeds::Renderer
@@ -556,6 +559,7 @@ void testOptionTable() {
     CHECK(tox2::gameOptionsUsage().find("[--vk-driver auto|moltenvk|kosmickrisp]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--window-size 720p|1080p|1440p|2160p]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--fullscreen on|off]") != std::string_view::npos);
+    CHECK(tox2::gameOptionsUsage().find("[--object-motion on|off]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--frame-gen off|60|90|120|180|unlimited]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--fg-present-mode mailbox|immediate|fifo]") != std::string_view::npos);
     CHECK(tox2::gameOptionsUsage().find("[--fg-reflex on|off] [--fg-only-generated]") != std::string_view::npos);
@@ -1325,6 +1329,43 @@ void testFrameGenOptions() {
     CHECK(rejectedLine({"--game-dir", "g", "--frame-gen", "120", "--fg-cycle", "5", "--no-window"}, need_window));
 }
 
+void testObjectMotionOption() {
+    const auto absent = parseLine({"--game-dir", "g"});
+    CHECK(absent && absent->object_motion);
+    const auto on = parseLine({"--game-dir", "g", "--object-motion", "on"});
+    CHECK(on && on->object_motion);
+    const auto off = parseLine({"--game-dir", "g", "--object-motion", "off"});
+    CHECK(off && !off->object_motion);
+    const auto last = parseLine({"--game-dir", "g", "--object-motion", "off", "--object-motion", "on"});
+    CHECK(last && last->object_motion);
+    for (const char* bad : {"maybe", "1", "true", "", "On"}) {
+        CHECK(rejectedLine({"--game-dir", "g", "--object-motion", bad}, "error: --object-motion needs on or off\n"));
+    }
+    CHECK(rejectedLine({"--game-dir", "g", "--object-motion"}, "error: --object-motion needs a value\n"));
+
+    ConfigDirs dirs("tox2_game_options_cfg_object_motion_");
+    const stdfs::path file = dirs.work / "config.json";
+    for (const auto& [text, expected] :
+         {std::pair<const char*, bool>{"false", false}, {"true", true}, {"\"off\"", false}, {"\"on\"", true}}) {
+        writeFile(file, std::string(R"({"game_dir": "g", "object_motion": )") + text + "}");
+        const auto saved = dirs.parse({});
+        CHECK(saved && saved->object_motion == expected && saved->config_ignored.empty());
+    }
+    writeFile(file, R"({"game_dir": "g", "object_motion": false})");
+    const auto over = dirs.parse({"--object-motion", "on"});
+    CHECK(over && over->object_motion);
+    writeFile(file, R"({"game_dir": "g", "object_motion": "maybe"})");
+    CHECK(dirs.error({}).message.starts_with("error: " + file.string() + ": \"object_motion\": expected "));
+
+    // A run without a renderer leaves the saved value out.
+    writeFile(file, R"({"game_dir": "g", "object_motion": false})");
+    const auto headless = dirs.parse({"--no-window"});
+    CHECK(headless && headless->object_motion);
+    if (headless) {
+        CHECK(headless->config_ignored == std::vector<std::string>{"object_motion ignored: the run has no renderer"});
+    }
+}
+
 void testConfigApply() {
     // Only the process state changes here; the lines themselves go to the log.
     ConfigDirs dirs("tox2_game_options_cfg_apply_");
@@ -1545,7 +1586,26 @@ void testStoreRejectsBadValue() {
     CHECK(readFile(dir.file) == "{\n  \"frame_limit\": \"off\",\n  \"resolution_scale\": 2\n}\n");
 }
 
+// The overlay saves the checkbox through the real option table; the file it writes reads back.
+void testStoreObjectMotion() {
+    ConfigDirs dirs("tox2_settings_store_object_motion_");
+    const stdfs::path file = dirs.work / "config.json";
+    writeFile(file, R"({"game_dir": "g"})");
+    for (const bool on : {false, true}) {
+        {
+            tox2::SettingsStore store(file, tox2::gameOptionSpecs(), kSlowTiming);
+            store.set("object_motion", on ? "on" : "off");
+            CHECK(store.flush(std::chrono::seconds(1)));
+        }
+        CHECK(readFile(file) ==
+              std::string("{\n  \"game_dir\": \"g\",\n  \"object_motion\": ") + (on ? "true" : "false") + "\n}\n");
+        const auto reread = dirs.parse({});
+        CHECK(reread && reread->object_motion == on);
+    }
+}
+
 void testSettingsStore() {
+    testStoreObjectMotion();
     testStoreWrites();
     testStoreFailures();
     testStoreReadOnlyFile();
@@ -1590,6 +1650,7 @@ int main() {
     testWindowAndFilterOptions();
     testVkDriverOption();
     testFrameGenOptions();
+    testObjectMotionOption();
     testConfigApply();
     testSettingsStore();
     std::printf("game options tests: %d passed, %d failed\n", g_passed, g_failed);

@@ -240,6 +240,7 @@ void saveOverlaySetting(tox2::OverlaySetting setting, std::string_view value) {
         case tox2::OverlaySetting::Anisotropy: g_settings_store->set("anisotropic_filter", value); break;
         case tox2::OverlaySetting::WindowSize: g_settings_store->set("window_size", value); break;
         case tox2::OverlaySetting::FrameGen: g_settings_store->set("frame_gen", value); break;
+        case tox2::OverlaySetting::ObjectMotion: g_settings_store->set("object_motion", value); break;
     }
 }
 
@@ -297,6 +298,7 @@ std::unique_ptr<tox2::RsxExecutor> createVulkanExecutor(const tox2::GameOptions&
     render_options.aa_mode = opt.aa_mode;
     render_options.anisotropy = opt.anisotropy;
     render_options.frame_gen = opt.frame_gen;
+    render_options.dlaa_debug.motion = opt.object_motion ? tox2::DlaaMotion::Object : tox2::DlaaMotion::Matrices;
     render_options.fg_debug.present_mode = presentModeFor(opt.fg_present_mode);
     render_options.fg_debug.reflex_low_latency = opt.fg_reflex;
     render_options.fg_debug.only_generated = opt.fg_only_generated;

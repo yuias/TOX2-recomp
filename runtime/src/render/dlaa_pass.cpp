@@ -111,7 +111,8 @@ bool DlaaPass::evaluate(VkCommandBuffer cmd, const Inputs& inputs, std::string& 
     frame.frame_index = inputs.frame_index;
     frame.color_in = inputs.color_in;
     frame.depth = inputs.depth;
-    frame.motion = describe(resources_->motion);
+    frame.motion = inputs.motion ? *inputs.motion : describe(resources_->motion);
+    frame.camera_motion_included = inputs.motion.has_value();
     frame.color_out = describe(resources_->output);
     frame.jitter_px[0] = inputs.jitter_px[0];
     frame.jitter_px[1] = inputs.jitter_px[1];
@@ -163,7 +164,8 @@ DlaaCameraTracker::Result DlaaCameraTracker::resolve(bool flip_clip_y) {
     matrices.clip_to_view = inverse_current;
     matrices.clip_to_prev_clip = mat4Multiply(inverse_current, clip_previous);
     matrices.prev_clip_to_clip = mat4Multiply(inverse_previous, clip_current);
-    result.reset = dlaaCameraCut(matrices.clip_to_prev_clip);
+    result.reset = dlaaCameraCut(matrices.clip_to_prev_clip, kDlaaCameraCutProbeZ);
+    result.fg_reset = dlaaCameraCut(matrices.clip_to_prev_clip, kFgCameraCutProbeZ);
     result.clip = clip_current;
     result.prev_clip = clip_previous;
     if (flip_clip_y) {

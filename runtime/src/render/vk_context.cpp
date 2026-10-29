@@ -238,6 +238,28 @@ std::string twoSampleGap(VkPhysicalDevice device, const VkPhysicalDeviceLimits& 
     return {};
 }
 
+// Returns an empty string when the object motion pipelines (two colour attachments with their own blend state, a
+// second set of 16 vertex inputs, the previous position varyings) fit the device; otherwise the first limit missed.
+std::string objectMotionGap(const VkPhysicalDeviceLimits& limits, const VkPhysicalDeviceFeatures& features) {
+    struct Limit {
+        const char* name;
+        std::uint32_t have, need;
+    };
+    const Limit limit_list[] = {
+            {"maxVertexInputAttributes", limits.maxVertexInputAttributes, 32},
+            {"maxVertexInputBindings", limits.maxVertexInputBindings, 32},
+            // 18 user locations plus the built-ins, which count on most implementations.
+            {"maxVertexOutputComponents", limits.maxVertexOutputComponents, 84},
+            {"maxFragmentInputComponents", limits.maxFragmentInputComponents, 72},
+            {"maxColorAttachments", limits.maxColorAttachments, 2},
+    };
+    for (const Limit& limit : limit_list) {
+        if (limit.have < limit.need) return std::format("{} {} < {}", limit.name, limit.have, limit.need);
+    }
+    if (features.independentBlend == VK_FALSE) return "independentBlend unsupported";
+    return {};
+}
+
 // Member names of the Vulkan 1.2 and 1.3 feature structs, in declaration order, to name what Streamline asks for.
 constexpr const char* kFeatures12Names[] = {
         "samplerMirrorClampToEdge",
@@ -909,6 +931,10 @@ std::unique_ptr<VkContext> createVkContext(const VkContextOptions& options, std:
         // Optional: forced anisotropic filtering (an overlay/command-line setting) is unavailable without it.
         ctx->has_sampler_anisotropy_ = supported_features.samplerAnisotropy == VK_TRUE;
         enabled_features.samplerAnisotropy = ctx->has_sampler_anisotropy_ ? VK_TRUE : VK_FALSE;
+        // Object motion pipelines blend the colour attachment and not the motion attachment. Enabling the feature
+        // changes no other pipeline.
+        ctx->object_motion_gap_ = objectMotionGap(ctx->properties_.limits, supported_features);
+        enabled_features.independentBlend = ctx->object_motion_gap_.empty() ? VK_TRUE : VK_FALSE;
 
         const std::uint32_t graphics_queue_count = ctx->streamline_ ? streamline_plan.graphics_queue_count : 1;
         const std::vector<float> priorities(std::max(graphics_queue_count, streamline_plan.compute_queue_count), 1.0f);

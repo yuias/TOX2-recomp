@@ -34,6 +34,8 @@ public:
     struct Result {
         DlaaMatrices matrices;
         bool reset = true;
+        // The same test with the frame generation probe depth (kFgCameraCutProbeZ).
+        bool fg_reset = true;
         // The unflipped view-to-clip transforms of the two cameras (current and previous frame), set whenever both
         // frames have an invertible camera. Motion vectors need the unflipped clip-to-clip transform regardless of
         // the y flip that `matrices` carries for Streamline.
@@ -90,7 +92,7 @@ public:
     // Everything that depends on the input size. Replaced as a whole when the size changes.
     struct Resources {
         Image output;    // DLSS output, input size
-        Image motion;    // motion vectors, input size; all zero until per-object vectors exist
+        Image motion;    // motion vectors, input size; all zero (the camera matrices carry the camera motion)
         Image expanded;  // the output widened to twice its width, which is what the game's resolve samples
         bool motion_cleared = false;
     };
@@ -117,8 +119,13 @@ public:
         std::optional<float> mvec_invalid_value;
         bool reset = false;
         bool alpha = false;
+        // Motion vectors of the renderer's own (the camera motion pass, with object motion where the scene pass wrote
+        // it) in place of the pass's zero image; they already contain the camera motion. SHADER_READ_ONLY_OPTIMAL,
+        // the input size.
+        std::optional<SlImage> motion;
     };
-    // Records one evaluation into resources().output (GENERAL) with resources().motion (SHADER_READ_ONLY_OPTIMAL). All
+    // Records one evaluation into resources().output (GENERAL) with Inputs::motion, or resources().motion
+    // (SHADER_READ_ONLY_OPTIMAL) and the camera matrices when there is none. All
     // bound command buffer state is invalid afterwards.
     bool evaluate(VkCommandBuffer cmd, const Inputs& inputs, std::string& error);
 

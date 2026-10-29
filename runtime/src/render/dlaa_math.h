@@ -24,6 +24,16 @@ inline constexpr std::uint32_t kDlaaJitterPhases = 8;
 
 // A projected point further than this from where it started (NDC units, the full range is 2) is a camera cut.
 inline constexpr float kDlaaCameraCutNdc = 0.5f;
+// Clip depth of the test points of the DLAA cut. It lies about twice the near-plane distance from the eye, so a dolly
+// of a few near-plane distances counts as a cut. That is what DLAA wants: keeping its history over such a step ghosts
+// the screen-space effects (the effects pair 9100 then 9101 scored 0.261 against the 4x render with the reset and
+// 0.567 without it).
+inline constexpr float kDlaaCameraCutProbeZ = 0.5f;
+// Clip depth of the test points of the frame generation cut. With depth 0..1 and a distant far plane a point at clip
+// depth z lies about near / (1 - z) from the eye, so this is about 100 near-plane distances away. A camera walking
+// through the dungeon steps several near-plane distances per frame, which moves the DLAA test points by more than
+// kDlaaCameraCutNdc on every frame while the scene behind them barely moves.
+inline constexpr float kFgCameraCutProbeZ = 0.99f;
 
 // Radical inverse of `index` (>= 1) in `base`, in [0, 1).
 constexpr float halton(std::uint32_t index, std::uint32_t base) {
@@ -163,14 +173,14 @@ inline Mat4 dlaaClipMatrix(const DlaaCameraKey& key) {
     return mat4Multiply(mat4Multiply(key.mvp, viewport), depth);
 }
 
-// True when the camera moved so far that the previous frame is not a usable history: a test point leaves the view
-// (w <= 0, or not a number) or lands more than kDlaaCameraCutNdc from where it started. `clip_to_prev_clip` maps
-// the current frame's clip space onto the previous frame's.
-inline bool dlaaCameraCut(const Mat4& clip_to_prev_clip) {
+// True when the camera moved so far that the previous frame is not a usable history: a test point at clip depth
+// `probe_z` leaves the view (w <= 0, or not a number) or lands more than kDlaaCameraCutNdc from where it started.
+// `clip_to_prev_clip` maps the current frame's clip space onto the previous frame's.
+inline bool dlaaCameraCut(const Mat4& clip_to_prev_clip, float probe_z) {
     constexpr float kCoords[3] = {-0.5f, 0.0f, 0.5f};
     for (const float x : kCoords) {
         for (const float y : kCoords) {
-            const std::array<float, 4> p = mat4Transform({x, y, 0.5f, 1.0f}, clip_to_prev_clip);
+            const std::array<float, 4> p = mat4Transform({x, y, probe_z, 1.0f}, clip_to_prev_clip);
             if (!(p[3] > 0.0f)) return true;
             const float dx = p[0] / p[3] - x;
             const float dy = p[1] / p[3] - y;

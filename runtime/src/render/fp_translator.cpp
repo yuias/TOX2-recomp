@@ -72,7 +72,7 @@ struct Expr {
 class Translator {
 public:
     GlslResult run(std::span<const std::uint32_t> ucode, std::uint32_t control, std::uint32_t texcoord_control,
-                   std::uint32_t texture_types);
+                   std::uint32_t texture_types, bool object_motion);
 
 private:
     void note(std::string message);
@@ -92,6 +92,7 @@ private:
     std::uint32_t texcoord_control_ = 0;
     std::uint32_t texture_types_ = 0;  // kFpTextureType* per unit, 2 bits each
     std::uint32_t control_ = 0;
+    bool object_motion_ = false;
     std::uint32_t tex_inputs_used_ = 0;  // bit n = TEXn read
     std::uint32_t texture_units_ = 0;
     std::uint32_t constant_count_ = 0;   // inline constant blocks seen, referenced or not
@@ -439,7 +440,16 @@ std::string Translator::assemble() const {
                 "layout(location = {}) in vec4 var_back_specular;\n",
                 kVaryingFrontSpecular, kVaryingBackSpecular);
     }
-    glsl += "layout(location = 0) out vec4 out_color0;\n\n";
+    if (object_motion_) {
+        glsl += std::format(
+                "layout(location = {}) in vec4 var_motion_cur;\n"
+                "layout(location = {}) in vec4 var_motion_prev;\n"
+                "layout(location = {}) flat in uint var_motion_valid;\n",
+                kVaryingMotionCur, kVaryingMotionPrev, kVaryingMotionValid);
+    }
+    glsl += "layout(location = 0) out vec4 out_color0;\n";
+    if (object_motion_) glsl += "layout(location = 1) out uvec2 out_object_motion;\n";
+    glsl += "\n";
 
     if (uses_clamp_) {
         glsl += "// NaN becomes 0, like the hardware clamps.\n"
@@ -516,14 +526,27 @@ std::string Translator::assemble() const {
             "  out_color0 = {0};\n",
             color, kFpFlagRound8Bit);
     if (depth_export) glsl += "  gl_FragDepth = fp_clamp(r_1, 0.0, 1.0).z;\n";
+    if (object_motion_) {
+        // After the discards, so a discarded fragment writes neither output. The depth is stored with the vector so
+        // the combine pass can tell whether a later draw replaced this fragment.
+        glsl += std::format(
+                "\n"
+                "  float motion_depth = {};\n"
+                "  bool has_motion = var_motion_valid != 0u && var_motion_cur.w > 0.0 && var_motion_prev.w > 0.0;\n"
+                "  vec2 mv = has_motion ? var_motion_prev.xy / var_motion_prev.w - var_motion_cur.xy / "
+                "var_motion_cur.w : vec2(0.0);\n"
+                "  out_object_motion = uvec2(packHalf2x16(mv), has_motion ? floatBitsToUint(motion_depth) : {}u);\n",
+                depth_export ? "gl_FragDepth" : "gl_FragCoord.z", kObjectMotionNone);
+    }
     glsl += "}\n";
     return glsl;
 }
 
 GlslResult Translator::run(std::span<const std::uint32_t> ucode, std::uint32_t control, std::uint32_t texcoord_control,
-                           std::uint32_t texture_types) {
+                           std::uint32_t texture_types, bool object_motion) {
     GlslResult result;
     control_ = control;
+    object_motion_ = object_motion;
     texcoord_control_ = texcoord_control;
     texture_types_ = texture_types;
     if (ucode.size() < 4 || ucode.size() % 4 != 0) {
@@ -559,8 +582,8 @@ GlslResult Translator::run(std::span<const std::uint32_t> ucode, std::uint32_t c
 }  // namespace
 
 GlslResult translateFragmentProgram(std::span<const std::uint32_t> ucode, std::uint32_t control,
-                                    std::uint32_t texcoord_control, std::uint32_t texture_types) {
-    return Translator().run(ucode, control, texcoord_control, texture_types);
+                                    std::uint32_t texcoord_control, std::uint32_t texture_types, bool object_motion) {
+    return Translator().run(ucode, control, texcoord_control, texture_types, object_motion);
 }
 
 }  // namespace tox2

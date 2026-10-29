@@ -84,6 +84,8 @@ struct DlaaFrame {
     std::optional<float> mvec_invalid_value = 0.0f;
     bool reset = false;  // the previous frame has no connection to this one
     bool alpha = false;  // DLSSOptions::alphaUpscalingEnabled
+    // Constants::cameraMotionIncluded: `motion` already carries the camera motion, so the matrices are not used for it.
+    bool camera_motion_included = false;
 };
 
 // The frame generation viewport. DLAA viewports are numbered from 1 so the two never share constants.
