@@ -3,29 +3,45 @@
 Static recompilation of the PS3 title *テイルズ オブ エクシリア2* (*Tales of Xillia 2*, title ID
 BLJS10188) for Windows and for macOS on Apple Silicon, built from your own copy of the game.
 
+Only the Japanese release, BLJS10188, is supported. The North American release, BLUS31397, is not.
+
 This repository contains no game data (see [Licence and legal notice](#licence-and-legal-notice)).
 No executables, keys, or decrypted binaries are included or accepted by version control. You
 supply your own `EBOOT.BIN` and the firmware's `PS3UPDAT.PUP`; the decrypted files are written to
 the ignored `generated/inputs/`, and the keys they need are downloaded at configure time, not
 stored (see [Decrypting `EBOOT.elf` and `libsre.prx`](#decrypting-ebootelf-and-libsreprx)).
 
-Current state: work in progress. The tools and the runtime were taken over from an earlier
-recompilation project of another game and are being pointed at this one. The executable and the
-firmware's SPURS module (`libsre`) are recovered, recompiled to C and linked, and so are the SPU
-programs (the SPURS kernels and policy modules in libsre and the game's 8 embedded SPU images). `tox2_game`
-runs the game's start-up code, SPURS on recompiled SPU code, the Edge LZMA task that inflates the game's
-archive items and the engine tasks, and runs the game's frame loop. The game can be started from the
-title screen and played, with picture and sound; a full play-through has not been checked. The Bink
-movies are decoded by the game's own recompiled code; the attract movie is still drawn with a
-placeholder texture. See [Status](docs/status.md).
+## Status
 
-The macOS build runs the same code. It shows the game in a Cocoa window, draws with Vulkan on top of
-Metal, plays sound through CoreAudio and reads gamepads with GameController.framework. On macOS the
-game has been run from boot through the title screen, NEW GAME and the config screen into the opening
-scenes, with picture and sound. Sections that differ by system are marked Windows or macOS; the others
-apply to both.
+Work in progress. The game's executable, the firmware's SPURS module (`libsre`) and all SPU programs
+are recompiled. The game can be started from the title screen and played, with picture and sound; a
+full play-through has not been checked, and the attract movie is still drawn with a placeholder
+texture. On macOS it has been run from boot into the opening scenes. See [Status](docs/status.md).
+
+## Features
+
+On top of the recompiled game, the port adds:
+
+- **Windows and macOS.** Native builds for Windows (x64) and for macOS on Apple Silicon (arm64) from
+  the same code. Both draw with Vulkan; on macOS Vulkan runs on top of Metal, through MoltenVK or
+  KosmicKrisp.
+- **Internal resolution scale.** Every render target can be drawn at 1 to 4 times the game's size,
+  for a sharper picture of the same frame.
+- **DLAA** (Windows, NVIDIA RTX). The game's anti-aliased scene can be anti-aliased by NVIDIA DLSS in
+  its DLAA mode, with per-object motion vectors. MSAA and supersampling are available on every GPU.
+- **Frame generation** (Windows, NVIDIA RTX 40 and 50 series). DLSS Frame Generation presents 60, 90,
+  120, 180 or as many frames per second as possible by inserting frames between the game's own, while
+  the game itself keeps its speed. It needs DLAA.
+- **Anisotropic filtering** from 2x to 16x.
+- **Window and settings.** Window sizes from 720p to 2160p and borderless fullscreen. The debug
+  overlay (`F1`) changes these and the options above while the game runs, and saves them.
+
+DLAA and frame generation need the optional NVIDIA Streamline SDK at build time (see
+[NVIDIA Streamline (DLAA)](docs/building.md#nvidia-streamline-dlaa)).
 
 ## Prerequisites
+
+Sections that differ by system are marked Windows or macOS; the others apply to both.
 
 ### Windows
 
