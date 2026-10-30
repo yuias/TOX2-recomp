@@ -52,7 +52,7 @@ Its saves are in `build/profile/hdd`; `--hdd-dir` can name another build's direc
 
 ## Building on macOS
 
-The prerequisites are in the [README](../README.md#macos). The build runs on Apple Silicon (arm64, 16 KiB
+The prerequisites are in the [README](../README.md#macos-apple-silicon). The build runs on Apple Silicon (arm64, 16 KiB
 pages) and uses Homebrew's clang and Homebrew's FFmpeg and the LunarG Vulkan SDK; the Windows presets and
 scripts are unchanged and cannot be used on a Mac. macOS 14.4 or newer is required: the SPU reservation
 waits use `os_sync_wait_on_address_with_timeout` (`runtime/src/core/reservation.cpp`).
