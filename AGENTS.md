@@ -2,11 +2,13 @@
 
 ## Comment style
 
-- Write concise code comments
-  - Focus on the "why" rather than the "what".
-  - Avoid stating the obvious; only explain non-trivial logic or edge cases.
-- Keep comments up to date when changing the code they describe.
-- Do not add comments that merely mark generated or modified sections.
+- Write code comments in English. Explain why, not what; skip comments on
+  obvious code; update comments when you change the code they describe; do not
+  add comments that only mark generated or modified sections. A language's own
+  conventions take precedence.
+- State things literally. Do not replace a plain phrase with a metaphor or
+  flourish. Figurative wording adds connotations you did not choose and makes
+  the reader decode it.
 - Prefer `//` over `/* */`. Both are acceptable, but be consistent within a file.
 
 ## C/C++ formatting
