@@ -101,6 +101,7 @@ function(tox2_bench_add)
     get_filename_component(stem "${capture}" NAME_WE)
     add_test(NAME bench_rsx_fifo_${stem} COMMAND tox2_bench rsx-fifo --capture "${capture}" --iterations 2 --warmup 1)
     set_tests_properties(bench_rsx_fifo_${stem} PROPERTIES
+      LABELS run
       PASS_REGULAR_EXPRESSION "bench rsx-fifo: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
       TIMEOUT 120)
   endforeach()
@@ -125,6 +126,7 @@ function(tox2_bench_add)
     add_test(NAME bench_spu_replay_${stem}
       COMMAND tox2_bench spu-replay --capture "${capture}" --iterations 2 --warmup 1)
     set_tests_properties(bench_spu_replay_${stem} PROPERTIES
+      LABELS run
       PASS_REGULAR_EXPRESSION "bench spu-replay: 2 iterations \\(1 warm-up\\), median [0-9]+ cycles .*; check ok"
       TIMEOUT 120)
   endforeach()

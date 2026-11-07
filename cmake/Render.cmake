@@ -376,6 +376,7 @@ function(tox2_render_add)
   if(replay_register)
     add_test(NAME rsx_replay COMMAND tox2_rsxreplay ${replay_args})
     set_tests_properties(rsx_replay PROPERTIES
+      LABELS run
       PASS_REGULAR_EXPRESSION "replay: [0-9]+ commands, [0-9]+ draws, [0-9]+ skipped"
       FAIL_REGULAR_EXPRESSION "validation: [a-z]+, [1-9][0-9]* errors;error: ")
   elseif(NOT EXISTS "${replay_capture}")
@@ -400,6 +401,7 @@ function(tox2_render_add)
       COMMAND tox2_rsxreplay "${replay_repeat_capture}" --repeat 3 --quiet --no-validation)
     # A CMake regular expression's "." also matches a newline, so ".*" spans the lines in between.
     set_tests_properties(rsx_replay_repeat PROPERTIES
+      LABELS run
       PASS_REGULAR_EXPRESSION
       "cycles: ${TOX2_RSX_REPLAY_REPEAT_CAPTURE}, 3 iterations \\(first excluded\\), median thread cycles per iteration: build [0-9]+, record [0-9]+, total [0-9]+.*builder: per iteration .*, texture unit cache [0-9]+ hits [0-9]+ misses, ${hash_skip_regex}.*render: per iteration .*, texture binds [0-9]+ cached [0-9]+ full;"
       FAIL_REGULAR_EXPRESSION "error: ")

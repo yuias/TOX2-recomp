@@ -77,11 +77,17 @@
     { "name": "macos-release", "configurePreset": "macos-release" }
   ],
   "testPresets": [
-    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
-    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
-    { "name": "profile", "configurePreset": "profile", "output": { "outputOnFailure": true } },
-    { "name": "release-wwoff", "configurePreset": "release-wwoff", "output": { "outputOnFailure": true } },
-    { "name": "macos-debug", "configurePreset": "macos-debug", "output": { "outputOnFailure": true } },
-    { "name": "macos-release", "configurePreset": "macos-release", "output": { "outputOnFailure": true } }
+    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true },
+      "filter": { "exclude": { "label": "run" } } },
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true },
+      "filter": { "exclude": { "label": "run" } } },
+    { "name": "profile", "configurePreset": "profile", "output": { "outputOnFailure": true },
+      "filter": { "exclude": { "label": "run" } } },
+    { "name": "release-wwoff", "configurePreset": "release-wwoff", "output": { "outputOnFailure": true },
+      "filter": { "exclude": { "label": "run" } } },
+    { "name": "macos-debug", "configurePreset": "macos-debug", "output": { "outputOnFailure": true },
+      "filter": { "exclude": { "label": "run" } } },
+    { "name": "macos-release", "configurePreset": "macos-release", "output": { "outputOnFailure": true },
+      "filter": { "exclude": { "label": "run" } } }
   ]
 }

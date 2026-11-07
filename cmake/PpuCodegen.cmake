@@ -128,6 +128,7 @@ function(tox2_ppu_add_generated_tree)
       COMMAND tox2_game --game-dir "${TOX2_GAME_DIR}" --elf "${TOX2_EBOOT_ELF}"
               --libsre "${TOX2_INPUTS_DIR}/libsre.reloc.elf" ${boot_args})
     set_tests_properties(game_boot PROPERTIES
+      LABELS run
       TIMEOUT 60
       # Only the milestone is asserted: while boot HLE is incomplete the run is expected to stop
       # (often fatally) somewhere after it, and a stop before it leaves the pattern unmatched.

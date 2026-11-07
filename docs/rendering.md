@@ -1543,7 +1543,8 @@ The CTest entry `rsx_replay_repeat` runs `tox2_rsxreplay generated/rsx/captures/
 printed, followed by a `builder` line that holds the texture unit cache figures and ends with the hash skip figures,
 and a `render` line that holds the texture bind figures. The hash skip figures must match the build: more than 0 skips
 and 0 unreported changes with `TOX2_RSX_WRITE_WATCH` on, and all three figures 0 with it off. It is registered only
-when the capture exists.
+when the capture exists. Like `rsx_replay` below, it has the `run` label, so the test presets leave it out (see
+[Tests](tests.md#ctest-targets)).
 
 The CTest entry `rsx_replay` runs `tox2_rsxreplay` on `generated/rsx/captures/title.tox2cap` with
 the options pinned in `cmake/rsx_replay.cmake`. The capture name `title` is only the name the test looks up; it says nothing about the

@@ -2,8 +2,23 @@
 
 ## CTest targets
 
-`tools/build.ps1 -Test` (Windows) and `tools/build.sh --test` (macOS) run every registered CTest
-target; `ctest --preset <preset>` does the same after a build. Targets that need the game or local
+`tools/build.ps1 -Test` (Windows) and `tools/build.sh --test` (macOS) run the registered CTest
+targets except those labelled `run`; `ctest --preset <preset>` does the same after a build.
+
+The `run` label marks the targets that run the game or replay a capture of it: `game_boot`, `rsx_replay`,
+`rsx_replay_repeat`, and the `bench_rsx_fifo_<name>` and `bench_spu_replay_<name>` entries of local captures. They
+take longer and need local game data. Run them when a change is reported to break the running game, or before a
+release:
+
+```sh
+ctest --test-dir build/<preset> -L run --output-on-failure   # only the run targets
+ctest --test-dir build/<preset> --output-on-failure          # every target
+```
+
+Without `--preset`, CTest applies no label filter. With a test preset, `-L run` selects nothing, because the preset
+already excludes the label.
+
+Targets that need the game or local
 files are registered only when those are configured, and configuration prints why one is not. Targets
 marked Windows only or macOS only exist on that system only; the others are registered everywhere.
 Targets that need a device or a window exit with code 77, which CTest reports as skipped, when the
