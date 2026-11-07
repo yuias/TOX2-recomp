@@ -302,6 +302,10 @@ function(tox2_render_add)
   add_test(NAME fp_translator COMMAND tox2_fp_translator_tests)
   set_tests_properties(fp_translator PROPERTIES
     PASS_REGULAR_EXPRESSION "fp translator tests: [0-9]+ passed, 0 failed")
+  add_test(NAME fp_translator_dumps COMMAND tox2_fp_translator_tests --dumps)
+  set_tests_properties(fp_translator_dumps PROPERTIES
+    LABELS dumps
+    PASS_REGULAR_EXPRESSION "fp translator dump tests: [0-9]+ passed, 0 failed")
 
   # Header-only maths; needs no GPU.
   add_executable(tox2_frame_gen_tests runtime/tests/frame_gen_test.cpp)

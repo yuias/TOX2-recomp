@@ -3,7 +3,11 @@
 ## CTest targets
 
 `tools/build.ps1 -Test` (Windows) and `tools/build.sh --test` (macOS) run the registered CTest
-targets except those labelled `run`; `ctest --preset <preset>` does the same after a build.
+targets except those labelled `run` or `dumps`; `ctest --preset <preset>` does the same after a build.
+
+The `dumps` label marks `fp_translator_dumps`, which translates and compiles every fragment program dumped under
+`generated/rsx` and takes most of the translator test time. Run it after a change to the fragment translator:
+`ctest --test-dir build/<preset> -L dumps --output-on-failure`.
 
 The `run` label marks the targets that run the game or replay a capture of it: `game_boot`, `rsx_replay`,
 `rsx_replay_repeat`, and the `bench_rsx_fifo_<name>` and `bench_spu_replay_<name>` entries of local captures. They
@@ -16,7 +20,7 @@ ctest --test-dir build/<preset> --output-on-failure          # every target
 ```
 
 Without `--preset`, CTest applies no label filter. With a test preset, `-L run` selects nothing, because the preset
-already excludes the label.
+already excludes the label; the same holds for `-L dumps`.
 
 Targets that need the game or local
 files are registered only when those are configured, and configuration prints why one is not. Targets
@@ -47,7 +51,7 @@ machine has none.
 | `spu_programs` | Four assembled SPU programs (a sum over an array, an atomic counter, a jump table, an event throw) go through recovery, the emitter and the runtime: they run as a thread group of up to 6 threads on the real runtime and their results are checked | - |
 | `spu_lzma_inflate` | The recompiled Edge LZMA inflate routine of the game's LZMA task decompresses a real item of `TLFILE.TLDAT` on one SPU thread, chunk by chunk as the task does, and the SHA-256 of the output must be `f4ad1f71...c751` (the value of the reference decoder). A second line gives the time spent in the recompiled code and the throughput (about 25 MB/s at `-O3` on the development machine, 3.7 MB/s at `-O1`); it is not checked. Timeout 120 s | `-GeneratedDir`, `-GameDir` and `-EbootElf` or `-EbootBin` |
 | `render_window` | macOS only. Opens a real Cocoa window and presents three frames to it (see [Vulkan on macOS](rendering.md#vulkan-on-macos)). It runs in `main`, because the window belongs to the main thread. Exit code 77 (skipped) when there is no window-server session. Runs serially, because it opens a window | a logged-in session and a Vulkan 1.3 device |
-| `render_core`, `vp_translator`, `fp_translator` | Renderer and shader translators (see [Rendering](rendering.md)). `vp_translator` and `fp_translator` also translate every program dumped under `generated/rsx`: the known ones are compared with their expected GLSL, the others must compile when they translate, and the programs the translators report are counted by report text in a printed summary, not failed (the tree has 33 vertex and 749 fragment dumps). `render_core` also covers the stencil state (decode, the zeta write rule, the test itself and a stencil-only pass followed by a read of the depth surface as a texture), user clip planes (decode and clipping), rebinding a target at another size (the overlap copy, its skips and the counted refusals) and vertex program condition codes drawn on the device. `vp_translator` also checks the condition code update and its fallback destination, conditional writes, the vector-before-scalar order and the user clip distance output. `render_core` also checks the idle present rule (`idlePresentDue`: 100 ms after the last flip, then every 33 ms, measured from the last real flip) and that `presentIdle` does nothing without a presenter and never counts as a flip | a Vulkan 1.3 device for the rendering parts |
+| `render_core`, `vp_translator`, `fp_translator`, `fp_translator_dumps` | Renderer and shader translators (see [Rendering](rendering.md)). `vp_translator` and `fp_translator_dumps` translate every program dumped under `generated/rsx`: the known ones are compared with their expected GLSL, the others must compile when they translate, and the programs the translators report are counted by report text in a printed summary, not failed (the tree has 33 vertex and 749 fragment dumps). `render_core` also covers the stencil state (decode, the zeta write rule, the test itself and a stencil-only pass followed by a read of the depth surface as a texture), user clip planes (decode and clipping), rebinding a target at another size (the overlap copy, its skips and the counted refusals) and vertex program condition codes drawn on the device. `vp_translator` also checks the condition code update and its fallback destination, conditional writes, the vector-before-scalar order and the user clip distance output. `render_core` also checks the idle present rule (`idlePresentDue`: 100 ms after the last flip, then every 33 ms, measured from the last real flip) and that `presentIdle` does nothing without a presenter and never counts as a flip | a Vulkan 1.3 device for the rendering parts |
 | `rsx_replay` | Replays a local capture and, when a reference image is pinned, compares the result with it | a local capture (see [Capture and replay](rendering.md#capture-and-replay)) |
 | `media_core` | PAMF parser and demuxer, the movie player and the cellSail HLE on synthetic data, with fake codecs (inherited code that this game does not use, see [Movies](movies.md)) | - |
 | `media_ffmpeg` | The FFmpeg loader, the H.264 and ATRAC3plus decoders (the movie decoder and the raw-frame decoder behind `cellAtrac`) and the colour and PCM conversion, all on synthetic data | the fetched FFmpeg DLLs (Windows), Homebrew's FFmpeg (macOS) |

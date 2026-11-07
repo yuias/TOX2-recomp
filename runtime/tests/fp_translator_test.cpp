@@ -13,6 +13,7 @@
 #include <map>
 #include <span>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -1053,13 +1054,16 @@ void testObjectMotionVariant() {
     CHECK(depth_kil.ok);
     CHECK(position(depth_kil.glsl, "  if (any(lessThan(cc1, vec4(0.0)))) discard;\n") <
           position(depth_kil.glsl, "  float motion_depth = gl_FragDepth;\n"));
+}
 
-    // The dumped programs.
+void testObjectMotionVariantDumps() {
     const std::vector<Dump> dumps = loadDumps();
     if (dumps.empty()) {
         std::printf("fp translator: no dumps in generated/rsx, variant dump tests skipped\n");
         return;
     }
+    // Keys apart from the hand-made programs of testObjectMotionVariant.
+    std::uint64_t key = 0xf9000;
     int checked = 0;
     for (const Dump& dump : dumps) {
         const bool text_program = dump.name.starts_with("fp_c5a1c19123aa52bb");
@@ -1074,7 +1078,15 @@ void testObjectMotionVariant() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // The dumped programs take most of the run time, so they are a separate CTest entry.
+    if (argc > 1 && std::string_view(argv[1]) == "--dumps") {
+        testObjectMotionVariantDumps();
+        testTextProgram();
+        testDumps();
+        std::printf("fp translator dump tests: %d passed, %d failed\n", g_passed, g_failed);
+        return g_failed != 0 ? 1 : 0;
+    }
     testAssembler();
     testTextureOnly();
     testTextureTypes();
@@ -1090,8 +1102,6 @@ int main() {
     testKillAndFences();
     testLayout();
     testObjectMotionVariant();
-    testTextProgram();
-    testDumps();
     std::printf("fp translator tests: %d passed, %d failed\n", g_passed, g_failed);
     return g_failed != 0 ? 1 : 0;
 }

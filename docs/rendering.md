@@ -1559,9 +1559,12 @@ set, the reference image must exist and match it, and the thresholds apply. To m
 `generated/rsx/captures/title.tox2cap`. Captures of this game have been recorded (see the default
 `frame_<N>.tox2cap` names above), so the test stays unregistered until one is copied to that name.
 
-Three further renderer tests are registered: `render_core` (renders synthetic command lists, and
-skips itself when there is no Vulkan device), and `vp_translator` and `fp_translator` (need no
-GPU; they also translate the programs dumped under `generated/rsx` and skip those when absent). A dump
+Further renderer tests are registered: `render_core` (renders synthetic command lists, and
+skips itself when there is no Vulkan device), `vp_translator` and `fp_translator` (need no
+GPU; `vp_translator` also translates the programs dumped under `generated/rsx` and skips those when absent), and
+`fp_translator_dumps` (`tox2_fp_translator_tests --dumps`), which does the same for the fragment programs. It has the
+`dumps` label, which the test presets exclude, because it takes most of the translator test time; run it with
+`ctest --test-dir build/<preset> -L dumps` after a change to the fragment translator. A dump
 with a known expected body is compared with it. Any other dump is translated, and when the translation
 succeeds its GLSL must compile; a translation the translator reports as unimplemented is not a failure,
 and each test prints a summary line (`<n> dumps, <n> translated, <n> reported`) followed by the report
