@@ -114,4 +114,12 @@ if(NOT TOX2_PUP STREQUAL "")
   set(TOX2_LIBSRE_ELF "${TOX2_INPUTS_DIR}/libsre.reloc.elf")
 endif()
 set_tests_properties(tools_unittest PROPERTIES
-  ENVIRONMENT "TOX2_EBOOT_ELF=${TOX2_EBOOT_ELF};TOX2_LIBSRE_ELF=${TOX2_LIBSRE_ELF}")
+  ENVIRONMENT "TOX2_EBOOT_ELF=${TOX2_EBOOT_ELF};TOX2_LIBSRE_ELF=${TOX2_LIBSRE_ELF};TOX2_SKIP_REAL_EBOOT=1")
+if(NOT TOX2_EBOOT_ELF STREQUAL "")
+  add_test(NAME tools_unittest_eboot
+    COMMAND ${Python3_EXECUTABLE} -B -m unittest discover -s tools/tests -t tools -p test_real_eboot.py
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  set_tests_properties(tools_unittest_eboot PROPERTIES
+    LABELS eboot
+    ENVIRONMENT "TOX2_EBOOT_ELF=${TOX2_EBOOT_ELF}")
+endif()

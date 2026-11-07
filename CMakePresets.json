@@ -78,16 +78,16 @@
   ],
   "testPresets": [
     { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true },
-      "filter": { "exclude": { "label": "^(run|dumps)$" } } },
+      "filter": { "exclude": { "label": "^(run|dumps|eboot)$" } } },
     { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true },
-      "filter": { "exclude": { "label": "^(run|dumps)$" } } },
+      "filter": { "exclude": { "label": "^(run|dumps|eboot)$" } } },
     { "name": "profile", "configurePreset": "profile", "output": { "outputOnFailure": true },
-      "filter": { "exclude": { "label": "^(run|dumps)$" } } },
+      "filter": { "exclude": { "label": "^(run|dumps|eboot)$" } } },
     { "name": "release-wwoff", "configurePreset": "release-wwoff", "output": { "outputOnFailure": true },
-      "filter": { "exclude": { "label": "^(run|dumps)$" } } },
+      "filter": { "exclude": { "label": "^(run|dumps|eboot)$" } } },
     { "name": "macos-debug", "configurePreset": "macos-debug", "output": { "outputOnFailure": true },
-      "filter": { "exclude": { "label": "^(run|dumps)$" } } },
+      "filter": { "exclude": { "label": "^(run|dumps|eboot)$" } } },
     { "name": "macos-release", "configurePreset": "macos-release", "output": { "outputOnFailure": true },
-      "filter": { "exclude": { "label": "^(run|dumps)$" } } }
+      "filter": { "exclude": { "label": "^(run|dumps|eboot)$" } } }
   ]
 }

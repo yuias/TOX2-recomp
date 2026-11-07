@@ -3,24 +3,22 @@
 ## CTest targets
 
 `tools/build.ps1 -Test` (Windows) and `tools/build.sh --test` (macOS) run the registered CTest
-targets except those labelled `run` or `dumps`; `ctest --preset <preset>` does the same after a build.
+targets except those with one of the labels below; `ctest --preset <preset>` does the same after a build. These
+targets are slow or need local game data, so run them when the change calls for it:
 
-The `dumps` label marks `fp_translator_dumps`, which translates and compiles every fragment program dumped under
-`generated/rsx` and takes most of the translator test time. Run it after a change to the fragment translator:
-`ctest --test-dir build/<preset> -L dumps --output-on-failure`.
-
-The `run` label marks the targets that run the game or replay a capture of it: `game_boot`, `rsx_replay`,
-`rsx_replay_repeat`, and the `bench_rsx_fifo_<name>` and `bench_spu_replay_<name>` entries of local captures. They
-take longer and need local game data. Run them when a change is reported to break the running game, or before a
-release:
+| Label | Targets | Run them |
+| --- | --- | --- |
+| `run` | `game_boot`, `rsx_replay`, `rsx_replay_repeat`, and the `bench_rsx_fifo_<name>` and `bench_spu_replay_<name>` entries of local captures: they run the game or replay a capture of it | when a change is reported to break the running game, or before a release |
+| `dumps` | `fp_translator_dumps`: translates and compiles every fragment program dumped under `generated/rsx` | after a change to the fragment translator |
+| `eboot` | `tools_unittest_eboot`: the Python tests of `test_real_eboot.py` on the real executable (recovery, emitting, disassembly statistics) | after a change to the PPU tools under `tools/ps3recomp` |
 
 ```sh
 ctest --test-dir build/<preset> -L run --output-on-failure   # only the run targets
 ctest --test-dir build/<preset> --output-on-failure          # every target
 ```
 
-Without `--preset`, CTest applies no label filter. With a test preset, `-L run` selects nothing, because the preset
-already excludes the label; the same holds for `-L dumps`.
+Without `--preset`, CTest applies no label filter. With a test preset, `-L <label>` selects nothing for these labels,
+because the preset already excludes them.
 
 Targets that need the game or local
 files are registered only when those are configured, and configuration prints why one is not. Targets
@@ -37,7 +35,8 @@ machine has none.
 | `decrypt_libsre_reloc` | `tox2_decrypt reloc` on `generated/inputs/libsre.prx` at `0x011d0000`; the output must match the pin of `libsre.reloc.elf` (written under `build/<preset>/decrypt_test`). The input file is written by the build step before this test runs | `-Pup` |
 | `decrypt_font` | `tox2_decrypt pup --raw` on the real `PS3UPDAT.PUP`; the output must match the pin of `SCE-PS3-SR-R-JPN.TTF` | `-Pup` |
 | `runtime_version`, `runtime_musttail` | The runtime stub starts, and the compiler supports `musttail` | - |
-| `tools_unittest` | The Python unit tests (below). CTest passes `TOX2_EBOOT_ELF` and `TOX2_LIBSRE_ELF` to them, so they include the real-executable tests when `-EbootElf` or `-EbootBin` is given, and the real-libsre tests when `-Pup` is given | - |
+| `tools_unittest` | The Python unit tests (below) except `test_real_eboot.py`, which CTest leaves out by setting `TOX2_SKIP_REAL_EBOOT`. CTest passes `TOX2_EBOOT_ELF` and `TOX2_LIBSRE_ELF` to them, so they include the other real-executable tests when `-EbootElf` or `-EbootBin` is given, and the real-libsre tests when `-Pup` is given | - |
+| `tools_unittest_eboot` | `test_real_eboot.py` on the real executable (label `eboot`) | `-EbootElf` or `-EbootBin` |
 | `ppu_header_check`, `ppu_semantics` | Contract header and the semantics harness (see [Emitting C](emitter.md)) | - |
 | `ppu_link` | The generated code of the executable and of libsre links; the function mappings, imports and export table of both trees register and pass the checks of `runtime/tests/ppu_link_test.cpp` | `-GeneratedDir` (with the libsre tree under `<dir>/libsre`) |
 | `ppu_overrides` | The hand-written replacements of guest functions (see [Overrides in use](emitter.md#overrides-in-use)), linked against fakes of the functions they call. The loader pushes into the ring or into staging under the stream mutex with the count updated in the same hold; the decoder setup runs SetData under the mutex, raises the flag only after it succeeded, sends a push that arrives during SetData to staging, and ends at the stop byte on a failed SetData without raising the flag. Each of these cases runs in the Legacy and the Split2 thread mode, where every lv2 call opens its own kernel section. The save DLC check passes, and frees the item vector, for an empty set, a fully licensed set and a set whose first or last item belongs to no installed DLC, for counts that take each path of the unrolled loop | - |

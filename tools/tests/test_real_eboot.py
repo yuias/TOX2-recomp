@@ -14,6 +14,11 @@ from ps3recomp.elf import ElfFile
 from ps3recomp.ppu import decode_range
 from ps3recomp.ppu_flow import CodeImage
 
+# These tests take most of the suite's time, so CTest runs them as their own entry (tools_unittest_eboot) and sets
+# this variable for the rest of the suite.
+if os.environ.get("TOX2_SKIP_REAL_EBOOT"):
+    raise unittest.SkipTest("TOX2_SKIP_REAL_EBOOT is set")
+
 _ELF_PATH = os.environ.get("TOX2_EBOOT_ELF")
 _GHIDRA_JSON = os.environ.get("TOX2_GHIDRA_JSON")
 _COMMITTED_SUMMARY = ghidra_summary.REPO_ROOT / "config" / "ghidra_summary.json"
