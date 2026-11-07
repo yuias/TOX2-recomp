@@ -383,30 +383,11 @@ function(tox2_render_add)
       "(generated/rsx/captures/${TOX2_RSX_REPLAY_CAPTURE}.tox2cap not found)")
   endif()
 
-  # Smoke test of the --repeat measurement the fixed-input comparisons use.
+  # Smoke test of the --repeat measurement the fixed-input comparisons use, and of the counters on the builder and
+  # render lines. One run checks every line: they are printed once, in this order, after the iterations.
   set(replay_repeat_capture
     "${CMAKE_SOURCE_DIR}/generated/rsx/captures/${TOX2_RSX_REPLAY_REPEAT_CAPTURE}.tox2cap")
   if(EXISTS "${replay_repeat_capture}")
-    add_test(NAME rsx_replay_repeat
-      COMMAND tox2_rsxreplay "${replay_repeat_capture}" --repeat 3 --quiet --no-validation)
-    set_tests_properties(rsx_replay_repeat PROPERTIES
-      PASS_REGULAR_EXPRESSION
-      "cycles: ${TOX2_RSX_REPLAY_REPEAT_CAPTURE}, 3 iterations \\(first excluded\\), median thread cycles per iteration: build [0-9]+, record [0-9]+, total [0-9]+"
-      FAIL_REGULAR_EXPRESSION "error: ")
-
-    # The builder and render lines carry the texture unit cache and texture bind counters.
-    add_test(NAME rsx_replay_builder_counters
-      COMMAND tox2_rsxreplay "${replay_repeat_capture}" --repeat 3 --quiet --no-validation)
-    set_tests_properties(rsx_replay_builder_counters PROPERTIES
-      PASS_REGULAR_EXPRESSION
-      "builder: per iteration .*, texture unit cache [0-9]+ hits [0-9]+ misses"
-      FAIL_REGULAR_EXPRESSION "error: ")
-    add_test(NAME rsx_replay_hash_counters
-      COMMAND tox2_rsxreplay "${replay_repeat_capture}" --repeat 3 --quiet --no-validation)
-    set_tests_properties(rsx_replay_hash_counters PROPERTIES
-      PASS_REGULAR_EXPRESSION
-      "builder: per iteration .*, texture hash skips [0-9]+ \\(safety hashes [0-9]+, unreported changes [0-9]+\\)"
-      FAIL_REGULAR_EXPRESSION "error: ")
     # The tracking skips hashes of unchanged textures only when the option is on; with it off the counters stay 0.
     if(TOX2_RSX_WRITE_WATCH)
       set(hash_skip_regex
@@ -415,16 +396,12 @@ function(tox2_render_add)
       set(hash_skip_regex
         "texture hash skips 0 \\(safety hashes 0, unreported changes 0\\)")
     endif()
-    add_test(NAME rsx_replay_hash_skip
+    add_test(NAME rsx_replay_repeat
       COMMAND tox2_rsxreplay "${replay_repeat_capture}" --repeat 3 --quiet --no-validation)
-    set_tests_properties(rsx_replay_hash_skip PROPERTIES
-      PASS_REGULAR_EXPRESSION "builder: per iteration .*, ${hash_skip_regex}"
-      FAIL_REGULAR_EXPRESSION "error: ")
-    add_test(NAME rsx_replay_render_counters
-      COMMAND tox2_rsxreplay "${replay_repeat_capture}" --repeat 3 --quiet --no-validation)
-    set_tests_properties(rsx_replay_render_counters PROPERTIES
+    # A CMake regular expression's "." also matches a newline, so ".*" spans the lines in between.
+    set_tests_properties(rsx_replay_repeat PROPERTIES
       PASS_REGULAR_EXPRESSION
-      "render: per iteration .*, texture binds [0-9]+ cached [0-9]+ full;"
+      "cycles: ${TOX2_RSX_REPLAY_REPEAT_CAPTURE}, 3 iterations \\(first excluded\\), median thread cycles per iteration: build [0-9]+, record [0-9]+, total [0-9]+.*builder: per iteration .*, texture unit cache [0-9]+ hits [0-9]+ misses, ${hash_skip_regex}.*render: per iteration .*, texture binds [0-9]+ cached [0-9]+ full;"
       FAIL_REGULAR_EXPRESSION "error: ")
   else()
     message(STATUS "TOX2: rsx_replay_repeat test not registered "

@@ -1540,11 +1540,10 @@ can be higher with `--gpu-timing` than without it (17.6 ms against 14.1 ms for `
 
 The CTest entry `rsx_replay_repeat` runs `tox2_rsxreplay generated/rsx/captures/frame_9400_room.tox2cap --repeat 3
 --quiet --no-validation` (the capture is named in `cmake/rsx_replay.cmake`) and passes when the `cycles` line is
-printed. It is registered only when the capture exists. The entries `rsx_replay_builder_counters`,
-`rsx_replay_hash_counters` and `rsx_replay_render_counters` run the same command and pass when the `builder` line holds
-the texture unit cache figures, the `builder` line ends with the hash skip figures, and the `render` line holds the
-texture bind figures. The entry `rsx_replay_hash_skip` runs it too and checks the value of the hash skip figures for the
-build: more than 0 skips and 0 unreported changes with `TOX2_RSX_WRITE_WATCH` on, and all three figures 0 with it off.
+printed, followed by a `builder` line that holds the texture unit cache figures and ends with the hash skip figures,
+and a `render` line that holds the texture bind figures. The hash skip figures must match the build: more than 0 skips
+and 0 unreported changes with `TOX2_RSX_WRITE_WATCH` on, and all three figures 0 with it off. It is registered only
+when the capture exists.
 
 The CTest entry `rsx_replay` runs `tox2_rsxreplay` on `generated/rsx/captures/title.tox2cap` with
 the options pinned in `cmake/rsx_replay.cmake`. The capture name `title` is only the name the test looks up; it says nothing about the
