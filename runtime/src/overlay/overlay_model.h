@@ -83,6 +83,8 @@ struct OverlaySources {
     std::function<std::uint64_t()> unimplemented_dropped;
     std::function<RsxFlipLimit()> flip_limit;
     std::function<void(RsxFlipLimit)> set_flip_limit;
+    std::function<bool()> field_hud_hidden;
+    std::function<void(bool)> set_field_hud_hidden;
     std::function<LogLevel()> log_level;
     std::function<void(LogLevel)> set_log_level;
     std::function<bool()> request_capture;

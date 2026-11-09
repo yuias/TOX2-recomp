@@ -11,6 +11,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iterator>
+#include <memory>
 #include <mutex>
 #include <string_view>
 #include <thread>
@@ -19,6 +21,7 @@
 #include "core/log.h"
 #include "core/threads.h"
 #include "lv2/sys_sync.h"
+#include "tox2/field_hud.h"
 #include "tox2/ppu_context.h"
 
 namespace {
@@ -229,6 +232,22 @@ TOX2_PPU_FUNC(fn_009b4088) {
 }
 
 TOX2_PPU_FUNC(fn_00523fb8);
+
+int g_field_hud_calls[5];
+
+#define FIELD_HUD_TASK_FAKE(entry, index)   \
+    TOX2_PPU_FUNC(fn_##entry##_generated) { \
+        (void)base;                         \
+        ++g_field_hud_calls[index];         \
+        ctx->gpr[3] = 0x1234;               \
+    }                                       \
+    TOX2_PPU_FUNC(fn_##entry)
+
+FIELD_HUD_TASK_FAKE(002bc734, 0);
+FIELD_HUD_TASK_FAKE(002f6c84, 1);
+FIELD_HUD_TASK_FAKE(00306724, 2);
+FIELD_HUD_TASK_FAKE(003cd424, 3);
+FIELD_HUD_TASK_FAKE(003048e4, 4);
 
 }  // extern "C"
 
@@ -662,9 +681,28 @@ void dlcCheckAlwaysPasses() {
     }
 }
 
+// A hidden task returns without running its body; a shown one runs it once and comes back with the body's r3.
+void fieldHudTasksFollowTheToggle() {
+    Tox2PpuFunc* const wrappers[] = {fn_002bc734, fn_002f6c84, fn_00306724, fn_003cd424, fn_003048e4};
+    auto context = std::make_unique<Tox2PpuContext>();
+    for (std::size_t i = 0; i < std::size(wrappers); ++i) {
+        g_field_hud_calls[i] = 0;
+        tox2SetFieldHudHidden(true);
+        wrappers[i](context.get(), nullptr);
+        CHECK(g_field_hud_calls[i] == 0);
+
+        tox2SetFieldHudHidden(false);
+        context->gpr[3] = 0;
+        wrappers[i](context.get(), nullptr);
+        CHECK(g_field_hud_calls[i] == 1);
+        CHECK(context->gpr[3] == 0x1234);
+    }
+}
+
 }  // namespace
 
 int main() {
+    fieldHudTasksFollowTheToggle();
     loaderDirectUnderLock();
     loaderStagingPath();
     decoderSetDataUnderLock();

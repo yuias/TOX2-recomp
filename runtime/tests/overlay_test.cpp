@@ -891,6 +891,39 @@ void testObjectMotionPanel() {
     }
 }
 
+// The checkbox shows and changes the source's value, is not a saved setting, and is absent without a source.
+void testFieldHudPanel() {
+    SettingCalls recorded;
+    tox2::OverlaySources sources = makeFakeSources();
+    recorded.attach(sources);
+    constexpr float kProbeX = 60.0f;
+    constexpr float kWindowBottom = 720.0f;
+
+    {
+        tox2::OverlayState state;
+        SettingsProbe probe(state, sources);
+        if (probe.window() == nullptr) return;
+        CHECK(!probe.findHovered(probe.window()->GetID("Hide field HUD"), kProbeX, 10.0f, kWindowBottom));
+    }
+
+    bool hidden = false;
+    sources.field_hud_hidden = [&hidden] { return hidden; };
+    sources.set_field_hud_hidden = [&hidden](bool value) { hidden = value; };
+    for (const bool before : {false, true}) {
+        hidden = before;
+        tox2::OverlayState state;
+        SettingsProbe probe(state, sources);
+        if (probe.window() == nullptr) return;
+        const std::optional<ImVec2> box =
+                probe.findHovered(probe.window()->GetID("Hide field HUD"), kProbeX, 10.0f, kWindowBottom);
+        CHECK(box.has_value());
+        if (!box) return;
+        probe.click(*box);
+        CHECK(hidden == !before);
+        CHECK(recorded.calls.empty());
+    }
+}
+
 // The saved target is the renderer's, so the AA combo cannot lose it: Dlaa -> Msaa -> Dlaa leaves target, request and
 // saved settings alone, and the combo is usable again at the end.
 void testFrameGenDlaaRoundTrip() {
@@ -2348,6 +2381,7 @@ int main() {
     testFrameGenSelectable();
     testFrameGenPanel();
     testObjectMotionPanel();
+    testFieldHudPanel();
     testFrameGenDlaaRoundTrip();
     testAnisotropyPanel();
     testWindowSizeLabels();

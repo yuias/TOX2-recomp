@@ -30,7 +30,8 @@ endfunction()
 # tox2_ppu_add_generated_tree.
 set(TOX2_PPU_OVERRIDE_SOURCES
   runtime/src/ppu_overrides/atrac_stream.c
-  runtime/src/ppu_overrides/dlc_check.c)
+  runtime/src/ppu_overrides/dlc_check.c
+  runtime/src/ppu_overrides/field_hud.c)
 
 function(tox2_ppu_add_overrides)
   add_library(tox2_ppu_overrides OBJECT ${TOX2_PPU_OVERRIDE_SOURCES})

@@ -14,6 +14,31 @@
       "entry": "0x00523fb8",
       "generated_sha256": "6c07dd44600f33fb81d0ad76856f3b0ff19541e424f2c6280cbe62c9f9ffaa47",
       "reason": "Save DLC check: a save that used DLC which is not installed loads instead of being rejected"
+    },
+    {
+      "entry": "0x002bc734",
+      "generated_sha256": "efce3216f0d99a5b4973392a03831d98432d11c372ec2039d2759a33ed31cded",
+      "reason": "Field HUD toggle: TaskDrawNavigationMap is skipped while the HUD is hidden"
+    },
+    {
+      "entry": "0x002f6c84",
+      "generated_sha256": "f06b832741dfbfcc22c6cb425c3688babf8b7f601c40020bbc6b2a1a95020c31",
+      "reason": "Field HUD toggle: TaskDrawChapterInformation is skipped while the HUD is hidden"
+    },
+    {
+      "entry": "0x00306724",
+      "generated_sha256": "c34309eb023555ab507eefeae9f5e0315b43151160f105f587b191397f995bbc",
+      "reason": "Field HUD toggle: TaskDrawControllerInformation is skipped while the HUD is hidden"
+    },
+    {
+      "entry": "0x003cd424",
+      "generated_sha256": "bc9fd328337df43a3f2272c5a6cfc56163a7f945ec8735f02289a3c3aada8107",
+      "reason": "Field HUD toggle: TaskDrawSearchMode is skipped while the HUD is hidden"
+    },
+    {
+      "entry": "0x003048e4",
+      "generated_sha256": "8f42d99f62abee1227eff39f8b07288410316937a91ee6c394f415004f62ce2f",
+      "reason": "Field HUD toggle: TaskRenderChatNavi is skipped while the HUD is hidden"
     }
   ]
 }

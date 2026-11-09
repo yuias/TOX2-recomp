@@ -196,3 +196,6 @@ void tox2Mtfsb(Tox2PpuContext* ctx, uint32_t bit, uint32_t value) {
 }
 
 }  // extern "C"
+
+// The override wrappers in runtime/src/ppu_overrides/field_hud.c read this; nothing hides the HUD here.
+extern "C" bool tox2FieldHudHidden(void) { return false; }

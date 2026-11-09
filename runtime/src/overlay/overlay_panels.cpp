@@ -304,6 +304,11 @@ void drawSettings(OverlayState& state, const OverlaySources& sources) {
     drawAnisotropy(state, sources);
     drawWindowSize(state, sources);
 
+    if (sources.field_hud_hidden && sources.set_field_hud_hidden) {
+        bool hidden = sources.field_hud_hidden();
+        if (ImGui::Checkbox("Hide field HUD", &hidden)) sources.set_field_hud_hidden(hidden);
+    }
+
     // Not wired to anything yet; shown so the layout of the finished panel is visible.
     ImGui::SeparatorText("(not implemented)");
     ImGui::BeginDisabled();

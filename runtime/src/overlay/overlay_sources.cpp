@@ -9,6 +9,7 @@
 #include "rsx/rsx_thread.h"
 #include "rsx/rsx_unimplemented.h"
 #include "spu/spu_census.h"
+#include "tox2/field_hud.h"
 
 namespace tox2 {
 
@@ -80,6 +81,8 @@ OverlaySources makeRuntimeOverlaySources() {
     sources.unimplemented_dropped = rsxUnimplementedDropped;
     sources.flip_limit = rsxFlipLimit;
     sources.set_flip_limit = setRsxFlipLimit;
+    sources.field_hud_hidden = tox2FieldHudHidden;
+    sources.set_field_hud_hidden = tox2SetFieldHudHidden;
     sources.log_level = currentLogLevel;
     sources.set_log_level = setLogLevel;
     sources.request_capture = requestRsxCapture;

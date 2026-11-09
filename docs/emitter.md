@@ -168,6 +168,14 @@ The one edit is the "not licensed" exit at `0x0052422c`, which returns 1 instead
 item vector is still freed. With a save that uses DLC items and no DLC installed, the game loads to the field and its
 item and equipment menus open.
 
+`runtime/src/ppu_overrides/field_hud.c` wraps five per-frame draw tasks of the field HUD (`TaskDrawNavigationMap`,
+`TaskDrawChapterInformation`, `TaskDrawControllerInformation`, `TaskDrawSearchMode` and `TaskRenderChatNavi`). Each
+wrapper returns at once while the overlay's `Hide field HUD` is on and otherwise tail-calls the generated body
+`fn_<address>_generated`, so these overrides are not copies of the body. The game's task dispatcher (`0x0027a35c`)
+ignores a task's return value and restores r2 itself. A hidden task does not run, so anything else its body advances
+waits until the HUD is shown again. Tasks that drain a queue the game may wait on are left out; the information and
+item-get notices therefore stay visible.
+
 The two ATRAC overrides are in `runtime/src/ppu_overrides/atrac_stream.c` and close races on the stream object
 of the game's ATRAC player (`obj`). The loader pushes bytes into the ring buffer of `obj`; the decoder
 setup runs on the player's own thread and hands the ring to `cellAtrac` with `SetDataAndGetMemSize`.
