@@ -14,7 +14,7 @@
 #include "ppu_semantics_cases.h"
 
 // Keep in sync with MEM_SIZE in tools/tests/ppu_semantics/__init__.py.
-enum { kSemanticsMemSize = 0x100000 };  // NOLINT(readability-identifier-naming)
+enum { kSemanticsMemSize = 0x100000 };
 
 static bool selected(const Tox2SemanticsCase* c, int argc, char** argv) {
     if (argc <= 1) return true;

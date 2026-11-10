@@ -62,10 +62,13 @@ CheckOptions:
   readability-identifier-naming.StaticConstantIgnoredRegexp: '^[a-z][a-z0-9_]*$'
   readability-identifier-naming.GlobalConstantIgnoredRegexp: '^g_[a-z0-9_]+$'
 
-  # --- Enumerators (deviation: no k prefix) ---
+  # --- Enumerators (deviation: enum class constants take no k prefix) ---
   readability-identifier-naming.EnumConstantCase: CamelCase
-  # Constants of the C headers shared with recompiler output, which spells them kTox2*.
-  readability-identifier-naming.EnumConstantIgnoredRegexp: '^kTox2[A-Z][A-Za-z0-9]*$'
+  # Unscoped enumerators may also use the k prefix: C has no constexpr, so an anonymous
+  # enum serves as a constant there, and the C headers shared with recompiler output
+  # spell their constants kTox2*.
+  readability-identifier-naming.EnumConstantIgnoredRegexp: '^k[A-Z][A-Za-z0-9]*$'
+  readability-identifier-naming.ScopedEnumConstantCase: CamelCase
 
   # --- Others (Google) ---
   readability-identifier-naming.NamespaceCase: lower_case

@@ -16,7 +16,8 @@
 Follow the Google C++ Style Guide, with these naming deviations:
 
 - Functions and methods: `camelCase` (e.g. `openFile()`), not PascalCase.
-- Enumerators: `PascalCase` (e.g. `NotFound`), no `k` prefix.
+- Enumerators: `PascalCase` (e.g. `NotFound`). `enum class` enumerators take no `k` prefix;
+  unscoped ones may (C has no `constexpr`, so `enum { kName = ... }` serves as a constant there).
 - Local variables: `snake_case` preferred; `camelCase` acceptable.
   Keep one style within a function, preferably within a file. Match the surrounding code.
 - Constants whose value is obtained at run time (`static const` counter frequency, page size,
@@ -32,8 +33,7 @@ Exception: types meant to satisfy STL concepts, members mirroring STL interfaces
 `CELL_GCM_*` formats) follow that naming. Wrap such classes in
 `// NOLINTBEGIN(readability-identifier-naming)` / `// NOLINTEND(readability-identifier-naming)`,
 or mark a single line with `// NOLINT(readability-identifier-naming)` (`NOLINTNEXTLINE` when it
-does not fit). C has no `constexpr`, so an anonymous `enum { kName = ... }` used as a constant in
-C code is marked the same way.
+does not fit).
 
 ## C/C++ formatting
 
