@@ -18,7 +18,7 @@ constexpr std::uint32_t kPtSceRela = 0x700000A4;
 constexpr std::uint32_t kBaseAlignment = 0x10000;
 constexpr std::uint64_t kAddressLimit = 0x100000000ull;
 
-enum RelocType : std::uint32_t { kAddr32 = 1, kAddr16Lo = 4, kAddr16Hi = 5, kAddr16Ha = 6 };
+enum RelocType : std::uint32_t { Addr32 = 1, Addr16Lo = 4, Addr16Hi = 5, Addr16Ha = 6 };
 
 struct Segment {
     std::uint32_t type = 0;
@@ -48,22 +48,22 @@ std::string hex(std::uint64_t value, int digits = 8) {
 
 const char* typeName(std::uint32_t type) {
     switch (type) {
-        case kAddr32: return "ADDR32";
-        case kAddr16Lo: return "ADDR16_LO";
-        case kAddr16Hi: return "ADDR16_HI";
-        case kAddr16Ha: return "ADDR16_HA";
+        case Addr32: return "ADDR32";
+        case Addr16Lo: return "ADDR16_LO";
+        case Addr16Hi: return "ADDR16_HI";
+        case Addr16Ha: return "ADDR16_HA";
         default: return "unknown";
     }
 }
 
-std::size_t siteSize(std::uint32_t type) { return type == kAddr32 ? 4 : 2; }
+std::size_t siteSize(std::uint32_t type) { return type == Addr32 ? 4 : 2; }
 
 // The bytes a record leaves at its site for the 32-bit address `s`.
 std::uint32_t siteValue(std::uint32_t type, std::uint32_t s) {
     switch (type) {
-        case kAddr16Lo: return s & 0xFFFF;
-        case kAddr16Hi: return (s >> 16) & 0xFFFF;
-        case kAddr16Ha: return ((s + 0x8000) >> 16) & 0xFFFF;
+        case Addr16Lo: return s & 0xFFFF;
+        case Addr16Hi: return (s >> 16) & 0xFFFF;
+        case Addr16Ha: return ((s + 0x8000) >> 16) & 0xFFFF;
         default: return s;
     }
 }
@@ -193,7 +193,7 @@ bool relocatePrx(std::span<const std::uint8_t> prx, std::uint32_t base, Bytes& o
         const std::string prefix = "relocation record " + std::to_string(i) + ": ";
 
         const std::uint32_t type = static_cast<std::uint32_t>(r_info);
-        if (type != kAddr32 && type != kAddr16Lo && type != kAddr16Hi && type != kAddr16Ha) {
+        if (type != Addr32 && type != Addr16Lo && type != Addr16Hi && type != Addr16Ha) {
             error = prefix + "unsupported relocation type " + std::to_string(type);
             return false;
         }
@@ -239,9 +239,9 @@ bool relocatePrx(std::span<const std::uint8_t> prx, std::uint32_t base, Bytes& o
             writeBe16(site, static_cast<std::uint16_t>(value));
         }
         switch (type) {
-            case kAddr32: applied.addr32++; break;
-            case kAddr16Lo: applied.addr16_lo++; break;
-            case kAddr16Hi: applied.addr16_hi++; break;
+            case Addr32: applied.addr32++; break;
+            case Addr16Lo: applied.addr16_lo++; break;
+            case Addr16Hi: applied.addr16_hi++; break;
             default: applied.addr16_ha++; break;
         }
     }

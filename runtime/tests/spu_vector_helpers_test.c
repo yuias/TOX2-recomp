@@ -50,7 +50,7 @@ static uint32_t pickWord(void) {
     }
 }
 
-enum { kBatch = 512 };
+enum { kBatch = 512 };  // NOLINT(readability-identifier-naming)
 
 // The sticky exception flags in the low bits of the MXCSR are not part of the environment. FPCR has none
 // (they live in FPSR), so on arm64 the whole word is.
@@ -323,7 +323,7 @@ static int checkExactPaths(void) {
 // caller's MXCSR and they restore it. Back-to-back calls on changing operands run in the SPU environment, the
 // references in the default one, and the MXCSR is checked after each step.
 static int checkExactPathLoop(void) {
-    enum { kSteps = 4 };
+    enum { kSteps = 4 };  // NOLINT(readability-identifier-naming)
     long bad = 0;
     long forced = 0;
     const uint32_t saved = tox2SpuMxcsrGet();
@@ -439,7 +439,7 @@ static uint64_t pickDouble(void) {
 // The helpers that need round to nearest or denormals give the same words in the SPU environment as
 // in the default one, and leave the environment as they found it.
 static int checkRoundedHelpers(void) {
-    enum { kHelpers = 14 };
+    enum { kHelpers = 14 };  // NOLINT(readability-identifier-naming)
     long bad = 0;
     for (long it = 0; it < 200000; it++) {
         Tox2Vr a;
@@ -649,7 +649,7 @@ static Tox2Vr refRotqmby(Tox2Vr a, uint32_t count) {
 
 static Tox2Vr refRotqmbybi(Tox2Vr a, uint32_t count) { return refRotqmby(a, count >> 3); }
 
-enum { kQuadwordHelpers = 9 };
+enum { kQuadwordHelpers = 9 };  // NOLINT(readability-identifier-naming)
 
 static long g_qw_bad;
 static long g_qw_cases;

@@ -13,6 +13,7 @@
 #include "overlay/imgui_context.h"
 
 // The header keeps this declaration under `#if 0` so that it does not pull in <windows.h>.
+// NOLINTNEXTLINE(readability-identifier-naming)
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace tox2::overlay_platform {

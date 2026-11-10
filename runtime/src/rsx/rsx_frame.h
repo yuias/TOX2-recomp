@@ -12,7 +12,8 @@
 
 namespace tox2 {
 
-enum class RsxColorFormat : std::uint8_t { A8R8G8B8, F_X32, Unsupported };
+// Formats are named after their CELL_GCM_SURFACE_* constants.
+enum class RsxColorFormat : std::uint8_t { A8R8G8B8, F_X32, Unsupported };  // NOLINT(readability-identifier-naming)
 enum class RsxDepthFormat : std::uint8_t { None, Z24S8, Z16, Unsupported };
 // RSX BEGIN_END values 1..10.
 enum class RsxPrimitive : std::uint8_t {

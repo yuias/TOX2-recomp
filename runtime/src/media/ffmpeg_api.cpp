@@ -94,13 +94,13 @@ struct Modules {
 };
 
 // Library order of the load; also indexes the file names and handles.
-enum Library : std::size_t { kAvutil, kSwresample, kSwscale, kAvcodec, kLibraryCount };
+enum Library : std::size_t { Avutil, Swresample, Swscale, Avcodec, LibraryCount };
 
 // Frees the libraries of a failed load, last loaded first. Both loaders resolve an already loaded
 // library by its name, so a leaked handle would make a later load from another directory return the
 // old libraries.
 struct LoadedLibraries {
-    std::array<LibraryHandle, kLibraryCount> handles{};
+    std::array<LibraryHandle, LibraryCount> handles{};
     bool keep = false;
 
     LoadedLibraries() = default;
@@ -153,11 +153,11 @@ std::expected<FfmpegApi, std::string> loadFrom(const std::filesystem::path& dir)
     }
 
     // Load order puts the dependencies first. swresample is only a static import of avcodec.
-    std::array<std::string, kLibraryCount> files;
-    files[kAvutil] = ffmpegLibraryFileName("avutil", LIBAVUTIL_VERSION_MAJOR);
-    files[kSwresample] = ffmpegLibraryFileName("swresample", LIBSWRESAMPLE_VERSION_MAJOR);
-    files[kSwscale] = ffmpegLibraryFileName("swscale", LIBSWSCALE_VERSION_MAJOR);
-    files[kAvcodec] = ffmpegLibraryFileName("avcodec", LIBAVCODEC_VERSION_MAJOR);
+    std::array<std::string, LibraryCount> files;
+    files[Avutil] = ffmpegLibraryFileName("avutil", LIBAVUTIL_VERSION_MAJOR);
+    files[Swresample] = ffmpegLibraryFileName("swresample", LIBSWRESAMPLE_VERSION_MAJOR);
+    files[Swscale] = ffmpegLibraryFileName("swscale", LIBSWSCALE_VERSION_MAJOR);
+    files[Avcodec] = ffmpegLibraryFileName("avcodec", LIBAVCODEC_VERSION_MAJOR);
 
     std::vector<std::string> missing_files;
     for (const std::string& file : files) {
@@ -183,9 +183,8 @@ std::expected<FfmpegApi, std::string> loadFrom(const std::filesystem::path& dir)
                     std::format("cannot load {} from {}: {}", files[i], absolute_dir.generic_string(), error));
         }
     }
-    const Modules modules{.avutil = loaded.handles[kAvutil],
-                          .avcodec = loaded.handles[kAvcodec],
-                          .swscale = loaded.handles[kSwscale]};
+    const Modules modules{
+            .avutil = loaded.handles[Avutil], .avcodec = loaded.handles[Avcodec], .swscale = loaded.handles[Swscale]};
 
     FfmpegApi api;
     std::vector<std::string> missing_symbols;

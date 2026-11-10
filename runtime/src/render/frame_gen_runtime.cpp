@@ -92,9 +92,12 @@ void FrameGenController::apply() {
 void FrameGenController::changeLoadState(bool on, FrameGenTarget target) {
     // The swapchain release below runs the recreation callback; generation is turned off here instead, before the
     // resources it works on are freed.
-    struct Changing {
+    class Changing {
+    public:
         explicit Changing(bool& flag) : flag_(flag) { flag_ = true; }
         ~Changing() { flag_ = false; }
+
+    private:
         bool& flag_;
     } changing(changing_);
 

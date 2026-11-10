@@ -66,11 +66,13 @@ namespace tox2 {
 
 // Member names match FFmpeg's own, so a call site reads like the FFmpeg documentation. The types
 // come from the headers, so a signature change breaks the build instead of the run.
+// NOLINTBEGIN(readability-identifier-naming)
 struct FfmpegApi {
 #define TOX2_FFMPEG_MEMBER(library, name) decltype(&::name) name = nullptr;
     TOX2_FFMPEG_FUNCTIONS(TOX2_FFMPEG_MEMBER)
 #undef TOX2_FFMPEG_MEMBER
 };
+// NOLINTEND(readability-identifier-naming)
 
 // File name of an FFmpeg library on this platform: "avcodec-62.dll" on Windows,
 // "libavcodec.62.dylib" on macOS.

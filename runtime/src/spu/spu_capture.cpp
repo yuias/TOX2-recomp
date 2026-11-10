@@ -104,8 +104,8 @@ std::vector<std::string_view> split(std::string_view text, char sep) {
 
 // --- Capture state machine ------------------------------------------------------------------------
 
-enum Reason : std::uint32_t { kReads, kMfc, kStops, kDispatches, kReasonCount };
-constexpr const char* kReasonNames[kReasonCount] = {"channel reads", "mfc commands", "stops", "dispatches"};
+enum Reason : std::uint32_t { Reads, Mfc, Stops, Dispatches, ReasonCount };
+constexpr const char* kReasonNames[ReasonCount] = {"channel reads", "mfc commands", "stops", "dispatches"};
 
 // What the purity check compares between S and E: anything that moved means the span consumed an input that
 // the capture does not record.
@@ -136,7 +136,7 @@ struct SelectorState {
     std::atomic<std::uint32_t> written{0};
     std::atomic<std::uint32_t> reserved{0};
     std::atomic<std::uint32_t> next_file{0};
-    std::array<std::atomic<std::uint64_t>, kReasonCount> rejected{};
+    std::array<std::atomic<std::uint64_t>, ReasonCount> rejected{};
 };
 
 struct Use {
@@ -245,9 +245,8 @@ void startSpan(Installation& inst, std::uint32_t selector, std::uint32_t start, 
 void logRejections(const SelectorState& sel) {
     const SpuCaptureSelector& spec = sel.spec;
     logInfo("tox2: spu capture: image {} end {:#07x}: rejected spans: {} {}, {} {}, {} {}, {} {}", spec.image, spec.end,
-            kReasonNames[kReads], sel.rejected[kReads].load(), kReasonNames[kMfc], sel.rejected[kMfc].load(),
-            kReasonNames[kStops], sel.rejected[kStops].load(), kReasonNames[kDispatches],
-            sel.rejected[kDispatches].load());
+            kReasonNames[Reads], sel.rejected[Reads].load(), kReasonNames[Mfc], sel.rejected[Mfc].load(),
+            kReasonNames[Stops], sel.rejected[Stops].load(), kReasonNames[Dispatches], sel.rejected[Dispatches].load());
 }
 
 void endSpan(Installation& inst, std::uint32_t selector, std::uint32_t end, SpuThread& thread,
@@ -265,13 +264,13 @@ void endSpan(Installation& inst, std::uint32_t selector, std::uint32_t end, SpuT
     const std::uint64_t dispatches = thread.dispatchCount() - p.dispatches;
     std::optional<Reason> reason;
     if (now.reads != p.totals.reads) {
-        reason = kReads;
+        reason = Reads;
     } else if (now.mfc != p.totals.mfc) {
-        reason = kMfc;
+        reason = Mfc;
     } else if (now.stops != p.totals.stops) {
-        reason = kStops;
+        reason = Stops;
     } else if (sel.spec.max_dispatches != 0 && dispatches > sel.spec.max_dispatches) {
-        reason = kDispatches;
+        reason = Dispatches;
     }
     if (reason) {
         sel.rejected[*reason].fetch_add(1, std::memory_order_relaxed);

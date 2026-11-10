@@ -13540,7 +13540,7 @@ void testLwmutex() {
             {0x00800040, 0x1bc200f4, kModule, "sys_lwmutex_unlock"},
     };
     tox2::installImports(imports, 5);
-    enum { kCreate, kDestroy, kLock, kTryLock, kUnlock };
+    enum { Create, Destroy, Lock, TryLock, Unlock };
     auto call = [&](tox2::GuestThread& caller, std::uint32_t index, std::uint64_t r3, std::uint64_t r4 = 0) {
         Tox2PpuContext* ctx = &caller.context();
         ctx->gpr[3] = r3;
@@ -13553,31 +13553,31 @@ void testLwmutex() {
 
     tox2Write32(base, attr, 2);
     tox2Write32(base, attr + 4, 0x10);
-    CHECK(call(*a, kCreate, lw, attr) == 0);
+    CHECK(call(*a, Create, lw, attr) == 0);
     CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree);
     CHECK(tox2Read32(base, lw + 8) == 0x12);
     CHECK(tox2Read32(base, lw + 16) == 0x95000000);
 
-    CHECK(call(*a, kLock, lw, 0) == 0);
+    CHECK(call(*a, Lock, lw, 0) == 0);
     CHECK(tox2Read32(base, lw) == 0x01000000);
-    CHECK(call(*a, kLock, lw, 0) == 0);  // recursive
+    CHECK(call(*a, Lock, lw, 0) == 0);  // recursive
     CHECK(tox2Read32(base, lw + 12) == 1);
-    CHECK(call(*a, kTryLock, lw) == 0);
+    CHECK(call(*a, TryLock, lw) == 0);
     CHECK(tox2Read32(base, lw + 12) == 2);
-    CHECK(call(*b, kTryLock, lw) == err(tox2::kCellEbusy));
-    CHECK(call(*b, kUnlock, lw) == err(tox2::kCellEperm));
-    CHECK(call(*a, kDestroy, lw) == err(tox2::kCellEbusy));
-    CHECK(call(*b, kDestroy, lw) == err(tox2::kCellEbusy));
-    CHECK(call(*a, kUnlock, lw) == 0);
-    CHECK(call(*a, kUnlock, lw) == 0);
+    CHECK(call(*b, TryLock, lw) == err(tox2::kCellEbusy));
+    CHECK(call(*b, Unlock, lw) == err(tox2::kCellEperm));
+    CHECK(call(*a, Destroy, lw) == err(tox2::kCellEbusy));
+    CHECK(call(*b, Destroy, lw) == err(tox2::kCellEbusy));
+    CHECK(call(*a, Unlock, lw) == 0);
+    CHECK(call(*a, Unlock, lw) == 0);
     CHECK(tox2Read32(base, lw + 12) == 0);
     CHECK(tox2Read32(base, lw) == 0x01000000);
-    CHECK(call(*a, kUnlock, lw) == 0);
+    CHECK(call(*a, Unlock, lw) == 0);
     CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree);
 
     // Contention: the second thread blocks until the owner unlocks, and the waiter count shows in
     // the guest struct meanwhile.
-    CHECK(call(*a, kLock, lw, 0) == 0);
+    CHECK(call(*a, Lock, lw, 0) == 0);
     std::atomic<bool> b_ready{false};
     std::uint64_t b_result = ~0ull;
     {
@@ -13585,13 +13585,13 @@ void testLwmutex() {
         std::thread worker([&] {
             std::lock_guard<tox2::GuestLock> worker_guard(tox2::guestLock());
             b_ready = true;
-            b_result = call(*b, kLock, lw, 0);
+            b_result = call(*b, Lock, lw, 0);
         });
         tox2::guestLock().unlock();
         while (!b_ready) std::this_thread::yield();
         tox2::guestLock().lock();
         CHECK(tox2Read32(base, lw + 4) == 1);
-        CHECK(call(*a, kUnlock, lw) == 0);
+        CHECK(call(*a, Unlock, lw) == 0);
         tox2::guestLock().unlock();
         worker.join();
         tox2::guestLock().lock();
@@ -13599,33 +13599,33 @@ void testLwmutex() {
     CHECK(b_result == 0);
     CHECK(tox2Read32(base, lw) == 0x01000001);
     CHECK(tox2Read32(base, lw + 4) == 0);
-    CHECK(call(*b, kUnlock, lw) == 0);
+    CHECK(call(*b, Unlock, lw) == 0);
 
     // A timed lock on a held lwmutex gives up with ETIMEDOUT.
-    CHECK(call(*a, kLock, lw, 0) == 0);
+    CHECK(call(*a, Lock, lw, 0) == 0);
     {
         std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
-        CHECK(call(*b, kLock, lw, 1000) == err(tox2::kCellEtimedout));
+        CHECK(call(*b, Lock, lw, 1000) == err(tox2::kCellEtimedout));
     }
-    CHECK(call(*a, kUnlock, lw) == 0);
+    CHECK(call(*a, Unlock, lw) == 0);
 
     // Non-recursive: relock is EDEADLK; a destroyed lwmutex is dead.
     tox2Write32(base, attr, 1);
     tox2Write32(base, attr + 4, 0x20);
-    CHECK(call(*a, kCreate, lw2, attr) == 0);
-    CHECK(call(*a, kLock, lw2, 0) == 0);
-    CHECK(call(*a, kLock, lw2, 0) == err(tox2::kCellEdeadlk));
-    CHECK(call(*a, kUnlock, lw2) == 0);
-    CHECK(call(*a, kDestroy, lw2) == 0);
+    CHECK(call(*a, Create, lw2, attr) == 0);
+    CHECK(call(*a, Lock, lw2, 0) == 0);
+    CHECK(call(*a, Lock, lw2, 0) == err(tox2::kCellEdeadlk));
+    CHECK(call(*a, Unlock, lw2) == 0);
+    CHECK(call(*a, Destroy, lw2) == 0);
     CHECK(tox2Read32(base, lw2) == tox2::kLwmutexDead);
-    CHECK(call(*a, kLock, lw2, 0) == err(tox2::kCellEinval));
-    CHECK(call(*a, kTryLock, lw2) == err(tox2::kCellEinval));
+    CHECK(call(*a, Lock, lw2, 0) == err(tox2::kCellEinval));
+    CHECK(call(*a, TryLock, lw2) == err(tox2::kCellEinval));
 
     tox2Write32(base, attr + 4, 0x30);
-    CHECK(call(*a, kCreate, lw2, attr) == err(tox2::kCellEinval));
+    CHECK(call(*a, Create, lw2, attr) == err(tox2::kCellEinval));
     tox2Write32(base, attr, 3);
     tox2Write32(base, attr + 4, 0x10);
-    CHECK(call(*a, kCreate, lw2, attr) == err(tox2::kCellEinval));
+    CHECK(call(*a, Create, lw2, attr) == err(tox2::kCellEinval));
 
     // The process-internal objects take the first ids of their kinds.
     tox2::resetSyncObjects();
@@ -13664,7 +13664,7 @@ void testLwcond() {
             {0x00800060, 0xef87a695, kModule, "sys_lwcond_signal"},
     };
     tox2::installImports(imports, 7);
-    enum { kMutexCreate, kLock, kUnlock, kCondCreate, kCondDestroy, kWait, kSignal };
+    enum { MutexCreate, Lock, Unlock, CondCreate, CondDestroy, Wait, Signal };
     auto call = [&](tox2::GuestThread& caller, std::uint32_t index, std::uint64_t r3, std::uint64_t r4 = 0,
                     std::uint64_t r5 = 0) {
         Tox2PpuContext* ctx = &caller.context();
@@ -13679,39 +13679,39 @@ void testLwcond() {
 
     tox2Write32(base, attr, 2);
     tox2Write32(base, attr + 4, 0x10);
-    CHECK(call(*a, kMutexCreate, lw, attr) == 0);
+    CHECK(call(*a, MutexCreate, lw, attr) == 0);
 
     // Create stores the lwmutex address and the object id; ids are never reused.
-    CHECK(call(*a, kCondCreate, 0, lw, cattr) == err(tox2::kCellEfault));
-    CHECK(call(*a, kCondCreate, lc, 0, cattr) == err(tox2::kCellEfault));
-    CHECK(call(*a, kCondCreate, lc, lw, cattr) == 0);
+    CHECK(call(*a, CondCreate, 0, lw, cattr) == err(tox2::kCellEfault));
+    CHECK(call(*a, CondCreate, lc, 0, cattr) == err(tox2::kCellEfault));
+    CHECK(call(*a, CondCreate, lc, lw, cattr) == 0);
     CHECK(tox2Read32(base, lc) == lw && tox2Read32(base, lc + 4) == 0x97000000);
-    CHECK(call(*a, kCondCreate, lc2, lw, cattr) == 0);
+    CHECK(call(*a, CondCreate, lc2, lw, cattr) == 0);
     CHECK(tox2Read32(base, lc2 + 4) == 0x97000100);
 
     // The caller must own the lwmutex; an unknown id is ESRCH.
-    CHECK(call(*a, kWait, lc, 0) == err(tox2::kCellEperm));
-    CHECK(call(*a, kLock, lw, 0) == 0);
-    CHECK(call(*b, kWait, lc, 0) == err(tox2::kCellEperm));
-    CHECK(call(*a, kUnlock, lw) == 0);
+    CHECK(call(*a, Wait, lc, 0) == err(tox2::kCellEperm));
+    CHECK(call(*a, Lock, lw, 0) == 0);
+    CHECK(call(*b, Wait, lc, 0) == err(tox2::kCellEperm));
+    CHECK(call(*a, Unlock, lw) == 0);
     tox2Write32(base, lc2 + 4, 0x97000fff);
-    CHECK(call(*a, kWait, lc2, 0) == err(tox2::kCellEsrch));
-    CHECK(call(*a, kSignal, lc2) == err(tox2::kCellEsrch));
-    CHECK(call(*a, kCondDestroy, lc2) == err(tox2::kCellEsrch));
+    CHECK(call(*a, Wait, lc2, 0) == err(tox2::kCellEsrch));
+    CHECK(call(*a, Signal, lc2) == err(tox2::kCellEsrch));
+    CHECK(call(*a, CondDestroy, lc2) == err(tox2::kCellEsrch));
     tox2Write32(base, lc2 + 4, 0x97000100);
 
     // A signal without a waiter is dropped; a timed wait gives the lwmutex back with its recursion
     // count restored.
-    CHECK(call(*a, kSignal, lc) == 0);
-    CHECK(call(*a, kLock, lw, 0) == 0);
-    CHECK(call(*a, kLock, lw, 0) == 0);
+    CHECK(call(*a, Signal, lc) == 0);
+    CHECK(call(*a, Lock, lw, 0) == 0);
+    CHECK(call(*a, Lock, lw, 0) == 0);
     {
         std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
-        CHECK(call(*a, kWait, lc, 1000) == err(tox2::kCellEtimedout));
+        CHECK(call(*a, Wait, lc, 1000) == err(tox2::kCellEtimedout));
     }
     CHECK(tox2Read32(base, lw) == 0x01000000 && tox2Read32(base, lw + 12) == 1);
-    CHECK(call(*a, kUnlock, lw) == 0);
-    CHECK(call(*a, kUnlock, lw) == 0);
+    CHECK(call(*a, Unlock, lw) == 0);
+    CHECK(call(*a, Unlock, lw) == 0);
     CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree);
 
     // Hand-over: the waiter releases the lwmutex completely, a signal sent while another thread owns
@@ -13722,18 +13722,18 @@ void testLwcond() {
         std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
         std::thread worker([&] {
             std::lock_guard<tox2::GuestLock> worker_guard(tox2::guestLock());
-            call(*b, kLock, lw, 0);
-            call(*b, kLock, lw, 0);
+            call(*b, Lock, lw, 0);
+            call(*b, Lock, lw, 0);
             b_ready = true;
-            b_result = call(*b, kWait, lc, 0);
+            b_result = call(*b, Wait, lc, 0);
         });
         tox2::guestLock().unlock();
         while (!b_ready) std::this_thread::yield();
         tox2::guestLock().lock();
         CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree && tox2Read32(base, lw + 12) == 0);
-        CHECK(call(*a, kCondDestroy, lc) == err(tox2::kCellEbusy));
-        CHECK(call(*a, kLock, lw, 0) == 0);
-        CHECK(call(*a, kSignal, lc) == 0);
+        CHECK(call(*a, CondDestroy, lc) == err(tox2::kCellEbusy));
+        CHECK(call(*a, Lock, lw, 0) == 0);
+        CHECK(call(*a, Signal, lc) == 0);
         tox2::guestLock().unlock();
         // The woken waiter blocks on the lwmutex that `a` still owns.
         for (;;) {
@@ -13743,22 +13743,22 @@ void testLwcond() {
             std::this_thread::yield();
         }
         CHECK(b_result == ~0ull);
-        CHECK(call(*a, kUnlock, lw) == 0);
+        CHECK(call(*a, Unlock, lw) == 0);
         tox2::guestLock().unlock();
         worker.join();
         tox2::guestLock().lock();
     }
     CHECK(b_result == 0);
     CHECK(tox2Read32(base, lw) == 0x01000001 && tox2Read32(base, lw + 12) == 1);
-    CHECK(call(*b, kUnlock, lw) == 0);
-    CHECK(call(*b, kUnlock, lw) == 0);
-    CHECK(call(*b, kUnlock, lw) == err(tox2::kCellEperm));
+    CHECK(call(*b, Unlock, lw) == 0);
+    CHECK(call(*b, Unlock, lw) == 0);
+    CHECK(call(*b, Unlock, lw) == err(tox2::kCellEperm));
 
     // Destroy forgets the object.
-    CHECK(call(*a, kCondDestroy, lc) == 0);
-    CHECK(call(*a, kCondDestroy, lc) == err(tox2::kCellEsrch));
-    CHECK(call(*a, kSignal, lc) == err(tox2::kCellEsrch));
-    CHECK(call(*a, kCondDestroy, lc2) == 0);
+    CHECK(call(*a, CondDestroy, lc) == 0);
+    CHECK(call(*a, CondDestroy, lc) == err(tox2::kCellEsrch));
+    CHECK(call(*a, Signal, lc) == err(tox2::kCellEsrch));
+    CHECK(call(*a, CondDestroy, lc2) == 0);
 
     p.main.free(scratch);
     tox2::resetSyncObjects();
@@ -13805,7 +13805,7 @@ void testLwmutexHandoff() {
             {0x00800060, 0xef87a695, kModule, "sys_lwcond_signal"},
     };
     tox2::installImports(imports, 7);
-    enum { kCreate, kLock, kTryLock, kUnlock, kCondCreate, kWait, kSignal };
+    enum { Create, Lock, TryLock, Unlock, CondCreate, Wait, Signal };
     auto call = [&](tox2::GuestThread& caller, std::uint32_t index, std::uint64_t r3, std::uint64_t r4 = 0,
                     std::uint64_t r5 = 0) {
         Tox2PpuContext* ctx = &caller.context();
@@ -13832,8 +13832,8 @@ void testLwmutexHandoff() {
     auto serveOrder = [&](std::uint32_t protocol) {
         tox2Write32(base, attr, protocol);
         tox2Write32(base, attr + 4, 0x10);
-        CHECK(call(*a, kCreate, lw, attr) == 0);
-        CHECK(call(*a, kLock, lw, 0) == 0);
+        CHECK(call(*a, Create, lw, attr) == 0);
+        CHECK(call(*a, Lock, lw, 0) == 0);
         std::vector<std::string> served;
         std::vector<std::thread> workers;
         tox2::GuestThread* const callers[] = {b.get(), c.get(), d.get()};
@@ -13841,19 +13841,19 @@ void testLwmutexHandoff() {
         for (std::uint32_t i = 0; i < 3; i++) {
             workers.emplace_back([&, i] {
                 std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
-                const bool locked = call(*callers[i], kLock, lw, 0) == 0;
+                const bool locked = call(*callers[i], Lock, lw, 0) == 0;
                 served.push_back(locked ? names[i] : "failed");
-                call(*callers[i], kUnlock, lw);
+                call(*callers[i], Unlock, lw);
             });
             CHECK(waitUnderGuestLock([&] { return tox2Read32(base, lw + 4) == i + 1; }));
         }
         {
             // The chosen waiter cannot run before the guest lock is given up.
             std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
-            CHECK(call(*a, kUnlock, lw) == 0);
+            CHECK(call(*a, Unlock, lw) == 0);
             CHECK(tox2Read32(base, lw) == tox2::kLwmutexReserved);
-            CHECK(call(*a, kTryLock, lw) == err(tox2::kCellEbusy));
-            CHECK(call(*a, kUnlock, lw) == err(tox2::kCellEperm));
+            CHECK(call(*a, TryLock, lw) == err(tox2::kCellEbusy));
+            CHECK(call(*a, Unlock, lw) == err(tox2::kCellEperm));
         }
         for (std::thread& worker : workers) worker.join();
         CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree && tox2Read32(base, lw + 4) == 0);
@@ -13872,36 +13872,36 @@ void testLwmutexHandoff() {
     // The unlock grants the waiter after its timeout expired but before it got the guest lock back: it owns the
     // lwmutex and reports success.
     tox2Write32(base, attr, 2);
-    CHECK(call(*a, kCreate, lw, attr) == 0);
-    CHECK(call(*a, kLock, lw, 0) == 0);
+    CHECK(call(*a, Create, lw, attr) == 0);
+    CHECK(call(*a, Lock, lw, 0) == 0);
     std::uint64_t e_result = ~0ull;
     std::thread timed([&] {
         std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
-        e_result = call(*e, kLock, lw, 20'000);
+        e_result = call(*e, Lock, lw, 20'000);
     });
     CHECK(waitUnderGuestLock([&] { return tox2Read32(base, lw + 4) == 1; }));
     {
         std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
-        CHECK(call(*a, kUnlock, lw) == 0);
+        CHECK(call(*a, Unlock, lw) == 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     timed.join();
     CHECK(e_result == 0);
     CHECK(tox2Read32(base, lw) == 0x01000004 && tox2Read32(base, lw + 4) == 0);
-    CHECK(call(*e, kUnlock, lw) == 0);
+    CHECK(call(*e, Unlock, lw) == 0);
     CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree);
 
     // The release inside lwcond_wait hands the lwmutex over too: b queued before `a` waits on the condition, so
     // right after the wait began the lwmutex is reserved for b. The observer queues for the guest lock before the wait
     // wakes b, so it runs first.
-    CHECK(call(*a, kCondCreate, lc, lw, cattr) == 0);
-    CHECK(call(*a, kLock, lw, 0) == 0);
+    CHECK(call(*a, CondCreate, lc, lw, cattr) == 0);
+    CHECK(call(*a, Lock, lw, 0) == 0);
     std::uint64_t b_result = ~0ull, a_result = ~0ull;
     std::thread locker([&] {
         std::lock_guard<tox2::GuestLock> guard(tox2::guestLock());
-        b_result = call(*b, kLock, lw, 0);
-        call(*b, kUnlock, lw);
+        b_result = call(*b, Lock, lw, 0);
+        call(*b, Unlock, lw);
     });
     CHECK(waitUnderGuestLock([&] { return tox2Read32(base, lw + 4) == 1; }));
     std::thread observer;
@@ -13912,11 +13912,11 @@ void testLwmutexHandoff() {
         observer = std::thread([&] {
             std::lock_guard<tox2::GuestLock> observer_guard(tox2::guestLock());
             owner_word = tox2Read32(base, lw);
-            try_result = call(*c, kTryLock, lw);
-            signal_result = call(*c, kSignal, lc);
+            try_result = call(*c, TryLock, lw);
+            signal_result = call(*c, Signal, lc);
         });
         while (tox2::guestLock().waiterCount() == 0) std::this_thread::yield();
-        a_result = call(*a, kWait, lc, 0);
+        a_result = call(*a, Wait, lc, 0);
     }
     observer.join();
     locker.join();
@@ -13924,7 +13924,7 @@ void testLwmutexHandoff() {
     CHECK(try_result == err(tox2::kCellEbusy) && signal_result == 0);
     CHECK(b_result == 0 && a_result == 0);
     CHECK(tox2Read32(base, lw) == 0x01000000);  // the waiter took the lwmutex back after b
-    CHECK(call(*a, kUnlock, lw) == 0);
+    CHECK(call(*a, Unlock, lw) == 0);
     CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree);
 
     p.main.free(scratch);
@@ -14177,19 +14177,19 @@ void testSysPrxForUserLibc() {
     };
     tox2::installImports(imports, 13);
     enum {
-        kStrlen,
-        kStrcpy,
-        kStrcat,
-        kStrncpy,
-        kStrncat,
-        kStrncmp,
-        kMemcmp,
-        kMemset,
-        kMemcpy,
-        kPrintf,
-        kVprintf,
-        kSnprintf,
-        kVsnprintf
+        Strlen,
+        Strcpy,
+        Strcat,
+        Strncpy,
+        Strncat,
+        Strncmp,
+        Memcmp,
+        Memset,
+        Memcpy,
+        Printf,
+        Vprintf,
+        Snprintf,
+        Vsnprintf
     };
     auto ctx = std::make_unique<Tox2PpuContext>();
     ctx->gpr[1] = stack;
@@ -14215,69 +14215,69 @@ void testSysPrxForUserLibc() {
 
     // strlen, strcpy, strcat: the result of the last two is the destination.
     put(a, "hello");
-    CHECK(call(kStrlen, a) == 5);
-    CHECK(call(kStrlen, c) == 0);
+    CHECK(call(Strlen, a) == 5);
+    CHECK(call(Strlen, c) == 0);
     fill(b, 0xaa, 32);
-    CHECK(call(kStrcpy, b, a) == b && get(b) == "hello" && tox2Read8(base, b + 6) == 0xaa);
+    CHECK(call(Strcpy, b, a) == b && get(b) == "hello" && tox2Read8(base, b + 6) == 0xaa);
     put(c, " world");
-    CHECK(call(kStrcat, b, c) == b && get(b) == "hello world");
+    CHECK(call(Strcat, b, c) == b && get(b) == "hello world");
 
     // strncpy pads with NULs up to n and leaves the string unterminated when the source is longer.
     fill(b, 0xaa, 32);
-    CHECK(call(kStrncpy, b, a, 8) == b);
+    CHECK(call(Strncpy, b, a, 8) == b);
     CHECK(get(b) == "hello" && tox2Read8(base, b + 5) == 0 && tox2Read8(base, b + 7) == 0 &&
           tox2Read8(base, b + 8) == 0xaa);
     fill(b, 0xaa, 32);
-    call(kStrncpy, b, a, 3);
+    call(Strncpy, b, a, 3);
     CHECK(tox2Read8(base, b + 2) == 'l' && tox2Read8(base, b + 3) == 0xaa);
 
     // strncat appends at most n characters and then a NUL.
     put(b, "ab");
     put(c, "cdefgh");
-    CHECK(call(kStrncat, b, c, 3) == b && get(b) == "abcde" && tox2Read8(base, b + 5) == 0);
+    CHECK(call(Strncat, b, c, 3) == b && get(b) == "abcde" && tox2Read8(base, b + 5) == 0);
     put(b, "ab");
-    call(kStrncat, b, c, 100);
+    call(Strncat, b, c, 100);
     CHECK(get(b) == "abcdefgh");
 
     // strncmp stops at NUL and at n; memcmp does neither. The result is the unsigned byte difference.
     put(a, "abc");
     put(b, "abd");
-    CHECK(call(kStrncmp, a, b, 3) == err(static_cast<std::uint32_t>(-1)));
-    CHECK(call(kStrncmp, b, a, 3) == 1);
-    CHECK(call(kStrncmp, a, b, 2) == 0);
-    CHECK(call(kStrncmp, a, b, 0) == 0);
+    CHECK(call(Strncmp, a, b, 3) == err(static_cast<std::uint32_t>(-1)));
+    CHECK(call(Strncmp, b, a, 3) == 1);
+    CHECK(call(Strncmp, a, b, 2) == 0);
+    CHECK(call(Strncmp, a, b, 0) == 0);
     put(a, "ab");
     tox2Write8(base, a + 3, 'x');
     put(b, "ab");
     tox2Write8(base, b + 3, 'y');
-    CHECK(call(kStrncmp, a, b, 4) == 0);
-    CHECK(call(kMemcmp, a, b, 4) == err(static_cast<std::uint32_t>(-1)));
+    CHECK(call(Strncmp, a, b, 4) == 0);
+    CHECK(call(Memcmp, a, b, 4) == err(static_cast<std::uint32_t>(-1)));
     tox2Write8(base, a, 0xff);
-    CHECK(call(kMemcmp, a, b, 1) == 0xff - 'a');
-    CHECK(call(kMemcmp, a, b, 0) == 0);
+    CHECK(call(Memcmp, a, b, 1) == 0xff - 'a');
+    CHECK(call(Memcmp, a, b, 0) == 0);
 
     // memset stores the low byte; memcpy copes with overlap in both directions.
     fill(a, 0, 16);
-    CHECK(call(kMemset, a, 0x1234, 4) == a);
+    CHECK(call(Memset, a, 0x1234, 4) == a);
     CHECK(tox2Read8(base, a) == 0x34 && tox2Read8(base, a + 3) == 0x34 && tox2Read8(base, a + 4) == 0);
     put(a, "0123456789");
-    CHECK(call(kMemcpy, a + 2, a, 6) == a + 2);
+    CHECK(call(Memcpy, a + 2, a, 6) == a + 2);
     CHECK(get(a) == "0101234589");
     put(a, "0123456789");
-    CHECK(call(kMemcpy, a, a + 2, 6) == a);
+    CHECK(call(Memcpy, a, a + 2, 6) == a);
     CHECK(get(a) == "2345676789");
 
     // printf returns the length; its arguments start at slot 1.
     put(fmt, "%s=%d\n");
     put(c, "key");
-    CHECK(call(kPrintf, fmt, c, 42) == 7);
+    CHECK(call(Printf, fmt, c, 42) == 7);
     CHECK(countContaining(lines, "tox2: printf:") == 0);
 
     // vprintf reads 8-byte slots at the pointer.
     tox2Write64(base, va, c);
     tox2Write64(base, va + 8, static_cast<std::uint64_t>(-1));
     put(fmt, "%s:%d\n");
-    CHECK(call(kVprintf, fmt, va) == 7);
+    CHECK(call(Vprintf, fmt, va) == 7);
 
     // snprintf returns the full length and cuts the output to size - 1 bytes plus a NUL. Its arguments
     // start at slot 3.
@@ -14285,11 +14285,11 @@ void testSysPrxForUserLibc() {
     put(a, "ab");
     put(b, "cd");
     fill(c, 0xaa, 16);
-    CHECK(call(kSnprintf, c, 16, fmt, a, b, 123) == 7 && get(c) == "abcd123");
+    CHECK(call(Snprintf, c, 16, fmt, a, b, 123) == 7 && get(c) == "abcd123");
     fill(c, 0xaa, 16);
-    CHECK(call(kSnprintf, c, 5, fmt, a, b, 123) == 7 && get(c) == "abcd" && tox2Read8(base, c + 5) == 0xaa);
-    CHECK(call(kSnprintf, c, 0, fmt, a, b, 123) == 7 && get(c) == "abcd");
-    CHECK(call(kSnprintf, c, 1, fmt, a, b, 123) == 7 && tox2Read8(base, c) == 0 && tox2Read8(base, c + 1) == 'b');
+    CHECK(call(Snprintf, c, 5, fmt, a, b, 123) == 7 && get(c) == "abcd" && tox2Read8(base, c + 5) == 0xaa);
+    CHECK(call(Snprintf, c, 0, fmt, a, b, 123) == 7 && get(c) == "abcd");
+    CHECK(call(Snprintf, c, 1, fmt, a, b, 123) == 7 && tox2Read8(base, c) == 0 && tox2Read8(base, c + 1) == 'b');
 
     // vsnprintf takes its arguments from the va list.
     put(fmt, "%s-%x");
@@ -14297,13 +14297,13 @@ void testSysPrxForUserLibc() {
     tox2Write64(base, va, c);
     tox2Write64(base, va + 8, 0xbeef);
     fill(a, 0xaa, 16);
-    CHECK(call(kVsnprintf, a, 16, fmt, va) == 7 && get(a) == "id-beef");
+    CHECK(call(Vsnprintf, a, 16, fmt, va) == 7 && get(a) == "id-beef");
 
     // An unsupported conversion is logged once per format address; what came before it is printed.
     put(fmt, "ab%n");
     lines.clear();
-    CHECK(call(kPrintf, fmt) == 2);
-    CHECK(call(kPrintf, fmt) == 2);
+    CHECK(call(Printf, fmt) == 2);
+    CHECK(call(Printf, fmt) == 2);
     CHECK(countContaining(lines, "tox2: printf:") == 1);
 
     p.main.free(scratch);
@@ -14449,7 +14449,7 @@ void testSpuPrintfCallbacks() {
             {0x00800030, 0x5fdfb2fe, "sysPrxForUser", "_sys_spu_printf_detach_group"},
     };
     tox2::installImports(imports, 4);
-    enum { kInitialize, kFinalize, kAttach, kDetach };
+    enum { Initialize, Finalize, Attach, Detach };
     auto ctx = std::make_unique<Tox2PpuContext>();
     const std::uint32_t scratch = p.main.allocate(0x10000, 0x10000);
     CHECK(scratch != 0);
@@ -14466,31 +14466,31 @@ void testSpuPrintfCallbacks() {
 
     // No server registered yet: both calls report a wrong state. An earlier test may have left callbacks
     // behind, so start from finalize.
-    CHECK(call(kFinalize) == 0);
-    CHECK(call(kAttach, 0x04000100) == err(tox2::kCellEstat));
-    CHECK(call(kDetach, 0x04000100) == err(tox2::kCellEstat));
+    CHECK(call(Finalize) == 0);
+    CHECK(call(Attach, 0x04000100) == err(tox2::kCellEstat));
+    CHECK(call(Detach, 0x04000100) == err(tox2::kCellEstat));
 
     const std::uint32_t attach = tox2::registerHostFunction("spuPrintfAttachCallback", spuPrintfAttachCallback);
     const std::uint32_t detach = tox2::registerHostFunction("spuPrintfDetachCallback", spuPrintfDetachCallback);
     CHECK(attach != 0 && detach != 0);
-    CHECK(call(kInitialize, attach, detach, 0x1234, 0x5678) == 0);
+    CHECK(call(Initialize, attach, detach, 0x1234, 0x5678) == 0);
 
     // The group id reaches the callback and the callback's result comes back.
     g_printf_callback_runs = 0;
-    CHECK(call(kAttach, 0x04000100) == 0);
+    CHECK(call(Attach, 0x04000100) == 0);
     CHECK(g_printf_callback_runs == 1 && g_printf_callback_group == 0x04000100);
-    CHECK(call(kDetach, 0x04000200) == err(tox2::kCellEinval));
+    CHECK(call(Detach, 0x04000200) == err(tox2::kCellEinval));
     CHECK(g_printf_callback_runs == 2 && g_printf_callback_group == 0x04000200);
 
     // Finalize forgets the callbacks.
-    CHECK(call(kFinalize) == 0);
-    CHECK(call(kAttach, 0x04000100) == err(tox2::kCellEstat));
+    CHECK(call(Finalize) == 0);
+    CHECK(call(Attach, 0x04000100) == err(tox2::kCellEstat));
     CHECK(g_printf_callback_runs == 2);
 
     // A server that registers no group callback is the same as none.
-    CHECK(call(kInitialize, 0, 0, 0, 0) == 0);
-    CHECK(call(kAttach, 0x04000100) == err(tox2::kCellEstat));
-    CHECK(call(kFinalize) == 0);
+    CHECK(call(Initialize, 0, 0, 0, 0) == 0);
+    CHECK(call(Attach, 0x04000100) == err(tox2::kCellEstat));
+    CHECK(call(Finalize) == 0);
 
     p.main.free(scratch);
     tox2::resetHostFunctions();
@@ -14639,7 +14639,7 @@ void testPpuThreads() {
             {0x00800030, 0xaff080a4, kModule, "sys_ppu_thread_exit"},
     };
     tox2::installImports(imports, 4);
-    enum { kCreate, kGetId, kOnce };
+    enum { Create, GetId, Once };
     auto call = [&](tox2::GuestThread& caller, std::uint32_t index, std::uint64_t r3 = 0, std::uint64_t r4 = 0,
                     std::uint64_t r5 = 0, std::uint64_t r6 = 0, std::uint64_t r7 = 0, std::uint64_t r8 = 0,
                     std::uint64_t r9 = 0) {
@@ -14667,12 +14667,12 @@ void testPpuThreads() {
     CHECK(probe != 0);
 
     // Creation errors give the TLS block back.
-    CHECK(call(*caller, kCreate, id_out, 0, 1, 500, 0x10000, 1, 0) == err(tox2::kCellEfault));
-    CHECK(call(*caller, kCreate, id_out, opd_entry, 1, 3072, 0x10000, 1, 0) == err(tox2::kCellEinval));
-    CHECK(call(*caller, kCreate, id_out, opd_entry, 1, static_cast<std::uint64_t>(-1), 0x10000, 1, 0) ==
+    CHECK(call(*caller, Create, id_out, 0, 1, 500, 0x10000, 1, 0) == err(tox2::kCellEfault));
+    CHECK(call(*caller, Create, id_out, opd_entry, 1, 3072, 0x10000, 1, 0) == err(tox2::kCellEinval));
+    CHECK(call(*caller, Create, id_out, opd_entry, 1, static_cast<std::uint64_t>(-1), 0x10000, 1, 0) ==
           err(tox2::kCellEinval));
-    CHECK(call(*caller, kCreate, id_out, opd_entry, 1, 500, 0x10000, 3, 0) == err(tox2::kCellEperm));
-    CHECK(call(*caller, kCreate, 0, opd_entry, 1, 500, 0x10000, 1, 0) == err(tox2::kCellEnomem));
+    CHECK(call(*caller, Create, id_out, opd_entry, 1, 500, 0x10000, 3, 0) == err(tox2::kCellEperm));
+    CHECK(call(*caller, Create, 0, opd_entry, 1, 500, 0x10000, 1, 0) == err(tox2::kCellEnomem));
     const std::uint32_t probe2 = tox2::allocateTls();
     tox2::freeTls(probe2);
     CHECK(probe2 == probe);
@@ -14681,7 +14681,7 @@ void testPpuThreads() {
     // A joinable thread starts at the descriptor with r3 = arg, r4 = 0, r2 = TOC and its own r13.
     const char long_name[] = "a-thread-name-that-is-far-longer-than-27-characters";
     std::memcpy(base + name, long_name, sizeof(long_name));
-    CHECK(call(*caller, kCreate, id_out, opd_entry, 7, 500, 0x10000, 1, name) == 0);
+    CHECK(call(*caller, Create, id_out, opd_entry, 7, 500, 0x10000, 1, name) == 0);
     const auto id = static_cast<std::uint32_t>(tox2Read64(base, id_out));
     tox2::GuestThread* thread = tox2::findThread(id);
     CHECK(thread != nullptr && thread->id() == id);
@@ -14703,7 +14703,7 @@ void testPpuThreads() {
     CHECK(syscallAs(*caller, 48, id, join_out) == err(tox2::kCellEsrch));
 
     // Leaving through sys_ppu_thread_exit returns the TLS block and reports the exit value.
-    CHECK(call(*caller, kCreate, id_out, opd_entry, 5, 500, 0x4000, 1, 0) == 0);
+    CHECK(call(*caller, Create, id_out, opd_entry, 5, 500, 0x4000, 1, 0) == 0);
     const auto id2 = static_cast<std::uint32_t>(tox2Read64(base, id_out));
     CHECK(id2 == id + 1);
     CHECK(syscallAs(*caller, 44, id2, join_out) == 0);
@@ -14714,10 +14714,10 @@ void testPpuThreads() {
     CHECK(syscallAs(*caller, 44, id2, 0) == err(tox2::kCellEsrch));
 
     // A detached thread cannot be joined; a missing result pointer is reported after the join.
-    CHECK(call(*caller, kCreate, id_out, opd_entry, 1, 500, 0x4000, 0, 0) == 0);
+    CHECK(call(*caller, Create, id_out, opd_entry, 1, 500, 0x4000, 0, 0) == 0);
     const auto id3 = static_cast<std::uint32_t>(tox2Read64(base, id_out));
     CHECK(syscallAs(*caller, 44, id3, join_out) == err(tox2::kCellEinval));
-    CHECK(call(*caller, kCreate, id_out, opd_entry, 2, 500, 0x4000, 1, 0) == 0);
+    CHECK(call(*caller, Create, id_out, opd_entry, 2, 500, 0x4000, 1, 0) == 0);
     const auto id4 = static_cast<std::uint32_t>(tox2Read64(base, id_out));
     CHECK(syscallAs(*caller, 44, id4, 0) == err(tox2::kCellEfault));
     while (tox2::findThread(id3)->state() != tox2::ThreadState::Exited) {
@@ -14727,7 +14727,7 @@ void testPpuThreads() {
     CHECK(g_entry_runs == 4);
 
     // The interrupt flag creates the thread without starting it.
-    CHECK(call(*caller, kCreate, id_out, opd_entry, 1, 500, 0x4000, 2, 0) == 0);
+    CHECK(call(*caller, Create, id_out, opd_entry, 1, 500, 0x4000, 2, 0) == 0);
     const auto id5 = static_cast<std::uint32_t>(tox2Read64(base, id_out));
     CHECK(tox2::findThread(id5) != nullptr && tox2::findThread(id5)->state() == tox2::ThreadState::Created);
     CHECK(g_entry_runs == 4);
@@ -14749,7 +14749,7 @@ void testPpuThreads() {
 
     // detach: a joinable thread that has not run yet becomes unjoinable, a second detach is
     // refused, and the thread is gone for lv2 once it has exited.
-    CHECK(call(*caller, kCreate, id_out, opd_entry, 1, 500, 0x4000, 1, 0) == 0);
+    CHECK(call(*caller, Create, id_out, opd_entry, 1, 500, 0x4000, 1, 0) == 0);
     const auto id6 = static_cast<std::uint32_t>(tox2Read64(base, id_out));
     CHECK(syscallAs(*caller, 45, id6) == 0);
     CHECK(syscallAs(*caller, 45, id6) == err(tox2::kCellEinval));
@@ -14760,7 +14760,7 @@ void testPpuThreads() {
     CHECK(syscallAs(*caller, 45, id6) == err(tox2::kCellEsrch));
 
     // A thread that exited without being joined is dropped by the detach.
-    CHECK(call(*caller, kCreate, id_out, opd_entry, 1, 500, 0x4000, 1, 0) == 0);
+    CHECK(call(*caller, Create, id_out, opd_entry, 1, 500, 0x4000, 1, 0) == 0);
     const auto id7 = static_cast<std::uint32_t>(tox2Read64(base, id_out));
     while (tox2::findThread(id7)->state() != tox2::ThreadState::Exited) {
         syscallAs(*caller, 141, 1000);
@@ -14777,13 +14777,13 @@ void testPpuThreads() {
 
     // sys_ppu_thread_get_id writes the id of the calling thread as a BE u64.
     tox2Write64(base, id_out, ~0ull);
-    CHECK(call(*caller, kGetId, id_out) == 0);
+    CHECK(call(*caller, GetId, id_out) == 0);
     CHECK(tox2Read64(base, id_out) == 0x0e000000);
 
     // sys_ppu_thread_once runs the initialiser once and leaves the mutex unlocked.
     tox2Write32(base, once_ctrl, tox2::kOnceInit);
-    call(*caller, kOnce, once_ctrl, opd_init);
-    call(*caller, kOnce, once_ctrl, opd_init);
+    call(*caller, Once, once_ctrl, opd_init);
+    call(*caller, Once, once_ctrl, opd_init);
     CHECK(g_once_runs == 1 && tox2Read32(base, once_ctrl) == tox2::kDoneInit);
     CHECK(tox2::mutexTryLock(&caller->context(), tox2::processSyncObjects().once_mutex) == 0);
     CHECK(tox2::mutexUnlock(&caller->context(), tox2::processSyncObjects().once_mutex) == 0);
@@ -17130,7 +17130,7 @@ void splitHleStressCase(tox2::PpuThreadsMode split) {
             {0x00800040, 0x1bc200f4, kModule, "sys_lwmutex_unlock"},
     };
     tox2::installImports(imports, 3);
-    enum { kCreate, kLock, kUnlock };
+    enum { Create, Lock, Unlock };
     const auto call = [&](tox2::GuestThread& caller, std::uint32_t index, std::uint64_t r3, std::uint64_t r4) {
         Tox2PpuContext* ctx = &caller.context();
         ctx->gpr[3] = r3;
@@ -17142,15 +17142,15 @@ void splitHleStressCase(tox2::PpuThreadsMode split) {
     auto setup = makeCaller(0x01000100);
     tox2Write32(base, attr, tox2::kSyncFifo);
     tox2Write32(base, attr + 4, tox2::kSyncNotRecursive);
-    CHECK(call(*setup, kCreate, lwmutex, attr) == 0);
+    CHECK(call(*setup, Create, lwmutex, attr) == 0);
     tox2Write32(base, word, 0);
 
     SplitModeScope mode(split);
     std::atomic<int> failures{0};
     const auto elapsed = runKernelStress([&](tox2::GuestThread& caller) {
-        if (call(caller, kLock, lwmutex, 0) != 0) failures++;
+        if (call(caller, Lock, lwmutex, 0) != 0) failures++;
         tox2Write32(base, word, tox2Read32(base, word) + 1);
-        if (call(caller, kUnlock, lwmutex, 0) != 0) failures++;
+        if (call(caller, Unlock, lwmutex, 0) != 0) failures++;
     });
     CHECK(failures == 0);
     CHECK(tox2Read32(base, word) == 80'000);
@@ -17448,16 +17448,16 @@ void testLwmutexKernelFree() {
         tox2::setLwmutexFastPathEnabled(fast_path);
         SplitModeScope mode(tox2::PpuThreadsMode::Split2);
         tox2::PpuSlots& slots = tox2::ppuSlots();
-        enum Step { kLock, kTryLock, kUnlock, kUnlockLast, kStepCount };
-        std::array<std::uint32_t, kStepCount> results{};
-        std::array<std::chrono::steady_clock::time_point, kStepCount> returned{};
+        enum Step { Lock, TryLock, Unlock, UnlockLast, StepCount };
+        std::array<std::uint32_t, StepCount> results{};
+        std::array<std::chrono::steady_clock::time_point, StepCount> returned{};
         std::atomic<bool> go{false};
         std::thread holder = slotThread(1001, [&] {
             slots.acquire();
             CHECK(pollUntil([&] { return go.load(); }));
-            const LwmutexHleEnv::Import calls[kStepCount] = {LwmutexHleEnv::Lock, LwmutexHleEnv::TryLock,
-                                                             LwmutexHleEnv::Unlock, LwmutexHleEnv::Unlock};
-            for (int i = 0; i < kStepCount; i++) {
+            const LwmutexHleEnv::Import calls[StepCount] = {LwmutexHleEnv::Lock, LwmutexHleEnv::TryLock,
+                                                            LwmutexHleEnv::Unlock, LwmutexHleEnv::Unlock};
+            for (int i = 0; i < StepCount; i++) {
                 results[i] = env.call(*caller, calls[i], lw, 0);
                 returned[i] = std::chrono::steady_clock::now();
             }
@@ -17471,7 +17471,7 @@ void testLwmutexKernelFree() {
             hold_end = std::chrono::steady_clock::now();
         }
         holder.join();
-        for (int i = 0; i < kStepCount; i++) {
+        for (int i = 0; i < StepCount; i++) {
             CHECK(results[i] == 0);
             // The calls run in order: with the lock held by the host the first one waits, and the rest follow it.
             if (fast_path) {
@@ -19282,7 +19282,7 @@ void testLwmutexWatchRegistration() {
             {0x00800070, 0x68b9b011, kModule, "_sys_memset"},
     };
     tox2::installImports(imports, 5);
-    enum { kCreate, kDestroy, kTryLock, kUnlock, kMemset };
+    enum { Create, Destroy, TryLock, Unlock, Memset };
     auto caller = makeCaller(0x01000000);
     auto call = [&](std::uint32_t index, std::uint64_t r3, std::uint64_t r4 = 0, std::uint64_t r5 = 0) {
         Tox2PpuContext* ctx = &caller->context();
@@ -19298,53 +19298,53 @@ void testLwmutexWatchRegistration() {
     tox2Write32(base, attr, 2);
     tox2Write32(base, attr + 4, 0x10);
     const std::uint64_t live_before = tox2::lwmutexWatchStats().live;
-    CHECK(call(kCreate, lw, attr) == 0);
+    CHECK(call(Create, lw, attr) == 0);
     CHECK(tox2::lwmutexWatchStats().live == live_before);
-    CHECK(call(kDestroy, lw) == 0);
+    CHECK(call(Destroy, lw) == 0);
 
     tox2::setLwmutexWatchEnabled(true);
-    CHECK(call(kCreate, lw, attr) == 0);
+    CHECK(call(Create, lw, attr) == 0);
     CHECK(tox2::lwmutexWatchStats().live == live_before + 1);
 
     // Writing the pad word through the HLE copy is a hit; the lwmutex calls themselves are not.
     const std::uint64_t copy_before = hits(Kind::HleCopy);
-    CHECK(call(kMemset, lw + 20, 0, 4) == lw + 20);
+    CHECK(call(Memset, lw + 20, 0, 4) == lw + 20);
     CHECK(hits(Kind::HleCopy) == copy_before + 1);
-    CHECK(call(kMemset, lw + 24, 0, 4) == lw + 24);  // the word after the struct
+    CHECK(call(Memset, lw + 24, 0, 4) == lw + 24);  // the word after the struct
     CHECK(hits(Kind::HleCopy) == copy_before + 1);
 
     // Lwmutex states and thread ids are valid owner words; anything else is a hit.
     const std::uint64_t owner_before = hits(Kind::OwnerValue);
-    CHECK(call(kTryLock, lw) == 0);
-    CHECK(call(kTryLock, lw) == 0);  // recursion step on the thread's own id
-    CHECK(call(kUnlock, lw) == 0);
-    CHECK(call(kUnlock, lw) == 0);
+    CHECK(call(TryLock, lw) == 0);
+    CHECK(call(TryLock, lw) == 0);  // recursion step on the thread's own id
+    CHECK(call(Unlock, lw) == 0);
+    CHECK(call(Unlock, lw) == 0);
     CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree);
     CHECK(hits(Kind::OwnerValue) == owner_before);
     tox2Write32(base, lw, 0x12345678);
-    CHECK(call(kTryLock, lw) == err(tox2::kCellEbusy));
+    CHECK(call(TryLock, lw) == err(tox2::kCellEbusy));
     CHECK(hits(Kind::OwnerValue) == owner_before + 1);
     tox2Write32(base, lw, tox2::kLwmutexFree);
 
     // A waiter word that differs from the (empty) wait list is a hit when the unlock enters the release path.
     const std::uint64_t waiter_before = hits(Kind::WaiterValue);
-    CHECK(call(kTryLock, lw) == 0);
-    CHECK(call(kUnlock, lw) == 0);
+    CHECK(call(TryLock, lw) == 0);
+    CHECK(call(Unlock, lw) == 0);
     CHECK(hits(Kind::WaiterValue) == waiter_before);
-    CHECK(call(kTryLock, lw) == 0);
+    CHECK(call(TryLock, lw) == 0);
     tox2Write32(base, lw + 4, 3);
-    CHECK(call(kUnlock, lw) == 0);
+    CHECK(call(Unlock, lw) == 0);
     CHECK(hits(Kind::WaiterValue) == waiter_before + 1);
     tox2Write32(base, lw + 4, 0);
 
     CHECK(tox2Read32(base, lw) == tox2::kLwmutexFree);
-    CHECK(call(kDestroy, lw) == 0);
+    CHECK(call(Destroy, lw) == 0);
     CHECK(tox2::lwmutexWatchStats().live == live_before);
     CHECK(tox2::lwmutexWatchStats().max_live >= live_before + 1);
 
     // The destroyed struct no longer counts.
     const std::uint64_t copy_after_destroy = hits(Kind::HleCopy);
-    CHECK(call(kMemset, lw + 20, 0, 4) == lw + 20);
+    CHECK(call(Memset, lw + 20, 0, 4) == lw + 20);
     CHECK(hits(Kind::HleCopy) == copy_after_destroy);
 
     tox2::setLwmutexWatchEnabled(false);
