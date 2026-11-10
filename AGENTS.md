@@ -11,35 +11,37 @@
   the reader decode it.
 - Prefer `//` over `/* */`. Both are acceptable, but be consistent within a file.
 
+## C/C++ style
+
+Follow the Google C++ Style Guide, with these naming deviations:
+
+- Functions and methods: `camelCase` (e.g. `openFile()`), not PascalCase.
+- Enumerators: `PascalCase` (e.g. `NotFound`), no `k` prefix.
+- Local variables: `snake_case` preferred; `camelCase` acceptable.
+  Keep one style within a function, preferably within a file. Match the surrounding code.
+- Constants whose value is obtained at run time (`static const` counter frequency, page size,
+  a lazily created handle): variable naming (`cycles_per_ms`, `g_start`). `k` marks values fixed in source.
+- Names emitted by the recompiler (`fn_%08x`, `imp_%08x`, `kTox2*` in the shared C headers)
+  keep the recompiler's scheme.
+
+Formatting is handled by clang-format. Naming is checked by clang-tidy (`.clang-tidy`);
+fix reported violations instead of suppressing them.
+
+Exception: types meant to satisfy STL concepts, members mirroring STL interfaces
+(`push_back`, `value_type`, ...), and names mirroring an external API (FFmpeg functions,
+`CELL_GCM_*` formats) follow that naming. Wrap such classes in
+`// NOLINTBEGIN(readability-identifier-naming)` / `// NOLINTEND(readability-identifier-naming)`,
+or mark a single line with `// NOLINT(readability-identifier-naming)` (`NOLINTNEXTLINE` when it
+does not fit). C has no `constexpr`, so an anonymous `enum { kName = ... }` used as a constant in
+C code is marked the same way.
+
 ## C/C++ formatting
 
 - Format C/C++ under `runtime/` and `tools/` with `clang-format` and the repository's `.clang-format`
   (Google style with 4-space indentation, 120 columns). `generated/` and `externals/` are not formatted.
-- The Google Style Guide below applies to naming only; layout follows `.clang-format`.
 
-## C/C++ Naming conventions
+## C/C++ naming checks
 
-Google C++ Style Guide (https://google.github.io/styleguide/cppguide.html) with the following modifications.
-
-| Kind | Convention | Example |
-| --- | --- | --- |
-| Variables (incl. arguments) | `snake_case` | `file_path` |
-| Local variables | `snake_case` preferred; `camelCase` acceptable | `file_path` |
-| Functions | `camelCase` | `openFile()` |
-| Types (class, struct, enum, enum class, typedef, using) | `PascalCase` | `FileReader` |
-| Concepts | `PascalCase` | `Readable` |
-| Class data members | `snake_case` + trailing underscore | `file_path_` |
-| Struct data members | `snake_case` | `file_path` |
-| Constants (`constexpr`, etc.) | `k` + `PascalCase` | `kFilePath` |
-| Enumerators | `PascalCase` | `NotFound` |
-| Macros (discouraged) | `ALL_CAPS_WITH_UNDERSCORES` | `LOG_ERROR` |
-
-### Consistency
-
-- Local variable style must be consistent within a function and, preferably, within a file. Match the surrounding code.
-
-### Exceptions
-
-- Deviate when aligning with STL or external library conventions,
-  e.g. `begin()`, `end()`, `value_type`, `iterator_category`.
-- Types intended to satisfy STL concepts follow STL naming.
+- Check C/C++ under `runtime/` and `tools/` with `clang-tidy` and the repository's `.clang-tidy`.
+  `generated/`, `externals/` and files generated into the build directory are not checked;
+  the header filters in `.clang-tidy` drop their headers.
